@@ -155158,9 +155158,26 @@ the other five use `<`. So a point exactly on the right or bottom edge is
 inside a whiteboard rectangle and outside every other kind. That is deliberate
 and pinned: `test_rect_contains` asserts `r.contains(110.0, 60.0)` for a
 100x50 rectangle at (10, 10), which is precisely the far corner. It also has an
-`intersects` the toolkit lacks. Converting it needs a decision about what a
-drawing canvas should do at its own boundary, which is a design question and
-not a cleanup -- left alone.
+`intersects` the toolkit lacks.
+
+**And on a second look it is not merely deliberate, it is right for this
+program** -- which matters, because "a test pins it" is a weak reason to leave
+something alone. A test can pin a bug. The argument is:
+
+* The toolkit's half-open rule exists to stop **two adjacent rectangles both
+  claiming a pixel**, where the winner would otherwise depend on the order they
+  were recorded in. Whiteboard cannot have that ambiguity: `hit_test_shapes`
+  walks the shapes in reverse and returns the first hit, so overlap is settled
+  by **z-order**, deterministically, before the rectangle is ever asked.
+* A drawing canvas *wants* its edges grabbable -- you draw a rectangle and then
+  reach for its border. The same function already widens the target for lines
+  and freehand strokes by half the stroke width with a four-pixel floor, which
+  is the same "generous hit-region" the roadmap asks for elsewhere.
+
+So the two rules answer different questions: the toolkit's disambiguates
+neighbours, whiteboard's makes a shape's own border part of it. Sweeping the
+second into the first would have traded a deliberate affordance for a guarantee
+this program does not need.
 
 **Two down, six to go, and the two were different jobs.** `apps/explorer` was
 group B: 73 field accesses renamed, each at the line and column the compiler

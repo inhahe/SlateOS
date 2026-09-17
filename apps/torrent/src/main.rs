@@ -6,12 +6,26 @@
 //! - SHA-1 info hash computation
 //! - Peer wire protocol messages (BEP 3)
 //! - Piece management with bitfield tracking
-//! - Tracker announce/scrape (HTTP)
+//! - Tracker announce URLs built, and announce responses parsed
 //! - Magnet link parsing (BEP 9)
 //! - Download/upload speed tracking
-//! - Bandwidth throttling
-//! - Peer discovery and management
 //! - Multi-tab UI with transfer list, details, peers, files, trackers
+//!
+//! What it cannot do is **transfer anything**. The crate depends on `guitk`,
+//! `oswindow`, `appearance` and `safeio`, and on no network at all: there is
+//! no `std::net` here and no socket of any kind. The announce URL
+//! `TrackerRequest::build_url` composes is never fetched, so no peer list
+//! comes back, and a torrent with no peers makes no progress. That is
+//! deliberate — see the note in the tick loop, which records why the
+//! invented peers it used to have were worse than none.
+//!
+//! Three entries were removed from the list above rather than left to
+//! mislead someone planning work from it. *Tracker announce/scrape (HTTP)*
+//! became the line above it, since what exists is the URL and the response
+//! parser, not the fetch between them. *Bandwidth throttling* is gone:
+//! `BandwidthLimiter` is implemented and tested, but the two fields that hold
+//! one are read by nothing, so no byte is ever delayed. *Peer discovery* is
+//! gone for want of the transport.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow

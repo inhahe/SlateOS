@@ -156965,3 +156965,58 @@ enough to enumerate, add the "declared and never read" arm to the gate with
 the survivors baselined. Deleting is usually right: a field nobody reads has
 never worked, so nothing can depend on it.
 
+### TRIAGE 2026-09-17 — most of these are one absent subsystem, not many mistakes
+
+**In short:** "deleting is usually right" is wrong for the bulk of this list,
+and the triage should know that before it starts. Grouping `apps/`'s 210
+candidates by crate and then asking what each crate can actually *do* shows
+the fields are mostly the shape of an I/O the app never performs. They are
+unwired, not unimplementable — so deleting them discards a design rather
+than dead weight.
+
+**The top of the list, measured.**
+
+| crate | candidates | what it cannot do |
+|---|---|---|
+| `torrent` | 23 | reach a network. Reads `.torrent` files through `safeio`; no socket at all |
+| `email` | 21 | reach a network |
+| `videoplayer` | 14 | open a file |
+| `undelete` | 12 | open a file, or a disk |
+| `ircclient` | 12 | reach a network |
+| `photomanager` | 10 | open a file |
+| `pdfviewer` | 10 | open a file — a PDF viewer that cannot open a PDF |
+| `imageviewer` | 10 | *nothing — it reads files* (see below) |
+| `mediaconvert` | 8 | open a file |
+
+`videoplayer`, `undelete`, `ircclient`, `photomanager`, `mediaconvert` and
+`email` each depend on exactly `appearance`, `guitk` and `oswindow`, and
+contain zero references to `std::fs` and zero to any socket. `pdfviewer` adds
+`printjob` and still reads nothing.
+
+**And the fields are exactly what that I/O would have filled.** `email`'s are
+an IMAP account (`protocol`, `auth_method`, `security`, `imap_path`,
+`sync_interval_minutes`), IMAP message flags (`uid`, `answered`, `deleted`)
+and a threading model. `torrent`'s are announce bookkeeping (`last_announce`,
+`next_announce`, `announce_count`), per-torrent rate limits, and peer stats
+(`connection_time`, `country`). None of it can be populated by a program that
+never connects.
+
+**The capabilities exist in-tree, which is what makes this a wiring gap.**
+`apps/safeio` reads files and `torrent` already uses it for Ctrl+O;
+`imageviewer` reads through `byteread`, `imagecodec` and `scratchdir`. A
+netstack service exists as `services/netstack`, and the `net*` crates are
+consumed by the kernel and by `userspace/wpa` — but by no app in the tree.
+
+**`imageviewer` is the counter-example and is why this is a taxonomy, not a
+theory.** It performs real file I/O (19 `std::fs` references) and still has
+10 candidates, so absent I/O does not explain everything. Whatever its ten
+are, they are a different cause and want looking at on their own.
+
+**What this changes about the triage.** Work it crate by crate, and for each
+crate establish what it can do *before* judging its fields. Where the field
+is the state of an I/O the app never performs, the entry belongs in the
+backlog as unfinished wiring, not in a deletion batch — and the same
+judgement that settled `archivemanager` applies: bare state deletes, a
+reasoned model gets asked about. Deleting `email`'s IMAP settings would
+delete the specification of the mail client.
+

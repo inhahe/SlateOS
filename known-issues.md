@@ -156764,6 +156764,50 @@ available the whole time to be asked which *pass* it used. The instrument
 that settled it was fifteen lines of Python. Reach for the oracle's own
 introspection before the next predicate.
 
+### THEN 15 -> 5 — the Tibetan ten, and a guess of mine refuted in passing
+
+**In short:** every Tibetan case above is fixed too. The cause was not the one
+I guessed one paragraph earlier, and the guess is worth keeping visible: I
+wrote that "a zero-height base would place every mark at 0 exactly as
+observed". The base is not zero-height. `hb_font_get_glyph_extents` on
+Hack-Bold's `.notdef` returns `y_bearing 1444, height -1806` — a real box.
+
+**What it actually was.** `fallback::attach_class` had no arm for Tibetan's
+combining classes, so 129, 130 and 132 fell through `other -> other` and
+reached `place` as numbers it has no case for, leaving `y` at 0. Its doc said
+they were left out because "nothing can ask the question", `tibt` being in
+`COMPLEX_SCRIPTS` — the same false premise this entry started with, and
+false for the same reason: `positions_marks` takes a `simple` argument, and a
+`DFLT`-only face makes it true.
+
+**The arithmetic confirms our formulas were right all along.** With the base
+extents above and a gap of `upem/16` = 128, `place`'s own expressions give
+
+    below:  1444 + (-1806 - 128) - 1444        = -1934
+    above:  (1444 + 128) - (1444 + -1806)      = +1934
+
+which are exactly HarfBuzz's two offsets. Nothing about the placement maths
+needed changing; the classes simply never reached it.
+
+**Why the signs are not inverted.** HarfBuzz puts `-1934` on the *first* mark,
+and vowel `i` (U+0F72) is drawn above, which looks backwards until the
+reordering is taken into account: `norm::display_class` permutes 130 to 132
+and 132 to 131, so `u` sorts before `i` and the first mark in the buffer is
+`u`, which does belong below. We already do that sort —
+`sort_marks(&mut out, display_class)` — which is why adding the arms was
+enough on its own.
+
+| corpus | at the start | after clustering on `M*` | after the Tibetan arms |
+|---|---|---|---|
+| default | `misplaced` 1 | 1 | **1** |
+| supplementary USE | `misplaced` 40 | 15 | **5** |
+
+**All that is left is Sinhala** `U+0D9A U+200D U+0DCA U+0DBB` on five faces:
+glyph 2 at 1233 against HarfBuzz's 0. A ZWJ sits between the letter and the
+virama, so the question is whether a default-ignorable breaks the cluster the
+fallback walks. `hide_ignorables` deliberately keeps a hidden mark's *role*;
+the mirror question is whether it keeps its place in the cluster.
+
 
 ## TD-C-A-FIELD-ONLY-EVER-INITIALISED-IS-INVISIBLE-TO-EVERY-CHECK-WE-HAVE -- METHOD 2026-09-17
 

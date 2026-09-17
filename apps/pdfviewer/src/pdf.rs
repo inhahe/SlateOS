@@ -52,11 +52,18 @@
 //! only seven of them in the band the threshold sits in.
 //!
 //! Three documents, three spacing mechanisms, which is why this is stated
-//! narrowly: one kerns its gaps and gained spaces on 3164 of its 4482 runs;
-//! one draws real spaces and has no adjustment anywhere near the threshold,
-//! so it is untouched; one puts every word in its own run, where the spaces
-//! are between runs and not inside them. **A search across separate runs
-//! still will not match**, and that is the remaining half of this. A composite font *without* a
+//! narrowly: one kerns its gaps and gained spaces on 3164 of its runs; one
+//! draws real spaces and has no adjustment anywhere near the threshold, so it
+//! is untouched; one puts every word in its own run.
+//!
+//! **That third case is handled by joining, not by spacing.** A run is one
+//! show operator, which is as fine-grained as a file happens to be, and a
+//! search runs *inside* a run -- so [`join_lines`] gathers the runs on one
+//! baseline into one. The document that drew a word at a time went from 16922
+//! runs to 1603, and a search for "user guide" that matched nothing now
+//! matches 48 of them. Position decides, not draw order: runs are sorted down
+//! the page and across it first, because the order a file draws in is not the
+//! order anyone reads. A composite font *without* a
 //! `/ToUnicode` map still yields nothing -- its codes are glyph indices into a
 //! subset font and relate to no character -- and such a page is counted in
 //! [`Document::unreadable_pages`], so "no results" from a search can be told
@@ -954,6 +961,71 @@ fn walk_pages(
     Ok(())
 }
 
+/// How far two runs' baselines may differ and still be one line.
+///
+/// A fraction of the size, so it scales with the text. Superscripts and
+/// subscripts sit further off than this and stay separate, which is right:
+/// joining a footnote marker into the word before it puts a digit inside it.
+const SAME_LINE_TOLERANCE: f32 = 0.3;
+
+/// The widest gap between two runs that still joins them, as a fraction of
+/// the size.
+///
+/// Wide enough for a space and the slack a justified line adds to it, narrow
+/// enough that two columns never join: a gutter is several times the point
+/// size, and at that distance the runs are different lines of different
+/// paragraphs that happen to share a baseline.
+const JOIN_GAP: f32 = 1.2;
+
+/// Join runs that sit on one baseline into one run each.
+///
+/// Extraction produces a run per show operator, which is as fine-grained as
+/// the file happens to be: one document gives a whole line at a time, another
+/// a word. **A search runs inside a run**, so in the second the viewer could
+/// not match "user guide" across the two runs holding it -- the words are
+/// there and the query never matches, which reads as a document that does not
+/// contain them.
+///
+/// Joining is by position rather than by order, because the order a file
+/// draws in is not the order anyone reads: runs are sorted down the page and
+/// then across it, and only then joined.
+fn join_lines(mut runs: Vec<TextRun>) -> Vec<TextRun> {
+    if runs.len() < 2 {
+        return runs;
+    }
+    // Down the page, then across. `total_cmp` rather than `partial_cmp`
+    // because a NaN coordinate would otherwise make the sort's ordering
+    // inconsistent, which can panic.
+    runs.sort_by(|a, b| b.y.total_cmp(&a.y).then(a.x.total_cmp(&b.x)));
+
+    let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
+    for run in runs {
+        let Some(last) = out.last_mut() else {
+            out.push(run);
+            continue;
+        };
+        let size = last.size.max(run.size);
+        let same_line = (last.y - run.y).abs() <= size * SAME_LINE_TOLERANCE;
+        let gap = run.x - (last.x + last.width);
+        let adjacent = gap <= size * JOIN_GAP && gap > -size;
+        if !same_line || !adjacent || (last.size - run.size).abs() > 0.01 {
+            out.push(run);
+            continue;
+        }
+        // A gap wide enough to be a space becomes one, on the same reasoning
+        // as the kerning threshold: the file separated the words by moving the
+        // pen, and the text has to say so.
+        let needs_space =
+            gap > size * 0.1 && !last.text.ends_with(' ') && !run.text.starts_with(' ');
+        if needs_space {
+            last.text.push(' ');
+        }
+        last.text.push_str(&run.text);
+        last.width = (run.x + run.width) - last.x;
+    }
+    out
+}
+
 /// The text on one page, and whether everything on it could be read.
 ///
 /// The second half of the answer is the point. A page whose content stream
@@ -998,7 +1070,7 @@ fn page_text(
             Err(_) => readable = false,
         }
     }
-    let runs = extract_text(&joined, &fonts);
+    let runs = join_lines(extract_text(&joined, &fonts));
     // A page that drew nothing this could decode is unreadable, not empty.
     // Composite fonts are the case that matters: one of the three documents
     // this was measured against uses them throughout, so every page came back
@@ -3488,6 +3560,94 @@ begincmap\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
         let content = b"BT /T1_0 10 Tf 1 0 0 1 0 0 Tm [(a)-400 -400(b)]TJ ET";
         let runs = extract_text(content, &simple_fonts());
         assert_eq!(runs.first().expect("a run").text, "a b");
+    }
+
+    fn run_at(text: &str, x: f32, y: f32, width: f32, size: f32) -> TextRun {
+        TextRun {
+            text: text.to_owned(),
+            x,
+            y,
+            width,
+            width_is_measured: true,
+            size,
+        }
+    }
+
+    /// Runs on one baseline join, and a gap between them becomes a space.
+    #[test]
+    fn runs_on_one_baseline_become_one_run() {
+        let runs = join_lines(vec![
+            run_at("User", 100.0, 700.0, 24.0, 10.0),
+            run_at("Guide", 127.0, 700.0, 28.0, 10.0),
+        ]);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs.first().expect("a run").text, "User Guide");
+    }
+
+    /// Two columns sharing a baseline do not join.
+    ///
+    /// The gutter is several times the point size, which is what tells a
+    /// column break from a word break. Joining them would put the right
+    /// column's first word inside the left column's last sentence.
+    #[test]
+    fn two_columns_do_not_join() {
+        let runs = join_lines(vec![
+            run_at("left", 72.0, 700.0, 20.0, 10.0),
+            run_at("right", 320.0, 700.0, 22.0, 10.0),
+        ]);
+        assert_eq!(runs.len(), 2, "a gutter is not a space");
+    }
+
+    /// Different baselines stay apart.
+    #[test]
+    fn different_lines_stay_apart() {
+        let runs = join_lines(vec![
+            run_at("first", 72.0, 700.0, 20.0, 10.0),
+            run_at("second", 72.0, 686.0, 24.0, 10.0),
+        ]);
+        assert_eq!(runs.len(), 2);
+    }
+
+    /// A superscript is not joined into the word it marks.
+    ///
+    /// It sits off the baseline and is set smaller, and either alone keeps it
+    /// separate -- joining would put a footnote digit inside a word.
+    #[test]
+    fn a_superscript_is_not_part_of_the_word() {
+        let runs = join_lines(vec![
+            run_at("footnote", 72.0, 700.0, 40.0, 10.0),
+            run_at("3", 112.0, 704.0, 3.0, 6.0),
+        ]);
+        assert_eq!(runs.len(), 2);
+    }
+
+    /// Joining is by position, not by the order the file draws in.
+    #[test]
+    fn runs_are_ordered_before_they_are_joined() {
+        // Given bottom-up and right-to-left, which a content stream may do.
+        let runs = join_lines(vec![
+            run_at("second", 72.0, 686.0, 30.0, 10.0),
+            run_at("World", 105.0, 700.0, 30.0, 10.0),
+            run_at("Hello", 72.0, 700.0, 30.0, 10.0),
+        ]);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs.first().expect("a run").text, "Hello World");
+        assert_eq!(runs.get(1).expect("a run").text, "second");
+    }
+
+    /// The joined run spans from the first run's start to the last one's end.
+    #[test]
+    fn a_joined_run_is_as_wide_as_its_parts() {
+        let runs = join_lines(vec![
+            run_at("ab", 100.0, 700.0, 20.0, 10.0),
+            run_at("cd", 124.0, 700.0, 20.0, 10.0),
+        ]);
+        let run = runs.first().expect("a run");
+        assert!((run.x - 100.0).abs() < 0.01);
+        assert!(
+            (run.width - 44.0).abs() < 0.01,
+            "to the far edge of the last"
+        );
     }
 
     fn obj(src: &[u8]) -> Object {

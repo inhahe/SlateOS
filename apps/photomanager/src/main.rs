@@ -14,6 +14,8 @@
 //! - Timeline view grouping photos by date
 //! - Slideshow mode with configurable interval and transitions
 //! - Import of a single file through a picker, with its EXIF read
+//! - A search box that filters the library by name, path or tag as you
+//!   type
 //! - The library is saved to `photolibrary.txt` and read back at start:
 //!   photographs, ratings, flags, tags and colour labels survive closing
 //!   the window. See `library` for the format and what it omits.
@@ -173,6 +175,13 @@ pub enum ToolbarControl {
     Sort,
     /// Step the thumbnail size along.
     ThumbSize,
+    /// The search box. Clicking it puts the keyboard there.
+    ///
+    /// It was drawn from the beginning and was not a control at all: its
+    /// rectangle existed in the layout only to position the button after it,
+    /// so the one thing in this toolbar that looks like it takes typing was
+    /// the one thing that could not be clicked.
+    Search,
     /// Start or stop the slideshow.
     Slideshow,
     /// Open the file picker and bring a photograph in.
@@ -1759,6 +1768,12 @@ pub struct PhotoApp {
     /// corrupt one permanently, turning a line somebody could still repair by
     /// hand into nothing at all.
     library_unread: usize,
+    /// Whether typing goes to the search box.
+    ///
+    /// Without this the digits would still rate the selected photograph and
+    /// `f` would still flag it, so searching for "flag5" would silently change
+    /// the library while the user thought they were typing.
+    search_focused: bool,
 }
 
 impl Default for PhotoApp {
@@ -1785,6 +1800,7 @@ impl PhotoApp {
             last_written: None,
             library_note: None,
             library_unread: 0,
+            search_focused: false,
             photos: Vec::new(),
             albums: Vec::new(),
             smart_albums: Vec::new(),
@@ -2780,6 +2796,15 @@ impl PhotoApp {
         let search_x = sort_x + 124.0;
         let search_w = 200.0;
         out.push((
+            ToolbarControl::Search,
+            Rect {
+                x: search_x,
+                y: 8.0,
+                w: search_w,
+                h: 24.0,
+            },
+        ));
+        out.push((
             ToolbarControl::ThumbSize,
             Rect {
                 x: search_x + search_w + 16.0,
@@ -2993,7 +3018,12 @@ impl PhotoApp {
         if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
             return false;
         }
-        if let Some(control) = self.toolbar_control_at(event.x, event.y) {
+        // Any press moves the keyboard out of the search box unless it is
+        // the search box being pressed. Done here rather than in each of the
+        // branches below so that a control added later cannot forget it.
+        let pressed = self.toolbar_control_at(event.x, event.y);
+        self.search_focused = pressed == Some(ToolbarControl::Search);
+        if let Some(control) = pressed {
             self.press_toolbar(control);
             return true;
         }
@@ -3037,6 +3067,9 @@ impl PhotoApp {
                     self.start_slideshow();
                 }
             }
+            // The click already moved the keyboard here; there is nothing
+            // else for pressing it to do.
+            ToolbarControl::Search => {}
             ToolbarControl::Import => self.open_import_dialog(),
         }
     }
@@ -3051,7 +3084,48 @@ impl PhotoApp {
         self.selected_photos.clear();
     }
 
+    /// Typing while the search box has the keyboard.
+    ///
+    /// Returns whether the event was consumed. Everything is consumed while
+    /// the box is focused, including keys this does not act on: a shortcut
+    /// that fired mid-word would edit the library under a user who believed
+    /// they were typing a query.
+    fn handle_search_key(&mut self, event: &KeyEvent) -> bool {
+        match event.key {
+            Key::Escape => {
+                // Escape abandons the search rather than merely leaving the
+                // box, because a filter left in place by an emptied box is a
+                // library that looks half-missing for no visible reason.
+                self.search_focused = false;
+                self.set_search("");
+                true
+            }
+            Key::Enter => {
+                self.search_focused = false;
+                true
+            }
+            Key::Backspace => {
+                let mut query = self.search_query.clone();
+                query.pop();
+                self.set_search(&query);
+                true
+            }
+            _ => {
+                let typed: String = event.typed().collect();
+                if !typed.is_empty() {
+                    let mut query = self.search_query.clone();
+                    query.push_str(&typed);
+                    self.set_search(&query);
+                }
+                true
+            }
+        }
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        if self.search_focused {
+            return self.handle_search_key(event);
+        }
         if self.view_mode == ViewMode::Slideshow {
             return self.handle_slideshow_key(event);
         }
@@ -3376,9 +3450,11 @@ impl PhotoApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Search box
-        let search_x = sort_x + 124.0;
-        let search_w = 200.0;
+        // Search box. The rectangle comes from `toolbar_controls` rather
+        // than being computed again here: it is the same law the click reads,
+        // and two copies of a layout drift the first time one is adjusted.
+        let search = rect_of(ToolbarControl::Search);
+        let (search_x, search_w) = (search.x, search.w);
         self.palette.push_surface(
             cmds,
             search_x,
@@ -3388,8 +3464,31 @@ impl PhotoApp {
             CORNER_RADIUS,
             Surface::Card,
         );
+        if self.search_focused {
+            // Where the typing is going. Without it a focused empty box and an
+            // unfocused empty box are the same picture, and the only way to
+            // find out which one is in front of you is to type and see what
+            // happens to the library.
+            cmds.push(RenderCommand::StrokeRect {
+                x: search_x,
+                y: 8.0,
+                width: search_w,
+                height: 24.0,
+                color: self.palette.blue,
+                line_width: 2.0,
+                corner_radii: CornerRadii::all(CORNER_RADIUS),
+            });
+        }
         let search_text = if self.search_query.is_empty() {
-            "Search photos...".to_owned()
+            if self.search_focused {
+                // The placeholder would read as text already typed once a
+                // caret is beside it.
+                "|".to_owned()
+            } else {
+                "Search photos...".to_owned()
+            }
+        } else if self.search_focused {
+            format!("{}|", self.search_query)
         } else {
             self.search_query.clone()
         };
@@ -5290,6 +5389,171 @@ mod tests {
             y,
             kind: MouseEventKind::Press(MouseButton::Left),
         })
+    }
+
+    /// The search box is a control the click handler knows about.
+    ///
+    /// It was drawn from the start and was never in the layout as anything
+    /// but a gap to position the next button past.
+    #[test]
+    fn the_search_box_is_a_control_that_can_be_clicked() {
+        let mut app = PhotoApp::new();
+        app.set_window_size(900.0, 700.0);
+        let hit = app
+            .toolbar_controls()
+            .into_iter()
+            .find(|(c, _)| *c == ToolbarControl::Search)
+            .map(|(_, r)| r)
+            .expect("the search box is not a control");
+        assert_eq!(
+            app.toolbar_control_at(hit.x + 4.0, hit.y + 4.0),
+            Some(ToolbarControl::Search),
+            "a click inside the drawn box does not land on it"
+        );
+    }
+
+    /// Focus the search box, wherever the toolbar happens to put it.
+    fn focus_search(app: &mut PhotoApp) {
+        app.set_window_size(900.0, 700.0);
+        let hit = app
+            .toolbar_controls()
+            .into_iter()
+            .find(|(c, _)| *c == ToolbarControl::Search)
+            .map(|(_, r)| r)
+            .expect("the search box is a control");
+        app.handle_event(&click(hit.x + 4.0, hit.y + 4.0));
+        assert!(app.search_focused, "the click did not take the keyboard");
+    }
+
+    /// Typing filters the library, which is what the box has always promised.
+    #[test]
+    fn typing_into_the_search_box_filters_the_library() {
+        let mut app = app_with_n_pictures("srch", 2);
+        let first = app.photos.first().expect("one").id;
+        app.add_tag(first, "pier");
+        assert_eq!(app.visible_photos().len(), 2, "the control failed");
+
+        focus_search(&mut app);
+        for (k, ch) in [(Key::P, 'p'), (Key::I, 'i'), (Key::E, 'e'), (Key::R, 'r')] {
+            app.handle_event(&typed(k, ch));
+        }
+
+        assert_eq!(app.search_query, "pier");
+        assert_eq!(
+            app.visible_photos().len(),
+            1,
+            "the query was stored but nothing was filtered"
+        );
+    }
+
+    /// A digit typed into the search box does not rate a photograph.
+    ///
+    /// The reason focus has to consume everything. `0`-`5` rate the selected
+    /// photograph and `f` flags it, so without this, searching for a filename
+    /// with a digit in it would quietly edit the library while the user
+    /// believed they were typing a query.
+    #[test]
+    fn a_digit_typed_into_the_search_box_does_not_rate_a_photograph() {
+        let mut app = app_with_n_pictures("digits", 1);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+
+        // Control: with the box unfocused, the digit really does rate.
+        app.handle_event(&typed(Key::Num5, '5'));
+        assert_eq!(
+            app.find_photo(pid).expect("one").rating,
+            5,
+            "the control failed: digits do not rate at all, so this proves nothing"
+        );
+
+        focus_search(&mut app);
+        app.handle_event(&typed(Key::Num3, '3'));
+
+        assert_eq!(
+            app.find_photo(pid).expect("one").rating,
+            5,
+            "typing into the search box changed a photograph's rating"
+        );
+        assert_eq!(app.search_query, "3", "and the digit went into the query");
+    }
+
+    /// `f` does not flag a photograph while the box has the keyboard either.
+    #[test]
+    fn a_letter_typed_into_the_search_box_does_not_flag_a_photograph() {
+        let mut app = app_with_n_pictures("flagging", 1);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+        assert!(!app.find_photo(pid).expect("one").flagged);
+
+        focus_search(&mut app);
+        app.handle_event(&typed(Key::F, 'f'));
+
+        assert!(
+            !app.find_photo(pid).expect("one").flagged,
+            "typing into the search box flagged a photograph"
+        );
+        assert_eq!(app.search_query, "f");
+    }
+
+    /// Backspace removes the last character.
+    #[test]
+    fn backspace_removes_the_last_character() {
+        let mut app = app_with_n_pictures("backspace", 1);
+        focus_search(&mut app);
+        app.handle_event(&typed(Key::P, 'p'));
+        app.handle_event(&typed(Key::I, 'i'));
+        assert_eq!(app.search_query, "pi");
+
+        app.handle_event(&key(Key::Backspace));
+        assert_eq!(app.search_query, "p");
+    }
+
+    /// Escape abandons the search rather than merely leaving the box.
+    ///
+    /// A filter left in place by a box that no longer looks active is a
+    /// library that appears half-missing with nothing on screen explaining
+    /// why.
+    #[test]
+    fn escape_abandons_the_search_and_restores_the_library() {
+        let mut app = app_with_n_pictures("escape", 2);
+        let first = app.photos.first().expect("one").id;
+        app.add_tag(first, "pier");
+        focus_search(&mut app);
+        for (k, ch) in [(Key::P, 'p'), (Key::I, 'i'), (Key::E, 'e'), (Key::R, 'r')] {
+            app.handle_event(&typed(k, ch));
+        }
+        assert_eq!(app.visible_photos().len(), 1, "the control failed");
+
+        app.handle_event(&key(Key::Escape));
+
+        assert!(!app.search_focused, "escape left the keyboard in the box");
+        assert!(
+            app.search_query.is_empty(),
+            "escape left the query in place"
+        );
+        assert_eq!(
+            app.visible_photos().len(),
+            2,
+            "the library did not come back"
+        );
+    }
+
+    /// Clicking anything else takes the keyboard out of the box.
+    #[test]
+    fn clicking_elsewhere_takes_the_keyboard_out_of_the_search_box() {
+        let mut app = app_with_n_pictures("unfocus", 1);
+        focus_search(&mut app);
+
+        // The sort button, which is a control and is not the search box.
+        let sort = app
+            .toolbar_controls()
+            .into_iter()
+            .find(|(c, _)| *c == ToolbarControl::Sort)
+            .map(|(_, r)| r)
+            .expect("sort is a control");
+        app.handle_event(&click(sort.x + 4.0, sort.y + 4.0));
+
+        assert!(!app.search_focused, "the keyboard stayed in the search box");
     }
 
     /// A library of `n` photos, all visible.

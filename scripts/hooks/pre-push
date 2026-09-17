@@ -840,6 +840,47 @@ if [ "$skip_lossy" != "1" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 43b: the same checker, ratcheted, over gui/ and apps/.
+#
+# Gate 43 above is scoped to userspace/ and says so -- "which is where it
+# looks". That was true of the tool and stopped being the whole truth the
+# moment the tool could look elsewhere: its default scope was a bare
+# os.walk(ROOT/"userspace") left over from the coreutils audit it was built
+# for, so lane C's entire tree was unscanned. Five lossy decodes that reached
+# a value were found there by hand on 2026-09-16, in code this checker ran
+# past every push without reading.
+#
+# It cannot be a hard failure here the way it is for userspace/. That tree was
+# audited down to six sites, all IGNORE-exempt with reasons, so zero is the
+# expected state and any finding is new. gui/ and apps/ have 74 sites and have
+# never been audited; failing on them would block every lane C push on a
+# backlog, and a gate that must be bypassed to work is not a gate.
+#
+# So this half is a ratchet against scripts/lossy-decode-baseline.txt: a NEW
+# file with a lossy decode fails, and so does an extra decode in a file already
+# listed, because the count is part of the key. A line that has become true
+# again also fails, so the baseline cannot quietly accumulate dead entries --
+# the failure mode argv-utf8-baseline.txt records having actually suffered,
+# 17 already-fixed lines deep.
+#
+# The backlog is not a list to add to. A site that is genuinely safe belongs in
+# the script's IGNORE table, which records WHY; the baseline records only THAT.
+skip_lossy_c=0
+[ -f "$lossy" ] || skip_lossy_c=1
+# Same no-pushed_shas-guard reasoning as gate 43: one run against the working
+# tree, not a loop over shas that could silently degrade to zero iterations.
+touches gui/ apps/ scripts/lossy-decode.py scripts/lossy-decode-baseline.txt \
+    || skip_lossy_c=1
+note_gate lossy-decode-lane-c "$skip_lossy_c"
+
+if [ "$skip_lossy_c" != "1" ]; then
+    if ! run_checker lossy-decode-lane-c "$py" "$lossy" \
+            --under gui --under apps --check; then
+        lossy_failed=1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Gate 44: refuse a text-mode write under `scripts/` with no `newline=`.
 #
 # check-text-mode-writes.py.

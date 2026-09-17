@@ -51,6 +51,46 @@ number.
     python scripts/lossy-decode.py                # the image's binaries
     python scripts/lossy-decode.py --all          # every crate under userspace
     python scripts/lossy-decode.py --selftest
+
+WHAT THE DEFAULT SCOPE ALSO DID NOT COVER, and for four months nobody noticed:
+`gui/` and `apps/`, which is to say lane C's entire tree. The scope was a bare
+`os.walk(ROOT/"userspace")` written for the coreutils audit this tool was built
+for. That default was right for that job and became the WHOLE scope once the
+tool was wired into the shared pre-push gate -- so it ran on every push,
+reported a number, passed, and the number was about a directory the pushed
+change had not touched. On 2026-09-16 five lossy decodes reaching a value were
+found in `apps/` and `gui/` BY HAND, in code this checker had run past for
+months. A green check about the wrong directory is indistinguishable from a
+green check.
+
+    python scripts/lossy-decode.py --under gui --under apps
+    python scripts/lossy-decode.py --under gui --under apps --write-baseline
+    python scripts/lossy-decode.py --under gui --under apps --check
+
+`--under` scans any subtree. `--check` compares against
+`scripts/lossy-decode-baseline.txt` and fails on a file that is new to it, on
+an EXTRA site in a file already listed (the count is part of the key, unlike
+the sibling `argv-utf8-baseline.txt` which keys on path alone), and on a line
+that has come true again -- so the backlog cannot silently accumulate dead
+entries, which is what the sibling ratchet was found doing, 17 lines deep.
+
+WHY `userspace/` IS A HARD FAILURE AND `gui/`+`apps/` IS A RATCHET. Not
+squeamishness: userspace was audited down to six sites, every one IGNORE-exempt
+with a written reason, so zero is its expected state and any finding there is
+genuinely new. The lane C trees have 74 sites and have never been audited. A
+hard failure would block every push on a pre-existing backlog, and a gate that
+has to be bypassed to get work done stops being read at all.
+
+AND THE BACKLOG IS NOT A LIST TO ADD TO. A site that is genuinely safe belongs
+in the IGNORE table below, which records WHY. The baseline records only THAT,
+and a long list of `that` is precisely what stops anyone reading it. Of the
+seven worst-looking of the 74, opened one at a time, ONE was a defect: four
+were displays that are correct as written, one was behaviour-identical, and one
+looked like a certain match for an already-fixed bug until sabotaging the fix
+showed the test passed against the old code too. The tool classifies by what
+the result is USED for; it cannot tell whether the bytes came from the
+filesystem or from a format that defines its own encoding, and that question is
+the whole of the triage.
 """
 
 import argparse
@@ -458,6 +498,148 @@ def selftest():
     return 1 if bad else 0
 
 
+BASELINE = os.path.join(ROOT, "scripts", "lossy-decode-baseline.txt")
+
+
+def baseline_key(rel, count):
+    """One baselined file: its path, the class, and how many sites it holds.
+
+    The count is part of the key on purpose. The sibling ratchet
+    (`argv-utf8-baseline.txt`) keys on path alone, which is right there --
+    "does this program read argv as a String" is a property of the program.
+    Here it is not: a file with four lossy decodes can grow a fifth without
+    changing a path-only key, and that fifth is exactly what this gate exists
+    to stop. Carrying the count makes a new site in an already-listed file a
+    failure, at the price that a refactor which legitimately moves one has to
+    re-run `--write-baseline`.
+    """
+    return "%s:VALUE:%d" % (rel.replace(os.sep, "/"), count)
+
+
+def load_baseline():
+    """The baselined backlog, and the roots it was taken over.
+
+    Read from disk rather than from the git tree, unlike `argv-utf8.py`, and
+    the difference is deliberate. That checker loops over the shas being
+    pushed, so it must read a baseline from the same sha or it answers for a
+    tree nobody is pushing. This one runs once against the **working tree** --
+    the pre-push hook says so where it invokes it -- so disk *is* the tree
+    being judged, and reading from git would compare a working-tree scan
+    against a committed baseline: a mismatch on every uncommitted edit.
+    """
+    roots = ()
+    known = {}
+    if not os.path.isfile(BASELINE):
+        return roots, known
+    for line in io.open(BASELINE, encoding="utf-8", errors="strict"):
+        line = line.strip()
+        if line.startswith("# roots:"):
+            roots = tuple(line.split(":", 1)[1].split())
+            continue
+        if not line or line.startswith("#"):
+            continue
+        rel, _kind, count = line.rsplit(":", 2)
+        known[rel] = int(count)
+    return roots, known
+
+
+def value_counts(targets):
+    """`{relpath: number of VALUE sites}` for every file that has any."""
+    counts = {}
+    for name, path in targets:
+        n = sum(1 for _, kind, _ in scan(path, name) if kind == "VALUE")
+        if n:
+            counts[name.replace(os.sep, "/")] = n
+    return counts
+
+
+def write_baseline(roots, counts):
+    lines = [
+        "# Lossy byte->text conversions that reach a VALUE, in trees",
+        "# `lossy-decode.py` does not scan by default. Generated by",
+        "# `scripts/lossy-decode.py --under <root> ... --write-baseline`.",
+        "#",
+        "# This file is a ratchet and only ever shrinks. Do NOT add a line to",
+        "# turn a red --check green: a new entry is a new place where a name",
+        "# that is not text becomes a name nobody can open.",
+        "#",
+        "# A site that is genuinely safe does not belong here at all -- it",
+        "# belongs in the IGNORE table in the script, which records WHY. This",
+        "# file records only THAT, and a backlog of `that` is what stops",
+        "# anyone reading the list.",
+        "#",
+        "# The count on each line is part of the key: a fifth decode in a file",
+        "# already listed with four is a new defect and fails --check.",
+        "#",
+        "# roots: " + " ".join(roots),
+        "",
+    ]
+    for rel in sorted(counts):
+        lines.append(baseline_key(rel, counts[rel]))
+    with io.open(BASELINE, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return len(counts)
+
+
+def check_against_baseline(roots, counts):
+    """Fail on a finding not in the baseline, and on a baseline line gone stale.
+
+    Both directions, for the reason `argv-utf8.py` records from experience: a
+    ratchet that checks only one of them accumulates dead lines, and a baseline
+    carrying already-fixed entries reads as a backlog that is not shrinking
+    when in fact it has.
+    """
+    want_roots, known = load_baseline()
+    if want_roots and tuple(roots) != want_roots:
+        print("lossy-decode: --check asked for roots %s but the baseline was "
+              "taken over %s. Comparing them would report every file in one "
+              "and not the other as new."
+              % (" ".join(roots), " ".join(want_roots)), file=sys.stderr)
+        return 1
+
+    worse = []
+    for rel in sorted(counts):
+        was = known.get(rel)
+        if was is None:
+            worse.append("  NEW   %s has %d lossy decode(s) reaching a value"
+                         % (rel, counts[rel]))
+        elif counts[rel] > was:
+            worse.append("  MORE  %s went from %d to %d"
+                         % (rel, was, counts[rel]))
+
+    stale = []
+    for rel in sorted(known):
+        now = counts.get(rel, 0)
+        if now == 0:
+            stale.append("  GONE  %s is clean now; drop its line" % rel)
+        elif now < known[rel]:
+            stale.append("  FEWER %s went from %d to %d; lower its line"
+                         % (rel, known[rel], now))
+
+    if worse:
+        print("lossy-decode: new lossy decode(s) reaching a value:",
+              file=sys.stderr)
+        for line in worse:
+            print(line, file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Do not add these to the baseline. Either the bytes are a path "
+              "and this is a defect, or they come from a format that defines "
+              "its own encoding -- in which case the site belongs in IGNORE "
+              "in the script, with the reason.", file=sys.stderr)
+    if stale:
+        print("lossy-decode: the baseline is out of date (this is good news):",
+              file=sys.stderr)
+        for line in stale:
+            print(line, file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Re-run with --write-baseline to record the improvement.",
+              file=sys.stderr)
+
+    if not worse and not stale:
+        print("lossy-decode: %d file(s) baselined, none worse." % len(known))
+    return 1 if (worse or stale) else 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -468,12 +650,32 @@ def main():
     ap.add_argument("--under", action="append", metavar="DIR", default=None,
                     help="scan every .rs under DIR instead (repeatable); "
                          "e.g. --under gui --under apps for lane C's tree")
+    ap.add_argument("--write-baseline", action="store_true",
+                    help="record the current findings as the ratchet's floor")
+    ap.add_argument("--check", action="store_true",
+                    help="fail on a finding not in the baseline, or on a "
+                         "baseline line that is no longer true")
     ap.add_argument("--show", choices=("value", "diag", "host", "ok", "all"),
                     default="value")
     args = ap.parse_args()
 
     if args.selftest:
         return selftest()
+
+    if args.write_baseline or args.check:
+        if not args.under:
+            print("lossy-decode: --write-baseline/--check need --under DIR; "
+                  "the default scope is already a hard failure, not a ratchet.",
+                  file=sys.stderr)
+            return 2
+        roots = tuple(args.under)
+        counts = value_counts(all_sources(roots))
+        if args.write_baseline:
+            n = write_baseline(roots, counts)
+            print("lossy-decode: baseline written -- %d file(s), %d site(s), "
+                  "over %s" % (n, sum(counts.values()), " ".join(roots)))
+            return 0
+        return check_against_baseline(roots, counts)
 
     if args.under:
         targets = all_sources(tuple(args.under))

@@ -4662,10 +4662,20 @@ impl ExplorerState {
             // a file is how a user *enters* Custom, so requiring the mode
             // first would make it unreachable by the gesture that is supposed
             // to create it.
+            // Dragging a row that is already part of the selection moves the
+            // whole selection; dragging an unselected row moves just it. Read
+            // *before* the selection handling below runs, because that is
+            // about to replace the selection with this row -- and the question
+            // being asked is what the user had chosen when they grabbed it.
+            let rows = if self.selected_indices.contains(&index) {
+                self.selected_indices.clone()
+            } else {
+                vec![index]
+            };
             self.row_drag = Some(RowDrag {
                 start_x: x,
                 start_y: y,
-                rows: vec![index],
+                rows,
                 active: false,
                 insert_at: index,
             });
@@ -9953,26 +9963,28 @@ mod tests {
     /// Dragging a row to the top puts it there and keeps it there.
     #[test]
     fn a_rearranged_folder_stays_rearranged() {
-        let scratch = temp_dir("manual_basic");
-        let root = scratch.dir().to_path_buf();
-        for name in ["a.txt", "b.txt", "c.txt"] {
-            write(&root.join(name), "x");
-        }
+        settingsfile::testing::with_scratch_config("manual-basic", |_root| {
+            let scratch = temp_dir("manual_basic");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                write(&root.join(name), "x");
+            }
 
-        let mut state = state_at(&root);
-        assert_eq!(state.entries[0].name, "a.txt");
+            let mut state = state_at(&root);
+            assert_eq!(state.entries[0].name, "a.txt");
 
-        // Move the third row (c.txt) to the front.
-        assert!(state.reorder_rows(vec![2], 0));
-        assert_eq!(state.entries[0].name, "c.txt");
-        assert_eq!(state.sort_by, SortBy::Custom);
+            // Move the third row (c.txt) to the front.
+            assert!(state.reorder_rows(vec![2], 0));
+            assert_eq!(state.entries[0].name, "c.txt");
+            assert_eq!(state.sort_by, SortBy::Custom);
 
-        // Re-listing the folder must not undo it.
-        state.load_directory();
-        assert_eq!(
-            state.entries[0].name, "c.txt",
-            "the arrangement did not survive a refresh"
-        );
+            // Re-listing the folder must not undo it.
+            state.load_directory();
+            assert_eq!(
+                state.entries[0].name, "c.txt",
+                "the arrangement did not survive a refresh"
+            );
+        });
     }
 
     /// A column sort overrides the arrangement without discarding it.
@@ -9982,86 +9994,92 @@ mod tests {
     /// looks correct until the user sorts by a column and comes back.
     #[test]
     fn a_column_sort_overrides_the_arrangement_without_losing_it() {
-        let scratch = temp_dir("manual_precedence");
-        let root = scratch.dir().to_path_buf();
-        for name in ["a.txt", "b.txt", "c.txt"] {
-            write(&root.join(name), "x");
-        }
+        settingsfile::testing::with_scratch_config("manual-prec", |_root| {
+            let scratch = temp_dir("manual_precedence");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                write(&root.join(name), "x");
+            }
 
-        let mut state = state_at(&root);
-        assert!(state.reorder_rows(vec![2], 0));
-        assert_eq!(state.entries[0].name, "c.txt");
+            let mut state = state_at(&root);
+            assert!(state.reorder_rows(vec![2], 0));
+            assert_eq!(state.entries[0].name, "c.txt");
 
-        // Sort by name: the view changes...
-        state.sort_by = SortBy::Name;
-        state.sort_entries();
-        assert_eq!(state.entries[0].name, "a.txt");
+            // Sort by name: the view changes...
+            state.sort_by = SortBy::Name;
+            state.sort_entries();
+            assert_eq!(state.entries[0].name, "a.txt");
 
-        // ...and switching back restores the arrangement intact.
-        state.sort_by = SortBy::Custom;
-        state.sort_entries();
-        assert_eq!(
-            state.entries[0].name, "c.txt",
-            "the hand arrangement was discarded by a column sort"
-        );
+            // ...and switching back restores the arrangement intact.
+            state.sort_by = SortBy::Custom;
+            state.sort_entries();
+            assert_eq!(
+                state.entries[0].name, "c.txt",
+                "the hand arrangement was discarded by a column sort"
+            );
+        });
     }
 
     /// A file that appears later lands at the end, not in the middle.
     #[test]
     fn a_new_file_joins_the_end_of_the_arrangement() {
-        let scratch = temp_dir("manual_newcomer");
-        let root = scratch.dir().to_path_buf();
-        for name in ["a.txt", "b.txt"] {
-            write(&root.join(name), "x");
-        }
+        settingsfile::testing::with_scratch_config("manual-new", |_root| {
+            let scratch = temp_dir("manual_newcomer");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt"] {
+                write(&root.join(name), "x");
+            }
 
-        let mut state = state_at(&root);
-        assert!(state.reorder_rows(vec![1], 0));
-        assert_eq!(state.entries[0].name, "b.txt");
+            let mut state = state_at(&root);
+            assert!(state.reorder_rows(vec![1], 0));
+            assert_eq!(state.entries[0].name, "b.txt");
 
-        write(&root.join("aaa-new.txt"), "x");
-        state.load_directory();
+            write(&root.join("aaa-new.txt"), "x");
+            state.load_directory();
 
-        assert_eq!(state.entries[0].name, "b.txt", "the arrangement moved");
-        assert_eq!(
-            state.entries.last().expect("entries").name,
-            "aaa-new.txt",
-            "a newcomer jumped the arrangement despite sorting first by name"
-        );
+            assert_eq!(state.entries[0].name, "b.txt", "the arrangement moved");
+            assert_eq!(
+                state.entries.last().expect("entries").name,
+                "aaa-new.txt",
+                "a newcomer jumped the arrangement despite sorting first by name"
+            );
+        });
     }
 
     /// Arrangements do not leak between folders.
     #[test]
     fn each_folder_keeps_its_own_arrangement() {
-        let scratch = temp_dir("manual_perfolder");
-        let root = scratch.dir().to_path_buf();
-        let other = root.join("other");
-        fs::create_dir_all(&other).expect("mkdir");
-        for name in ["a.txt", "b.txt"] {
-            write(&root.join(name), "x");
-            write(&other.join(name), "x");
-        }
+        settingsfile::testing::with_scratch_config("manual-perfolder", |_root| {
+            let scratch = temp_dir("manual_perfolder");
+            let root = scratch.dir().to_path_buf();
+            let other = root.join("other");
+            fs::create_dir_all(&other).expect("mkdir");
+            for name in ["a.txt", "b.txt"] {
+                write(&root.join(name), "x");
+                write(&other.join(name), "x");
+            }
 
-        let mut state = state_at(&root);
-        // `other/` is a row too, and folders sort first, so the files are at
-        // 1 and 2 rather than 0 and 1. Naming the index by what is in it
-        // rather than by counting: a fixture that silently means a different
-        // row than the test says is how a green test proves nothing.
-        let last = state.entries.len().saturating_sub(1);
-        assert_eq!(state.entries[last].name, "b.txt");
-        assert!(state.reorder_rows(vec![last], 0));
-        assert_eq!(state.entries[0].name, "b.txt");
+            let mut state = state_at(&root);
+            // `other/` is a row too, and folders sort first, so the files are at
+            // 1 and 2 rather than 0 and 1. Naming the index by what is in it
+            // rather than by counting: a fixture that silently means a different
+            // row than the test says is how a green test proves nothing.
+            let last = state.entries.len().saturating_sub(1);
+            assert_eq!(state.entries[last].name, "b.txt");
+            assert!(state.reorder_rows(vec![last], 0));
+            assert_eq!(state.entries[0].name, "b.txt");
 
-        state.navigate_to(&other);
-        assert_eq!(
-            state.entries[0].name, "a.txt",
-            "one folder's arrangement was applied to another"
-        );
-        assert_eq!(
-            state.sort_by,
-            SortBy::Name,
-            "Custom stuck on a folder with no arrangement, where it means nothing"
-        );
+            state.navigate_to(&other);
+            assert_eq!(
+                state.entries[0].name, "a.txt",
+                "one folder's arrangement was applied to another"
+            );
+            assert_eq!(
+                state.sort_by,
+                SortBy::Name,
+                "Custom stuck on a folder with no arrangement, where it means nothing"
+            );
+        });
     }
 
     /// A press that does not move is a click, not a rearrangement.
@@ -10071,25 +10089,27 @@ mod tests {
     /// blamed on something else.
     #[test]
     fn a_press_without_movement_does_not_rearrange() {
-        let scratch = temp_dir("manual_threshold");
-        let root = scratch.dir().to_path_buf();
-        for name in ["a.txt", "b.txt"] {
-            write(&root.join(name), "x");
-        }
+        settingsfile::testing::with_scratch_config("manual-thresh", |_root| {
+            let scratch = temp_dir("manual_threshold");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt"] {
+                write(&root.join(name), "x");
+            }
 
-        let mut state = state_at(&root);
-        state.row_drag = Some(RowDrag {
-            start_x: 10.0,
-            start_y: 10.0,
-            rows: vec![1],
-            active: false,
-            insert_at: 0,
+            let mut state = state_at(&root);
+            state.row_drag = Some(RowDrag {
+                start_x: 10.0,
+                start_y: 10.0,
+                rows: vec![1],
+                active: false,
+                insert_at: 0,
+            });
+            // A jitter of one pixel, well inside the threshold.
+            let _ = state.drag_row(11.0, 10.0);
+            assert!(!state.drop_row(), "a click rearranged the folder");
+            assert_eq!(state.entries[0].name, "a.txt");
+            assert_eq!(state.sort_by, SortBy::Name);
         });
-        // A jitter of one pixel, well inside the threshold.
-        let _ = state.drag_row(11.0, 10.0);
-        assert!(!state.drop_row(), "a click rearranged the folder");
-        assert_eq!(state.entries[0].name, "a.txt");
-        assert_eq!(state.sort_by, SortBy::Name);
     }
 
     /// Past the threshold, the same gesture rearranges.
@@ -10100,45 +10120,93 @@ mod tests {
     /// So this pins the append case: a file dragged past the end goes last.
     #[test]
     fn a_press_that_travels_far_enough_rearranges() {
-        let scratch = temp_dir("manual_threshold_pass");
-        let root = scratch.dir().to_path_buf();
-        for name in ["a.txt", "b.txt"] {
-            write(&root.join(name), "x");
-        }
+        settingsfile::testing::with_scratch_config("manual-thresh-pass", |_root| {
+            let scratch = temp_dir("manual_threshold_pass");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt"] {
+                write(&root.join(name), "x");
+            }
 
-        let mut state = state_at(&root);
-        assert_eq!(state.entries[0].name, "a.txt");
-        state.row_drag = Some(RowDrag {
-            start_x: 10.0,
-            start_y: 10.0,
-            rows: vec![0],
-            active: false,
-            insert_at: 0,
+            let mut state = state_at(&root);
+            assert_eq!(state.entries[0].name, "a.txt");
+            state.row_drag = Some(RowDrag {
+                start_x: 10.0,
+                start_y: 10.0,
+                rows: vec![0],
+                active: false,
+                insert_at: 0,
+            });
+            let _ = state.drag_row(10.0, 60.0);
+            assert!(state.drop_row(), "a real drag did nothing");
+            assert_eq!(
+                state.entries.last().expect("entries").name,
+                "a.txt",
+                "a row dropped past the end did not go last"
+            );
+            assert_eq!(state.sort_by, SortBy::Custom);
         });
-        let _ = state.drag_row(10.0, 60.0);
-        assert!(state.drop_row(), "a real drag did nothing");
-        assert_eq!(
-            state.entries.last().expect("entries").name,
-            "a.txt",
-            "a row dropped past the end did not go last"
-        );
-        assert_eq!(state.sort_by, SortBy::Custom);
+    }
+
+    /// Several rows move together and keep their relative order.
+    #[test]
+    fn a_multi_row_drag_moves_them_all_in_order() {
+        settingsfile::testing::with_scratch_config("manual-multi", |_root| {
+            let scratch = temp_dir("manual_multi");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            // Move b and c (rows 1 and 2) to the front, together.
+            assert!(state.reorder_rows(vec![1, 2], 0));
+            let names: Vec<&str> = state.entries.iter().map(|e| e.name.as_str()).collect();
+            assert_eq!(
+                names,
+                vec!["b.txt", "c.txt", "a.txt", "d.txt"],
+                "the moved rows lost their order relative to each other"
+            );
+        });
+    }
+
+    /// Moving rows downward accounts for the gap they leave behind.
+    ///
+    /// The off-by-one this arithmetic exists for: lifting two rows out from
+    /// above the target shifts the target up by two, and not adjusting drops
+    /// them two places further down than the user pointed.
+    #[test]
+    fn rows_moved_downward_land_where_they_were_dropped() {
+        settingsfile::testing::with_scratch_config("manual-down", |_root| {
+            let scratch = temp_dir("manual_down");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            // Drop a.txt (row 0) before d.txt (row 3).
+            assert!(state.reorder_rows(vec![0], 3));
+            let names: Vec<&str> = state.entries.iter().map(|e| e.name.as_str()).collect();
+            assert_eq!(names, vec!["b.txt", "c.txt", "a.txt", "d.txt"]);
+        });
     }
 
     /// An out-of-range target is refused rather than clamped.
     #[test]
     fn an_impossible_move_is_refused() {
-        let scratch = temp_dir("manual_range");
-        let root = scratch.dir().to_path_buf();
-        write(&root.join("a.txt"), "x");
+        settingsfile::testing::with_scratch_config("manual-range", |_root| {
+            let scratch = temp_dir("manual_range");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
 
-        let mut state = state_at(&root);
-        assert!(
-            !state.reorder_rows(vec![9], 0),
-            "moved a row that is not there"
-        );
-        assert!(!state.reorder_rows(vec![0], 99), "moved a row past the end");
-        assert!(!state.reorder_rows(Vec::new(), 0), "moved nothing, loudly");
+            let mut state = state_at(&root);
+            assert!(
+                !state.reorder_rows(vec![9], 0),
+                "moved a row that is not there"
+            );
+            assert!(!state.reorder_rows(vec![0], 99), "moved a row past the end");
+            assert!(!state.reorder_rows(Vec::new(), 0), "moved nothing, loudly");
+        });
     }
 
     // ======================================================================

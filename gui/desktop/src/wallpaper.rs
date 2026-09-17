@@ -443,11 +443,38 @@ impl SlideshowState {
 // WallpaperHistory
 // ============================================================================
 
+/// One wallpaper the user chose, recorded so it can be chosen again.
+///
+/// # Why an enum and not a tagged string
+///
+/// These entries used to be strings: `image:<path>`, `slideshow:<path>`,
+/// `solid:#RRGGBB`, `solid:theme`, `dynamic`. Writing them was easy and
+/// **nothing ever read them back** -- the history had working `go_back` and
+/// `go_forward`, and no caller, because going back means turning an entry into
+/// a wallpaper again and no parser existed to do it.
+///
+/// Parsing them would also have been wrong in a way that is easy to miss: a
+/// path may contain `:`, so `image:/a:b/c.png` cannot be split on the first
+/// colon without guessing. An enum has nothing to split.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WallpaperChoice {
+    /// A colour the user picked.
+    Solid(Color),
+    /// The theme's own base colour, which follows light and dark.
+    SolidTheme,
+    /// One picture.
+    Image(PathBuf),
+    /// A folder of pictures, shown in turn.
+    Slideshow(PathBuf),
+    /// The time-of-day gradient.
+    Dynamic,
+}
+
 /// Tracks recent wallpapers for back-navigation.
 #[derive(Clone, Debug)]
 pub struct WallpaperHistory {
-    /// Ring buffer of recent wallpaper descriptions (path or color hex).
-    entries: Vec<String>,
+    /// Ring buffer of recent wallpaper choices.
+    entries: Vec<WallpaperChoice>,
     /// Index into `entries` of the current wallpaper, or `None` before
     /// anything has been recorded.
     ///
@@ -470,7 +497,7 @@ impl WallpaperHistory {
     }
 
     /// Record a new wallpaper. Truncates any forward history.
-    pub fn push(&mut self, entry: String) {
+    pub fn push(&mut self, entry: WallpaperChoice) {
         // Anything past the cursor is a branch the user navigated away from.
         self.entries
             .truncate(self.cursor.map_or(0, |i| i.saturating_add(1)));
@@ -484,25 +511,25 @@ impl WallpaperHistory {
     }
 
     /// Navigate back. Returns the previous entry, if any.
-    pub fn go_back(&mut self) -> Option<&str> {
+    pub fn go_back(&mut self) -> Option<&WallpaperChoice> {
         let previous = self.cursor?.checked_sub(1)?;
         self.cursor = Some(previous);
-        self.entries.get(previous).map(String::as_str)
+        self.entries.get(previous)
     }
 
     /// Navigate forward. Returns the next entry, if any.
-    pub fn go_forward(&mut self) -> Option<&str> {
+    pub fn go_forward(&mut self) -> Option<&WallpaperChoice> {
         let next = self.cursor?.checked_add(1)?;
         if next >= self.entries.len() {
             return None;
         }
         self.cursor = Some(next);
-        self.entries.get(next).map(String::as_str)
+        self.entries.get(next)
     }
 
     /// Current entry, if any.
-    pub fn current(&self) -> Option<&str> {
-        self.entries.get(self.cursor?).map(String::as_str)
+    pub fn current(&self) -> Option<&WallpaperChoice> {
+        self.entries.get(self.cursor?)
     }
 
     /// Number of entries in the history.
@@ -667,10 +694,7 @@ impl WallpaperManager {
         self.config.color = Some(color);
         self.slideshow = None;
         self.current_image_id = 0;
-        self.history.push(format!(
-            "solid:#{:02X}{:02X}{:02X}",
-            color.r, color.g, color.b
-        ));
+        self.history.push(WallpaperChoice::Solid(color));
     }
 
     /// Set the wallpaper to a solid colour that follows the desktop's theme.
@@ -685,7 +709,7 @@ impl WallpaperManager {
         self.config.color = None;
         self.slideshow = None;
         self.current_image_id = 0;
-        self.history.push("solid:theme".to_string());
+        self.history.push(WallpaperChoice::SolidTheme);
     }
 
     /// Set the wallpaper to a single image.
@@ -700,7 +724,8 @@ impl WallpaperManager {
         // nothing can navigate to what it records. See `known-issues.md`
         // `TD-C-THE-WALLPAPER-SUBSYSTEM-CARRIES-PATHS-AS-TEXT-THROUGHOUT`;
         // spelling a write-only log exactly would be making dead code correct.
-        self.history.push(format!("image:{}", path.display()));
+        self.history
+            .push(WallpaperChoice::Image(path.to_path_buf()));
     }
 
     /// Set the wallpaper to slideshow mode.
@@ -765,7 +790,8 @@ impl WallpaperManager {
         }
         if let Some(path) = state.current_path() {
             self.current_image_id = self.alloc_image_id();
-            self.history.push(format!("slideshow:{}", path.display()));
+            self.history
+                .push(WallpaperChoice::Slideshow(path.to_path_buf()));
         }
         self.slideshow = Some(state);
     }
@@ -776,7 +802,7 @@ impl WallpaperManager {
         self.config.dynamic_theme = DynamicTheme::from_palette(base_palette);
         self.slideshow = None;
         self.current_image_id = 0;
-        self.history.push("dynamic".to_string());
+        self.history.push(WallpaperChoice::Dynamic);
     }
 
     // ======================================================================
@@ -837,7 +863,8 @@ impl WallpaperManager {
         if advanced {
             self.current_image_id = self.alloc_image_id();
             if let Some(path) = self.slideshow.as_ref().and_then(|s| s.current_path()) {
-                self.history.push(format!("slideshow:{}", path.display()));
+                self.history
+                    .push(WallpaperChoice::Slideshow(path.to_path_buf()));
             }
         }
 
@@ -854,7 +881,8 @@ impl WallpaperManager {
         if advanced {
             self.current_image_id = self.alloc_image_id();
             if let Some(path) = self.slideshow.as_ref().and_then(|s| s.current_path()) {
-                self.history.push(format!("slideshow:{}", path.display()));
+                self.history
+                    .push(WallpaperChoice::Slideshow(path.to_path_buf()));
             }
             if let Some(ref mut s) = self.slideshow {
                 s.last_change_secs = 0; // Reset timer.
@@ -868,7 +896,8 @@ impl WallpaperManager {
         if went_back {
             self.current_image_id = self.alloc_image_id();
             if let Some(path) = self.slideshow.as_ref().and_then(|s| s.current_path()) {
-                self.history.push(format!("slideshow:{}", path.display()));
+                self.history
+                    .push(WallpaperChoice::Slideshow(path.to_path_buf()));
             }
             if let Some(ref mut s) = self.slideshow {
                 s.last_change_secs = 0;
@@ -918,7 +947,7 @@ impl WallpaperManager {
 
         self.current_image_id = self.alloc_image_id();
         if let Some(path) = effective_path {
-            self.history.push(format!("slideshow:{}", path.display()));
+            self.history.push(WallpaperChoice::Slideshow(path.clone()));
         }
     }
 
@@ -1838,59 +1867,64 @@ mod tests {
         assert!(history.current().is_none());
     }
 
+    /// A picture choice, for the history fixtures.
+    fn pic(name: &str) -> WallpaperChoice {
+        WallpaperChoice::Image(PathBuf::from(name))
+    }
+
     #[test]
     fn history_push_and_current() {
         let mut history = WallpaperHistory::new();
-        history.push("a.png".into());
-        assert_eq!(history.current(), Some("a.png"));
+        history.push(pic("a.png"));
+        assert_eq!(history.current(), Some(&pic("a.png")));
         assert_eq!(history.len(), 1);
     }
 
     #[test]
     fn history_go_back_and_forward() {
         let mut history = WallpaperHistory::new();
-        history.push("first.png".into());
-        history.push("second.png".into());
-        history.push("third.png".into());
+        history.push(pic("first.png"));
+        history.push(pic("second.png"));
+        history.push(pic("third.png"));
 
-        assert_eq!(history.current(), Some("third.png"));
+        assert_eq!(history.current(), Some(&pic("third.png")));
 
         let back = history.go_back();
-        assert_eq!(back, Some("second.png"));
-        assert_eq!(history.current(), Some("second.png"));
+        assert_eq!(back, Some(&pic("second.png")));
+        assert_eq!(history.current(), Some(&pic("second.png")));
 
         let forward = history.go_forward();
-        assert_eq!(forward, Some("third.png"));
+        assert_eq!(forward, Some(&pic("third.png")));
     }
 
     #[test]
     fn history_go_back_at_start_returns_none() {
         let mut history = WallpaperHistory::new();
-        history.push("only.png".into());
+        history.push(pic("only.png"));
         assert!(history.go_back().is_none());
     }
 
     #[test]
     fn history_go_forward_at_end_returns_none() {
         let mut history = WallpaperHistory::new();
-        history.push("only.png".into());
+        history.push(pic("only.png"));
         assert!(history.go_forward().is_none());
     }
 
     #[test]
     fn history_push_after_back_truncates_forward() {
         let mut history = WallpaperHistory::new();
-        history.push("a.png".into());
-        history.push("b.png".into());
-        history.push("c.png".into());
+        history.push(pic("a.png"));
+        history.push(pic("b.png"));
+        history.push(pic("c.png"));
 
         // Go back to "b"
         history.go_back();
-        assert_eq!(history.current(), Some("b.png"));
+        assert_eq!(history.current(), Some(&pic("b.png")));
 
         // Push a new entry -- "c" should be gone
-        history.push("d.png".into());
-        assert_eq!(history.current(), Some("d.png"));
+        history.push(pic("d.png"));
+        assert_eq!(history.current(), Some(&pic("d.png")));
         assert!(history.go_forward().is_none());
         assert_eq!(history.len(), 3); // a, b, d
     }
@@ -1899,11 +1933,11 @@ mod tests {
     fn history_respects_capacity() {
         let mut history = WallpaperHistory::new();
         for i in 0..30 {
-            history.push(format!("wp_{i}.png"));
+            history.push(pic(&format!("wp_{i}.png")));
         }
         assert_eq!(history.len(), HISTORY_CAPACITY);
         // The oldest entries should have been evicted.
-        assert_eq!(history.entries[0], "wp_10.png");
+        assert_eq!(history.entries[0], pic("wp_10.png"));
     }
 
     #[test]
@@ -1913,22 +1947,22 @@ mod tests {
         // where those guards had to agree and did not.
         let mut history = WallpaperHistory::new();
         for name in ["a.png", "b.png", "c.png"] {
-            history.push(name.into());
+            history.push(pic(name));
         }
 
         // Back to the oldest, then no further.
-        assert_eq!(history.go_back(), Some("b.png"));
-        assert_eq!(history.go_back(), Some("a.png"));
+        assert_eq!(history.go_back(), Some(&pic("b.png")));
+        assert_eq!(history.go_back(), Some(&pic("a.png")));
         assert_eq!(history.go_back(), None);
         assert_eq!(history.go_back(), None, "still pinned at the oldest");
-        assert_eq!(history.current(), Some("a.png"));
+        assert_eq!(history.current(), Some(&pic("a.png")));
 
         // Forward to the newest, then no further.
-        assert_eq!(history.go_forward(), Some("b.png"));
-        assert_eq!(history.go_forward(), Some("c.png"));
+        assert_eq!(history.go_forward(), Some(&pic("b.png")));
+        assert_eq!(history.go_forward(), Some(&pic("c.png")));
         assert_eq!(history.go_forward(), None);
         assert_eq!(history.go_forward(), None, "still pinned at the newest");
-        assert_eq!(history.current(), Some("c.png"));
+        assert_eq!(history.current(), Some(&pic("c.png")));
     }
 
     #[test]
@@ -1939,8 +1973,8 @@ mod tests {
         assert_eq!(history.go_back(), None);
         assert_eq!(history.go_forward(), None);
         // A first push lands on the entry, not one past it.
-        history.push("first.png".into());
-        assert_eq!(history.current(), Some("first.png"));
+        history.push(pic("first.png"));
+        assert_eq!(history.current(), Some(&pic("first.png")));
         assert_eq!(history.go_back(), None);
         assert_eq!(history.go_forward(), None);
     }
@@ -1953,10 +1987,10 @@ mod tests {
         // pushed.
         let mut history = WallpaperHistory::new();
         for i in 0..(HISTORY_CAPACITY * 2) {
-            history.push(format!("wp_{i}.png"));
+            history.push(pic(&format!("wp_{i}.png")));
             assert_eq!(
                 history.current(),
-                Some(format!("wp_{i}.png").as_str()),
+                Some(&pic(&format!("wp_{i}.png"))),
                 "after push {i}"
             );
         }
@@ -2238,7 +2272,7 @@ mod tests {
                 .expect("a non-empty slideshow is always showing something");
             assert_eq!(
                 mgr.history.current(),
-                Some(format!("slideshow:{}", showing.display()).as_str()),
+                Some(&WallpaperChoice::Slideshow(showing.to_path_buf())),
                 "seed {seed}"
             );
         }

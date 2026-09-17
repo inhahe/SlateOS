@@ -1325,7 +1325,7 @@ fn a_wallpaper_chosen_while_running_is_adopted_without_a_restart() {
 
         assert_eq!(
             session.wallpaper_mut().current_image_path(),
-            Some(picture.as_str()),
+            Some(picture.as_path()),
             "the desktop did not adopt the picture until a restart"
         );
     });
@@ -2681,7 +2681,7 @@ fn a_wallpaper_named_in_the_settings_is_adopted() {
 
     assert_eq!(
         session.wallpaper_mut().current_image_path(),
-        Some(picture.as_str()),
+        Some(picture.as_path()),
         "the desktop is not showing the picture the settings name"
     );
 }
@@ -2729,11 +2729,11 @@ fn an_unrelated_settings_change_does_not_reload_the_picture() {
     );
 }
 
-fn fixture(name: &str) -> String {
-    format!(
+fn fixture(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!(
         "{}/../imagecodec/tests/data/{name}.png",
         env!("CARGO_MANIFEST_DIR")
-    )
+    ))
 }
 
 /// The directory this process's scratch files live in, created once.
@@ -2765,10 +2765,10 @@ fn scratch_dir() -> &'static std::path::Path {
 }
 
 /// A file with contents of our choosing, for the cases no valid fixture covers.
-fn scratch(name: &str, bytes: &[u8]) -> String {
+fn scratch(name: &str, bytes: &[u8]) -> std::path::PathBuf {
     let path = scratch_dir().join(name);
     std::fs::write(&path, bytes).expect("the temp directory is not writable");
-    path.to_string_lossy().into_owned()
+    path
 }
 
 /// Every image upload the session sent, as `(window, image_id, width, height,
@@ -2904,9 +2904,10 @@ fn a_slideshow_step_releases_the_old_picture_before_uploading_the_new_one() {
     let (mut session, desktop, _turn) = session();
     let background = session.background().window();
     session.wallpaper_mut().set_slideshow("/pics", 60, false);
-    session
-        .wallpaper_mut()
-        .populate_slideshow_paths(vec![fixture("rgb8"), fixture("gray8")]);
+    session.wallpaper_mut().populate_slideshow_paths(vec![
+        fixture("rgb8").display().to_string(),
+        fixture("gray8").display().to_string(),
+    ]);
     let first = session.wallpaper_mut().current_image_id();
     session.paint_background().expect("the harness refused");
 
@@ -2954,9 +2955,10 @@ fn a_wallpaper_that_is_not_there_costs_a_picture_and_not_a_desktop() {
     // run of the same test in another process.
     let _ = std::fs::remove_file(&missing);
     let (mut session, desktop, _turn) = session();
-    session
-        .wallpaper_mut()
-        .set_image(&missing, crate::wallpaper::ImageFit::Fill);
+    session.wallpaper_mut().set_image(
+        std::path::Path::new(&missing),
+        crate::wallpaper::ImageFit::Fill,
+    );
     let before = desktop.borrow_mut().drawn().len();
 
     session
@@ -2980,9 +2982,10 @@ fn a_wallpaper_that_is_not_there_costs_a_picture_and_not_a_desktop() {
 fn a_corrupt_wallpaper_is_attempted_once_and_not_on_every_repaint() {
     let (mut session, desktop, _turn) = session();
     let path = scratch("corrupt.png", b"\x89PNG\r\n\x1a\nand then nonsense");
-    session
-        .wallpaper_mut()
-        .set_image(&path, crate::wallpaper::ImageFit::Fill);
+    session.wallpaper_mut().set_image(
+        std::path::Path::new(&path),
+        crate::wallpaper::ImageFit::Fill,
+    );
 
     session
         .paint_background()
@@ -3088,9 +3091,10 @@ fn posted(session: &Session) -> Vec<(String, String)> {
 fn a_wallpaper_that_will_not_decode_says_so_where_the_user_can_read_it() {
     let (mut session, _desktop, _turn) = session();
     let path = scratch("says-so.png", b"\x89PNG\r\n\x1a\nand then nonsense");
-    session
-        .wallpaper_mut()
-        .set_image(&path, crate::wallpaper::ImageFit::Fill);
+    session.wallpaper_mut().set_image(
+        std::path::Path::new(&path),
+        crate::wallpaper::ImageFit::Fill,
+    );
 
     session.paint_background().expect("the harness refused");
 
@@ -3121,9 +3125,10 @@ fn a_failure_is_reported_once_and_not_once_per_repaint() {
     // corrupt file stayed selected.
     let (mut session, _desktop, _turn) = session();
     let path = scratch("once-only.png", b"\x89PNG\r\n\x1a\nand then nonsense");
-    session
-        .wallpaper_mut()
-        .set_image(&path, crate::wallpaper::ImageFit::Fill);
+    session.wallpaper_mut().set_image(
+        std::path::Path::new(&path),
+        crate::wallpaper::ImageFit::Fill,
+    );
 
     for _ in 0..5 {
         session.paint_background().expect("the harness refused");

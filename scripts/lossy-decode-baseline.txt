@@ -11,12 +11,6 @@
 # file records only THAT, and a backlog of `that` is what stops
 # anyone reading the list.
 #
-# A FALL IN THIS FILE IS EVIDENCE, NOT PROOF. Routing several lossy
-# conversions through one helper drops the count without changing a
-# single call site's behaviour -- measured: three sites become one.
-# The detector is line-based and has no call graph. A large fall
-# deserves a look at the diff.
-#
 # The count on each line is part of the key: a fifth decode in a file
 # already listed with four is a new defect and fails --check.
 #
@@ -37,7 +31,6 @@ apps/installer/src/grub.rs:VALUE:3
 apps/markdowneditor/src/main.rs:VALUE:2
 apps/rssreader/src/main.rs:VALUE:1
 apps/safeio/src/lib.rs:VALUE:1
-apps/settings/src/main.rs:VALUE:1
 apps/sysmonitor/src/main.rs:VALUE:4
 apps/worldclock/src/main.rs:VALUE:1
 gui/compositor/src/present/drm/sys.rs:VALUE:1

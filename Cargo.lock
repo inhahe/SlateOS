@@ -41,6 +41,7 @@ name = "appearance"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "pathcodec",
  "settingsfile",
  "yamldoc",
 ]
@@ -577,6 +578,7 @@ dependencies = [
  "loginusers",
  "notifsettings",
  "oswindow",
+ "pathcodec",
  "posix",
  "procinfo",
  "scratchdir",

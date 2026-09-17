@@ -5,6 +5,10 @@ edition = "2024"
 description = "SlateOS appearance settings — the shared model behind the desktop's look"
 
 [dependencies]
+
+# design-decisions 426's path escape: a wallpaper's filename need not be
+# text, and this file is YAML, whose scalars are.
+pathcodec = { path = "../pathcodec" }
 # For `Color`. Both consumers (the shell and the Settings app) already depend
 # on the toolkit, so this adds no weight; the alternative — a local colour type
 # converted at every boundary — would put a second definition of a colour in

@@ -7940,39 +7940,7 @@ pub fn kill_orphaned_pgrp(pgid: crate::proc::pcb::ProcessId) {
 /// — it will be retried on the next return to userspace. This avoids
 /// corrupting memory; a proper alternate signal stack (`sigaltstack`) is
 /// a documented future enhancement.
-/// ROUND-7 DISCRIMINATOR for ctest-pty exit 45. See known-issues
-/// `A-TERMINAL-SIGNAL-WITH-NO-FOREGROUND-GROUP-IS-DROPPED`.
-///
-/// Six links are settled and all six are fine: the byte reaches the input
-/// ring, the discipline sees it, `ISIG` is on, a `SIGINT` is decided, the
-/// foreground group is non-empty, and delivery to it succeeds. The child
-/// still never returns from its read.
-///
-/// The read that raises the signal also CONSUMES the `0x03`, and returns
-/// `ERESTARTSYS`. If no handler runs, the pending signal is never cleared,
-/// the restarted read reports `Interrupted`, and that is `ERESTARTSYS`
-/// again -- an unbounded restart loop with the child alive and never
-/// exiting, which is exit 45 exactly.
-///
-/// This wrapper reports when the trampoline IS set up. That polarity is
-/// deliberate and is the lesson of rounds 1 and 4: both asked *did the bad
-/// thing happen*, and their silence needed two further rounds to interpret.
-/// Asking *did the good thing happen* makes silence and speech equally
-/// informative on first reading -- silence here means the handler never runs.
 pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i64) -> bool {
-    let delivered = deliver_pending_signal_inner(frame, ret_val);
-    if delivered {
-        let pid = crate::proc::thread::owner_process(crate::sched::current_task_id());
-        crate::serial_println!(
-            "[sig] trampoline SET UP for pid {:?} (syscall ret was {})",
-            pid,
-            ret_val
-        );
-    }
-    delivered
-}
-
-fn deliver_pending_signal_inner(frame: &mut super::entry::SyscallFrame, ret_val: i64) -> bool {
     use crate::proc::signal::{self, SIGNAL_CONTEXT_SIZE, SignalContext};
 
     // Fast path: nothing pending anywhere.

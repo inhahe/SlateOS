@@ -76836,3 +76836,35 @@ a pool with release exists because the grid cannot work without one, and the
 single-photo view should draw from it rather than keep a private number. The
 sequencing is deliberate: build the lifecycle where it is forced, not where it
 can be avoided.
+
+**FOLLOW-UP, same day: the grid needed no pool, and the reasoning above was
+half wrong.** The thumbnails landed within hours, on `gui/thumbs` (extracted
+from `apps/explorer`, which had solved this long before I asked the question).
+Ids there are **derived, not allocated**: `thumbs::image_id` hashes the file's
+path, modification time and size. There is no free list, no allocator and
+nothing to hand a number back to.
+
+So of the two halves of "the lifecycle":
+
+| Half | Predicted | Actual |
+|---|---|---|
+| **Allocation** | a pool to draw ids from | none exists; an id is a hash of the file's identity |
+| **Release** | a rule for when a photograph is off screen | real, and the cache owns it -- eviction reports the ids the compositor must be told to drop |
+
+The release half was genuine and is exactly as load-bearing as claimed; what
+made it tractable is that an LRU already knows when something has left, so
+nobody had to invent "no longer visible". The allocation half I worried about
+does not exist as a problem.
+
+**The decision stands; the reasoning that produced it does not.** One fixed id
+for the single-photo view is still right -- that view holds a full decode
+rather than a `Thumbnail`, it is not in the cache, and giving it a derived id
+would mean inventing a cache entry to derive it from. But it was chosen by
+weighing a cost that was never going to be paid.
+
+**What I would do differently.** Ask whether the tree already solves it before
+reasoning about what solving it would cost. `apps/explorer` had a working
+thumbnail cache with an id scheme, an eviction rule and the
+drops-before-uploads ordering at the time this entry was written, and I did
+not look. An hour of careful argument about a hypothetical allocator was
+answered by one `grep` for `ImageChange::Drop`.

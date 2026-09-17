@@ -311,14 +311,33 @@ def image_binaries():
     return paths
 
 
-def all_sources():
+def all_sources(roots=("userspace",)):
+    """Every `.rs` under each of `roots`.
+
+    Parameterised rather than hardcoded to `userspace/` because that default
+    silently scoped this checker to one lane's tree. The defect it looks for is
+    not a userspace defect -- it is a consequence of `design.txt` allowing every
+    byte but `/` and NUL in a name, which binds equally to `gui/` and `apps/`.
+    Five instances were found there by hand on 2026-09-16, in a tree this
+    checker could not see. See `known-issues.md`
+    `TD-C-THE-LOSSY-DECODE-CHECKER-NEVER-LOOKED-AT-TWO-THIRDS-OF-THE-TREE`.
+    """
     out = []
-    for dirpath, dirnames, filenames in os.walk(os.path.join(ROOT, "userspace")):
-        dirnames[:] = [d for d in dirnames if d != "target"]
-        for f in filenames:
-            if f.endswith(".rs"):
-                full = os.path.join(dirpath, f)
-                out.append((os.path.relpath(full, ROOT), full))
+    seen = set()
+    for root in roots:
+        base = os.path.join(ROOT, *root.split("/"))
+        if not os.path.isdir(base):
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = [d for d in dirnames if d != "target"]
+            for f in filenames:
+                if f.endswith(".rs"):
+                    full = os.path.join(dirpath, f)
+                    rel = os.path.relpath(full, ROOT)
+                    if rel in seen:
+                        continue
+                    seen.add(rel)
+                    out.append((rel, full))
     return out
 
 
@@ -446,6 +465,9 @@ def main():
     ap.add_argument("--selftest", "--self-test", dest="selftest", action="store_true")
     ap.add_argument("--all", action="store_true",
                     help="every .rs under userspace/, not just the image's binaries")
+    ap.add_argument("--under", action="append", metavar="DIR", default=None,
+                    help="scan every .rs under DIR instead (repeatable); "
+                         "e.g. --under gui --under apps for lane C's tree")
     ap.add_argument("--show", choices=("value", "diag", "host", "ok", "all"),
                     default="value")
     args = ap.parse_args()
@@ -453,7 +475,12 @@ def main():
     if args.selftest:
         return selftest()
 
-    targets = all_sources() if args.all else image_binaries()
+    if args.under:
+        targets = all_sources(tuple(args.under))
+    elif args.all:
+        targets = all_sources()
+    else:
+        targets = image_binaries()
     totals = {"VALUE": 0, "DIAG": 0, "HOST": 0, "OK": 0}
     per_bin = []
     for name, path in targets:

@@ -958,6 +958,24 @@ extern "C" fn kernel_main() -> ! {
             // reasoning, and same idempotence, as the sysuptime init below.
             fs::futexstat::init_defaults();
 
+            // Same defect, same fix, found 2026-09-17: `binfmt` had no
+            // caller of `init_defaults()` anywhere, so its STATE stayed
+            // None, every `record_*` would have returned NotSupported, and
+            // /proc/binfmt reported nothing for the life of the machine --
+            // indistinguishable from a system that has never executed a
+            // binary. Registering Elf64 here rather than in a loader
+            // because this kernel validates ELF inline in `proc::spawn`
+            // rather than installing pluggable format handlers, so there is
+            // no loader to do it at install time as binfmt's doc expects.
+            fs::binfmt::init_defaults();
+            // AlreadyExists is the idempotent case and is not a failure;
+            // anything else means the table is unusable and is worth saying.
+            if let Err(e) = fs::binfmt::register_format(fs::binfmt::BinFormat::Elf64) {
+                if e != error::KernelError::AlreadyExists {
+                    serial_println!("[boot] WARNING: binfmt Elf64 register failed: {:?}", e);
+                }
+            }
+
             // Step 12: Initialize futex subsystem.
             // Futexes enable fast userspace synchronization: the uncontended
             // path is pure atomic CAS (no syscall), the contended path uses

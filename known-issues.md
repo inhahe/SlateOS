@@ -158590,7 +158590,7 @@ number that large deserves a check that does not come from the same script:
 
 | module | every external reference |
 |---|---|
-| `binfmt` | 3 in `procfs.rs`, 3 in `kshell.rs`. **Nothing in the exec path consults it**, so the binary-format registry is decorative. |
+| `binfmt` | 3 in `procfs.rs`, 3 in `kshell.rs`. See the correction below -- my first reading of this one was wrong. |
 | `brightness` | `procfs.rs` stats, and `kshell.rs:80881 brightness::init_defaults()`. No backlight is ever set. |
 | `faceunlock` | 2 in `procfs.rs`. Nothing else. |
 
@@ -158655,3 +158655,33 @@ were fixed today where the claim was checkable and the disclosure cheap:
 not 337 bugs, and a sweep rewriting 337 module docs on one agent's reading of
 the architecture would be exactly the kind of unilateral change dd-951 is
 about.
+
+### Correction 2026-09-17: `binfmt` is a statistics module, and I called it a registry
+
+The row above originally read *"nothing in the exec path consults it, so the
+binary-format registry is decorative"*. That was wrong, and it reached `main`
+before I read the module's first line:
+
+> `//! Binary Format -- executable format loader statistics.`
+
+`binfmt` is not something `exec` should *consult*. `register_format`,
+`record_load` and `record_error` are recorders: the module's job is to be
+**told** what the loader did. So the question is the reverse of the one I
+asked -- and the answer is still a gap, just a smaller and different one.
+**Nothing reports to it.** Outside `binfmt.rs` there is not one call to
+`record_load`, `record_error` or `register_format`; all 11 references are its
+own API and self-test. `/proc/binfmt`'s load and error counts are therefore
+permanently zero, and a reader would conclude no binary has ever been
+executed on this system.
+
+That is dd-946 from the other side: not a publisher with no subscriber, but a
+**subscriber with no publisher**. The fix is one call in the ELF loader, and
+it is a real instance of the wiring backlog this entry describes rather than
+a documentation defect.
+
+Recorded as a correction rather than a silent edit, because the wrong version
+is already on `main` and because the mistake is instructive: I inferred a
+module's purpose from its **name** and its function signatures without
+reading its first line. dd-947's rule is to grep the tree for prose about the
+thing before instrumenting it, and the prose here was line 1 of the file I
+already had open.

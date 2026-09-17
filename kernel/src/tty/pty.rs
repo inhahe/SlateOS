@@ -828,6 +828,16 @@ pub(crate) fn slave_try_read_input(id: TtyId) -> Input {
         return Input::Hangup;
     };
     if let Some(b) = pty.input.read_byte() {
+        // ROUND-11 probe. `input.read_byte()` has THREE callers and
+        // round 9 instrumented only the blocking one; the fixture
+        // reads non-blocking, so it uses a different path. Found by
+        // enumerating every caller rather than reasoning about which
+        // one 'should' be used -- which is how three earlier subsets
+        // were missed. The unlabelled `slave_read tty=` message is
+        // the blocking path.
+        if b == 3u8 {
+            crate::serial_println!("[pty] slave_read(try) tty={:?}: consumed VINTR", id);
+        }
         let woken = pty.input_waiters.take_all();
         drop(table);
         wake_all(woken);
@@ -868,6 +878,19 @@ pub(crate) fn slave_read_input_timeout(id: TtyId, deadline_ns: u64) -> Input {
             pty.input_waiters.remove(task);
 
             if let Some(b) = pty.input.read_byte() {
+                // ROUND-11 probe. `input.read_byte()` has THREE callers and
+                // round 9 instrumented only the blocking one; the fixture
+                // reads non-blocking, so it uses a different path. Found by
+                // enumerating every caller rather than reasoning about which
+                // one 'should' be used -- which is how three earlier subsets
+                // were missed. The unlabelled `slave_read tty=` message is
+                // the blocking path.
+                if b == 3u8 {
+                    crate::serial_println!(
+                        "[pty] slave_read(timeout) tty={:?}: consumed VINTR",
+                        id
+                    );
+                }
                 let woken = pty.input_waiters.take_all();
                 crate::hrtimer::cancel(timer);
                 drop(table);

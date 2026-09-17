@@ -153,6 +153,12 @@
 #      broke it -- two commits went out green and cost lane A two dead
 #      pre-flights before anyone knew.
 #
+#  49. Refuse text inked against a ground it is not drawn on -- gate 48's
+#      sibling, and here for the same reason. Chosen out of the twenty-six
+#      boot-only checkers because it costs 1.6s and carries twelve self-test
+#      cases; `check-frame-needles` is cheaper still and is deliberately left
+#      out, having no self-test and a `return 2` for "I could not look".
+#
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
 # section and the bypass landed in `0ab4b55bc` and this list did not; and
@@ -5495,6 +5501,84 @@ change and exits 0, which reads like a clean tree and is not one.
 
 To push anyway:
     ALLOW_TEXT_INK_DRIFT=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 49 -- text inked against overlay0.
+#
+# check-overlay0-ink.py, gate 48's sibling: 48 catches an accent hue drawn
+# without `ink()`, this one catches text inked against the wrong ground.  Both
+# already ran at boot and only at boot.
+#
+# What a gate here is actually for, which is worth stating because the obvious
+# reading is wrong.  It is not "catch it earlier for the author": lane A's
+# chain is clippy -> commit -> merge -> sweep -> boot, with push a later step,
+# so the pre-push battery has not run when their boot starts and moving a
+# checker here buys them nothing defensively.  What it buys is **containment**
+# -- one lane's breakage stops before it reaches the other two.  That is the
+# only good that justifies spending every lane's push time, and it is why the
+# `touches` guard below matters: the cost falls on the lane that can create
+# the failure and on nobody else.
+#
+# Why this one and not the other twenty-five.  A survey on 2026-09-17 found 26
+# of the 33 checkers boot-test runs for real are absent from pre-push, and the
+# instinct is to wire the lot.  Measured, they do not deserve it:
+#
+#     check-frame-needles         0.3s
+#     check-overlay0-ink          1.6s
+#     check-option-refusal       10.0s
+#     check-variant-lists        15.9s
+#     check-tick-wiring          28.6s
+#     check-live-counter-reads   92.6s
+#
+# Wholesale, that is about two and a half minutes added to every push of every
+# lane, to catch failures that are mostly not that lane's.  This one is 1.6s
+# and carries twelve self-test cases.
+#
+# check-frame-needles is cheaper still and is deliberately NOT here: it has no
+# self-test, and reports "I could not look" with a `return 2`, so it cannot
+# satisfy the self-test-before-verdict shape gates 3-5, 35, 47 and 48 use.
+# Fast is not the same as safe to gate on.
+# ---------------------------------------------------------------------------
+
+overlay0="${repo_root:-.}/scripts/check-overlay0-ink.py"
+skip_overlay0=0
+# Bypass: ALLOW_OVERLAY0_INK_DRIFT=1 git push origin <branch>
+if [ "${ALLOW_OVERLAY0_INK_DRIFT:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_OVERLAY0_INK_DRIFT=1 set - skipping the overlay0-ink gate." >&2
+    skip_overlay0=1
+fi
+[ -n "$py" ] || skip_overlay0=1
+[ -f "$overlay0" ] || skip_overlay0=1
+touches gui/ apps/ scripts/check-overlay0-ink.py || skip_overlay0=1
+# No `pushed_shas` guard: one run over the worktree, as gates 35, 43b, 47 and
+# 48 do.
+note_gate overlay0-ink "$skip_overlay0"
+
+overlay0_failed=0
+if [ "$skip_overlay0" != "1" ]; then
+    if ! run_checker overlay0-ink-selftest "$py" "$overlay0" --self-test; then
+        echo "pre-push: check-overlay0-ink.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        overlay0_failed=1
+    elif ! run_checker overlay0-ink "$py" "$overlay0"; then
+        overlay0_failed=1
+    fi
+fi
+if [ "$overlay0_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - text is inked against a ground it is not drawn
+on.
+
+The site is named above.  \`ink()\` picks a readable foreground for the surface
+underneath, so naming the wrong surface gives text whose contrast was computed
+against something else - which looks right on whichever theme it was written
+under and wrong on the others.
+
+To push anyway:
+    ALLOW_OVERLAY0_INK_DRIFT=1 git push $remote_name ...
 
 EOF
     exit 1

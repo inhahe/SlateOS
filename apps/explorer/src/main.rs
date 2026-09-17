@@ -952,6 +952,22 @@ impl ExplorerState {
     // Search
     // ======================================================================
 
+    /// How a search result names itself: its path below the search root.
+    ///
+    /// Falls back to the whole path when the result is not under `root`, which
+    /// should not happen but is not worth a panic if it ever does -- an
+    /// over-long label is a worse-looking row, while an unwrap here would be a
+    /// crash in a file manager for a cosmetic reason.
+    fn relative_label(path: &Path, root: &Path) -> String {
+        let shown = path.strip_prefix(root).unwrap_or(path);
+        // Lossy on purpose and safe here: this is the text a row is drawn
+        // with, and `FileEntry::path` beside it is what opening the row uses.
+        // Named rather than chained so the exemption in `lossy-decode.py` has
+        // something specific to anchor on -- a bare `.to_string_lossy()` would
+        // match every future lossy call in this file too.
+        shown.to_string_lossy().into_owned()
+    }
+
     /// Ask what to look for.
     fn open_search(&mut self) {
         // Pre-filled with the query in force, so refining a search is an edit
@@ -979,7 +995,19 @@ impl ExplorerState {
 
         self.entries.clear();
         for path in found.paths {
-            if let Some(entry) = Self::entry_for(path) {
+            if let Some(mut entry) = Self::entry_for(path) {
+                // A search row says where it is, not only what it is. Every
+                // row in a folder listing shares one parent, so the bare name
+                // is enough there; results come from all over the subtree, and
+                // two files called `notes.txt` in different folders are the
+                // same row twice to anyone reading the screen.
+                //
+                // Qualifying the Name column rather than adding a Location
+                // one, because a column that appears and disappears is the
+                // view changing shape -- the thing roadmap-detailed.md §4.1
+                // objects to -- and this needs no new column machinery to
+                // answer the same question.
+                entry.name = Self::relative_label(&entry.path, &root);
                 self.entries.push(entry);
             }
         }
@@ -9711,6 +9739,31 @@ mod tests {
 
         assert_eq!(state.entries.len(), 2, "{:?}", state.entries);
         assert!(state.search_showing.is_some(), "the view is a search");
+    }
+
+    /// A result in a subfolder says which subfolder.
+    ///
+    /// Without this, two files called `notes.txt` in different folders are the
+    /// same row twice to anyone reading the screen.
+    #[test]
+    fn a_nested_result_is_labelled_with_its_folder() {
+        let scratch = temp_dir("search_label");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("sub")).expect("mkdir");
+        write(&root.join("notes.txt"), "x");
+        write(&root.join("sub/notes.txt"), "x");
+
+        let mut state = state_at(&root);
+        state.run_search("notes");
+
+        let mut labels: Vec<&str> = state.entries.iter().map(|e| e.name.as_str()).collect();
+        labels.sort_unstable();
+        assert_eq!(labels.len(), 2, "{labels:?}");
+        assert!(
+            labels.iter().any(|l| l.contains("sub")),
+            "the nested result does not say where it is: {labels:?}"
+        );
+        assert_ne!(labels[0], labels[1], "two rows are indistinguishable");
     }
 
     /// Escape puts the folder back.

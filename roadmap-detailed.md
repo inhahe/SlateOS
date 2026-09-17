@@ -1956,6 +1956,7 @@ _Click selected radio button to deselect (returns group to no-selection state)._
 - [ ] Apps define available panel types; user arranges them
 
 #### Code-Aware TextEdit Widget
+*Audited 2026-09-17: none of this exists as a widget, and most of it exists twice as an application. `apps/editor` and `apps/markdowneditor` each implement undo/redo, find/replace, syntax highlighting and a line-number gutter separately — by mention count they are comparable in size, and `apps/notes` has a third, smaller find. So these bullets are not stale: the capabilities are real and the shared widget is the gap, which is the same shape as `SimpleTextView` against `apps/logviewer` above. Extracting one from two working editors is the work, and the two would have to agree on a buffer first — which is what the bullet below is about.*
 - [ ] Rope or gap buffer backing (efficient for large files)
 - [ ] Syntax highlighting via tree-sitter integration
 - [ ] Line numbers (toggleable)

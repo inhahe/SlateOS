@@ -156620,11 +156620,31 @@ to_zero_it`. HarfBuzz's `zero_mark_widths_by_gdef` adjusts the offset by
 `scaled.rs` (`let back = ...`) is gated on `synth_at`, which is
 `!applies_gpos` — we placed it ourselves — and so does not fire here.
 
-**One hypothesis, refuted.** Gating that shift on `zeroed_at` instead made it
-worse: `agree` 32203 -> 32178, `misplaced` 40 -> 65. So it is not simply
-"shift whenever the advance was zeroed", and the next attempt should start by
-finding which of HarfBuzz's three zeroing modes (`BY_GDEF_EARLY`,
-`BY_GDEF_LATE`, `NONE`) each of these runs takes.
+**Three hypotheses, all refuted, and the mechanism is now known.** HarfBuzz's
+two GDEF zeroing modes differ in exactly this: `BY_GDEF_EARLY` calls
+`zero_mark_widths_by_gdef(buffer, true)`, whose `true` means
+`x_offset -= x_advance` *before* the advance is zeroed; `BY_GDEF_LATE` passes
+`false` and does not move it. This crate already models the three modes, as
+`fallback::Zeroing::{Never, BeforeGpos, AfterGpos}`, and already asks the
+question, as `ScaledFont::zeroes_marks_first`. So the obvious fix is to gate
+the back-shift on that instead of on `synth_at`. Measured, on both corpora:
+
+| gate for the shift | default `misplaced` | USE `misplaced` |
+|---|---|---|
+| `synth_at` (*current*) | **1** | **40** |
+| `zeroed_at` | -- | 65 |
+| `early_at` (`zeroes_marks_first`) | 1315 | 105 |
+| `synth_at \|\| early_at` | 31 | 65 |
+
+So our `back` and HarfBuzz's `adjust_offsets` are **two different shifts**,
+not one seen from two angles: replacing ours with theirs is catastrophic, and
+adding theirs on top makes 30 runs worse that were right before. Whatever
+`early_at` selects, it includes runs that must not be shifted.
+
+The next attempt should not start from the gate. It should print, for one
+failing run, HarfBuzz's `x_offset` and `x_advance` at each stage against
+ours -- the likely difference is *when* the advance is read, since HarfBuzz
+subtracts the advance it has before `GPOS` and ours is read after.
 
 **Why it is not urgent.** It arises only on a face with no glyphs for the
 script, so every glyph in the run is already a box. The reason to fix it is

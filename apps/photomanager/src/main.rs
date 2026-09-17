@@ -1,8 +1,9 @@
 //! Slate OS Photo Manager
 //!
 //! A photo library management application with:
-//! - Photo library with albums, made from the sidebar and browsable as a
-//!   view; smart albums exist as a model only
+//! - Photo library with albums: made from the sidebar, filled by
+//!   right-clicking a photograph, and browsable as a view; smart albums
+//!   exist as a model only
 //! - EXIF metadata parsing and display (camera, exposure, GPS, etc.)
 //! - Thumbnail grid view at four card sizes (80/120/160/200 px), cycled from
 //!   the toolbar, each card showing the photograph itself
@@ -46,11 +47,11 @@
 //!   way to record one.)
 //! - **Face regions are never detected.** `Photo::faces` is constructed empty
 //!   and nothing ever pushes to it.
-//! - **A photograph cannot be put into an album.** Albums can now be made
-//!   and selected, and an empty one is a real view. `add_to_album` and
-//!   `batch_add_to_album` are written and tested, and every caller is still in
-//!   the test module, so an album stays empty. That is the next increment and
-//!   it is what makes the feature whole.
+//! - **Only one photograph can be selected.** `selected_photos` is a `Vec`
+//!   that production code never pushes to, so the batch operations --
+//!   `batch_add_to_album`, batch rate, batch tag -- are written, tested and
+//!   unreachable. The grid already draws a card as selected if it is in that
+//!   list, so the drawing is ready and the selecting is not.
 //! - **Smart albums cannot be made either.** `create_smart_album` and the
 //!   rule matching behind it are tested and unreachable, exactly as ordinary
 //!   albums were until now.
@@ -103,6 +104,7 @@ use guitk::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::menu::{ContextMenu, MenuItem};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
@@ -1748,7 +1750,10 @@ pub struct PhotoApp {
     /// Carries the failure too. An import that silently does nothing is the
     /// defect this whole application was an instance of, so a file that cannot
     /// be read says so rather than leaving the grid unchanged and unexplained.
-    pub last_import: Option<String>,
+    /// The line the status bar shows, when there is something to say.
+    ///
+    /// Called `last_import` until it carried anything but an import.
+    pub status_message: Option<String>,
     photo_id_gen: IdGen,
     album_id_gen: IdGen,
     timestamp_counter: u64,
@@ -1824,6 +1829,19 @@ pub struct PhotoApp {
     /// `None` when nothing is being named. An empty `Some` is a row waiting
     /// for its first character, which is why this is not just a `String`.
     naming_album: Option<String>,
+    /// The album menu, while it is open.
+    ///
+    /// Rebuilt on every opening rather than kept and updated, because its
+    /// items are the albums and those change underneath it. A menu holding a
+    /// name the library no longer has is worse than one that costs a few
+    /// allocations to raise.
+    photo_menu: Option<ContextMenu>,
+    /// The photograph the open menu is about.
+    ///
+    /// Remembered rather than read from the selection when the menu is
+    /// clicked: a menu is a question about the thing you opened it on, and
+    /// nothing should be able to move the answer while it is up.
+    menu_photo: Option<PhotoId>,
 }
 
 impl Default for PhotoApp {
@@ -1852,6 +1870,8 @@ impl PhotoApp {
             library_unread: 0,
             search_focused: false,
             naming_album: None,
+            photo_menu: None,
+            menu_photo: None,
             photos: Vec::new(),
             albums: Vec::new(),
             smart_albums: Vec::new(),
@@ -1871,7 +1891,7 @@ impl PhotoApp {
             window_width: 1400.0,
             window_height: 900.0,
             picker: FilePicker::new(),
-            last_import: None,
+            status_message: None,
             photo_id_gen: IdGen::new(1),
             album_id_gen: IdGen::new(1),
             timestamp_counter: 1000,
@@ -3018,7 +3038,7 @@ impl PhotoApp {
             .handle(event, self.window_width, self.window_height)
         {
             Picked::Chose(path) => {
-                self.last_import = Some(self.import_from_disk(&path));
+                self.status_message = Some(self.import_from_disk(&path));
                 return true;
             }
             // Cancelled grouped with Handled: this caller keeps no dialog
@@ -3100,6 +3120,31 @@ impl PhotoApp {
     }
 
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        // An open menu takes the click before anything under it does --
+        // that is what being over everything means.
+        if self.photo_menu.is_some() {
+            if let MouseEventKind::Press(_) = event.kind {
+                let chosen = self
+                    .photo_menu
+                    .as_mut()
+                    .and_then(|m| m.handle_click(event.x, event.y));
+                self.photo_menu = None;
+                if let Some(id) = chosen {
+                    self.choose_album_from_menu(id);
+                }
+                // Consumed either way: a click that dismisses a menu should
+                // not also land on whatever was behind it.
+                return true;
+            }
+        }
+        if matches!(event.kind, MouseEventKind::Press(MouseButton::Right))
+            && self.view_mode == ViewMode::Grid
+            && let Some(pid) = self.photo_at(event.x, event.y)
+        {
+            self.selected_photo = Some(pid);
+            self.open_photo_menu(pid, event.x, event.y);
+            return true;
+        }
         if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
             return false;
         }
@@ -3217,6 +3262,59 @@ impl PhotoApp {
                 }
                 true
             }
+        }
+    }
+
+    /// Raise the album menu over a photograph.
+    ///
+    /// With no albums the menu still opens, carrying one disabled row saying
+    /// so. A menu that refuses to appear leaves the user with no way to find
+    /// out *why* nothing happened, and the answer -- there is nowhere to put
+    /// it yet -- is exactly what they need to know.
+    fn open_photo_menu(&mut self, pid: PhotoId, x: f32, y: f32) {
+        let items: Vec<MenuItem> = if self.albums.is_empty() {
+            vec![MenuItem::Action {
+                id: 0,
+                label: "No albums yet - make one in the sidebar".to_owned(),
+                shortcut: None,
+                icon: None,
+                enabled: false,
+                checked: None,
+            }]
+        } else {
+            self.albums
+                .iter()
+                .map(|album| MenuItem::Action {
+                    // The album's own id *is* the menu item's id, so nothing
+                    // has to map between two numbering schemes and get it
+                    // wrong when an album is deleted.
+                    id: album.id,
+                    label: format!("Add to {}", album.name),
+                    shortcut: None,
+                    icon: None,
+                    enabled: !album.photo_ids.contains(&pid),
+                    checked: None,
+                })
+                .collect()
+        };
+        let mut menu = ContextMenu::new(items);
+        menu.show(x, y, (self.window_width, self.window_height));
+        self.photo_menu = Some(menu);
+        self.menu_photo = Some(pid);
+    }
+
+    /// Put the menu's photograph into the album that was chosen.
+    fn choose_album_from_menu(&mut self, album_id: AlbumId) {
+        let Some(pid) = self.menu_photo else {
+            return;
+        };
+        let name = self
+            .albums
+            .iter()
+            .find(|a| a.id == album_id)
+            .map(|a| a.name.clone());
+        if self.add_to_album(album_id, pid) {
+            self.status_message = name.map(|n| format!("Added to {n}"));
         }
     }
 
@@ -3509,6 +3607,12 @@ impl PhotoApp {
 
         // The picker goes last so it sits over everything, which is the same
         // order in which `handle_event` gives it the click.
+        // Over the window, under the picker: the picker is modal, and a
+        // menu raised before it opened has no business on top of it.
+        if let Some(menu) = &self.photo_menu {
+            cmds.extend(menu.render(&self.palette));
+        }
+
         cmds.extend(self.picker.render(&self.palette, width, height));
 
         cmds
@@ -3776,7 +3880,7 @@ impl PhotoApp {
 
         let stats = self.library_stats();
         let visible = self.visible_photos().len();
-        let status_text = self.last_import.as_ref().map_or_else(
+        let status_text = self.status_message.as_ref().map_or_else(
             || {
                 format!(
                     "{} photos shown  |  {} total  |  {} albums  |  {} in trash",
@@ -5569,6 +5673,136 @@ mod tests {
             y,
             kind: MouseEventKind::Press(MouseButton::Left),
         })
+    }
+
+    fn right_click(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        })
+    }
+
+    /// Where the first grid card is drawn.
+    fn first_card_point(app: &PhotoApp) -> (f32, f32) {
+        let cell = app.thumb_rect(0).expect("a first card");
+        (cell.x + 4.0, cell.y + 4.0)
+    }
+
+    /// Right-clicking a photograph offers the albums it could go into.
+    #[test]
+    fn right_clicking_a_photograph_offers_the_albums() {
+        let mut app = app_with_n_pictures("menu", 1);
+        app.set_window_size(900.0, 700.0);
+        app.create_album("Holiday");
+        let (x, y) = first_card_point(&app);
+
+        app.handle_event(&right_click(x, y));
+
+        assert!(app.photo_menu.is_some(), "no menu appeared");
+        assert_eq!(
+            app.menu_photo,
+            app.photos.first().map(|p| p.id),
+            "the menu is about the wrong photograph"
+        );
+    }
+
+    /// Choosing an album puts the photograph in it.
+    ///
+    /// The point of the whole feature: `add_to_album` has been written and
+    /// tested since this crate existed and had no caller outside the test
+    /// module, so an album stayed empty however many photographs you had.
+    #[test]
+    fn choosing_an_album_puts_the_photograph_in_it() {
+        let mut app = app_with_n_pictures("addto", 1);
+        app.set_window_size(900.0, 700.0);
+        let album = app.create_album("Holiday");
+        let pid = app.photos.first().expect("one").id;
+        let (x, y) = first_card_point(&app);
+        app.handle_event(&right_click(x, y));
+
+        app.choose_album_from_menu(album);
+
+        let in_album = app
+            .albums
+            .iter()
+            .find(|a| a.id == album)
+            .expect("the album")
+            .photo_ids
+            .clone();
+        assert_eq!(in_album, vec![pid], "the photograph did not go in");
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Added to Holiday"),
+            "nothing on screen said it worked"
+        );
+    }
+
+    /// With no albums the menu still opens and says why it is empty.
+    ///
+    /// A menu that refused to appear would leave no way to find out *why*
+    /// nothing happened.
+    #[test]
+    fn with_no_albums_the_menu_still_opens_and_says_so() {
+        let mut app = app_with_n_pictures("noalbums", 1);
+        app.set_window_size(900.0, 700.0);
+        assert!(app.albums.is_empty(), "the control failed");
+        let (x, y) = first_card_point(&app);
+
+        app.handle_event(&right_click(x, y));
+
+        assert!(app.photo_menu.is_some(), "the menu refused to appear");
+    }
+
+    /// A click while the menu is up dismisses it and does not fall through.
+    ///
+    /// Without that, dismissing a menu over the grid would also select
+    /// whatever card was underneath it.
+    #[test]
+    fn a_click_dismisses_the_menu_without_falling_through() {
+        let mut app = app_with_n_pictures("dismiss", 2);
+        app.set_window_size(900.0, 700.0);
+        app.create_album("Holiday");
+        let (x, y) = first_card_point(&app);
+        app.handle_event(&right_click(x, y));
+        let before = app.selected_photo;
+
+        // Far from the menu, over the grid.
+        let elsewhere = app.thumb_rect(1).expect("a second card");
+        assert!(
+            app.handle_event(&click(elsewhere.x + 4.0, elsewhere.y + 4.0)),
+            "the click was not consumed"
+        );
+
+        assert!(app.photo_menu.is_none(), "the menu is still up");
+        assert_eq!(
+            app.selected_photo, before,
+            "the dismissing click also selected the card behind it"
+        );
+    }
+
+    /// A photograph already in an album is not offered it again.
+    #[test]
+    fn a_photograph_already_in_an_album_is_not_offered_it_twice() {
+        let mut app = app_with_n_pictures("twice", 1);
+        app.set_window_size(900.0, 700.0);
+        let album = app.create_album("Holiday");
+        let pid = app.photos.first().expect("one").id;
+        assert!(app.add_to_album(album, pid), "the control failed");
+
+        let (x, y) = first_card_point(&app);
+        app.handle_event(&right_click(x, y));
+
+        // Choosing it anyway must not duplicate the entry.
+        app.choose_album_from_menu(album);
+        let in_album = app
+            .albums
+            .iter()
+            .find(|a| a.id == album)
+            .expect("the album")
+            .photo_ids
+            .clone();
+        assert_eq!(in_album, vec![pid], "the photograph was added twice");
     }
 
     /// Where the "New Album" row is drawn, so a click can land on it.

@@ -1,8 +1,17 @@
 //! Slate OS PDF Viewer
 //!
 //! Graphical PDF document viewer with:
+//! - **Opens a PDF** (Ctrl+O): the header, cross-reference table, trailer and
+//!   page tree are read, so the page count and each page's size and rotation
+//!   come from the file. See [`pdf`].
 //! - PDF document model (pages, metadata, bookmarks/outline)
 //! - Page rendering (placeholder — renders page boxes with text content)
+//!
+//! What it does **not** do is read a page's *contents*: content streams are
+//! not interpreted, so an opened document has the right number of pages at the
+//! right sizes and nothing drawn on them. Files using PDF 1.5 cross-reference
+//! streams are refused by name rather than opened empty, because a document
+//! reported as having zero pages is a claim about the document.
 //! - Zoom controls (fit width, fit page, 25%-400%, zoom in/out)
 //! - Page navigation (next/prev, go to page, first/last)
 //! - Continuous scroll and single-page view modes
@@ -36,8 +45,12 @@
 
 use std::process::ExitCode;
 
+/// Reading the PDF file format. See [`pdf`].
+mod pdf;
+
 use appearance::{Edge, Palette, Surface};
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
 #[cfg(test)]
@@ -1357,6 +1370,15 @@ pub struct PdfViewerApp {
     /// The print dialog, open or not.
     pub print_dialog: PrintDialog,
     pub recent_files: RecentFilesList,
+    /// The open dialog, up or not.
+    pub picker: FilePicker,
+    /// Why the last attempt to open a file did not produce a document.
+    ///
+    /// Shown in the status bar. A viewer that failed to open a file and said
+    /// nothing would leave the window exactly as it was, which reads as
+    /// "nothing happened" rather than "that did not work" -- and the one thing
+    /// the reader knows for certain is that they asked for something.
+    pub open_error: Option<String>,
     /// The job the print dialog is filling in, in the format the printing
     /// service will receive.
     ///
@@ -1399,6 +1421,8 @@ impl std::fmt::Debug for PdfViewerApp {
             .field("search_focused", &self.search_focused)
             .field("print_dialog_open", &self.print_dialog.open)
             .field("recent_files", &self.recent_files)
+            .field("picker_open", &self.picker.is_open())
+            .field("open_error", &self.open_error)
             .field("print_job", &self.print_job)
             .field("dark_mode", &self.dark_mode)
             .field("window_width", &self.window_width)
@@ -1427,6 +1451,8 @@ impl PdfViewerApp {
             recent_files: RecentFilesList::default(),
             print_job: PrintJob::default(),
             dark_mode: true,
+            picker: FilePicker::default(),
+            open_error: None,
             window_width: width,
             window_height: height,
             id_gen,
@@ -1660,6 +1686,18 @@ impl PdfViewerApp {
         // into that.
         if self.print_dialog.open {
             self.render_print_dialog(&mut frame, &layout);
+        }
+
+        // After even the print dialog: the open dialog is modal over the whole
+        // window. No `unclip` here -- every band above closes the clip it
+        // opened, which `every_frame_closes_the_clips_it_opens` holds them to,
+        // so there is nothing open to close and an extra `unclip` would
+        // unbalance the frame rather than free the dialog.
+        for command in self
+            .picker
+            .render(&self.palette, self.window_width, self.window_height)
+        {
+            frame.push(command);
         }
 
         frame
@@ -3371,6 +3409,22 @@ impl PdfViewerApp {
             width: 1.0,
         });
 
+        // Before the per-document fields, and instead of them: a failed open
+        // leaves no document, so there is nothing for the rest of this bar to
+        // describe.
+        if let Some(message) = &self.open_error {
+            frame.push(RenderCommand::Text {
+                x: 12.0,
+                y: y + 7.0,
+                text: message.clone(),
+                color: self.palette.red,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(band.w - 24.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
         if let Some(tab) = self.active_tab() {
             let mut sx: f32 = 12.0;
 
@@ -3922,6 +3976,69 @@ impl PdfViewerApp {
 
     /// Handle a keystroke, answering whether anything changed.
     #[allow(clippy::too_many_lines)]
+    /// The largest PDF this will read into memory.
+    ///
+    /// A window cannot usefully draw a document larger than this, and the
+    /// number in a file header is a claim by whoever wrote it. `read_capped`
+    /// stops at the cap and says it did, which is the part that matters:
+    /// a PDF cut short is refused below rather than half-parsed, because the
+    /// cross-reference table lives at the *end* and a truncated file would
+    /// lose exactly the part that says where everything is.
+    const MAX_PDF_BYTES: usize = 64 * 1024 * 1024;
+
+    /// Open `path`, replacing the active tab's document.
+    ///
+    /// Every failure is reported. The one that would otherwise be silent is a
+    /// file this reader does not understand -- a cross-reference stream, say
+    /// -- where showing a document of zero pages would be a claim about the
+    /// document rather than about the reader.
+    pub fn open_path(&mut self, path: &std::path::Path) {
+        self.open_error = None;
+        let read = match safeio::read_capped(path, Self::MAX_PDF_BYTES) {
+            Ok(read) => read,
+            Err(err) => {
+                self.open_error = Some(format!("Could not read {}: {err}", path.display()));
+                return;
+            }
+        };
+        if read.truncated {
+            self.open_error = Some(format!(
+                "{} is larger than {} MiB, and a PDF cut short loses the table that says where its pages are",
+                path.display(),
+                Self::MAX_PDF_BYTES / (1024 * 1024)
+            ));
+            return;
+        }
+        let parsed = match pdf::read(&read.bytes) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                self.open_error = Some(format!("{}: {err}", path.display()));
+                return;
+            }
+        };
+        let mut document = PdfDocument::new(path.to_path_buf());
+        for page in &parsed.pages {
+            let mut made = PdfPage::new(page.width, page.height);
+            // The four the file may name. Anything else is a malformed
+            // `/Rotate`, and upright is the specification's own default.
+            made.rotation = match page.rotation {
+                90 => Rotation::Deg90,
+                180 => Rotation::Deg180,
+                270 => Rotation::Deg270,
+                _ => Rotation::Deg0,
+            };
+            document.pages.push(made);
+        }
+        // Deliberately not added to the recent-files list: that list stores a
+        // timestamp per entry and this program has no clock to read, so the
+        // only way to file one would be to make the number up.
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.document = Some(document);
+            tab.current_page = 0;
+            tab.scroll_offset_y = 0.0;
+        }
+    }
+
     pub fn handle_key(&mut self, event: &KeyEvent) -> bool {
         if !event.pressed {
             return false;
@@ -3948,6 +4065,10 @@ impl PdfViewerApp {
         }
 
         match event.key {
+            Key::O if event.modifiers.ctrl => {
+                self.picker.open_to_read();
+                true
+            }
             Key::Right | Key::Down | Key::PageDown | Key::Space => {
                 self.step_page(true);
                 true
@@ -4056,6 +4177,21 @@ impl PdfViewerApp {
 
     /// Route one window event.
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // The picker takes input first while it is up. It does not take `Tick`
+        // or `Resize`, so the clock keeps running behind the dialog --
+        // `gui/toolkit`'s `a_tick_and_a_resize_still_reach_the_application`
+        // is what holds that.
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
+        {
+            Picked::Chose(path) => {
+                self.open_path(&path);
+                return true;
+            }
+            Picked::Handled | Picked::Cancelled => return true,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Resize { width, height } => {
                 // `as f32` on a window dimension: exact for every size a
@@ -4650,6 +4786,163 @@ mod tests {
         assert_eq!(doc.page_count(), 0);
         assert!(doc.bookmarks.is_empty());
         assert!(doc.metadata.title.is_none());
+    }
+
+    // ---- Opening a file ------------------------------------------------
+
+    fn pdf_scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("pdfviewer-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// A two-page PDF with a correct cross-reference table.
+    ///
+    /// Assembled rather than written out, for the reason the parser's own
+    /// fixture is: the offsets in the table are byte positions, so a literal
+    /// would be wrong the moment anything above it changed length.
+    fn two_page_pdf() -> Vec<u8> {
+        const NL: u8 = 10;
+        let mut out: Vec<u8> = Vec::new();
+        let mut offsets: Vec<usize> = Vec::new();
+        out.extend_from_slice(b"%PDF-1.7");
+        out.push(NL);
+        offsets.push(out.len());
+        out.extend_from_slice(b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj");
+        out.push(NL);
+        offsets.push(out.len());
+        out.extend_from_slice(b"2 0 obj << /Type /Pages /Count 2 /Kids [3 0 R 4 0 R] >> endobj");
+        out.push(NL);
+        for (i, (w, h)) in [(612, 792), (595, 842)].iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(
+                format!(
+                    "{} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 {w} {h}] >> endobj",
+                    i + 3
+                )
+                .as_bytes(),
+            );
+            out.push(NL);
+        }
+        let xref_at = out.len();
+        out.extend_from_slice(b"xref");
+        out.push(NL);
+        out.extend_from_slice(format!("0 {}", offsets.len() + 1).as_bytes());
+        out.push(NL);
+        out.extend_from_slice(b"0000000000 65535 f");
+        out.push(NL);
+        for off in &offsets {
+            out.extend_from_slice(format!("{off:010} 00000 n").as_bytes());
+            out.push(NL);
+        }
+        out.extend_from_slice(
+            format!("trailer << /Size {} /Root 1 0 R >>", offsets.len() + 1).as_bytes(),
+        );
+        out.push(NL);
+        out.extend_from_slice(b"startxref");
+        out.push(NL);
+        out.extend_from_slice(format!("{xref_at}").as_bytes());
+        out.push(NL);
+        out.extend_from_slice(b"%%EOF");
+        out
+    }
+
+    /// Opening a PDF fills the tab with the pages the file actually declares.
+    ///
+    /// The point of the whole module: before this, the only thing that ever
+    /// produced a `PdfDocument` outside a test was `create_sample`, which
+    /// invents pages. A viewer whose page count came from nowhere had nothing
+    /// to do with the file on disk.
+    #[test]
+    fn opening_a_pdf_reads_its_real_pages() {
+        let dir = pdf_scratch("open");
+        let path = dir.join("two.pdf");
+        std::fs::write(&path, two_page_pdf()).expect("write fixture");
+
+        let mut app = PdfViewerApp::new(1000.0, 700.0);
+        app.open_path(&path);
+
+        assert_eq!(app.open_error, None, "it should have opened");
+        let tab = app.active_tab().expect("a tab");
+        let doc = tab.document.as_ref().expect("a document");
+        assert_eq!(doc.pages.len(), 2, "the file declares two pages");
+        let first = doc.pages.first().expect("a first page");
+        assert!(
+            (first.width - 612.0).abs() < 0.01,
+            "US Letter, from the file"
+        );
+        let second = doc.pages.get(1).expect("a second page");
+        assert!((second.width - 595.0).abs() < 0.01, "A4, from the file");
+        assert_eq!(doc.path, path, "the document remembers where it came from");
+    }
+
+    /// A file that is not a PDF is refused, and the window says so.
+    ///
+    /// Silence is the failure being guarded against here: the window would
+    /// look exactly as it did before, which reads as "nothing happened" rather
+    /// than "that did not work".
+    #[test]
+    fn a_file_that_is_not_a_pdf_is_reported_not_ignored() {
+        let dir = pdf_scratch("bad");
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, b"this is not a PDF").expect("write fixture");
+
+        let mut app = PdfViewerApp::new(1000.0, 700.0);
+        app.open_path(&path);
+
+        let message = app.open_error.as_ref().expect("a refusal");
+        assert!(
+            message.contains("not a PDF"),
+            "the message should name the problem, got {message:?}"
+        );
+        assert!(
+            app.active_tab().and_then(|t| t.document.as_ref()).is_none(),
+            "a refused file must not leave a document behind"
+        );
+
+        // And it reaches the screen. Storing the message without drawing it
+        // would be the same silence with extra steps.
+        let texts: Vec<String> = app
+            .frame(1000.0, 700.0)
+            .into_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("not a PDF")),
+            "the refusal was never drawn"
+        );
+    }
+
+    /// Ctrl+O raises the open dialog, and the dialog is drawn.
+    #[test]
+    fn ctrl_o_opens_the_picker_and_it_is_visible() {
+        let mut app = PdfViewerApp::new(1000.0, 700.0);
+        let before = app.frame(1000.0, 700.0).into_tree().commands.len();
+        assert!(app.handle_event(&Event::Key(probe::ctrl(Key::O))));
+        let after = app.frame(1000.0, 700.0).into_tree().commands.len();
+        assert!(
+            after > before,
+            "the picker took the key and drew nothing: {before} commands before, {after} after"
+        );
+    }
+
+    /// A missing file is reported rather than opened.
+    #[test]
+    fn a_path_that_is_not_there_is_reported() {
+        let dir = pdf_scratch("missing");
+        let mut app = PdfViewerApp::new(1000.0, 700.0);
+        app.open_path(&dir.join("absent.pdf"));
+        let message = app.open_error.as_ref().expect("a refusal");
+        assert!(message.contains("Could not read"), "got {message:?}");
     }
 
     #[test]

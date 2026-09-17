@@ -1225,7 +1225,7 @@ fn note_leaf_nesting(inner: &'static [u8]) {
     crate::serial_println!(
         concat!(
             "[sync] LEAF CLAIM BROKEN: {:?} acquired while {:?} is held, at ",
-            "{}, while the outer one was taken at {}. {:?} is a ",
+            "{}, while the outer one was taken at {}:{}. {:?} is a ",
             "PreemptSpinMutex, whose whole justification for ",
             "skipping lockdep is that nothing nests inside it (dd-70). ",
             "Either it is not a leaf and should be crate::sync::Mutex, or ",
@@ -1234,7 +1234,11 @@ fn note_leaf_nesting(inner: &'static [u8]) {
         core::str::from_utf8(inner).unwrap_or("<utf8>"),
         core::str::from_utf8(outer).unwrap_or("<utf8>"),
         core::panic::Location::caller(),
+        // File and line as two args: `Location`'s own Display would also
+        // carry the column, and the first boot showed the file alone is not
+        // enough to find the acquire in a 700-line module.
         leaf_site().map_or("<unrecorded>", |l| l.file()),
+        leaf_site().map_or(0, |l| l.line()),
         core::str::from_utf8(outer).unwrap_or("<utf8>")
     );
 }

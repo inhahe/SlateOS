@@ -53,8 +53,17 @@
 //! `WATCHES` lock is itself a leaf).  The ordering is therefore
 //! `INOTIFY_TABLE` → `notify::WATCHES`, and no path takes them in the reverse
 //! order, so there is no cycle.
+//!
+//! **That last clause is now checked rather than asserted.** It was prose for
+//! as long as `INOTIFY_TABLE` was a `PreemptSpinMutex`: that type does not
+//! register with lockdep (design-decisions §70), so the edge this paragraph
+//! describes was absent from the dependency graph and a path taking the two
+//! in reverse would have deadlocked with nothing reported. Being held across
+//! another lock is also the definition of *not* a leaf, which is what that
+//! type is for. Found by the leaf-claim check in §949, which reported four
+//! sites in `fs/notify.rs` on its first real boot.
 
-use crate::sync::PreemptSpinMutex as Mutex;
+use crate::sync::Mutex;
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -445,7 +454,18 @@ impl Inotify {
 // ---------------------------------------------------------------------------
 
 /// Global table of all live inotify instances, keyed by ID.
-static INOTIFY_TABLE: Mutex<BTreeMap<InotifyId, Inotify>> = Mutex::new(BTreeMap::new());
+/// The instance table.
+///
+/// `crate::sync::Mutex`, not `PreemptSpinMutex`, and that is load-bearing:
+/// this lock is held across calls into [`crate::fs::notify`] (see "Lock
+/// ordering" above), so it is not a leaf, and the untracked type would keep
+/// the `INOTIFY_TABLE` -> `notify::WATCHES` edge out of lockdep's graph --
+/// leaving the no-reverse-order claim above as prose nothing checks.
+///
+/// Named rather than left as the default `?`: 563 locks in this kernel share
+/// that default, so an unnamed lock in a violation report identifies nothing.
+static INOTIFY_TABLE: Mutex<BTreeMap<InotifyId, Inotify>> =
+    Mutex::named(BTreeMap::new(), b"INOTIFY_TABLE");
 
 // ---------------------------------------------------------------------------
 // Lifetime API

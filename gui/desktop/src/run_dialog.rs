@@ -42,7 +42,11 @@ use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEve
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
-use guitk::text::TextCursor;
+// The field's state, and no longer a copy of it. This type lived here, private,
+// until 2026-09-17; twenty-two files in the tree hand-roll typing because they
+// could not reach it, and the bidirectional caret it carries is the reason a
+// second implementation would have been a worse one. See design-decisions 541.
+use guitk::textinput::TextInput;
 // The candidate ranking is shared with both launchers. It used to be a third
 // copy of the same routine here, under a comment saying it "uses the same
 // algorithm as the application launcher for consistency" — a promise with no
@@ -138,248 +142,6 @@ enum ButtonId {
 // ============================================================================
 // Text input state
 // ============================================================================
-
-/// Single-line text input state with cursor, selection, and clipboard.
-#[derive(Clone, Debug)]
-struct TextInput {
-    /// The text content.
-    text: String,
-    /// The caret: a byte offset (always at a char boundary) *and* which side of
-    /// a direction boundary it sits on.
-    ///
-    /// The second half is what makes the visual arrows safe. Where a
-    /// left-to-right and a right-to-left run meet, one byte offset names two
-    /// places on screen; a caret rebuilt from the offset alone cannot tell them
-    /// apart and steps over the whole right-to-left word in a single press,
-    /// which `design-decisions.md` §541 records as worse than not moving
-    /// visually at all.
-    cursor: TextCursor,
-    /// Selection anchor (byte offset). If `Some`, selection spans anchor..cursor.
-    ///
-    /// A plain byte on purpose: a selection is a *range of text*, not a place
-    /// on screen, so it has no side of a boundary to be on. Only the caret
-    /// does.
-    selection_anchor: Option<usize>,
-    /// Clipboard contents (internal; real clipboard would use IPC).
-    clipboard: String,
-}
-
-impl TextInput {
-    fn new() -> Self {
-        Self {
-            text: String::new(),
-            cursor: TextCursor::default(),
-            selection_anchor: None,
-            clipboard: String::new(),
-        }
-    }
-
-    fn clear(&mut self) {
-        self.text.clear();
-        self.cursor = TextCursor::default();
-        self.selection_anchor = None;
-    }
-
-    fn set_text(&mut self, text: &str) {
-        self.text = text.to_string();
-        self.cursor = TextCursor::from(self.text.len());
-        self.selection_anchor = None;
-    }
-
-    /// Returns (start, end) byte offsets of the selection, or (cursor, cursor).
-    fn selection_range(&self) -> (usize, usize) {
-        let at = self.cursor.byte();
-        match self.selection_anchor {
-            Some(anchor) => (anchor.min(at), anchor.max(at)),
-            None => (at, at),
-        }
-    }
-
-    fn has_selection(&self) -> bool {
-        self.selection_anchor
-            .is_some_and(|a| a != self.cursor.byte())
-    }
-
-    fn selected_text(&self) -> &str {
-        let (start, end) = self.selection_range();
-        self.text.get(start..end).unwrap_or("")
-    }
-
-    /// The largest character boundary at or before `at`, and never past the
-    /// end of the text.
-    ///
-    /// Every offset this type holds is supposed to be on a boundary already.
-    /// This is what makes that a *property* rather than an assumption: the
-    /// primitives below all pass their offsets through here, so a stale or
-    /// mid-character offset shortens an edit instead of panicking inside
-    /// `String::replace_range`.
-    /// The answer lives in the toolkit: one implementation of "where is the
-    /// nearest caret stop" for every text field in the system, rather than one
-    /// per field, each free to drift from the others.
-    fn floor_boundary(&self, at: usize) -> usize {
-        TextCursor::from(at).snapped_in(&self.text).byte()
-    }
-
-    /// The byte offset of the character before `at`, or `at` at the start.
-    fn prev_boundary(&self, at: usize) -> usize {
-        let at = TextCursor::from(at).snapped_in(&self.text);
-        at.prev_in(&self.text).unwrap_or(at).byte()
-    }
-
-    /// The byte offset just past the character at `at`, or `at` at the end.
-    fn next_boundary(&self, at: usize) -> usize {
-        let at = TextCursor::from(at).snapped_in(&self.text);
-        at.next_in(&self.text).unwrap_or(at).byte()
-    }
-
-    /// Replace the bytes in `start..end` with `with`, leaving the cursor just
-    /// past the inserted text and nothing selected.
-    ///
-    /// The single place `text` is mutated. Insert, paste, delete, backspace
-    /// and delete-selection are all this operation with different arguments,
-    /// and each used to spell out its own `drain`/`insert` plus its own cursor
-    /// adjustment — five chances to move the cursor to somewhere the text no
-    /// longer has a character.
-    fn replace_range(&mut self, start: usize, end: usize, with: &str) {
-        let start = self.floor_boundary(start);
-        let end = self.floor_boundary(end).max(start);
-        self.text.replace_range(start..end, with);
-        self.cursor = TextCursor::from(start.saturating_add(with.len()));
-        self.selection_anchor = None;
-    }
-
-    fn delete_selection(&mut self) {
-        if !self.has_selection() {
-            return;
-        }
-        let (start, end) = self.selection_range();
-        self.replace_range(start, end, "");
-    }
-
-    fn select_all(&mut self) {
-        self.selection_anchor = Some(0);
-        self.cursor = TextCursor::from(self.text.len());
-    }
-
-    /// Update the selection anchor for a cursor move: holding shift starts (or
-    /// keeps) a selection, releasing it drops one.
-    fn anchor_for_move(&mut self, shift: bool) {
-        if shift {
-            self.selection_anchor.get_or_insert(self.cursor.byte());
-        } else {
-            self.selection_anchor = None;
-        }
-    }
-
-    fn move_cursor_left(&mut self, shift: bool) {
-        // An unshifted arrow against a selection collapses it to that end
-        // rather than moving — the cursor lands where the selection was, not
-        // one character further.
-        if !shift && self.has_selection() {
-            let (start, _) = self.selection_range();
-            self.cursor = TextCursor::from(start);
-            self.selection_anchor = None;
-            return;
-        }
-        self.anchor_for_move(shift);
-        // One place left on the *screen*, not one character back through the
-        // string: on a line that mixes directions those are different moves.
-        // `design-decisions.md` §541. Measured at the size and weight the input
-        // is drawn at, because the gaps between glyphs belong to the shaped
-        // run, and assigned whole so the affinity survives the keypress.
-        if let Some(prev) = text::caret_left(
-            &self.text,
-            self.cursor,
-            INPUT_FONT_SIZE,
-            FontWeightHint::Regular,
-        ) {
-            self.cursor = prev;
-        }
-    }
-
-    fn move_cursor_right(&mut self, shift: bool) {
-        if !shift && self.has_selection() {
-            let (_, end) = self.selection_range();
-            self.cursor = TextCursor::from(end);
-            self.selection_anchor = None;
-            return;
-        }
-        self.anchor_for_move(shift);
-        // Visual, for the reason given in `move_cursor_left` above.
-        if let Some(next) = text::caret_right(
-            &self.text,
-            self.cursor,
-            INPUT_FONT_SIZE,
-            FontWeightHint::Regular,
-        ) {
-            self.cursor = next;
-        }
-    }
-
-    fn move_home(&mut self, shift: bool) {
-        self.anchor_for_move(shift);
-        self.cursor = TextCursor::default();
-    }
-
-    fn move_end(&mut self, shift: bool) {
-        self.anchor_for_move(shift);
-        self.cursor = TextCursor::from(self.text.len());
-    }
-
-    fn insert_char(&mut self, ch: char) {
-        let (start, end) = self.selection_range();
-        let mut buf = [0u8; 4];
-        self.replace_range(start, end, ch.encode_utf8(&mut buf));
-    }
-
-    fn backspace(&mut self) {
-        if self.has_selection() {
-            self.delete_selection();
-            return;
-        }
-        // Logical, deliberately, while the arrows above are visual: Backspace
-        // deletes the character before this one *in the string*, which is what
-        // a reader of that script means wherever it happens to be drawn.
-        // Deleting and moving are allowed to disagree.
-        let at = self.cursor.byte();
-        let start = self.prev_boundary(at);
-        self.replace_range(start, at, "");
-    }
-
-    fn delete(&mut self) {
-        if self.has_selection() {
-            self.delete_selection();
-            return;
-        }
-        // Logical, as with Backspace above.
-        let at = self.cursor.byte();
-        let end = self.next_boundary(at);
-        self.replace_range(at, end, "");
-    }
-
-    fn cut(&mut self) {
-        if self.has_selection() {
-            self.clipboard = self.selected_text().to_string();
-            self.delete_selection();
-        }
-    }
-
-    fn copy(&mut self) {
-        if self.has_selection() {
-            self.clipboard = self.selected_text().to_string();
-        }
-    }
-
-    fn paste(&mut self) {
-        if self.clipboard.is_empty() {
-            return;
-        }
-        let (start, end) = self.selection_range();
-        let clip = core::mem::take(&mut self.clipboard);
-        self.replace_range(start, end, &clip);
-        self.clipboard = clip;
-    }
-}
 
 // ============================================================================
 // Autocomplete
@@ -545,7 +307,7 @@ impl RunDialog {
     /// `terminal`" would show an empty list.
     #[must_use]
     pub fn browse_start(&self) -> PathBuf {
-        let text = self.input.text.trim();
+        let text = self.input.text().trim();
         if !text.starts_with('/') {
             return PathBuf::from("/");
         }
@@ -751,11 +513,13 @@ impl RunDialog {
 
             // Cursor movement
             Key::Left => {
-                self.input.move_cursor_left(shift);
+                self.input
+                    .move_cursor_left(shift, INPUT_FONT_SIZE, FontWeightHint::Regular);
             }
 
             Key::Right => {
-                self.input.move_cursor_right(shift);
+                self.input
+                    .move_cursor_right(shift, INPUT_FONT_SIZE, FontWeightHint::Regular);
             }
 
             Key::Home => {
@@ -984,7 +748,7 @@ impl RunDialog {
             // boundaries — but a render pass is the wrong place to find out
             // that one of them isn't, so it tolerates a bad offset the same
             // way `selected_text` already does rather than panicking mid-frame.
-            let text_before_start = self.input.text.get(..start).unwrap_or("");
+            let text_before_start = self.input.text().get(..start).unwrap_or("");
             let start_px = text::width(text_before_start, INPUT_FONT_SIZE);
             let sel_width = text::width(self.input.selected_text(), INPUT_FONT_SIZE);
             cmds.push(RenderCommand::FillRect {
@@ -1001,7 +765,7 @@ impl RunDialog {
         cmds.push(RenderCommand::Text {
             x: input_x + 4.0,
             y: y + INPUT_Y_OFFSET + 7.0,
-            text: self.input.text.clone(),
+            text: self.input.text().to_string(),
             color: p.text,
             font_size: INPUT_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
@@ -1016,13 +780,13 @@ impl RunDialog {
         // is right depends on the affinity the cursor carries. This is what
         // makes the visual arrows draw where they move.
         //
-        // It also retires a real panic: `&self.input.text[..self.input.cursor]`
+        // It also retires a real panic: `&self.input.text()[..self.input.cursor()]`
         // sliced a `str` at a raw byte offset, so a caret that had drifted
         // inside a character took the whole desktop shell down while merely
         // *drawing* the dialog. `caret_x` is handed the cursor, not a slice.
         let cursor_px = text::caret_x(
-            &self.input.text,
-            self.input.cursor,
+            self.input.text(),
+            self.input.cursor(),
             INPUT_FONT_SIZE,
             FontWeightHint::Regular,
         );
@@ -1187,7 +951,7 @@ impl RunDialog {
     }
 
     fn execute_current(&mut self) {
-        let command = self.input.text.trim().to_string();
+        let command = self.input.text().trim().to_string();
         if command.is_empty() {
             return;
         }
@@ -1284,7 +1048,7 @@ impl RunDialog {
             return;
         };
         if entering {
-            self.pre_history_text = self.input.text.clone();
+            self.pre_history_text = self.input.text().to_string();
         }
         self.history_index = target;
         self.fill_exact(&entry);
@@ -1363,7 +1127,7 @@ impl RunDialog {
     }
 
     fn update_suggestions(&mut self) {
-        let query = self.input.text.trim();
+        let query = self.input.text().trim();
         if query.is_empty() {
             self.suggestions.clear();
             self.show_autocomplete = false;
@@ -1474,7 +1238,9 @@ mod tests {
     )]
 
     use super::*;
+    // Only the tests place a caret by hand now; the field owns it.
     use appearance::palette_check;
+    use guitk::text::TextCursor;
 
     fn make_key(key: Key, ctrl: bool, shift: bool, text: Option<char>) -> KeyEvent {
         KeyEvent {
@@ -1494,99 +1260,6 @@ mod tests {
     // Text input tests
     // ====================================================================
 
-    #[test]
-    fn test_text_input_insert() {
-        let mut input = TextInput::new();
-        input.insert_char('h');
-        input.insert_char('e');
-        input.insert_char('l');
-        input.insert_char('l');
-        input.insert_char('o');
-        assert_eq!(input.text, "hello");
-        assert_eq!(input.cursor.byte(), 5);
-    }
-
-    #[test]
-    fn test_text_input_backspace() {
-        let mut input = TextInput::new();
-        input.set_text("hello");
-        input.backspace();
-        assert_eq!(input.text, "hell");
-        assert_eq!(input.cursor.byte(), 4);
-    }
-
-    #[test]
-    fn test_text_input_delete() {
-        let mut input = TextInput::new();
-        input.set_text("hello");
-        input.cursor = TextCursor::from(0);
-        input.delete();
-        assert_eq!(input.text, "ello");
-        assert_eq!(input.cursor.byte(), 0);
-    }
-
-    #[test]
-    fn test_text_input_cursor_movement() {
-        let mut input = TextInput::new();
-        input.set_text("hello");
-        assert_eq!(input.cursor.byte(), 5);
-        input.move_cursor_left(false);
-        assert_eq!(input.cursor.byte(), 4);
-        input.move_cursor_left(false);
-        assert_eq!(input.cursor.byte(), 3);
-        input.move_cursor_right(false);
-        assert_eq!(input.cursor.byte(), 4);
-        input.move_home(false);
-        assert_eq!(input.cursor.byte(), 0);
-        input.move_end(false);
-        assert_eq!(input.cursor.byte(), 5);
-    }
-
-    #[test]
-    fn test_text_input_selection() {
-        let mut input = TextInput::new();
-        input.set_text("hello world");
-        input.move_home(false);
-        // Select "hello" with shift+right x5
-        for _ in 0..5 {
-            input.move_cursor_right(true);
-        }
-        assert!(input.has_selection());
-        assert_eq!(input.selected_text(), "hello");
-        assert_eq!(input.selection_range(), (0, 5));
-    }
-
-    #[test]
-    fn test_text_input_select_all() {
-        let mut input = TextInput::new();
-        input.set_text("hello world");
-        input.select_all();
-        assert_eq!(input.selected_text(), "hello world");
-    }
-
-    #[test]
-    fn test_text_input_cut_paste() {
-        let mut input = TextInput::new();
-        input.set_text("hello world");
-        input.select_all();
-        input.cut();
-        assert_eq!(input.text, "");
-        assert_eq!(input.clipboard, "hello world");
-        input.paste();
-        assert_eq!(input.text, "hello world");
-    }
-
-    #[test]
-    fn test_text_input_delete_selection() {
-        let mut input = TextInput::new();
-        input.set_text("hello world");
-        input.selection_anchor = Some(0);
-        input.cursor = TextCursor::from(5);
-        input.delete_selection();
-        assert_eq!(input.text, " world");
-        assert_eq!(input.cursor.byte(), 0);
-    }
-
     // ------------------------------------------------------------------
     // Multi-byte text, which is where the byte offsets are load-bearing
     // ------------------------------------------------------------------
@@ -1599,63 +1272,21 @@ mod tests {
         let mut input = TextInput::new();
         input.set_text("aé→😀b");
         input.move_home(false);
-        let mut offsets = vec![input.cursor.byte()];
+        let mut offsets = vec![input.cursor().byte()];
         for _ in 0..5 {
-            input.move_cursor_right(false);
-            offsets.push(input.cursor.byte());
+            input.move_cursor_right(false, INPUT_FONT_SIZE, FontWeightHint::Regular);
+            offsets.push(input.cursor().byte());
         }
         assert_eq!(offsets, vec![0, 1, 3, 6, 10, 11]);
 
         // And back, landing on the same boundaries in reverse.
-        let mut back = vec![input.cursor.byte()];
+        let mut back = vec![input.cursor().byte()];
         for _ in 0..5 {
-            input.move_cursor_left(false);
-            back.push(input.cursor.byte());
+            input.move_cursor_left(false, INPUT_FONT_SIZE, FontWeightHint::Regular);
+            back.push(input.cursor().byte());
         }
         back.reverse();
         assert_eq!(back, offsets);
-    }
-
-    #[test]
-    fn backspace_and_delete_remove_one_whole_character() {
-        let mut input = TextInput::new();
-        input.set_text("a😀b");
-        input.move_end(false);
-        input.move_cursor_left(false); // before 'b'
-        input.backspace();
-        assert_eq!(input.text, "ab");
-        assert_eq!(input.cursor.byte(), 1);
-
-        let mut input = TextInput::new();
-        input.set_text("a😀b");
-        input.move_home(false);
-        input.move_cursor_right(false); // after 'a'
-        input.delete();
-        assert_eq!(input.text, "ab");
-        assert_eq!(input.cursor.byte(), 1);
-    }
-
-    #[test]
-    fn typing_or_pasting_over_a_selection_replaces_it() {
-        let mut input = TextInput::new();
-        input.set_text("hello world");
-        input.selection_anchor = Some(0);
-        input.cursor = TextCursor::from(5);
-        input.insert_char('X');
-        assert_eq!(input.text, "X world");
-        assert_eq!(input.cursor.byte(), 1);
-        assert!(!input.has_selection());
-
-        let mut input = TextInput::new();
-        input.set_text("hello world");
-        input.clipboard = "bye".to_string();
-        input.selection_anchor = Some(0);
-        input.cursor = TextCursor::from(5);
-        input.paste();
-        assert_eq!(input.text, "bye world");
-        assert_eq!(input.cursor.byte(), 3);
-        // Pasting does not consume the clipboard.
-        assert_eq!(input.clipboard, "bye");
     }
 
     #[test]
@@ -1665,63 +1296,23 @@ mod tests {
         // of. Every entry point clamps to a boundary instead.
         let mut input = TextInput::new();
         input.set_text("a😀b");
-        input.cursor = TextCursor::from(3); // inside the four-byte character, which spans 1..5
-        input.selection_anchor = None;
+        input.set_cursor(TextCursor::from(3)); // inside the four-byte character, which spans 1..5
+        input.set_selection_anchor(None);
         input.backspace();
         // The offset floors to the start of the character it was inside, so
         // backspace takes the `a` before that. *Which* character goes is not
         // the claim — the claim is that an offset the type cannot legitimately
         // hold produces a smaller edit and a cursor still on a boundary,
         // rather than a panic inside `String::replace_range`.
-        assert_eq!(input.text, "😀b");
-        assert!(input.text.is_char_boundary(input.cursor.byte()));
+        assert_eq!(input.text(), "😀b");
+        assert!(input.text().is_char_boundary(input.cursor().byte()));
 
         let mut input = TextInput::new();
         input.set_text("a😀b");
-        input.cursor = TextCursor::from(99); // past the end
+        input.set_cursor(TextCursor::from(99)); // past the end
         input.delete();
-        assert_eq!(input.text, "a😀b");
-        assert!(input.text.is_char_boundary(input.cursor.byte()));
-    }
-
-    /// The Run dialog's arrows walk the *screen*, not the string
-    /// (`design-decisions.md` §541).
-    ///
-    /// `"ab\u{05D0}\u{05D1}cd"` draws as `a b <bet> <aleph> c d` — the two
-    /// Hebrew letters run right-to-left inside a left-to-right line, so the
-    /// character stored second is painted first. Six letters, so six caret
-    /// stops in each direction, and the same six screen positions both ways.
-    ///
-    /// The two gaps where the directions meet — `b|<bet>` and `<aleph>|c` —
-    /// each answer to *both* byte 2 and byte 6. Which one is reported depends
-    /// on the side the caret is on, and the caret keeps the side it is
-    /// travelling towards: walking left it reports 6 at both gaps, walking
-    /// right it reports 2 at both. That is why the sequences below repeat a
-    /// number, and why the whole `TextCursor` is assigned rather than its byte.
-    ///
-    /// **A failure here showing a shorter sequence, or one without the repeat,
-    /// is §541's measured trap**: a field that kept only the byte cannot tell
-    /// the second 6 from the first and jumps the entire Hebrew word in one
-    /// keypress — worse than the logical motion this replaced.
-    #[test]
-    fn the_run_dialogs_arrows_walk_the_line_by_the_screen_not_by_the_string() {
-        let mut input = TextInput::new();
-        input.set_text("ab\u{05D0}\u{05D1}cd");
-        input.move_end(false);
-
-        let mut leftwards = Vec::new();
-        for _ in 0..6 {
-            input.move_cursor_left(false);
-            leftwards.push(input.cursor.byte());
-        }
-        assert_eq!(leftwards, vec![7, 6, 4, 6, 1, 0]);
-
-        let mut rightwards = Vec::new();
-        for _ in 0..6 {
-            input.move_cursor_right(false);
-            rightwards.push(input.cursor.byte());
-        }
-        assert_eq!(rightwards, vec![1, 2, 4, 2, 7, 8]);
+        assert_eq!(input.text(), "a😀b");
+        assert!(input.text().is_char_boundary(input.cursor().byte()));
     }
 
     /// Where the dialog *draws* its caret, in the order it drew it.
@@ -1798,7 +1389,9 @@ mod tests {
 
         let mut xs = vec![drawn_caret_x(&dialog, &p)];
         for _ in 0..6 {
-            dialog.input.move_cursor_right(false);
+            dialog
+                .input
+                .move_cursor_right(false, INPUT_FONT_SIZE, FontWeightHint::Regular);
             xs.push(drawn_caret_x(&dialog, &p));
         }
         for pair in xs.windows(2) {
@@ -1812,7 +1405,7 @@ mod tests {
 
     /// A caret byte offset off a character boundary must not abort the process.
     ///
-    /// This is not hypothetical tidiness. `&self.input.text[..self.input.cursor]`
+    /// This is not hypothetical tidiness. `&self.input.text()[..self.input.cursor()]`
     /// panics on such an offset, and it sat inside `render` — so a cursor that
     /// had drifted took the whole desktop shell down while merely *painting*
     /// the dialog, with no user action involved beyond it being on screen.
@@ -1822,29 +1415,8 @@ mod tests {
         let mut dialog = RunDialog::new();
         dialog.show();
         dialog.input.set_text("é");
-        dialog.input.cursor = TextCursor::from(1); // inside the two-byte letter
+        dialog.input.set_cursor(TextCursor::from(1)); // inside the two-byte letter
         assert!(!dialog.render(&p).is_empty());
-    }
-
-    #[test]
-    fn a_shifted_arrow_extends_the_selection_and_an_unshifted_one_collapses_it() {
-        let mut input = TextInput::new();
-        input.set_text("abcdef");
-        input.move_home(false);
-        input.move_cursor_right(true);
-        input.move_cursor_right(true);
-        assert_eq!(input.selected_text(), "ab");
-
-        // Unshifted Left collapses to the near end without moving further.
-        input.move_cursor_left(false);
-        assert_eq!(input.cursor.byte(), 0);
-        assert!(!input.has_selection());
-
-        input.move_cursor_right(true);
-        input.move_cursor_right(true);
-        input.move_cursor_right(false);
-        assert_eq!(input.cursor.byte(), 2);
-        assert!(!input.has_selection());
     }
 
     // ====================================================================
@@ -1861,21 +1433,21 @@ mod tests {
 
         // Navigate up through history.
         dialog.history_prev();
-        assert_eq!(dialog.input.text, "cat file.txt");
+        assert_eq!(dialog.input.text(), "cat file.txt");
         dialog.history_prev();
-        assert_eq!(dialog.input.text, "pwd");
+        assert_eq!(dialog.input.text(), "pwd");
         dialog.history_prev();
-        assert_eq!(dialog.input.text, "ls");
+        assert_eq!(dialog.input.text(), "ls");
 
         // Navigate back down.
         dialog.history_next();
-        assert_eq!(dialog.input.text, "pwd");
+        assert_eq!(dialog.input.text(), "pwd");
         dialog.history_next();
-        assert_eq!(dialog.input.text, "cat file.txt");
+        assert_eq!(dialog.input.text(), "cat file.txt");
 
         // Past the end returns to original.
         dialog.history_next();
-        assert_eq!(dialog.input.text, "");
+        assert_eq!(dialog.input.text(), "");
     }
 
     #[test]
@@ -1889,11 +1461,11 @@ mod tests {
 
         // Go up into history.
         dialog.history_prev();
-        assert_eq!(dialog.input.text, "old-command");
+        assert_eq!(dialog.input.text(), "old-command");
 
         // Come back down — original text restored.
         dialog.history_next();
-        assert_eq!(dialog.input.text, "partial");
+        assert_eq!(dialog.input.text(), "partial");
     }
 
     #[test]
@@ -1928,21 +1500,21 @@ mod tests {
 
         // Older, older, and once more past the oldest.
         dialog.history_prev();
-        assert_eq!(dialog.input.text, "two");
+        assert_eq!(dialog.input.text(), "two");
         dialog.history_prev();
-        assert_eq!(dialog.input.text, "one");
+        assert_eq!(dialog.input.text(), "one");
         dialog.history_prev();
-        assert_eq!(dialog.input.text, "one");
+        assert_eq!(dialog.input.text(), "one");
 
         // Back down, and one step past the newest returns the typed text.
         dialog.history_next();
-        assert_eq!(dialog.input.text, "two");
+        assert_eq!(dialog.input.text(), "two");
         dialog.history_next();
-        assert_eq!(dialog.input.text, "");
+        assert_eq!(dialog.input.text(), "");
         assert!(dialog.history_index.is_none());
         // Already out of browse mode: another step changes nothing.
         dialog.history_next();
-        assert_eq!(dialog.input.text, "");
+        assert_eq!(dialog.input.text(), "");
     }
 
     #[test]
@@ -1954,7 +1526,7 @@ mod tests {
         }
         dialog.history_prev();
         dialog.history_next();
-        assert_eq!(dialog.input.text, "typed");
+        assert_eq!(dialog.input.text(), "typed");
         assert!(dialog.history_index.is_none());
     }
 
@@ -2015,7 +1587,7 @@ mod tests {
         assert!(dialog.show_autocomplete);
 
         dialog.accept_suggestion();
-        assert_eq!(dialog.input.text, "terminal");
+        assert_eq!(dialog.input.text(), "terminal");
         assert!(!dialog.show_autocomplete);
     }
 
@@ -2266,7 +1838,7 @@ mod tests {
         let event = make_key(Key::A, false, false, Some('a'));
         let result = dialog.handle_key_event(&event);
         assert_eq!(result, EventResult::Consumed);
-        assert_eq!(dialog.input.text, "a");
+        assert_eq!(dialog.input.text(), "a");
     }
 
     #[test]
@@ -2290,6 +1862,6 @@ mod tests {
 
         let event = make_key(Key::Tab, false, false, None);
         dialog.handle_key_event(&event);
-        assert_eq!(dialog.input.text, "calculator");
+        assert_eq!(dialog.input.text(), "calculator");
     }
 }

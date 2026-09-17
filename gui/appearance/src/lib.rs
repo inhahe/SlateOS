@@ -245,6 +245,70 @@ const WALLPAPER_ENCODING: &str = "percent";
 /// 2026-09-14, which made it unreachable from `appearance.yaml` -- the setting
 /// could name a picture and not how to place it. design-decisions 852 records
 /// why that shipped as a gap rather than as a second copy of this enum.
+/// Background style for the login screen.
+///
+/// Lives here rather than in the greeter that draws it because it is a
+/// setting: `appearance.yaml` names it under `login.background`, the Settings
+/// app offers it, and `gui/desktop`'s `login_screen` re-exports this type
+/// rather than defining a second one to convert to and from.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum LoginBackground {
+    /// Whatever the theme's deepest surface is — resolved at render time.
+    ///
+    /// The default, and the only variant that names no colour. A variant was
+    /// needed because [`Default::default`] takes no arguments and so cannot be
+    /// handed a [`Palette`]: the previous default was `SolidColor(CRUST)` with
+    /// `CRUST` a Mocha literal in this file, which is why the greeter stayed
+    /// black for a user who had asked for the light theme. Deferring the
+    /// question to `render` is what makes the answer follow the mode.
+    #[default]
+    Theme,
+    /// Solid color, chosen by the user.
+    ///
+    /// Drawn exactly as given. This is not a theme role and is not re-themed:
+    /// a user who picked a colour picked *that* colour.
+    SolidColor(Color),
+    /// Whatever the desktop is showing behind the session, right now.
+    ///
+    /// **Carries no path, deliberately.** The obvious shape is to store the
+    /// wallpaper's path here when the user ticks "same as my desktop", and it
+    /// is wrong: the desktop's picture is not a constant. A rotation folder
+    /// changes it every `wallpaper.interval_secs`, and a stored copy would go
+    /// stale on the first change -- the greeter would show the picture that
+    /// was up when the box was ticked, for ever, while calling itself "same
+    /// as desktop". Holding no path is what makes the name true: the session
+    /// asks the wallpaper what it is showing at the moment it paints.
+    SameAsDesktop,
+    /// A picture chosen for the greeter alone, which the desktop does not share.
+    ///
+    /// A `PathBuf` rather than a `String` because a filename may hold any byte
+    /// but `/` and NUL -- the same reason `AppearanceSettings::wallpaper` is
+    /// one. A `String` here could not name every file a user may legitimately
+    /// pick, and the ones it could not name are exactly the ones a lossy
+    /// conversion would silently turn into a *different* path.
+    CustomImage(PathBuf),
+    /// Gradient between two colors, chosen by the user. Drawn as given.
+    Gradient { top: Color, bottom: Color },
+}
+
+impl LoginBackground {
+    /// The spelling `appearance.yaml` uses under `login.background`.
+    ///
+    /// Every variant has one. A style the file cannot name is a style the user
+    /// can reach from the Settings app and then lose on the next save, which
+    /// is worse than not offering it.
+    #[must_use]
+    pub const fn yaml_name(&self) -> &'static str {
+        match self {
+            Self::Theme => "theme",
+            Self::SolidColor(_) => "color",
+            Self::SameAsDesktop => "desktop",
+            Self::CustomImage(_) => "image",
+            Self::Gradient { .. } => "gradient",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageFit {
     /// Scale to cover the entire area, cropping if necessary.
@@ -1384,6 +1448,13 @@ pub struct AppearanceSettings {
     /// `apps/backup` -- see `known-issues.md`
     /// `TD-C-THE-TWO-GLOB-MATCHERS-ARE-NOT-DUPLICATES`.
     pub wallpaper_exclusions: Vec<String>,
+    /// What the login screen draws behind itself.
+    ///
+    /// `design.txt` line 1247 asks for "login screen background image - easy
+    /// way to make the two the same", and [`LoginBackground::SameAsDesktop`]
+    /// is that easy way: it names no file, so it follows the desktop wherever
+    /// the desktop goes, including through a rotation folder.
+    pub login_background: LoginBackground,
     /// The high-contrast scheme in force, or `None` for an ordinary theme.
     ///
     /// When set it *replaces* [`theme_mode`](Self::theme_mode) rather than
@@ -1472,6 +1543,7 @@ impl Default for AppearanceSettings {
             wallpaper_interval_secs: 600,
             wallpaper_shuffle: true,
             wallpaper_exclusions: Vec::new(),
+            login_background: LoginBackground::Theme,
             theme_mode: ThemeMode::Dark,
             // Borders, per §829. The `Default` impl is what a machine with no
             // configuration file gets, so this is where "the default theme" is
@@ -2121,6 +2193,54 @@ impl AppearanceSettings {
                 .and_then(|v| IconSize::from_yaml_name(&v))
         );
 
+        // The greeter's background. The mode decides which other keys are
+        // consulted, so a file that names a colour *and* a picture is not
+        // ambiguous: whichever the mode says wins, and the other is left alone
+        // for when the user switches back to it.
+        if let Some(mode) = doc.get_str(&["login", "background"]) {
+            s.login_background = match mode.trim() {
+                "desktop" => LoginBackground::SameAsDesktop,
+                "color" => doc
+                    .get_str(&["login", "color"])
+                    .and_then(|v| color_from_hex(&v))
+                    .map_or(LoginBackground::Theme, LoginBackground::SolidColor),
+                "gradient" => {
+                    let top = doc
+                        .get_str(&["login", "gradient_top"])
+                        .and_then(|v| color_from_hex(&v));
+                    let bottom = doc
+                        .get_str(&["login", "gradient_bottom"])
+                        .and_then(|v| color_from_hex(&v));
+                    match (top, bottom) {
+                        (Some(top), Some(bottom)) => LoginBackground::Gradient { top, bottom },
+                        // Half a gradient is not a gradient. The theme is the
+                        // honest answer, and is what an unreadable value means
+                        // everywhere else in this file.
+                        _ => LoginBackground::Theme,
+                    }
+                }
+                "image" => doc
+                    .get_str(&["login", "image"])
+                    .map(|raw| {
+                        let trimmed = raw.trim();
+                        let encoded = doc
+                            .get_str(&["login", "image_encoding"])
+                            .is_some_and(|v| v.trim() == WALLPAPER_ENCODING);
+                        if encoded {
+                            pathcodec::decode_path(trimmed)
+                        } else {
+                            PathBuf::from(trimmed)
+                        }
+                    })
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map_or(LoginBackground::Theme, LoginBackground::CustomImage),
+                // An unknown mode is left at whatever the default is rather
+                // than guessed at, the same rule `PreviewSide::from_yaml_name`
+                // follows: a typo should not move the user's background.
+                _ => s.login_background,
+            };
+        }
+
         // A scaling percentage outside u16 is not a number this UI can mean;
         // `validate` clamps the rest of the range.
         read_into!(
@@ -2173,6 +2293,25 @@ impl AppearanceSettings {
             .collect();
         doc.set_seq(&["wallpaper", "exclude"], &excludes);
         doc.set_str(&["wallpaper", "fit"], self.wallpaper_fit.yaml_name());
+        doc.set_str(&["login", "background"], self.login_background.yaml_name());
+        match &self.login_background {
+            LoginBackground::SolidColor(color) => {
+                doc.set_str(&["login", "color"], &color_to_hex(*color));
+            }
+            LoginBackground::Gradient { top, bottom } => {
+                doc.set_str(&["login", "gradient_top"], &color_to_hex(*top));
+                doc.set_str(&["login", "gradient_bottom"], &color_to_hex(*bottom));
+            }
+            LoginBackground::CustomImage(path) => {
+                // Percent-encoded under the same marker as the wallpaper, and
+                // for the same reason: a filename may hold any byte but `/`
+                // and NUL, and YAML scalars are text. design-decisions 426.
+                doc.set_str(&["login", "image"], &pathcodec::encode_path(path));
+                doc.set_str(&["login", "image_encoding"], WALLPAPER_ENCODING);
+            }
+            // Nothing else to write down: these two name no value of their own.
+            LoginBackground::Theme | LoginBackground::SameAsDesktop => {}
+        }
         doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
         doc.set_str(
             &["theme", "surface_style"],
@@ -2633,6 +2772,12 @@ mod tests {
             wallpaper_folder: Some(PathBuf::from("/home/u/Pictures/rotation")),
             // Non-default, like every other field here: the default is empty.
             wallpaper_exclusions: vec!["*.gif".to_string(), "draft-*".to_string()],
+            // Not `SameAsDesktop`: that one carries no value, so a round trip
+            // could lose the path and still compare equal. The variant with
+            // something to lose is the one worth round-tripping.
+            login_background: LoginBackground::CustomImage(PathBuf::from(
+                "/home/u/greeter/100% sure.png",
+            )),
             wallpaper_interval_secs: 45,
             wallpaper_shuffle: false,
             // A path with a space and a non-ASCII character in it, because a
@@ -3648,13 +3793,6 @@ mod tests {
         }
     }
 
-    /// A wallpaper label stays pale in Latte, and is legible over its own
-    /// shadow in both modes.
-    ///
-    /// The trap this exists to stop is the obvious one: someone converting a
-    /// module off its constants sees a label colour, reaches for `p.text`, and
-    /// a Light desktop gets dark labels under a black shadow — which is
-    /// illegible against every wallpaper rather than merely some of them. The
     /// A picture whose filename is not text survives being saved and reloaded.
     ///
     /// The defect this encoding exists for: the path used to be stored with
@@ -3782,6 +3920,155 @@ mod tests {
         );
     }
 
+    /// "Same as my desktop" survives a save, and stores no path while doing it.
+    ///
+    /// The second half is the point. A background that remembered *which*
+    /// picture the desktop was showing when the box was ticked would be wrong
+    /// the moment a rotation folder advanced, and would go on calling itself
+    /// "same as desktop" while showing something else.
+    #[test]
+    fn following_the_desktop_round_trips_and_names_no_file() {
+        let mut s = AppearanceSettings::default();
+        s.login_background = LoginBackground::SameAsDesktop;
+
+        let mut doc = Document::new();
+        s.write_into(&mut doc);
+
+        assert_eq!(
+            doc.get_str(&["login", "background"]).as_deref(),
+            Some("desktop")
+        );
+        assert_eq!(
+            doc.get_str(&["login", "image"]),
+            None,
+            "following the desktop wrote a filename down, which is the one \
+             thing it must never do"
+        );
+        assert_eq!(
+            AppearanceSettings::read_from(&doc).login_background,
+            LoginBackground::SameAsDesktop
+        );
+    }
+
+    /// A greeter picture whose filename is not text survives a save.
+    ///
+    /// Same defect, same escape and same marker as the wallpaper's: see
+    /// [`a_wallpaper_whose_name_is_not_text_round_trips`]. Asserted separately
+    /// because it is a separate key, and a key that forgot to encode would be
+    /// invisible until somebody picked such a file.
+    #[cfg(windows)]
+    #[test]
+    fn a_greeter_picture_whose_name_is_not_text_round_trips() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let odd = PathBuf::from(OsString::from_wide(&[
+            u16::from(b'/'),
+            u16::from(b'z'),
+            0xD800,
+            u16::from(b'.'),
+            u16::from(b'p'),
+            u16::from(b'n'),
+            u16::from(b'g'),
+        ]));
+
+        let mut s = AppearanceSettings::default();
+        s.login_background = LoginBackground::CustomImage(odd.clone());
+
+        let mut doc = Document::new();
+        s.write_into(&mut doc);
+
+        // Asserted on BYTES rather than by reading the setting back into a
+        // `PathBuf`, for the reason spelled out in
+        // `a_wallpaper_whose_name_is_not_text_round_trips` just above: a
+        // Windows `OsString` is WTF-8 and cannot hold an unpaired surrogate,
+        // so the round trip through `PathBuf` measures this host and not the
+        // format, and fails against code that is right on the target. Written
+        // the other way first, this test duly failed with `/z<3x U+FFFD>.png`
+        // -- which is the host substituting, not the setting losing anything.
+        let stored = doc
+            .get_str(&["login", "image"])
+            .expect("the key is always written for a picture");
+        assert_eq!(
+            pathcodec::decode_bytes(&stored),
+            odd.as_os_str().as_encoded_bytes(),
+            "the greeter's picture did not survive the settings file exactly"
+        );
+        assert_eq!(
+            doc.get_str(&["login", "image_encoding"]).as_deref(),
+            Some(WALLPAPER_ENCODING),
+            "without the marker a later read cannot tell an escape from a \
+             literal percent"
+        );
+    }
+
+    /// A percent in a greeter picture's name is not mistaken for an escape.
+    #[test]
+    fn a_percent_in_the_greeters_picture_survives() {
+        let path = PathBuf::from("/home/u/100% sure.png");
+        let mut s = AppearanceSettings::default();
+        s.login_background = LoginBackground::CustomImage(path.clone());
+
+        let mut doc = Document::new();
+        s.write_into(&mut doc);
+        assert_eq!(
+            AppearanceSettings::read_from(&doc).login_background,
+            LoginBackground::CustomImage(path)
+        );
+    }
+
+    /// A mode this version does not know leaves the background alone.
+    ///
+    /// The same rule `PreviewSide::from_yaml_name` follows: a typo, or a file
+    /// written by a newer build, must not move the user's background to
+    /// something they never chose.
+    #[test]
+    fn an_unknown_greeter_mode_changes_nothing() {
+        let mut doc = Document::new();
+        doc.set_str(&["login", "background"], "aquarium");
+        assert_eq!(
+            AppearanceSettings::read_from(&doc).login_background,
+            AppearanceSettings::default().login_background
+        );
+    }
+
+    /// Half a gradient is not a gradient.
+    ///
+    /// A hand-edited file that names a top colour and no bottom one has not
+    /// described anything drawable, and inventing the missing half would put a
+    /// colour on screen that nobody chose.
+    #[test]
+    fn a_gradient_missing_a_colour_falls_back_to_the_theme() {
+        let mut doc = Document::new();
+        doc.set_str(&["login", "background"], "gradient");
+        doc.set_str(&["login", "gradient_top"], "#112233");
+        assert_eq!(
+            AppearanceSettings::read_from(&doc).login_background,
+            LoginBackground::Theme
+        );
+    }
+
+    /// A colour the user picked comes back as that colour.
+    #[test]
+    fn a_greeter_colour_round_trips() {
+        let mut s = AppearanceSettings::default();
+        s.login_background = LoginBackground::SolidColor(Color::from_hex(0xAB12CD));
+
+        let mut doc = Document::new();
+        s.write_into(&mut doc);
+        assert_eq!(
+            AppearanceSettings::read_from(&doc).login_background,
+            LoginBackground::SolidColor(Color::from_hex(0xAB12CD))
+        );
+    }
+
+    /// A wallpaper label stays pale in Latte, and is legible over its own
+    /// shadow in both modes.
+    ///
+    /// The trap this exists to stop is the obvious one: someone converting a
+    /// module off its constants sees a label colour, reaches for `p.text`, and
+    /// a Light desktop gets dark labels under a black shadow — which is
+    /// illegible against every wallpaper rather than merely some of them. The
     /// first assertion is what makes `on_wallpaper` different from `text`; the
     /// second is why it has to be.
     #[test]

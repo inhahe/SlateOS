@@ -1408,7 +1408,12 @@ fn parse_hex_color(s: &str) -> Result<Color, ConfigError> {
 /// the image's native size, and the desired fit mode.
 ///
 /// Returns `(x, y, width, height)` in display coordinates.
-fn compute_image_rect(
+///
+/// `pub(crate)` for the login screen, which fits a picture to a screen for the
+/// same reasons and must do it the same way: the greeter's whole purpose in
+/// `SameAsDesktop` is to look like the desktop, which a second implementation
+/// of this arithmetic would eventually stop doing.
+pub(crate) fn compute_image_rect(
     display_w: f32,
     display_h: f32,
     image_w: f32,

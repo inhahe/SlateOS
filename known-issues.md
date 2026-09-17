@@ -157272,3 +157272,53 @@ obeys it, not when something stores it.* This is that rule met from a new
 direction: a consumer did exist, and was reached, and still made the displayed
 claim false, because it was fed an argument that erased the difference.
 
+
+## TD-C-THREE-LAUNCHER-ENTRIES-NAME-A-PROGRAM-THAT-CANNOT-EXIST -- 2026-09-17
+
+**In short:** the search launcher's built-in app list has three entries
+— "Display settings", "Network settings", "Sound settings" — whose
+program is written as `/usr/bin/settings --display` and so on. That is one
+string naming a file with a space in it, which no filesystem holds. Nothing
+runs it today, so nothing is broken yet; the day the launcher is wired up,
+all three fail. And even spelled correctly they would do nothing, because the
+Settings application never reads its arguments.
+
+**Date:** 2026-09-17. **Lane:** C.
+
+**Where.** `gui/desktop/src/launcher.rs`, the default app database:
+
+    executable_path: "/usr/bin/settings --display".to_string(),
+    executable_path: "/usr/bin/settings --network".to_string(),
+    executable_path: "/usr/bin/settings --sound".to_string(),
+
+The field is called `executable_path`, is a `String`, and ends up in
+`LauncherAction::Launch(path)`.
+
+**Why it is not live.** `LauncherAction::Launch` has no consumer outside its
+own module — the dangling end `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`
+records. The start menu's path (`ShellAction::Launch`) *is* wired and does
+spawn, which is how the identical defect in the screenshot shortcuts was a
+live failure at every press rather than a latent one.
+
+**It is wrong twice over.** Even passed as a proper argument, `--display`
+would change nothing: `apps/settings` never looks at `std::env::args`. So the
+three entries promise a settings page and would open the front page. A
+launcher row that says "Display settings" is a claim about where it lands,
+which is the shape design-decisions 856 is about.
+
+**Proper fix, and what has to exist first.** Two pieces, in this order:
+
+1. `apps/settings` accepts a page argument and opens that page. It already has
+   a `SettingsPage` enum and a `current_page`, so this is small — but it
+   should not be built until something passes one, or it is a feature with no
+   caller, which is the other half of 856.
+2. The launcher's model carries arguments, as `gui/desktop/src/hotkeys.rs`'s
+   `Launch { program, args }` now does for shortcuts. One type for "a program
+   and how to invoke it" rather than a second one here.
+
+**Trigger.** Do this when `LauncherAction::Launch` gains a consumer. Until
+then the three rows are inert and the cheap half-fix — deleting the
+arguments so they honestly read `/usr/bin/settings` — is deliberately not
+taken, because three rows that all open the same front page is a *worse* lie
+than three rows that do not work: the first looks like a feature that works.
+

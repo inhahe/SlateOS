@@ -984,8 +984,8 @@ fn a_start_menu_row_comes_out_as_a_program_to_start() {
     let launched = session.take_launches();
     assert_eq!(launched.len(), 1, "expected one program, got {launched:?}");
     assert!(
-        launched[0].starts_with("/"),
-        "a launch should be a path, not {:?}",
+        launched[0].program.starts_with("/"),
+        "a launch should name a path, not {:?}",
         launched[0]
     );
     assert!(
@@ -3694,7 +3694,11 @@ fn a_command_confirmed_with_enter_reaches_the_launcher() {
     session.pump().expect("pump");
 
     assert_eq!(
-        session.take_launches(),
+        session
+            .take_launches()
+            .into_iter()
+            .map(|l| l.program)
+            .collect::<Vec<_>>(),
         [std::path::PathBuf::from("terminal")]
     );
     assert!(
@@ -3996,7 +4000,11 @@ fn an_idle_session_locks_itself() {
 
     send_session_idle(&desktop, &mut session);
     assert_eq!(
-        session.take_launches(),
+        session
+            .take_launches()
+            .into_iter()
+            .map(|l| l.program)
+            .collect::<Vec<_>>(),
         [std::path::PathBuf::from(crate::hotkeys::LOCK_COMMAND)],
         "an idle session did not ask for the lock screen"
     );
@@ -4048,7 +4056,7 @@ fn a_session_with_a_password_still_locks() {
     press_lock_shortcut(&desktop, &mut session);
     let launched = session.take_launches();
     assert_eq!(
-        launched,
+        launched.into_iter().map(|l| l.program).collect::<Vec<_>>(),
         vec![std::path::PathBuf::from("/usr/bin/lockscreen")],
         "an account with a password locks as it always did"
     );

@@ -918,7 +918,7 @@ pub struct HotkeyOutcome {
     /// A `Vec` rather than an `Option` to match `requests` above: both are
     /// unordered, independent asks, and a caller that can already loop over one
     /// should not need a second shape for the other.
-    pub launches: Vec<PathBuf>,
+    pub launches: Vec<hotkeys::Launch>,
 }
 
 impl HotkeyOutcome {
@@ -954,7 +954,7 @@ impl HotkeyOutcome {
     }
 
     /// The shell claimed the key and wants these programs started.
-    fn start(launches: Vec<PathBuf>) -> Self {
+    fn start(launches: Vec<hotkeys::Launch>) -> Self {
         Self {
             consumed: true,
             launches,
@@ -4598,7 +4598,7 @@ impl DesktopShell {
             | HotkeyAction::ScreenLock
             | HotkeyAction::Screenshot
             | HotkeyAction::ScreenshotRegion => {
-                HotkeyOutcome::start(action.command().map(PathBuf::from).into_iter().collect())
+                HotkeyOutcome::start(action.launch().into_iter().collect())
             }
             // Nothing can carry these out: there is no backlight channel out of
             // the shell, and inventing one would mean a request the compositor
@@ -4657,7 +4657,21 @@ impl DesktopShell {
         // a press the dialog had no meaning for is still not the desktop's while
         // the dialog is up.
         let _ = self.run_dialog.handle_key_event(key);
-        HotkeyOutcome::start(self.drain_run_dialog())
+        // Wrapped with no arguments, because that is what this box produces:
+        // what the user typed is taken as the whole name of one program.
+        // Splitting it would need a quoting rule, and inventing one silently
+        // would make `my program` two words to the shell and one to the
+        // filesystem. Whether the Run box should accept arguments at all is a
+        // real question and a separate one; it is not settled by a conversion.
+        HotkeyOutcome::start(
+            self.drain_run_dialog()
+                .into_iter()
+                .map(|program| hotkeys::Launch {
+                    program,
+                    args: Vec::new(),
+                })
+                .collect(),
+        )
     }
 
     /// Answer whatever the Run box has asked for since it was last emptied, and
@@ -12570,7 +12584,73 @@ mod run_box_wiring_tests {
         for ch in command.chars() {
             launches.extend(s.handle_hotkey(&typed(ch)).launches);
         }
-        launches
+        programs(&launches)
+    }
+
+    /// The programs a batch of launches names, without their arguments.
+    ///
+    /// Most of these tests are about *which program* was named -- several
+    /// about naming it byte-exactly -- and the Run box passes no arguments, so
+    /// asserting on the program keeps them saying what they were written to
+    /// say. The arguments have tests of their own; see
+    /// `the_screenshot_shortcut_passes_its_mode_as_an_argument`.
+    fn programs(launches: &[crate::hotkeys::Launch]) -> Vec<PathBuf> {
+        launches.iter().map(|l| l.program.clone()).collect()
+    }
+
+    /// **A screenshot shortcut asks for a program, and tells it which mode.**
+    ///
+    /// The two screenshot actions are one program invoked two ways, and until
+    /// 2026-09-17 the difference was carried inside the path:
+    /// `SCREENSHOT_COMMAND` was `"/usr/bin/screenshot --fullscreen"`, turned
+    /// into one `PathBuf` and handed to `Command::new`. That asks the system
+    /// for a file with a space and two dashes in its name, so **both
+    /// screenshot shortcuts failed at every press** -- and failed by printing
+    /// "cannot start", which reads like a program that is not installed rather
+    /// than a request that was never well formed.
+    ///
+    /// Asserted on the argument and not merely on the program: with the
+    /// argument dropped the two actions become the same launch, which is the
+    /// other way to get this wrong.
+    #[test]
+    fn the_screenshot_shortcut_passes_its_mode_as_an_argument() {
+        let full = crate::hotkeys::HotkeyAction::Screenshot
+            .launch()
+            .expect("the screenshot action starts a program");
+        let region = crate::hotkeys::HotkeyAction::ScreenshotRegion
+            .launch()
+            .expect("the region action starts a program");
+
+        assert_eq!(
+            full.program,
+            PathBuf::from("/usr/bin/screenshot"),
+            "the program is not a file name any filesystem could hold"
+        );
+        assert_eq!(full.program, region.program, "two programs, not two modes");
+        assert_eq!(full.args, [std::ffi::OsString::from("--fullscreen")]);
+        assert_eq!(region.args, [std::ffi::OsString::from("--region")]);
+        assert_ne!(
+            full, region,
+            "the two shortcuts became the same launch, so one of them is unreachable"
+        );
+    }
+
+    /// A program named with no arguments is launched with none.
+    ///
+    /// The start menu and the Run box name programs rather than invocations,
+    /// and an empty `args` is what says so. A default of "whatever was last
+    /// set" would be the kind of leak that only shows up on the second press.
+    #[test]
+    fn an_action_that_names_only_a_program_carries_no_arguments() {
+        let lock = crate::hotkeys::HotkeyAction::ScreenLock
+            .launch()
+            .expect("the lock action starts a program");
+        assert_eq!(lock.program, PathBuf::from(crate::hotkeys::LOCK_COMMAND));
+        assert!(
+            lock.args.is_empty(),
+            "arguments appeared for an action that names none: {:?}",
+            lock.args
+        );
     }
 
     fn press(s: &mut DesktopShell, x: f32, y: f32) -> ShellAction {
@@ -12823,7 +12903,7 @@ mod run_box_wiring_tests {
         );
 
         let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
-        assert_eq!(outcome.launches, [PathBuf::from("terminal")]);
+        assert_eq!(programs(&outcome.launches), [PathBuf::from("terminal")]);
         assert!(
             !s.run_dialog.is_visible(),
             "the box stayed up after starting the command"
@@ -13003,7 +13083,7 @@ mod run_box_wiring_tests {
         expected.push(&name);
         let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
         assert_eq!(
-            outcome.launches,
+            programs(&outcome.launches),
             [PathBuf::from(&expected)],
             "the launch named a lossy rendering rather than the file that was picked"
         );
@@ -13029,8 +13109,10 @@ mod run_box_wiring_tests {
         let _ = s.handle_hotkey(&chord(Key::Down, Modifiers::NONE));
         let _ = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
         assert_eq!(
-            s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
-                .launches,
+            programs(
+                &s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
+                    .launches
+            ),
             [PathBuf::from(&expected)]
         );
 
@@ -13039,8 +13121,10 @@ mod run_box_wiring_tests {
         assert!(s.run_dialog.is_visible(), "the box did not reopen");
         assert!(s.handle_hotkey(&chord(Key::Up, Modifiers::NONE)).consumed);
         assert_eq!(
-            s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
-                .launches,
+            programs(
+                &s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
+                    .launches
+            ),
             [PathBuf::from(&expected)],
             "the recalled command named a lossy rendering rather than the file that ran"
         );
@@ -13066,7 +13150,7 @@ mod run_box_wiring_tests {
 
         let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
         assert_eq!(
-            outcome.launches,
+            programs(&outcome.launches),
             [PathBuf::from("terminal")],
             "cancelling the chooser edited the command that was already typed"
         );
@@ -13089,7 +13173,7 @@ mod run_box_wiring_tests {
 
         let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
         assert_eq!(
-            outcome.launches,
+            programs(&outcome.launches),
             [PathBuf::from("term")],
             "a key aimed at the chooser was typed into the box behind it"
         );

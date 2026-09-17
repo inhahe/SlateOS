@@ -77,6 +77,48 @@ use guitk::style::CornerRadii;
 use guitk::text;
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+/// A program to start, with the arguments it is to be started with.
+///
+/// The arguments are the whole reason this is a struct rather than a
+/// `PathBuf`. One program can be two shortcuts — `screenshot --fullscreen`
+/// and `screenshot --region` — and putting the difference inside the path
+/// makes a filename that cannot exist. `Command::new` took it literally and
+/// both shortcuts failed at every press.
+///
+/// The program stays a [`PathBuf`] for the reason
+/// `ShellSession::take_launches` gives: a program's name is a filesystem path,
+/// our paths are byte strings, and a program whose name has no UTF-8 spelling
+/// must reach the process server as the bytes that name it. The arguments are
+/// [`OsString`] for exactly the same reason — an argument is very often a
+/// path, and one that cannot be spelled is one the user meant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Launch {
+    /// The program to start.
+    pub program: PathBuf,
+    /// Its arguments, in order, not including the program name itself.
+    pub args: Vec<OsString>,
+}
+
+impl Launch {
+    /// The whole invocation, as one line, for showing to a person.
+    ///
+    /// Display only. Both halves go through `Path::display`, which renders
+    /// unspellable bytes rather than refusing -- right for a label and wrong
+    /// for anything that opens a file, which is why nothing here feeds it back
+    /// into a `PathBuf`.
+    #[must_use]
+    pub fn display_line(&self) -> String {
+        let mut out = self.program.display().to_string();
+        for arg in &self.args {
+            out.push(' ');
+            out.push_str(&std::path::Path::new(arg).display().to_string());
+        }
+        out
+    }
+}
 use std::fmt;
 use yamldoc::Document;
 
@@ -538,8 +580,17 @@ pub(crate) const LOCK_COMMAND: &str = "/usr/bin/lockscreen";
 /// which parses `--fullscreen`/`-f` and `--region`/`-r` as its first argument.
 /// A flag it does not know would leave it sitting in its interactive menu, which
 /// is not what either shortcut promises.
-const SCREENSHOT_COMMAND: &str = "/usr/bin/screenshot --fullscreen";
-const SCREENSHOT_REGION_COMMAND: &str = "/usr/bin/screenshot --region";
+/// The screenshot tool, and the two ways the shell asks for it.
+///
+/// One program, two invocations — which is why a launch has to carry
+/// arguments. These were written as `"/usr/bin/screenshot --fullscreen"` and
+/// `"/usr/bin/screenshot --region"` until 2026-09-17, single strings that were
+/// then turned into a `PathBuf` and handed to `Command::new`. That names a file
+/// with a space and two dashes in it, which cannot exist, so both screenshot
+/// shortcuts failed with "cannot start" every time they were pressed.
+const SCREENSHOT_COMMAND: &str = "/usr/bin/screenshot";
+const SCREENSHOT_FULLSCREEN_ARG: &str = "--fullscreen";
+const SCREENSHOT_REGION_ARG: &str = "--region";
 
 impl HotkeyAction {
     /// Whether the press is claimed only when the shell has something to do.
@@ -552,6 +603,33 @@ impl HotkeyAction {
     #[must_use]
     pub const fn is_conditional(&self) -> bool {
         matches!(self, Self::DismissPopup)
+    }
+
+    /// The program this action starts, and how to invoke it.
+    ///
+    /// `None` for every action that acts on a window or on the shell itself.
+    ///
+    /// Separate from [`command`](Self::command), which answers only the
+    /// program: a caller that wants to *start* the action needs both halves,
+    /// and one that only wants to name it (the shortcut card, the settings
+    /// list) wants neither the arguments nor to have to ignore them.
+    #[must_use]
+    pub fn launch(&self) -> Option<Launch> {
+        let plain = |p: &str| Launch {
+            program: PathBuf::from(p),
+            args: Vec::new(),
+        };
+        match self {
+            Self::Screenshot => Some(Launch {
+                program: PathBuf::from(SCREENSHOT_COMMAND),
+                args: vec![OsString::from(SCREENSHOT_FULLSCREEN_ARG)],
+            }),
+            Self::ScreenshotRegion => Some(Launch {
+                program: PathBuf::from(SCREENSHOT_COMMAND),
+                args: vec![OsString::from(SCREENSHOT_REGION_ARG)],
+            }),
+            _ => self.command().map(plain),
+        }
     }
 
     /// The program this action starts, if starting a program is what it does.
@@ -567,8 +645,9 @@ impl HotkeyAction {
             Self::ShowTaskManager => Some(TASK_MANAGER_COMMAND),
             Self::SystemSettings => Some(SETTINGS_COMMAND),
             Self::ScreenLock => Some(LOCK_COMMAND),
-            Self::Screenshot => Some(SCREENSHOT_COMMAND),
-            Self::ScreenshotRegion => Some(SCREENSHOT_REGION_COMMAND),
+            // Both, because `command` answers *which program*; the two
+            // differ only in how it is invoked, which is `launch`'s answer.
+            Self::Screenshot | Self::ScreenshotRegion => Some(SCREENSHOT_COMMAND),
             _ => None,
         }
     }
@@ -1708,13 +1787,19 @@ pub fn render_settings_panel(
         // "Launch application" — but the fixed-command actions get it too,
         // because "Task manager" is a name and `/usr/bin/procexplorer` is the
         // answer to *which* task manager.
-        let extra_text = action.command();
+        // The whole invocation, not just the program. Asked of `launch`
+        // rather than `command` because those two stopped being the same
+        // thing when a launch gained arguments: the two screenshot rows name
+        // one program and differ only in the argument, so a card built from
+        // `command` alone drew the same line twice and gave the user no way to
+        // tell which row was which.
+        let extra_text = action.launch().map(|l| l.display_line());
         if let Some(detail) = extra_text {
             let detail_x = panel_x + PADDING + content_width * 0.2;
             cmds.push(RenderCommand::Text {
                 x: detail_x,
                 y: row_y + (ROW_HEIGHT - KEY_FONT_SIZE) / 2.0 + 1.0,
-                text: detail.to_string(),
+                text: detail.clone(),
                 // Dimmer than either label branch: the app name is an
                 // argument to the action beside it, not a second action.
                 color: p.subtext0,
@@ -3010,7 +3095,9 @@ mod tests {
     fn detail_lines() -> Vec<String> {
         HotkeyRegistry::defaults()
             .all_bindings()
-            .filter_map(|(_, action)| action.command().map(str::to_owned))
+            // `launch`, not `command`: the card draws the whole invocation, and
+            // this list is only useful while it names the same strings.
+            .filter_map(|(_, action)| action.launch().map(|l| l.display_line()))
             .collect()
     }
 

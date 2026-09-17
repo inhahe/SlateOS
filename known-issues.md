@@ -157359,3 +157359,141 @@ built to enforce 942, and it was not found by a boot failing -- the boot
 said `clean` and the tree was in fact clean. It was found by asking what the
 number was made of, which is the same question 942 is about, pointed at my
 own output instead of somebody else's.
+
+### [A] Why that corpus is near-empty, and what it makes the check worth -- 2026-09-17
+
+Having found that the lock-context check's population was two synthetic
+classes, the next question is whether the *real* number can be anything but
+zero. Mostly it cannot, and the reason is that the hazard has been designed
+out rather than guarded. That changes what the check is for, so it is worth
+writing down instead of leaving the zero to look like a defect.
+
+**My first explanation was wrong.** I assumed an automated QEMU boot presses
+no keys, so `console`'s interrupt path never runs. The log says otherwise --
+`Live IRQ lines: 1 seen via the ISR path [1]` -- IRQ 1 is the keyboard and it
+fired.
+
+The actual reason is better. `push_char` no longer calls `putchar`; it calls
+`queue_echo`, whose doc says *"Called from hard-IRQ context, so it must not
+render: see `drain_echo` for why the rendering moved to a worker task."* The
+chain `console.rs`'s module doc still describes -- IRQ 1 ->
+`handle_device_irq` -> `handle_scancode` -> `push_char` -> `putchar` -- is
+now taken only in a pre-`workqueue::init` window, and `queue_echo`'s comment
+explains why rendering from an ISR is harmless in that one stretch: no
+userspace, no scheduler-visible latency budget, nothing else contending for
+the console lock. That window is ~700 lines of boot wide and needs a
+keystroke to land inside it.
+
+So the two reasons the real corpus is ~0 are both deliberate engineering:
+
+| reason | whose decision |
+|---|---|
+| interrupt-context locks are raw `spin::Mutex` or `PreemptSpinMutex`, and the check hooks `crate::sync::Mutex` | dd-70's conversion sweep, which kept the ISR-reached locks raw on purpose |
+| the one `sync::Mutex` that was IRQ-reachable had its hot path moved to a worker | whoever wrote `queue_echo`/`drain_echo` |
+
+**What that makes the check worth.** It is a **tripwire for regressions, not
+an audit of the present.** It cannot tell me the kernel is currently correct,
+because it can barely see the kernel; it can tell me the day somebody makes
+an ISR take a `crate::sync::Mutex` with a blocking acquire. That is a real
+thing to want -- `console` and `sysctl` were both *converted* from raw to
+`sync::Mutex`, which is exactly the migration that would trip it -- but it is
+a much narrower claim than `clean` sounds.
+
+This is the whole reason the line prints `VACUOUS` rather than `clean` when
+the population is zero. Without that word the output would read as a clean
+bill of health for a kernel the instrument never examined.
+
+**What would give it a real corpus.** Extend it to `PreemptSpinMutex`, which
+is where interrupt-context locking actually lives now. The obstacle is that
+the type deliberately has no lockdep class (dd-70), so there is no class
+index to key the two bits on -- but they do not need a class table: two
+`AtomicBool`s in the lock struct itself is 489 x 2 bits, needs no
+registration, and is already the pattern the leaf check uses for its name.
+Not done yet; recorded so the zero is not mistaken for completeness.
+
+### [A] Confirmed on boot `4e9595a63`: the lock-context check has been reporting nothing about nothing -- 2026-09-17
+
+With the controls excluded from the population, the line reads:
+
+```
+[lockdep] lock-context: 0 violation(s), 0 suspect(s), over 0 class(es) seen in interrupt context -- VACUOUS: no interrupt-context acquisition was seen all boot
+```
+
+So the earlier `over 2 class(es) -- clean` was entirely synthetic, as
+predicted, and **every `clean` this check printed before today carried no
+information about the kernel.** It was not wrong; it was empty, and those are
+indistinguishable without the population number. The entry above explains
+why the real corpus is legitimately ~0 -- the hazard is designed out, not
+guarded -- so the honest reading is that this is a tripwire armed for a
+future regression, and the `VACUOUS` word is what stops it reading as a
+clean bill of health in the meantime.
+
+### [A] The leaf-claim check's first real boot: four sites in `fs/notify.rs`, and a report I cannot act on yet -- 2026-09-17
+
+It fired 8 times (its cap) across **four distinct sites**, all in one file:
+`fs/notify.rs` lines 330, 394, 440, 481.
+
+The inner lock is identifiable from the site alone: `notify.rs:46` is `use
+crate::sync::Mutex`, so those are acquisitions of `NOTIFY_WAITERS` /
+`WATCHES`, both tracked `Mutex`es. Something holding a `PreemptSpinMutex` is
+therefore calling into `notify` and taking a tracked lock inside that
+critical section. Four sites in one file suggests `notify` is routinely
+reached from inside other subsystems' critical sections, which is exactly the
+class dd-70's premise forbids and which no existing detector could see:
+lockdep cannot see the outer type at all, and `fail_if_recursive` compares a
+lock against itself.
+
+**Not yet actionable, because I rebuilt this morning's defect.** Every report
+reads:
+
+```
+"?" acquired while "?" is held, at kernel/src/fs/notify.rs:330:10
+```
+
+I carried the outer lock's *name* specifically so the report would not be
+one-sided -- and the name is the half that cannot identify anything, because
+`PreemptSpinMutex::new` defaults it to `b"?"` and 563 locks in this kernel
+answer to that. The entry two above records exactly this about lockdep's
+reports, hours earlier, and I built it straight into the replacement. What
+identifies a lock is where it was acquired.
+
+`leaf_enter` now also stores `Location::caller()` -- one pointer per CPU, on
+the 0 -> 1 transition only, which is what the `#[track_caller]` added to the
+`PreemptSpinMutex` paths was for in the first place. The name is kept
+alongside it, because a *named* lock is the more readable half; it just
+cannot be the only half. Whether these four are real is unknown until the
+next boot names the outer lock -- and on this session's record (five findings,
+five false) they should not be assumed real.
+
+### [A] dd-70 split the lock types on cost, and never benchmarked the type it created -- 2026-09-17
+
+`bench_lock_primitives` has four arms. `RAW` is a bare `spin::Mutex`;
+`TRACKED` and `TRACKED_B` are `crate::sync::Mutex`. There is **no**
+`PreemptSpinMutex` arm -- so the two types measured are the two dd-70 was
+choosing *between*, and never the one the decision produced, despite it now
+holding 489 instances on the hottest paths in the kernel.
+
+This is the same shape as the leaf claim, on the other half of the same
+decision. dd-70's *correctness* premise was "nothing nests inside it" (now
+checked, see dd-949). Its *performance* premise was "where the per-acquire
+tracking cost of `Mutex` would matter" -- and that had no measurement behind
+it either.
+
+A `lock_preempt_spin` arm is added. Fully qualified deliberately: `bench.rs`
+aliases `Mutex` *to* `PreemptSpinMutex` at the top of the file, so an
+unqualified name there reads as the opposite of what it is, which is how one
+would measure the wrong type and believe it.
+
+Two caveats on the existing numbers, so they are not over-read. dd-70 quotes
+"~5ns/acquire" for `Mutex`'s overhead; the measured figure on boot
+`b1ebbda65` was `+549ns = lockdep 254ns + preempt 36ns + rdtsc 56ns +
+unexplained 203ns`, two orders larger. These are QEMU TCG measurements, so
+the absolute nanoseconds are not hardware nanoseconds -- the 21x *ratio*
+between raw and tracked is the part that transfers, not the ns.
+
+**And the leaf check's own cost is still unmeasured.** It adds three atomic
+operations to `PreemptSpinMutex`'s acquire path. The bench runs in the
+deferred bench task, and every boot this session was torn down on lane B's
+three ring-3 failures before that task reached the lock arm -- the same
+teardown that hid the lock-context line. So the arm exists and the number
+does not yet. Stated rather than assumed cheap.

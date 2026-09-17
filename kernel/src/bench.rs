@@ -6369,6 +6369,24 @@ fn bench_lock_primitives() {
         *g = core::hint::black_box(*g).wrapping_add(1);
     });
 
+    // `PreemptSpinMutex` had no arm here, and the gap matters more than this
+    // one number. dd-70 split the lock types on per-acquire cost and created
+    // this one to be the cheap side -- "where the per-acquire tracking cost of
+    // `Mutex` would matter" -- and that premise had never been measured. The
+    // four arms around it compare bare `spin::Mutex` against
+    // `crate::sync::Mutex`, which are the two types the decision was choosing
+    // *between*, not the one it produced.
+    //
+    // Fully qualified on purpose: `Mutex` is aliased to `PreemptSpinMutex` at
+    // the top of this file, so an unqualified name here would read as the
+    // opposite of what it is.
+    static LEAF: crate::sync::PreemptSpinMutex<u64> =
+        crate::sync::PreemptSpinMutex::new(0);
+    let leaf = run_diagnostic("lock_preempt_spin", 2000, || {
+        let mut g = LEAF.lock();
+        *g = core::hint::black_box(*g).wrapping_add(1);
+    });
+
     let tracked = run("lock_tracked", 2000, || {
         let mut g = TRACKED.lock();
         *g = core::hint::black_box(*g).wrapping_add(1);
@@ -6445,8 +6463,12 @@ fn bench_lock_primitives() {
     });
 
     serial_println!(
-        "[bench]   lock acquire+release: raw {}ns, tracked {}ns, no-lockdep {}ns, no-stats {}ns",
+        concat!(
+            "[bench]   lock acquire+release: raw {}ns, preempt-spin {}ns, ",
+            "tracked {}ns, no-lockdep {}ns, no-stats {}ns"
+        ),
         raw.min_ns,
+        leaf.min_ns,
         tracked.min_ns,
         no_lockdep.min_ns,
         untracked.min_ns

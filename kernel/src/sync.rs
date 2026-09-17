@@ -42,7 +42,7 @@
 
 use crate::lockdep;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // Spinlock stall detector (software hard-lockup diagnostic)
@@ -1104,6 +1104,18 @@ static LEAF_NAME_PTR: [AtomicUsize; crate::smp::MAX_CPUS] = {
     const ZERO: AtomicUsize = AtomicUsize::new(0);
     [ZERO; crate::smp::MAX_CPUS]
 };
+/// Where the outermost leaf lock this CPU holds was acquired.
+///
+/// The name alone cannot identify it: `PreemptSpinMutex::new` defaults to
+/// `b"?"` and 563 locks in this kernel answer to that. The first real boot
+/// of this check reported `"?" acquired while "?" is held`, which names
+/// exactly one of the two locks involved -- the inner one, by its site. This
+/// gives the outer one the same treatment.
+static LEAF_SITE: [AtomicPtr<core::panic::Location<'static>>; crate::smp::MAX_CPUS] = {
+    const NULL: AtomicPtr<core::panic::Location<'static>> = AtomicPtr::new(core::ptr::null_mut());
+    [NULL; crate::smp::MAX_CPUS]
+};
+
 static LEAF_NAME_LEN: [AtomicUsize; crate::smp::MAX_CPUS] = {
     const ZERO: AtomicUsize = AtomicUsize::new(0);
     [ZERO; crate::smp::MAX_CPUS]
@@ -1115,6 +1127,19 @@ static LEAF_NESTINGS: AtomicU64 = AtomicU64::new(0);
 /// Cap on reports so a hot offender cannot flood serial. The count above
 /// keeps rising after the reports stop, so the number stays honest.
 const MAX_LEAF_REPORTS: u64 = 8;
+
+/// Where this CPU's outermost leaf lock was acquired, if any.
+fn leaf_site() -> Option<&'static core::panic::Location<'static>> {
+    let cpu = crate::smp::current_cpu_index();
+    let p = LEAF_SITE.get(cpu)?.load(Ordering::Relaxed);
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: stored from a `&'static Location` handed back by
+    // `Location::caller()`, which points into read-only data that lives for
+    // the whole program, so the reference is valid for `'static`.
+    Some(unsafe { &*p })
+}
 
 /// Is this CPU inside a lock that claims to be a leaf?
 fn leaf_held() -> Option<&'static [u8]> {
@@ -1135,10 +1160,24 @@ fn leaf_held() -> Option<&'static [u8]> {
 }
 
 /// Note that this CPU has entered a leaf critical section.
+///
+/// `#[track_caller]` so the stored site is the acquiring code, not this
+/// line. Without it every outer lock would be reported as taken here, which
+/// is the failure `Mutex::lock`'s own comment says site recording exists to
+/// avoid.
+#[track_caller]
 fn leaf_enter(name: &'static [u8]) {
     let cpu = crate::smp::current_cpu_index();
     let Some(slot) = LEAF_DEPTH.get(cpu) else { return };
     if slot.fetch_add(1, Ordering::Relaxed) == 0 {
+        if let Some(p) = LEAF_SITE.get(cpu) {
+            let site: &'static core::panic::Location<'static> =
+                core::panic::Location::caller();
+            p.store(
+                core::ptr::from_ref::<core::panic::Location<'static>>(site).cast_mut(),
+                Ordering::Relaxed,
+            );
+        }
         if let Some(p) = LEAF_NAME_PTR.get(cpu) {
             p.store(name.as_ptr() as usize, Ordering::Relaxed);
         }
@@ -1186,7 +1225,8 @@ fn note_leaf_nesting(inner: &'static [u8]) {
     crate::serial_println!(
         concat!(
             "[sync] LEAF CLAIM BROKEN: {:?} acquired while {:?} is held, at ",
-            "{}. {:?} is a PreemptSpinMutex, whose whole justification for ",
+            "{}, while the outer one was taken at {}. {:?} is a ",
+            "PreemptSpinMutex, whose whole justification for ",
             "skipping lockdep is that nothing nests inside it (dd-70). ",
             "Either it is not a leaf and should be crate::sync::Mutex, or ",
             "this acquire does not belong in its critical section."
@@ -1194,6 +1234,7 @@ fn note_leaf_nesting(inner: &'static [u8]) {
         core::str::from_utf8(inner).unwrap_or("<utf8>"),
         core::str::from_utf8(outer).unwrap_or("<utf8>"),
         core::panic::Location::caller(),
+        leaf_site().map_or("<unrecorded>", |l| l.file()),
         core::str::from_utf8(outer).unwrap_or("<utf8>")
     );
 }

@@ -77,6 +77,132 @@ const THUMB_SIZE: [&str; 2] = ["thumbnails", "size"];
 /// this would then have to refuse. `DiskCache` keys its entries on this, so a
 /// new size misses the cache and regenerates rather than serving one made at
 /// the old size.
+/// Where the preview panel's two settings live.
+const PREVIEW: [&str; 2] = ["preview", "open"];
+/// The list pane's share of the width, as a whole percentage.
+const PREVIEW_SPLIT: [&str; 2] = ["preview", "list_percent"];
+
+/// Which side of the listing the preview panel sits on.
+const PREVIEW_SIDE: [&str; 2] = ["preview", "side"];
+
+/// The narrowest and widest the list pane may be left at, as percentages.
+///
+/// Clamped on read as well as on write, because this file is meant to be
+/// hand-editable: a `list_percent: 2` typed into it by hand should give a
+/// narrow list, not a window with no list in it and no way to get one back.
+const SPLIT_RANGE: (i64, i64) = (20, 90);
+
+/// Whether the preview panel is showing.
+#[must_use]
+pub fn preview_open(doc: &Document) -> bool {
+    doc.get_i64(&PREVIEW).unwrap_or(0) != 0
+}
+
+/// Remember whether the preview panel is showing.
+pub fn set_preview_open(doc: &mut Document, open: bool) {
+    doc.set_i64(&PREVIEW, i64::from(open));
+}
+
+/// The list pane's share of the width, as a fraction between 0 and 1.
+///
+/// Stored as a whole percentage because `yamldoc` holds integers and strings,
+/// and a percentage is the form a person editing the file by hand would
+/// expect -- `list_percent: 70` rather than `0.7000000000000001`.
+#[must_use]
+pub fn preview_split(doc: &Document) -> f32 {
+    let percent = doc
+        .get_i64(&PREVIEW_SPLIT)
+        .unwrap_or(65)
+        .clamp(SPLIT_RANGE.0, SPLIT_RANGE.1);
+    // A percentage is small enough to convert exactly.
+    percent as f32 / 100.0
+}
+
+/// Remember the list pane's share of the width.
+pub fn set_preview_split(doc: &mut Document, fraction: f32) {
+    let percent = (fraction * 100.0).round();
+    // `as` after a clamp into a range an `i64` holds exactly.
+    let percent = percent.clamp(SPLIT_RANGE.0 as f32, SPLIT_RANGE.1 as f32) as i64;
+    doc.set_i64(&PREVIEW_SPLIT, percent);
+}
+
+/// Which side of the listing the preview panel is on.
+///
+/// Stored as a word rather than a number: a settings file is meant to be
+/// readable, and `side: bottom` says what `side: 3` does not.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PreviewSide {
+    Left,
+    #[default]
+    Right,
+    Top,
+    Bottom,
+}
+
+impl PreviewSide {
+    /// Every side, in the order the menu offers them.
+    pub const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Top, Self::Bottom];
+
+    /// How the side is written in the settings file.
+    #[must_use]
+    pub const fn yaml_name(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+        }
+    }
+
+    /// How the side is written on the menu.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Preview on the left",
+            Self::Right => "Preview on the right",
+            Self::Top => "Preview above",
+            Self::Bottom => "Preview below",
+        }
+    }
+
+    /// Whether the split runs across the pane or down it.
+    ///
+    /// Left and right divide the width; top and bottom divide the height.
+    #[must_use]
+    pub const fn is_horizontal(self) -> bool {
+        matches!(self, Self::Left | Self::Right)
+    }
+
+    /// Whether the preview comes before the listing in layout order.
+    #[must_use]
+    pub const fn is_first(self) -> bool {
+        matches!(self, Self::Left | Self::Top)
+    }
+
+    /// Read a side back, or `None` for anything else.
+    ///
+    /// `None` rather than a default, so the caller decides -- a hand-edited
+    /// `side: rihgt` should leave the panel where it was rather than silently
+    /// moving it, and the caller is the only one that knows where that is.
+    #[must_use]
+    pub fn from_yaml_name(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.yaml_name() == text.trim())
+    }
+}
+
+/// Which side the preview panel is on.
+#[must_use]
+pub fn preview_side(doc: &Document) -> PreviewSide {
+    doc.get_str(&PREVIEW_SIDE)
+        .and_then(|v| PreviewSide::from_yaml_name(&v))
+        .unwrap_or_default()
+}
+
+/// Remember which side the preview panel is on.
+pub fn set_preview_side(doc: &mut Document, side: PreviewSide) {
+    doc.set_str(&PREVIEW_SIDE, side.yaml_name());
+}
+
 pub const THUMB_SIZES: [u32; 4] = [64, 96, 128, 192];
 
 /// The saved thumbnail size, if the user has chosen one.

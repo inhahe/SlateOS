@@ -35,11 +35,13 @@ mod thumbs;
 
 use appearance::Palette;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::layout::Axis;
 use guitk::listview::ListViewport;
 use guitk::modal::{AlertDialog, DialogResult, InputDialog};
 use guitk::render::RenderTree;
 use guitk::scroll_window;
 use guitk::scrollbar;
+use guitk::splitter;
 use guitk::theme::with_alpha;
 use guitk::wheel::Accumulator as WheelAccumulator;
 
@@ -431,6 +433,24 @@ struct RowDrag {
     insert_at: usize,
 }
 
+/// The narrowest the listing may be squeezed to by the preview's divider.
+///
+/// Wide enough for a name and a size: a listing narrower than this is not a
+/// listing, and a user who drags that far has overshot rather than asked for
+/// it.
+const LIST_MIN_W: f32 = 240.0;
+
+/// The narrowest the preview may be squeezed to.
+const PREVIEW_MIN_W: f32 = 160.0;
+
+/// The shortest the listing may be squeezed to, with the preview above or
+/// below it. Smaller than the width minimum because a few rows is still a
+/// usable listing, where a few pixels of width is not.
+const LIST_MIN_H: f32 = 120.0;
+
+/// The shortest the preview may be squeezed to.
+const PREVIEW_MIN_H: f32 = 100.0;
+
 /// How thick the line marking a pending drop is.
 ///
 /// Centred on the boundary rather than drawn below it, so it reads as "between
@@ -733,6 +753,18 @@ pub struct ExplorerState {
     manual_order: Vec<String>,
     /// A row press that may be turning into a rearrangement.
     row_drag: Option<RowDrag>,
+    /// Whether the preview panel is showing beside the listing.
+    preview_open: bool,
+    /// The listing's share of the file pane, along the split's axis.
+    preview_split: f32,
+    /// Which side of the listing the preview sits on.
+    preview_side: columnprefs::PreviewSide,
+    /// Where inside the divider a pointer grabbed it, while dragging.
+    ///
+    /// The offset is kept rather than just a flag so the divider does not jump
+    /// to centre itself under the pointer on the first move -- a drag should
+    /// move what is under the finger, not snap it.
+    divider_grab: Option<f32>,
     search_showing: Option<String>,
     /// The folder a search started from, to go back to when it is dismissed.
     ///
@@ -804,6 +836,9 @@ pub struct ExplorerState {
 
 impl ExplorerState {
     pub fn new(start_path: &Path) -> Self {
+        // Read once, before the literal: two fields are derived from it, and
+        // reading the file twice would let them disagree if it changed between.
+        let prefs = settingsfile::load(columnprefs::CONFIG_NAME);
         let mut state = Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             current_path: start_path.to_path_buf(),
@@ -836,10 +871,14 @@ impl ExplorerState {
             modal: None,
             manual_order: Vec::new(),
             row_drag: None,
+            preview_open: columnprefs::preview_open(&prefs),
+            preview_split: columnprefs::preview_split(&prefs),
+            preview_side: columnprefs::preview_side(&prefs),
+            divider_grab: None,
             search_showing: None,
             search_origin: None,
             columns: ColumnManager::with_defaults(),
-            column_prefs: settingsfile::load(columnprefs::CONFIG_NAME),
+            column_prefs: prefs,
             thumbs: ThumbnailCache::default_capacity(),
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
             icon_labels: columnprefs::icon_labels(&settingsfile::load(columnprefs::CONFIG_NAME)),
@@ -1101,14 +1140,14 @@ impl ExplorerState {
             return None;
         }
         if let Some(rect) = self.dropzone.file_row_rect(drag.insert_at) {
-            return Some((rect.y, rect.x, rect.width));
+            return Some((rect.y, rect.x, rect.w));
         }
         // Past the last row: sit on its bottom edge rather than vanishing,
         // because "drop at the end" is a real target and a user aiming at it
         // should see the same feedback as any other.
         let last = self.entries.len().checked_sub(1)?;
         let rect = self.dropzone.file_row_rect(last)?;
-        Some((rect.y + rect.height, rect.x, rect.width))
+        Some((rect.y + rect.h, rect.x, rect.w))
     }
 
     /// Track a press that is turning into a rearrangement.
@@ -2087,7 +2126,7 @@ impl ExplorerState {
             let h = TRANSFER_ROW_H - 4.0;
             // Laid out from the right edge inwards, so a long label is what
             // gets squeezed rather than the buttons sliding off the panel.
-            let mut x = panel.x + panel.width - TRANSFER_BTN - 4.0;
+            let mut x = panel.x + panel.w - TRANSFER_BTN - 4.0;
             let mut place = |control: TransferControl, controls: &mut Vec<_>| {
                 controls.push((control, Rect::new(x, y, TRANSFER_BTN, h)));
                 x -= TRANSFER_BTN + 2.0;
@@ -2168,7 +2207,7 @@ impl ExplorerState {
             return false;
         }
         let pane = self.pane_rect();
-        x >= pane.x && x < pane.x + pane.width && y >= pane.y && y < pane.y + HEADER_H
+        x >= pane.x && x < pane.x + pane.w && y >= pane.y && y < pane.y + HEADER_H
     }
 
     /// How tall one icon cell is, given the labels in force.
@@ -2300,6 +2339,72 @@ impl ExplorerState {
         true
     }
 
+    /// Write the view preferences, saying either `done` or what went wrong.
+    ///
+    /// One place rather than the same `match settingsfile::store(..)` at each
+    /// call site: a preference that is applied on screen but not written down
+    /// looks identical to one that was saved, right up until the next start.
+    fn persist_view_prefs(&mut self, done: &str) {
+        self.status_message =
+            match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                Ok(()) => done.to_string(),
+                Err(e) => format!("Could not save the view settings: {e}"),
+            };
+    }
+
+    /// The file pane split into the listing and the preview, when it is open.
+    ///
+    /// `None` when the preview is closed, and also when the pane is too narrow
+    /// to hold both at their minimums -- a window that cannot fit the preview
+    /// shows the listing rather than two unusable slivers, and the preference
+    /// stays on so it comes back when the window grows.
+    fn preview_panes(&self) -> Option<(Rect, Rect)> {
+        if !self.preview_open {
+            return None;
+        }
+        let area = self.pane_rect();
+        let side = self.preview_side;
+        let axis = if side.is_horizontal() {
+            Axis::Horizontal
+        } else {
+            Axis::Vertical
+        };
+        // Measured along the axis being divided: a panel on the left needs
+        // room across the width, one below needs it down the height, and
+        // checking the wrong one would hide the panel on a window that could
+        // hold it perfectly well.
+        let span = if side.is_horizontal() { area.w } else { area.h };
+        let (list_min, preview_min) = if side.is_horizontal() {
+            (LIST_MIN_W, PREVIEW_MIN_W)
+        } else {
+            (LIST_MIN_H, PREVIEW_MIN_H)
+        };
+        if span < list_min + preview_min + splitter::DIVIDER {
+            return None;
+        }
+
+        // `preview_split` is always the LISTING's share, whichever side the
+        // panel is on. Storing it that way means moving the panel from right
+        // to left keeps the listing the same size, instead of swapping the two
+        // and surprising the user with a preview that suddenly fills the
+        // window.
+        let fractions = if side.is_first() {
+            [1.0 - self.preview_split, self.preview_split]
+        } else {
+            [self.preview_split, 1.0 - self.preview_split]
+        };
+        let panes = splitter::panes(area, axis, &fractions, splitter::DIVIDER);
+        let (first, second) = match (panes.first(), panes.get(1)) {
+            (Some(a), Some(b)) => (*a, *b),
+            _ => return None,
+        };
+        Some(if side.is_first() {
+            (second, first)
+        } else {
+            (first, second)
+        })
+    }
+
     /// The column picker: every column, ticked when shown, and the two saves.
     fn open_column_menu(&mut self, x: f32, y: f32) {
         let mut items = self.column_menu_items();
@@ -2341,6 +2446,34 @@ impl ExplorerState {
     /// Toggle a column, or save the current set. Answers whether it was ours.
     fn column_menu_action(&mut self, id: u64) -> bool {
         match id {
+            id if (MENU_PREVIEW_SIDE_BASE..MENU_PREVIEW_SIDE_BASE.saturating_add(4))
+                .contains(&id) =>
+            {
+                // Bounded at both ends: an unbounded `>=` would swallow every
+                // later menu range, which is the defect the column range
+                // already carries a comment about.
+                let Some(offset) = usize::try_from(id.saturating_sub(MENU_PREVIEW_SIDE_BASE)).ok()
+                else {
+                    return false;
+                };
+                let Some(side) = columnprefs::PreviewSide::ALL.get(offset).copied() else {
+                    return false;
+                };
+                self.preview_side = side;
+                columnprefs::set_preview_side(&mut self.column_prefs, side);
+                self.persist_view_prefs(side.label());
+                true
+            }
+            MENU_PREVIEW_TOGGLE => {
+                self.preview_open = !self.preview_open;
+                columnprefs::set_preview_open(&mut self.column_prefs, self.preview_open);
+                self.persist_view_prefs(if self.preview_open {
+                    "Preview panel shown"
+                } else {
+                    "Preview panel hidden"
+                });
+                true
+            }
             MENU_COLUMNS_SAVE_FOLDER => {
                 let keys = self.columns.visible_keys();
                 let saved =
@@ -2426,6 +2559,34 @@ impl ExplorerState {
             items.push(MenuItem::Separator);
             items.push(self.thumb_size_menu());
             items.push(self.icon_label_menu());
+        }
+
+        // Here rather than on the column header's menu, which only Details
+        // view has: a panel that can only be switched on from one of three
+        // views is a panel most users will never find. The thumbnail settings
+        // above are here for the same reason.
+        items.push(MenuItem::Separator);
+        items.push(MenuItem::Action {
+            id: MENU_PREVIEW_TOGGLE,
+            label: String::from("Preview panel"),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: Some(self.preview_open),
+        });
+        // The sides are offered only while the panel is showing: a choice of
+        // where to put something invisible is a control with nothing to obey.
+        if self.preview_open {
+            for (i, side) in columnprefs::PreviewSide::ALL.into_iter().enumerate() {
+                items.push(MenuItem::Action {
+                    id: MENU_PREVIEW_SIDE_BASE.saturating_add(i as u64),
+                    label: String::from(side.label()),
+                    shortcut: None,
+                    icon: None,
+                    enabled: true,
+                    checked: Some(self.preview_side == side),
+                });
+            }
         }
         items
     }
@@ -3364,13 +3525,7 @@ impl ExplorerState {
                     self.palette.surface1,
                 );
             }
-            tree.fill_rect(
-                rect.x,
-                rect.y,
-                rect.width,
-                rect.height,
-                self.palette.surface0,
-            );
+            tree.fill_rect(rect.x, rect.y, rect.w, rect.h, self.palette.surface0);
             let ink = if self.toolbar_button_state(button).is_enabled() {
                 self.palette.text
             } else {
@@ -3381,7 +3536,7 @@ impl ExplorerState {
             tree.text_in(
                 rect.x + 6.0,
                 rect.y + 6.0,
-                rect.width - 8.0,
+                rect.w - 8.0,
                 button.glyph(),
                 ink,
                 14.0,
@@ -3408,11 +3563,9 @@ impl ExplorerState {
         // renderer honours, so extending the command list inside one places
         // the whole widget without it having to be told.
         tree.translate(rect.x, rect.y);
-        let commands = self.pathbar.render(
-            &palette,
-            rect.width.max(0.0) as u32,
-            rect.height.max(0.0) as u32,
-        );
+        let commands =
+            self.pathbar
+                .render(&palette, rect.w.max(0.0) as u32, rect.h.max(0.0) as u32);
         tree.commands.extend(commands);
         tree.untranslate();
     }
@@ -3542,20 +3695,39 @@ impl ExplorerState {
     }
 
     fn render_file_list(&self, tree: &mut RenderTree, zones: &mut DropZoneManager) {
-        let list_x = self.sidebar_width;
-        let list_y = 64.0;
-        let list_w = self.window_width as f32 - self.sidebar_width;
-        let list_h = self.window_height as f32 - 64.0 - 24.0;
+        // With the preview open the listing gets the left pane; without it,
+        // the whole thing. Both come from one place so the drop target, the
+        // rows and the divider cannot be computed against different widths --
+        // which would drop a file into the folder next to the one it was
+        // dragged onto.
+        let (list_rect, preview_rect) = match self.preview_panes() {
+            Some((list, preview)) => (list, Some(preview)),
+            None => (self.pane_rect(), None),
+        };
+        let (list_x, list_y, list_w, list_h) = (list_rect.x, list_rect.y, list_rect.w, list_rect.h);
 
         // The pane itself is the fallback target: anything inside it that is
         // not a folder row means "into the directory being shown".
-        zones.set_list_area(Rect::new(list_x, list_y, list_w, list_h));
+        zones.set_list_area(list_rect);
 
         match self.view_mode {
             ViewMode::Details => self.render_details(tree, zones, list_x, list_y, list_w, list_h),
             ViewMode::Icons => self.render_icons(tree, zones, list_x, list_y, list_w, list_h),
             ViewMode::List => self.render_list(tree, zones, list_x, list_y, list_w, list_h),
         }
+        if let Some(preview) = preview_rect {
+            self.render_preview(tree, preview);
+            // The divider last, so it sits over both panes' edges rather than
+            // being clipped by whichever drew second.
+            tree.fill_rect(
+                list_rect.x + list_rect.w,
+                list_rect.y,
+                splitter::DIVIDER,
+                list_rect.h,
+                self.palette.surface2,
+            );
+        }
+
         // Over the rows, under the scrollbar: the line marks a place
         // between two rows, so it has to be visible above them, but it is not
         // furniture and should not sit over the bar the user may be holding.
@@ -3570,6 +3742,189 @@ impl ExplorerState {
         }
         // After the view, so the bar sits over the rows rather than under them.
         self.render_scrollbar(tree);
+    }
+
+    /// The divider's rectangle, between the two panes.
+    ///
+    /// One function, used by both the hit test and the renderer. A line drawn
+    /// in one place and grabbed in another is the defect this crate's
+    /// `pane_rect` comment already warns about.
+    fn preview_divider_rect(&self) -> Option<Rect> {
+        let (list, preview) = self.preview_panes()?;
+        Some(if self.preview_side.is_horizontal() {
+            let left = if list.x < preview.x { list } else { preview };
+            Rect::new(left.x + left.w, left.y, splitter::DIVIDER, left.h)
+        } else {
+            let top = if list.y < preview.y { list } else { preview };
+            Rect::new(top.x, top.y + top.h, top.w, splitter::DIVIDER)
+        })
+    }
+
+    /// Where inside the divider `(x, y)` grabbed it, if it did.
+    fn divider_grab_at(&self, x: f32, y: f32) -> Option<f32> {
+        let rect = self.preview_divider_rect()?;
+        // Grown by the same margin the toolkit uses, on whichever axis the
+        // divider runs across: the grab region is deliberately wider than the
+        // drawn line so nobody has to pixel-hunt for it.
+        let grown = if self.preview_side.is_horizontal() {
+            Rect::new(
+                rect.x - splitter::GRAB_MARGIN,
+                rect.y,
+                rect.w + splitter::GRAB_MARGIN * 2.0,
+                rect.h,
+            )
+        } else {
+            Rect::new(
+                rect.x,
+                rect.y - splitter::GRAB_MARGIN,
+                rect.w,
+                rect.h + splitter::GRAB_MARGIN * 2.0,
+            )
+        };
+        if !grown.contains(x, y) {
+            return None;
+        }
+        // The offset from the divider's leading edge, so the line keeps its
+        // position under the pointer instead of jumping to centre itself.
+        Some(if self.preview_side.is_horizontal() {
+            x - rect.x
+        } else {
+            y - rect.y
+        })
+    }
+
+    /// Move the divider to follow the pointer. Answers whether it moved.
+    fn drag_divider(&mut self, x: f32, y: f32) -> bool {
+        let Some(offset) = self.divider_grab else {
+            return false;
+        };
+        let area = self.pane_rect();
+        let side = self.preview_side;
+        let horizontal = side.is_horizontal();
+        let (pointer, start, span) = if horizontal {
+            (x, area.x, area.w)
+        } else {
+            (y, area.y, area.h)
+        };
+        let (list_min, preview_min) = if horizontal {
+            (LIST_MIN_W, PREVIEW_MIN_W)
+        } else {
+            (LIST_MIN_H, PREVIEW_MIN_H)
+        };
+
+        // Fractions are in LAYOUT order, so the minimums must be too. With the
+        // preview first, index 0 is the preview and its minimum belongs there;
+        // passing them the other way round would let a drag squeeze whichever
+        // pane happened to be leading past a limit that is not its own.
+        let mut fractions = if side.is_first() {
+            [1.0 - self.preview_split, self.preview_split]
+        } else {
+            [self.preview_split, 1.0 - self.preview_split]
+        };
+        let mins = if side.is_first() {
+            [preview_min, list_min]
+        } else {
+            [list_min, preview_min]
+        };
+
+        let moved = splitter::resize(
+            &mut fractions,
+            0,
+            pointer - offset - start,
+            span,
+            splitter::DIVIDER,
+            &mins,
+        );
+        if moved {
+            // Stored as the LISTING's share whichever side the panel is on, so
+            // moving the panel across does not resize it.
+            self.preview_split = if side.is_first() {
+                fractions[1]
+            } else {
+                fractions[0]
+            };
+        }
+        moved
+    }
+
+    /// Let go of the divider, remembering where it was left.
+    ///
+    /// Written on release rather than on every move: a drag is dozens of
+    /// events and each one would be a file write, which is both wasteful and a
+    /// way to leave a half-written settings file if the drag is interrupted.
+    fn drop_divider(&mut self) -> bool {
+        if self.divider_grab.take().is_none() {
+            return false;
+        }
+        columnprefs::set_preview_split(&mut self.column_prefs, self.preview_split);
+        self.persist_view_prefs("Preview panel resized");
+        true
+    }
+
+    /// Draw the preview panel: the selected picture, or why there is none.
+    ///
+    /// Shows the thumbnail rather than decoding the original at full size. A
+    /// preview pane is a few hundred pixels wide, the thumbnail is already
+    /// decoded and already uploaded, and re-reading a forty-megapixel photo to
+    /// fill it would stall the window on every arrow-key press. A larger
+    /// thumbnail size is the lever if the preview looks soft, and that is a
+    /// setting the user already has.
+    fn render_preview(&self, tree: &mut RenderTree, area: Rect) {
+        tree.fill_rect(area.x, area.y, area.w, area.h, self.palette.surface0);
+
+        let selected = self
+            .selected_indices
+            .first()
+            .and_then(|i| self.entries.get(*i));
+
+        let Some(entry) = selected else {
+            self.preview_note(tree, area, "Select a file to preview it");
+            return;
+        };
+
+        let Some((id, thumb)) = self.drawable_thumb(entry) else {
+            // Said plainly rather than left blank: a blank panel beside a
+            // selected file reads as a broken preview, and "no picture" and
+            // "not a picture" are different answers.
+            self.preview_note(tree, area, "No preview for this file");
+            return;
+        };
+
+        // Fitted inside the pane, never enlarged past its own pixels: blowing
+        // a 96-pixel thumbnail up to fill a wide pane looks like a fault
+        // rather than a preview.
+        let pad = 12.0;
+        let avail_w = (area.w - pad * 2.0).max(0.0);
+        let avail_h = (area.h - pad * 2.0).max(0.0);
+        let tw = thumb.width as f32;
+        let th = thumb.height as f32;
+        if tw <= 0.0 || th <= 0.0 || avail_w <= 0.0 || avail_h <= 0.0 {
+            return;
+        }
+        let scale = (avail_w / tw).min(avail_h / th).min(1.0);
+        let w = tw * scale;
+        let h = th * scale;
+        tree.push(guitk::render::RenderCommand::Image {
+            x: area.x + (area.w - w) / 2.0,
+            y: area.y + (area.h - h) / 2.0,
+            width: w,
+            height: h,
+            image_id: id,
+        });
+    }
+
+    /// One line of explanation, centred in the preview pane.
+    fn preview_note(&self, tree: &mut RenderTree, area: Rect, text: &str) {
+        tree.push(guitk::render::RenderCommand::Text {
+            x: area.x + 12.0,
+            y: area.y + area.h / 2.0,
+            text: text.to_string(),
+            color: self.palette.subtext0,
+            font_size: 13.0,
+            font_weight: guitk::render::FontWeightHint::Regular,
+            max_width: Some((area.w - 24.0).max(0.0)),
+            overflow: guitk::render::TextOverflow::Ellipsis,
+        });
     }
 
     /// The file pane's rectangle: below the toolbar, right of the sidebar.
@@ -3593,9 +3948,9 @@ impl ExplorerState {
     fn visible_capacity(&self) -> usize {
         let pane = self.pane_rect();
         match self.view_mode {
-            ViewMode::List => scroll_window::capacity(LIST_ROW_H, pane.height),
-            ViewMode::Details => scroll_window::capacity(ROW_H, (pane.height - HEADER_H).max(0.0)),
-            ViewMode::Icons => scroll_window::capacity(self.icon_cell_h(), pane.height)
+            ViewMode::List => scroll_window::capacity(LIST_ROW_H, pane.h),
+            ViewMode::Details => scroll_window::capacity(ROW_H, (pane.h - HEADER_H).max(0.0)),
+            ViewMode::Icons => scroll_window::capacity(self.icon_cell_h(), pane.h)
                 .saturating_mul(self.icon_columns()),
         }
     }
@@ -3615,10 +3970,10 @@ impl ExplorerState {
             ViewMode::List | ViewMode::Icons => pane.y,
         };
         Some(Rect::new(
-            pane.x + pane.width - scrollbar::WIDTH,
+            pane.x + pane.w - scrollbar::WIDTH,
             top,
             scrollbar::WIDTH,
-            (pane.y + pane.height - top).max(0.0),
+            (pane.y + pane.h - top).max(0.0),
         ))
     }
 
@@ -3626,7 +3981,7 @@ impl ExplorerState {
     fn scrollbar_thumb(&self) -> Option<guitk::frame::Rect> {
         let track = self.scrollbar_track()?;
         Some(scrollbar::thumb(
-            guitk::frame::Rect::new(track.x, track.y, track.width, track.height),
+            track,
             self.entries.len(),
             self.visible_capacity(),
             self.viewport.first_visible(),
@@ -3640,10 +3995,10 @@ impl ExplorerState {
         let (Some(track), Some(thumb)) = (self.scrollbar_track(), self.scrollbar_thumb()) else {
             return false;
         };
-        if x < track.x || x >= track.x + track.width {
+        if x < track.x || x >= track.x + track.w {
             return false;
         }
-        if y < track.y || y >= track.y + track.height {
+        if y < track.y || y >= track.y + track.h {
             return false;
         }
         if y >= thumb.y && y < thumb.y + thumb.h {
@@ -3677,7 +4032,7 @@ impl ExplorerState {
             return false;
         };
         let Some(first) = scrollbar::first_from_drag(
-            guitk::frame::Rect::new(track.x, track.y, track.width, track.height),
+            track,
             thumb.h,
             grab,
             y,
@@ -3700,20 +4055,14 @@ impl ExplorerState {
         };
         // The toolkit's `Rect` names its sides `w`/`h` where explorer's names
         // them `width`/`height`; converted here, at the one call that crosses.
-        let track_gui = guitk::frame::Rect::new(track.x, track.y, track.width, track.height);
+        let track_gui = track;
         let thumb = scrollbar::thumb(
             track_gui,
             self.entries.len(),
             self.visible_capacity(),
             self.viewport.first_visible(),
         );
-        tree.fill_rect(
-            track.x,
-            track.y,
-            track.width,
-            track.height,
-            self.palette.mantle,
-        );
+        tree.fill_rect(track.x, track.y, track.w, track.h, self.palette.mantle);
         tree.fill_rounded_rect(
             thumb.x + 1.0,
             thumb.y,
@@ -4068,13 +4417,7 @@ impl ExplorerState {
         let Some(panel) = self.transfers_rect() else {
             return;
         };
-        tree.fill_rect(
-            panel.x,
-            panel.y,
-            panel.width,
-            panel.height,
-            self.palette.mantle,
-        );
+        tree.fill_rect(panel.x, panel.y, panel.w, panel.h, self.palette.mantle);
 
         let controls = self.transfers_layout();
         // The leftmost button on each row is where its label has to stop.
@@ -4086,21 +4429,15 @@ impl ExplorerState {
             let row_band = y..y + TRANSFER_ROW_H;
             let leftmost = controls
                 .iter()
-                .filter(|(_, r)| row_band.contains(&(r.y + r.height / 2.0)))
+                .filter(|(_, r)| row_band.contains(&(r.y + r.h / 2.0)))
                 .map(|(_, r)| r.x)
-                .fold(panel.x + panel.width, f32::min);
+                .fold(panel.x + panel.w, f32::min);
             let room = (leftmost - panel.x - 16.0).max(0.0);
             tree.text_in(panel.x + 8.0, y + 4.0, room, label, self.palette.text, 11.0);
         }
 
         for (control, rect) in controls {
-            tree.fill_rect(
-                rect.x,
-                rect.y,
-                rect.width,
-                rect.height,
-                self.palette.surface0,
-            );
+            tree.fill_rect(rect.x, rect.y, rect.w, rect.h, self.palette.surface0);
             let glyph = match control {
                 TransferControl::CancelRunning(_) | TransferControl::CancelQueued(_) => "\u{2715}",
                 TransferControl::MoveQueuedUp(_) => "\u{25B2}",
@@ -4110,7 +4447,7 @@ impl ExplorerState {
             tree.text_in(
                 rect.x + 4.0,
                 rect.y + 2.0,
-                rect.width - 6.0,
+                rect.w - 6.0,
                 glyph,
                 self.palette.text,
                 11.0,
@@ -4337,6 +4674,11 @@ const MENU_OPEN: u64 = 1;
 const MENU_COLUMNS_SAVE_FOLDER: u64 = 100;
 /// Save them as the default for folders with no preference of their own.
 const MENU_COLUMNS_SAVE_GLOBAL: u64 = 101;
+/// Show or hide the preview panel.
+const MENU_PREVIEW_TOGGLE: u64 = 102;
+/// Put the preview panel on one of the four sides. Offset by `PreviewSide`'s
+/// index in `ALL`, which is the order the menu lists them in.
+const MENU_PREVIEW_SIDE_BASE: u64 = 200;
 /// One id per column, offset so it cannot collide with an action above.
 /// `ColumnId` is a small integer, and 1000 is far above every action here.
 const MENU_COLUMN_BASE: u64 = 1000;
@@ -4625,9 +4967,11 @@ impl ExplorerState {
                 // so an ordinary click cannot leave one armed to fire on the
                 // next stray move.
                 let dropped = self.drop_row();
-                was.is_some() || dropped
+                let divider = self.drop_divider();
+                was.is_some() || dropped || divider
             }
             MouseEventKind::Move if self.thumb_grab.is_some() => self.drag_scrollbar(m.y),
+            MouseEventKind::Move if self.divider_grab.is_some() => self.drag_divider(m.x, m.y),
             MouseEventKind::Move if self.row_drag.is_some() => self.drag_row(m.x, m.y),
             // Motion with nothing grabbed: the only thing the explorer does
             // with it is say why the button under the pointer is greyed.
@@ -4668,6 +5012,14 @@ impl ExplorerState {
     /// A single left click: select the row under the pointer, follow the
     /// sidebar place under it, or clear the selection.
     fn click_at(&mut self, x: f32, y: f32) -> bool {
+        // The divider first: it is drawn over the panes' edges, so a press on
+        // it must be spent here rather than selecting whatever row happens to
+        // end underneath. Its grab region is wider than the line, which is the
+        // whole reason to ask the toolkit rather than compare against `x`.
+        if let Some(offset) = self.divider_grab_at(x, y) {
+            self.divider_grab = Some(offset);
+            return true;
+        }
         // The toolbar first. It is drawn above the list and does not overlap
         // it, but asking in draw order is what keeps that true when one of
         // them moves.
@@ -5664,7 +6016,7 @@ mod tests {
 
         assert!(bottom > top, "the thumb did not move with the view");
         assert!(
-            bottom + state.scrollbar_thumb().unwrap().h <= track.y + track.height + 0.01,
+            bottom + state.scrollbar_thumb().unwrap().h <= track.y + track.h + 0.01,
             "the thumb ran past the end of its track"
         );
     }
@@ -5681,7 +6033,7 @@ mod tests {
         assert!(press(&mut state, track.x + 2.0, thumb.y + 2.0));
         state.handle_mouse(&MouseEvent {
             x: track.x + 2.0,
-            y: track.y + track.height,
+            y: track.y + track.h,
             kind: MouseEventKind::Move,
         });
 
@@ -5868,8 +6220,8 @@ mod tests {
         send(
             state,
             &Event::Mouse(MouseEvent {
-                x: rect.x + rect.width / 2.0,
-                y: rect.y + rect.height / 2.0,
+                x: rect.x + rect.w / 2.0,
+                y: rect.y + rect.h / 2.0,
                 kind: MouseEventKind::Press(MouseButton::Left),
             }),
         );
@@ -6478,7 +6830,7 @@ mod tests {
             .into_iter()
             .find(|(b, _)| *b == button)
             .unwrap_or_else(|| panic!("{button:?} is not in the layout"));
-        (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0)
+        (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
     }
 
     /// **A greyed button says why**, which a bare `bool` could not.
@@ -6814,8 +7166,8 @@ mod tests {
         send(
             state,
             &Event::Mouse(MouseEvent {
-                x: rect.x + rect.width / 2.0,
-                y: rect.y + rect.height / 2.0,
+                x: rect.x + rect.w / 2.0,
+                y: rect.y + rect.h / 2.0,
                 kind: MouseEventKind::Press(MouseButton::Left),
             }),
         );
@@ -7004,7 +7356,7 @@ mod tests {
                 panel.contains(rect.x, rect.y),
                 "{control:?} is drawn outside the panel"
             );
-            let (cx, cy) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+            let (cx, cy) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
             assert_eq!(
                 state.transfers_control_at(cx, cy),
                 Some(control),
@@ -7030,8 +7382,8 @@ mod tests {
         send(
             state,
             &Event::Mouse(MouseEvent {
-                x: rect.x + rect.width / 2.0,
-                y: rect.y + rect.height / 2.0,
+                x: rect.x + rect.w / 2.0,
+                y: rect.y + rect.h / 2.0,
                 kind: MouseEventKind::Press(MouseButton::Left),
             }),
         );
@@ -9995,6 +10347,294 @@ mod tests {
             "got {:?}",
             state.status_message
         );
+    }
+
+    // ======================================================================
+    // Preview panel
+    // ======================================================================
+
+    /// Closed by default, and the listing has the whole pane.
+    #[test]
+    fn the_preview_is_closed_until_asked_for() {
+        settingsfile::testing::with_scratch_config("preview-default", |_root| {
+            let scratch = temp_dir("preview_default");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let state = state_at(&root);
+            assert!(!state.preview_open);
+            assert!(state.preview_panes().is_none());
+        });
+    }
+
+    /// Opening it splits the pane, and the two halves tile it exactly.
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the last pane reaching the edge exactly is the property under test"
+    )]
+    fn opening_the_preview_splits_the_pane() {
+        settingsfile::testing::with_scratch_config("preview-split", |_root| {
+            let scratch = temp_dir("preview_split");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            assert!(state.column_menu_action(MENU_PREVIEW_TOGGLE));
+            assert!(state.preview_open);
+
+            let (list, preview) = state.preview_panes().expect("a split");
+            let whole = state.pane_rect();
+            assert!(list.w > 0.0 && preview.w > 0.0);
+            // Exact, not a tolerance: the splitter gives the last pane what
+            // remains precisely so this holds to the bit, and a tolerance here
+            // would pass against an implementation that had dropped that --
+            // which is exactly how the splitter's own tiling test managed to
+            // prove nothing until it was sabotage-checked.
+            assert_eq!(
+                preview.x + preview.w,
+                whole.x + whole.w,
+                "the preview must reach the pane's edge exactly"
+            );
+            assert!(
+                (preview.x - (list.x + list.w) - splitter::DIVIDER).abs() < 0.01,
+                "the divider belongs between them"
+            );
+        });
+    }
+
+    /// The choice is remembered, not just applied.
+    #[test]
+    fn the_preview_preference_is_written_down() {
+        settingsfile::testing::with_scratch_config("preview-persist", |_root| {
+            let scratch = temp_dir("preview_persist");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            assert!(state.column_menu_action(MENU_PREVIEW_TOGGLE));
+
+            let saved = settingsfile::load(columnprefs::CONFIG_NAME);
+            assert!(
+                columnprefs::preview_open(&saved),
+                "the toggle was applied on screen but not saved"
+            );
+        });
+    }
+
+    /// A pane too narrow for both keeps the listing, and keeps the preference.
+    ///
+    /// Shrinking the window must not silently forget that a preview was
+    /// wanted: it comes back when there is room for it.
+    #[test]
+    fn a_pane_too_narrow_for_both_shows_the_listing() {
+        settingsfile::testing::with_scratch_config("preview-narrow", |_root| {
+            let scratch = temp_dir("preview_narrow");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+            state.window_width = 300;
+
+            assert!(
+                state.preview_panes().is_none(),
+                "two unusable slivers is worse than one listing"
+            );
+            assert!(state.preview_open, "the preference was silently dropped");
+        });
+    }
+
+    /// Dragging the divider moves it and writes the new split down.
+    #[test]
+    fn dragging_the_divider_resizes_and_remembers() {
+        settingsfile::testing::with_scratch_config("preview-drag", |_root| {
+            let scratch = temp_dir("preview_drag");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+            let before = state.preview_split;
+
+            let (list, _) = state.preview_panes().expect("a split");
+            let divider_x = list.x + list.w;
+            state.divider_grab = Some(0.0);
+            assert!(
+                state.drag_divider(divider_x - 120.0, 0.0),
+                "the drag did nothing"
+            );
+            assert!(
+                state.preview_split < before,
+                "the listing should have shrunk"
+            );
+
+            assert!(state.drop_divider());
+            let saved = settingsfile::load(columnprefs::CONFIG_NAME);
+            assert!(
+                (columnprefs::preview_split(&saved) - state.preview_split).abs() < 0.02,
+                "the new split was applied but not saved"
+            );
+        });
+    }
+
+    /// The listing is never dragged below its minimum.
+    #[test]
+    fn the_divider_stops_at_the_listing_minimum() {
+        settingsfile::testing::with_scratch_config("preview-min", |_root| {
+            let scratch = temp_dir("preview_min");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+            state.divider_grab = Some(0.0);
+            // Aim far past the left edge of the window.
+            state.drag_divider(-2_000.0, 0.0);
+
+            let (list, _) = state.preview_panes().expect("a split");
+            assert!(
+                list.w >= LIST_MIN_W - 1.0,
+                "the listing was squeezed to {}, below its minimum",
+                list.w
+            );
+        });
+    }
+
+    /// A press on the divider is spent there, not on the row beneath it.
+    #[test]
+    fn a_press_on_the_divider_does_not_reach_the_listing() {
+        settingsfile::testing::with_scratch_config("preview-press", |_root| {
+            let scratch = temp_dir("preview_press");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+            let (list, _) = state.preview_panes().expect("a split");
+
+            let grabbed = state.divider_grab_at(list.x + list.w, list.y + 40.0);
+            assert!(grabbed.is_some(), "the divider was not grabbable");
+        });
+    }
+
+    /// With the preview closed there is no divider to grab.
+    #[test]
+    fn there_is_no_divider_when_the_preview_is_closed() {
+        settingsfile::testing::with_scratch_config("preview-nodiv", |_root| {
+            let scratch = temp_dir("preview_nodiv");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let state = state_at(&root);
+            let whole = state.pane_rect();
+            assert_eq!(
+                state.divider_grab_at(whole.x + whole.w * 0.65, whole.y + 40.0),
+                None
+            );
+        });
+    }
+
+    /// The panel can sit on any of the four sides, and the split follows.
+    #[test]
+    fn the_preview_can_move_to_any_side() {
+        settingsfile::testing::with_scratch_config("preview-sides", |_root| {
+            let scratch = temp_dir("preview_sides");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+
+            for (i, side) in columnprefs::PreviewSide::ALL.into_iter().enumerate() {
+                assert!(state.column_menu_action(MENU_PREVIEW_SIDE_BASE.saturating_add(i as u64)));
+                assert_eq!(state.preview_side, side);
+
+                let (list, preview) = state.preview_panes().expect("a split");
+                match side {
+                    columnprefs::PreviewSide::Left => assert!(preview.x < list.x),
+                    columnprefs::PreviewSide::Right => assert!(preview.x > list.x),
+                    columnprefs::PreviewSide::Top => assert!(preview.y < list.y),
+                    columnprefs::PreviewSide::Bottom => assert!(preview.y > list.y),
+                }
+            }
+        });
+    }
+
+    /// Moving the panel does not resize the listing.
+    ///
+    /// `preview_split` is the listing's share whichever side the panel is on,
+    /// so swapping sides mirrors the layout without redistributing it. Stored
+    /// the other way round, moving right-to-left would hand the listing's
+    /// width to the preview and look like a bug in the drag.
+    #[test]
+    fn moving_the_panel_keeps_the_listing_the_same_size() {
+        settingsfile::testing::with_scratch_config("preview-mirror", |_root| {
+            let scratch = temp_dir("preview_mirror");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+            state.preview_side = columnprefs::PreviewSide::Right;
+            let (right_list, _) = state.preview_panes().expect("a split");
+
+            state.preview_side = columnprefs::PreviewSide::Left;
+            let (left_list, _) = state.preview_panes().expect("a split");
+
+            assert!(
+                (right_list.w - left_list.w).abs() < 0.01,
+                "the listing changed width when the panel moved: {} then {}",
+                right_list.w,
+                left_list.w
+            );
+        });
+    }
+
+    /// The divider is grabbable on a vertical split too.
+    #[test]
+    fn the_divider_can_be_grabbed_when_the_panel_is_below() {
+        settingsfile::testing::with_scratch_config("preview-vgrab", |_root| {
+            let scratch = temp_dir("preview_vgrab");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+            state.preview_side = columnprefs::PreviewSide::Bottom;
+
+            let d = state.preview_divider_rect().expect("a divider");
+            assert!(d.w > d.h, "a horizontal divider should be wide, not tall");
+            assert!(
+                state.divider_grab_at(d.x + d.w / 2.0, d.y).is_some(),
+                "the divider was not grabbable"
+            );
+        });
+    }
+
+    /// The side choice is only offered while the panel is showing.
+    #[test]
+    fn the_sides_are_not_offered_for_a_hidden_panel() {
+        settingsfile::testing::with_scratch_config("preview-hidden-sides", |_root| {
+            let scratch = temp_dir("preview_hidden_sides");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let state = state_at(&root);
+            assert!(!state.preview_open);
+            let labels: Vec<String> = state
+                .folder_menu_items()
+                .iter()
+                .filter_map(|i| match i {
+                    MenuItem::Action { label, .. } => Some(label.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                !labels.iter().any(|l| l.contains("Preview on")),
+                "a hidden panel offered a choice of where to put it: {labels:?}"
+            );
+        });
     }
 
     // ======================================================================

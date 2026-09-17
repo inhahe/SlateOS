@@ -65,6 +65,7 @@ pub mod row_strip;
 pub mod scaling;
 pub mod scroll_window;
 pub mod scrollbar;
+pub mod splitter;
 pub mod step;
 pub mod style;
 pub mod svg;

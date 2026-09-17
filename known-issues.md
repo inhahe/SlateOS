@@ -158912,3 +158912,62 @@ were fixed today where the claim was checkable and the disclosure cheap:
 not 337 bugs, and a sweep rewriting 337 module docs on one agent's reading of
 the architecture would be exactly the kind of unilateral change dd-951 is
 about.
+
+## `TD-C-THREE-CHECKERS-STOP-READING-AT-THE-FIRST-CFG-TEST-ATTRIBUTE` (lane C, 2026-09-17)
+
+**In short:** three of the tools that inspect Rust source cut the file off at
+the first `#[cfg(test)]` they find, meaning to stop at the test module. But a
+`#[cfg(test)]` also appears on individual test-only helpers, indented inside an
+`impl`, hundreds of lines earlier -- and everything after that point was then
+treated as test code and never examined. The tools reported confident numbers
+about a fraction of each file.
+
+**Measured over `gui/` and `apps/`:** 357 files contain the attribute; **57 are
+cut early** by an item-level one. The worst is `apps/photomanager/src/main.rs`,
+where the attribute is on line 392 and the test module on line 4640 -- **4,251
+lines of a 6,100-line application invisible**. Seven lossy-decode calls were
+hiding in the cut regions of four files.
+
+**Fixed in `scripts/lossy-decode.py`** (2026-09-17): the cut is now the
+module-level attribute, at column 0 where a test module is written, and when no
+unindented one exists nothing is cut. VALUE went 54 to 61 over gui/apps, in 32
+to 36 files; the seven newly visible sites are pre-existing and are recorded in
+the baseline, because the alternative was every lane's push failing on a
+backlog none of them created.
+
+**Still unfixed, same idiom, not changed blind:**
+
+| Script | Why it was left |
+|---|---|
+| `scripts/audit-cli-fabrication.py` | Has its own gate and its own notion of what it is counting; widening its eyes may surface findings that fail that gate, and the right response to each has to be read rather than assumed. |
+| `scripts/check-config-turn-guards.py` | Same. |
+
+Both should get the same repair, each with its own look at what becomes
+visible. The fix itself is four lines; the work is the triage after it.
+
+**How to tell if a checker has this class of fault.** Not by reading its
+output, which is the whole problem. Ask what it *skipped* and whether it says
+so. A tool that reports "391 scanned" while silently reading a third of one
+file is indistinguishable, from its output alone, from one that read all of
+them. The three questions worth asking of any of them: what corpus does it
+walk, what does it exclude within a file, and does it say which.
+
+**The bug this uncovered, which is real and is not fixed.**
+`apps/photomanager/src/main.rs` line 2986 does
+
+    self.import_photo_with_exif(&path.to_string_lossy(), ...)
+
+and that string becomes `Photo::file_path`, which is what the application
+later opens to decode the photograph and what the library file stores. On this
+OS a filename may hold any byte but `/` and NUL, so a name that is not UTF-8
+becomes a path with U+FFFD in it -- **a name nobody can open**, saved to the
+library as though it were the real one. The photograph then fails to decode
+with "could not be read", pointing at a file that does exist under a name the
+application has destroyed.
+
+The proper fix is not at that line: `Photo::file_path` is a `String`, so the
+damage is done by the type. It wants to be an `OsString`/`PathBuf`, with the
+library format storing the bytes (the format already escapes, and
+`gui/pathcodec` exists for exactly this). That is a real change through the
+whole crate -- import, search, the library file, the thumbnail cache key --
+and is worth doing properly rather than papering over at the call site.

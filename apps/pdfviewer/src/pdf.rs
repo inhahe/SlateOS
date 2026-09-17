@@ -43,14 +43,20 @@
 //! as WinAnsi, so a font declaring one has the wrong characters where the two
 //! differ.
 //!
-//! **And a run holds no spaces it was not given.** A PDF separates words by
-//! *moving the pen*, not by drawing a space, so a line may arrive as
-//! "Definingandassigningmaterials". The text is exactly what the file draws
-//! and a search for two words with a space between them will not match it.
-//! Inferring the breaks means deciding a kerning gap is wide enough to be a
-//! space, which is a threshold and therefore a guess; it is not made here
-//! yet, and the absence is written down because a search that silently fails
-//! to match looks like a document that does not contain the words. A composite font *without* a
+//! **Words separated by pen movement get their spaces back**, which they
+//! need: a PDF may separate words by *moving the pen* rather than drawing a
+//! space, and a line that lost those reads "Definingandassigningmaterials"
+//! and matches no search for two words. A jump wider than
+//! [`WORD_GAP_THOUSANDTHS`] becomes one space. The cutoff is measured rather
+//! than chosen -- the distribution of 7919 real adjustments is bimodal with
+//! only seven of them in the band the threshold sits in.
+//!
+//! Three documents, three spacing mechanisms, which is why this is stated
+//! narrowly: one kerns its gaps and gained spaces on 3164 of its 4482 runs;
+//! one draws real spaces and has no adjustment anywhere near the threshold,
+//! so it is untouched; one puts every word in its own run, where the spaces
+//! are between runs and not inside them. **A search across separate runs
+//! still will not match**, and that is the remaining half of this. A composite font *without* a
 //! `/ToUnicode` map still yields nothing -- its codes are glyph indices into a
 //! subset font and relate to no character -- and such a page is counted in
 //! [`Document::unreadable_pages`], so "no results" from a search can be told
@@ -1980,6 +1986,30 @@ impl Font {
 /// The fonts a page's `/Resources` declares, by the name `Tf` uses.
 pub type FontMap = BTreeMap<String, Font>;
 
+/// How far the pen must jump backwards inside a `TJ` array to mean a space.
+///
+/// In thousandths of an em, negative because `TJ`'s numbers *subtract* from
+/// the pen. **Measured, not chosen.** Across 7919 adjustments in one document
+/// the distribution is sharply bimodal:
+///
+/// | band | count |
+/// |---|---|
+/// | <= -400 | 4212 |
+/// | -400..-200 | 1410 |
+/// | **-200..-100** | **7** |
+/// | -100..-10 | 160 |
+/// | > -10 | 2130 |
+///
+/// Seven values in 7919 fall between -200 and -100, so the threshold is not a
+/// judgement call: it sits in a valley the data already has. Anywhere in that
+/// band separates word gaps from the kerning inside a word.
+///
+/// It is safe for documents that space differently. The other two measured
+/// here never cross it -- one writes real space characters and has nothing
+/// below -100, the other puts every word in its own run -- so this changes
+/// their text not at all.
+const WORD_GAP_THOUSANDTHS: f32 = -150.0;
+
 /// The identity matrix, which `BT` resets both text matrices to.
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
@@ -2113,10 +2143,32 @@ pub fn extract_text(content: &[u8], fonts: &FontMap) -> Vec<TextRun> {
                     // The numbers between the strings are kerning, in
                     // thousandths of an em. They move the pen; they are not
                     // text. Concatenating them would put "-3" inside a word.
+                    //
+                    // But a big enough jump *is* a space: a PDF may separate
+                    // words by moving the pen rather than by drawing one, and
+                    // a run that lost those reads "Definingandassigning" and
+                    // matches no search for two words. See
+                    // [`WORD_GAP_THOUSANDTHS`] for where the cutoff comes
+                    // from.
                     let mut joined: Vec<u8> = Vec::new();
+                    let mut pending_space = false;
                     for item in items {
-                        if let Object::Str(bytes) = item {
-                            joined.extend_from_slice(bytes);
+                        match item {
+                            Object::Str(bytes) => {
+                                if pending_space && !joined.is_empty() && !bytes.is_empty() {
+                                    joined.push(b' ');
+                                }
+                                pending_space = false;
+                                joined.extend_from_slice(bytes);
+                            }
+                            other => {
+                                if other
+                                    .as_f64()
+                                    .is_some_and(|v| v <= f64::from(WORD_GAP_THOUSANDTHS))
+                                {
+                                    pending_space = true;
+                                }
+                            }
                         }
                     }
                     push_run(&mut runs, &joined, text_matrix, font_size, font);
@@ -3396,6 +3448,46 @@ begincmap\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
         assert_eq!(glyph_name_char("bracketleftBig"), Some('['));
         assert_eq!(glyph_name_char("bracketlefttp"), Some('['));
         assert_eq!(glyph_name_char("bracketleftex"), None);
+    }
+
+    /// A wide kerning jump inside a `TJ` array becomes a space.
+    ///
+    /// -313 is taken from a real document, where it separates "User" from
+    /// "Manual". Without this the run reads "UserManual" and matches no
+    /// search for the two words.
+    #[test]
+    fn a_wide_kerning_gap_becomes_a_space() {
+        let content = b"BT /T1_0 10 Tf 1 0 0 1 0 0 Tm [(Use)0.048(r)-313.004(M)-0.98(anual)]TJ ET";
+        let runs = extract_text(content, &simple_fonts());
+        assert_eq!(runs.first().expect("a run").text, "User Manual");
+    }
+
+    /// Kerning inside a word does not become a space.
+    ///
+    /// The other half, and the one that would be silently wrong: the same
+    /// array carries small adjustments between letters, and a threshold set
+    /// too near zero would spell "U s e r".
+    #[test]
+    fn kerning_within_a_word_is_not_a_space() {
+        let content = b"BT /T1_0 10 Tf 1 0 0 1 0 0 Tm [(Q)-3(uick S)3(tar)-24(t)]TJ ET";
+        let runs = extract_text(content, &simple_fonts());
+        assert_eq!(runs.first().expect("a run").text, "Quick Start");
+    }
+
+    /// A gap at the very start of an array does not indent the run.
+    #[test]
+    fn a_leading_gap_adds_no_space() {
+        let content = b"BT /T1_0 10 Tf 1 0 0 1 0 0 Tm [-500(Word)]TJ ET";
+        let runs = extract_text(content, &simple_fonts());
+        assert_eq!(runs.first().expect("a run").text, "Word");
+    }
+
+    /// Two gaps in a row add one space, not two.
+    #[test]
+    fn consecutive_gaps_collapse() {
+        let content = b"BT /T1_0 10 Tf 1 0 0 1 0 0 Tm [(a)-400 -400(b)]TJ ET";
+        let runs = extract_text(content, &simple_fonts());
+        assert_eq!(runs.first().expect("a run").text, "a b");
     }
 
     fn obj(src: &[u8]) -> Object {

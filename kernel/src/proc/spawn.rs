@@ -29778,13 +29778,29 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
 /// `create-ext4-rootfs.sh` used to stage first. Its name said so until
 /// 2026-09-16 and no longer does.
 ///
-/// **Open, and deliberately not settled by the rename:** this rung still
-/// stages `/mnt/lib64/ld-linux-x86-64.so.2` and
-/// `/mnt/lib/x86_64-linux-gnu/libc.so.6` beside the binary. A static,
-/// `libc.a`-linked make needs neither, and their presence is part of what
-/// made the old name believable -- everything about the rung said
-/// "unmodified glibc PIE". Removing them changes behaviour where a rename
-/// does not, so it wants its own commit and its own boot.  The
+/// **SETTLED 2026-09-16, and the answer is the opposite of what I assumed.**
+/// This rung stages `/mnt/lib64/ld-linux-x86-64.so.2` and
+/// `/mnt/lib/x86_64-linux-gnu/libc.so.6`, and I had flagged that as probably
+/// vestigial -- a static `libc.a`-linked make needs neither, and I read their
+/// presence as part of what made the old "glibc" name believable.
+///
+/// **They are required, by `/bin/sh`.** The recipe contains a shell
+/// metacharacter, so make dispatches it through `/bin/sh -c`, and the staged
+/// shell is the host's dash: `ELF 64-bit LSB pie executable, dynamically
+/// linked, interpreter /lib64/ld-linux-x86-64.so.2` -- checked with `debugfs`
+/// against `rootfs.ext4` rather than inferred. `create-ext4-rootfs.sh` logs it
+/// as "staged real shell: /bin/dash (+ /bin/sh)", in contrast to bash, which
+/// it logs as "linked against our libc.a".
+///
+/// So the staging is correct and load-bearing, and **removing it would break
+/// this rung**. Recorded rather than deleted because the wrong version of
+/// this note was live for several hours and the next reader may have seen it.
+///
+/// Worth keeping as a caution: I treated evidence of a real requirement as
+/// evidence of a lie, because it sat next to a name that *was* a lie. Fixing
+/// the name did not make everything beside it suspect. Deferring the removal
+/// to its own commit and boot is what stopped that assumption becoming a
+/// breakage.  The
 /// script then **overwrites** `/bin//make` with `build/spike/make-slateos.elf`
 /// — GNU make 4.4.1 linked against our own `libc.a` — so the binary that runs
 /// here is static, non-PIE, and speaks the **native** syscall ABI, not the

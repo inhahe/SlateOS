@@ -13,6 +13,12 @@ guitk = { path = "../../gui/toolkit" }
 # written twenty lines earlier -- see `byteread/src/lib.rs`.
 byteread = { path = "../../byteread" }
 
+# Pictures are read through `safeio::read_capped`, not `std::fs::read`.
+# `imagecodec::Limits` is checked against a file's *header* -- "a limit applied
+# afterwards is not a limit, it is a post-mortem" -- and reading the whole file
+# first is exactly that afterwards.
+safeio = { path = "../safeio" }
+
 # The picture decoder. Without it this viewer had no way to turn a file into
 # pixels, and said so: `display_image` built a grey checkerboard and left a
 # comment reading "in a real implementation, this would decode the image".

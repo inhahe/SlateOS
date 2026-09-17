@@ -11,7 +11,9 @@
 //!   and drawn at its own proportions
 //! - Per-photograph adjustment values: brightness, contrast, saturation,
 //!   exposure, temperature
-//! - Star ratings (0-5) and color labels
+//! - Star ratings (0-5), applied to every selected photograph; colour
+//!   labels exist as a model only
+//! - Several photographs at once, with Shift and an arrow
 //! - Tagging and keyword system
 //! - Timeline view grouping photos by date
 //! - Slideshow mode with configurable interval and transitions
@@ -47,11 +49,10 @@
 //!   way to record one.)
 //! - **Face regions are never detected.** `Photo::faces` is constructed empty
 //!   and nothing ever pushes to it.
-//! - **Only one photograph can be selected.** `selected_photos` is a `Vec`
-//!   that production code never pushes to, so the batch operations --
-//!   `batch_add_to_album`, batch rate, batch tag -- are written, tested and
-//!   unreachable. The grid already draws a card as selected if it is in that
-//!   list, so the drawing is ready and the selecting is not.
+//! - **`batch_tag` is still unreachable.** Selecting several photographs and
+//!   rating them, or putting them all in an album, both work now; tagging
+//!   does not, because there is nowhere to type a tag. The function is
+//!   written and tested and waiting for a text field.
 //! - **Smart albums cannot be made either.** `create_smart_album` and the
 //!   rule matching behind it are tested and unreachable, exactly as ordinary
 //!   albums were until now.
@@ -3178,6 +3179,10 @@ impl PhotoApp {
             && let Some(pid) = self.photo_at(event.x, event.y)
         {
             self.selected_photo = Some(pid);
+            // A plain click starts again. Without this, a card clicked after
+            // a Shift+arrow run would join a set the user believes they have
+            // just replaced, and the next rating would land on all of it.
+            self.selected_photos.clear();
             return true;
         }
         false
@@ -3308,13 +3313,28 @@ impl PhotoApp {
         let Some(pid) = self.menu_photo else {
             return;
         };
+        // The whole selection when the menu was raised on part of it, and that
+        // photograph alone otherwise -- right-clicking a card outside the
+        // selection is a statement about that card, not about the set.
+        let ids = if self.selected_photos.contains(&pid) {
+            self.selected_photos.clone()
+        } else {
+            vec![pid]
+        };
         let name = self
             .albums
             .iter()
             .find(|a| a.id == album_id)
             .map(|a| a.name.clone());
-        if self.add_to_album(album_id, pid) {
-            self.status_message = name.map(|n| format!("Added to {n}"));
+        if self.batch_add_to_album(&ids, album_id) {
+            let count = ids.len();
+            self.status_message = name.map(|n| {
+                if count == 1 {
+                    format!("Added to {n}")
+                } else {
+                    format!("Added {count} photos to {n}")
+                }
+            });
         }
     }
 
@@ -3388,16 +3408,17 @@ impl PhotoApp {
         if self.view_mode == ViewMode::Slideshow {
             return self.handle_slideshow_key(event);
         }
+        let extend = event.modifiers.shift;
         match event.key {
-            Key::Left => self.move_selection(-1),
-            Key::Right => self.move_selection(1),
+            Key::Left => self.step_selection(-1, extend),
+            Key::Right => self.step_selection(1, extend),
             Key::Up => {
                 let cols = self.row_step();
-                self.move_selection(cols.checked_neg().unwrap_or(-1))
+                self.step_selection(cols.checked_neg().unwrap_or(-1), extend)
             }
             Key::Down => {
                 let cols = self.row_step();
-                self.move_selection(cols)
+                self.step_selection(cols, extend)
             }
             Key::Home => self.select_index(0),
             Key::End => {
@@ -3438,8 +3459,8 @@ impl PhotoApp {
             // capping it again here would be a second statement of the range.
             '0'..='5' => {
                 let stars = u8::try_from(u32::from(ch).saturating_sub(u32::from('0'))).unwrap_or(0);
-                self.selected_photo
-                    .is_some_and(|pid| self.rate_photo(pid, stars))
+                let ids = self.acting_on();
+                self.batch_rate(&ids, stars) > 0
             }
             'f' | 'F' => self.selected_photo.is_some_and(|pid| self.toggle_flag(pid)),
             'i' | 'I' => {
@@ -3511,6 +3532,42 @@ impl PhotoApp {
     /// Stopping rather than wrapping: holding Right to the end of a library
     /// and silently arriving back at the first photo is a worse answer than
     /// stopping, because the grid looks much the same either way.
+    /// Move the selection, growing it instead when `extend` is set.
+    ///
+    /// Both ends join the set on every step, so a run of Shift+Right collects
+    /// everything it passes over rather than just where it started and
+    /// stopped. Moving *without* extending drops the set: an arrow key on its
+    /// own is a fresh single selection, and leaving six cards highlighted
+    /// behind a cursor that has moved away from them is how a batch operation
+    /// surprises somebody.
+    fn step_selection(&mut self, delta: isize, extend: bool) -> bool {
+        let anchor = self.selected_photo;
+        let moved = self.move_selection(delta);
+        if !extend {
+            self.selected_photos.clear();
+            return moved;
+        }
+        for pid in [anchor, self.selected_photo].into_iter().flatten() {
+            if !self.selected_photos.contains(&pid) {
+                self.selected_photos.push(pid);
+            }
+        }
+        moved
+    }
+
+    /// Every photograph an action should apply to.
+    ///
+    /// The multi-selection when there is one, and the single selection
+    /// otherwise -- so every caller gets a list and none has to remember that
+    /// there are two ways to have selected something.
+    fn acting_on(&self) -> Vec<PhotoId> {
+        if self.selected_photos.is_empty() {
+            self.selected_photo.into_iter().collect()
+        } else {
+            self.selected_photos.clone()
+        }
+    }
+
     fn move_selection(&mut self, delta: isize) -> bool {
         let total = self.visible_photos().len();
         if total == 0 {
@@ -3880,25 +3937,45 @@ impl PhotoApp {
 
         let stats = self.library_stats();
         let visible = self.visible_photos().len();
-        let status_text = self.status_message.as_ref().map_or_else(
-            || {
-                format!(
-                    "{} photos shown  |  {} total  |  {} albums  |  {} in trash",
-                    visible, stats.total_photos, stats.total_albums, stats.trash_count,
-                )
-            },
-            // The import result takes the bar until something else happens.
-            // A read that failed has to be visible somewhere, and the counts
-            // it replaces are the thing that would otherwise be read as the
-            // answer -- an unchanged total looks like a refusal nobody
-            // explained.
-            Clone::clone,
-        );
+        // The library note outranks the transient one. A failed load or a
+        // refused save is a standing condition -- it is still true after the
+        // next import reports success -- so it must not be pushed off the bar
+        // by something that happened afterwards.
+        //
+        // This field was written and never read until 2026-09-17, which lane
+        // A's sweep caught through `check-fields-written-never-read`: the
+        // application recorded why it could not read the library and then
+        // showed nobody. A test asserted the field was set and called that
+        // "the user is told", which is the exact mistake design-decisions 856
+        // names -- a thing is built when something obeys it, not when
+        // something stores it.
+        let status_text = self
+            .library_note
+            .as_ref()
+            .or(self.status_message.as_ref())
+            .map_or_else(
+                || {
+                    format!(
+                        "{} photos shown  |  {} total  |  {} albums  |  {} in trash",
+                        visible, stats.total_photos, stats.total_albums, stats.trash_count,
+                    )
+                },
+                // The import result takes the bar until something else
+                // happens. A read that failed has to be visible somewhere, and
+                // the counts it replaces are the thing that would otherwise be
+                // read as the answer -- an unchanged total looks like a
+                // refusal nobody explained.
+                Clone::clone,
+            );
         cmds.push(RenderCommand::Text {
             x: 12.0,
             y: bar_y + 6.0,
             text: status_text,
-            color: self.palette.subtext0,
+            color: if self.library_note.is_some() {
+                self.palette.ink(self.palette.red)
+            } else {
+                self.palette.subtext0
+            },
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
@@ -5675,6 +5752,154 @@ mod tests {
         })
     }
 
+    fn shift_key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        })
+    }
+
+    /// Shift and an arrow select more than one photograph.
+    ///
+    /// `selected_photos` is a `Vec` production code never pushed to, so the
+    /// batch operations were written, tested and unreachable. The grid already
+    /// drew a card as selected when it was in this list.
+    #[test]
+    fn shift_and_an_arrow_selects_more_than_one() {
+        let mut app = app_with_n_pictures("multi", 3);
+        app.set_window_size(900.0, 700.0);
+        // The first card *on screen*: the default sort is newest-first, so
+        // `photos.first()` is the last one and an arrow from it goes nowhere.
+        app.selected_photo = app.visible_photos().first().copied();
+
+        app.handle_event(&shift_key(Key::Right));
+
+        assert_eq!(
+            app.selected_photos.len(),
+            2,
+            "both ends of the step should be in the set: {:?}",
+            app.selected_photos
+        );
+        app.handle_event(&shift_key(Key::Right));
+        assert_eq!(
+            app.selected_photos.len(),
+            3,
+            "a run should collect what it passes over"
+        );
+    }
+
+    /// An arrow on its own starts again.
+    ///
+    /// Leaving cards highlighted behind a cursor that has moved away from them
+    /// is how a batch operation surprises somebody.
+    #[test]
+    fn an_arrow_without_shift_starts_the_selection_again() {
+        let mut app = app_with_n_pictures("single", 3);
+        app.set_window_size(900.0, 700.0);
+        // The first card *on screen*: the default sort is newest-first, so
+        // `photos.first()` is the last one and an arrow from it goes nowhere.
+        app.selected_photo = app.visible_photos().first().copied();
+        app.handle_event(&shift_key(Key::Right));
+        assert!(!app.selected_photos.is_empty(), "the control failed");
+
+        app.handle_event(&key(Key::Right));
+
+        assert!(
+            app.selected_photos.is_empty(),
+            "a plain arrow left the old set behind"
+        );
+    }
+
+    /// A rating applies to everything selected.
+    ///
+    /// `batch_rate` has been written and tested since this crate existed, with
+    /// no way to reach it.
+    #[test]
+    fn a_rating_applies_to_everything_selected() {
+        let mut app = app_with_n_pictures("rateall", 3);
+        app.set_window_size(900.0, 700.0);
+        // The first card *on screen*: the default sort is newest-first, so
+        // `photos.first()` is the last one and an arrow from it goes nowhere.
+        app.selected_photo = app.visible_photos().first().copied();
+        app.handle_event(&shift_key(Key::Right));
+        let chosen = app.selected_photos.clone();
+        assert_eq!(chosen.len(), 2, "the control failed");
+
+        app.handle_event(&typed(Key::Num4, '4'));
+
+        for pid in &chosen {
+            assert_eq!(
+                app.find_photo(*pid).expect("a photo").rating,
+                4,
+                "photograph {pid} was not rated"
+            );
+        }
+        // The third was never selected and must be untouched.
+        let untouched = app
+            .photos
+            .iter()
+            .filter(|p| !chosen.contains(&p.id))
+            .all(|p| p.rating == 0);
+        assert!(untouched, "a photograph outside the selection was rated");
+    }
+
+    /// A plain click starts the selection again.
+    #[test]
+    fn a_plain_click_starts_the_selection_again() {
+        let mut app = app_with_n_pictures("clickreset", 3);
+        app.set_window_size(900.0, 700.0);
+        // The first card *on screen*: the default sort is newest-first, so
+        // `photos.first()` is the last one and an arrow from it goes nowhere.
+        app.selected_photo = app.visible_photos().first().copied();
+        app.handle_event(&shift_key(Key::Right));
+        assert!(!app.selected_photos.is_empty(), "the control failed");
+
+        let cell = app.thumb_rect(2).expect("a third card");
+        app.handle_event(&click(cell.x + 4.0, cell.y + 4.0));
+
+        assert!(
+            app.selected_photos.is_empty(),
+            "the click joined the old set instead of replacing it"
+        );
+    }
+
+    /// The menu adds the whole selection when it was raised on part of it.
+    #[test]
+    fn the_menu_adds_the_whole_selection() {
+        let mut app = app_with_n_pictures("batchalbum", 3);
+        app.set_window_size(900.0, 700.0);
+        let album = app.create_album("Holiday");
+        // The first card *on screen*: the default sort is newest-first, so
+        // `photos.first()` is the last one and an arrow from it goes nowhere.
+        app.selected_photo = app.visible_photos().first().copied();
+        app.handle_event(&shift_key(Key::Right));
+        let chosen = app.selected_photos.clone();
+        assert_eq!(chosen.len(), 2, "the control failed");
+
+        // Raise it on one of the selected cards.
+        let cell = app.thumb_rect(0).expect("a first card");
+        app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
+        app.choose_album_from_menu(album);
+
+        let in_album = app
+            .albums
+            .iter()
+            .find(|a| a.id == album)
+            .expect("the album")
+            .photo_ids
+            .clone();
+        assert_eq!(in_album.len(), 2, "only part of the selection went in");
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Added 2 photos to Holiday")
+        );
+    }
+
     fn right_click(x: f32, y: f32) -> Event {
         Event::Mouse(MouseEvent {
             x,
@@ -6934,7 +7159,14 @@ mod tests {
             app.library_unread, 1,
             "the control failed: nothing was skipped"
         );
-        assert!(app.library_note.is_some(), "the user is not told");
+        // Not `library_note.is_some()`: that asserts a field was written,
+        // which is what let this ship with nothing displaying it. Assert the
+        // words reach the screen.
+        let tree = app.render(900.0, 700.0);
+        let told = tree.commands.iter().any(
+            |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("could not be read")),
+        );
+        assert!(told, "the reason was recorded but never put on screen");
 
         // Change something, then try to save.
         assert!(app.rate_photo(1, 5));

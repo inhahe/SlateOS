@@ -159,6 +159,15 @@
 #      cases; `check-frame-needles` is cheaper still and is deliberately left
 #      out, having no self-test and a `return 2` for "I could not look".
 #
+#  50. Refuse a field written in production and read only by a test. Same
+#      reason as 48 and 49, and the same day: a second change of this lane's
+#      went out green and stopped lane A's sweep, because
+#      `check-fields-written-never-read` runs in that sweep and in the boot
+#      battery and was not on a push. It costs 20s, which is the most of the
+#      three, and it is worth it because the failure it catches is one lane
+#      handing another a red main -- twice in one day, from the same lane,
+#      through the same hole.
+#
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
 # section and the bypass landed in `0ab4b55bc` and this list did not; and
@@ -5579,6 +5588,88 @@ under and wrong on the others.
 
 To push anyway:
     ALLOW_OVERLAY0_INK_DRIFT=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 50 -- a field written in production and read only by a test.
+#
+# `check-fields-written-never-read.py`, which lane A's sweep and the boot
+# battery already run.  This adds it here for the reason gates 43b, 48 and 49
+# were added, and on the strength of the same day's evidence: on 2026-09-17 a
+# commit of this lane's reached origin/main green and stopped lane A's sweep
+# on `library_note` -- a field this application set to say why it could not
+# read the library, and then showed to nobody.
+#
+# That is the second time in one day that work of this lane's went out green
+# from here and arrived red there, through the same hole: a checker this lane
+# owns, running everywhere except on the push that introduces the fault.  The
+# containment argument is the one that settled gate 48 -- the point is not to
+# protect the author, whose own tree is already fine, but to stop one lane's
+# breakage reaching the other two.
+#
+# It costs 20s, more than either sibling.  That is the whole cost, and it buys
+# not handing two other lanes a main they cannot build on.
+#
+# The self-test runs first, as gates 3-5, 35, 47, 48 and 49 do.  This
+# checker's `return 2` cases are both misuse -- an unrecognised option, a
+# missing directory -- rather than "I could not look", so a non-zero exit here
+# is always a real verdict; that is what makes it safe to gate on, and is the
+# distinction that keeps `check-frame-needles` out of this file.
+#
+# `touches gui/ apps/` keeps it off pushes that cannot have broken it.
+# ---------------------------------------------------------------------------
+
+wofields="${repo_root:-.}/scripts/check-fields-written-never-read.py"
+skip_wofields=0
+# Bypass: ALLOW_WRITE_ONLY_FIELDS=1 git push origin <branch>
+if [ "${ALLOW_WRITE_ONLY_FIELDS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_WRITE_ONLY_FIELDS=1 set - skipping the write-only-field gate." >&2
+    skip_wofields=1
+fi
+[ -n "$py" ] || skip_wofields=1
+[ -f "$wofields" ] || skip_wofields=1
+touches gui/ apps/ scripts/check-fields-written-never-read.py || skip_wofields=1
+# No `pushed_shas` guard: one run over the worktree, as gates 35, 43b, 47, 48
+# and 49 do.
+note_gate write-only-fields "$skip_wofields"
+
+wofields_failed=0
+if [ "$skip_wofields" != "1" ]; then
+    if ! run_checker write-only-fields-selftest "$py" "$wofields" --selftest; then
+        echo "pre-push: check-fields-written-never-read.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        wofields_failed=1
+    elif ! run_checker write-only-fields "$py" "$wofields"; then
+        wofields_failed=1
+    fi
+fi
+if [ "$wofields_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - a field is written in production and read by
+nothing but a test.
+
+The field is named above.  This is not what \`dead_code\` catches: a test
+counts as a read, and so does a \`derive(Debug)\`, so the compiler is content
+with a field nothing in the shipped program ever looks at.
+
+It is usually one of two things, and they want opposite fixes:
+
+  * something recorded for a reader that was never written -- a message set
+    and never displayed, a count kept and never shown.  Wire up the reader.
+    design-decisions 856: a thing is built when something obeys it, not when
+    something stores it.
+  * something genuinely finished with.  Delete the field.
+
+A test asserting the field was written is not a reader.  That is what the
+gate is distinguishing, and it is the case it was added for.
+
+    python scripts/check-fields-written-never-read.py
+    python scripts/check-fields-written-never-read.py --list
+
+To push anyway:
+    ALLOW_WRITE_ONLY_FIELDS=1 git push $remote_name ...
 
 EOF
     exit 1

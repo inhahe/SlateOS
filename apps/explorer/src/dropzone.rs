@@ -27,41 +27,16 @@
 use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+// The toolkit's rectangle rather than one of this crate's own. See
+// `known-issues.md` `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`: eight
+// crates declared the same four floats under two spellings, and every
+// place an application met a toolkit widget paid to convert between them.
+pub use guitk::frame::Rect;
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::theme::with_alpha;
 
 use std::path::{Path, PathBuf};
-
-// ============================================================================
-// Rect helper
-// ============================================================================
-
-/// Axis-aligned rectangle used for zone bounding boxes.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    /// Create a new rectangle.
-    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-
-    /// Returns `true` if the point `(px, py)` lies inside this rectangle.
-    pub fn contains(&self, px: f32, py: f32) -> bool {
-        px >= self.x && px < self.x + self.width && py >= self.y && py < self.y + self.height
-    }
-}
 
 // ============================================================================
 // Drop zone enum
@@ -719,8 +694,8 @@ pub fn render_drop_feedback(
                 cmds.push(RenderCommand::FillRect {
                     x: area.x,
                     y: area.y,
-                    width: area.width,
-                    height: area.height,
+                    width: area.w,
+                    height: area.h,
                     color: highlight,
                     corner_radii: CornerRadii::ZERO,
                 });
@@ -731,16 +706,16 @@ pub fn render_drop_feedback(
             cmds.push(RenderCommand::FillRect {
                 x: rect.x,
                 y: rect.y,
-                width: rect.width,
-                height: rect.height,
+                width: rect.w,
+                height: rect.h,
                 color: highlight,
                 corner_radii: CornerRadii::ZERO,
             });
             // Underline at the bottom of the row.
             cmds.push(RenderCommand::FillRect {
                 x: rect.x,
-                y: rect.y + rect.height - 2.0,
-                width: rect.width,
+                y: rect.y + rect.h - 2.0,
+                width: rect.w,
                 height: 2.0,
                 color: underline,
                 corner_radii: CornerRadii::ZERO,
@@ -751,16 +726,16 @@ pub fn render_drop_feedback(
             cmds.push(RenderCommand::FillRect {
                 x: rect.x,
                 y: rect.y,
-                width: rect.width,
-                height: rect.height,
+                width: rect.w,
+                height: rect.h,
                 color: highlight,
                 corner_radii: CornerRadii::ZERO,
             });
             // Underline.
             cmds.push(RenderCommand::FillRect {
                 x: rect.x,
-                y: rect.y + rect.height - 2.0,
-                width: rect.width,
+                y: rect.y + rect.h - 2.0,
+                width: rect.w,
                 height: 2.0,
                 color: underline,
                 corner_radii: CornerRadii::ZERO,

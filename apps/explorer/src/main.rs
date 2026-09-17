@@ -1129,14 +1129,14 @@ impl ExplorerState {
             return None;
         }
         if let Some(rect) = self.dropzone.file_row_rect(drag.insert_at) {
-            return Some((rect.y, rect.x, rect.width));
+            return Some((rect.y, rect.x, rect.w));
         }
         // Past the last row: sit on its bottom edge rather than vanishing,
         // because "drop at the end" is a real target and a user aiming at it
         // should see the same feedback as any other.
         let last = self.entries.len().checked_sub(1)?;
         let rect = self.dropzone.file_row_rect(last)?;
-        Some((rect.y + rect.height, rect.x, rect.width))
+        Some((rect.y + rect.h, rect.x, rect.w))
     }
 
     /// Track a press that is turning into a rearrangement.
@@ -2115,7 +2115,7 @@ impl ExplorerState {
             let h = TRANSFER_ROW_H - 4.0;
             // Laid out from the right edge inwards, so a long label is what
             // gets squeezed rather than the buttons sliding off the panel.
-            let mut x = panel.x + panel.width - TRANSFER_BTN - 4.0;
+            let mut x = panel.x + panel.w - TRANSFER_BTN - 4.0;
             let mut place = |control: TransferControl, controls: &mut Vec<_>| {
                 controls.push((control, Rect::new(x, y, TRANSFER_BTN, h)));
                 x -= TRANSFER_BTN + 2.0;
@@ -2196,7 +2196,7 @@ impl ExplorerState {
             return false;
         }
         let pane = self.pane_rect();
-        x >= pane.x && x < pane.x + pane.width && y >= pane.y && y < pane.y + HEADER_H
+        x >= pane.x && x < pane.x + pane.w && y >= pane.y && y < pane.y + HEADER_H
     }
 
     /// How tall one icon cell is, given the labels in force.
@@ -2352,26 +2352,13 @@ impl ExplorerState {
             return None;
         }
         let area = self.pane_rect();
-        if area.width < LIST_MIN_W + PREVIEW_MIN_W + splitter::DIVIDER {
+        if area.w < LIST_MIN_W + PREVIEW_MIN_W + splitter::DIVIDER {
             return None;
         }
         let fractions = [self.preview_split, 1.0 - self.preview_split];
-        // Converted at the boundary: this crate has its own `Rect` with
-        // `width`/`height` where the toolkit's has `w`/`h`. Two identical
-        // rectangles under different field names, filed as
-        // `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`; adapting here is two lines, and
-        // converting the explorer is not this change's job.
-        let panes = splitter::panes(
-            guitk::frame::Rect::new(area.x, area.y, area.width, area.height),
-            Axis::Horizontal,
-            &fractions,
-            splitter::DIVIDER,
-        );
+        let panes = splitter::panes(area, Axis::Horizontal, &fractions, splitter::DIVIDER);
         match (panes.first(), panes.get(1)) {
-            (Some(list), Some(preview)) => Some((
-                Rect::new(list.x, list.y, list.w, list.h),
-                Rect::new(preview.x, preview.y, preview.w, preview.h),
-            )),
+            (Some(list), Some(preview)) => Some((*list, *preview)),
             _ => None,
         }
     }
@@ -3459,13 +3446,7 @@ impl ExplorerState {
                     self.palette.surface1,
                 );
             }
-            tree.fill_rect(
-                rect.x,
-                rect.y,
-                rect.width,
-                rect.height,
-                self.palette.surface0,
-            );
+            tree.fill_rect(rect.x, rect.y, rect.w, rect.h, self.palette.surface0);
             let ink = if self.toolbar_button_state(button).is_enabled() {
                 self.palette.text
             } else {
@@ -3476,7 +3457,7 @@ impl ExplorerState {
             tree.text_in(
                 rect.x + 6.0,
                 rect.y + 6.0,
-                rect.width - 8.0,
+                rect.w - 8.0,
                 button.glyph(),
                 ink,
                 14.0,
@@ -3503,11 +3484,9 @@ impl ExplorerState {
         // renderer honours, so extending the command list inside one places
         // the whole widget without it having to be told.
         tree.translate(rect.x, rect.y);
-        let commands = self.pathbar.render(
-            &palette,
-            rect.width.max(0.0) as u32,
-            rect.height.max(0.0) as u32,
-        );
+        let commands =
+            self.pathbar
+                .render(&palette, rect.w.max(0.0) as u32, rect.h.max(0.0) as u32);
         tree.commands.extend(commands);
         tree.untranslate();
     }
@@ -3646,8 +3625,7 @@ impl ExplorerState {
             Some((list, preview)) => (list, Some(preview)),
             None => (self.pane_rect(), None),
         };
-        let (list_x, list_y, list_w, list_h) =
-            (list_rect.x, list_rect.y, list_rect.width, list_rect.height);
+        let (list_x, list_y, list_w, list_h) = (list_rect.x, list_rect.y, list_rect.w, list_rect.h);
 
         // The pane itself is the fallback target: anything inside it that is
         // not a folder row means "into the directory being shown".
@@ -3663,10 +3641,10 @@ impl ExplorerState {
             // The divider last, so it sits over both panes' edges rather than
             // being clipped by whichever drew second.
             tree.fill_rect(
-                list_rect.x + list_rect.width,
+                list_rect.x + list_rect.w,
                 list_rect.y,
                 splitter::DIVIDER,
-                list_rect.height,
+                list_rect.h,
                 self.palette.surface2,
             );
         }
@@ -3692,17 +3670,10 @@ impl ExplorerState {
         let (list, _) = self.preview_panes()?;
         let area = self.pane_rect();
         let fractions = [self.preview_split, 1.0 - self.preview_split];
-        splitter::divider_at(
-            guitk::frame::Rect::new(area.x, area.y, area.width, area.height),
-            Axis::Horizontal,
-            &fractions,
-            splitter::DIVIDER,
-            x,
-            y,
-        )?;
+        splitter::divider_at(area, Axis::Horizontal, &fractions, splitter::DIVIDER, x, y)?;
         // The offset from the divider's own left edge, so the line keeps its
         // position under the pointer instead of jumping to centre itself.
-        Some(x - (list.x + list.width))
+        Some(x - (list.x + list.w))
     }
 
     /// Move the divider to follow the pointer. Answers whether it moved.
@@ -3716,7 +3687,7 @@ impl ExplorerState {
             &mut fractions,
             0,
             x - offset - area.x,
-            area.width,
+            area.w,
             splitter::DIVIDER,
             &[LIST_MIN_W, PREVIEW_MIN_W],
         );
@@ -3749,13 +3720,7 @@ impl ExplorerState {
     /// thumbnail size is the lever if the preview looks soft, and that is a
     /// setting the user already has.
     fn render_preview(&self, tree: &mut RenderTree, area: Rect) {
-        tree.fill_rect(
-            area.x,
-            area.y,
-            area.width,
-            area.height,
-            self.palette.surface0,
-        );
+        tree.fill_rect(area.x, area.y, area.w, area.h, self.palette.surface0);
 
         let selected = self
             .selected_indices
@@ -3779,8 +3744,8 @@ impl ExplorerState {
         // a 96-pixel thumbnail up to fill a wide pane looks like a fault
         // rather than a preview.
         let pad = 12.0;
-        let avail_w = (area.width - pad * 2.0).max(0.0);
-        let avail_h = (area.height - pad * 2.0).max(0.0);
+        let avail_w = (area.w - pad * 2.0).max(0.0);
+        let avail_h = (area.h - pad * 2.0).max(0.0);
         let tw = thumb.width as f32;
         let th = thumb.height as f32;
         if tw <= 0.0 || th <= 0.0 || avail_w <= 0.0 || avail_h <= 0.0 {
@@ -3790,8 +3755,8 @@ impl ExplorerState {
         let w = tw * scale;
         let h = th * scale;
         tree.push(guitk::render::RenderCommand::Image {
-            x: area.x + (area.width - w) / 2.0,
-            y: area.y + (area.height - h) / 2.0,
+            x: area.x + (area.w - w) / 2.0,
+            y: area.y + (area.h - h) / 2.0,
             width: w,
             height: h,
             image_id: id,
@@ -3802,12 +3767,12 @@ impl ExplorerState {
     fn preview_note(&self, tree: &mut RenderTree, area: Rect, text: &str) {
         tree.push(guitk::render::RenderCommand::Text {
             x: area.x + 12.0,
-            y: area.y + area.height / 2.0,
+            y: area.y + area.h / 2.0,
             text: text.to_string(),
             color: self.palette.subtext0,
             font_size: 13.0,
             font_weight: guitk::render::FontWeightHint::Regular,
-            max_width: Some((area.width - 24.0).max(0.0)),
+            max_width: Some((area.w - 24.0).max(0.0)),
             overflow: guitk::render::TextOverflow::Ellipsis,
         });
     }
@@ -3833,9 +3798,9 @@ impl ExplorerState {
     fn visible_capacity(&self) -> usize {
         let pane = self.pane_rect();
         match self.view_mode {
-            ViewMode::List => scroll_window::capacity(LIST_ROW_H, pane.height),
-            ViewMode::Details => scroll_window::capacity(ROW_H, (pane.height - HEADER_H).max(0.0)),
-            ViewMode::Icons => scroll_window::capacity(self.icon_cell_h(), pane.height)
+            ViewMode::List => scroll_window::capacity(LIST_ROW_H, pane.h),
+            ViewMode::Details => scroll_window::capacity(ROW_H, (pane.h - HEADER_H).max(0.0)),
+            ViewMode::Icons => scroll_window::capacity(self.icon_cell_h(), pane.h)
                 .saturating_mul(self.icon_columns()),
         }
     }
@@ -3855,10 +3820,10 @@ impl ExplorerState {
             ViewMode::List | ViewMode::Icons => pane.y,
         };
         Some(Rect::new(
-            pane.x + pane.width - scrollbar::WIDTH,
+            pane.x + pane.w - scrollbar::WIDTH,
             top,
             scrollbar::WIDTH,
-            (pane.y + pane.height - top).max(0.0),
+            (pane.y + pane.h - top).max(0.0),
         ))
     }
 
@@ -3866,7 +3831,7 @@ impl ExplorerState {
     fn scrollbar_thumb(&self) -> Option<guitk::frame::Rect> {
         let track = self.scrollbar_track()?;
         Some(scrollbar::thumb(
-            guitk::frame::Rect::new(track.x, track.y, track.width, track.height),
+            track,
             self.entries.len(),
             self.visible_capacity(),
             self.viewport.first_visible(),
@@ -3880,10 +3845,10 @@ impl ExplorerState {
         let (Some(track), Some(thumb)) = (self.scrollbar_track(), self.scrollbar_thumb()) else {
             return false;
         };
-        if x < track.x || x >= track.x + track.width {
+        if x < track.x || x >= track.x + track.w {
             return false;
         }
-        if y < track.y || y >= track.y + track.height {
+        if y < track.y || y >= track.y + track.h {
             return false;
         }
         if y >= thumb.y && y < thumb.y + thumb.h {
@@ -3917,7 +3882,7 @@ impl ExplorerState {
             return false;
         };
         let Some(first) = scrollbar::first_from_drag(
-            guitk::frame::Rect::new(track.x, track.y, track.width, track.height),
+            track,
             thumb.h,
             grab,
             y,
@@ -3940,20 +3905,14 @@ impl ExplorerState {
         };
         // The toolkit's `Rect` names its sides `w`/`h` where explorer's names
         // them `width`/`height`; converted here, at the one call that crosses.
-        let track_gui = guitk::frame::Rect::new(track.x, track.y, track.width, track.height);
+        let track_gui = track;
         let thumb = scrollbar::thumb(
             track_gui,
             self.entries.len(),
             self.visible_capacity(),
             self.viewport.first_visible(),
         );
-        tree.fill_rect(
-            track.x,
-            track.y,
-            track.width,
-            track.height,
-            self.palette.mantle,
-        );
+        tree.fill_rect(track.x, track.y, track.w, track.h, self.palette.mantle);
         tree.fill_rounded_rect(
             thumb.x + 1.0,
             thumb.y,
@@ -4308,13 +4267,7 @@ impl ExplorerState {
         let Some(panel) = self.transfers_rect() else {
             return;
         };
-        tree.fill_rect(
-            panel.x,
-            panel.y,
-            panel.width,
-            panel.height,
-            self.palette.mantle,
-        );
+        tree.fill_rect(panel.x, panel.y, panel.w, panel.h, self.palette.mantle);
 
         let controls = self.transfers_layout();
         // The leftmost button on each row is where its label has to stop.
@@ -4326,21 +4279,15 @@ impl ExplorerState {
             let row_band = y..y + TRANSFER_ROW_H;
             let leftmost = controls
                 .iter()
-                .filter(|(_, r)| row_band.contains(&(r.y + r.height / 2.0)))
+                .filter(|(_, r)| row_band.contains(&(r.y + r.h / 2.0)))
                 .map(|(_, r)| r.x)
-                .fold(panel.x + panel.width, f32::min);
+                .fold(panel.x + panel.w, f32::min);
             let room = (leftmost - panel.x - 16.0).max(0.0);
             tree.text_in(panel.x + 8.0, y + 4.0, room, label, self.palette.text, 11.0);
         }
 
         for (control, rect) in controls {
-            tree.fill_rect(
-                rect.x,
-                rect.y,
-                rect.width,
-                rect.height,
-                self.palette.surface0,
-            );
+            tree.fill_rect(rect.x, rect.y, rect.w, rect.h, self.palette.surface0);
             let glyph = match control {
                 TransferControl::CancelRunning(_) | TransferControl::CancelQueued(_) => "\u{2715}",
                 TransferControl::MoveQueuedUp(_) => "\u{25B2}",
@@ -4350,7 +4297,7 @@ impl ExplorerState {
             tree.text_in(
                 rect.x + 4.0,
                 rect.y + 2.0,
-                rect.width - 6.0,
+                rect.w - 6.0,
                 glyph,
                 self.palette.text,
                 11.0,
@@ -5916,7 +5863,7 @@ mod tests {
 
         assert!(bottom > top, "the thumb did not move with the view");
         assert!(
-            bottom + state.scrollbar_thumb().unwrap().h <= track.y + track.height + 0.01,
+            bottom + state.scrollbar_thumb().unwrap().h <= track.y + track.h + 0.01,
             "the thumb ran past the end of its track"
         );
     }
@@ -5933,7 +5880,7 @@ mod tests {
         assert!(press(&mut state, track.x + 2.0, thumb.y + 2.0));
         state.handle_mouse(&MouseEvent {
             x: track.x + 2.0,
-            y: track.y + track.height,
+            y: track.y + track.h,
             kind: MouseEventKind::Move,
         });
 
@@ -6120,8 +6067,8 @@ mod tests {
         send(
             state,
             &Event::Mouse(MouseEvent {
-                x: rect.x + rect.width / 2.0,
-                y: rect.y + rect.height / 2.0,
+                x: rect.x + rect.w / 2.0,
+                y: rect.y + rect.h / 2.0,
                 kind: MouseEventKind::Press(MouseButton::Left),
             }),
         );
@@ -6730,7 +6677,7 @@ mod tests {
             .into_iter()
             .find(|(b, _)| *b == button)
             .unwrap_or_else(|| panic!("{button:?} is not in the layout"));
-        (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0)
+        (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
     }
 
     /// **A greyed button says why**, which a bare `bool` could not.
@@ -7066,8 +7013,8 @@ mod tests {
         send(
             state,
             &Event::Mouse(MouseEvent {
-                x: rect.x + rect.width / 2.0,
-                y: rect.y + rect.height / 2.0,
+                x: rect.x + rect.w / 2.0,
+                y: rect.y + rect.h / 2.0,
                 kind: MouseEventKind::Press(MouseButton::Left),
             }),
         );
@@ -7256,7 +7203,7 @@ mod tests {
                 panel.contains(rect.x, rect.y),
                 "{control:?} is drawn outside the panel"
             );
-            let (cx, cy) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+            let (cx, cy) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
             assert_eq!(
                 state.transfers_control_at(cx, cy),
                 Some(control),
@@ -7282,8 +7229,8 @@ mod tests {
         send(
             state,
             &Event::Mouse(MouseEvent {
-                x: rect.x + rect.width / 2.0,
-                y: rect.y + rect.height / 2.0,
+                x: rect.x + rect.w / 2.0,
+                y: rect.y + rect.h / 2.0,
                 kind: MouseEventKind::Press(MouseButton::Left),
             }),
         );
@@ -10269,6 +10216,10 @@ mod tests {
 
     /// Opening it splits the pane, and the two halves tile it exactly.
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the last pane reaching the edge exactly is the property under test"
+    )]
     fn opening_the_preview_splits_the_pane() {
         settingsfile::testing::with_scratch_config("preview-split", |_root| {
             let scratch = temp_dir("preview_split");
@@ -10281,14 +10232,19 @@ mod tests {
 
             let (list, preview) = state.preview_panes().expect("a split");
             let whole = state.pane_rect();
-            assert!(list.width > 0.0 && preview.width > 0.0);
+            assert!(list.w > 0.0 && preview.w > 0.0);
+            // Exact, not a tolerance: the splitter gives the last pane what
+            // remains precisely so this holds to the bit, and a tolerance here
+            // would pass against an implementation that had dropped that --
+            // which is exactly how the splitter's own tiling test managed to
+            // prove nothing until it was sabotage-checked.
             assert_eq!(
-                preview.x + preview.width,
-                whole.x + whole.width,
+                preview.x + preview.w,
+                whole.x + whole.w,
                 "the preview must reach the pane's edge exactly"
             );
             assert!(
-                (preview.x - (list.x + list.width) - splitter::DIVIDER).abs() < 0.01,
+                (preview.x - (list.x + list.w) - splitter::DIVIDER).abs() < 0.01,
                 "the divider belongs between them"
             );
         });
@@ -10349,7 +10305,7 @@ mod tests {
             let before = state.preview_split;
 
             let (list, _) = state.preview_panes().expect("a split");
-            let divider_x = list.x + list.width;
+            let divider_x = list.x + list.w;
             state.divider_grab = Some(0.0);
             assert!(
                 state.drag_divider(divider_x - 120.0),
@@ -10385,9 +10341,9 @@ mod tests {
 
             let (list, _) = state.preview_panes().expect("a split");
             assert!(
-                list.width >= LIST_MIN_W - 1.0,
+                list.w >= LIST_MIN_W - 1.0,
                 "the listing was squeezed to {}, below its minimum",
-                list.width
+                list.w
             );
         });
     }
@@ -10404,7 +10360,7 @@ mod tests {
             state.preview_open = true;
             let (list, _) = state.preview_panes().expect("a split");
 
-            let grabbed = state.divider_grab_at(list.x + list.width, list.y + 40.0);
+            let grabbed = state.divider_grab_at(list.x + list.w, list.y + 40.0);
             assert!(grabbed.is_some(), "the divider was not grabbable");
         });
     }
@@ -10420,7 +10376,7 @@ mod tests {
             let state = state_at(&root);
             let whole = state.pane_rect();
             assert_eq!(
-                state.divider_grab_at(whole.x + whole.width * 0.65, whole.y + 40.0),
+                state.divider_grab_at(whole.x + whole.w * 0.65, whole.y + 40.0),
                 None
             );
         });

@@ -2169,6 +2169,8 @@ dependencies = [
  "imagecodec",
  "oswindow",
  "safeio",
+ "scratchdir",
+ "settingsfile",
  "thumbs",
 ]
 

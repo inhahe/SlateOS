@@ -14,6 +14,9 @@
 //! - Timeline view grouping photos by date
 //! - Slideshow mode with configurable interval and transitions
 //! - Import of a single file through a picker, with its EXIF read
+//! - The library is saved to `photolibrary.txt` and read back at start:
+//!   photographs, ratings, flags, tags and colour labels survive closing
+//!   the window. See `library` for the format and what it omits.
 //! - Re-import detection by path and size, not by image content
 //! - Batch operations: tag, rate, move, delete
 //! - Multi-panel UI: sidebar, thumbnail grid, info panel
@@ -49,11 +52,6 @@
 //!   with date-based organization". There is no `read_dir` in this crate;
 //!   `import_from_disk` takes a single path from the picker, and nothing
 //!   organises anything by date.
-//! - **The library is not saved.** Every photograph imported in a session is
-//!   gone when the window closes: there is no file written anywhere, and no
-//!   code here reads one. Albums, ratings, tags and colour labels go with it.
-//!   This is the largest remaining gap and it is not a small one -- the whole
-//!   of what this application is *for* currently lasts until it is closed.
 //! - **The single-photo view has no zoom and no pan.** The list claimed
 //!   both. The only `Zoom` in this file is the name of a slideshow
 //!   transition. The grid's four card sizes, listed above, are a different
@@ -80,6 +78,8 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::doc_markdown)]
+
+mod library;
 
 use appearance::Edge;
 use appearance::Palette;
@@ -1739,6 +1739,26 @@ pub struct PhotoApp {
     /// pushing the same request sixty times a second would grow the queue
     /// without bound and starve the cards actually on screen behind it.
     thumb_queued_for: Option<u64>,
+    /// Where the library is saved, or `None` for a library that is not saved
+    /// at all -- which is what every test gets unless it asks otherwise.
+    library_path: Option<std::path::PathBuf>,
+    /// The exact text last written, so a save happens only when something
+    /// changed.
+    ///
+    /// The whole serialization rather than a hash of it: a hash would be
+    /// smaller and would make two different libraries compare equal once in a
+    /// very long while, and the cost of that coincidence is a save that never
+    /// happens. A few hundred kilobytes is the cheaper side of that trade.
+    last_written: Option<String>,
+    /// Why the library could not be loaded or saved, when it could not.
+    library_note: Option<String>,
+    /// Records the file held that this build could not read.
+    ///
+    /// **Saving is refused while this is non-zero.** A file with one corrupt
+    /// line loads every other photograph; writing that back would delete the
+    /// corrupt one permanently, turning a line somebody could still repair by
+    /// hand into nothing at all.
+    library_unread: usize,
 }
 
 impl Default for PhotoApp {
@@ -1761,6 +1781,10 @@ impl PhotoApp {
             thumb_ready: HashMap::new(),
             thumb_uploads: Vec::new(),
             thumb_queued_for: None,
+            library_path: None,
+            last_written: None,
+            library_note: None,
+            library_unread: 0,
             photos: Vec::new(),
             albums: Vec::new(),
             smart_albums: Vec::new(),
@@ -1865,6 +1889,117 @@ impl PhotoApp {
     }
 
     /// Find a photo by ID.
+    /// An application whose library is saved to `path`, and loaded from it now.
+    #[must_use]
+    pub fn with_storage(path: std::path::PathBuf) -> Self {
+        let mut app = Self::new();
+        app.library_path = Some(path);
+        app.load_library();
+        app
+    }
+
+    /// Read the library file, if there is one to read.
+    ///
+    /// A missing file is not an error: it is what a first run looks like, and
+    /// saying so would be an alarm about the ordinary case.
+    fn load_library(&mut self) {
+        let Some(path) = self.library_path.clone() else {
+            return;
+        };
+        let text = match safeio::read_to_string_capped(&path, Self::MAX_LIBRARY_BYTES) {
+            Ok(read) if read.truncated => {
+                self.library_note = Some(format!(
+                    "the library file is larger than {} MiB and was not read",
+                    Self::MAX_LIBRARY_BYTES / (1024 * 1024)
+                ));
+                // Nothing was loaded, so everything is unread; refusing to save
+                // is exactly right.
+                self.library_unread = 1;
+                return;
+            }
+            Ok(read) => read.text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                self.library_note = Some(format!("could not read the library: {e}"));
+                self.library_unread = 1;
+                return;
+            }
+        };
+        match library::parse(&text) {
+            Ok(loaded) => {
+                self.library_unread = loaded.skipped;
+                if loaded.skipped > 0 {
+                    self.library_note = Some(format!(
+                        "{} record(s) in the library could not be read; \
+                         it will not be overwritten",
+                        loaded.skipped
+                    ));
+                }
+                self.photo_id_gen = IdGen::new(
+                    loaded
+                        .photos
+                        .iter()
+                        .map(|p| p.id)
+                        .max()
+                        .map_or(1, |m| m.saturating_add(1)),
+                );
+                self.photos = loaded.photos;
+                // What is on disk is what is in memory, so nothing is owed
+                // until the user changes something.
+                self.last_written = Some(library::serialize(&self.photos));
+            }
+            Err(e) => {
+                self.library_note = Some(format!("could not read the library: {e}"));
+                self.library_unread = 1;
+            }
+        }
+    }
+
+    /// Write the library, but only if it differs from what is already there.
+    ///
+    /// Called after every event rather than from each of the dozen places that
+    /// change something. A flag set at each call site is one `self.dirty =
+    /// true` away from losing a change silently, and the failure is invisible
+    /// until someone notices their ratings did not survive a restart; a
+    /// comparison against the bytes last written cannot be forgotten.
+    fn persist_if_changed(&mut self) {
+        let Some(path) = self.library_path.clone() else {
+            return;
+        };
+        if self.library_unread > 0 {
+            // See `library_unread`: never overwrite a file we could not read
+            // in full.
+            return;
+        }
+        let text = library::serialize(&self.photos);
+        if self.last_written.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        if let Some(dir) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(dir)
+        {
+            self.library_note = Some(format!("could not save the library: {e}"));
+            return;
+        }
+        match safeio::write_atomically(&path, text.as_bytes()) {
+            Ok(()) => {
+                self.last_written = Some(text);
+                self.library_note = None;
+            }
+            Err(e) => {
+                self.library_note = Some(format!("could not save the library: {e}"));
+            }
+        }
+    }
+
+    /// The most bytes of library file to read.
+    ///
+    /// A library of a hundred thousand photographs is a few tens of megabytes
+    /// of text, so this is generous; the point is that a file which has been
+    /// corrupted into something enormous cannot be read into memory whole
+    /// before anything objects.
+    const MAX_LIBRARY_BYTES: usize = 64 * 1024 * 1024;
+
     /// Thumbnails generated per frame.
     ///
     /// Generation is synchronous -- `thumbs` has no worker thread -- so this
@@ -4304,7 +4439,13 @@ impl App for PhotoApp {
                 }
             }
             other => {
-                if self.handle_event(other) {
+                let redraw = self.handle_event(other);
+                // After the handler, not inside it: every path that changes a
+                // rating, a flag or the photo list goes through here, and this
+                // is the one place that cannot be forgotten when a new one is
+                // added.
+                self.persist_if_changed();
+                if redraw {
                     Response::Redraw
                 } else {
                     Response::Idle
@@ -4387,7 +4528,13 @@ fn main() -> ExitCode {
     // that do not exist, taken on a camera you do not own, is a worse first
     // window than an empty one -- and it cannot be clicked through to anything
     // real, so the impression it makes is the only thing it ever does.
-    let mut app = PhotoApp::new();
+    // The library is read here rather than in `new()`, so that a test does
+    // not depend on the machine it runs on -- the same split as
+    // `load_appearance` elsewhere in the tree.
+    let mut app = match library::default_path() {
+        Some(path) => PhotoApp::with_storage(path),
+        None => PhotoApp::new(),
+    };
     app::launch("photomanager", &mut app)
 }
 
@@ -4400,6 +4547,8 @@ fn main() -> ExitCode {
     clippy::float_cmp
 )]
 mod tests {
+    use scratchdir::ScratchDir;
+
     use super::*;
 
     // --- ImageFormat tests ---
@@ -5858,6 +6007,173 @@ mod tests {
         }
         assert_eq!(app.photos.len(), 2, "the fixture did not import its photos");
         app
+    }
+
+    /// A photograph, its rating and its flag survive closing the window.
+    ///
+    /// The whole point. Before this, every import, rating and flag lasted
+    /// exactly as long as the process.
+    #[test]
+    fn a_library_survives_a_restart() {
+        let scratch = ScratchDir::new("photomanager-restart");
+        let path = scratch.path("photolibrary.txt");
+        let picture = scratch.path("holiday.png");
+        std::fs::write(&picture, imagecodec::testing::png_gradient(4, 4)).expect("write");
+
+        let pid = {
+            let mut app = PhotoApp::with_storage(path.clone());
+            app.import_from_disk(&picture);
+            let pid = app.photos.first().expect("imported").id;
+            assert!(app.rate_photo(pid, 5), "the control failed: not rated");
+            assert!(app.toggle_flag(pid), "the control failed: not flagged");
+            app.add_tag(pid, "pier");
+            app.persist_if_changed();
+            pid
+        };
+
+        let reopened = PhotoApp::with_storage(path);
+        assert_eq!(reopened.photos.len(), 1, "the photograph did not come back");
+        let photo = reopened.photos.first().expect("one");
+        assert_eq!(photo.id, pid, "and it is the same one");
+        assert_eq!(photo.rating, 5, "the rating did not survive");
+        assert!(photo.flagged, "the flag did not survive");
+        assert_eq!(
+            photo.tags,
+            vec!["pier".to_owned()],
+            "the tag did not survive"
+        );
+        assert!(
+            reopened.library_note.is_none(),
+            "{:?}",
+            reopened.library_note
+        );
+    }
+
+    /// The save goes through `safeio`, not `fs::write`.
+    ///
+    /// The two leave identical bytes, so nothing else can tell them apart --
+    /// and `fs::write` truncates before it writes, so an interrupted save
+    /// would destroy the whole library rather than one photograph.
+    #[test]
+    fn the_save_is_atomic() {
+        let scratch = ScratchDir::new("photomanager-atomic");
+        let path = scratch.path("photolibrary.txt");
+        let picture = scratch.path("p.png");
+        std::fs::write(&picture, imagecodec::testing::png_gradient(4, 4)).expect("write");
+
+        let mut app = PhotoApp::with_storage(path);
+        app.import_from_disk(&picture);
+        let before = safeio::writes_performed();
+        app.persist_if_changed();
+        assert!(
+            safeio::writes_performed() > before,
+            "the library must be written through safeio::write_atomically"
+        );
+    }
+
+    /// Nothing is written when nothing changed.
+    #[test]
+    fn an_unchanged_library_is_not_rewritten() {
+        let scratch = ScratchDir::new("photomanager-unchanged");
+        let path = scratch.path("photolibrary.txt");
+        let picture = scratch.path("p.png");
+        std::fs::write(&picture, imagecodec::testing::png_gradient(4, 4)).expect("write");
+
+        let mut app = PhotoApp::with_storage(path);
+        app.import_from_disk(&picture);
+        app.persist_if_changed();
+
+        let before = safeio::writes_performed();
+        app.persist_if_changed();
+        app.persist_if_changed();
+        assert_eq!(
+            safeio::writes_performed(),
+            before,
+            "an unchanged library was written again"
+        );
+    }
+
+    /// A library file that could not be read in full is never overwritten.
+    ///
+    /// The dangerous case, and the reason `library_unread` exists. One corrupt
+    /// line still loads every other photograph -- and saving that back would
+    /// delete the corrupt one for good, turning something a person could still
+    /// repair in a text editor into nothing at all.
+    #[test]
+    fn a_library_that_did_not_fully_load_is_not_overwritten() {
+        let scratch = ScratchDir::new("photomanager-unread");
+        let path = scratch.path("photolibrary.txt");
+        // The second record is truncated: too few fields to be a photograph.
+        let original = "PHOTOLIBRARY|1\n\
+             PHOTO|1|/a.jpg|a.jpg|10|jpeg|100||3|none|0|0|\n\
+             PHOTO|2|/b.jpg\n";
+        std::fs::write(&path, original).expect("write");
+
+        let mut app = PhotoApp::with_storage(path.clone());
+        assert_eq!(app.photos.len(), 1, "the good record still loaded");
+        assert_eq!(
+            app.library_unread, 1,
+            "the control failed: nothing was skipped"
+        );
+        assert!(app.library_note.is_some(), "the user is not told");
+
+        // Change something, then try to save.
+        assert!(app.rate_photo(1, 5));
+        app.persist_if_changed();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            original,
+            "a file that could not be read in full was overwritten"
+        );
+    }
+
+    /// A first run has no library file, and that is not an error.
+    #[test]
+    fn a_missing_library_is_an_ordinary_first_run() {
+        let scratch = ScratchDir::new("photomanager-firstrun");
+        let path = scratch.path("nothing-here.txt");
+
+        let app = PhotoApp::with_storage(path);
+        assert!(app.photos.is_empty());
+        assert_eq!(app.library_unread, 0);
+        assert!(
+            app.library_note.is_none(),
+            "a first run was reported as a problem: {:?}",
+            app.library_note
+        );
+    }
+
+    /// Ids carry on from where the saved library left off.
+    ///
+    /// Without this the generator would restart at 1 and the next import
+    /// would be given an id a saved photograph already has -- so a rating
+    /// typed on one would land on the other.
+    #[test]
+    fn ids_do_not_restart_over_a_saved_library() {
+        let scratch = ScratchDir::new("photomanager-ids");
+        let path = scratch.path("photolibrary.txt");
+        let one = scratch.path("one.png");
+        let two = scratch.path("two.png");
+        std::fs::write(&one, imagecodec::testing::png_gradient(4, 4)).expect("write");
+        std::fs::write(&two, imagecodec::testing::png_gradient(5, 4)).expect("write");
+
+        let first_id = {
+            let mut app = PhotoApp::with_storage(path.clone());
+            app.import_from_disk(&one);
+            app.persist_if_changed();
+            app.photos.first().expect("one").id
+        };
+
+        let mut reopened = PhotoApp::with_storage(path);
+        reopened.import_from_disk(&two);
+        let ids: Vec<PhotoId> = reopened.photos.iter().map(|p| p.id).collect();
+        assert_eq!(ids.len(), 2, "both photographs are present");
+        assert_ne!(
+            ids.first(),
+            ids.get(1),
+            "the new import reused a saved photograph's id: {ids:?} (first was {first_id})"
+        );
     }
 
     /// A fixture whose files are real pictures, not merely real files.

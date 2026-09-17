@@ -26,5 +26,17 @@ thumbs = { path = "../../gui/thumbs" }
 # nothing left to be protected from.
 safeio = { path = "../safeio" }
 
+# Where the library file lives. The answer to "which directory?" belongs in
+# one place, and this is where every other application asks.
+settingsfile = { path = "../../gui/settingsfile" }
+
+[dev-dependencies]
+# The same crate with its counters on, so a test can prove the save really
+# went through `safeio::write_atomically` rather than quietly regressing to
+# `fs::write` -- the two leave identical bytes, so nothing else can tell them
+# apart.
+safeio = { path = "../safeio", features = ["audit"] }
+scratchdir = { path = "../../userspace/scratchdir" }
+
 [lints]
 workspace = true

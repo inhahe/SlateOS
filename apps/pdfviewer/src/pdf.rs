@@ -19,13 +19,15 @@
 //! 5. **Content streams**, whose text operators give each page its words and
 //!    where they sit. [`extract_text`].
 //!
-//! **What is deliberately not here yet.** A font's `/Encoding` is not read, so
-//! `WinAnsiEncoding` is assumed; and a *composite* font's text is not decoded
-//! at all, because its codes are multi-byte and mean nothing without the
-//! font's `/ToUnicode` map. A page drawn entirely in composite fonts
-//! therefore yields no text -- and is counted in
-//! [`Document::unreadable_pages`], so that "no results" from a search can be
-//! told apart from "nothing to find". Cross-reference *streams* (PDF 1.5's
+//! 6. **`/ToUnicode` CMaps**, which say what a composite font's codes mean.
+//!    [`parse_cmap`] and [`CMap::decode`].
+//!
+//! **What is deliberately not here yet.** A simple font's `/Encoding` is not
+//! read, so `WinAnsiEncoding` is assumed. A composite font *without* a
+//! `/ToUnicode` map still yields nothing -- its codes are glyph indices into a
+//! subset font and relate to no character -- and such a page is counted in
+//! [`Document::unreadable_pages`], so "no results" from a search can be told
+//! apart from "nothing to find". Cross-reference *streams* (PDF 1.5's
 //! compressed replacement for the table) are not read either, so a file using
 //! them is refused by name rather than half-read; [`Error::XrefStream`] says
 //! so. Refusing is the point: a viewer that opened such a file and showed
@@ -52,6 +54,14 @@
 //! without the files. Text runs measured afterwards: 451 from the
 //! quick-start, 4372 from the manual, 0 from the guide with all 47 pages
 //! counted unread.
+//!
+//! **Then the CMaps went in and the guide came back.** Its 47 pages hold
+//! 16922 runs, beginning "Voxengo | Primary | User Guide", which is its title
+//! page; the quick-start rose from 451 to 507, because one of its fonts was
+//! composite too and had been skipped whole. All three documents now report
+//! zero unread pages. `bfchar` is measured against both; **`bfrange` is
+//! implemented from the specification and measured against nothing**, since
+//! neither file uses a range -- both write every code out as a pair.
 //!
 //! **Hostile input is the normal case.** A PDF is a file from elsewhere, and
 //! every length in it is a claim. Nothing here allocates on the strength of a
@@ -952,7 +962,13 @@ fn page_text(
     // this was measured against uses them throughout, so every page came back
     // with no text and nothing said why -- and a search over it would have
     // answered "no results" about a document that is full of words.
-    let blocked = runs.is_empty() && fonts.values().any(|kind| *kind == FontKind::Composite);
+    // Unreadable only when nothing could have decoded it. A composite font
+    // that brought its `/ToUnicode` is readable; one without is not, and the
+    // difference is the whole point of carrying the map this far.
+    let blocked = runs.is_empty()
+        && fonts
+            .values()
+            .any(|font| font.kind == FontKind::Composite && font.to_unicode.is_none());
     (runs, readable && !blocked)
 }
 
@@ -979,15 +995,30 @@ fn font_map(data: &[u8], offsets: &BTreeMap<u32, usize>, resources: Option<&Obje
         return map;
     };
     for (name, entry) in fonts {
-        let kind = match resolve(data, offsets, entry, 0) {
-            Ok(font) => match font.as_dict().and_then(|d| d.get("Subtype")) {
-                Some(Object::Name(subtype)) if subtype == "Type0" => FontKind::Composite,
-                Some(_) => FontKind::Simple,
-                None => FontKind::Composite,
-            },
-            Err(_) => FontKind::Composite,
+        let Ok(font) = resolve(data, offsets, entry, 0) else {
+            // A font that will not resolve is assumed composite and mapless,
+            // which decodes nothing: the cautious direction, since decoding an
+            // unknown font's codes as bytes invents characters.
+            map.insert(name.clone(), Font::composite(None));
+            continue;
         };
-        map.insert(name.clone(), kind);
+        let dict = font.as_dict();
+        let composite = matches!(
+            dict.and_then(|d| d.get("Subtype")),
+            Some(Object::Name(subtype)) if subtype == "Type0"
+        ) || dict.is_none_or(|d| !d.contains_key("Subtype"));
+        if !composite {
+            map.insert(name.clone(), Font::simple());
+            continue;
+        }
+        // `/ToUnicode` hangs off the Type0 font itself, not its descendant.
+        let cmap = dict
+            .and_then(|d| d.get("ToUnicode"))
+            .and_then(|entry| resolve(data, offsets, entry, 0).ok())
+            .and_then(|stream| stream_bytes_resolved(data, offsets, &stream).ok())
+            .map(|bytes| parse_cmap(&bytes))
+            .filter(|cmap| !cmap.is_empty());
+        map.insert(name.clone(), Font::composite(cmap));
     }
     map
 }
@@ -1209,8 +1240,42 @@ pub enum FontKind {
     Composite,
 }
 
+/// One font a page's `/Resources` declares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Font {
+    pub kind: FontKind,
+    /// The `/ToUnicode` map, when the file supplies one.
+    ///
+    /// A composite font without one cannot be read at all: its codes are glyph
+    /// indices into a subset font and carry no relation to any character. A
+    /// *simple* font does not need one, because its codes are bytes in an
+    /// encoding -- so `None` means "unreadable" for one kind and "no matter"
+    /// for the other, and the two must not be collapsed.
+    pub to_unicode: Option<CMap>,
+}
+
+impl Font {
+    /// A one-byte-per-character font.
+    #[must_use]
+    pub const fn simple() -> Self {
+        Self {
+            kind: FontKind::Simple,
+            to_unicode: None,
+        }
+    }
+
+    /// A composite font, with its map if the file gave one.
+    #[must_use]
+    pub const fn composite(to_unicode: Option<CMap>) -> Self {
+        Self {
+            kind: FontKind::Composite,
+            to_unicode,
+        }
+    }
+}
+
 /// The fonts a page's `/Resources` declares, by the name `Tf` uses.
-pub type FontMap = BTreeMap<String, FontKind>;
+pub type FontMap = BTreeMap<String, Font>;
 
 /// The identity matrix, which `BT` resets both text matrices to.
 const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
@@ -1275,7 +1340,7 @@ pub fn extract_text(content: &[u8], fonts: &FontMap) -> Vec<TextRun> {
     let mut line_matrix = IDENTITY;
     let mut font_size = 0.0f32;
     let mut leading = 0.0f32;
-    let mut composite = false;
+    let mut font: Option<&Font> = None;
 
     while let Some(piece) = lexer.content_piece() {
         let op = match piece {
@@ -1298,11 +1363,9 @@ pub fn extract_text(content: &[u8], fonts: &FontMap) -> Vec<TextRun> {
                 if let Some(size) = operands.last().and_then(Object::as_f64) {
                     font_size = size as f32;
                 }
-                composite = match operands.iter().rev().nth(1) {
-                    Some(Object::Name(name)) => {
-                        matches!(fonts.get(name), Some(FontKind::Composite))
-                    }
-                    _ => false,
+                font = match operands.iter().rev().nth(1) {
+                    Some(Object::Name(name)) => fonts.get(name),
+                    _ => None,
                 };
             }
             b"TL" => {
@@ -1339,7 +1402,7 @@ pub fn extract_text(content: &[u8], fonts: &FontMap) -> Vec<TextRun> {
                     text_matrix = line_matrix;
                 }
                 if let Some(Object::Str(bytes)) = operands.last() {
-                    push_run(&mut runs, bytes, text_matrix, font_size, composite);
+                    push_run(&mut runs, bytes, text_matrix, font_size, font);
                 }
             }
             b"TJ" => {
@@ -1353,7 +1416,7 @@ pub fn extract_text(content: &[u8], fonts: &FontMap) -> Vec<TextRun> {
                             joined.extend_from_slice(bytes);
                         }
                     }
-                    push_run(&mut runs, &joined, text_matrix, font_size, composite);
+                    push_run(&mut runs, &joined, text_matrix, font_size, font);
                 }
             }
             _ => {}
@@ -1379,12 +1442,25 @@ fn push_run(
     bytes: &[u8],
     matrix: [f32; 6],
     font_size: f32,
-    composite: bool,
+    font: Option<&Font>,
 ) {
-    if composite || bytes.is_empty() {
+    if bytes.is_empty() {
         return;
     }
-    let text: String = bytes.iter().filter_map(|b| win_ansi(*b)).collect();
+    // Three cases, and the middle one is the whole reason a font is carried
+    // here rather than a boolean. A composite font *with* a map decodes; one
+    // without stays unreadable; a simple font never needed one.
+    let text: String = match font {
+        Some(Font {
+            kind: FontKind::Composite,
+            to_unicode: Some(cmap),
+        }) => cmap.decode(bytes),
+        Some(Font {
+            kind: FontKind::Composite,
+            to_unicode: None,
+        }) => return,
+        _ => bytes.iter().filter_map(|b| win_ansi(*b)).collect(),
+    };
     if text.trim().is_empty() {
         return;
     }
@@ -1453,6 +1529,210 @@ impl Lexer<'_> {
     fn bump(&mut self) {
         self.pos = self.pos.saturating_add(1);
     }
+}
+
+/// The most entries a `/ToUnicode` map may hold.
+///
+/// A CMap is a file from elsewhere and its entry count is a claim. 65536 is
+/// every code a two-byte codespace can express, so nothing legitimate is
+/// turned away by the cap.
+const MAX_CMAP_ENTRIES: usize = 65_536;
+
+/// A `/ToUnicode` map: what a font's codes mean.
+///
+/// Without one, a composite font's text cannot be read at all -- the codes are
+/// glyph indices in a subset font and carry no relation to any character.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CMap {
+    /// How many bytes make one code, from `begincodespacerange`.
+    ///
+    /// Two for `/Identity-H`, which is what every composite font in the
+    /// documents this was measured against uses. One is legal and handled;
+    /// three and four are legal, rare, and treated as two rather than guessed
+    /// at, because splitting a string on the wrong width silently produces
+    /// characters that were never on the page.
+    code_bytes: usize,
+    entries: BTreeMap<u32, String>,
+}
+
+impl CMap {
+    /// The text one code stands for, if the map says.
+    #[must_use]
+    pub fn lookup(&self, code: u32) -> Option<&str> {
+        self.entries.get(&code).map(String::as_str)
+    }
+
+    /// Whether the map says nothing at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Split a show operator's bytes into codes and look each one up.
+    ///
+    /// A code the map does not cover contributes nothing: it is a glyph whose
+    /// character this file never stated, and inventing one would put a
+    /// character on the page that is not there.
+    #[must_use]
+    pub fn decode(&self, bytes: &[u8]) -> String {
+        let width = self.code_bytes.clamp(1, 2);
+        let mut out = String::new();
+        for chunk in bytes.chunks(width) {
+            let mut code = 0u32;
+            for byte in chunk {
+                code = code.saturating_mul(256).saturating_add(u32::from(*byte));
+            }
+            if let Some(text) = self.lookup(code) {
+                out.push_str(text);
+            }
+        }
+        out
+    }
+}
+
+/// A big-endian integer from a hex string's bytes.
+fn be_code(bytes: &[u8]) -> u32 {
+    let mut code = 0u32;
+    for byte in bytes.iter().take(4) {
+        code = code.saturating_mul(256).saturating_add(u32::from(*byte));
+    }
+    code
+}
+
+/// UTF-16BE bytes as text, or `None` if they are not valid UTF-16.
+///
+/// Strict rather than lossy. An entry that will not decode is left out of the
+/// map, so its code draws nothing; mapping it to a replacement character would
+/// put a visible `U+FFFD` into the document's text and into search results.
+fn utf16be(bytes: &[u8]) -> Option<String> {
+    let mut units = Vec::new();
+    for pair in bytes.chunks_exact(2) {
+        if let [hi, lo] = pair {
+            units.push(u16::from_be_bytes([*hi, *lo]));
+        }
+    }
+    if units.is_empty() {
+        return None;
+    }
+    String::from_utf16(&units).ok()
+}
+
+/// Read a `/ToUnicode` CMap.
+///
+/// The syntax is postfix like a content stream, so it walks with the same
+/// [`Lexer::content_piece`]. It needs its own loop rather than
+/// [`extract_text`]'s because a CMap's operands come in one long run -- 85
+/// `bfchar` entries are 170 operands before the `endbfchar` that consumes
+/// them -- and that loop caps operands at 64 to stop a malformed content
+/// stream growing without bound.
+#[must_use]
+pub fn parse_cmap(bytes: &[u8]) -> CMap {
+    let mut lexer = Lexer::new(bytes);
+    let mut map = CMap {
+        code_bytes: 2,
+        entries: BTreeMap::new(),
+    };
+    let mut operands: Vec<Object> = Vec::new();
+
+    while let Some(piece) = lexer.content_piece() {
+        let op = match piece {
+            Piece::Value(value) => {
+                if operands.len() < MAX_CMAP_ENTRIES.saturating_mul(3) {
+                    operands.push(value);
+                }
+                continue;
+            }
+            Piece::Op(op) => op,
+        };
+        match op.as_slice() {
+            b"endcodespacerange" => {
+                // The first low bound's width is the code width. Every
+                // codespace in one CMap has the same width in practice, and a
+                // file mixing widths needs the full multi-range machinery this
+                // does not have.
+                if let Some(Object::Str(low)) = operands.first() {
+                    if !low.is_empty() {
+                        map.code_bytes = low.len();
+                    }
+                }
+            }
+            b"endbfchar" => {
+                for pair in operands.chunks_exact(2) {
+                    if let [Object::Str(src), Object::Str(dst)] = pair {
+                        if map.entries.len() >= MAX_CMAP_ENTRIES {
+                            break;
+                        }
+                        if let Some(text) = utf16be(dst) {
+                            map.entries.insert(be_code(src), text);
+                        }
+                    }
+                }
+            }
+            b"endbfrange" => {
+                for triple in operands.chunks_exact(3) {
+                    let [Object::Str(lo), Object::Str(hi), dst] = triple else {
+                        continue;
+                    };
+                    let (lo, hi) = (be_code(lo), be_code(hi));
+                    if hi < lo {
+                        continue;
+                    }
+                    match dst {
+                        // `<lo> <hi> <dst>`: consecutive codes map to
+                        // consecutive characters from `dst`.
+                        Object::Str(dst) => {
+                            let Some(base) = utf16be(dst) else { continue };
+                            let Some(first) = base.chars().next() else {
+                                continue;
+                            };
+                            let tail: String = base.chars().skip(1).collect();
+                            for (step, code) in (lo..=hi).enumerate() {
+                                if map.entries.len() >= MAX_CMAP_ENTRIES {
+                                    break;
+                                }
+                                let Ok(step) = u32::try_from(step) else { break };
+                                let Some(scalar) = u32::from(first).checked_add(step) else {
+                                    break;
+                                };
+                                let Some(ch) = char::from_u32(scalar) else {
+                                    continue;
+                                };
+                                let mut text = String::new();
+                                text.push(ch);
+                                text.push_str(&tail);
+                                map.entries.insert(code, text);
+                            }
+                        }
+                        // `<lo> <hi> [<d0> <d1> ...]`: one destination each.
+                        Object::Array(items) => {
+                            for (offset, item) in items.iter().enumerate() {
+                                let Object::Str(dst) = item else { continue };
+                                let Ok(offset) = u32::try_from(offset) else {
+                                    break;
+                                };
+                                let Some(code) = lo.checked_add(offset) else {
+                                    break;
+                                };
+                                if code > hi || map.entries.len() >= MAX_CMAP_ENTRIES {
+                                    break;
+                                }
+                                if let Some(text) = utf16be(dst) {
+                                    map.entries.insert(code, text);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        // Every operator here consumes what came before it, including the
+        // `begin*` forms whose count operand is not needed: the entries are
+        // counted by walking them, not by believing the number.
+        operands.clear();
+    }
+    map
 }
 
 #[cfg(test)]
@@ -1677,7 +1957,7 @@ mod tests {
 
     fn simple_fonts() -> FontMap {
         let mut map = FontMap::new();
-        map.insert("T1_0".to_owned(), FontKind::Simple);
+        map.insert("T1_0".to_owned(), Font::simple());
         map
     }
 
@@ -1721,14 +2001,14 @@ mod tests {
     #[test]
     fn a_composite_font_yields_no_text() {
         let mut fonts = FontMap::new();
-        fonts.insert("C2_0".to_owned(), FontKind::Composite);
+        fonts.insert("C2_0".to_owned(), Font::composite(None));
         let content = b"BT /C2_0 12 Tf 1 0 0 1 10 10 Tm (\x00H\x00i) Tj ET";
         assert!(extract_text(content, &fonts).is_empty());
 
         // And the same bytes under a simple font do produce something, so the
         // test above is about the font and not about the string.
         let mut simple = FontMap::new();
-        simple.insert("C2_0".to_owned(), FontKind::Simple);
+        simple.insert("C2_0".to_owned(), Font::simple());
         assert!(!extract_text(content, &simple).is_empty());
     }
 
@@ -1907,6 +2187,216 @@ mod tests {
         assert_eq!(
             doc.unreadable_pages, 1,
             "a page nobody could read must not look like an empty one"
+        );
+    }
+
+    /// `bfchar` pairs, which is what both measured documents use.
+    #[test]
+    fn a_bfchar_map_reads_its_pairs() {
+        let src = b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+2 beginbfchar\n<0003> <0020>\n<0024> <0041>\nendbfchar\n";
+        let map = parse_cmap(src);
+        assert_eq!(map.lookup(0x0003), Some(" "));
+        assert_eq!(map.lookup(0x0024), Some("A"));
+        assert_eq!(map.lookup(0x0099), None, "a code the file never mapped");
+    }
+
+    /// Two-byte codes are split on the codespace width, not guessed.
+    #[test]
+    fn decoding_splits_on_the_codespace_width() {
+        let src = b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+2 beginbfchar\n<0003> <0048>\n<0004> <0069>\nendbfchar\n";
+        let map = parse_cmap(src);
+        assert_eq!(map.decode(&[0x00, 0x03, 0x00, 0x04]), "Hi");
+        // An unmapped code contributes nothing rather than a guess.
+        assert_eq!(map.decode(&[0x00, 0x03, 0x99, 0x99]), "H");
+    }
+
+    /// A one-byte codespace is honoured.
+    #[test]
+    fn a_single_byte_codespace_is_read_as_one_byte() {
+        let src = b"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n\
+1 beginbfchar\n<41> <0041>\nendbfchar\n";
+        let map = parse_cmap(src);
+        assert_eq!(map.decode(&[0x41, 0x41]), "AA");
+    }
+
+    /// `bfrange`, both forms.
+    ///
+    /// **Implemented from the specification, not measured.** Neither PDF this
+    /// reader was checked against uses a range -- both write every code out as
+    /// a `bfchar` pair -- so unlike the rest of this module these two forms
+    /// have no real document behind them, only the tests here.
+    #[test]
+    fn a_bfrange_covers_consecutive_codes() {
+        let src = b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+1 beginbfrange\n<0010> <0012> <0041>\nendbfrange\n";
+        let map = parse_cmap(src);
+        assert_eq!(map.lookup(0x0010), Some("A"));
+        assert_eq!(
+            map.lookup(0x0011),
+            Some("B"),
+            "the range steps the character"
+        );
+        assert_eq!(map.lookup(0x0012), Some("C"));
+        assert_eq!(map.lookup(0x0013), None, "and stops at the high bound");
+    }
+
+    #[test]
+    fn a_bfrange_with_an_array_names_each_one() {
+        let src = b"1 beginbfrange\n<0020> <0022> [<0058> <0059> <005A>]\nendbfrange\n";
+        let map = parse_cmap(src);
+        assert_eq!(map.lookup(0x0020), Some("X"));
+        assert_eq!(map.lookup(0x0021), Some("Y"));
+        assert_eq!(map.lookup(0x0022), Some("Z"));
+    }
+
+    /// An entry whose destination is not valid UTF-16 is left out.
+    ///
+    /// A lone high surrogate has no character. Mapping it to `U+FFFD` would
+    /// put a visible replacement character into the page text and into every
+    /// search result over it.
+    #[test]
+    fn an_undecodable_destination_is_dropped_not_replaced() {
+        let src = b"1 beginbfchar\n<0005> <D800>\nendbfchar\n";
+        let map = parse_cmap(src);
+        assert_eq!(map.lookup(0x0005), None);
+        assert!(map.is_empty());
+    }
+
+    /// A range whose bounds are backwards is ignored rather than looped over.
+    #[test]
+    fn a_backwards_range_is_ignored() {
+        let src = b"1 beginbfrange\n<00FF> <0001> <0041>\nendbfrange\n";
+        assert!(parse_cmap(src).is_empty());
+    }
+
+    /// A one-page PDF drawn in a composite font carrying a `/ToUnicode` map.
+    ///
+    /// Object 5 is the Type0 font, 7 its CMap stream. The codes below are
+    /// two-byte, as `/Identity-H` requires.
+    fn pdf_with_composite_text() -> Vec<u8> {
+        const NL: u8 = 10;
+        let content: &[u8] = b"BT /F1 14 Tf 1 0 0 1 72 700 Tm <00030004000500050006> Tj ET";
+        let cmap: &[u8] = b"/CIDInit /ProcSet findresource begin\n\
+begincmap\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+5 beginbfchar\n<0003> <0048>\n<0004> <0065>\n<0005> <006C>\n<0006> <006F>\n\
+<0007> <0021>\nendbfchar\nendcmap\n";
+
+        let mut out: Vec<u8> = Vec::new();
+        let mut offsets: Vec<usize> = Vec::new();
+        out.extend_from_slice(b"%PDF-1.4");
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj");
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(b"2 0 obj << /Type /Pages /Count 1 /Kids [3 0 R] >> endobj");
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(
+            b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >> endobj",
+        );
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(format!("4 0 obj << /Length {} >>", content.len()).as_bytes());
+        out.push(NL);
+        out.extend_from_slice(b"stream");
+        out.push(NL);
+        out.extend_from_slice(content);
+        out.push(NL);
+        out.extend_from_slice(b"endstream endobj");
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(
+            b"5 0 obj << /Type /Font /Subtype /Type0 /Encoding /Identity-H \
+/DescendantFonts [6 0 R] /ToUnicode 7 0 R >> endobj",
+        );
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(
+            b"6 0 obj << /Type /Font /Subtype /CIDFontType2 /BaseFont /Test >> endobj",
+        );
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(format!("7 0 obj << /Length {} >>", cmap.len()).as_bytes());
+        out.push(NL);
+        out.extend_from_slice(b"stream");
+        out.push(NL);
+        out.extend_from_slice(cmap);
+        out.push(NL);
+        out.extend_from_slice(b"endstream endobj");
+        out.push(NL);
+
+        let xref_at = out.len();
+        out.extend_from_slice(b"xref");
+        out.push(NL);
+        out.extend_from_slice(format!("0 {}", offsets.len() + 1).as_bytes());
+        out.push(NL);
+        out.extend_from_slice(b"0000000000 65535 f");
+        out.push(NL);
+        for off in &offsets {
+            out.extend_from_slice(format!("{off:010} 00000 n").as_bytes());
+            out.push(NL);
+        }
+        out.extend_from_slice(
+            format!("trailer << /Size {} /Root 1 0 R >>", offsets.len() + 1).as_bytes(),
+        );
+        out.push(NL);
+        out.extend_from_slice(b"startxref");
+        out.push(NL);
+        out.extend_from_slice(format!("{xref_at}").as_bytes());
+        out.push(NL);
+        out.extend_from_slice(b"%%EOF");
+        out
+    }
+
+    /// A composite font with a `/ToUnicode` map reads, end to end.
+    ///
+    /// The whole chain in one test: the page's `/Resources` names the font,
+    /// the font names its CMap, the CMap stream is fetched and parsed, and the
+    /// show operator's two-byte codes are split and looked up. Before this the
+    /// same page produced nothing and was counted unread -- which is what a
+    /// 47-page guide measured against this reader did, all of it.
+    #[test]
+    fn a_composite_font_with_a_map_reads_end_to_end() {
+        let doc = read(&pdf_with_composite_text()).expect("reads");
+        let page = doc.pages.first().expect("a page");
+        assert_eq!(
+            page.text.first().map(|r| r.text.as_str()),
+            Some("Hello"),
+            "the two-byte codes were not decoded through the font's map"
+        );
+        assert_eq!(
+            doc.unreadable_pages, 0,
+            "a page that decoded is not an unread one"
+        );
+    }
+
+    /// The same page without the map is unread, not empty.
+    ///
+    /// Same file, one reference removed. This is the pair that makes the test
+    /// above about the map rather than about the fixture.
+    #[test]
+    fn the_same_page_without_its_map_is_unread() {
+        let file = pdf_with_composite_text();
+        // Blank the reference, keeping every byte offset intact so the
+        // cross-reference table still points where it says.
+        let patched =
+            String::from_utf8_lossy(&file).replace("/ToUnicode 7 0 R", "/ToUnicodd 7 0 R");
+        let doc = read(patched.as_bytes()).expect("still reads");
+        assert!(doc.pages.first().expect("a page").text.is_empty());
+        assert_eq!(
+            doc.unreadable_pages, 1,
+            "a composite page with no map must be counted, not silently empty"
         );
     }
 

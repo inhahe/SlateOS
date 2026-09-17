@@ -155219,6 +155219,29 @@ corrected here after checking rather than asserting twice in a row:
   touches exactly two files, which is the fact that decides whether this is
   an evening's work or a week's.
 
+  **Worked design, 2026-09-16, so the next session starts from a plan rather
+  than a survey.** The widget does not need byte surgery: `Path::components()`
+  does the breadcrumb split, so no `OsStr` splitting is involved.
+
+  * `path: PathBuf` instead of `String`; `segments` keeps display strings for
+    drawing, and a breadcrumb click joins components up to the clicked one.
+  * `Navigate(String)` becomes `Navigate(PathBuf)`. `apps/explorer` is the only
+    matcher.
+  * `edit_text` **stays a `String`** — it is a text field with a caret, and the
+    cursor handling there is BiDi-aware byte offsets that should not be
+    disturbed. Typing produces text, and text is what `PathBuf::from` takes.
+  * The exactness is kept the way `RunDialog` already keeps it: on entering
+    edit mode, store `edit_exact: Option<PathBuf>` beside the lossy
+    `edit_text`; on confirm, if `edit_text` still equals the lossy rendering,
+    navigate to `edit_exact`, otherwise to `PathBuf::from(edit_text)`. That is
+    `command_exact`'s logic, which is already proven in this tree and was
+    nearly "fixed" out of it this evening by someone who did not read around
+    the line.
+
+  What this buys: a directory whose name is not UTF-8 displays and navigates
+  correctly unless the user edits the text, which is the same guarantee the
+  file dialog and the run dialog give.
+
 Saying "one extra field" for all three was the same error as the entries it was
 correcting: a scope stated without being measured. The difference matters
 because it decides whether someone starts.

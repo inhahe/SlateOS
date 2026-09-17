@@ -156720,6 +156720,24 @@ survives, then the check — which is how
 `fields-written-never-read-baseline.txt` itself describes its own 46: "a
 triage queue, not an amnesty".
 
+**Most of the count is one known cause, and that makes the triage far
+cheaper than 347 suggests.** Per crate: `gui/desktop` 84, `gui/compositor`
+23, `apps/torrent` 23, `apps/email` 21, then a long tail. The 84 are very
+largely the fields of panels nothing can display -- `ink_level`, `stapling`,
+`collation` and `submitted_at` all belong to `print_manager.rs`, which is
+1961 lines and 44 tests whose only mention anywhere in the tree is `pub mod
+print_manager;`. That is not a new finding; it is
+`TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`, which counted about
+fifty such modules and named this one. **Do not triage those field by field.**
+They are dead because their module is unreachable, and they stop being dead
+the moment it is reached, so they follow that entry's decision and not this
+one's.
+
+What is left for this entry is the rest: the tail across `apps/`, where a
+field is dead on its own account rather than because its whole module is.
+`apps/camera`'s `view_mode` is the shape to look for -- a feature half-built
+inside a module that does run.
+
 **Proper fix.** Work the list down in batches, per crate, deciding for each
 field whether it is a feature to finish or state to delete. When it is small
 enough to enumerate, add the "declared and never read" arm to the gate with

@@ -61,5 +61,9 @@ for crate, paths in sorted(by_crate.items()):
                 suspects.append((p, name))
 
 print("fields declared and never read as `.name`: %d" % len(suspects))
-for p, name in suspects[:25]:
+# All of them, not a sample. This exists to be triaged from, and a list that
+# stops at twenty-five sends the reader back to the script to find the rest --
+# which is how the per-crate counts came out wrong the first time they were
+# asked for.
+for p, name in suspects:
     print("  %-46s %s" % (p.replace("\\", "/"), name))

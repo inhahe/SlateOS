@@ -155303,12 +155303,25 @@ command reaches `go_back`.
 Two consequences for whoever picks this up:
 
 * The work is a *caller*, not an implementation. The type is complete.
-* A caller needs one thing that genuinely does not exist: the entries are
-  tagged strings -- `image:<path>`, `slideshow:<path>`, `solid:theme`,
-  `dynamic` -- and **nothing anywhere parses them back**. Going back requires
-  turning an entry into a wallpaper again, and that reader has never been
-  written. A typed enum would be the better shape, and would also settle what
-  `image:` does with a path containing a colon.
+* ~~A caller needs one thing that genuinely does not exist: the entries are
+  tagged strings and nothing parses them back.~~ **Done 2026-09-17:** the
+  entries are a `WallpaperChoice` enum -- `Solid(Color)`, `SolidTheme`,
+  `Image(PathBuf)`, `Slideshow(PathBuf)`, `Dynamic` -- so there is nothing to
+  parse, and what `image:` should do with a path containing a colon cannot
+  arise.
+* **§858 removed the other blocker.** The history was recording every automatic
+  slideshow advance, so at the default interval a twenty-entry buffer turned
+  over in ten minutes and a user's own choice was evicted by a slideshow they
+  left running. Only deliberate acts are recorded now.
+* **What remains is a caller, and it is deliberately not built.**
+  `roadmap-detailed.md`'s Desktop Background section has **no bullet for
+  history navigation**, so adding a menu item would be inventing a feature
+  rather than implementing one. The nearest thing to a specification is the
+  kernel-side `wallpaper` kshell command's `history` subcommand
+  (`roadmap.md` §2761, lane A), which is not this shell. If it is wanted, the
+  desktop's context menu is the obvious home -- with the wrinkle that the menu
+  is built once and reused, so items whose enabled state depends on there being
+  something to go back to need it rebuilt when shown.
 
 **A version marker is required, not optional.** Existing files hold the path
 raw under `["wallpaper", "image"]`. Writing encoded text into the same key

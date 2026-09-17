@@ -367,14 +367,27 @@ impl Extents {
 ///   below, Hebrew sheva below, shin dot above-right, and so on.
 ///
 /// Unicode's other fixed-position classes — 103 and 107 (Thai), 118 and 122
-/// (Lao), 129–132 (Tibetan) — are deliberately absent, along with the Thai and
-/// Lao vowel signs that carry class 0 despite being drawn above or below. Not
-/// because they have no answer but because nothing can ask the question: the
-/// one caller asks only about a run whose script passed
-/// [`positions_marks`], and `thai`, `lao ` and `tibt` are all in
-/// [`COMPLEX_SCRIPTS`]. Arms for them would be claims no test could check and
-/// no sweep could measure. HarfBuzz declines those scripts' fallback placement
-/// too, so their absence changes no output.
+/// (Lao) — are absent, along with the Thai and Lao vowel signs that carry
+/// class 0 despite being drawn above or below. Arms for them would be claims
+/// no test could check and no sweep could measure, which is the only reason
+/// they are not here.
+///
+/// **That used to be said of Tibetan's 129 to 132 as well**, on the grounds
+/// that the one caller asks only about a run whose script passed
+/// [`positions_marks`] and `tibt` is in [`COMPLEX_SCRIPTS`], so nothing could
+/// ask the question. It was wrong, and measurably so. `positions_marks` takes
+/// a second argument: a face that files its features under `DFLT` has called
+/// the complex shaper off, and HarfBuzz then shapes the run with its
+/// *default* shaper, whose `fallback_position` is `true`. So a Tibetan run on
+/// a face with no Tibetan reaches here after all, and HarfBuzz places those
+/// marks rather than declining — traced stage by stage with
+/// `tools/hb_trace.py`. Ten runs in the supplementary corpus were landing
+/// every Tibetan vowel sign at `y` 0, because the class fell through
+/// `other -> other` to a `place` arm that does not exist.
+///
+/// The same argument would now admit Thai and Lao. They stay out until a
+/// corpus string measures them, which is the standard the Tibetan arms below
+/// had to meet.
 ///
 /// The mapping is HarfBuzz's `recategorize_combining_class`, transposed from
 /// its "modified" combining classes back onto Unicode's. HarfBuzz permutes
@@ -404,6 +417,19 @@ pub(crate) fn attach_class(ch: char) -> u8 {
         // Arabic and Syriac vowels: everything above but kasra and kasratan.
         27 | 28 | 30 | 31 | 33..=36 => ABOVE,
         29 | 32 => BELOW,
+        // Tibetan vowel signs. Their classes are fixed positions like the 200s
+        // but numbered below them, so they need naming here or they reach
+        // `place` as a number it has no arm for and the mark stays at the
+        // base's origin. `aa` (129) and `u` (132) hang under the letter, `i`
+        // (130) sits over it.
+        //
+        // These are Unicode's raw classes, not the permuted ones
+        // [`norm::display_class`] sorts by: 130 and 132 trade places there, so
+        // that `u` is drawn before `i` in a multi-vowel Dzongkha syllable. The
+        // permutation is injective, so matching the raw value here picks
+        // exactly the same characters after the sort as before it.
+        129 | 132 => BELOW,
+        130 => ABOVE,
         other => other,
     }
 }
@@ -760,6 +786,33 @@ mod tests {
         assert_eq!(attach_class('\u{0301}'), ABOVE);
         assert_eq!(attach_class('\u{0323}'), BELOW);
         assert_eq!(attach_class('\u{0328}'), ATTACHED_BELOW);
+    }
+
+    /// Tibetan's vowel signs are positions, not just an ordering.
+    ///
+    /// They carry fixed classes numbered below 200, so without an arm each one
+    /// arrives at [`place`] as a number it has no case for and the mark stays
+    /// on the base's origin. Measured against HarfBuzz on a face with no
+    /// Tibetan in it: `u` lands 1934 font units under the letter and `i` the
+    /// same distance over it, and before these arms both sat at 0.
+    ///
+    /// The `i`/`u` pair is also the one the display order swaps, so this
+    /// doubles as a check that [`attach_class`] reads the *raw* class: key it
+    /// on `norm::display_class` instead and the two answers trade places,
+    /// putting the vowel `i` underneath.
+    #[test]
+    fn tibetan_vowel_signs_have_positions() {
+        assert_eq!(
+            attach_class('\u{0F72}'),
+            ABOVE,
+            "vowel i is drawn over the letter"
+        );
+        assert_eq!(attach_class('\u{0F74}'), BELOW, "vowel u is drawn under it");
+        assert_eq!(
+            attach_class('\u{0F71}'),
+            BELOW,
+            "vowel aa is drawn under it"
+        );
     }
 
     #[test]

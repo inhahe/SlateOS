@@ -470,7 +470,12 @@ pub struct SettingsState {
     // Navigation
     pub current_category: SettingsCategory,
     pub current_page: SettingsPage,
-    pub search_query: String,
+    /// What has been typed into the sidebar's search box.
+    ///
+    /// A [`TextInput`] since 2026-09-17. It was a `String` with `push` and
+    /// `pop`, so a mistyped query could only be fixed from the end -- and the
+    /// box drew no caret, because there was no caret to draw.
+    pub search_query: TextInput,
     pub search_focused: bool,
     pub sidebar_hovered: Option<usize>,
 
@@ -1273,7 +1278,7 @@ impl SettingsState {
         Self {
             current_category: SettingsCategory::System,
             current_page: SettingsPage::Display,
-            search_query: String::new(),
+            search_query: TextInput::new(),
             search_focused: false,
             sidebar_hovered: None,
 
@@ -3047,7 +3052,7 @@ impl SettingsState {
             pal.surface0,
             8.0,
         );
-        if self.search_query.is_empty() {
+        if self.search_query.text().is_empty() && !self.search_focused {
             tree.text(
                 24.0,
                 search_y + 12.0,
@@ -3056,14 +3061,27 @@ impl SettingsState {
                 13.0,
             );
         } else {
-            text_clipped(
+            // Through the toolkit's own single-line drawer, which is what puts
+            // a caret and a selection on screen. `text_clipped` drew neither,
+            // and could not: it is handed a string and nothing else.
+            textedit::draw(
                 tree,
-                24.0,
-                search_y + 12.0,
-                &self.search_query,
-                pal.text,
-                13.0,
-                SIDEBAR_WIDTH - 52.0,
+                &textedit::SingleLine {
+                    text: self.search_query.text(),
+                    cursor: self.search_query.cursor(),
+                    selection_anchor: self.search_query.selection_anchor(),
+                    focused: self.search_focused,
+                    x: 24.0,
+                    y: search_y + 12.0,
+                    width: SIDEBAR_WIDTH - 52.0,
+                    line_height: 18.0,
+                    font_size: FIELD_FONT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: pal.text,
+                    selection_bg: pal.accent,
+                    selection_fg: pal.crust,
+                    caret_width: 1.5,
+                },
             );
         }
 
@@ -5499,7 +5517,53 @@ impl SettingsState {
         if self.search_focused {
             match evt.key {
                 Key::Backspace => {
-                    self.search_query.pop();
+                    self.search_query.backspace();
+                    return EventResult::Consumed;
+                }
+                Key::Delete => {
+                    self.search_query.delete();
+                    return EventResult::Consumed;
+                }
+                // The caret moves, and moves visually. None of this was
+                // reachable while the query was a `String`.
+                Key::Left => {
+                    self.search_query.move_cursor_left(
+                        evt.modifiers.shift,
+                        FIELD_FONT_SIZE,
+                        FontWeightHint::Regular,
+                    );
+                    return EventResult::Consumed;
+                }
+                Key::Right => {
+                    self.search_query.move_cursor_right(
+                        evt.modifiers.shift,
+                        FIELD_FONT_SIZE,
+                        FontWeightHint::Regular,
+                    );
+                    return EventResult::Consumed;
+                }
+                Key::Home => {
+                    self.search_query.move_home(evt.modifiers.shift);
+                    return EventResult::Consumed;
+                }
+                Key::End => {
+                    self.search_query.move_end(evt.modifiers.shift);
+                    return EventResult::Consumed;
+                }
+                Key::A if evt.modifiers.ctrl => {
+                    self.search_query.select_all();
+                    return EventResult::Consumed;
+                }
+                Key::C if evt.modifiers.ctrl => {
+                    self.search_query.copy();
+                    return EventResult::Consumed;
+                }
+                Key::X if evt.modifiers.ctrl => {
+                    self.search_query.cut();
+                    return EventResult::Consumed;
+                }
+                Key::V if evt.modifiers.ctrl => {
+                    self.search_query.paste();
                     return EventResult::Consumed;
                 }
                 Key::Escape => {
@@ -5509,7 +5573,9 @@ impl SettingsState {
                 }
                 _ => {
                     if evt.types_text() {
-                        self.search_query.extend(evt.typed());
+                        for ch in evt.typed() {
+                            self.search_query.insert_char(ch);
+                        }
                         return EventResult::Consumed;
                     }
                 }
@@ -6116,10 +6182,10 @@ impl SettingsState {
 
     /// Check if a category/page matches the current search query.
     pub fn matches_search(&self, text: &str) -> bool {
-        if self.search_query.is_empty() {
+        if self.search_query.text().is_empty() {
             return true;
         }
-        let query_lower = self.search_query.to_lowercase();
+        let query_lower = self.search_query.text().to_lowercase();
         let text_lower = text.to_lowercase();
         if text_lower.contains(&query_lower) {
             return true;
@@ -6149,7 +6215,7 @@ impl SettingsState {
     /// resolved against a different list is how a click lands on the wrong
     /// category.
     pub fn filtered_categories(&self) -> Vec<SettingsCategory> {
-        if self.search_query.is_empty() {
+        if self.search_query.text().is_empty() {
             return SettingsCategory::ALL.to_vec();
         }
         SettingsCategory::ALL
@@ -6896,7 +6962,7 @@ mod tests {
         let state = SettingsState::new();
         assert_eq!(state.current_category, SettingsCategory::System);
         assert_eq!(state.current_page, SettingsPage::Display);
-        assert!(state.search_query.is_empty());
+        assert!(state.search_query.text().is_empty());
         assert!(!state.appearance.settings.night_light);
         assert_eq!(state.appearance.settings.theme_mode, ThemeMode::Dark);
     }
@@ -7013,7 +7079,7 @@ mod tests {
     #[test]
     fn test_search_filter_categories() {
         let mut state = SettingsState::new();
-        state.search_query = "wifi".to_string();
+        state.search_query.set_text("wifi");
         let filtered = state.filtered_categories();
         assert!(filtered.contains(&SettingsCategory::Network));
         assert!(!filtered.contains(&SettingsCategory::System));
@@ -7131,7 +7197,7 @@ mod tests {
             "the unfiltered sidebar does not draw Network: {all:?}"
         );
 
-        state.search_query = "network".to_string();
+        state.search_query.set_text("network");
         let filtered = sidebar_labels(&state);
 
         assert!(
@@ -7155,7 +7221,7 @@ mod tests {
         let mut state = SettingsState::new();
         // A query that certainly excludes the first category, so an index into
         // `ALL` and an index into the filtered list cannot agree by accident.
-        state.search_query = "network".to_string();
+        state.search_query.set_text("network");
         let visible = state.filtered_categories();
         assert!(!visible.is_empty(), "the query matched nothing at all");
         assert_ne!(
@@ -7717,6 +7783,42 @@ mod tests {
                 "ab",
                 "typing went on landing in a field the user had clicked away from"
             );
+        });
+    }
+
+    /// The search box takes a caret too, and shows one.
+    ///
+    /// It was a `String` with `push` and `pop`: a mistyped query could only be
+    /// fixed from the end, and the box drew no caret because there was none to
+    /// draw. Asserted through the key handler and then on the drawn commands,
+    /// since "the model moved the caret" and "the user can see where it is"
+    /// are separate claims and only the second is the feature.
+    #[test]
+    fn the_search_box_has_a_caret_and_draws_it() {
+        with_scratch_config("settings-search-caret", |_root| {
+            let mut state = SettingsState::new();
+            state.search_focused = true;
+            type_text(&mut state, "wfi");
+
+            // Back two and insert the missing letter.
+            state.handle_event(&key_press(Key::Left));
+            state.handle_event(&key_press(Key::Left));
+            type_text(&mut state, "i");
+            assert_eq!(
+                state.search_query.text(),
+                "wifi",
+                "the caret did not move back into the query"
+            );
+
+            let tree = state.render_tree();
+            // A `Line`, which is what `textedit::push_caret` emits -- not a
+            // thin `FillRect`, which is what this test looked for first and
+            // is how the caret is drawn in the page rows.
+            let painted = tree.commands.iter().any(|c| {
+                matches!(c, guitk::render::RenderCommand::Line { width, .. }
+                    if (width - 1.5).abs() < f32::EPSILON)
+            });
+            assert!(painted, "no caret was drawn in a focused search box");
         });
     }
 

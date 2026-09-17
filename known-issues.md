@@ -157725,6 +157725,161 @@ script, so every glyph in the run is already a box. The reason to fix it is
 that the USE corpus is otherwise at `differ` 0 and would become a clean
 instrument, the way the default corpus now is.
 
+### MOSTLY FIXED 2026-09-17 — and the mechanism above was wrong
+
+**In short:** the five refuted hypotheses were all aimed at the wrong pass.
+HarfBuzz is not zeroing these marks in the routine this entry names; it is
+doing it inside its *fallback mark positioning*, the very pass this entry
+argued was not involved. Asking HarfBuzz directly settled in one run what
+guessing had not in five. `misplaced` on the supplementary corpus is
+**40 -> 15**, with the default corpus unmoved at 1 and `differ` still 0.
+
+**How it was settled.** `uharfbuzz` exposes `hb_buffer_set_message_func`,
+which reports each shaping stage as it happens. Printing the buffer's
+advances and offsets at every stage for Javanese `U+A98F U+A9C0` on Hack-Bold
+(`gui/font/tools/hb_trace.py`, added with this fix):
+
+    start table GSUB script tag 'DFLT'   (unchanged)
+    start fallback mark   [(0, 1233, 0, 0), (0, 1233, 0, 0)]
+    end   fallback mark   [(0, 1233, 0, 0), (0, 0, -1233, 0)]
+
+Both halves of the divergence appear in one stage, and it is not
+`zero_mark_widths_by_gdef`. Two further measurements explain *why* that stage
+runs at all, when this entry had reasoned it could not:
+
+* `hb.ot_layout_has_glyph_classes(face)` is **0** for Hack-Bold. The face has
+  no `GlyphClassDef`, so the entry's "on any face that classifies its glyphs
+  at all" never applied to the face the divergence was measured on.
+* The trace line above says `script tag 'DFLT'`. A face with no Javanese
+  script table sends HarfBuzz to the **default** shaper, not USE — and the
+  default shaper's `fallback_position` is `true`. The entry's "HarfBuzz's
+  Thai, Myanmar and USE shapers all set `fallback_position = false`" is
+  correct and irrelevant: none of them is the shaper that ran.
+
+  This tree already models that, in `fallback::positions_marks`'s `simple`
+  argument, fed from `face.shapes_as_default(script)`. It was working.
+
+**The sixth hypothesis, which held.** The pass ran; the run had no marks in
+it to place. Our role assignment asked `SubGlyph::mark`, which is `Mn` alone,
+and `U+A9C0` JAVANESE PANGKON is `Mc`. HarfBuzz clusters a run for
+`_hb_ot_shape_fallback_mark_position` with
+`HB_UNICODE_GENERAL_CATEGORY_IS_MARK`, which counts `Mn`, `Mc` and `Me`. So
+the mark was never in a cluster, nothing placed it and nothing zeroed it.
+
+`SubGlyph` now carries **both** questions — `mark` for zeroing, `any_mark`
+for clustering — and `mark_roles` asks the wide one. The narrow predicate
+stays exactly where it was: a spacing combining mark occupies width, and
+zeroing it would pile a Devanagari matra onto its consonant, which is what
+`norm::is_mark`'s own doc warns about.
+
+| corpus | before | after |
+|---|---|---|
+| default | `misplaced` 1 | `misplaced` **1** |
+| supplementary USE | `misplaced` 40 | `misplaced` **15** |
+
+**What the remaining 15 are.** Three strings on five faces each, and two
+distinct shapes — neither of them the one fixed here:
+
+* Tibetan `U+0F40 U+0F72 U+0F74` and `U+0F56 U+0F40 U+0FB2 U+0F0B U+0F64
+  U+0F72 U+0F66`: the advance is now zeroed and agrees, and the *vertical*
+  placement does not. We put the mark at `y` 0; HarfBuzz stacks it at
+  -1934 and +1934, which are its combining classes 130 (above) and 132
+  (below) resolved against the base's extents. So the next question is what
+  our extents for a `.notdef` base come back as, since a zero-height base
+  would place every mark at 0 exactly as observed.
+* Sinhala `U+0D9A U+200D U+0DCA U+0DBB`: glyph 2 at 1233 against 0. A ZWJ
+  sits between the letter and the virama, so this is likely about whether a
+  default-ignorable breaks the cluster — `hide_ignorables` deliberately
+  keeps a hidden mark's role, and the mirror question here is whether it
+  keeps its place in the cluster the fallback walks.
+
+**Lesson, and it is the same one as the fifth refutation.** Five hypotheses
+were spent guessing which predicate HarfBuzz used, when HarfBuzz was
+available the whole time to be asked which *pass* it used. The instrument
+that settled it was fifteen lines of Python. Reach for the oracle's own
+introspection before the next predicate.
+
+### THEN 15 -> 5 — the Tibetan ten, and a guess of mine refuted in passing
+
+**In short:** every Tibetan case above is fixed too. The cause was not the one
+I guessed one paragraph earlier, and the guess is worth keeping visible: I
+wrote that "a zero-height base would place every mark at 0 exactly as
+observed". The base is not zero-height. `hb_font_get_glyph_extents` on
+Hack-Bold's `.notdef` returns `y_bearing 1444, height -1806` — a real box.
+
+**What it actually was.** `fallback::attach_class` had no arm for Tibetan's
+combining classes, so 129, 130 and 132 fell through `other -> other` and
+reached `place` as numbers it has no case for, leaving `y` at 0. Its doc said
+they were left out because "nothing can ask the question", `tibt` being in
+`COMPLEX_SCRIPTS` — the same false premise this entry started with, and
+false for the same reason: `positions_marks` takes a `simple` argument, and a
+`DFLT`-only face makes it true.
+
+**The arithmetic confirms our formulas were right all along.** With the base
+extents above and a gap of `upem/16` = 128, `place`'s own expressions give
+
+    below:  1444 + (-1806 - 128) - 1444        = -1934
+    above:  (1444 + 128) - (1444 + -1806)      = +1934
+
+which are exactly HarfBuzz's two offsets. Nothing about the placement maths
+needed changing; the classes simply never reached it.
+
+**Why the signs are not inverted.** HarfBuzz puts `-1934` on the *first* mark,
+and vowel `i` (U+0F72) is drawn above, which looks backwards until the
+reordering is taken into account: `norm::display_class` permutes 130 to 132
+and 132 to 131, so `u` sorts before `i` and the first mark in the buffer is
+`u`, which does belong below. We already do that sort —
+`sort_marks(&mut out, display_class)` — which is why adding the arms was
+enough on its own.
+
+| corpus | at the start | after clustering on `M*` | after the Tibetan arms |
+|---|---|---|---|
+| default | `misplaced` 1 | 1 | **1** |
+| supplementary USE | `misplaced` 40 | 15 | **5** |
+
+**All that is left is Sinhala** `U+0D9A U+200D U+0DCA U+0DBB` on five faces:
+glyph 2 at 1233 against HarfBuzz's 0. A ZWJ sits between the letter and the
+virama, so the question is whether a default-ignorable breaks the cluster the
+fallback walks. `hide_ignorables` deliberately keeps a hidden mark's *role*;
+the mirror question is whether it keeps its place in the cluster.
+
+### FIXED 2026-09-17 — supplementary corpus `misplaced` 0
+
+**In short:** it was the cluster, and the answer to the mirror question was
+no. A blanked ZWJ kept `Role::Base`, which ended the run of marks before it
+and started a new cluster, so the Sinhala virama measured itself against the
+invisible joiner instead of the consonant — and an invisible glyph is
+exactly as wide as nothing, so it landed a whole letter to the right.
+
+**Both corpora are now clean instruments:**
+
+| corpus | agree | differ | misplaced |
+|---|---|---|---|
+| default | 60490 | 0 | 1 |
+| supplementary USE | 32243 | 0 | **0** |
+
+The one remaining default-corpus case is the long-standing `SegUIVar` CGJ
+entry, which is a deliberate divergence, not a defect.
+
+**Why a third role rather than a special case.** `Role` had `Base` and
+`Mark`, and a default ignorable is honestly neither. As a mark it would be
+placed and zeroed, which is work on a glyph with nothing to draw; as a base
+it cuts the cluster. `Role::Ignored` says what it is and the walk steps over
+it, which is the same treatment `Role::Mark`'s own note already prescribed
+for class-zero marks: *"Calling it a base instead restarts the measurement
+halfway through a syllable."* The note was right and its reasoning simply had
+not been carried across to the ignorables.
+
+**Only a base is demoted.** A default ignorable that is *itself* a combining
+mark — U+034F and the variation selectors are `Mn` — keeps `Role::Mark`,
+which `hide_ignorables`' existing doc asks for and a test pins. It is
+transparent to the walk either way.
+
+**Note on the delete path.** A face with no space glyph deletes ignorables
+outright, taking their roles with them, so it never had this bug. Only the
+blanking path did, which is why it needed a face that *has* a space —
+Hack-Bold — to show up at all.
+
 ### [A] RESOLVED -- the leaf check's first real finding: `INOTIFY_TABLE` is not a leaf, and its documented lock order was unenforceable because of it -- 2026-09-17
 
 **In short:** two locks have to be taken in a fixed order or the kernel can
@@ -157887,7 +158042,21 @@ whoever edits the file, a feature list misleads everybody.
 
 **Proper fix.** Work the list down in batches, per crate, deciding for each
 field whether it is a feature to finish or state to delete. Read the module's
-own doc comment alongside, and correct it in the same pass. When it is small
+own doc comment alongside, and correct it in the same pass.
+
+**"Delete it" is not always the answer, and the difference is legible.**
+`apps/camera`'s three were a bare `usize`, a bare enum value and a 64-byte
+zero buffer: nothing was lost by deleting them, because nothing had ever been
+decided. `apps/archivemanager`'s `CreateArchiveSettings` is the other kind --
+nine fields, a `Default`, and a `validate()` that returns "Output path", "No
+source", and refusals for encryption and splitting on formats that do not
+support them, with four tests over it. It is constructed only by those tests,
+so it is as dead as the rest of this list, but it is *reasoned* dead code: a
+model somebody thought through for a create-archive dialog that was never
+built. Deleting that is a decision about whether the dialog is coming, which
+is the question `open-questions.md` **C-Q17** already puts to the operator
+about five larger cases. Left in place and named here rather than removed on
+a triage pass's own authority. When it is small
 enough to enumerate, add the "declared and never read" arm to the gate with
 the survivors baselined. Deleting is usually right: a field nobody reads has
 never worked, so nothing can depend on it.

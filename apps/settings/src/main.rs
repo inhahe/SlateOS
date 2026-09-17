@@ -726,6 +726,7 @@ pub enum DropdownId {
     /// When quiet hours begin.
     /// How long each picture in a rotation stays up.
     RotationInterval,
+    LoginBackground,
     QuietStart,
     /// When they end. Earlier than the start means they run through midnight,
     /// which is what nearly everyone wants and what the default is.
@@ -900,11 +901,30 @@ impl SettingsState {
     }
 
     fn open_wallpaper_dialog(&mut self) {
-        let start = self
-            .appearance
-            .settings
-            .wallpaper
-            .as_deref()
+        let start = self.appearance.settings.wallpaper.clone();
+        self.open_picture_dialog(PickerPurpose::Wallpaper, start.as_deref());
+    }
+
+    /// Choose the picture the login screen shows.
+    fn open_login_image_dialog(&mut self) {
+        let start = match &self.appearance.settings.login_background {
+            appearance::LoginBackground::CustomImage(path) => Some(path.clone()),
+            // No picture of its own yet, so start where the desktop's is: the
+            // two are usually in the same folder, and it is a better guess
+            // than the home directory.
+            _ => self.appearance.settings.wallpaper.clone(),
+        };
+        self.open_picture_dialog(PickerPurpose::LoginImage, start.as_deref());
+    }
+
+    /// The picture picker, wherever its answer is going to land.
+    ///
+    /// One opener rather than one per errand: the filter list below is the
+    /// part worth not copying. Passing the extensions bare instead of as globs
+    /// made every directory list as empty, and a second copy of that list is a
+    /// second chance to get it wrong.
+    fn open_picture_dialog(&mut self, purpose: PickerPurpose, near: Option<&std::path::Path>) {
+        let start = near
             .and_then(|p| {
                 std::path::Path::new(p)
                     .parent()
@@ -922,7 +942,7 @@ impl SettingsState {
             // find its own fixture.
             .with_filter("Pictures", &["*.png", "*.jpg", "*.jpeg", "*.bmp"]);
         dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
-        self.picker_is_for = PickerPurpose::Wallpaper;
+        self.picker_is_for = purpose;
         self.dialog = Some(dialog);
     }
 
@@ -955,6 +975,15 @@ impl SettingsState {
                     PickerPurpose::Wallpaper => self.appearance.settings.wallpaper = Some(path),
                     PickerPurpose::RotationFolder => {
                         self.appearance.settings.wallpaper_folder = Some(path);
+                    }
+                    // The mode becomes "a picture" only now, when there is a
+                    // picture. Setting it when the dropdown was clicked would
+                    // leave `login.background: image` with no `login.image` if
+                    // the user cancelled, which reads back as the theme -- a
+                    // setting that silently undoes itself.
+                    PickerPurpose::LoginImage => {
+                        self.appearance.settings.login_background =
+                            appearance::LoginBackground::CustomImage(path);
                     }
                 }
             }
@@ -2189,6 +2218,7 @@ enum ButtonId {
     ClearWallpaper,
     /// Open the picker and choose a folder to rotate wallpapers from.
     ChooseRotationFolder,
+    ChooseLoginImage,
     /// Stop rotating and go back to a single picture.
     ClearRotation,
 }
@@ -2199,6 +2229,28 @@ enum ButtonId {
 /// and the thumbnail sizes make: this is a policy the user picks, not a
 /// measurement they take, and a text field would invite "5 min" and "0.5" and
 /// other things the reader would then have to refuse.
+/// The greeter backgrounds this page can set up from start to finish.
+///
+/// Three, not five. `LoginBackground` also has a solid colour and a gradient,
+/// and both are honoured by the login screen and readable from
+/// `appearance.yaml` — but there is nowhere in this app yet to pick a colour,
+/// so offering them here would be a choice that leads nowhere. They are shown
+/// when already in force and are never silently overwritten. design-decisions
+/// 856: a settings page is built when something obeys it, not when something
+/// stores it, and the same rule refuses a control that cannot finish the job.
+const LOGIN_BACKGROUNDS: [&str; 3] = ["Theme colour", "Same as my desktop", "A picture"];
+
+/// What to call a greeter background in the interface.
+fn login_background_label(bg: &appearance::LoginBackground) -> &'static str {
+    match bg {
+        appearance::LoginBackground::Theme => "Theme colour",
+        appearance::LoginBackground::SameAsDesktop => "Same as my desktop",
+        appearance::LoginBackground::CustomImage(_) => "A picture",
+        appearance::LoginBackground::SolidColor(_) => "A colour (set by hand)",
+        appearance::LoginBackground::Gradient { .. } => "A gradient (set by hand)",
+    }
+}
+
 const ROTATION_INTERVALS: [u64; 6] = [60, 300, 600, 1_800, 3_600, 86_400];
 
 /// How an interval is written on the row.
@@ -2220,6 +2272,7 @@ enum PickerPurpose {
     #[default]
     Wallpaper,
     RotationFolder,
+    LoginImage,
 }
 
 /// What a click on a page landed on.
@@ -3317,6 +3370,36 @@ impl SettingsState {
                 pal.surface1,
                 Some(RowHit::Press(ButtonId::ClearWallpaper)),
             );
+        }
+
+        // On this page rather than a page of its own, because the setting most
+        // people want is "the same as that one" and a choice is easiest to make
+        // next to the thing it is being compared with. `design.txt` line 1247
+        // asks for exactly that: an easy way to make the two the same.
+        s.section("Login screen");
+        s.dropdown_row(
+            "Background",
+            DropdownId::LoginBackground,
+            login_background_label(&self.appearance.settings.login_background),
+        );
+        match &self.appearance.settings.login_background {
+            appearance::LoginBackground::SameAsDesktop => s.note(
+                "The login screen shows whatever the desktop is showing, \
+                 including as a rotation changes it.",
+                28.0,
+            ),
+            appearance::LoginBackground::CustomImage(path) => {
+                s.note(&path.display().to_string(), 28.0);
+                s.button_row(
+                    "Login picture",
+                    "Choose...",
+                    pal.accent,
+                    Some(RowHit::Press(ButtonId::ChooseLoginImage)),
+                );
+            }
+            // The theme needs no explaining, and the two hand-written styles
+            // are named by the dropdown itself.
+            _ => {}
         }
     }
 
@@ -4618,6 +4701,27 @@ impl SettingsState {
                     at,
                 )
             }
+            DropdownId::LoginBackground => {
+                let mut items: Vec<String> =
+                    LOGIN_BACKGROUNDS.iter().map(|b| (*b).to_string()).collect();
+                let current = match &self.appearance.settings.login_background {
+                    appearance::LoginBackground::Theme => 0,
+                    appearance::LoginBackground::SameAsDesktop => 1,
+                    appearance::LoginBackground::CustomImage(_) => 2,
+                    // A colour or a gradient can be written into
+                    // `appearance.yaml` by hand but not built here, because
+                    // there is nowhere yet to pick the colours. Shown as a
+                    // fourth entry so the list says what is actually in force:
+                    // a dropdown that displayed "Theme colour" over a
+                    // hand-written gradient would be reporting a setting the
+                    // machine is not using.
+                    other => {
+                        items.push(login_background_label(other).to_string());
+                        3
+                    }
+                };
+                (items, current)
+            }
             DropdownId::RotationInterval => {
                 let items: Vec<String> = ROTATION_INTERVALS
                     .iter()
@@ -5219,6 +5323,7 @@ impl SettingsState {
                 self.appearance.settings.wallpaper = None;
             }
             RowHit::Press(ButtonId::ChooseRotationFolder) => self.open_rotation_folder_dialog(),
+            RowHit::Press(ButtonId::ChooseLoginImage) => self.open_login_image_dialog(),
             RowHit::Press(ButtonId::ClearRotation) => {
                 self.appearance.settings.wallpaper_folder = None;
             }
@@ -5489,6 +5594,18 @@ impl SettingsState {
                     self.appearance.settings.wallpaper_interval_secs = *secs;
                 }
             }
+            DropdownId::LoginBackground => match index {
+                0 => self.appearance.settings.login_background = appearance::LoginBackground::Theme,
+                1 => {
+                    self.appearance.settings.login_background =
+                        appearance::LoginBackground::SameAsDesktop;
+                }
+                // Straight to the picker: see `PickerPurpose::LoginImage`.
+                2 => self.open_login_image_dialog(),
+                // The hand-written entry. Choosing it means "leave it alone",
+                // which is what doing nothing achieves.
+                _ => {}
+            },
             DropdownId::WallpaperFit => {
                 if let Some(fit) = appearance::ImageFit::ALL.get(index) {
                     self.appearance.settings.wallpaper_fit = *fit;
@@ -6813,6 +6930,129 @@ mod tests {
     /// Three controls of which two govern nothing read as broken rather than
     /// as inapplicable -- the judgement the fit dropdown already makes, and
     /// the one design-decisions 856 is about.
+    /// The dropdown offers the three styles it can set up from start to finish.
+    ///
+    /// Not five. A colour and a gradient are drawn by the login screen and can
+    /// be written into `appearance.yaml`, but this app has nowhere to pick a
+    /// colour, so an entry for them would lead nowhere. design-decisions 856.
+    #[test]
+    fn the_login_background_dropdown_offers_only_what_it_can_finish() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.show_dropdown(DropdownId::LoginBackground);
+
+        let layout = state.dropdown_layout().expect("the dropdown did not open");
+        assert_eq!(
+            layout.items.len(),
+            3,
+            "offered a style it cannot finish setting up: {:?}",
+            layout.items
+        );
+        assert_eq!(layout.selected, 0, "a fresh install is on the theme");
+    }
+
+    /// A style written into the file by hand is reported, not overwritten.
+    ///
+    /// A dropdown that showed "Theme colour" over a hand-written gradient
+    /// would be describing a machine other than the one in front of the user,
+    /// and the first click anywhere in it would silently discard their
+    /// colours.
+    #[test]
+    fn a_hand_written_greeter_style_is_shown_rather_than_misreported() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.appearance.settings.login_background = appearance::LoginBackground::Gradient {
+            top: guitk::color::Color::from_hex(0x112233),
+            bottom: guitk::color::Color::from_hex(0x445566),
+        };
+        state.show_dropdown(DropdownId::LoginBackground);
+
+        let layout = state.dropdown_layout().expect("the dropdown did not open");
+        assert_eq!(layout.items.len(), 4, "the gradient was not listed");
+        assert_eq!(
+            layout.selected, 3,
+            "the list pointed at a style the machine is not using"
+        );
+        assert!(
+            layout.items[3].contains("gradient"),
+            "the entry does not say what it is: {:?}",
+            layout.items[3]
+        );
+    }
+
+    /// "Same as my desktop" is one click, and stores no filename.
+    #[test]
+    fn following_the_desktop_is_one_click() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.show_dropdown(DropdownId::LoginBackground);
+        state.apply_dropdown_selection(1);
+
+        assert_eq!(
+            state.appearance.settings.login_background,
+            appearance::LoginBackground::SameAsDesktop
+        );
+    }
+
+    /// Choosing "A picture" asks which picture.
+    ///
+    /// The setting must not become `CustomImage` before there is a path to put
+    /// in it: an `image` mode with no `login.image` reads back as the theme, so
+    /// a cancelled picker would leave a setting that silently undid itself.
+    #[test]
+    fn choosing_a_picture_asks_which_picture() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.show_dropdown(DropdownId::LoginBackground);
+        state.apply_dropdown_selection(2);
+
+        assert!(state.dialog.is_some(), "no picker appeared");
+        assert_eq!(
+            state.appearance.settings.login_background,
+            appearance::LoginBackground::Theme,
+            "the mode changed before a picture had been named"
+        );
+    }
+
+    /// The picture the picker returns is the picture the greeter is set to.
+    #[test]
+    fn the_chosen_login_picture_lands_in_the_setting() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.show_dropdown(DropdownId::LoginBackground);
+        state.apply_dropdown_selection(2);
+
+        let chosen = std::path::PathBuf::from("/home/u/Pictures/greeter.png");
+        state.apply_dialog_answer(DialogAction::Selected(chosen.clone()));
+
+        assert_eq!(
+            state.appearance.settings.login_background,
+            appearance::LoginBackground::CustomImage(chosen),
+            "the picture the user picked is not the one that was saved"
+        );
+        assert!(state.dialog.is_none(), "the picker stayed up");
+    }
+
+    /// The Choose button appears with a picture to choose, and not otherwise.
+    #[test]
+    fn the_login_picture_row_waits_for_a_picture_style() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+
+        state.appearance.settings.login_background = appearance::LoginBackground::SameAsDesktop;
+        assert!(
+            center_of(&state, RowHit::Press(ButtonId::ChooseLoginImage)).is_none(),
+            "a picture chooser was drawn for a style that uses no picture"
+        );
+
+        state.appearance.settings.login_background =
+            appearance::LoginBackground::CustomImage(std::path::PathBuf::from("/p.png"));
+        assert!(
+            center_of(&state, RowHit::Press(ButtonId::ChooseLoginImage)).is_some(),
+            "no way to change the greeter's picture"
+        );
+    }
+
     #[test]
     fn rotation_detail_rows_wait_for_a_folder() {
         let mut state = SettingsState::new();

@@ -4,14 +4,12 @@
 //! - **Opens a PDF** (Ctrl+O): the header, cross-reference table, trailer and
 //!   page tree are read, so the page count and each page's size and rotation
 //!   come from the file. See [`pdf`].
+//! - **Draws a page's text**: content streams are interpreted, so each page
+//!   shows the words the file puts on it, at the positions and sizes it gives
+//!   them. Composite fonts are decoded through their `/ToUnicode` maps, and
+//!   PDF 1.5 cross-reference and object streams are read.
 //! - PDF document model (pages, metadata, bookmarks/outline)
-//! - Page rendering (placeholder — renders page boxes with text content)
-//!
-//! What it does **not** do is read a page's *contents*: content streams are
-//! not interpreted, so an opened document has the right number of pages at the
-//! right sizes and nothing drawn on them. Files using PDF 1.5 cross-reference
-//! streams are refused by name rather than opened empty, because a document
-//! reported as having zero pages is a claim about the document.
+//! - Page rendering (text; graphics operators are not drawn)
 //! - Zoom controls (fit width, fit page, 25%-400%, zoom in/out)
 //! - Page navigation (next/prev, go to page, first/last)
 //! - Continuous scroll and single-page view modes
@@ -22,6 +20,27 @@
 //! - Recent files list
 //! - Print integration (page range selection)
 //! - Annotation support model (highlights, notes, freehand)
+//!
+//! **What it does not draw.** A page's *graphics* -- lines, fills, images --
+//! are not rendered; only its text is. So a page is its words at their real
+//! positions on a blank sheet, which is right for reading and wrong for a
+//! figure.
+//!
+//! Two things a page's text can still be missing. A simple font's
+//! `/Encoding` is not read, so `WinAnsiEncoding` is assumed and a font using
+//! `/Differences` will have the wrong characters where they differ. And a
+//! composite font that ships no `/ToUnicode` map cannot be decoded at all --
+//! its codes are glyph indices into a subset font and relate to no character
+//! -- so such a page contributes nothing and is *counted*, with the status bar
+//! reporting how many pages went unread. That count is the difference between
+//! a search saying "no results" about the document and about this program.
+//!
+//! **This list said the opposite an hour ago** -- that content streams were
+//! not interpreted and 1.5 files were refused -- both true when written and
+//! made false by the work that followed. It is the same failure this lane
+//! spent the morning fixing in `whiteboard`, `filediff` and `musicplayer`, and
+//! the understating direction is the one that gets believed, because nobody
+//! tries a thing they have been told is impossible.
 //! - Multi-tab document viewing
 //! - Dark mode rendering
 //!
@@ -4019,13 +4038,13 @@ impl PdfViewerApp {
                     rect: PageRect {
                         x: run.x,
                         y: (page.height - run.y - run.size).max(0.0),
-                        // An estimate, and the only one here. The real width
-                        // needs the font's `/Widths`, which this does not read
-                        // yet; half the point size per character is the usual
-                        // approximation for proportional text. It decides how
-                        // wide a search highlight is drawn, not whether the
-                        // text is found.
-                        width: run.size * 0.5 * run.text.chars().count() as f32,
+                        // The font's own summed glyph widths. It used to be
+                        // half the point size per character, which measured up
+                        // to 25% wide on one document's body text and 19%
+                        // narrow on another's display type -- visible on every
+                        // search highlight, since this is the box they are
+                        // drawn in.
+                        width: run.width,
                         height: run.size,
                     },
                     font_size: run.size,

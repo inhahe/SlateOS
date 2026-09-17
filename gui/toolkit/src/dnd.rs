@@ -91,37 +91,44 @@ impl DataObject {
 
     /// Creates a data object containing file paths.
     ///
-    /// Paths are separated by a NUL byte.
+    /// Paths are **bytes**, separated by NUL.
     ///
-    /// # Why NUL and not a newline
+    /// # Why bytes, and why NUL
     ///
-    /// This used to join on `\n`, and a newline is a **legal character in a
-    /// SlateOS filename**: `design.txt` allows every byte in a name except `/`
-    /// and NUL. So a file genuinely called `notes<LF>draft.txt` was carried
-    /// across a drag as *two* paths, neither of which exists. NUL is the only
-    /// byte that cannot occur in a name, which is exactly what makes it the
-    /// only safe separator -- the same reasoning that makes `find -print0` the
-    /// form worth using.
+    /// A SlateOS filename may hold every byte except `/` and NUL
+    /// (`design.txt`), so neither half of the old signature worked: paths were
+    /// `&str`, which cannot express such a name at all, and they were joined
+    /// on `\n`, which is a *legal* character in one -- a file called
+    /// `notes<LF>draft.txt` arrived as two paths that do not exist. NUL is the
+    /// one byte that cannot occur, which is exactly what makes it the only
+    /// unambiguous separator, and is why `find -print0` exists.
     ///
-    /// Nothing outside this file's own tests used this format yet, so the
-    /// change breaks no caller. It is being fixed now rather than when the
-    /// first one arrives, because the failure is silent and rare enough to be
-    /// mistaken for a filesystem error by whoever meets it.
+    /// # This is not a new decision
     ///
-    /// # What is still wrong here
+    /// It is the format `kernel/src/fs/clipboard.rs` already uses --
+    /// `set_files(&[&[u8]])`, NUL-separated, `get_files() -> Vec<Vec<u8>>` --
+    /// settled on 2026-09-07 in answer to lane C's own request
+    /// `c-a-the-system-clipboards-file-list-cannot-carry-our-own-paths.md`.
+    /// A clipboard and a drag are the same problem (a list of files crossing a
+    /// process boundary) and two formats for it that disagreed would be a
+    /// third place deciding what a path is.
     ///
-    /// The `&str` in this signature. A path is bytes, so a name that is not
-    /// valid UTF-8 cannot be put into a drag at all -- and worse,
-    /// [`Self::get_file_paths`] returns `None` for the *whole* object if any
-    /// single path fails to decode, so one awkward filename loses the other
-    /// nine. Fixing that needs a decision about how a cross-process format
-    /// carries bytes on a host whose `OsStr` is not bytes; see
-    /// `known-issues.md`
-    /// `TD-C-DRAGGED-FILE-PATHS-CANNOT-CARRY-A-NAME-THAT-IS-NOT-TEXT`.
-    pub fn with_files(paths: &[&str]) -> Self {
+    /// Returning raw bytes rather than `PathBuf` is the part that makes this
+    /// sound everywhere. On SlateOS an `OsStr` is bytes and the conversion is
+    /// free; on the Windows host it is WTF-8 and bytes arriving from another
+    /// process are not necessarily valid, so a conversion here would be
+    /// unsound exactly where the tests run. Handing back bytes leaves that to
+    /// the caller, which knows its platform.
+    pub fn with_files(paths: &[&[u8]]) -> Self {
         let mut obj = Self::new();
-        let joined = paths.join("\0");
-        obj.set_data(DataFormat::FilePaths, joined.into_bytes());
+        let mut joined: Vec<u8> = Vec::new();
+        for (i, path) in paths.iter().enumerate() {
+            if i > 0 {
+                joined.push(0);
+            }
+            joined.extend_from_slice(path);
+        }
+        obj.set_data(DataFormat::FilePaths, joined);
         obj
     }
 
@@ -162,17 +169,20 @@ impl DataObject {
             .and_then(|bytes| core::str::from_utf8(bytes).ok())
     }
 
-    /// Convenience: retrieves file paths as a vector of string slices.
+    /// Retrieves the file paths, as bytes.
     ///
-    /// Returns `None` if no `FilePaths` data is set or if the bytes are not
-    /// valid UTF-8. Individual paths are split on NUL, which is the one byte a
-    /// SlateOS filename cannot contain -- see [`Self::with_files`] for why the
-    /// newline this used to split on was the wrong choice, and for what is
-    /// still wrong with the `&str`.
-    pub fn get_file_paths(&self) -> Option<Vec<&str>> {
+    /// `None` when no `FilePaths` data is set. Empty runs are dropped, so a
+    /// trailing separator does not produce a path with no name.
+    ///
+    /// No UTF-8 validation: see [`Self::with_files`]. The previous version
+    /// validated the *whole* blob and returned `None` if any part of it
+    /// failed, so a single awkward filename made the receiving application see
+    /// nothing at all -- not "the odd file is missing" but "the drop did
+    /// nothing", with no clue which file caused it.
+    #[must_use]
+    pub fn get_file_paths(&self) -> Option<Vec<&[u8]>> {
         self.get_data(&DataFormat::FilePaths)
-            .and_then(|bytes| core::str::from_utf8(bytes).ok())
-            .map(|s| s.split('\0').filter(|p| !p.is_empty()).collect())
+            .map(|bytes| bytes.split(|b| *b == 0).filter(|p| !p.is_empty()).collect())
     }
 
     /// Convenience: retrieves the URL content as a string slice.
@@ -715,20 +725,70 @@ mod tests {
     /// file plainly visible on screen.
     #[test]
     fn a_name_containing_a_newline_is_one_path_not_two() {
-        let obj = DataObject::with_files(&["/home/user/notes\ndraft.txt"]);
+        let obj = DataObject::with_files(&[b"/home/user/notes\ndraft.txt"]);
         let paths = obj.get_file_paths().expect("file paths");
         assert_eq!(paths.len(), 1, "a legal filename was split: {paths:?}");
-        assert_eq!(paths[0], "/home/user/notes\ndraft.txt");
+        assert_eq!(paths[0], b"/home/user/notes\ndraft.txt");
     }
 
     #[test]
     fn data_object_with_files() {
-        let obj = DataObject::with_files(&["/home/user/doc.txt", "/tmp/image.png"]);
+        let obj = DataObject::with_files(&[b"/home/user/doc.txt", b"/tmp/image.png"]);
         assert!(obj.has_format(&DataFormat::FilePaths));
         let paths = obj.get_file_paths().expect("should have file paths");
         assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0], "/home/user/doc.txt");
-        assert_eq!(paths[1], "/tmp/image.png");
+        assert_eq!(paths[0], b"/home/user/doc.txt");
+        assert_eq!(paths[1], b"/tmp/image.png");
+
+        // Round trip: what comes out joins back to what went in.
+        let rejoined: Vec<u8> = paths.join(&0u8);
+        assert_eq!(
+            obj.get_data(&DataFormat::FilePaths),
+            Some(rejoined.as_slice())
+        );
+    }
+
+    /// A name that is not text survives the drag.
+    ///
+    /// The reason the signature is bytes. Such a name is legal here --
+    /// `design.txt` allows every byte but `/` and NUL -- and the old `&str`
+    /// could not express one at all.
+    #[test]
+    fn a_path_that_is_not_utf8_survives() {
+        // 0xFF is not valid UTF-8 in any position.
+        let odd: &[u8] = b"/home/user/report\xFF.txt";
+        // No runtime check that this is really undecodable: it is a literal,
+        // so the compiler knows, and clippy says so outright if it ever
+        // becomes valid UTF-8. A guard the compiler can prove is a guard
+        // better placed in the compiler.
+
+        let obj = DataObject::with_files(&[odd]);
+        let paths = obj.get_file_paths().expect("file paths");
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], odd, "the path was altered in transit");
+    }
+
+    /// One undecodable name does not lose the others.
+    ///
+    /// The sharp edge of the old version: it validated the WHOLE blob as UTF-8
+    /// and returned `None` if any part failed, so a single awkward filename
+    /// made the drop do nothing at all, with no indication which file was
+    /// responsible.
+    #[test]
+    fn one_odd_name_does_not_lose_the_rest() {
+        let obj = DataObject::with_files(&[
+            b"/home/user/a.txt",
+            b"/home/user/b\xFF.txt",
+            b"/home/user/c.txt",
+        ]);
+        let paths = obj.get_file_paths().expect("file paths");
+        assert_eq!(
+            paths.len(),
+            3,
+            "an undecodable name took the whole selection with it: {paths:?}"
+        );
+        assert_eq!(paths[0], b"/home/user/a.txt");
+        assert_eq!(paths[2], b"/home/user/c.txt");
     }
 
     #[test]

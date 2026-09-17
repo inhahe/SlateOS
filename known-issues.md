@@ -155127,7 +155127,7 @@ look at whether the record is serialised anywhere first, and because the fix is
 a deletion whose value is in being done deliberately rather than as a
 by-product of a byte-safety sweep.
 
-## TD-C-DRAGGED-FILE-PATHS-CANNOT-CARRY-A-NAME-THAT-IS-NOT-TEXT -- 2026-09-16
+## TD-C-DRAGGED-FILE-PATHS-CANNOT-CARRY-A-NAME-THAT-IS-NOT-TEXT -- FIXED 2026-09-16
 
 **In short:** the format used to carry files between applications during a
 drag holds each path as text. A file whose name is not text cannot be dragged
@@ -155159,9 +155159,36 @@ byte a name cannot hold -- the same reasoning behind `find -print0`. Pinned by
 restoring the newline splits that name into `["/home/user/notes",
 "draft.txt"]`.
 
-**Why the encoding half was not fixed with it.** It needs a decision this entry
-cannot make on its own, and the decision is about the host rather than about
-the target:
+**FIXED the same day, and the fix was a decision that already existed.**
+`DataObject::with_files` takes `&[&[u8]]`, `get_file_paths` returns
+`Option<Vec<&[u8]>>`, and nothing validates UTF-8 anywhere on path data.
+
+**The part worth reading is where the answer came from.** This entry said the
+fix needed a decision about the host that it could not make. That was wrong --
+not in the reasoning below, which still holds, but in the conclusion that the
+decision was open. `kernel/src/fs/clipboard.rs` had already settled it on
+2026-09-07: `set_files(&[&[u8]])`, NUL-separated, `get_files() ->
+Vec<Vec<u8>>`. **Returning raw bytes is what makes it sound on both** -- the
+caller converts, and the caller is the side that knows whether its `OsStr` is
+bytes or WTF-8.
+
+And the request that produced it was filed by **lane C**, to lane A:
+`requests/c-a-the-system-clipboards-file-list-cannot-carry-our-own-paths.md`.
+So this lane asked the question, got a complete answer nine days ago, and then
+re-derived half of it -- the NUL separator -- from scratch while recording the
+other half as undecided. The answer was sitting in `requests/`, in this
+worktree, the whole time.
+
+The lesson is not "read `requests/`", which is already a rule. It is narrower
+and worth stating: **when a problem looks like it needs a new decision, check
+whether the same problem has already been decided somewhere else in the
+system.** A clipboard and a drag are the same problem wearing different names
+-- a list of files crossing a process boundary -- and nothing about the phrase
+"drag and drop" suggests looking in the clipboard. What suggested it was
+scanning `requests/` for the word *byte*.
+
+**The original reasoning, kept because it is still the argument for why the
+accessor hands back bytes:**
 
 * On SlateOS, and on any unix, an `OsStr` **is** bytes, so the fix is
   `OsStrExt::from_bytes` and it is safe.

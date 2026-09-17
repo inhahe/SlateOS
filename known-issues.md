@@ -155181,8 +155181,21 @@ dialog applied a second time.
 That settles the scope for two of the three, and **not** for the pathbar --
 corrected here after checking rather than asserting twice in a row:
 
-* `IconAction::OpenPath` really is one field: hold a `PathBuf`, derive the
-  label. The saved layout's `path:{…}` key needs a byte-safe form with it.
+* `IconAction::OpenPath` is a real defect, measured 2026-09-16. Half the
+  byte-safety is already there -- `icons.rs` reads `HOME` with `var_os` and
+  builds a `PathBuf` -- and the `String`-typed variant throws the bytes away,
+  after which activation does `PathBuf::from(path)` on the flattened text. So a
+  home directory that is not UTF-8 gives a desktop icon that launches a path
+  which does not exist.
+
+  The fix is `OpenPath(PathBuf)` **plus a decision**, because `storage_key`
+  writes `path:{…}` into the saved icon layout and that document's keys are
+  text. A path with no text form cannot be a key there at all. The precedent is
+  already in this tree: `columnprefs::set_for_folder` answers `false` for such a
+  path and lets the caller say so, rather than inventing a key that would save
+  the position against a different folder. Applying that here means an icon on
+  an unrepresentable path keeps working and simply does not remember where it
+  was put.
 * **The run dialog is not a defect at all** -- corrected after reading around
   the line rather than at it. `RunDialog` already holds `command_exact:
   Option<PathBuf>`, which is the kept-bytes half of the pattern. The lossy

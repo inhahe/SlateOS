@@ -156733,10 +156733,27 @@ They are dead because their module is unreachable, and they stop being dead
 the moment it is reached, so they follow that entry's decision and not this
 one's.
 
-What is left for this entry is the rest: the tail across `apps/`, where a
-field is dead on its own account rather than because its whole module is.
-`apps/camera`'s `view_mode` is the shape to look for -- a feature half-built
-inside a module that does run.
+**A second known cause takes most of the `apps/` tail.**
+`TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES` already names that
+pattern -- a complete, correct-looking screen over a source that does not
+exist -- and says it had been found sixteen times by 2026-09-04. `apps/email`
+is 21 of the 347 and is that entry's sharpest case by its own account.
+`apps/torrent` is 23 and is the same shape though the entry does not name it:
+`download_limit` and `upload_limit` are never read, and a bandwidth throttle
+*does* exist beside them (`set_limit`, `is_unlimited`, tested), so the setting
+and the mechanism are both built and nothing joins them. Wiring them would be
+theatre while the app has no socket at all -- its "Tracker announce/scrape
+(HTTP)" is a `TrackerProtocol::Http` enum variant and a `Display` impl.
+
+So the count decomposes, roughly: 84 unreachable shell modules, ~60 or more
+across the apps that display what nothing produces, and a genuinely-new
+remainder in the long tail. **Triage the remainder; leave the other two to the
+entries that own them**, or the same fields get argued about twice.
+
+`apps/camera` was the first of the remainder and is done (2026-09-17): three
+fields for a thumbnail grid that was never built, deleted with the enum that
+existed only to fill a chooser nothing has. The probe now reports zero for
+that crate.
 
 **Proper fix.** Work the list down in batches, per crate, deciding for each
 field whether it is a feature to finish or state to delete. When it is small

@@ -1,7 +1,7 @@
 //! Slate OS File Explorer
 //!
 //! Graphical file manager with:
-//! - Directory tree sidebar
+//! - Quick-access sidebar (five fixed places, each a drop target)
 //! - File/folder list with an extensible column set (see [`columns`]): the
 //!   built-in Name/Size/Date/Type, plus whatever the directory's contents
 //!   warrant — image dimensions, audio duration, source line counts
@@ -726,8 +726,6 @@ pub struct ExplorerState {
     pending: VecDeque<PendingOperation>,
     /// Derived one-line description of the current directory's contents.
     pub dir_summary: String,
-    /// Tree sidebar expanded paths.
-    pub tree_expanded: Vec<PathBuf>,
     /// Window dimensions.
     pub window_width: u32,
     pub window_height: u32,
@@ -878,7 +876,6 @@ impl ExplorerState {
             operations: Vec::new(),
             pending: VecDeque::new(),
             dir_summary: String::new(),
-            tree_expanded: vec![PathBuf::from("/")],
             window_width: 900,
             window_height: 600,
             sidebar_width: 200.0,

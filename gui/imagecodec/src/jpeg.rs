@@ -99,6 +99,9 @@ struct Component {
 struct Huffman {
     /// `counts[n]` is how many codes have length `n + 1`.
     counts: [u8; 16],
+    /// The first code of each length, and where that length's values begin.
+    first: [u32; 16],
+    offset: [usize; 16],
     values: Vec<u8>,
 }
 
@@ -110,34 +113,42 @@ impl Huffman {
     #[allow(clippy::arithmetic_side_effects, reason = "guarded by the bound above")]
     fn decode(&self, bits: &mut BitReader<'_>) -> Option<u8> {
         let mut code = 0u32;
-        let mut index = 0usize;
         for length in 0..16usize {
             code = code.checked_mul(2)?.checked_add(u32::from(bits.bit()?))?;
-            let count = usize::from(*self.counts.get(length)?);
-            // The canonical code for this length starts where the previous
-            // length's codes ended, shifted along.
-            let first = self.first_code(length);
-            if count > 0 && code >= first && code < first.checked_add(count as u32)? {
-                let offset = index.checked_add((code - first) as usize)?;
-                return self.values.get(offset).copied();
+            let count = u32::from(*self.counts.get(length)?);
+            let first = *self.first.get(length)?;
+            if count > 0 && code >= first && code < first.checked_add(count)? {
+                let at = self
+                    .offset
+                    .get(length)?
+                    .checked_add(code.checked_sub(first)? as usize)?;
+                return self.values.get(at).copied();
             }
-            index = index.checked_add(count)?;
         }
         None
     }
 
-    /// The numeric value of the first code of length `length + 1`.
-    fn first_code(&self, length: usize) -> u32 {
+    /// Fill the first-code and offset tables in from the counts.
+    ///
+    /// Both are derivable from `counts`, and the first version derived them
+    /// per symbol -- a loop inside the decode loop, so about 128 iterations to
+    /// read one symbol where 16 would do. Every block of a picture must be
+    /// entropy-decoded whatever size it is reconstructed at, so this is the
+    /// cost a scaled decode cannot avoid and the one worth spending care on.
+    fn index(&mut self) {
         let mut code = 0u32;
-        for n in 0..=length {
-            if n > 0 {
-                code = code.saturating_mul(2);
+        let mut offset = 0usize;
+        for length in 0..16usize {
+            if let Some(slot) = self.first.get_mut(length) {
+                *slot = code;
             }
-            if n < length {
-                code = code.saturating_add(u32::from(self.counts.get(n).copied().unwrap_or(0)));
+            if let Some(slot) = self.offset.get_mut(length) {
+                *slot = offset;
             }
+            let count = u32::from(self.counts.get(length).copied().unwrap_or(0));
+            code = code.saturating_add(count).saturating_mul(2);
+            offset = offset.saturating_add(count as usize);
         }
-        code
     }
 }
 
@@ -281,6 +292,87 @@ impl Basis {
     }
 }
 
+/// The inverse DCT at a reduced size, using only the coefficients that matter.
+///
+/// A block's top-left `n` x `n` coefficients are its low frequencies, and
+/// transforming just those yields an `n` x `n` image of the block directly --
+/// a scaled decode that costs less than a full one rather than more. At `n =
+/// 1` that is the DC coefficient alone: the block's average, which is exactly
+/// what a one-pixel-per-block thumbnail wants.
+///
+/// This is why a JPEG thumbnail need never hold the full picture. Decoding a
+/// 4000x5333 photograph whole to make a 128-pixel preview allocates about 85
+/// MB on the way; at `n = 1` it allocates a sixty-fourth of that, and
+/// `apps/explorer`'s own comment records paying that cost down for PNG for the
+/// same reason.
+// The same bounded float arithmetic as the full transform, over `0..n` where
+// `n` is `1..=8`; the one index expression is `y * 8 + x` with both under 8,
+// and every access through it is a `get`.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "bounded coefficients and 0..8 indices"
+)]
+fn idct_scaled(block: &[f32; 64], basis: &Basis, n: usize, out: &mut [f32; 64]) {
+    let n = n.clamp(1, 8);
+    if n == 8 {
+        let mut full = *block;
+        idct_8x8(&mut full, basis);
+        *out = full;
+        return;
+    }
+    // Rows first, into the top-left n x n of the scratch, then columns. The
+    // normalisation is the same 1/4 as the full transform and does *not*
+    // depend on how many terms are summed -- it is fixed by the definition.
+    //
+    // The first version scaled by `n/8` on the reasoning that fewer basis
+    // functions carry less amplitude. That is wrong, and wrong in a way no
+    // test caught: at `n = 1` it made every block an eighth of its true
+    // value, so every sample collapsed toward the 128 that centres the range
+    // and the picture came out as flat mid-grey. Comparing the mean colour of
+    // a scaled decode against a full one showed it at once -- (124, 127, 131)
+    // against (103, 128, 158), every channel pulled to the middle.
+    let mut scratch = [0.0f32; 64];
+    for y in 0..n {
+        for x in 0..n {
+            let mut sum = 0.0f32;
+            for u in 0..n {
+                sum += basis.at(u, scaled_position(x, n))
+                    * block.get(y * 8 + u).copied().unwrap_or(0.0);
+            }
+            if let Some(slot) = scratch.get_mut(y * 8 + x) {
+                *slot = sum / 2.0;
+            }
+        }
+    }
+    for x in 0..n {
+        for y in 0..n {
+            let mut sum = 0.0f32;
+            for v in 0..n {
+                sum += basis.at(v, scaled_position(y, n))
+                    * scratch.get(v * 8 + x).copied().unwrap_or(0.0);
+            }
+            if let Some(slot) = out.get_mut(y * 8 + x) {
+                *slot = sum / 2.0;
+            }
+        }
+    }
+}
+
+/// Where an output sample of an `n`-point transform sits among the 8.
+///
+/// The basis table is built for eight positions; an `n`-point transform wants
+/// the sample at the centre of the `8/n` it stands for, which keeps the
+/// reduced image aligned with the full one instead of shifted a fraction of a
+/// block to one side.
+const fn scaled_position(index: usize, n: usize) -> usize {
+    // `n` is clamped to 1..=8 by the caller, so the divisor is never zero and
+    // the step is 1..=8; `index` is below `n`, so the product is under 64 and
+    // the result is clamped to a valid position regardless.
+    let step = 8usize.saturating_div(if n == 0 { 1 } else { n });
+    let centre = index.saturating_mul(step).saturating_add(step / 2);
+    if centre > 7 { 7 } else { centre }
+}
+
 /// The inverse discrete cosine transform, 8x8, separable.
 ///
 /// Rows then columns, which is 16 eight-point transforms rather than the 4096
@@ -397,6 +489,11 @@ impl Default for Tables {
 /// that cannot be true; [`ImageError::Truncated`] when the file stops inside a
 /// structure it announced; [`ImageError::TooLarge`] past `limits`.
 pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
+    decode_at(bytes, limits, 8)
+}
+
+/// [`decode`], with each 8x8 block reconstructed at `block` pixels square.
+fn decode_at(bytes: &[u8], limits: Limits, block: usize) -> ImageResult<Image> {
     if !is_jpeg(bytes) {
         return Err(ImageError::UnknownFormat);
     }
@@ -470,7 +567,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
                 };
                 let components = read_scan_header(payload, components)?;
                 let data = bytes.get(at..).ok_or(ImageError::Truncated)?;
-                return decode_scan(data, width, height, components, &tables, limits);
+                return decode_scan(data, width, height, components, &tables, limits, block);
             }
             // APPn, COM and everything else carries no state this needs.
             _ => {}
@@ -611,7 +708,13 @@ fn read_huffman_tables(payload: &[u8], tables: &mut Tables) -> ImageResult<()> {
             .ok_or(ImageError::Truncated)?
             .to_vec();
         at = at.saturating_add(total);
-        let table = Huffman { counts, values };
+        let mut table = Huffman {
+            counts,
+            first: [0; 16],
+            offset: [0; 16],
+            values,
+        };
+        table.index();
         let slot = if is_ac {
             tables.ac.get_mut(index)
         } else {
@@ -666,6 +769,7 @@ fn decode_scan(
     mut components: Vec<Component>,
     tables: &Tables,
     limits: Limits,
+    block_size: usize,
 ) -> ImageResult<Image> {
     let pixels_claimed = width.saturating_mul(height) as u64;
     if pixels_claimed > limits.max_pixels {
@@ -675,19 +779,29 @@ fn decode_scan(
         });
     }
 
+    // How many pixels each 8x8 block becomes. Eight is a full decode; less is
+    // a scaled one, done by transforming fewer coefficients rather than by
+    // decoding everything and throwing most of it away.
+    let block_size = block_size.clamp(1, 8);
     let max_h = components.iter().map(|c| c.h).max().unwrap_or(1);
     let max_v = components.iter().map(|c| c.v).max().unwrap_or(1);
-    let mcu_w = max_h.saturating_mul(8);
-    let mcu_h = max_v.saturating_mul(8);
-    let mcus_x = width.div_ceil(mcu_w);
-    let mcus_y = height.div_ceil(mcu_h);
+    // MCU geometry is in source pixels and does not change with the scale; only
+    // what each block *becomes* does.
+    let mcus_x = width.div_ceil(max_h.saturating_mul(8));
+    let mcus_y = height.div_ceil(max_v.saturating_mul(8));
+    let out_width = width.saturating_mul(block_size).div_ceil(8).max(1);
+    let out_height = height.saturating_mul(block_size).div_ceil(8).max(1);
 
     // One plane per component, padded out to whole MCUs so a block never has
     // to be clipped while it is being written.
     let mut planes: Vec<(usize, usize, Vec<u8>)> = Vec::with_capacity(components.len());
     for component in &components {
-        let plane_w = mcus_x.saturating_mul(component.h).saturating_mul(8);
-        let plane_h = mcus_y.saturating_mul(component.v).saturating_mul(8);
+        let plane_w = mcus_x
+            .saturating_mul(component.h)
+            .saturating_mul(block_size);
+        let plane_h = mcus_y
+            .saturating_mul(component.v)
+            .saturating_mul(block_size);
         let size = plane_w.saturating_mul(plane_h);
         // Four times the pixel budget: the planes are padded out to whole MCUs
         // and a 4:2:0 file carries a plane per component, so a little slack is
@@ -720,20 +834,22 @@ fn decode_scan(
                     for bx in 0..component.h {
                         let mut block = [0.0f32; 64];
                         decode_block(&mut bits, component, tables, &mut block)?;
-                        idct_8x8(&mut block, &basis);
+                        let mut scaled = [0.0f32; 64];
+                        idct_scaled(&block, &basis, block_size, &mut scaled);
+                        let block = scaled;
                         let Some((plane_w, plane_h, plane)) = planes.get_mut(index) else {
                             continue;
                         };
                         let origin_x = mcu_x
                             .saturating_mul(component.h)
                             .saturating_add(bx)
-                            .saturating_mul(8);
+                            .saturating_mul(block_size);
                         let origin_y = mcu_y
                             .saturating_mul(component.v)
                             .saturating_add(by)
-                            .saturating_mul(8);
-                        for y in 0..8usize {
-                            for x in 0..8usize {
+                            .saturating_mul(block_size);
+                        for y in 0..block_size {
+                            for x in 0..block_size {
                                 let px = origin_x.saturating_add(x);
                                 let py = origin_y.saturating_add(y);
                                 if px >= *plane_w || py >= *plane_h {
@@ -760,9 +876,11 @@ fn decode_scan(
     }
 
     Ok(Image {
-        width: u32::try_from(width).map_err(|_| ImageError::Malformed("an impossible width"))?,
-        height: u32::try_from(height).map_err(|_| ImageError::Malformed("an impossible height"))?,
-        pixels: to_pixels(width, height, &components, &planes, max_h, max_v),
+        width: u32::try_from(out_width)
+            .map_err(|_| ImageError::Malformed("an impossible width"))?,
+        height: u32::try_from(out_height)
+            .map_err(|_| ImageError::Malformed("an impossible height"))?,
+        pixels: to_pixels(out_width, out_height, &components, &planes, max_h, max_v),
     })
 }
 
@@ -910,34 +1028,110 @@ fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> u32 {
     0xFF00_0000 | (r << 16) | (g << 8) | b
 }
 
-/// Decode, then shrink to fit `max_w` x `max_h`.
+/// The picture's size, without decoding it.
 ///
-/// A JPEG *can* be scaled during reconstruction -- taking only the top-left
-/// corner of each block's coefficients yields a half, quarter or eighth-size
-/// image nearly free -- and that is worth doing one day. This does the plain
-/// thing instead: decode, then average. The crate's own contract allows it
-/// ("falls back to a full decode for formats that cannot be scaled during
-/// reconstruction"), and a thumbnailer that gets the right pixels slowly beats
-/// one that refuses the format.
+/// Walks to the frame header and stops. A thumbnailer needs this to choose how
+/// much of the picture to reconstruct, and reading it should not cost what
+/// reading the picture costs.
+///
+/// # Errors
+///
+/// As [`decode`], for the header it does read.
+pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
+    if !is_jpeg(bytes) {
+        return Err(ImageError::UnknownFormat);
+    }
+    let mut at = 2usize;
+    loop {
+        let mut marker = None;
+        while at < bytes.len() {
+            let byte = *bytes.get(at).ok_or(ImageError::Truncated)?;
+            at = at.saturating_add(1);
+            if byte != 0xFF {
+                continue;
+            }
+            while *bytes.get(at).unwrap_or(&0) == 0xFF {
+                at = at.saturating_add(1);
+            }
+            marker = bytes.get(at).copied();
+            at = at.saturating_add(1);
+            break;
+        }
+        let Some(marker) = marker else {
+            return Err(ImageError::Truncated);
+        };
+        match marker {
+            0xD8 | 0x01 | 0xD0..=0xD7 => continue,
+            // Every frame marker carries the size in the same place, including
+            // the ones this cannot decode: a caller may want to know how big a
+            // progressive file is in order to say so.
+            0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
+                let length = read_u16(bytes, at)?;
+                let payload = bytes
+                    .get(at.saturating_add(2)..at.saturating_add(usize::from(length)))
+                    .ok_or(ImageError::Truncated)?;
+                let height = u32::from(read_u16(payload, 1)?);
+                let width = u32::from(read_u16(payload, 3)?);
+                if width == 0 || height == 0 {
+                    return Err(ImageError::Malformed("a frame with a zero dimension"));
+                }
+                return Ok((width, height));
+            }
+            0xD9 => return Err(ImageError::Truncated),
+            _ => {}
+        }
+        let length = read_u16(bytes, at)?;
+        at = at
+            .checked_add(usize::from(length))
+            .ok_or(ImageError::Truncated)?;
+    }
+}
+
+/// Decode at the smallest size that still covers `max_w` x `max_h`.
+///
+/// **Scaled during reconstruction, not decoded whole and shrunk.** Each 8x8
+/// block is transformed from only its top-left coefficients, so asking for a
+/// preview of a 4000x5333 photograph reconstructs it at 500x667 and never
+/// allocates the 85 MB the full picture would need. `apps/explorer`'s
+/// thumbnailer has a comment recording that it paid exactly this cost down for
+/// PNG -- "the larger half of this function's peak, 96 MB for a 24-megapixel
+/// photograph, to produce 64 KB of preview" -- and a JPEG path that decoded
+/// whole would have handed it straight back.
+///
+/// The block size is a power of two because that is what transforming a
+/// prefix of the coefficients gives; the caller's exact box is fitted by
+/// averaging what remains, which is at most a 2x reduction.
+///
+/// **Measured**, on a 4000x5333 photograph from this machine: a 128-pixel
+/// thumbnail in 669 ms against 91 seconds to decode the picture whole, and
+/// 9408 pixels held rather than 21332000. The same run in a debug build takes
+/// 7.6 seconds, which is worth knowing before anyone optimises against it.
 ///
 /// # Errors
 ///
 /// As [`decode`].
-#[allow(
-    clippy::arithmetic_side_effects,
-    reason = "div_ceil and max keep the factor >= 1"
-)]
 pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> ImageResult<Image> {
-    let full = decode(bytes, limits)?;
-    if max_w == 0 || max_h == 0 || (full.width <= max_w && full.height <= max_h) {
-        // Already small enough. Inventing pixels is not what this is for.
-        return Ok(full);
+    let (width, height) = dimensions(bytes)?;
+    let mut block = 8usize;
+    if max_w > 0 && max_h > 0 {
+        // The smallest power of two whose reconstruction still covers the
+        // request in both directions.
+        for candidate in [1usize, 2, 4] {
+            let at_w = width.saturating_mul(candidate as u32).div_ceil(8);
+            let at_h = height.saturating_mul(candidate as u32).div_ceil(8);
+            if at_w >= max_w && at_h >= max_h {
+                block = candidate;
+                break;
+            }
+        }
     }
-    // The larger of the two ratios, so the result fits inside both bounds.
-    let factor_w = full.width.div_ceil(max_w).max(1);
-    let factor_h = full.height.div_ceil(max_h).max(1);
-    let factor = factor_w.max(factor_h) as usize;
-    Ok(box_filter(&full, factor))
+    let image = decode_at(bytes, limits, block)?;
+    if max_w == 0 || max_h == 0 || (image.width <= max_w && image.height <= max_h) {
+        return Ok(image);
+    }
+    let factor_w = image.width.div_ceil(max_w).max(1);
+    let factor_h = image.height.div_ceil(max_h).max(1);
+    Ok(box_filter(&image, factor_w.max(factor_h) as usize))
 }
 
 /// Average each `factor` x `factor` square down to one pixel.

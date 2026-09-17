@@ -802,9 +802,17 @@ mod tests {
     /// putting the vowel `i` underneath.
     #[test]
     fn tibetan_vowel_signs_have_positions() {
-        assert_eq!(attach_class('\u{0F72}'), ABOVE, "vowel i is drawn over the letter");
+        assert_eq!(
+            attach_class('\u{0F72}'),
+            ABOVE,
+            "vowel i is drawn over the letter"
+        );
         assert_eq!(attach_class('\u{0F74}'), BELOW, "vowel u is drawn under it");
-        assert_eq!(attach_class('\u{0F71}'), BELOW, "vowel aa is drawn under it");
+        assert_eq!(
+            attach_class('\u{0F71}'),
+            BELOW,
+            "vowel aa is drawn under it"
+        );
     }
 
     #[test]

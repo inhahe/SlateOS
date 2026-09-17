@@ -4106,3 +4106,35 @@ fn a_power_choice_is_reported_rather_than_acted_on() {
     );
     assert_eq!(session.take_login_power(), None, "draining it empties it");
 }
+
+/// An exclusion pattern keeps a picture out of the rotation.
+///
+/// Matched against the file name, which is what a user writing `*.gif` into
+/// the settings file means.
+#[test]
+fn an_exclusion_pattern_removes_a_picture_from_the_rotation() {
+    let dir = scratch_dir().join("rotation-exclude");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    for name in ["keep.png", "skip.gif", "draft-one.png", "final.png"] {
+        std::fs::write(dir.join(name), b"x").expect("write");
+    }
+
+    let all = Session::pictures_in(&dir, &[]);
+    assert_eq!(
+        all.len(),
+        4,
+        "the folder should hold four pictures: {all:?}"
+    );
+
+    let filtered = Session::pictures_in(&dir, &["*.gif".to_string(), "draft-*".to_string()]);
+    let names: Vec<String> = filtered
+        .iter()
+        .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        names,
+        ["final.png", "keep.png"],
+        "the wrong pictures survived the filter"
+    );
+}

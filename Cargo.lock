@@ -570,6 +570,7 @@ dependencies = [
  "appearance",
  "authlib",
  "daywindow",
+ "globmatch",
  "guiremote",
  "guitk",
  "imagecodec",

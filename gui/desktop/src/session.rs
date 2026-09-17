@@ -1669,7 +1669,7 @@ impl<T: Transport> ShellSession<T> {
             return;
         }
 
-        let pictures = Self::pictures_in(folder);
+        let pictures = Self::pictures_in(folder, &self.shell.appearance.wallpaper_exclusions);
         self.wallpaper.set_slideshow(
             folder,
             self.shell.appearance.wallpaper_interval_secs,
@@ -1690,7 +1690,21 @@ impl<T: Transport> ShellSession<T> {
     /// wallpaper is not the place to report a missing directory, and an empty
     /// slideshow leaves the desktop on its plain background, which is the
     /// honest picture of "there is nothing to show".
-    fn pictures_in(folder: &Path) -> Vec<PathBuf> {
+    fn is_excluded(path: &Path, exclude: &[String]) -> bool {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            // A name with no text form matches no pattern, so it stays in the
+            // rotation. Excluding a picture because its name could not be read
+            // would be the wrong way round.
+            return false;
+        };
+        exclude.iter().any(|p| globmatch::glob_match(p, name))
+    }
+
+    /// The pictures in `folder`, in a stable order, minus the excluded ones.
+    ///
+    /// Patterns are matched against the file NAME, not the whole path: a
+    /// rotation reads one folder, so `*.gif` is what a user would write.
+    fn pictures_in(folder: &Path, exclude: &[String]) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(folder) else {
             return Vec::new();
         };
@@ -1699,6 +1713,7 @@ impl<T: Transport> ShellSession<T> {
             .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
             .map(|e| e.path())
             .filter(|p| crate::wallpaper::is_picture(p))
+            .filter(|p| !Self::is_excluded(p, exclude))
             .collect();
         out.sort_unstable();
         out

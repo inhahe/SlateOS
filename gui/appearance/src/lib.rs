@@ -1373,6 +1373,17 @@ pub struct AppearanceSettings {
 
     /// Whether the rotation is shuffled or goes in directory order.
     pub wallpaper_shuffle: bool,
+
+    /// Names to leave out of a rotation, as glob patterns.
+    ///
+    /// `roadmap-detailed.md` §3.4 asks for "exclusion filters" alongside the
+    /// rotation. Matched against a picture's **file name**, not its path: the
+    /// rotation reads one folder, so a pattern that could cross directories
+    /// would have nothing to cross. That is also why this uses the flat
+    /// matcher in `gui/globmatch` rather than the path-aware one in
+    /// `apps/backup` -- see `known-issues.md`
+    /// `TD-C-THE-TWO-GLOB-MATCHERS-ARE-NOT-DUPLICATES`.
+    pub wallpaper_exclusions: Vec<String>,
     /// The high-contrast scheme in force, or `None` for an ordinary theme.
     ///
     /// When set it *replaces* [`theme_mode`](Self::theme_mode) rather than
@@ -1460,6 +1471,7 @@ impl Default for AppearanceSettings {
             // on sees it work without waiting for the next day.
             wallpaper_interval_secs: 600,
             wallpaper_shuffle: true,
+            wallpaper_exclusions: Vec::new(),
             theme_mode: ThemeMode::Dark,
             // Borders, per §829. The `Default` impl is what a machine with no
             // configuration file gets, so this is where "the default theme" is
@@ -1976,6 +1988,15 @@ impl AppearanceSettings {
         if let Some(shuffle) = doc.get_i64(&["wallpaper", "shuffle"]) {
             s.wallpaper_shuffle = shuffle != 0;
         }
+        if let Some(patterns) = doc.get_seq(&["wallpaper", "exclude"]) {
+            // Empty lines dropped: a YAML list a person edited by hand grows
+            // blank entries, and an empty pattern matches nothing useful but
+            // would sit in the list looking like it does something.
+            s.wallpaper_exclusions = patterns
+                .into_iter()
+                .filter(|p| !p.trim().is_empty())
+                .collect();
+        }
 
         read_into!(
             s.theme_mode,
@@ -2145,6 +2166,12 @@ impl AppearanceSettings {
             i64::try_from(self.wallpaper_interval_secs).unwrap_or(600),
         );
         doc.set_i64(&["wallpaper", "shuffle"], i64::from(self.wallpaper_shuffle));
+        let excludes: Vec<&str> = self
+            .wallpaper_exclusions
+            .iter()
+            .map(String::as_str)
+            .collect();
+        doc.set_seq(&["wallpaper", "exclude"], &excludes);
         doc.set_str(&["wallpaper", "fit"], self.wallpaper_fit.yaml_name());
         doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
         doc.set_str(
@@ -2604,6 +2631,8 @@ mod tests {
             // Every one of these differs from the default, which is what the
             // fixture is for: the defaults are `None`, 600 and `true`.
             wallpaper_folder: Some(PathBuf::from("/home/u/Pictures/rotation")),
+            // Non-default, like every other field here: the default is empty.
+            wallpaper_exclusions: vec!["*.gif".to_string(), "draft-*".to_string()],
             wallpaper_interval_secs: 45,
             wallpaper_shuffle: false,
             // A path with a space and a non-ASCII character in it, because a

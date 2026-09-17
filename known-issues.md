@@ -155219,9 +155219,24 @@ corrected here after checking rather than asserting twice in a row:
   touches exactly two files, which is the fact that decides whether this is
   an evening's work or a week's.
 
-  **Worked design, 2026-09-16, so the next session starts from a plan rather
-  than a survey.** The widget does not need byte surgery: `Path::components()`
-  does the breadcrumb split, so no `OsStr` splitting is involved.
+  **Worked design, 2026-09-16 — with one part corrected before any code was
+  written, and the correction is the important half.**
+
+  My first plan was "`Path::components()` does the breadcrumb split, so no byte
+  surgery is needed". **That is wrong for this widget.** It splits on `/`
+  because SlateOS paths use forward slashes, and `Path::components()` is
+  *host-dependent*: on the Windows machine the tests run on it also treats `\`
+  as a separator and `C:\` as a prefix. Converting to it would make the widget
+  behave differently on the host than on the target, and the tests only see the
+  host — a green suite proving nothing about the system this ships on.
+
+  So the real choice is narrower than it looked, and it is a decision rather
+  than a keystroke: either split the bytes on `b'/'` and rebuild segments with
+  `OsStr::from_encoded_bytes_unchecked` (which is `unsafe`, and this project
+  requires a `// SAFETY:` argument for it), or keep the split target-specific
+  and accept that the widget is POSIX-shaped by design. The second is probably
+  right — this is an OS with one path syntax — but it should be written down as
+  a decision instead of arrived at by accident.
 
   * `path: PathBuf` instead of `String`; `segments` keeps display strings for
     drawing, and a breadcrumb click joins components up to the clicked one.

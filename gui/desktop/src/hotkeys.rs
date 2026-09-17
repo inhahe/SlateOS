@@ -1092,9 +1092,29 @@ fn register_defaults(reg: &mut HotkeyRegistry) {
 /// Super+E=launch:/usr/bin/explorer
 /// Ctrl+Alt+Delete=show_task_manager
 /// ```
+/// What the left-hand side reads when an action is deliberately unbound.
+///
+/// `none=screenshot` says "screenshot is on no keys". That is a different
+/// statement from the line being absent: absent means "this file has nothing
+/// to say about it", and the defaults then apply. A deletion has to be said
+/// out loud or it cannot survive one, because [`load_shortcuts`] merges onto
+/// the defaults rather than replacing them — deliberately, so that a
+/// shortcut added in a later version still reaches a user who has customised
+/// theirs. See design-decisions 860.
+///
+/// [`load_shortcuts`]: crate::DesktopShell::load_shortcuts
+pub const UNBOUND: &str = "none";
+
 pub struct HotkeyConfig {
     /// Parsed bindings.
     bindings: Vec<(Hotkey, HotkeyAction)>,
+    /// Actions this file says are on no keys at all.
+    ///
+    /// Held apart from `bindings` rather than as a binding to a sentinel
+    /// chord, because there is no such chord: every `Hotkey` names keys a
+    /// user could press, and inventing one that cannot be pressed would put a
+    /// value into the registry that every other reader has to know to skip.
+    unbound: Vec<HotkeyAction>,
 }
 
 impl HotkeyConfig {
@@ -1104,13 +1124,43 @@ impl HotkeyConfig {
             .all_bindings()
             .map(|(k, v)| (*k, v.clone()))
             .collect();
-        Self { bindings }
+        // A default that this registry no longer holds was deleted by the
+        // user, and saying so is the only way the deletion survives a restart.
+        // Computed against `defaults()` rather than remembered, so that a
+        // registry assembled any other way still writes a truthful file.
+        let unbound: Vec<HotkeyAction> = Self::from_registry_defaults()
+            .into_iter()
+            .filter(|action| !bindings.iter().any(|(_, a)| a == action))
+            .collect();
+        Self { bindings, unbound }
+    }
+
+    /// Every action the shipped defaults bind, without duplicates.
+    ///
+    /// Its own function so that "what counts as a default" has one answer;
+    /// `from_registry` asks it to decide which actions a save must record as
+    /// deliberately unbound.
+    fn from_registry_defaults() -> Vec<HotkeyAction> {
+        let mut seen: Vec<HotkeyAction> = Vec::new();
+        for (_, action) in HotkeyRegistry::defaults().all_bindings() {
+            if !seen.contains(action) {
+                seen.push(action.clone());
+            }
+        }
+        seen
+    }
+
+    /// The actions this config says are bound to nothing.
+    #[must_use]
+    pub fn unbound(&self) -> &[HotkeyAction] {
+        &self.unbound
     }
 
     /// Parse hotkey configuration from text. Lines starting with '#' are
     /// comments. Blank lines are skipped.
     pub fn load(text: &str) -> Result<Self, HotkeyError> {
         let mut bindings = Vec::new();
+        let mut unbound = Vec::new();
 
         for (line_idx, raw_line) in text.lines().enumerate() {
             let line = raw_line.trim();
@@ -1126,10 +1176,42 @@ impl HotkeyConfig {
             // number reported for an implausibly long file is wrong by one
             // rather than wrapping to zero.
             let line_number = line_idx.saturating_add(1);
-            bindings.push(Self::parse_line(line, line_number)?);
+            Self::take_line(line, line_number, &mut bindings, &mut unbound)?;
         }
 
-        Ok(Self { bindings })
+        Ok(Self { bindings, unbound })
+    }
+
+    /// Take one line into either the bindings or the unbound list.
+    ///
+    /// The classification is here rather than at each call site so that the
+    /// two readers (a text file and a settings document) cannot disagree about
+    /// what `none=` means.
+    fn take_line(
+        line: &str,
+        line_number: usize,
+        bindings: &mut Vec<(Hotkey, HotkeyAction)>,
+        unbound: &mut Vec<HotkeyAction>,
+    ) -> Result<(), HotkeyError> {
+        if let Some(value) = line.strip_prefix(UNBOUND) {
+            // Only when `none` is the whole left-hand side. A chord could
+            // legitimately be parsed from something starting with those
+            // letters, and swallowing it here would silently unbind it.
+            if let Some(rest) = value.strip_prefix('=') {
+                let action = HotkeyAction::from_config_value(rest.trim()).map_err(|e| {
+                    HotkeyError::ParseError {
+                        line_number,
+                        message: format!("{e}"),
+                    }
+                })?;
+                if !unbound.contains(&action) {
+                    unbound.push(action);
+                }
+                return Ok(());
+            }
+        }
+        bindings.push(Self::parse_line(line, line_number)?);
+        Ok(())
     }
 
     /// Parse one `chord=action` line.
@@ -1160,12 +1242,19 @@ impl HotkeyConfig {
 
     /// The bindings, as the lines a configuration file carries.
     fn lines(&self) -> Vec<String> {
-        self.bindings
+        let mut out: Vec<String> = self
+            .bindings
             .iter()
             .map(|(hotkey, action)| {
                 format!("{}={}", hotkey.display_name(), action.to_config_value())
             })
-            .collect()
+            .collect();
+        out.extend(
+            self.unbound
+                .iter()
+                .map(|action| format!("{UNBOUND}={}", action.to_config_value())),
+        );
+        out
     }
 
     /// Write the bindings into a configuration document.
@@ -1197,18 +1286,20 @@ impl HotkeyConfig {
         let Some(entries) = doc.get_seq(&["shortcuts"]) else {
             return Ok(Self {
                 bindings: Vec::new(),
+                unbound: Vec::new(),
             });
         };
 
         let mut bindings = Vec::new();
+        let mut unbound = Vec::new();
         for (index, entry) in entries.iter().enumerate() {
             let line = entry.trim();
             if line.is_empty() {
                 continue;
             }
-            bindings.push(Self::parse_line(line, index.saturating_add(1))?);
+            Self::take_line(line, index.saturating_add(1), &mut bindings, &mut unbound)?;
         }
-        Ok(Self { bindings })
+        Ok(Self { bindings, unbound })
     }
 
     /// The bindings this config holds.

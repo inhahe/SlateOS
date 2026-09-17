@@ -6389,8 +6389,46 @@ impl DesktopShell {
                 self.shortcut_message = None;
                 Some(HotkeyOutcome::ignored())
             }
+            Key::Delete => {
+                if rows == 0 {
+                    return Some(HotkeyOutcome::ignored());
+                }
+                self.delete_shortcut_row(self.shortcut_selected.min(rows.saturating_sub(1)));
+                Some(HotkeyOutcome::ignored())
+            }
             _ => None,
         }
+    }
+
+    /// Unbind the action on row `row`, and remember that it was unbound.
+    ///
+    /// Remembering is the whole of it. `load_shortcuts` merges the saved file
+    /// onto the shipped defaults — so that a shortcut added in a later
+    /// version reaches a user who has customised theirs — which means a
+    /// deletion that only removed a line would be undone by the very next
+    /// login, silently, with the registry looking correct in between.
+    /// `HotkeyConfig::from_registry` writes a `none=` line for every default
+    /// this registry no longer holds, and that line is what survives.
+    fn delete_shortcut_row(&mut self, row: usize) {
+        let Some((chord, action)) = self
+            .hotkeys
+            .all_bindings()
+            .nth(row)
+            .map(|(h, a)| (*h, a.clone()))
+        else {
+            self.shortcut_message = Some("That row is gone".to_string());
+            return;
+        };
+
+        self.hotkeys.unregister(&chord);
+        let label = action.display_label();
+        self.shortcut_message = Some(match self.save_shortcuts() {
+            Ok(()) => format!("{label} is no longer on any keys"),
+            // Said rather than swallowed, and said precisely: the shortcut is
+            // gone from this session either way, and the part that failed is
+            // the part that would have made it stay gone.
+            Err(e) => format!("{label} is unbound, but could not be saved: {e}"),
+        });
     }
 
     /// Read one keystroke as the new chord for the row being recorded.
@@ -6963,16 +7001,46 @@ impl DesktopShell {
         };
 
         for (chord, action) in saved.bindings() {
+            // Every chord the file gives this action, not just this one. An
+            // action can legitimately have two -- the defaults put the Start
+            // Menu on both Super keys, so that a driver which sets the Super
+            // bit and one which does not are both answered -- and the earlier
+            // version of this filter, `*h != chord`, unregistered each of them
+            // while processing the other. Whichever came last was the only one
+            // left, so the Start Menu quietly stopped answering one of the two
+            // Super keys after any save and reload.
+            let keeps: Vec<_> = saved
+                .bindings()
+                .iter()
+                .filter(|(_, a)| a == action)
+                .map(|(h, _)| *h)
+                .collect();
             let stale: Vec<_> = self
                 .hotkeys
                 .all_bindings()
-                .filter(|(h, a)| *a == action && *h != chord)
+                .filter(|(h, a)| *a == action && !keeps.contains(h))
                 .map(|(h, _)| *h)
                 .collect();
             for old in stale {
                 self.hotkeys.unregister(&old);
             }
             drop(self.hotkeys.register(*chord, action.clone()));
+        }
+
+        // Then the deletions. After the bindings, so that a file which both
+        // rebinds and unbinds the same action ends with it unbound -- the last
+        // thing the user did to it is the thing that stands, and a file cannot
+        // say both about one action unless it was hand-edited.
+        for action in saved.unbound() {
+            let bound: Vec<_> = self
+                .hotkeys
+                .all_bindings()
+                .filter(|(_, a)| *a == action)
+                .map(|(h, _)| *h)
+                .collect();
+            for chord in bound {
+                self.hotkeys.unregister(&chord);
+            }
         }
     }
 
@@ -13508,6 +13576,145 @@ mod run_box_wiring_tests {
                     );
                 }
             },
+        );
+    }
+
+    /// **A deleted shortcut is still deleted in a fresh shell.**
+    ///
+    /// The test this feature exists to pass, and the one a naive
+    /// implementation fails. `load_shortcuts` merges the saved file onto the
+    /// shipped defaults rather than replacing them -- on purpose, so that a
+    /// shortcut added in a later version reaches a user who has customised
+    /// theirs. A deletion that only dropped the line from the file would
+    /// therefore be undone at the next login, while every in-memory assertion
+    /// went on passing. Only a fresh shell can see it.
+    #[test]
+    fn a_deleted_shortcut_is_still_deleted_in_a_fresh_shell() {
+        settingsfile::testing::with_scratch_config("hk-delete", |_root| {
+            let mut shell = card_shell();
+            let (chord, action) = shell
+                .hotkeys
+                .all_bindings()
+                .next()
+                .map(|(h, a)| (*h, a.clone()))
+                .expect("a binding to delete");
+
+            shell.delete_shortcut_row(0);
+            assert_eq!(
+                shell.hotkeys.conflicts_with(&chord),
+                None,
+                "the shortcut is still bound in the session that deleted it"
+            );
+
+            let mut fresh = DesktopShell::new(1920, 1080);
+            assert_eq!(
+                fresh.hotkeys.conflicts_with(&chord),
+                Some(&action),
+                "the defaults must still have it, or this proves nothing"
+            );
+            fresh.load_shortcuts();
+
+            assert_eq!(
+                fresh.hotkeys.conflicts_with(&chord),
+                None,
+                "the deleted shortcut came back at the next login"
+            );
+            assert!(
+                fresh.hotkeys.all_bindings().all(|(_, a)| *a != action),
+                "the action returned on some other chord"
+            );
+        });
+    }
+
+    /// **An action on two chords keeps both across a save and reload.**
+    ///
+    /// The defaults put the Start Menu on both Super keys on purpose: one
+    /// entry answers a driver that sets the Super bit for the Super key
+    /// itself, the other a driver that does not. `load_shortcuts` used to
+    /// unregister every *other* chord bound to an action as it applied each
+    /// binding, so the two entries deleted each other and whichever was
+    /// processed last was the only survivor -- after any save and reload, one
+    /// of the two Super keys silently stopped opening the menu.
+    ///
+    /// Found by `deleting_one_shortcut_keeps_the_rest`, which failed with
+    /// "deleting one shortcut took Start Menu with it" against code that had
+    /// nothing to do with deleting.
+    #[test]
+    fn an_action_on_two_chords_keeps_both() {
+        settingsfile::testing::with_scratch_config("hk-two-chords", |_root| {
+            let shell = card_shell();
+            let doubled: Vec<_> = shell
+                .hotkeys
+                .all_bindings()
+                .filter(|(_, a)| **a == crate::hotkeys::HotkeyAction::ToggleStartMenu)
+                .map(|(h, _)| *h)
+                .collect();
+            assert_eq!(
+                doubled.len(),
+                2,
+                "the fixture no longer binds one action to two chords, so this proves nothing"
+            );
+            shell.save_shortcuts().expect("save");
+
+            let mut fresh = DesktopShell::new(1920, 1080);
+            fresh.load_shortcuts();
+            for chord in doubled {
+                assert_eq!(
+                    fresh.hotkeys.conflicts_with(&chord),
+                    Some(&crate::hotkeys::HotkeyAction::ToggleStartMenu),
+                    "{} lost its binding on reload",
+                    chord.display_name()
+                );
+            }
+        });
+    }
+
+    /// Deleting one shortcut leaves the others alone.
+    ///
+    /// A tombstone names an action, and the merge that applies it walks every
+    /// binding; an over-eager unregister would take the neighbours with it.
+    #[test]
+    fn deleting_one_shortcut_keeps_the_rest() {
+        settingsfile::testing::with_scratch_config("hk-delete-one", |_root| {
+            let mut shell = card_shell();
+            let before: Vec<_> = shell
+                .hotkeys
+                .all_bindings()
+                .map(|(h, a)| (*h, a.clone()))
+                .collect();
+            assert!(before.len() > 2, "fixture too small to prove anything");
+
+            shell.delete_shortcut_row(0);
+
+            let mut fresh = DesktopShell::new(1920, 1080);
+            fresh.load_shortcuts();
+            for (chord, action) in before.iter().skip(1) {
+                assert_eq!(
+                    fresh.hotkeys.conflicts_with(chord),
+                    Some(action),
+                    "deleting one shortcut took {} with it",
+                    action.display_label()
+                );
+            }
+        });
+    }
+
+    /// A shortcut this build has never heard of is not a parse error.
+    ///
+    /// `none=` is a new spelling on the left-hand side, so a file written by
+    /// this version is read by an older one as a chord named "none". That is
+    /// already handled -- an unparseable file is left alone rather than
+    /// rewritten -- but the reverse must hold too: `none` is only a tombstone
+    /// when it is the whole left-hand side, or a chord whose name merely
+    /// starts with those letters would be silently unbound instead of bound.
+    #[test]
+    fn only_a_bare_none_is_a_tombstone() {
+        let cfg = crate::hotkeys::HotkeyConfig::load("none=screenshot\n")
+            .expect("a tombstone should parse");
+        assert_eq!(cfg.unbound().len(), 1, "the tombstone was not recognised");
+        assert!(
+            cfg.bindings().is_empty(),
+            "a tombstone was also stored as a binding"
         );
     }
 

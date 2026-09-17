@@ -435,7 +435,16 @@ impl<'a> Skipper<'a> {
             Ignorable::Plain => true,
             Ignorable::Zwnj => j.positioning || (self.context && j.auto_zwnj),
             Ignorable::Zwj => self.context || j.auto_zwj,
-            Ignorable::Hidden => j.positioning,
+            // Stepped over in both passes, not only when positioning.
+            //
+            // A rule that *names* one of these still matches it, because
+            // `wants` is asked first -- which is what
+            // `a_rule_that_names_an_ignorable_matches_it_instead_of_stepping_over_it`
+            // holds, and what makes this safe for the Mongolian free variation
+            // selectors and the language tag characters that share this
+            // variant. Stepping over is only the answer for a rule that did
+            // not ask for it.
+            Ignorable::Hidden => true,
         }
     }
 
@@ -1026,11 +1035,25 @@ mod tests {
         }
     }
 
+    /// **A hidden character is stepped over by both passes.**
+    ///
+    /// This test used to assert the opposite for substitution, on the grounds
+    /// that "CGJ blocks a substitution deliberately -- that is its whole job".
+    /// That is ZWNJ's job. U+034F COMBINING GRAPHEME JOINER exists to affect
+    /// *collation* and to block canonical reordering; Unicode says to ignore
+    /// it when rendering, and this crate already models the blocker separately
+    /// as [`Ignorable::Zwnj`].
+    ///
+    /// Measured, not argued: with the old rule, `a` + CGJ + `b` on Segoe
+    /// Script gave `a` its isolated glyph 584 where HarfBuzz gave the
+    /// contextual 618, and `ab` alone gave 618 from both -- so the joiner, and
+    /// only the joiner, was suppressing the substitution. Across every font on
+    /// the host the sweep's unexplained disagreements went 2 to 0.
     #[test]
-    fn a_hidden_character_is_stepped_over_when_positioning_and_not_before() {
+    fn a_hidden_character_is_stepped_over_by_both_passes() {
         let data = gdef(2, None, None);
-        // CGJ blocks a substitution deliberately — that is its whole job — but
-        // it must not push a mark off the base it is anchored to.
+        // Stepping over it must still not push a mark off the base it is
+        // anchored to, which is what the positioning half below holds.
         let glyphs = kinds(&[
             (1, Ignorable::No),
             (2, Ignorable::Hidden),
@@ -1038,8 +1061,12 @@ mod tests {
         ]);
         let wants_3 = |p: usize| glyphs.get(p).is_some_and(|g| g.gid == 3);
         let subs = plain(&data, Joiners::substitution(false, false));
-        assert_eq!(subs.next_matching(&glyphs, 0, wants_3), None);
-        assert_eq!(subs.context().next_matching(&glyphs, 0, wants_3), None);
+        assert_eq!(
+            subs.next_matching(&glyphs, 0, wants_3),
+            Some(2),
+            "a hidden character blocked a substitution it has no business blocking"
+        );
+        assert_eq!(subs.context().next_matching(&glyphs, 0, wants_3), Some(2));
         let pos = plain(&data, Joiners::POSITIONING);
         assert_eq!(pos.next_matching(&glyphs, 0, wants_3), Some(2));
         assert_eq!(pos.next(&glyphs, 0), Some(2));

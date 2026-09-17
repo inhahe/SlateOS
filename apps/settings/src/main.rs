@@ -480,6 +480,14 @@ pub struct SettingsState {
     /// questions -- a switch, a value from a list -- and a wallpaper is the one
     /// answer that comes from the filesystem.
     pub dialog: Option<FileDialog>,
+    /// What the open picker is being used for.
+    ///
+    /// `DialogAction::Selected` arrives with a path and nothing else, so the
+    /// answer has to say which question it answers. The same shape as
+    /// `apps/explorer`'s `Modal`, which carries what to do when it replies --
+    /// and for the same reason: a second picker sharing one handler would
+    /// apply a chosen folder as a wallpaper.
+    picker_is_for: PickerPurpose,
 
     // Display settings
     pub resolution_index: usize,
@@ -716,6 +724,8 @@ pub enum DropdownId {
     /// How far the `n`-th program's notifications get while focusing.
     NotifImportance(usize),
     /// When quiet hours begin.
+    /// How long each picture in a rotation stays up.
+    RotationInterval,
     QuietStart,
     /// When they end. Earlier than the start means they run through midnight,
     /// which is what nearly everyone wants and what the default is.
@@ -869,6 +879,26 @@ impl SettingsState {
     /// The filter is the formats `gui/imagecodec` can actually decode. A
     /// picker that offered every file would let a user choose a `.txt` and
     /// meet a failure the desktop reports somewhere they are not looking.
+    /// Choose a folder to rotate wallpapers from.
+    ///
+    /// `select_folder` rather than `open`, because the thing being chosen is a
+    /// directory -- the same call `apps/filesearch` and `apps/renamer` make for
+    /// the same reason. It existed already; a folder picker did not need
+    /// inventing.
+    fn open_rotation_folder_dialog(&mut self) {
+        let start = self
+            .appearance
+            .settings
+            .wallpaper_folder
+            .clone()
+            .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = FileDialog::select_folder().with_initial_path(start);
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.picker_is_for = PickerPurpose::RotationFolder;
+        self.dialog = Some(dialog);
+    }
+
     fn open_wallpaper_dialog(&mut self) {
         let start = self
             .appearance
@@ -892,6 +922,7 @@ impl SettingsState {
             // find its own fixture.
             .with_filter("Pictures", &["*.png", "*.jpg", "*.jpeg", "*.bmp"]);
         dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.picker_is_for = PickerPurpose::Wallpaper;
         self.dialog = Some(dialog);
     }
 
@@ -906,10 +937,26 @@ impl SettingsState {
                 _ => DialogAction::None,
             }
         };
+        Some(self.apply_dialog_answer(action))
+    }
+
+    /// Apply the picker's answer.
+    ///
+    /// Separate from [`Self::dialog_event`] so a test can hand it an answer
+    /// without a compositor. Inline, the only way to ask "where does a chosen
+    /// folder land" was to synthesise the mouse events that would choose one
+    /// -- which is how the menu test earlier today ended up asking a function
+    /// that could not have failed.
+    fn apply_dialog_answer(&mut self, action: DialogAction) -> bool {
         match action {
             DialogAction::Selected(path) => {
                 self.dialog = None;
-                self.appearance.settings.wallpaper = Some(path);
+                match self.picker_is_for {
+                    PickerPurpose::Wallpaper => self.appearance.settings.wallpaper = Some(path),
+                    PickerPurpose::RotationFolder => {
+                        self.appearance.settings.wallpaper_folder = Some(path);
+                    }
+                }
             }
             DialogAction::Cancelled => self.dialog = None,
             DialogAction::NavigatedTo(path) => {
@@ -919,7 +966,7 @@ impl SettingsState {
             }
             DialogAction::None => {}
         }
-        Some(true)
+        true
     }
 
     fn save_appearance(&mut self) {
@@ -1109,6 +1156,7 @@ impl SettingsState {
             window_width: 1200.0,
             window_height: 800.0,
             dialog: None,
+            picker_is_for: PickerPurpose::Wallpaper,
 
             // Display defaults
             resolution_index: 2,   // 1920x1080
@@ -1844,6 +1892,8 @@ enum ToggleId {
     /// Whether it shows a banner rather than only appearing in the list.
     NotifBanner(usize),
     /// Whether the nightly quiet hours are in force at all.
+    /// Whether a rotation is shuffled or goes in folder order.
+    RotationShuffle,
     QuietHours,
     MonoAudio,
     VisualAlerts,
@@ -2137,6 +2187,39 @@ enum ButtonId {
     ChooseWallpaper,
     /// Go back to the plain background that follows the theme.
     ClearWallpaper,
+    /// Open the picker and choose a folder to rotate wallpapers from.
+    ChooseRotationFolder,
+    /// Stop rotating and go back to a single picture.
+    ClearRotation,
+}
+
+/// How long a rotation leaves each picture up, in seconds.
+///
+/// A fixed list rather than a free number, the same judgement the lock delay
+/// and the thumbnail sizes make: this is a policy the user picks, not a
+/// measurement they take, and a text field would invite "5 min" and "0.5" and
+/// other things the reader would then have to refuse.
+const ROTATION_INTERVALS: [u64; 6] = [60, 300, 600, 1_800, 3_600, 86_400];
+
+/// How an interval is written on the row.
+fn rotation_interval_label(secs: u64) -> &'static str {
+    match secs {
+        0..=60 => "Every minute",
+        61..=300 => "Every 5 minutes",
+        301..=600 => "Every 10 minutes",
+        601..=1_800 => "Every 30 minutes",
+        1_801..=3_600 => "Every hour",
+        _ => "Every day",
+    }
+}
+
+/// What the file picker is being used for, so its answer lands in the right
+/// place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum PickerPurpose {
+    #[default]
+    Wallpaper,
+    RotationFolder,
 }
 
 /// What a click on a page landed on.
@@ -3177,6 +3260,43 @@ impl SettingsState {
             pal.accent,
             Some(RowHit::Press(ButtonId::ChooseWallpaper)),
         );
+
+        s.section("Rotation");
+        match self.appearance.settings.wallpaper_folder.as_deref() {
+            Some(folder) => s.note(&folder.display().to_string(), 28.0),
+            None => s.note(
+                "No folder. The desktop shows the single picture above.",
+                28.0,
+            ),
+        }
+        s.button_row(
+            "Rotate through a folder",
+            "Choose...",
+            pal.accent,
+            Some(RowHit::Press(ButtonId::ChooseRotationFolder)),
+        );
+        // The interval and the order are about a folder, so they appear with
+        // one and not before: three controls of which two govern nothing read
+        // as broken rather than as inapplicable, which is the judgement the
+        // fit dropdown below already makes.
+        if self.appearance.settings.wallpaper_folder.is_some() {
+            s.dropdown_row(
+                "Change picture",
+                DropdownId::RotationInterval,
+                rotation_interval_label(self.appearance.settings.wallpaper_interval_secs),
+            );
+            s.toggle_row(
+                "Shuffle the order",
+                ToggleId::RotationShuffle,
+                self.appearance.settings.wallpaper_shuffle,
+            );
+            s.button_row(
+                "Stop rotating",
+                "Clear",
+                pal.subtext0,
+                Some(RowHit::Press(ButtonId::ClearRotation)),
+            );
+        }
         // Offered only with a picture to place, for the reason Remove is:
         // a control whose every option does the same nothing is one a user
         // reads as broken rather than as inapplicable.
@@ -4498,6 +4618,17 @@ impl SettingsState {
                     at,
                 )
             }
+            DropdownId::RotationInterval => {
+                let items: Vec<String> = ROTATION_INTERVALS
+                    .iter()
+                    .map(|s| rotation_interval_label(*s).to_string())
+                    .collect();
+                let current = ROTATION_INTERVALS
+                    .iter()
+                    .position(|s| *s == self.appearance.settings.wallpaper_interval_secs)
+                    .unwrap_or(2);
+                (items, current)
+            }
             DropdownId::WallpaperFit => {
                 let items: Vec<String> = appearance::ImageFit::ALL
                     .iter()
@@ -5087,6 +5218,10 @@ impl SettingsState {
             RowHit::Press(ButtonId::ClearWallpaper) => {
                 self.appearance.settings.wallpaper = None;
             }
+            RowHit::Press(ButtonId::ChooseRotationFolder) => self.open_rotation_folder_dialog(),
+            RowHit::Press(ButtonId::ClearRotation) => {
+                self.appearance.settings.wallpaper_folder = None;
+            }
         }
     }
 
@@ -5217,6 +5352,7 @@ impl SettingsState {
     /// principle, and a stale index must not panic.
     fn toggle_mut(&mut self, id: ToggleId) -> Option<&mut bool> {
         Some(match id {
+            ToggleId::RotationShuffle => &mut self.appearance.settings.wallpaper_shuffle,
             ToggleId::NightLight => &mut self.appearance.settings.night_light,
             ToggleId::AutoLogin => &mut self.auto_login_enabled,
             ToggleId::NotifSound(index) => &mut self.notif.settings.apps.get_mut(index)?.sound,
@@ -5346,6 +5482,11 @@ impl SettingsState {
                     && let Some(rule) = self.notif.settings.apps.get_mut(app)
                 {
                     rule.importance = *chosen;
+                }
+            }
+            DropdownId::RotationInterval => {
+                if let Some(secs) = ROTATION_INTERVALS.get(index) {
+                    self.appearance.settings.wallpaper_interval_secs = *secs;
                 }
             }
             DropdownId::WallpaperFit => {
@@ -6667,6 +6808,60 @@ mod tests {
     }
 
     /// **The Wallpaper page is a page now, not a placeholder.**
+    /// The rotation rows appear only once there is a folder for them.
+    ///
+    /// Three controls of which two govern nothing read as broken rather than
+    /// as inapplicable -- the judgement the fit dropdown already makes, and
+    /// the one design-decisions 856 is about.
+    #[test]
+    fn rotation_detail_rows_wait_for_a_folder() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+
+        state.appearance.settings.wallpaper_folder = None;
+        assert!(
+            center_of(&state, RowHit::Toggle(ToggleId::RotationShuffle)).is_none(),
+            "a shuffle switch was drawn with no folder to shuffle"
+        );
+        assert!(
+            center_of(&state, RowHit::Press(ButtonId::ChooseRotationFolder)).is_some(),
+            "the page must always offer a way to START rotating"
+        );
+
+        state.appearance.settings.wallpaper_folder = Some(std::path::PathBuf::from("/pics"));
+        assert!(
+            center_of(&state, RowHit::Toggle(ToggleId::RotationShuffle)).is_some(),
+            "a folder is set and the rows did not appear"
+        );
+        assert!(
+            center_of(&state, RowHit::Dropdown(DropdownId::RotationInterval)).is_some(),
+            "no way to change how often it rotates"
+        );
+    }
+
+    /// Choosing a folder does not set it as the single picture.
+    ///
+    /// One picker serves both, and its answer is a bare path: without
+    /// `picker_is_for` the chosen folder would be applied as a wallpaper, and
+    /// the desktop would try to draw a directory.
+    #[test]
+    fn a_chosen_folder_lands_in_the_folder_setting() {
+        let mut state = SettingsState::new();
+        state.open_rotation_folder_dialog();
+        assert!(
+            state.apply_dialog_answer(DialogAction::Selected(std::path::PathBuf::from("/pics")))
+        );
+
+        assert_eq!(
+            state.appearance.settings.wallpaper_folder,
+            Some(std::path::PathBuf::from("/pics"))
+        );
+        assert_eq!(
+            state.appearance.settings.wallpaper, None,
+            "the folder was applied as the single picture"
+        );
+    }
+
     #[test]
     fn the_wallpaper_page_offers_a_way_to_choose_one() {
         let mut state = SettingsState::new();

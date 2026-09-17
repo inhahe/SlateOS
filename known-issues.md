@@ -159006,3 +159006,44 @@ library format storing the bytes (the format already escapes, and
 `gui/pathcodec` exists for exactly this). That is a real change through the
 whole crate -- import, search, the library file, the thumbnail cache key --
 and is worth doing properly rather than papering over at the call site.
+
+## `TD-C-A-BAD-ARGUMENT-TO-OPEN-EMPTIES-THE-FILE-BEFORE-IT-COMPLAINS` (lane C, 2026-09-17)
+
+**In short:** `io.open(path, "w", ...)` truncates the file and *then* validates
+its arguments. A typo in one of them destroys the target and raises afterwards,
+so a script that never wrote a byte can still leave nothing behind. This
+emptied `scripts/hooks/pre-push` -- 5,591 lines, the hook all three lanes push
+through -- from a script whose only fault was `newline="\\n"` where it meant
+`newline="\n"`.
+
+**Demonstrated, not inferred:**
+
+    >>> io.open(P, "w", encoding="utf-8", newline=chr(92) + "n")
+    ValueError: illegal newline value: \n
+    >>> io.open(P, encoding="utf-8").read()
+    ''
+
+The file is empty and the exception makes it look as though nothing happened.
+
+**Why it was nearly invisible.** An empty hook is not an obviously broken one:
+`sh -n` accepts it, git runs it, it exits 0, and every gate silently does not
+run. What caught it was `scripts/test-pre-push-gates.py` reporting that
+`pre-push` had no shebang -- a structural check that had no idea what it was
+really looking at. Restored with `git restore`; it had never been committed or
+pushed.
+
+**The transferable part is the shape, not the typo.** A destructive operation
+sequenced before its own validation. The same shape as `fs::write` truncating
+before it writes, which is the entire reason `safeio::write_atomically` exists
+in this tree for Rust -- and the Python side had no equivalent, so every
+generator script in `build/` and `scripts/` carries this.
+
+**What to do instead.** Build the text, write it beside the target, rename over
+it. A rename within a directory is atomic, so a failure anywhere before it
+leaves the original untouched. `build/safewrite.py` is that, and its check
+shows the same typo leaving the file as it was.
+
+**Why the fix is not "be careful".** I typed this exact escape three times in
+one session -- twice caught before running, once not. A habit that fails one
+time in three is not a habit, and the answer to a destructive default is to
+stop calling it, not to concentrate harder.

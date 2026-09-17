@@ -7162,6 +7162,15 @@ mod tests {
     }
 
     /// Open the colour picker the way a user does, and answer where it is.
+    ///
+    /// **Call this inside `with_scratch_config`.** It goes through
+    /// `handle_event`, and this application persists by comparing the whole
+    /// settings struct around that call -- so opening the picker writes
+    /// `appearance.yaml` wherever the run's configuration directory happens
+    /// to point. On a developer's machine that is their own; under a parallel
+    /// workspace run it is a neighbouring test's scratch directory, which is
+    /// where `BUG-C-THE-KEYBOARD-LAYOUT-TEST-FAILS-ABOUT-ONE-WORKSPACE-RUN-IN-TWO`
+    /// came from. The pre-push gate caught this helper doing exactly that.
     fn open_accent_picker() -> SettingsState {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::Colors;
@@ -7181,9 +7190,11 @@ mod tests {
     /// The palette has honoured `AccentColor::Custom` since it was written --
     /// `effective_accent` returns `custom_accent` for it, and `accent_on` has
     /// a branch saying the user's choice is not to be second-guessed -- but
-    /// `AccentColor::presets()` lists the thirteen named accents and not that
-    /// one, so there was no way to reach it. This is the control catching up
-    /// with the consumer, which is the direction that leaves nothing lying.
+    /// `AccentColor::presets()` lists the named accents and not that one, so
+    /// there was no way to reach it. This is the control catching up with the
+    /// consumer, which is the direction that leaves nothing lying.
+    ///
+    /// No scratch config: this one only lays the page out and never persists.
     #[test]
     fn the_accent_grid_offers_a_colour_of_your_own() {
         let mut state = SettingsState::new();
@@ -7201,13 +7212,15 @@ mod tests {
     /// Pressing it asks which colour, and changes nothing until told.
     #[test]
     fn choosing_your_own_colour_asks_which_colour() {
-        let state = open_accent_picker();
-        assert!(state.color_dialog.is_some(), "no colour picker appeared");
-        assert_eq!(
-            state.appearance.settings.accent_color,
-            AccentColor::Blue,
-            "the accent changed before a colour had been chosen"
-        );
+        with_scratch_config("settings-accent-open", |_root| {
+            let state = open_accent_picker();
+            assert!(state.color_dialog.is_some(), "no colour picker appeared");
+            assert_eq!(
+                state.appearance.settings.accent_color,
+                AccentColor::Blue,
+                "the accent changed before a colour had been chosen"
+            );
+        });
     }
 
     /// **A confirmed colour is the accent, and the desktop is told to use it.**
@@ -7219,53 +7232,57 @@ mod tests {
     /// fit defect -- stored, and nothing obeying it.
     #[test]
     fn a_confirmed_colour_becomes_the_accent() {
-        let mut state = open_accent_picker();
-        let chosen = Color::from_hex(0x1D7A3F);
-        state
-            .color_dialog
-            .as_mut()
-            .expect("picker")
-            .picker_mut()
-            .set_color(chosen);
+        with_scratch_config("settings-accent-confirm", |_root| {
+            let mut state = open_accent_picker();
+            let chosen = Color::from_hex(0x1D7A3F);
+            state
+                .color_dialog
+                .as_mut()
+                .expect("picker")
+                .picker_mut()
+                .set_color(chosen);
 
-        state.handle_event(&key_press(Key::Enter));
+            state.handle_event(&key_press(Key::Enter));
 
-        assert!(state.color_dialog.is_none(), "the picker stayed up");
-        assert_eq!(state.appearance.settings.custom_accent, chosen);
-        assert_eq!(
-            state.appearance.settings.accent_color,
-            AccentColor::Custom,
-            "the colour was saved but nothing was told to use it"
-        );
-        // The claim that matters to a user: the desktop's accent is now theirs.
-        assert_eq!(
-            state.appearance.settings.effective_accent(),
-            chosen,
-            "the accent the desktop will draw is not the colour that was picked"
-        );
+            assert!(state.color_dialog.is_none(), "the picker stayed up");
+            assert_eq!(state.appearance.settings.custom_accent, chosen);
+            assert_eq!(
+                state.appearance.settings.accent_color,
+                AccentColor::Custom,
+                "the colour was saved but nothing was told to use it"
+            );
+            // The claim that matters to a user: the desktop's accent is theirs.
+            assert_eq!(
+                state.appearance.settings.effective_accent(),
+                chosen,
+                "the accent the desktop will draw is not the colour picked"
+            );
+        });
     }
 
     /// Cancelling leaves the accent exactly as it was.
     #[test]
     fn cancelling_the_colour_picker_changes_nothing() {
-        let mut state = open_accent_picker();
-        let before = state.appearance.settings.effective_accent();
-        state
-            .color_dialog
-            .as_mut()
-            .expect("picker")
-            .picker_mut()
-            .set_color(Color::from_hex(0xFF00FF));
+        with_scratch_config("settings-accent-cancel", |_root| {
+            let mut state = open_accent_picker();
+            let before = state.appearance.settings.effective_accent();
+            state
+                .color_dialog
+                .as_mut()
+                .expect("picker")
+                .picker_mut()
+                .set_color(Color::from_hex(0xFF00FF));
 
-        state.handle_event(&key_press(Key::Escape));
+            state.handle_event(&key_press(Key::Escape));
 
-        assert!(state.color_dialog.is_none(), "the picker stayed up");
-        assert_eq!(
-            state.appearance.settings.effective_accent(),
-            before,
-            "a cancelled colour was adopted anyway"
-        );
-        assert_ne!(state.appearance.settings.accent_color, AccentColor::Custom);
+            assert!(state.color_dialog.is_none(), "the picker stayed up");
+            assert_eq!(
+                state.appearance.settings.effective_accent(),
+                before,
+                "a cancelled colour was adopted anyway"
+            );
+            assert_ne!(state.appearance.settings.accent_color, AccentColor::Custom);
+        });
     }
 
     /// While the picker is up, a keystroke does not reach the page behind it.
@@ -7275,14 +7292,16 @@ mod tests {
     /// file picker is guarded this way already; this is the same guard.
     #[test]
     fn the_colour_picker_answers_before_the_page() {
-        let mut state = open_accent_picker();
-        let page = state.current_page;
+        with_scratch_config("settings-accent-modal", |_root| {
+            let mut state = open_accent_picker();
+            let page = state.current_page;
 
-        // Down would move the sidebar selection on an unguarded page.
-        state.handle_event(&key_press(Key::Down));
+            // Down would move the sidebar selection on an unguarded page.
+            state.handle_event(&key_press(Key::Down));
 
-        assert_eq!(state.current_page, page, "a keystroke reached the page");
-        assert!(state.color_dialog.is_some(), "the picker went away");
+            assert_eq!(state.current_page, page, "a keystroke reached the page");
+            assert!(state.color_dialog.is_some(), "the picker went away");
+        });
     }
 
     #[test]

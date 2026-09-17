@@ -190,6 +190,25 @@ IGNORE = (
      "Some(exact) if exact.as_os_str().to_string_lossy() == self.edit_text",
      "asks whether the field still reads as the rendering of those bytes, "
      "i.e. whether the user typed; comparing bytes would always say yes"),
+    # --- lane C, audited 2026-09-17 ---
+    #
+    # A third shape, and the first of it: the contents of a file being shown
+    # to somebody. The two above are about a *path* drawn as text with the
+    # bytes kept beside it. This one is not a path at all -- it is the first
+    # 4 KiB of whatever file the preview pane is pointed at, and a file's
+    # contents have no declared encoding to honour.
+    #
+    # It replaced `BufRead::lines().filter_map(|l| l.ok())`, which silently
+    # *dropped* every line that was not UTF-8. A dropped line is the worse
+    # failure: the reader sees plausible text with no sign that anything is
+    # missing, where a replacement character says exactly where the bytes
+    # stopped being text. Nothing downstream consumes the rendering -- it is
+    # drawn and dropped, and the path beside it is untouched.
+    ("apps/explorer/src/thumbs.rs",
+     "let text = String::from_utf8_lossy(&bytes);",
+     "the first 4 KiB of a previewed file, drawn as text; a file's contents "
+     "declare no encoding, and dropping the undecodable lines instead -- "
+     "which is what this replaced -- hid them from the reader entirely"),
     ("gui/toolkit/src/pathbar.rs",
      "label: exact.to_string_lossy().into_owned()",
      "the drawn breadcrumb pill; `Segment::exact` beside it is the click "

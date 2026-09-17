@@ -1929,11 +1929,11 @@ _Minimal hotkey defaults: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print Screen. Eve
 _Click selected radio button to deselect (returns group to no-selection state)._
 
 #### Text Views
-- [ ] Simple text view: plain text, single font, ANSI colors (for terminals/logs)
-- [ ] Rich text view: fonts, sizes, colors, inline images (NOT HTML, simpler markup)
+- [x] Simple text view: plain text, single font, ANSI colors (for terminals/logs) — *`guitk::textview::SimpleTextView`: ANSI colour, vertical scrolling, selection, copy and search. **Nothing consumes it.** `apps/logviewer` hand-rolls its own scrolling, wrapping, search and selection in 3117 lines and has no ANSI colour at all — the one capability the widget has and it lacks. Same shape as `TextInput` before 2026-09-17: a good shared widget with apps reimplementing a subset beside it.*
+- [x] Rich text view: fonts, sizes, colors, inline images (NOT HTML, simpler markup) — *`guitk::textview::RichTextView`: headings, lists, links and styling. No consumer either.*
 - [ ] Web view: embedded browser engine (after Chromium port)
-- [ ] Word wrap option (if off, horizontal scroll)
-- [ ] Scroll-to-bottom / stay-at-bottom when new text added
+- [x] Word wrap option (if off, horizontal scroll) — *in `textview.rs`; `textedit::horizontal_scroll` is the single-line counterpart.*
+- [x] Scroll-to-bottom / stay-at-bottom when new text added — *in `textview.rs`.*
 - [ ] Emoji display without oversizing or resizing the line (unlike Qt)
 
 #### Input Fields

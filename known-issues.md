@@ -155488,7 +155488,19 @@ missing. They were *finished work pointing the wrong way*, and no checkbox
 state can express that.
 
 **What made the check cheap.** Look for the type and the entry point, not the
-word. Grepping "tab" in `apps/editor` returns 260 hits, nearly all tab
+word. **Four cases this evening, and the count pointed the wrong way in every
+one:**
+
+| word | hits | what they actually were |
+|---|---|---|
+| `tab` in `apps/editor` | 260 | tab characters and indentation; the feature was real but the count proved nothing |
+| `priority` in `apps/procexplorer` | 9 | all display — no setter exists |
+| `history` in `apps/terminal` | 5 | the scrollback buffer; input history does not exist |
+| `dmi` in `apps/` | several | matched inside "admin" |
+
+The pattern is not that counting is imprecise. It is that **a word appears in a
+file because the domain is adjacent**, which is exactly the situation where the
+answer is least obvious and the count most tempting. Grepping "tab" in `apps/editor` returns 260 hits, nearly all tab
 characters; the answer came from finding `Tabs<Document>` and a `render_tabs`
 that the frame calls. A count measures vocabulary, not behaviour -- the same
 error that matched `dmi` inside "admin" earlier the same day.

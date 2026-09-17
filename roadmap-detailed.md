@@ -1580,13 +1580,13 @@ honest one — and the native ones deliberately do **not** shadow the POSIX name
 on `$PATH`, so a script that says `ps` gets `ps`._
 
 #### Terminal Emulator
-- [ ] Persistent input history (searchable)
+- [ ] Persistent input history (searchable) *Checked 2026-09-16: genuinely unstarted. The five "history" hits in `apps/terminal` are all the **scrollback** buffer, which is a different thing — there is no record of what was typed and nothing persists one.*
 - [ ] Arrow keys and insert work in input
-- [ ] Tab autocomplete for file/directory names
-- [ ] Find text in backscroll (Ctrl+F)
+- [ ] Tab autocomplete for file/directory names *Checked 2026-09-16: genuinely unstarted — no completion of any kind in `apps/terminal`. Note for whoever starts it: `apps/explorer`'s `completions_for` is the working example, including why a name with no text form is skipped rather than offered.*
+- [ ] Find text in backscroll (Ctrl+F) *Checked 2026-09-16: genuinely unstarted — no search over the scrollback and no Ctrl+F binding.*
 - [ ] Configurable colors and font
 - [ ] Ability to log all output
-- [ ] Unicode and ANSI support
+- [x] Unicode and ANSI support *Verified 2026-09-16: `apps/terminal` carries a VT100/xterm escape-sequence parser with its own state machine, a 256-colour table, and CSI handling for cursor movement, erase, scroll and modes.*
 - [ ] Resizable, remembers last size and location
 - [ ] Word wrap option (if off, horizontal scroll to longest line)
 - [ ] tmux-like session detach/reattach

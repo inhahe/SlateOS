@@ -156561,3 +156561,50 @@ of HarfBuzz directly rather than of our source. The lesson is narrower than
 "measure": *when a disagreement is about positions and the totals match, the
 disagreement is about apportionment, not about what was applied.*
 
+
+## TD-FONT-A-ZEROED-MARK-IS-NOT-PARKED-ON-ITS-BASE -- 2026-09-17
+
+**In short:** on a font that cannot draw a script at all, HarfBuzz tucks that
+script's combining marks back onto the letter they belong to and we leave them
+where the pen was. Every glyph involved is a missing-glyph box, so nothing
+looks different; what differs is where the boxes sit. Forty cases, all in the
+supplementary USE corpus.
+
+**Date:** 2026-09-17. **Lane:** C.
+
+**How to see it.** The default corpus does not show this at all:
+
+    python gui/font/tools/harfbuzz_sweep.py                              # misplaced 1
+    python gui/font/tools/harfbuzz_sweep.py --corpus gui/font/tools/use-corpus.txt
+
+The second reports `agree` 32203, `differ` 0, `misplaced` **40**, and every
+one is the same shape — e.g. Javanese `U+A98F U+A9C0` on Hack-Bold, where we
+put the mark at 1233 and HarfBuzz puts it at 0, which is the base's origin.
+Tibetan `U+0F40 U+0F72 U+0F74` differs vertically instead: `(0, 0)` against
+`(0, -1934)`.
+
+**Not caused by the kern split.** Checked by restoring the previous
+`scaled.rs` and re-running: 32203 / 40 either way.
+
+**Where the cause is, and where it is not.** Not in fallback *placement*:
+`fallback::positions_marks` declines these scripts deliberately, HarfBuzz's
+Thai, Myanmar and USE shapers all set `fallback_position = false`, and
+`TD-FONT-FALLBACK-CLASSES-SCRIPTS-IT-NEVER-PLACES` covers that. The
+difference is the *other* half, which this crate already knows is a separate
+question — see `fallback::tests::declining_to_place_a_mark_is_not_declining_
+to_zero_it`. HarfBuzz's `zero_mark_widths_by_gdef` adjusts the offset by
+`-advance` as it zeroes, parking the mark on its base; our equivalent shift in
+`scaled.rs` (`let back = ...`) is gated on `synth_at`, which is
+`!applies_gpos` — we placed it ourselves — and so does not fire here.
+
+**One hypothesis, refuted.** Gating that shift on `zeroed_at` instead made it
+worse: `agree` 32203 -> 32178, `misplaced` 40 -> 65. So it is not simply
+"shift whenever the advance was zeroed", and the next attempt should start by
+finding which of HarfBuzz's three zeroing modes (`BY_GDEF_EARLY`,
+`BY_GDEF_LATE`, `NONE`) each of these runs takes.
+
+**Why it is not urgent.** It arises only on a face with no glyphs for the
+script, so every glyph in the run is already a box. The reason to fix it is
+that the USE corpus is otherwise at `differ` 0 and would become a clean
+instrument, the way the default corpus now is.
+

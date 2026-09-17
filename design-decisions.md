@@ -68511,6 +68511,33 @@ small caveat that becomes a hole the day somebody reads "disable" as a security
 primitive. Its doc comment says, in the negative, that it is ergonomics and not
 a control.
 
+### Closed 2026-09-17: the subscriber exists
+
+`scancode_to_ascii` now consults the active layout, so a key types
+differently and the feature this entry was written about is real.
+
+Built as the entry prescribed rather than as the obvious lookup:
+`translate_try` uses `try_lock` and returns three outcomes, because the
+caller is IRQ 1's handler and each case needs a different action there --
+`Contended` passes the raw scancode through (a keystroke racing a layout
+edit gets the old mapping, which is the documented degradation and not an
+error), `Disabled` produces no character, `Mapped` is used, falling back to
+the physical key if a layout maps to an extended keycode with no
+scan-code-set-1 byte rather than dropping the keystroke silently.
+
+Two details worth keeping. **No translation layer was needed**, because
+`keylayout`'s `KeyCode` space *is* scan-code set 1 -- `keys::ESCAPE` is
+`0x01`, `keys::KEY_1` is `0x02` -- which the entry had noted and which made
+the consumer a lookup in front of the existing table rather than a mapping
+exercise. And **the default path is unchanged**: with no active layout,
+`translate_try` returns the key it was given, so a tree that never calls
+1074 behaves exactly as before.
+
+The `disable_key` caveat is now stated at that function's own signature, not
+only here. The reader who would misread it as a security control is reading
+the signature.
+
+
 ## 947. A probe needs identity and coverage, and they fail independently
 
 **Date:** 2026-09-16 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; paid for over eleven rounds of one investigation

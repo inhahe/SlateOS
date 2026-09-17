@@ -515,6 +515,31 @@ fn handle_extended(code: u8, pressed: bool) {
 /// Returns `None` for keys that don't produce visible characters
 /// (function keys, modifier keys handled elsewhere, etc.).
 fn scancode_to_ascii(code: u8) -> Option<u8> {
+    // Consult the active keyboard layout. Until 2026-09-17 this table was
+    // hardcoded US QWERTY and nothing read `fs::keylayout` at all, so
+    // `SYS_KEYLAYOUT_SET` set a value no key was translated through --
+    // design-decisions 946, a publisher with no subscriber.
+    //
+    // `translate_try`, not `translate`: this runs in IRQ 1's handler and
+    // `translate` takes a lock a task may hold. 940's rule -- the IRQ backs
+    // off rather than the registry becoming IRQ-safe.
+    //
+    // `keylayout`'s KeyCode space IS scan-code set 1 (`keys::ESCAPE` is
+    // 0x01, `keys::KEY_1` is 0x02), so no translation layer is needed here;
+    // the remap happens before the table lookup below.
+    let code = match crate::fs::keylayout::translate_try(u16::from(code)) {
+        // Raced a layout edit: use the old mapping rather than waiting. A
+        // keystroke translated by the previous layout is the documented
+        // degradation and is not an error.
+        crate::fs::keylayout::TranslateTry::Contended => code,
+        // Disabled in the active layout: produce no character at all.
+        crate::fs::keylayout::TranslateTry::Disabled => return None,
+        // A layout may map to an extended keycode with no scan-code-set-1
+        // byte. Nothing below can render one, so fall back to the physical
+        // key rather than dropping the keystroke silently.
+        crate::fs::keylayout::TranslateTry::Mapped(k) => u8::try_from(k).unwrap_or(code),
+    };
+
     let shift = LEFT_SHIFT.load(Ordering::Acquire) || RIGHT_SHIFT.load(Ordering::Acquire);
     let caps = CAPS_LOCK.load(Ordering::Acquire);
     let ctrl = LEFT_CTRL.load(Ordering::Acquire) || RIGHT_CTRL.load(Ordering::Acquire);

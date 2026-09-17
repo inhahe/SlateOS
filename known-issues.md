@@ -156664,8 +156664,26 @@ face that classifies, and the difference is somewhere in *how HarfBuzz
 decides mark-ness for a glyph its `GDEF` has no class for* -- which is not
 the same question as "does this face classify".
 
-Start there, with `_hb_ot_layout_set_glyph_props` and what it does for a
-codepoint that maps to `.notdef`.
+**A fifth hypothesis, refuted, and it closes off a whole direction.** The
+obvious reading of "how HarfBuzz decides mark-ness for a glyph its `GDEF` has
+no class for" is a *per-glyph* fallback: consult the class, and where there is
+none, use the character's general category. Implemented that way it changes
+nothing at all, because `otl::glyph_class` returns `Some(0)` for any glyph
+outside the table's ranges and the first attempt read that as an answer.
+Correcting it to treat class 0 as "no class" -- which is what OpenType means
+by it -- then gives default `misplaced` 1 -> 16 and USE 40 -> 50: *exactly*
+the numbers the blunt `is_mark(gid) || glyph.mark` produced.
+
+That is the useful part. Class 0 is not a small set; it is every glyph the
+face did not explicitly list, so a category fallback over it is the same
+thing as the OR, and a per-glyph rule of that shape cannot be the answer
+however it is phrased. Whatever zeroes that mark in HarfBuzz is not a
+mark-ness fallback at all.
+
+Five hypotheses are now spent on the gate and the mark-ness test. The next
+attempt should leave both alone and instrument the other end: print what our
+zeroing pass *does* for this run -- `zeroed_at`, `marks`, the advance before
+and after -- rather than guessing which predicate ought to select it.
 
 **Why it is not urgent.** It arises only on a face with no glyphs for the
 script, so every glyph in the run is already a box. The reason to fix it is

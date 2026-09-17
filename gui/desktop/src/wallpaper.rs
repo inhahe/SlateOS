@@ -666,6 +666,17 @@ pub struct WallpaperManager {
     current_image_id: u64,
     /// Monotonic counter for generating image IDs.
     next_image_id: u64,
+    /// The pixel size of the picture behind [`Self::current_image_id`].
+    ///
+    /// Carries the id it was measured from, and is believed only while that
+    /// id is still current. Decoding takes time: a slideshow that advances
+    /// while a picture is being read would otherwise have the *outgoing*
+    /// picture's size applied to the incoming one, and every fit but
+    /// `Stretch` would place it wrongly for one frame.
+    ///
+    /// `None` until something measures one, which is the honest state -- a
+    /// manager that has allocated an id has not necessarily seen any pixels.
+    image_size: Option<(u64, f32, f32)>,
     /// Draws for [`Self::random_wallpaper`]. See [`Self::with_seed`] for why
     /// the manager owns one rather than being handed a seed per call.
     rng: SeededRng,
@@ -706,6 +717,7 @@ impl WallpaperManager {
             history: WallpaperHistory::new(),
             current_image_id: 0,
             next_image_id: 1,
+            image_size: None,
             rng,
         }
     }
@@ -1055,8 +1067,18 @@ impl WallpaperManager {
         });
 
         if self.current_image_id != 0 {
+            // The picture's own size, not the screen's. Passing the screen's
+            // size as the image's is what made all six fit modes draw the
+            // identical full-screen rectangle for as long as the setting
+            // existed: `Fill` and `Fit` both scale by a ratio that is then 1,
+            // and `Center` and `Tile` both return the rectangle they were
+            // handed. Falling back to the screen's size when nothing has
+            // measured the picture yet keeps that old behaviour for the one
+            // frame before the decode lands, which is a full-bleed picture
+            // rather than a gap.
+            let (iw_src, ih_src) = self.current_image_size().unwrap_or((width, height));
             let (ix, iy, iw, ih) =
-                compute_image_rect(width, height, width, height, self.config.fit);
+                compute_image_rect(width, height, iw_src, ih_src, self.config.fit);
             cmds.push(RenderCommand::Image {
                 x: ix,
                 y: iy,
@@ -1321,6 +1343,31 @@ impl WallpaperManager {
     // ======================================================================
     // Internal helpers
     // ======================================================================
+
+    /// Record the pixel size of the picture now loaded under `id`.
+    ///
+    /// Called by whoever decoded it -- this manager never reads a file, so it
+    /// cannot find this out for itself. Until it is told, every fit mode
+    /// renders as `Stretch`, because a picture assumed to be exactly the size
+    /// of the screen needs no scaling under any of them.
+    ///
+    /// A size for an id that is no longer current is *kept*, not dropped: the
+    /// guard is on the reading side, so a late answer for a superseded picture
+    /// is simply never consulted, and one that arrives just before its own id
+    /// becomes current still applies.
+    pub fn note_image_size(&mut self, id: u64, width: f32, height: f32) {
+        self.image_size = Some((id, width, height));
+    }
+
+    /// The size of the picture actually on screen, if it has been measured.
+    ///
+    /// The id check is the whole point -- see [`Self::image_size`].
+    fn current_image_size(&self) -> Option<(f32, f32)> {
+        match self.image_size {
+            Some((id, w, h)) if id == self.current_image_id && w > 0.0 && h > 0.0 => Some((w, h)),
+            _ => None,
+        }
+    }
 
     /// Allocate a new unique image ID.
     fn alloc_image_id(&mut self) -> u64 {
@@ -2513,6 +2560,87 @@ mod tests {
         assert_eq!(cmds.len(), 2);
         assert!(matches!(&cmds[0], RenderCommand::FillRect { .. }));
         assert!(matches!(&cmds[1], RenderCommand::Image { .. }));
+    }
+
+    /// The fit the user chose reaches the screen.
+    ///
+    /// Asserted through `get_render_commands`, not through
+    /// [`compute_image_rect`]. That function has been correct since it was
+    /// written and has six tests of its own; the defect was entirely in its
+    /// caller, which passed the *screen's* dimensions in place of the
+    /// picture's. Under that assumption every one of the six modes returns the
+    /// same full-screen rectangle -- `Fill` and `Fit` scale by a ratio of
+    /// exactly 1, `Center` and `Tile` hand back the rectangle they were
+    /// given -- so the setting drew the identical picture in all six
+    /// positions, and every test that asked the function directly passed
+    /// throughout. `known-issues.md`
+    /// `TD-C-A-PURE-FUNCTIONS-TESTS-SAY-NOTHING-ABOUT-ITS-CALLER` records the
+    /// lesson: a unit test of a pure function proves the function and says
+    /// nothing whatever about whether anybody calls it correctly -- and one
+    /// whose arguments are all the same type will take them in the wrong
+    /// order in silence.
+    #[test]
+    fn a_letterboxed_picture_and_a_cropped_one_are_not_the_same_picture() {
+        // Wider than the screen's 16:9, so the two modes cannot agree: one
+        // matches the width and leaves bars above and below, the other matches
+        // the height and loses the left and right edges.
+        fn rect_of(fit: ImageFit) -> (f32, f32, f32, f32) {
+            let mut mgr = WallpaperManager::new();
+            mgr.set_image(Path::new("/wide.png"), fit);
+            mgr.note_image_size(mgr.current_image_id(), 3000.0, 1000.0);
+            let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
+            cmds.iter()
+                .find_map(|c| match c {
+                    RenderCommand::Image {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } => Some((*x, *y, *width, *height)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{fit:?} drew no picture at all"))
+        }
+
+        let fit = rect_of(ImageFit::Fit);
+        let fill = rect_of(ImageFit::Fill);
+
+        assert!(
+            fit.1 > 0.0 && fit.3 < 1080.0,
+            "Fit must leave a bar above and below: {fit:?}"
+        );
+        assert!(
+            fill.0 < 0.0 && fill.2 > 1920.0,
+            "Fill must run off both sides: {fill:?}"
+        );
+        assert_ne!(fit, fill, "the fit setting changed nothing on screen");
+    }
+
+    /// A size measured from a picture that is no longer up is not applied.
+    ///
+    /// The decode happens off in `session.rs` and takes as long as reading a
+    /// file; a slideshow that advances while one is in flight would otherwise
+    /// have the outgoing picture's proportions imposed on the incoming one.
+    #[test]
+    fn a_size_from_a_superseded_picture_is_ignored() {
+        let mut mgr = WallpaperManager::new();
+        mgr.set_image(Path::new("/first.png"), ImageFit::Fit);
+        let stale = mgr.current_image_id();
+        mgr.set_image(Path::new("/second.png"), ImageFit::Fit);
+        assert_ne!(stale, mgr.current_image_id(), "the fixture reused the id");
+
+        mgr.note_image_size(stale, 3000.0, 1000.0);
+        let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
+        let drawn = cmds.iter().find_map(|c| match c {
+            RenderCommand::Image { y, height, .. } => Some((*y, *height)),
+            _ => None,
+        });
+        assert_eq!(
+            drawn,
+            Some((0.0, 1080.0)),
+            "a measurement of the previous picture was applied to this one"
+        );
     }
 
     #[test]

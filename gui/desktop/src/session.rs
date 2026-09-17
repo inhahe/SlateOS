@@ -1053,6 +1053,16 @@ impl<T: Transport> ShellSession<T> {
         };
 
         let (width, height, stride) = (image.width, image.height, image.stride());
+
+        // The only moment in the tree at which a wallpaper's pixel size is
+        // known. The manager allocates ids and picks fits but never opens a
+        // file, so without this it has to assume the picture is exactly the
+        // size of the screen -- an assumption under which `Fill`, `Fit`,
+        // `Center`, `Tile`, `Span` and `Stretch` all produce the same
+        // full-screen rectangle, which is why the fit setting drew the same
+        // thing in all six positions until this line existed.
+        self.wallpaper
+            .note_image_size(id, width as f32, height as f32);
         // Through `WireBytes` rather than `Image::to_argb_bytes`, which returns
         // a bare `Vec<u8>`: the upload takes the typed form so that the other
         // ARGB byte order cannot arrive here. Same expansion, same cost.

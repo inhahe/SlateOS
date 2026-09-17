@@ -43,6 +43,12 @@ use std::fmt;
 use std::fs;
 use std::io::{self, BufRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
+
+// The percent-encoding design-decisions §426 chose for records that must
+// stay human-readable. Shared rather than copied: §426 picked ONE escape
+// precisely so two formats could not drift, and this file and
+// `apps/backup` held byte-identical copies of it until 2026-09-16.
+use pathcodec::{decode_bytes, decode_path, encode_bytes, encode_path};
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -1698,92 +1704,6 @@ fn set_file_mtime(path: &Path, _mtime: SystemTime) -> io::Result<()> {
 /// Entries written before this existed begin with the raw path, so the marker
 /// is what tells the two formats apart.
 const META_VERSION: &str = "slate-recycle-v2";
-
-/// Escape a path into a single line of printable ASCII, losslessly.
-///
-/// Paths on this OS may contain any byte except `/` and NUL, so they are not
-/// necessarily UTF-8 and cannot be written with `Display` — that substitutes
-/// U+FFFD and the original bytes are gone. `OsStr::as_encoded_bytes` gives the
-/// exact bytes back; everything outside printable ASCII, plus `%` itself, is
-/// percent-encoded so the metadata file stays line-oriented text.
-fn encode_path(path: &Path) -> String {
-    encode_bytes(path.as_os_str().as_encoded_bytes())
-}
-
-/// The lossless core of [`encode_path`], on bytes rather than a path.
-///
-/// Kept separate because this — not the `OsStr` conversion around it — is where
-/// the round-trip property lives, and it can be tested on any host.
-fn encode_bytes(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len());
-    for &b in bytes {
-        if b == b'%' || !(0x20..0x7f).contains(&b) {
-            out.push_str(&format!("%{b:02X}"));
-        } else {
-            out.push(b as char); // guarded: printable ASCII only
-        }
-    }
-    out
-}
-
-/// Reverse of [`encode_path`].
-fn decode_path(encoded: &str) -> PathBuf {
-    PathBuf::from(os_string_from_bytes(decode_bytes(encoded)))
-}
-
-/// Reverse of [`encode_bytes`].
-///
-/// A `%` not followed by two hex digits is passed through literally rather than
-/// dropped: the metadata file may have been hand-edited, and losing a byte
-/// silently is worse than keeping one that was never an escape.
-fn decode_bytes(encoded: &str) -> Vec<u8> {
-    let bytes = encoded.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while let Some(&b) = bytes.get(i) {
-        if b == b'%'
-            && let Some(hex) = encoded.get(i.saturating_add(1)..i.saturating_add(3))
-            && let Ok(v) = u8::from_str_radix(hex, 16)
-        {
-            out.push(v);
-            i = i.saturating_add(3);
-            continue;
-        }
-        out.push(b);
-        i = i.saturating_add(1);
-    }
-    out
-}
-
-/// Build an `OsString` from the raw bytes of a path.
-///
-/// This is where the byte world meets the platform's path type, so it is split
-/// per platform rather than papered over with
-/// `OsStr::from_encoded_bytes_unchecked`: that function's contract is that the
-/// bytes are valid for the platform's `OsStr` encoding, which is true for
-/// arbitrary bytes on Unix but *not* on Windows, where `OsStr` is WTF-8. Since
-/// our target is `target-family = ["unix"]`, the safe, total conversion below
-/// is the one that actually runs; Windows appears only as a test host.
-#[cfg(unix)]
-fn os_string_from_bytes(bytes: Vec<u8>) -> std::ffi::OsString {
-    use std::os::unix::ffi::OsStringExt;
-    std::ffi::OsString::from_vec(bytes)
-}
-
-/// Test-host fallback. Windows `OsString` cannot hold a byte string that is not
-/// WTF-8, so bytes that are not valid UTF-8 cannot survive here. They are not
-/// silently mangled: [`decode_bytes`] is still exact, and the tests assert the
-/// round-trip at that level, which is the level `meta.txt` is written at.
-#[cfg(not(unix))]
-fn os_string_from_bytes(bytes: Vec<u8>) -> std::ffi::OsString {
-    match String::from_utf8(bytes) {
-        Ok(s) => std::ffi::OsString::from(s),
-        // Reachable only on a non-Unix host reading a bin written on the
-        // target. Nothing better is representable; `decode_bytes` is the API to
-        // use if the exact bytes are needed.
-        Err(e) => std::ffi::OsString::from(String::from_utf8_lossy(e.as_bytes()).into_owned()),
-    }
-}
 
 /// Move `src` to `dest`, falling back to copy-then-remove across devices.
 ///

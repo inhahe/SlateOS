@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+# design-decisions 426's path escape. A crate rather than a copy in each
+# program, because 426 chose one escape so that two formats could not
+# drift, and two copies of it reintroduced exactly that.
+pathcodec = { path = "../pathcodec" }
 # The content-addressed blob store treats a file's presence at a hash-derived
 # path as proof that the hash's content is there, so a blob must never appear
 # at its final name until it is complete.

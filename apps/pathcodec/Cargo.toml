@@ -1,0 +1,14 @@
+[package]
+name = "pathcodec"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS lossless path-in-a-text-record encoding — percent-escape a filename's bytes so a record that must stay human-readable can still name a file that is not text."
+
+# Deliberately none. `apps/backup` is a command-line program that must not link
+# a widget library, which is why this is not a module in `guitk` where the rest
+# of lane C's shared code lives. `apps/safeio` is the precedent for a
+# dependency-free library crate sitting under `apps/`.
+[dependencies]
+
+[lints]
+workspace = true

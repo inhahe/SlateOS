@@ -54,16 +54,26 @@ const FALLBACK_SEED: u64 = 0x4D55_5349_4350_4C52;
 // Layout Constants
 // ============================================================================
 
-/// What the window says instead of a library.
+/// What the window says while the library is empty.
 ///
 /// Three lines. The third names the distinction the old comment here already
 /// identified and then resolved the wrong way: **an empty library reads as a
 /// broken player rather than an unimplemented one.** That is exactly right,
 /// and the remedy is to say which of the two it is -- not to fill the library
 /// so the question never comes up.
-const CANNOT_SCAN_LINES: [&str; 3] = [
+///
+/// The second line used to say "it has no filesystem access, so nothing has
+/// been scanned and no track can be opened or played", which stopped being
+/// true when `Ctrl+O` and `Ctrl+S` landed — the two keys the handler's own
+/// comment calls the ones that "make this a playlist editor rather than a
+/// viewer". Only half of that sentence had gone stale, which is why it is now
+/// two clauses: a playlist really can be opened and saved, and a track really
+/// cannot be played, because nothing here decodes audio. Collapsing either
+/// way would be wrong — claiming the player works, or denying the one
+/// thing it does. Found by `scripts/find-stale-admissions.py`.
+const CANNOT_PLAY_LINES: [&str; 3] = [
     "This player has no music library.",
-    "It has no filesystem access, so nothing has been scanned and no track can be opened or played.",
+    "Ctrl+O opens an M3U playlist and Ctrl+S saves one, but nothing here decodes audio, so a track can be listed and never played.",
     "The library is empty because this is unfinished, not because the player is broken.",
 ];
 
@@ -1319,7 +1329,7 @@ pub fn render(state: &PlayerState) -> RenderTree {
     // After the background, or it would be painted over. Keyed on the library
     // being empty so it retires itself when a scanner lands.
     if state.library.is_empty() {
-        for (i, line) in CANNOT_SCAN_LINES.iter().enumerate() {
+        for (i, line) in CANNOT_PLAY_LINES.iter().enumerate() {
             tree.push(RenderCommand::Text {
                 x: 10.0,
                 #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
@@ -2913,7 +2923,7 @@ fn main() -> ExitCode {
 /// identified precisely the question the user cannot answer, it answered it
 /// by removing the evidence.
 ///
-/// The remedy is to say which of the two it is. See `CANNOT_SCAN_LINES`.
+/// The remedy is to say which of the two it is. See `CANNOT_PLAY_LINES`.
 #[cfg(test)]
 fn load_demo_library(state: &mut PlayerState) {
     // Add some demo tracks to show the UI populated
@@ -3062,14 +3072,14 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for line in CANNOT_SCAN_LINES {
+        for line in CANNOT_PLAY_LINES {
             assert!(
                 texts.iter().any(|t| t == line),
                 "the window never said {line:?}"
             );
         }
         assert!(
-            CANNOT_SCAN_LINES
+            CANNOT_PLAY_LINES
                 .iter()
                 .any(|l| l.contains("unfinished, not because the player is broken")),
             "nothing distinguishes an unimplemented player from a broken one",
@@ -3105,7 +3115,7 @@ mod tests {
         );
         // And the banner is gone, because the library is no longer empty.
         assert!(
-            !texts.iter().any(|t| t == CANNOT_SCAN_LINES[0]),
+            !texts.iter().any(|t| t == CANNOT_PLAY_LINES[0]),
             "the empty-library banner survived a library",
         );
     }

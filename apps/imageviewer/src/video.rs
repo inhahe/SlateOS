@@ -1070,9 +1070,35 @@ impl VideoPlayer {
 
     // -- Subtitles --------------------------------------------------------
 
-    /// Toggle subtitle display.
+    /// Toggle subtitle display, if the open file has a subtitle track.
+    ///
+    /// With no track there is nothing to turn on, and the toggle does
+    /// nothing. It used to flip regardless, which lit the green `CC` badge
+    /// over a video that had no subtitles and never could — the badge is
+    /// the whole of what "subtitles are on" means here, since no subtitle is
+    /// drawn anywhere. A control that reports a state the program cannot be
+    /// in is the same class of untruth as a progress bar for a download that
+    /// is not happening.
+    ///
+    /// This is also the only reader of `subtitle_tracks`, which the container
+    /// parsers leave empty: none of them enumerates tracks yet. So today the
+    /// answer is always "no track" and the badge never lights. That is the
+    /// honest behaviour for a parser that cannot find subtitles, and it
+    /// becomes the useful one the moment a parser can, with nothing here to
+    /// change.
     pub fn toggle_subtitles(&mut self) {
+        if self.subtitle_track_count() == 0 {
+            return;
+        }
         self.subtitles_enabled = !self.subtitles_enabled;
+    }
+
+    /// How many subtitle tracks the open file has.
+    #[must_use]
+    pub fn subtitle_track_count(&self) -> usize {
+        self.video_info
+            .as_ref()
+            .map_or(0, |info| info.subtitle_tracks.len())
     }
 
     // -- Fullscreen -------------------------------------------------------
@@ -2293,14 +2319,67 @@ mod tests {
         assert!(!p.is_fullscreen());
     }
 
+    /// A file with a subtitle track toggles, as before.
     #[test]
     fn test_subtitle_toggle() {
         let mut p = VideoPlayer::new();
+        p.video_info = Some(VideoInfo {
+            duration_ms: 1000,
+            width: 640,
+            height: 480,
+            frame_rate: 25.0,
+            codec_name: "h264".to_owned(),
+            container: ContainerFormat::Mkv,
+            audio_tracks: Vec::new(),
+            subtitle_tracks: alloc_subtitle_track(),
+        });
         assert!(!p.subtitles_enabled());
         p.toggle_subtitles();
         assert!(p.subtitles_enabled());
         p.toggle_subtitles();
         assert!(!p.subtitles_enabled());
+    }
+
+    fn alloc_subtitle_track() -> Vec<SubtitleTrackInfo> {
+        vec![SubtitleTrackInfo {
+            language: "eng".to_owned(),
+            format: "srt".to_owned(),
+            index: 0,
+        }]
+    }
+
+    /// With no subtitle track, the badge cannot be lit.
+    ///
+    /// The bug this pins: `toggle_subtitles` used to flip unconditionally, so
+    /// the green `CC` badge appeared over every video — and since nothing
+    /// draws a subtitle, the badge was the entire claim. Both cases below are
+    /// real: no file open at all, and a file whose container reported no
+    /// subtitle tracks, which today is every file.
+    #[test]
+    fn the_cc_badge_does_not_light_without_a_track() {
+        let mut nothing_open = VideoPlayer::new();
+        nothing_open.toggle_subtitles();
+        assert!(
+            !nothing_open.subtitles_enabled(),
+            "no file open, so nothing to subtitle"
+        );
+
+        let mut no_tracks = VideoPlayer::new();
+        no_tracks.video_info = Some(VideoInfo {
+            duration_ms: 1000,
+            width: 640,
+            height: 480,
+            frame_rate: 25.0,
+            codec_name: "h264".to_owned(),
+            container: ContainerFormat::Mkv,
+            audio_tracks: Vec::new(),
+            subtitle_tracks: Vec::new(),
+        });
+        no_tracks.toggle_subtitles();
+        assert!(
+            !no_tracks.subtitles_enabled(),
+            "the file carries no subtitle track"
+        );
     }
 
     // -- Key mapping ------------------------------------------------------

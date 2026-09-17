@@ -152044,6 +152044,53 @@ the transferable part: `spreadsheet`, `credmanager`, `defrag` and
 `systemrestore` all documented their own missing capability accurately, in the
 source, and the accuracy is what made it look handled.
 
+### TRIAGED 2026-09-17 — the 37 that remain hold no unblocked door
+
+**In short:** the scanner now reports **37 functions across 20 crates**, not
+the 80 the roadmap still claims. All 37 were read this pass, and not one of
+them is a door waiting to be built. They fall into three groups, and the
+useful part is that the *reason* differs — so "build the rest of the
+doors" is not the next task, and was quietly turning into busywork.
+
+**1. Not file formats at all (about half).** The scanner says so itself in
+its own banner: `to_hex6(self) -> String` and `export_csv(&self) -> String`
+are the same shape to it. `to_wire`, `to_header`, `to_rwx`, `to_algebraic`,
+`from_extension`, `from_yaml_name`, `from_str`, `from_label`, `from_code`,
+`from_names_entry`, `to_string_repr` (a cron expression) and `to_hex6`/
+`to_hex8` are field and protocol formatters. `qrcode`'s `to_bytes` is the
+clearest case: it is a method on the encoder's internal `BitBuffer`, an
+accumulator of bits mid-encode, not an image writer. `colorpicker`'s
+`save_to_palette` and `regextester`'s `save_to_library` save to memory, and
+the latter says in its own doc that there is no way to type the name.
+
+**2. Exports over data the program cannot gather (most of the rest).**
+`netscan`, `speedtest` and `devicemanager` each depend on `appearance`,
+`guitk` and `oswindow` and nothing else — no network, no device
+enumeration. `systemrestore` likewise, so its snapshot tree is synthetic; its
+`export_all`/`import_all` pair is complete and symmetric and would export
+fabricated restore points. A door on any of these writes a real file with
+invented contents, which is worse than no door: the file outlives the window
+that would have told you it was a mock.
+
+`soundrecorder` is the one already handled, and is the proof of that
+reasoning: its `to_bytes` is a genuine WAV writer (RIFF, `fmt `, PCM), and
+nothing in production calls `process_samples`, so a take recorded silence
+while the clock climbed and auto-save reported writing. The 2026-09-15 fix
+refuses to start a take there is no input for. Same shape, caught earlier.
+
+**3. Blocked on an answer (one).** `credmanager`. `export_csv` writes every
+password as clear text and `serialize_backup` writes a file it calls a backup
+that contains no passwords at all. Which to offer is a policy call —
+**C-Q25**.
+
+**What this changes.** The remaining work behind this item is not door
+building. It is (a) teaching the scanner to tell a file format from a field
+formatter, which its banner currently delegates to the reader, and (b) the
+I/O gap those crates share, which is the same one the dead-field triage
+landed on: a program that cannot gather data has no data to export. Both are
+bigger than this entry and neither is unblocked by finishing "the other 80",
+which do not exist.
+
 ## TD-C-A-BANNER-THAT-DENIES-A-CAPABILITY-THE-PROGRAM-HAS -- FIXED 2026-09-15
 
 **In short:** three apps told the user "this app has no filesystem access, so
@@ -158060,6 +158107,61 @@ a triage pass's own authority. When it is small
 enough to enumerate, add the "declared and never read" arm to the gate with
 the survivors baselined. Deleting is usually right: a field nobody reads has
 never worked, so nothing can depend on it.
+
+### TRIAGE 2026-09-17 — most of these are one absent subsystem, not many mistakes
+
+**In short:** "deleting is usually right" is wrong for the bulk of this list,
+and the triage should know that before it starts. Grouping `apps/`'s 210
+candidates by crate and then asking what each crate can actually *do* shows
+the fields are mostly the shape of an I/O the app never performs. They are
+unwired, not unimplementable — so deleting them discards a design rather
+than dead weight.
+
+**The top of the list, measured.**
+
+| crate | candidates | what it cannot do |
+|---|---|---|
+| `torrent` | 23 | reach a network. Reads `.torrent` files through `safeio`; no socket at all |
+| `email` | 21 | reach a network |
+| `videoplayer` | 14 | open a file |
+| `undelete` | 12 | open a file, or a disk |
+| `ircclient` | 12 | reach a network |
+| `photomanager` | 10 | open a file |
+| `pdfviewer` | 10 | open a file — a PDF viewer that cannot open a PDF |
+| `imageviewer` | 10 | *nothing — it reads files* (see below) |
+| `mediaconvert` | 8 | open a file |
+
+`videoplayer`, `undelete`, `ircclient`, `photomanager`, `mediaconvert` and
+`email` each depend on exactly `appearance`, `guitk` and `oswindow`, and
+contain zero references to `std::fs` and zero to any socket. `pdfviewer` adds
+`printjob` and still reads nothing.
+
+**And the fields are exactly what that I/O would have filled.** `email`'s are
+an IMAP account (`protocol`, `auth_method`, `security`, `imap_path`,
+`sync_interval_minutes`), IMAP message flags (`uid`, `answered`, `deleted`)
+and a threading model. `torrent`'s are announce bookkeeping (`last_announce`,
+`next_announce`, `announce_count`), per-torrent rate limits, and peer stats
+(`connection_time`, `country`). None of it can be populated by a program that
+never connects.
+
+**The capabilities exist in-tree, which is what makes this a wiring gap.**
+`apps/safeio` reads files and `torrent` already uses it for Ctrl+O;
+`imageviewer` reads through `byteread`, `imagecodec` and `scratchdir`. A
+netstack service exists as `services/netstack`, and the `net*` crates are
+consumed by the kernel and by `userspace/wpa` — but by no app in the tree.
+
+**`imageviewer` is the counter-example and is why this is a taxonomy, not a
+theory.** It performs real file I/O (19 `std::fs` references) and still has
+10 candidates, so absent I/O does not explain everything. Whatever its ten
+are, they are a different cause and want looking at on their own.
+
+**What this changes about the triage.** Work it crate by crate, and for each
+crate establish what it can do *before* judging its fields. Where the field
+is the state of an I/O the app never performs, the entry belongs in the
+backlog as unfinished wiring, not in a deletion batch — and the same
+judgement that settled `archivemanager` applies: bare state deletes, a
+reasoned model gets asked about. Deleting `email`'s IMAP settings would
+delete the specification of the mail client.
 
 ### [A] `check-fields-written-never-read.py` has never scanned `kernel/`: 169 fields, 39 of them correct by design -- 2026-09-17
 

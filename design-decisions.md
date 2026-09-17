@@ -68709,8 +68709,15 @@ have made the gate untrustworthy the first time somebody checked one.
 `handle_timer_irq` and `handle_device_irq` only -- **two of the five arms** of
 `dispatch_vector`'s match. Vectors 251, 252 and 255 never touch it, nor does
 the `_` arm. Those three handlers are lock-free today, so this is latent
-rather than live, but it also means nested-IRQ detection and CPU-time
-accounting are simply wrong for them.
+rather than live.
+
+I first wrote that the gap also breaks the nesting cap at `apic.rs:1006`,
+where `irq_depth() > 1` stops timer-on-timer nesting overflowing the IRQ
+stack. That was wrong, and checking beat reasoning: a nest can only form
+inside a handler that re-enables interrupts, none of these three does, and
+the two that do both bump the counter. What remains is CPU-time attribution,
+plus the latent case -- the day one of them grows a softirq tail, the cap
+loses coverage silently.
 
 The new marker is maintained in `dispatch_vector` itself, for the reason that
 function *already gives* for counting there rather than in the handlers:

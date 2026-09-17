@@ -1419,6 +1419,106 @@ fn report_recursive(class_idx: u16, cpu: usize) {
     dump_held_locks(cpu);
 }
 
+/// The lock-context check's own controls. **Must run with interrupts on.**
+///
+/// Split out of [`self_test`] rather than living in it, because that one is
+/// dispatched at main.rs:1949 and `cpu::sti()` is at main.rs:1993 -- the
+/// battery deliberately runs before interrupts are enabled. The task half of
+/// this control needs IF=1 to exist at all, so in that slot the precondition
+/// assert below would panic the kernel during boot. Same reason the timerfd
+/// blocking control sits after the enable rather than in
+/// `ipc::timerfd::self_test`.
+///
+/// # Errors
+///
+/// Never returns `Err`: every check is an assertion, so a failure is a panic
+/// with the reason attached. The `KernelResult` is for the dispatcher's sake.
+pub fn self_test_lock_context() -> crate::error::KernelResult<()> {
+    serial_println!("[lockdep] Running lock-context self-test...");
+    let prev_enabled = ENABLED.load(Ordering::Relaxed);
+    ENABLED.store(true, Ordering::Relaxed);
+    IN_SELF_TEST.store(true, Ordering::Relaxed);
+
+    // --- lock-context check: the negative control ------------------------
+    //
+    // Provoke exactly the pair the check reports -- one acquisition from a
+    // task with interrupts ENABLED, one from interrupt context with them
+    // OFF -- and require that it fires. A checker that has never been shown
+    // to fire is indistinguishable from one that cannot, and this gate's
+    // whole value is the report it makes on a boot years from now.
+    let ctx_lock: usize = 0xDEAD_00C7;
+    let ctx_before = CTX_SELF_TEST_VIOLATIONS.load(Ordering::Relaxed);
+
+    // Precondition, checked rather than assumed. The task half needs
+    // interrupts genuinely enabled; with them masked this test would take
+    // the (false, false) path, record nothing, report nothing, and pass --
+    // vacuously, which is the failure mode it exists to rule out.
+    assert!(
+        crate::cpu::interrupts_enabled(),
+        "lock-context control needs interrupts enabled to establish the task \
+         side; masked, it would pass without testing anything"
+    );
+    lock_acquire(ctx_lock, b"ctx-control", Acquire::Blocking);
+    lock_release(ctx_lock);
+
+    // The interrupt side, which completes the pair.
+    crate::cpu::without_interrupts(|| {
+        let _irq = crate::idt::enter_hardirq_for_test();
+        lock_acquire(ctx_lock, b"ctx-control", Acquire::Blocking);
+        lock_release(ctx_lock);
+    });
+    assert_eq!(
+        CTX_SELF_TEST_VIOLATIONS.load(Ordering::Relaxed),
+        ctx_before.wrapping_add(1),
+        "lock-context check did not fire on a class acquired from a task with \
+         interrupts on and then from interrupt context with them off"
+    );
+
+    // ...and exactly once. These sit on the hottest paths in the kernel, so
+    // a per-acquisition report would drown the serial log in the one
+    // situation where the log is what you have.
+    crate::cpu::without_interrupts(|| {
+        let _irq = crate::idt::enter_hardirq_for_test();
+        lock_acquire(ctx_lock, b"ctx-control", Acquire::Blocking);
+        lock_release(ctx_lock);
+    });
+    assert_eq!(
+        CTX_SELF_TEST_VIOLATIONS.load(Ordering::Relaxed),
+        ctx_before.wrapping_add(1),
+        "lock-context check reported the same class twice"
+    );
+
+    // Positive control: a lock only ever taken with interrupts masked is the
+    // CORRECT pattern (this is what console.rs does 45 times) and must NOT
+    // be reported. Without this arm the check could be a function that
+    // reports everything and the test above would still pass.
+    let safe_lock: usize = 0xDEAD_00C8;
+    crate::cpu::without_interrupts(|| {
+        let _irq = crate::idt::enter_hardirq_for_test();
+        lock_acquire(safe_lock, b"ctx-safe", Acquire::Blocking);
+        lock_release(safe_lock);
+    });
+    crate::cpu::without_interrupts(|| {
+        lock_acquire(safe_lock, b"ctx-safe", Acquire::Blocking);
+        lock_release(safe_lock);
+    });
+    assert_eq!(
+        CTX_SELF_TEST_VIOLATIONS.load(Ordering::Relaxed),
+        ctx_before.wrapping_add(1),
+        "lock-context check reported a lock that is only ever taken with \
+         interrupts masked -- that is the safe pattern, not a defect"
+    );
+    serial_println!(
+        "[lockdep]   lock-context: fires once on a real overlap, silent on \
+         the irqsave pattern: OK"
+    );
+    // Cleared here and nowhere else: every check above panics on failure, so
+    // there is no early return that could leave real reports being tallied as
+    // deliberate ones.
+    ENABLED.store(prev_enabled, Ordering::Relaxed);
+    IN_SELF_TEST.store(false, Ordering::Relaxed);
+    Ok(())
+}
 /// Get the name of a lock class for diagnostic output.
 ///
 /// Returns `"?"` for an out-of-range index and for a slot that is reserved but
@@ -1942,79 +2042,6 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     EDGE_COUNT.store(edges_before_chain, Ordering::Relaxed);
     serial_println!("[lockdep]   BFS completeness (chain of {CHAIN} > old bound 32): OK");
 
-    // --- lock-context check: the negative control ------------------------
-    //
-    // Provoke exactly the pair the check reports -- one acquisition from a
-    // task with interrupts ENABLED, one from interrupt context with them
-    // OFF -- and require that it fires. A checker that has never been shown
-    // to fire is indistinguishable from one that cannot, and this gate's
-    // whole value is the report it makes on a boot years from now.
-    let ctx_lock: usize = 0xDEAD_00C7;
-    let ctx_before = CTX_SELF_TEST_VIOLATIONS.load(Ordering::Relaxed);
-
-    // Precondition, checked rather than assumed. The task half needs
-    // interrupts genuinely enabled; with them masked this test would take
-    // the (false, false) path, record nothing, report nothing, and pass --
-    // vacuously, which is the failure mode it exists to rule out.
-    assert!(
-        crate::cpu::interrupts_enabled(),
-        "lock-context control needs interrupts enabled to establish the task \
-         side; masked, it would pass without testing anything"
-    );
-    lock_acquire(ctx_lock, b"ctx-control", Acquire::Blocking);
-    lock_release(ctx_lock);
-
-    // The interrupt side, which completes the pair.
-    crate::cpu::without_interrupts(|| {
-        let _irq = crate::idt::enter_hardirq_for_test();
-        lock_acquire(ctx_lock, b"ctx-control", Acquire::Blocking);
-        lock_release(ctx_lock);
-    });
-    assert_eq!(
-        CTX_SELF_TEST_VIOLATIONS.load(Ordering::Relaxed),
-        ctx_before.wrapping_add(1),
-        "lock-context check did not fire on a class acquired from a task with \
-         interrupts on and then from interrupt context with them off"
-    );
-
-    // ...and exactly once. These sit on the hottest paths in the kernel, so
-    // a per-acquisition report would drown the serial log in the one
-    // situation where the log is what you have.
-    crate::cpu::without_interrupts(|| {
-        let _irq = crate::idt::enter_hardirq_for_test();
-        lock_acquire(ctx_lock, b"ctx-control", Acquire::Blocking);
-        lock_release(ctx_lock);
-    });
-    assert_eq!(
-        CTX_SELF_TEST_VIOLATIONS.load(Ordering::Relaxed),
-        ctx_before.wrapping_add(1),
-        "lock-context check reported the same class twice"
-    );
-
-    // Positive control: a lock only ever taken with interrupts masked is the
-    // CORRECT pattern (this is what console.rs does 45 times) and must NOT
-    // be reported. Without this arm the check could be a function that
-    // reports everything and the test above would still pass.
-    let safe_lock: usize = 0xDEAD_00C8;
-    crate::cpu::without_interrupts(|| {
-        let _irq = crate::idt::enter_hardirq_for_test();
-        lock_acquire(safe_lock, b"ctx-safe", Acquire::Blocking);
-        lock_release(safe_lock);
-    });
-    crate::cpu::without_interrupts(|| {
-        lock_acquire(safe_lock, b"ctx-safe", Acquire::Blocking);
-        lock_release(safe_lock);
-    });
-    assert_eq!(
-        CTX_SELF_TEST_VIOLATIONS.load(Ordering::Relaxed),
-        ctx_before.wrapping_add(1),
-        "lock-context check reported a lock that is only ever taken with \
-         interrupts masked -- that is the safe pattern, not a defect"
-    );
-    serial_println!(
-        "[lockdep]   lock-context: fires once on a real overlap, silent on \
-         the irqsave pattern: OK"
-    );
     // Restore state. The self-test routing goes off here and nowhere else:
     // every assertion above panics on failure, so there is no early return that
     // could leave real violations being tallied as deliberate ones.

@@ -156859,9 +156859,27 @@ Any gate that flags `console` is a wrong gate.
 (vector 32) and `handle_device_irq` (33-56). Vectors 251 (TLB shootdown), 252
 (reschedule IPI) and 255 (spurious) never bump `irq_depth`, nor does the
 `_ => {}` arm. Those three handlers are lock-free today -- atomics, `invlpg`,
-EOI -- so this is latent rather than live, but `irq_depth` also feeds
-nested-IRQ detection at `apic.rs:1006` and the CPU-time accounting, both of
-which are simply wrong for those vectors. `dispatch_vector` already carries
+EOI -- so this is latent rather than live.
+
+**Corrected the same day, because the first version of this entry overstated
+it.** I wrote that `irq_depth`'s gap also breaks nested-IRQ detection at
+`apic.rs:1006`, where `irq_depth() > 1` caps timer-on-timer nesting to stop
+the 16 KiB IRQ stack overflowing -- a real safety mechanism, not accounting.
+It does not. A nest can only form inside a handler that re-enables
+interrupts, and all three of these return with IF still clear: checked, not
+assumed -- none contains an `sti`, a `without_interrupts`, or a
+`softirq::process_pending`. The only handlers that do re-enable are the timer
+and the device path, and both bump `irq_depth`. So the cap keeps its
+coverage.
+
+What is actually left is CPU-time *attribution*: cycles spent in those three
+vectors are charged to whatever task they interrupted rather than to IRQ
+time. That is worth fixing and is not urgent. The latent part is the one to
+watch: the day any of the three grows a softirq tail or re-enables
+interrupts, the nesting cap silently loses coverage, and nothing would say
+so.
+
+`dispatch_vector` already carries
 the argument for fixing this, written for `count_vector` right above the same
 `match`: *the five-call-site version is correct exactly as long as everyone
 remembers it, which is the property that failed for 33-56 already.* The file

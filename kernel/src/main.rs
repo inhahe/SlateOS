@@ -2005,6 +2005,18 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Integrity,
         apic::self_test(),
     );
+
+    // The lock-context check's controls, here rather than in
+    // `lockdep::self_test()` (Step ~19) for the same reason the timerfd
+    // blocking control below is here: they need IF=1 to exist. That battery
+    // runs before `cpu::sti()` above, so its task-context half -- a lock taken
+    // with interrupts ENABLED, which is the dangerous side the check exists to
+    // catch -- cannot be produced there at all.
+    selftest::dispatch(
+        "Lockdep lock-context",
+        selftest::Severity::Integrity,
+        lockdep::self_test_lock_context(),
+    );
     console::boot_step_update(console::BootStatus::Ok, "Preemptive scheduling");
 
     {

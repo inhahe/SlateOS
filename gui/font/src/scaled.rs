@@ -182,6 +182,19 @@ enum Role {
     /// A glyph the marks after it attach to, and the end of the run of marks
     /// before it.
     Base,
+    /// A glyph that is not drawn, and that the cluster walk steps over.
+    ///
+    /// A default ignorable the face had a space glyph to blank it with. It is
+    /// still in the run -- something has to hold its cluster and its byte
+    /// offset -- but it is neither a base nor a mark, and treating it as
+    /// either is wrong in a different way. As a *mark* it would be placed and
+    /// zeroed, which is work on a glyph with nothing to draw. As a *base* it
+    /// ends the run of marks before it and starts a new cluster, which is the
+    /// failure [`Role::Mark`]'s own note describes for class-zero marks: the
+    /// measurement restarts halfway through a syllable. A ZWJ between a
+    /// Sinhala letter and its virama did exactly that, leaving the virama a
+    /// whole letter to the right of the consonant it kills.
+    Ignored,
     /// A combining mark this pass owns, carrying its combining class.
     ///
     /// Zero is a class like any other here. HarfBuzz neither moves nor zeroes
@@ -1694,13 +1707,16 @@ impl ScaledFont {
             // A mark with no base before it — a run that opens with a
             // combining character — attaches to nothing, exactly as in
             // HarfBuzz, where the first cluster simply contains no base.
-            if matches!(roles.get(at), Some(Role::Mark(_))) {
+            if matches!(roles.get(at), Some(Role::Mark(_) | Role::Ignored)) {
                 at = at.saturating_add(1);
                 continue;
             }
             let base = at;
             let mut end = base.saturating_add(1);
-            while matches!(roles.get(end), Some(Role::Mark(_))) {
+            // An ignorable inside the run of marks does not end it. It draws
+            // nothing and takes no advance, so the marks after it still belong
+            // to the base before it.
+            while matches!(roles.get(end), Some(Role::Mark(_) | Role::Ignored)) {
                 end = end.saturating_add(1);
             }
             at = end.max(base.saturating_add(1));
@@ -2185,9 +2201,19 @@ fn hide_ignorables(
         });
         return;
     }
-    for (glyph, sub) in out.iter_mut().zip(glyphs) {
+    for (i, (glyph, sub)) in out.iter_mut().zip(glyphs).enumerate() {
         if !sub.ignorable.erased() {
             continue;
+        }
+        // Only a *base* is demoted. A default ignorable that is itself a
+        // combining mark -- U+034F and the variation selectors are `Mn` --
+        // keeps `Role::Mark`, for the reason above: it is already transparent
+        // to the walk, and moving it would cut the cluster at a character
+        // that was never meant to be seen.
+        if let Some(slot) = roles.get_mut(i)
+            && *slot == Role::Base
+        {
+            *slot = Role::Ignored;
         }
         glyph.key = GlyphKey::outline(space);
         // Advance *and* the kern charged to it, because the kern was added
@@ -2602,6 +2628,45 @@ mod tests {
             roles,
             alloc::vec![Role::Base, Role::Mark(9), Role::Mark(230)],
             "a spacing combining mark belongs in the cluster too"
+        );
+    }
+
+    /// A blanked glyph stops being something marks can attach to.
+    ///
+    /// The ZWJ case. Blanking leaves the glyph in the run, and while it stayed
+    /// a `Role::Base` it ended the run of marks before it and began a new
+    /// cluster -- so a Sinhala virama measured against the invisible joiner
+    /// instead of the consonant, and came out a whole letter to its right.
+    ///
+    /// A blanked glyph that is already a *mark* keeps `Role::Mark`, which the
+    /// test above pins: it is transparent to the walk either way, and demoting
+    /// it would cut the cluster at U+034F or a variation selector.
+    #[test]
+    fn a_blanked_base_is_no_longer_a_base() {
+        let ignorable = |yes: Ignorable| {
+            let mut g = SubGlyph::new(0, 0);
+            g.ignorable = yes;
+            g
+        };
+        let subs = alloc::vec![
+            ignorable(Ignorable::No),
+            ignorable(Ignorable::Plain),
+            ignorable(Ignorable::No)
+        ];
+        let filled = |gid: u16| ShapedGlyph {
+            key: GlyphKey::outline(gid),
+            cluster: 0,
+            advance: 7.0,
+            kern_next: 2.0,
+            offset: (3.0, 5.0),
+        };
+        let mut out = alloc::vec![filled(10), filled(11), filled(12)];
+        let mut roles = alloc::vec![Role::Base, Role::Base, Role::Mark(9)];
+        hide_ignorables(&mut out, &mut roles, &subs, 3);
+        assert_eq!(
+            roles,
+            alloc::vec![Role::Base, Role::Ignored, Role::Mark(9)],
+            "the blanked joiner must not stand between a mark and its base"
         );
     }
 

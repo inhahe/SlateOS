@@ -156808,6 +156808,43 @@ virama, so the question is whether a default-ignorable breaks the cluster the
 fallback walks. `hide_ignorables` deliberately keeps a hidden mark's *role*;
 the mirror question is whether it keeps its place in the cluster.
 
+### FIXED 2026-09-17 — supplementary corpus `misplaced` 0
+
+**In short:** it was the cluster, and the answer to the mirror question was
+no. A blanked ZWJ kept `Role::Base`, which ended the run of marks before it
+and started a new cluster, so the Sinhala virama measured itself against the
+invisible joiner instead of the consonant — and an invisible glyph is
+exactly as wide as nothing, so it landed a whole letter to the right.
+
+**Both corpora are now clean instruments:**
+
+| corpus | agree | differ | misplaced |
+|---|---|---|---|
+| default | 60490 | 0 | 1 |
+| supplementary USE | 32243 | 0 | **0** |
+
+The one remaining default-corpus case is the long-standing `SegUIVar` CGJ
+entry, which is a deliberate divergence, not a defect.
+
+**Why a third role rather than a special case.** `Role` had `Base` and
+`Mark`, and a default ignorable is honestly neither. As a mark it would be
+placed and zeroed, which is work on a glyph with nothing to draw; as a base
+it cuts the cluster. `Role::Ignored` says what it is and the walk steps over
+it, which is the same treatment `Role::Mark`'s own note already prescribed
+for class-zero marks: *"Calling it a base instead restarts the measurement
+halfway through a syllable."* The note was right and its reasoning simply had
+not been carried across to the ignorables.
+
+**Only a base is demoted.** A default ignorable that is *itself* a combining
+mark — U+034F and the variation selectors are `Mn` — keeps `Role::Mark`,
+which `hide_ignorables`' existing doc asks for and a test pins. It is
+transparent to the walk either way.
+
+**Note on the delete path.** A face with no space glyph deletes ignorables
+outright, taking their roles with them, so it never had this bug. Only the
+blanking path did, which is why it needed a face that *has* a space —
+Hack-Bold — to show up at all.
+
 
 ## TD-C-A-FIELD-ONLY-EVER-INITIALISED-IS-INVISIBLE-TO-EVERY-CHECK-WE-HAVE -- METHOD 2026-09-17
 

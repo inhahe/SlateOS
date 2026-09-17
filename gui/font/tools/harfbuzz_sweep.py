@@ -173,6 +173,32 @@ CORPUS = [
     "\\u0e40\\u0e01\\u0e34\\u0e14",
     # Devanagari, the reason script tags have two spellings.
     "\\u0939\\u093f\\u0928\\u094d\\u0926\\u0940",
+    # The other eight scripts `indic.rs` shapes. One shaper serves all nine
+    # and only Devanagari above was ever put to the oracle, which is the gap
+    # design-decisions 451 warns about: a differential test proves only the
+    # questions it asks.
+    #
+    # Two cases each, because they are the two an Indic shaper gets wrong in
+    # different ways: a consonant-virama-consonant conjunct (does the cluster
+    # hold together), and a pre-base vowel sign, which is typed *after* its
+    # consonant and drawn *before* it (does the reordering happen, and once).
+    # Devanagari's own entry above is the pre-base case, `\u093f`.
+    "\u0995\u09cd\u09b7",
+    "\u0995\u09bf",
+    "\u0a95\u0acd\u0ab7",
+    "\u0a95\u0abf",
+    "\u0a15\u0a4d\u0a38",
+    "\u0a15\u0a3f",
+    "\u0b15\u0b4d\u0b37",
+    "\u0b15\u0b3f",
+    "\u0b95\u0bcd\u0bb7",
+    "\u0b95\u0bbf",
+    "\u0c15\u0c4d\u0c37",
+    "\u0c15\u0c3f",
+    "\u0c95\u0ccd\u0cb7",
+    "\u0c95\u0cbf",
+    "\u0d15\u0d4d\u0d37",
+    "\u0d15\u0d3f",
     # --- Khmer, which the Khmer shaper is for ---
     #
     # Khmer stacks a consonant under another by writing COENG (U+17D2) between

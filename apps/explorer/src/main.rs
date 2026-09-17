@@ -443,6 +443,14 @@ const LIST_MIN_W: f32 = 240.0;
 /// The narrowest the preview may be squeezed to.
 const PREVIEW_MIN_W: f32 = 160.0;
 
+/// The shortest the listing may be squeezed to, with the preview above or
+/// below it. Smaller than the width minimum because a few rows is still a
+/// usable listing, where a few pixels of width is not.
+const LIST_MIN_H: f32 = 120.0;
+
+/// The shortest the preview may be squeezed to.
+const PREVIEW_MIN_H: f32 = 100.0;
+
 /// How thick the line marking a pending drop is.
 ///
 /// Centred on the boundary rather than drawn below it, so it reads as "between
@@ -747,8 +755,10 @@ pub struct ExplorerState {
     row_drag: Option<RowDrag>,
     /// Whether the preview panel is showing beside the listing.
     preview_open: bool,
-    /// The listing's share of the file pane's width, when it is.
+    /// The listing's share of the file pane, along the split's axis.
     preview_split: f32,
+    /// Which side of the listing the preview sits on.
+    preview_side: columnprefs::PreviewSide,
     /// Where inside the divider a pointer grabbed it, while dragging.
     ///
     /// The offset is kept rather than just a flag so the divider does not jump
@@ -863,6 +873,7 @@ impl ExplorerState {
             row_drag: None,
             preview_open: columnprefs::preview_open(&prefs),
             preview_split: columnprefs::preview_split(&prefs),
+            preview_side: columnprefs::preview_side(&prefs),
             divider_grab: None,
             search_showing: None,
             search_origin: None,
@@ -2352,15 +2363,46 @@ impl ExplorerState {
             return None;
         }
         let area = self.pane_rect();
-        if area.w < LIST_MIN_W + PREVIEW_MIN_W + splitter::DIVIDER {
+        let side = self.preview_side;
+        let axis = if side.is_horizontal() {
+            Axis::Horizontal
+        } else {
+            Axis::Vertical
+        };
+        // Measured along the axis being divided: a panel on the left needs
+        // room across the width, one below needs it down the height, and
+        // checking the wrong one would hide the panel on a window that could
+        // hold it perfectly well.
+        let span = if side.is_horizontal() { area.w } else { area.h };
+        let (list_min, preview_min) = if side.is_horizontal() {
+            (LIST_MIN_W, PREVIEW_MIN_W)
+        } else {
+            (LIST_MIN_H, PREVIEW_MIN_H)
+        };
+        if span < list_min + preview_min + splitter::DIVIDER {
             return None;
         }
-        let fractions = [self.preview_split, 1.0 - self.preview_split];
-        let panes = splitter::panes(area, Axis::Horizontal, &fractions, splitter::DIVIDER);
-        match (panes.first(), panes.get(1)) {
-            (Some(list), Some(preview)) => Some((*list, *preview)),
-            _ => None,
-        }
+
+        // `preview_split` is always the LISTING's share, whichever side the
+        // panel is on. Storing it that way means moving the panel from right
+        // to left keeps the listing the same size, instead of swapping the two
+        // and surprising the user with a preview that suddenly fills the
+        // window.
+        let fractions = if side.is_first() {
+            [1.0 - self.preview_split, self.preview_split]
+        } else {
+            [self.preview_split, 1.0 - self.preview_split]
+        };
+        let panes = splitter::panes(area, axis, &fractions, splitter::DIVIDER);
+        let (first, second) = match (panes.first(), panes.get(1)) {
+            (Some(a), Some(b)) => (*a, *b),
+            _ => return None,
+        };
+        Some(if side.is_first() {
+            (second, first)
+        } else {
+            (first, second)
+        })
     }
 
     /// The column picker: every column, ticked when shown, and the two saves.
@@ -2377,15 +2419,6 @@ impl ExplorerState {
             "Save as default for all folders",
             true,
         ));
-        items.push(MenuItem::Separator);
-        items.push(MenuItem::Action {
-            id: MENU_PREVIEW_TOGGLE,
-            label: String::from("Preview panel"),
-            shortcut: None,
-            icon: None,
-            enabled: true,
-            checked: Some(self.preview_open),
-        });
         let mut menu = ContextMenu::new(items);
         menu.show(x, y, (self.window_width as f32, self.window_height as f32));
         self.menu = Some(menu);
@@ -2413,6 +2446,24 @@ impl ExplorerState {
     /// Toggle a column, or save the current set. Answers whether it was ours.
     fn column_menu_action(&mut self, id: u64) -> bool {
         match id {
+            id if (MENU_PREVIEW_SIDE_BASE..MENU_PREVIEW_SIDE_BASE.saturating_add(4))
+                .contains(&id) =>
+            {
+                // Bounded at both ends: an unbounded `>=` would swallow every
+                // later menu range, which is the defect the column range
+                // already carries a comment about.
+                let Some(offset) = usize::try_from(id.saturating_sub(MENU_PREVIEW_SIDE_BASE)).ok()
+                else {
+                    return false;
+                };
+                let Some(side) = columnprefs::PreviewSide::ALL.get(offset).copied() else {
+                    return false;
+                };
+                self.preview_side = side;
+                columnprefs::set_preview_side(&mut self.column_prefs, side);
+                self.persist_view_prefs(side.label());
+                true
+            }
             MENU_PREVIEW_TOGGLE => {
                 self.preview_open = !self.preview_open;
                 columnprefs::set_preview_open(&mut self.column_prefs, self.preview_open);
@@ -2508,6 +2559,34 @@ impl ExplorerState {
             items.push(MenuItem::Separator);
             items.push(self.thumb_size_menu());
             items.push(self.icon_label_menu());
+        }
+
+        // Here rather than on the column header's menu, which only Details
+        // view has: a panel that can only be switched on from one of three
+        // views is a panel most users will never find. The thumbnail settings
+        // above are here for the same reason.
+        items.push(MenuItem::Separator);
+        items.push(MenuItem::Action {
+            id: MENU_PREVIEW_TOGGLE,
+            label: String::from("Preview panel"),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: Some(self.preview_open),
+        });
+        // The sides are offered only while the panel is showing: a choice of
+        // where to put something invisible is a control with nothing to obey.
+        if self.preview_open {
+            for (i, side) in columnprefs::PreviewSide::ALL.into_iter().enumerate() {
+                items.push(MenuItem::Action {
+                    id: MENU_PREVIEW_SIDE_BASE.saturating_add(i as u64),
+                    label: String::from(side.label()),
+                    shortcut: None,
+                    icon: None,
+                    enabled: true,
+                    checked: Some(self.preview_side == side),
+                });
+            }
         }
         items
     }
@@ -3665,34 +3744,105 @@ impl ExplorerState {
         self.render_scrollbar(tree);
     }
 
+    /// The divider's rectangle, between the two panes.
+    ///
+    /// One function, used by both the hit test and the renderer. A line drawn
+    /// in one place and grabbed in another is the defect this crate's
+    /// `pane_rect` comment already warns about.
+    fn preview_divider_rect(&self) -> Option<Rect> {
+        let (list, preview) = self.preview_panes()?;
+        Some(if self.preview_side.is_horizontal() {
+            let left = if list.x < preview.x { list } else { preview };
+            Rect::new(left.x + left.w, left.y, splitter::DIVIDER, left.h)
+        } else {
+            let top = if list.y < preview.y { list } else { preview };
+            Rect::new(top.x, top.y + top.h, top.w, splitter::DIVIDER)
+        })
+    }
+
     /// Where inside the divider `(x, y)` grabbed it, if it did.
     fn divider_grab_at(&self, x: f32, y: f32) -> Option<f32> {
-        let (list, _) = self.preview_panes()?;
-        let area = self.pane_rect();
-        let fractions = [self.preview_split, 1.0 - self.preview_split];
-        splitter::divider_at(area, Axis::Horizontal, &fractions, splitter::DIVIDER, x, y)?;
-        // The offset from the divider's own left edge, so the line keeps its
+        let rect = self.preview_divider_rect()?;
+        // Grown by the same margin the toolkit uses, on whichever axis the
+        // divider runs across: the grab region is deliberately wider than the
+        // drawn line so nobody has to pixel-hunt for it.
+        let grown = if self.preview_side.is_horizontal() {
+            Rect::new(
+                rect.x - splitter::GRAB_MARGIN,
+                rect.y,
+                rect.w + splitter::GRAB_MARGIN * 2.0,
+                rect.h,
+            )
+        } else {
+            Rect::new(
+                rect.x,
+                rect.y - splitter::GRAB_MARGIN,
+                rect.w,
+                rect.h + splitter::GRAB_MARGIN * 2.0,
+            )
+        };
+        if !grown.contains(x, y) {
+            return None;
+        }
+        // The offset from the divider's leading edge, so the line keeps its
         // position under the pointer instead of jumping to centre itself.
-        Some(x - (list.x + list.w))
+        Some(if self.preview_side.is_horizontal() {
+            x - rect.x
+        } else {
+            y - rect.y
+        })
     }
 
     /// Move the divider to follow the pointer. Answers whether it moved.
-    fn drag_divider(&mut self, x: f32) -> bool {
+    fn drag_divider(&mut self, x: f32, y: f32) -> bool {
         let Some(offset) = self.divider_grab else {
             return false;
         };
         let area = self.pane_rect();
-        let mut fractions = [self.preview_split, 1.0 - self.preview_split];
+        let side = self.preview_side;
+        let horizontal = side.is_horizontal();
+        let (pointer, start, span) = if horizontal {
+            (x, area.x, area.w)
+        } else {
+            (y, area.y, area.h)
+        };
+        let (list_min, preview_min) = if horizontal {
+            (LIST_MIN_W, PREVIEW_MIN_W)
+        } else {
+            (LIST_MIN_H, PREVIEW_MIN_H)
+        };
+
+        // Fractions are in LAYOUT order, so the minimums must be too. With the
+        // preview first, index 0 is the preview and its minimum belongs there;
+        // passing them the other way round would let a drag squeeze whichever
+        // pane happened to be leading past a limit that is not its own.
+        let mut fractions = if side.is_first() {
+            [1.0 - self.preview_split, self.preview_split]
+        } else {
+            [self.preview_split, 1.0 - self.preview_split]
+        };
+        let mins = if side.is_first() {
+            [preview_min, list_min]
+        } else {
+            [list_min, preview_min]
+        };
+
         let moved = splitter::resize(
             &mut fractions,
             0,
-            x - offset - area.x,
-            area.w,
+            pointer - offset - start,
+            span,
             splitter::DIVIDER,
-            &[LIST_MIN_W, PREVIEW_MIN_W],
+            &mins,
         );
         if moved {
-            self.preview_split = fractions[0];
+            // Stored as the LISTING's share whichever side the panel is on, so
+            // moving the panel across does not resize it.
+            self.preview_split = if side.is_first() {
+                fractions[1]
+            } else {
+                fractions[0]
+            };
         }
         moved
     }
@@ -4526,6 +4676,9 @@ const MENU_COLUMNS_SAVE_FOLDER: u64 = 100;
 const MENU_COLUMNS_SAVE_GLOBAL: u64 = 101;
 /// Show or hide the preview panel.
 const MENU_PREVIEW_TOGGLE: u64 = 102;
+/// Put the preview panel on one of the four sides. Offset by `PreviewSide`'s
+/// index in `ALL`, which is the order the menu lists them in.
+const MENU_PREVIEW_SIDE_BASE: u64 = 200;
 /// One id per column, offset so it cannot collide with an action above.
 /// `ColumnId` is a small integer, and 1000 is far above every action here.
 const MENU_COLUMN_BASE: u64 = 1000;
@@ -4818,7 +4971,7 @@ impl ExplorerState {
                 was.is_some() || dropped || divider
             }
             MouseEventKind::Move if self.thumb_grab.is_some() => self.drag_scrollbar(m.y),
-            MouseEventKind::Move if self.divider_grab.is_some() => self.drag_divider(m.x),
+            MouseEventKind::Move if self.divider_grab.is_some() => self.drag_divider(m.x, m.y),
             MouseEventKind::Move if self.row_drag.is_some() => self.drag_row(m.x, m.y),
             // Motion with nothing grabbed: the only thing the explorer does
             // with it is say why the button under the pointer is greyed.
@@ -10308,7 +10461,7 @@ mod tests {
             let divider_x = list.x + list.w;
             state.divider_grab = Some(0.0);
             assert!(
-                state.drag_divider(divider_x - 120.0),
+                state.drag_divider(divider_x - 120.0, 0.0),
                 "the drag did nothing"
             );
             assert!(
@@ -10337,7 +10490,7 @@ mod tests {
             state.preview_open = true;
             state.divider_grab = Some(0.0);
             // Aim far past the left edge of the window.
-            state.drag_divider(-2_000.0);
+            state.drag_divider(-2_000.0, 0.0);
 
             let (list, _) = state.preview_panes().expect("a split");
             assert!(
@@ -10378,6 +10531,108 @@ mod tests {
             assert_eq!(
                 state.divider_grab_at(whole.x + whole.w * 0.65, whole.y + 40.0),
                 None
+            );
+        });
+    }
+
+    /// The panel can sit on any of the four sides, and the split follows.
+    #[test]
+    fn the_preview_can_move_to_any_side() {
+        settingsfile::testing::with_scratch_config("preview-sides", |_root| {
+            let scratch = temp_dir("preview_sides");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+
+            for (i, side) in columnprefs::PreviewSide::ALL.into_iter().enumerate() {
+                assert!(state.column_menu_action(MENU_PREVIEW_SIDE_BASE.saturating_add(i as u64)));
+                assert_eq!(state.preview_side, side);
+
+                let (list, preview) = state.preview_panes().expect("a split");
+                match side {
+                    columnprefs::PreviewSide::Left => assert!(preview.x < list.x),
+                    columnprefs::PreviewSide::Right => assert!(preview.x > list.x),
+                    columnprefs::PreviewSide::Top => assert!(preview.y < list.y),
+                    columnprefs::PreviewSide::Bottom => assert!(preview.y > list.y),
+                }
+            }
+        });
+    }
+
+    /// Moving the panel does not resize the listing.
+    ///
+    /// `preview_split` is the listing's share whichever side the panel is on,
+    /// so swapping sides mirrors the layout without redistributing it. Stored
+    /// the other way round, moving right-to-left would hand the listing's
+    /// width to the preview and look like a bug in the drag.
+    #[test]
+    fn moving_the_panel_keeps_the_listing_the_same_size() {
+        settingsfile::testing::with_scratch_config("preview-mirror", |_root| {
+            let scratch = temp_dir("preview_mirror");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+            state.preview_side = columnprefs::PreviewSide::Right;
+            let (right_list, _) = state.preview_panes().expect("a split");
+
+            state.preview_side = columnprefs::PreviewSide::Left;
+            let (left_list, _) = state.preview_panes().expect("a split");
+
+            assert!(
+                (right_list.w - left_list.w).abs() < 0.01,
+                "the listing changed width when the panel moved: {} then {}",
+                right_list.w,
+                left_list.w
+            );
+        });
+    }
+
+    /// The divider is grabbable on a vertical split too.
+    #[test]
+    fn the_divider_can_be_grabbed_when_the_panel_is_below() {
+        settingsfile::testing::with_scratch_config("preview-vgrab", |_root| {
+            let scratch = temp_dir("preview_vgrab");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+            state.preview_side = columnprefs::PreviewSide::Bottom;
+
+            let d = state.preview_divider_rect().expect("a divider");
+            assert!(d.w > d.h, "a horizontal divider should be wide, not tall");
+            assert!(
+                state.divider_grab_at(d.x + d.w / 2.0, d.y).is_some(),
+                "the divider was not grabbable"
+            );
+        });
+    }
+
+    /// The side choice is only offered while the panel is showing.
+    #[test]
+    fn the_sides_are_not_offered_for_a_hidden_panel() {
+        settingsfile::testing::with_scratch_config("preview-hidden-sides", |_root| {
+            let scratch = temp_dir("preview_hidden_sides");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let state = state_at(&root);
+            assert!(!state.preview_open);
+            let labels: Vec<String> = state
+                .folder_menu_items()
+                .iter()
+                .filter_map(|i| match i {
+                    MenuItem::Action { label, .. } => Some(label.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                !labels.iter().any(|l| l.contains("Preview on")),
+                "a hidden panel offered a choice of where to put it: {labels:?}"
             );
         });
     }

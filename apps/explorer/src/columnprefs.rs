@@ -82,6 +82,9 @@ const PREVIEW: [&str; 2] = ["preview", "open"];
 /// The list pane's share of the width, as a whole percentage.
 const PREVIEW_SPLIT: [&str; 2] = ["preview", "list_percent"];
 
+/// Which side of the listing the preview panel sits on.
+const PREVIEW_SIDE: [&str; 2] = ["preview", "side"];
+
 /// The narrowest and widest the list pane may be left at, as percentages.
 ///
 /// Clamped on read as well as on write, because this file is meant to be
@@ -121,6 +124,83 @@ pub fn set_preview_split(doc: &mut Document, fraction: f32) {
     // `as` after a clamp into a range an `i64` holds exactly.
     let percent = percent.clamp(SPLIT_RANGE.0 as f32, SPLIT_RANGE.1 as f32) as i64;
     doc.set_i64(&PREVIEW_SPLIT, percent);
+}
+
+/// Which side of the listing the preview panel is on.
+///
+/// Stored as a word rather than a number: a settings file is meant to be
+/// readable, and `side: bottom` says what `side: 3` does not.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PreviewSide {
+    Left,
+    #[default]
+    Right,
+    Top,
+    Bottom,
+}
+
+impl PreviewSide {
+    /// Every side, in the order the menu offers them.
+    pub const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Top, Self::Bottom];
+
+    /// How the side is written in the settings file.
+    #[must_use]
+    pub const fn yaml_name(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+        }
+    }
+
+    /// How the side is written on the menu.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Preview on the left",
+            Self::Right => "Preview on the right",
+            Self::Top => "Preview above",
+            Self::Bottom => "Preview below",
+        }
+    }
+
+    /// Whether the split runs across the pane or down it.
+    ///
+    /// Left and right divide the width; top and bottom divide the height.
+    #[must_use]
+    pub const fn is_horizontal(self) -> bool {
+        matches!(self, Self::Left | Self::Right)
+    }
+
+    /// Whether the preview comes before the listing in layout order.
+    #[must_use]
+    pub const fn is_first(self) -> bool {
+        matches!(self, Self::Left | Self::Top)
+    }
+
+    /// Read a side back, or `None` for anything else.
+    ///
+    /// `None` rather than a default, so the caller decides -- a hand-edited
+    /// `side: rihgt` should leave the panel where it was rather than silently
+    /// moving it, and the caller is the only one that knows where that is.
+    #[must_use]
+    pub fn from_yaml_name(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.yaml_name() == text.trim())
+    }
+}
+
+/// Which side the preview panel is on.
+#[must_use]
+pub fn preview_side(doc: &Document) -> PreviewSide {
+    doc.get_str(&PREVIEW_SIDE)
+        .and_then(|v| PreviewSide::from_yaml_name(&v))
+        .unwrap_or_default()
+}
+
+/// Remember which side the preview panel is on.
+pub fn set_preview_side(doc: &mut Document, side: PreviewSide) {
+    doc.set_str(&PREVIEW_SIDE, side.yaml_name());
 }
 
 pub const THUMB_SIZES: [u32; 4] = [64, 96, 128, 192];

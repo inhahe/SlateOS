@@ -155146,8 +155146,21 @@ useful content.
 | Group | Fields | Where |
 |---|---|---|
 | **A** | `x, y, w, h` (`f32`) | `gui/toolkit/src/frame.rs`; ~~`gui/desktop/src/lib.rs`~~ **done 2026-09-17** |
-| **B** | `x, y, width, height` (`f32`) | ~~`apps/explorer/src/dropzone.rs`~~ **done 2026-09-17**; `apps/ircclient`, `apps/photomanager`, `apps/podcast`, `apps/radio`, `apps/videoplayer`, `apps/whiteboard` |
+| **B** | `x, y, width, height` (`f32`) | ~~`explorer`, `ircclient`, `photomanager`, `podcast`, `radio`, `videoplayer`~~ **all done 2026-09-17**; `apps/whiteboard` — **not a drop-in, see below** |
 | **C** | `x, y: i32`, `width, height: u32` | `gui/compositor/src/lib.rs` — **correct as it is, do not sweep** |
+
+**FIXED for seven of the ten; the three that remain are the canonical one and
+two that are genuinely different.**
+
+**`apps/whiteboard` is not a drop-in, and its own test says so.** Its
+`contains` uses `<=` on both axes -- closed intervals, where the toolkit and
+the other five use `<`. So a point exactly on the right or bottom edge is
+inside a whiteboard rectangle and outside every other kind. That is deliberate
+and pinned: `test_rect_contains` asserts `r.contains(110.0, 60.0)` for a
+100x50 rectangle at (10, 10), which is precisely the far corner. It also has an
+`intersects` the toolkit lacks. Converting it needs a decision about what a
+drawing canvas should do at its own boundary, which is a design question and
+not a cleanup -- left alone.
 
 **Two down, six to go, and the two were different jobs.** `apps/explorer` was
 group B: 73 field accesses renamed, each at the line and column the compiler

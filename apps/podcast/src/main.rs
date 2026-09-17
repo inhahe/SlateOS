@@ -22,9 +22,14 @@ use appearance::Palette;
 use appearance::Surface;
 use std::collections::HashMap;
 
+// The toolkit's rectangle rather than a private copy: this crate had
+// the same four floats under `width`/`height`, with the same half-open
+// `contains`. See `known-issues.md`
+// `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`.
 use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
@@ -858,28 +863,6 @@ pub enum MainView {
     History,
     Statistics,
     Search,
-}
-
-/// A rectangle on screen.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    const ZERO: Self = Self {
-        x: 0.0,
-        y: 0.0,
-        width: 0.0,
-        height: 0.0,
-    };
-
-    fn contains(self, x: f32, y: f32) -> bool {
-        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
-    }
 }
 
 /// A control in the now-playing bar.
@@ -4121,8 +4104,8 @@ impl PodcastApp {
                 Rect {
                     x: 0.0,
                     y: bar_y,
-                    width: self.width,
-                    height: SEEK_STRIP_HEIGHT,
+                    w: self.width,
+                    h: SEEK_STRIP_HEIGHT,
                 },
             ),
             (
@@ -4130,8 +4113,8 @@ impl PodcastApp {
                 Rect {
                     x: controls_x,
                     y: controls_y,
-                    width: 36.0,
-                    height: 36.0,
+                    w: 36.0,
+                    h: 36.0,
                 },
             ),
             (
@@ -4139,8 +4122,8 @@ impl PodcastApp {
                 Rect {
                     x: controls_x + 48.0,
                     y: controls_y - 2.0,
-                    width: 40.0,
-                    height: 40.0,
+                    w: 40.0,
+                    h: 40.0,
                 },
             ),
             (
@@ -4148,8 +4131,8 @@ impl PodcastApp {
                 Rect {
                     x: controls_x + 100.0,
                     y: controls_y,
-                    width: 36.0,
-                    height: 36.0,
+                    w: 36.0,
+                    h: 36.0,
                 },
             ),
             (
@@ -4157,8 +4140,8 @@ impl PodcastApp {
                 Rect {
                     x: self.width - 120.0,
                     y: bar_y + 14.0,
-                    width: 44.0,
-                    height: 22.0,
+                    w: 44.0,
+                    h: 22.0,
                 },
             ),
         ]
@@ -4288,20 +4271,13 @@ impl PodcastApp {
             controls
                 .iter()
                 .find(|(c, _)| *c == wanted)
-                .map_or(Rect::ZERO, |(_, r)| *r)
+                .map_or(Rect::EMPTY, |(_, r)| *r)
         };
 
         // Skip back button.
         let back = rect_of(PlayerControl::SkipBack);
-        self.palette.push_surface(
-            cmds,
-            back.x,
-            back.y,
-            back.width,
-            back.height,
-            18.0,
-            Surface::Card,
-        );
+        self.palette
+            .push_surface(cmds, back.x, back.y, back.w, back.h, 18.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: back.x + 6.0,
             y: back.y + 9.0,
@@ -4318,8 +4294,8 @@ impl PodcastApp {
         cmds.push(RenderCommand::FillRect {
             x: pp.x,
             y: pp.y,
-            width: pp.width,
-            height: pp.height,
+            width: pp.w,
+            height: pp.h,
             color: self.palette.blue,
             corner_radii: CornerRadii::all(20.0),
         });
@@ -4341,15 +4317,8 @@ impl PodcastApp {
 
         // Skip forward button.
         let fwd = rect_of(PlayerControl::SkipForward);
-        self.palette.push_surface(
-            cmds,
-            fwd.x,
-            fwd.y,
-            fwd.width,
-            fwd.height,
-            18.0,
-            Surface::Card,
-        );
+        self.palette
+            .push_surface(cmds, fwd.x, fwd.y, fwd.w, fwd.h, 18.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: fwd.x + 4.0,
             y: fwd.y + 9.0,
@@ -4380,15 +4349,8 @@ impl PodcastApp {
 
         // Speed indicator, which is also the button that cycles it.
         let speed = rect_of(PlayerControl::Speed);
-        self.palette.push_surface(
-            cmds,
-            speed.x,
-            speed.y,
-            speed.width,
-            speed.height,
-            4.0,
-            Surface::Card,
-        );
+        self.palette
+            .push_surface(cmds, speed.x, speed.y, speed.w, speed.h, 4.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: speed.x + 6.0,
             y: speed.y + 4.0,
@@ -7099,7 +7061,7 @@ mod tests {
             .iter()
             .find(|(c, _)| *c == PlayerControl::PlayPause)
             .expect("a play button");
-        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
         assert_eq!(app.player_control_at(x, y), Some(PlayerControl::PlayPause));
         assert!(app.handle_event(&click_at(x, y)));
         assert_eq!(app.player_state, PlayerState::Paused);
@@ -7117,7 +7079,7 @@ mod tests {
                 .iter()
                 .find(|(c, _)| *c == wanted)
                 .expect("a control");
-            (r.x + r.width / 2.0, r.y + r.height / 2.0)
+            (r.x + r.w / 2.0, r.y + r.h / 2.0)
         };
         let (x, y) = at(PlayerControl::SkipForward);
         app.handle_event(&click_at(x, y));
@@ -7167,10 +7129,7 @@ mod tests {
             .iter()
             .find(|(c, _)| *c == PlayerControl::Speed)
             .expect("a speed badge");
-        app.handle_event(&click_at(
-            rect.x + rect.width / 2.0,
-            rect.y + rect.height / 2.0,
-        ));
+        app.handle_event(&click_at(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0));
         assert_ne!(app.playback_speed, before);
     }
 
@@ -7197,7 +7156,7 @@ mod tests {
             .iter()
             .find(|(c, _)| *c == PlayerControl::PlayPause)
             .expect("a play button");
-        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
         let before = app.selected_episode_id;
         app.handle_event(&click_at(x, y));
         assert_eq!(app.player_state, PlayerState::Paused);

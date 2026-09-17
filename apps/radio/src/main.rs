@@ -15,8 +15,13 @@
 
 use appearance::Palette;
 use appearance::Surface;
+// The toolkit's rectangle rather than a private copy: this crate had
+// the same four floats under `width`/`height`, with the same half-open
+// `contains`. See `known-issues.md`
+// `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`.
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
 use guitk::listview::ListViewport;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
@@ -67,21 +72,6 @@ const WINDOW_WIDTH: f32 = 1000.0;
 const WINDOW_HEIGHT: f32 = 700.0;
 /// How often the spectrum is redrawn while something is playing.
 const FRAME_TICK: Duration = Duration::from_millis(100);
-
-/// A rectangle on screen.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    fn contains(self, x: f32, y: f32) -> bool {
-        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
-    }
-}
 
 /// Height of one station row in the main list.
 const STATION_ROW_HEIGHT: f32 = 50.0;
@@ -994,8 +984,8 @@ impl RadioApp {
                     Rect {
                         x: 0.0,
                         y,
-                        width: SIDEBAR_WIDTH,
-                        height: SIDEBAR_TAB_HEIGHT,
+                        w: SIDEBAR_WIDTH,
+                        h: SIDEBAR_TAB_HEIGHT,
                     },
                 )
             })
@@ -1016,8 +1006,8 @@ impl RadioApp {
         Rect {
             x: SIDEBAR_WIDTH,
             y: 0.0,
-            width: (self.width - SIDEBAR_WIDTH).max(1.0),
-            height: (self.height - PLAYER_BAR_HEIGHT).max(1.0),
+            w: (self.width - SIDEBAR_WIDTH).max(1.0),
+            h: (self.height - PLAYER_BAR_HEIGHT).max(1.0),
         }
     }
 
@@ -2798,7 +2788,7 @@ mod tests {
         let tabs = app.screen_tabs();
         let (screen, rect) = tabs[1];
         assert_eq!(screen, Screen::Favorites);
-        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
         assert_eq!(app.screen_tab_at(x, y), Some(screen));
         assert!(app.handle_event(&click(x, y)));
         assert_eq!(app.screen, screen);
@@ -2809,7 +2799,7 @@ mod tests {
         let app = sized();
         for (screen, rect) in app.screen_tabs() {
             assert_eq!(
-                app.screen_tab_at(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+                app.screen_tab_at(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0),
                 Some(screen),
                 "{screen:?} is drawn at {rect:?} and must be clickable there"
             );
@@ -2904,7 +2894,7 @@ mod tests {
     fn the_wheel_moves_the_selection() {
         let mut app = sized();
         let pane = app.station_list_rect();
-        let (x, y) = (pane.x + 40.0, pane.y + pane.height / 2.0);
+        let (x, y) = (pane.x + 40.0, pane.y + pane.h / 2.0);
         app.handle_key(&key(Key::Down));
         let before = app.selected_station();
         assert!(app.handle_event(&Event::Mouse(MouseEvent {
@@ -3199,7 +3189,7 @@ mod tests {
         app.set_window_size(1.0, 1.0);
         assert!(app.width >= MIN_WINDOW_WIDTH);
         assert!(app.height >= MIN_WINDOW_HEIGHT);
-        assert!(app.station_list_rect().width >= 1.0);
+        assert!(app.station_list_rect().w >= 1.0);
     }
 
     #[test]
@@ -3288,7 +3278,7 @@ mod tests {
         let app = sized();
         let rect = app.screen_tabs()[0].1;
         assert_eq!(
-            app.screen_tab_at(SIDEBAR_WIDTH + 40.0, rect.y + rect.height / 2.0),
+            app.screen_tab_at(SIDEBAR_WIDTH + 40.0, rect.y + rect.h / 2.0),
             None,
             "the tabs end where the sidebar does, and the station list starts there"
         );

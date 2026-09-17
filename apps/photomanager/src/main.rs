@@ -40,9 +40,14 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+// The toolkit's rectangle rather than a private copy: this crate had
+// the same four floats under `width`/`height`, with the same half-open
+// `contains`. See `known-issues.md`
+// `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`.
 use guitk::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
@@ -80,21 +85,6 @@ const MIN_WINDOW_WIDTH: f32 = 640.0;
 const MIN_WINDOW_HEIGHT: f32 = 400.0;
 const WINDOW_WIDTH: f32 = 1400.0;
 const WINDOW_HEIGHT: f32 = 900.0;
-
-/// A rectangle on screen.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    fn contains(self, x: f32, y: f32) -> bool {
-        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
-    }
-}
 
 /// One row of the sidebar, as it is laid out down the column.
 ///
@@ -2183,8 +2173,8 @@ impl PhotoApp {
         Rect {
             x: SIDEBAR_WIDTH,
             y: TOOLBAR_HEIGHT,
-            width: (self.window_width - SIDEBAR_WIDTH - info_w).max(1.0),
-            height: (self.window_height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT).max(1.0),
+            w: (self.window_width - SIDEBAR_WIDTH - info_w).max(1.0),
+            h: (self.window_height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT).max(1.0),
         }
     }
 
@@ -2286,8 +2276,8 @@ impl PhotoApp {
                 Rect {
                     x: vx,
                     y: 8.0,
-                    width: w,
-                    height: 24.0,
+                    w,
+                    h: 24.0,
                 },
             ));
             vx += w + 4.0;
@@ -2298,8 +2288,8 @@ impl PhotoApp {
             Rect {
                 x: sort_x,
                 y: 8.0,
-                width: 112.0,
-                height: 24.0,
+                w: 112.0,
+                h: 24.0,
             },
         ));
         let search_x = sort_x + 124.0;
@@ -2309,8 +2299,8 @@ impl PhotoApp {
             Rect {
                 x: search_x + search_w + 16.0,
                 y: 8.0,
-                width: 48.0,
-                height: 24.0,
+                w: 48.0,
+                h: 24.0,
             },
         ));
         out.push((
@@ -2318,8 +2308,8 @@ impl PhotoApp {
             Rect {
                 x: self.window_width - 196.0,
                 y: 8.0,
-                width: 88.0,
-                height: 24.0,
+                w: 88.0,
+                h: 24.0,
             },
         ));
         out.push((
@@ -2327,8 +2317,8 @@ impl PhotoApp {
             Rect {
                 x: self.window_width - 100.0,
                 y: 8.0,
-                width: 88.0,
-                height: 24.0,
+                w: 88.0,
+                h: 24.0,
             },
         ));
         out
@@ -2345,7 +2335,7 @@ impl PhotoApp {
     /// How many thumbnails fit across the content area.
     pub fn grid_columns(&self) -> usize {
         let cell = self.current_thumb_size() + THUMB_PADDING;
-        let width = self.content_rect().width;
+        let width = self.content_rect().w;
         #[allow(clippy::cast_sign_loss)]
         let cols = (width / cell).floor() as usize;
         cols.max(1)
@@ -2362,7 +2352,7 @@ impl PhotoApp {
         let cell = self.current_thumb_size() + THUMB_PADDING;
         let total = self.visible_photos().len();
         let rows = total.div_ceil(self.grid_columns());
-        scroll_window::visible(rows, cell, content.height - THUMB_PADDING, self.grid_scroll)
+        scroll_window::visible(rows, cell, content.h - THUMB_PADDING, self.grid_scroll)
     }
 
     /// Where the thumbnail at `index` among the visible photos is drawn, or
@@ -2386,8 +2376,8 @@ impl PhotoApp {
         Some(Rect {
             x: content.x + THUMB_PADDING + col * cell,
             y: content.y + THUMB_PADDING + drawn * cell,
-            width: thumb,
-            height: thumb,
+            w: thumb,
+            h: thumb,
         })
     }
 
@@ -2835,8 +2825,8 @@ impl PhotoApp {
                 Rect {
                     x: 0.0,
                     y: 0.0,
-                    width: 0.0,
-                    height: 0.0,
+                    w: 0.0,
+                    h: 0.0,
                 },
                 |(_, r)| *r,
             )
@@ -2861,8 +2851,8 @@ impl PhotoApp {
             cmds.push(RenderCommand::FillRect {
                 x: rect.x,
                 y: rect.y,
-                width: rect.width,
-                height: rect.height,
+                width: rect.w,
+                height: rect.h,
                 color: bg,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
@@ -2873,7 +2863,7 @@ impl PhotoApp {
                 color: fg,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some((rect.width - 12.0).max(1.0)),
+                max_width: Some((rect.w - 12.0).max(1.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
@@ -2960,8 +2950,8 @@ impl PhotoApp {
             cmds,
             import_rect.x,
             import_rect.y,
-            import_rect.width,
-            import_rect.height,
+            import_rect.w,
+            import_rect.h,
             CORNER_RADIUS,
             Surface::Card,
         );
@@ -2972,7 +2962,7 @@ impl PhotoApp {
             color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some((import_rect.width - 12.0).max(1.0)),
+            max_width: Some((import_rect.w - 12.0).max(1.0)),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -4824,10 +4814,7 @@ mod tests {
             .iter()
             .find(|(c, _)| *c == ToolbarControl::View(ViewMode::Timeline))
             .expect("a Timeline button");
-        assert!(app.handle_event(&click(
-            rect.x + rect.width / 2.0,
-            rect.y + rect.height / 2.0
-        )));
+        assert!(app.handle_event(&click(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)));
         assert_eq!(app.view_mode, ViewMode::Timeline);
     }
 
@@ -4836,7 +4823,7 @@ mod tests {
         let app = library(3);
         for (control, rect) in app.toolbar_controls() {
             assert_eq!(
-                app.toolbar_control_at(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+                app.toolbar_control_at(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0),
                 Some(control),
                 "{control:?} is drawn at {rect:?} and must be clickable there"
             );
@@ -4851,7 +4838,7 @@ mod tests {
             .iter()
             .find(|(c, _)| *c == ToolbarControl::Slideshow)
             .expect("a Slideshow button");
-        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
         app.handle_event(&click(x, y));
         assert!(app.slideshow.is_some());
         assert_eq!(app.view_mode, ViewMode::Slideshow);
@@ -4920,7 +4907,7 @@ mod tests {
         let mut app = library(20);
         let visible = app.visible_photos();
         let rect = app.thumb_rect(5).expect("a sixth thumbnail");
-        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
         assert_eq!(app.photo_at(x, y), Some(visible[5]));
         assert!(app.handle_event(&click(x, y)));
         assert_eq!(app.selected_photo, Some(visible[5]));
@@ -4970,9 +4957,9 @@ mod tests {
     fn opening_the_info_panel_narrows_the_grid() {
         let mut app = library(50);
         app.show_info_panel = false;
-        let wide = app.content_rect().width;
+        let wide = app.content_rect().w;
         app.show_info_panel = true;
-        assert_eq!(app.content_rect().width, wide - INFO_PANEL_WIDTH);
+        assert_eq!(app.content_rect().w, wide - INFO_PANEL_WIDTH);
     }
 
     // --- the keyboard ---
@@ -5246,7 +5233,7 @@ mod tests {
         assert!(app.window_width >= MIN_WINDOW_WIDTH);
         assert!(app.window_height >= MIN_WINDOW_HEIGHT);
         assert!(app.grid_columns() >= 1);
-        assert!(app.content_rect().width >= 1.0);
+        assert!(app.content_rect().w >= 1.0);
     }
 
     #[test]
@@ -5395,7 +5382,7 @@ mod tests {
             .expect("no Import control")
             .1;
         assert_eq!(
-            app.toolbar_control_at(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+            app.toolbar_control_at(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0),
             Some(ToolbarControl::Import),
             "the middle of the Import rectangle does not hit Import"
         );
@@ -5608,7 +5595,7 @@ mod tests {
             app.cycle_thumb_size();
         }
         assert!(
-            app.content_rect().width < app.current_thumb_size(),
+            app.content_rect().w < app.current_thumb_size(),
             "the fixture must be narrower than one thumbnail"
         );
         assert!(

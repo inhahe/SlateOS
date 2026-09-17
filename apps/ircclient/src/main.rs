@@ -6,8 +6,13 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+// The toolkit's rectangle rather than a private copy: this crate had
+// the same four floats under `width`/`height`, with the same half-open
+// `contains`. See `known-issues.md`
+// `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`.
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use oswindow::app::{self, App, Response};
@@ -44,21 +49,6 @@ const MIN_WINDOW_WIDTH: f32 = 560.0;
 const MIN_WINDOW_HEIGHT: f32 = 320.0;
 const WINDOW_WIDTH: f32 = 1280.0;
 const WINDOW_HEIGHT: f32 = 720.0;
-
-/// A rectangle on screen.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    fn contains(self, x: f32, y: f32) -> bool {
-        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
-    }
-}
 
 /// One row of the sidebar, as it is laid out down the column.
 ///
@@ -1465,8 +1455,8 @@ impl IrcClientApp {
         Rect {
             x: SIDEBAR_WIDTH,
             y: CONTENT_TOP,
-            width: (self.width - SIDEBAR_WIDTH - nick_w).max(1.0),
-            height: (self.height - CONTENT_TOP - INPUT_HEIGHT).max(1.0),
+            w: (self.width - SIDEBAR_WIDTH - nick_w).max(1.0),
+            h: (self.height - CONTENT_TOP - INPUT_HEIGHT).max(1.0),
         }
     }
 
@@ -1477,10 +1467,10 @@ impl IrcClientApp {
         }
         let chat = self.chat_rect();
         Some(Rect {
-            x: chat.x + chat.width,
+            x: chat.x + chat.w,
             y: CONTENT_TOP,
-            width: NICK_LIST_WIDTH,
-            height: chat.height,
+            w: NICK_LIST_WIDTH,
+            h: chat.h,
         })
     }
 
@@ -1489,9 +1479,9 @@ impl IrcClientApp {
         let chat = self.chat_rect();
         Rect {
             x: chat.x,
-            y: chat.y + chat.height,
-            width: self.width - SIDEBAR_WIDTH,
-            height: INPUT_HEIGHT,
+            y: chat.y + chat.h,
+            w: self.width - SIDEBAR_WIDTH,
+            h: INPUT_HEIGHT,
         }
     }
 
@@ -1556,7 +1546,7 @@ impl IrcClientApp {
             clippy::cast_possible_truncation,
             reason = "a positive height over a positive row height"
         )]
-        let capacity = (self.chat_rect().height / MESSAGE_HEIGHT) as usize;
+        let capacity = (self.chat_rect().h / MESSAGE_HEIGHT) as usize;
         // A chat pins to the newest line, so the scroll is counted backwards
         // from the end -- `chat_scroll` is how many lines have been scrolled
         // up out of the bottom.
@@ -1581,7 +1571,7 @@ impl IrcClientApp {
             clippy::cast_possible_truncation,
             reason = "a positive height over a positive row height"
         )]
-        let capacity = (self.chat_rect().height / MESSAGE_HEIGHT) as usize;
+        let capacity = (self.chat_rect().h / MESSAGE_HEIGHT) as usize;
         total.saturating_sub(capacity)
     }
 
@@ -3499,11 +3489,11 @@ mod tests {
     #[test]
     fn tab_hides_and_shows_the_nick_list() {
         let mut app = joined();
-        let before = app.chat_rect().width;
+        let before = app.chat_rect().w;
         assert!(app.handle_event(&key(Key::Tab)));
         assert!(!app.nick_list_visible);
         assert!(
-            app.chat_rect().width > before,
+            app.chat_rect().w > before,
             "the chat column takes the space the list gave up"
         );
     }
@@ -3820,7 +3810,7 @@ mod tests {
     fn the_wheel_scrolls_the_chat() {
         let mut app = app_with_history(200);
         let chat = app.chat_rect();
-        let (x, y) = (chat.x + chat.width / 2.0, chat.y + chat.height / 2.0);
+        let (x, y) = (chat.x + chat.w / 2.0, chat.y + chat.h / 2.0);
         assert!(app.handle_event(&Event::Mouse(MouseEvent {
             x,
             y,
@@ -3920,8 +3910,8 @@ mod tests {
         app.set_window_size(1.0, 1.0);
         assert!(app.width >= MIN_WINDOW_WIDTH);
         assert!(app.height >= MIN_WINDOW_HEIGHT);
-        assert!(app.chat_rect().width >= 1.0);
-        assert!(app.chat_rect().height >= 1.0);
+        assert!(app.chat_rect().w >= 1.0);
+        assert!(app.chat_rect().h >= 1.0);
     }
 
     #[test]

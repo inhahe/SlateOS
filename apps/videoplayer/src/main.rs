@@ -8,8 +8,13 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+// The toolkit's rectangle rather than a private copy: this crate had
+// the same four floats under `width`/`height`, with the same half-open
+// `contains`. See `known-issues.md`
+// `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`.
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
@@ -91,21 +96,6 @@ const MIN_WINDOW_HEIGHT: f32 = 320.0;
 /// the queue did not reach the panel that configured it.
 const NO_SCREENSHOTS: &str = "Not applied: this player cannot take a \
 screenshot -- no frame is decoded and there is nowhere to write one.";
-
-/// A rectangle on screen.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    fn contains(self, x: f32, y: f32) -> bool {
-        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
-    }
-}
 
 // ============================================================================
 // Media container and codec types
@@ -2932,8 +2922,8 @@ impl VideoPlayerApp {
                     Rect {
                         x,
                         y: TAB_PADDING,
-                        width: (slot - TAB_PADDING).max(1.0),
-                        height: TAB_BAR_HEIGHT - TAB_PADDING * 2.0,
+                        w: (slot - TAB_PADDING).max(1.0),
+                        h: TAB_BAR_HEIGHT - TAB_PADDING * 2.0,
                     },
                 )
             })
@@ -2956,8 +2946,8 @@ impl VideoPlayerApp {
             // Centred on the line that is drawn, so the grab band reaches as
             // far above it as below.
             y: drawn_y - (SEEK_BAR_GRAB_HEIGHT - SEEK_BAR_HEIGHT) / 2.0,
-            width: (self.width - SEEK_BAR_INSET * 2.0).max(1.0),
-            height: SEEK_BAR_GRAB_HEIGHT,
+            w: (self.width - SEEK_BAR_INSET * 2.0).max(1.0),
+            h: SEEK_BAR_GRAB_HEIGHT,
         }
     }
 
@@ -2969,7 +2959,7 @@ impl VideoPlayerApp {
     /// Where along the file a point on the seek bar is.
     fn seek_fraction_at(&self, x: f32) -> f64 {
         let bar = self.seek_bar();
-        f64::from(((x - bar.x) / bar.width).clamp(0.0, 1.0))
+        f64::from(((x - bar.x) / bar.w).clamp(0.0, 1.0))
     }
 
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
@@ -3115,14 +3105,14 @@ impl VideoPlayerApp {
             cmds.push(RenderCommand::FillRect {
                 x: rect.x,
                 y: rect.y,
-                width: rect.width,
-                height: rect.height,
+                width: rect.w,
+                height: rect.h,
                 color: bg,
                 corner_radii: CornerRadii::all(4.0),
             });
 
             cmds.push(RenderCommand::Text {
-                x: rect.x + rect.width / 2.0 - 24.0,
+                x: rect.x + rect.w / 2.0 - 24.0,
                 y: 12.0,
                 text: tab.label().to_string(),
                 font_size: 12.0,
@@ -3132,7 +3122,7 @@ impl VideoPlayerApp {
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some((rect.width - 8.0).max(1.0)),
+                max_width: Some((rect.w - 8.0).max(1.0)),
                 overflow: TextOverflow::Ellipsis,
             });
 
@@ -3140,7 +3130,7 @@ impl VideoPlayerApp {
                 cmds.push(RenderCommand::FillRect {
                     x: rect.x + 2.0,
                     y: TAB_BAR_HEIGHT - 3.0,
-                    width: (rect.width - 4.0).max(1.0),
+                    width: (rect.w - 4.0).max(1.0),
                     height: 2.0,
                     color: self.palette.blue,
                     corner_radii: CornerRadii::all(1.0),
@@ -3303,7 +3293,7 @@ impl VideoPlayerApp {
         let bar = self.seek_bar();
         let seek_y = y + SEEK_BAR_OFFSET;
         let seek_x = bar.x;
-        let seek_w = bar.width;
+        let seek_w = bar.w;
         let seek_h = SEEK_BAR_HEIGHT;
 
         // Seek track background
@@ -6660,7 +6650,7 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         let rects = app.tab_rects();
         let (tab, rect) = rects[3];
-        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
         assert_eq!(app.tab_at(x, y), Some(tab));
         assert!(app.handle_event(&mouse(x, y, MouseEventKind::Press(MouseButton::Left))));
         assert_eq!(app.active_tab, tab);
@@ -6671,7 +6661,7 @@ test to be about anything -- it drew {} text command(s)",
         let app = loaded();
         for (tab, rect) in app.tab_rects() {
             assert_eq!(
-                app.tab_at(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+                app.tab_at(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0),
                 Some(tab),
                 "{tab:?} is drawn at {rect:?} and must be clickable there"
             );
@@ -6727,10 +6717,10 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         app.play();
         let bar = app.seek_bar();
-        let y = bar.y + bar.height / 2.0;
+        let y = bar.y + bar.h / 2.0;
 
         app.handle_event(&mouse(
-            bar.x + bar.width / 2.0,
+            bar.x + bar.w / 2.0,
             y,
             MouseEventKind::Press(MouseButton::Left),
         ));
@@ -6750,15 +6740,15 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         app.play();
         let bar = app.seek_bar();
-        let y = bar.y + bar.height / 2.0;
+        let y = bar.y + bar.h / 2.0;
 
         app.handle_event(&mouse(
-            bar.x + bar.width * 0.25,
+            bar.x + bar.w * 0.25,
             y,
             MouseEventKind::Press(MouseButton::Left),
         ));
         let early = app.seek_preview_position.expect("no preview").format();
-        app.handle_event(&mouse(bar.x + bar.width * 0.75, y, MouseEventKind::Move));
+        app.handle_event(&mouse(bar.x + bar.w * 0.75, y, MouseEventKind::Move));
         let late = app.seek_preview_position.expect("no preview").format();
         assert_ne!(early, late, "the preview did not follow the pointer");
 
@@ -6776,16 +6766,16 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         app.play();
         let bar = app.seek_bar();
-        let y = bar.y + bar.height / 2.0;
+        let y = bar.y + bar.h / 2.0;
 
         app.handle_event(&mouse(
-            bar.x + bar.width / 2.0,
+            bar.x + bar.w / 2.0,
             y,
             MouseEventKind::Press(MouseButton::Left),
         ));
         let preview = app.seek_preview_position.expect("no preview").format();
         app.handle_event(&mouse(
-            bar.x + bar.width / 2.0,
+            bar.x + bar.w / 2.0,
             y,
             MouseEventKind::Release(MouseButton::Left),
         ));
@@ -6802,8 +6792,8 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         app.play();
         let bar = app.seek_bar();
-        let y = bar.y + bar.height / 2.0;
-        let quarter = bar.x + bar.width / 4.0;
+        let y = bar.y + bar.h / 2.0;
+        let quarter = bar.x + bar.w / 4.0;
 
         app.handle_event(&mouse(quarter, y, MouseEventKind::Press(MouseButton::Left)));
         assert!(app.seeking);
@@ -6814,7 +6804,7 @@ test to be about anything -- it drew {} text command(s)",
             "dragging across a film must not seek to every pixel of the way"
         );
 
-        let three_quarters = bar.x + bar.width * 0.75;
+        let three_quarters = bar.x + bar.w * 0.75;
         app.handle_event(&mouse(three_quarters, y, MouseEventKind::Move));
         assert_eq!(app.position, Duration::ZERO);
 
@@ -6840,12 +6830,12 @@ test to be about anything -- it drew {} text command(s)",
         let app = loaded();
         let bar = app.seek_bar();
         assert!(
-            bar.height > SEEK_BAR_HEIGHT,
+            bar.h > SEEK_BAR_HEIGHT,
             "a six-pixel line is not a thing a pointer can land on"
         );
         let drawn_top = app.controls_top() + SEEK_BAR_OFFSET;
         assert!(
-            bar.y < drawn_top && bar.y + bar.height > drawn_top + SEEK_BAR_HEIGHT,
+            bar.y < drawn_top && bar.y + bar.h > drawn_top + SEEK_BAR_HEIGHT,
             "the grab band must reach above and below the line it is for"
         );
     }
@@ -6870,7 +6860,7 @@ test to be about anything -- it drew {} text command(s)",
         let narrow = app.seek_bar();
         app.set_window_size(1920.0, 1080.0);
         let wide = app.seek_bar();
-        assert!(wide.width > narrow.width, "the bar spans the window");
+        assert!(wide.w > narrow.w, "the bar spans the window");
         assert!(wide.y > narrow.y, "the controls sit on the bottom edge");
     }
 
@@ -6937,7 +6927,7 @@ test to be about anything -- it drew {} text command(s)",
         app.set_window_size(1.0, 1.0);
         assert!(app.width >= MIN_WINDOW_WIDTH);
         assert!(app.height >= MIN_WINDOW_HEIGHT);
-        assert!(app.seek_bar().width >= 1.0);
+        assert!(app.seek_bar().w >= 1.0);
     }
 
     #[test]
@@ -7020,10 +7010,10 @@ test to be about anything -- it drew {} text command(s)",
         app.set_window_size(2560.0, 1440.0);
         for (tab, rect) in app.tab_rects() {
             assert!(
-                rect.width <= TAB_MAX_WIDTH,
+                rect.w <= TAB_MAX_WIDTH,
                 "{tab:?} is {} wide on a 2560px window; a tab strip that \
                  grows without limit is a row of seven enormous buttons",
-                rect.width
+                rect.w
             );
         }
     }
@@ -7035,15 +7025,15 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         app.play();
         let bar = app.seek_bar();
-        let y = bar.y + bar.height / 2.0;
+        let y = bar.y + bar.h / 2.0;
         app.handle_event(&mouse(
             bar.x + 10.0,
             y,
             MouseEventKind::Press(MouseButton::Left),
         ));
-        app.handle_event(&mouse(bar.x + bar.width * 3.0, y, MouseEventKind::Move));
+        app.handle_event(&mouse(bar.x + bar.w * 3.0, y, MouseEventKind::Move));
         app.handle_event(&mouse(
-            bar.x + bar.width * 3.0,
+            bar.x + bar.w * 3.0,
             y,
             MouseEventKind::Release(MouseButton::Left),
         ));
@@ -7056,7 +7046,7 @@ test to be about anything -- it drew {} text command(s)",
             MouseEventKind::Press(MouseButton::Left),
         ));
         app.handle_event(&mouse(
-            bar.x - bar.width,
+            bar.x - bar.w,
             y,
             MouseEventKind::Release(MouseButton::Left),
         ));
@@ -7068,14 +7058,14 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         app.play();
         let bar = app.seek_bar();
-        let y = bar.y + bar.height / 2.0;
+        let y = bar.y + bar.h / 2.0;
         app.handle_event(&mouse(
-            bar.x + bar.width * 0.1,
+            bar.x + bar.w * 0.1,
             y,
             MouseEventKind::Press(MouseButton::Left),
         ));
         let first = app.seek_preview_position.expect("a preview");
-        app.handle_event(&mouse(bar.x + bar.width * 0.9, y, MouseEventKind::Move));
+        app.handle_event(&mouse(bar.x + bar.w * 0.9, y, MouseEventKind::Move));
         let second = app.seek_preview_position.expect("a preview");
         assert!(
             second > first,
@@ -7123,20 +7113,20 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         app.play();
         let bar = app.seek_bar();
-        let y = bar.y + bar.height / 2.0;
+        let y = bar.y + bar.h / 2.0;
         let duration = app.current_file.as_ref().expect("a file").duration;
         app.handle_event(&mouse(
             bar.x + 10.0,
             y,
             MouseEventKind::Press(MouseButton::Left),
         ));
-        app.handle_event(&mouse(bar.x + bar.width * 5.0, y, MouseEventKind::Move));
+        app.handle_event(&mouse(bar.x + bar.w * 5.0, y, MouseEventKind::Move));
         assert_eq!(
             app.seek_preview_position,
             Some(duration),
             "the time shown under a pointer dragged off the right of the bar must be the end of the film, not a time past it"
         );
-        app.handle_event(&mouse(bar.x - bar.width, y, MouseEventKind::Move));
+        app.handle_event(&mouse(bar.x - bar.w, y, MouseEventKind::Move));
         assert_eq!(app.seek_preview_position, Some(Duration::ZERO));
     }
 

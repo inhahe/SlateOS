@@ -22,16 +22,16 @@
 //! 6. **`/ToUnicode` CMaps**, which say what a composite font's codes mean.
 //!    [`parse_cmap`] and [`CMap::decode`].
 //!
+//! 7. **Cross-reference streams and object streams**, PDF 1.5's compressed
+//!    replacement for the table -- including the PNG row predictor their bytes
+//!    are usually stored under. [`read_xref_stream`] and [`object_in_stream`].
+//!
 //! **What is deliberately not here yet.** A simple font's `/Encoding` is not
 //! read, so `WinAnsiEncoding` is assumed. A composite font *without* a
 //! `/ToUnicode` map still yields nothing -- its codes are glyph indices into a
 //! subset font and relate to no character -- and such a page is counted in
 //! [`Document::unreadable_pages`], so "no results" from a search can be told
-//! apart from "nothing to find". Cross-reference *streams* (PDF 1.5's
-//! compressed replacement for the table) are not read either, so a file using
-//! them is refused by name rather than half-read; [`Error::XrefStream`] says
-//! so. Refusing is the point: a viewer that opened such a file and showed
-//! zero pages would be indistinguishable from an empty document.
+//! apart from "nothing to find".
 //!
 //! **Measured against files this did not write.** Every fixture in the tests
 //! below is assembled here, which proves the parser agrees with itself and
@@ -64,16 +64,16 @@
 //! neither file uses a range -- both write every code out as a pair.
 //!
 //! **Over a corpus rather than three files.** Run across every PDF under the
-//! machine's program directories -- 20 documents nobody here wrote -- it read
-//! 18 and refused 2, pulling 183673 text runs out with **zero unread pages**.
-//! Both refusals are the same named case: a PDF 1.5 cross-reference stream.
-//! That is now the only thing between this and every file to hand, which is
-//! what makes it the next piece rather than `/Encoding` or `/Widths`.
+//! machine's program directories -- 20 documents nobody here wrote -- it reads
+//! **all 20**, refusing none, pulling 184519 text runs out with **zero unread
+//! pages**. Before cross-reference streams went in it read 18 and refused 2,
+//! and those two were the whole of the gap.
 //!
-//! A separate survey of 41 files found 38 classic tables to 2 streams, but
-//! that corpus is documentation shipped with installed software and skews old
-//! by construction; anything printed from a browser or a word processor today
-//! is 1.5 or later. The 5% is a property of this machine, not of PDFs.
+//! A survey of 41 files found 38 classic tables to 2 streams, but that corpus
+//! is documentation shipped with installed software and skews old by
+//! construction; anything printed from a browser or a word processor today is
+//! 1.5 or later. The 5% is a property of this machine, not of PDFs, which is
+//! why the two were worth the work.
 //!
 //! **Hostile input is the normal case.** A PDF is a file from elsewhere, and
 //! every length in it is a claim. Nothing here allocates on the strength of a
@@ -99,8 +99,6 @@ pub enum Error {
     NotAPdf,
     /// No `startxref`, or it does not point at a table.
     NoXref,
-    /// The cross-reference is a stream, which this does not read yet.
-    XrefStream,
     /// The trailer has no `/Root`, or it does not resolve to a catalog.
     NoCatalog,
     /// The catalog has no page tree.
@@ -116,7 +114,6 @@ impl core::fmt::Display for Error {
         let text = match self {
             Self::NotAPdf => "not a PDF file (no %PDF- header)",
             Self::NoXref => "no cross-reference table",
-            Self::XrefStream => "this PDF uses a cross-reference stream, which is not read yet",
             Self::NoCatalog => "no document catalog",
             Self::NoPages => "no page tree",
             Self::Truncated => "the file ends mid-object",
@@ -636,7 +633,7 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
     let version = header_version(bytes)?;
     let start = startxref_offset(bytes)?;
 
-    let mut offsets: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut offsets = Xref::default();
     let mut trailer: Option<BTreeMap<String, Object>> = None;
     let mut seen_sections: BTreeSet<usize> = BTreeSet::new();
     let mut next = Some(start);
@@ -653,6 +650,9 @@ pub fn read(bytes: &[u8]) -> Result<Document, Error> {
         next = prev;
     }
 
+    if offsets.is_empty() {
+        return Err(Error::NoXref);
+    }
     let trailer = trailer.ok_or(Error::NoXref)?;
     let root = trailer.get("Root").ok_or(Error::NoCatalog)?;
     let catalog = resolve(bytes, &offsets, root, 0)?;
@@ -739,14 +739,15 @@ fn startxref_offset(bytes: &[u8]) -> Result<usize, Error> {
 fn read_xref_section(
     data: &[u8],
     pos: usize,
-    offsets: &mut BTreeMap<u32, usize>,
+    offsets: &mut Xref,
 ) -> Result<(BTreeMap<String, Object>, Option<usize>), Error> {
     let mut lex = Lexer::new(data);
     lex.seek(pos)?;
     if !lex.eat(b"xref") {
-        // PDF 1.5 replaced the table with a compressed stream. Saying so by
-        // name beats reporting a document with no pages.
-        return Err(Error::XrefStream);
+        // PDF 1.5 replaced the table with a stream. Its dictionary doubles as
+        // the trailer, so this returns the same pair and the caller cannot
+        // tell which kind it read.
+        return read_xref_stream(data, pos, offsets);
     }
     loop {
         if lex.eat(b"trailer") {
@@ -790,7 +791,7 @@ fn read_xref_section(
                 if off < data.len() {
                     // The newest section is read first, so an entry already
                     // here came from a later update and wins.
-                    offsets.entry(num).or_insert(off);
+                    offsets.add_direct(num, off);
                 }
             }
         }
@@ -823,23 +824,23 @@ fn object_at(data: &[u8], offset: usize) -> Result<Object, Error> {
 }
 
 /// Follow `object` through the cross-reference table until it is a value.
-fn resolve(
-    data: &[u8],
-    offsets: &BTreeMap<u32, usize>,
-    object: &Object,
-    depth: usize,
-) -> Result<Object, Error> {
+fn resolve(data: &[u8], offsets: &Xref, object: &Object, depth: usize) -> Result<Object, Error> {
     if depth > MAX_TREE_DEPTH {
         return Err(Error::Malformed("a reference chain that does not end"));
     }
     match object {
         Object::Ref(number, _) => {
-            // A dangling reference is `null` by the specification, not an
-            // error: a file may point at an object it did not include.
-            let Some(offset) = offsets.get(number) else {
+            // Direct first, then inside an object stream. A dangling reference
+            // is `null` by the specification, not an error: a file may point
+            // at an object it did not include.
+            if let Some(offset) = offsets.direct.get(number) {
+                let target = object_at(data, *offset)?;
+                return resolve(data, offsets, &target, depth.saturating_add(1));
+            }
+            let Some((stream, index)) = offsets.compressed.get(number).copied() else {
                 return Ok(Object::Null);
             };
-            let target = object_at(data, *offset)?;
+            let target = object_in_stream(data, offsets, stream, index, depth)?;
             resolve(data, offsets, &target, depth.saturating_add(1))
         }
         other => Ok(other.clone()),
@@ -849,7 +850,7 @@ fn resolve(
 /// Walk the page tree, appending a [`PageInfo`] per leaf.
 fn walk_pages(
     data: &[u8],
-    offsets: &BTreeMap<u32, usize>,
+    offsets: &Xref,
     node_ref: &Object,
     inherited: Inherited,
     depth: usize,
@@ -932,7 +933,7 @@ fn walk_pages(
 /// about a document it never read.
 fn page_text(
     data: &[u8],
-    offsets: &BTreeMap<u32, usize>,
+    offsets: &Xref,
     page: &BTreeMap<String, Object>,
     resources: Option<&Object>,
 ) -> (Vec<TextRun>, bool) {
@@ -989,7 +990,7 @@ fn page_text(
 /// A font this cannot resolve is treated as composite, which is the cautious
 /// direction: an unknown font's codes are decoded as nothing rather than as
 /// bytes that may not be bytes.
-fn font_map(data: &[u8], offsets: &BTreeMap<u32, usize>, resources: Option<&Object>) -> FontMap {
+fn font_map(data: &[u8], offsets: &Xref, resources: Option<&Object>) -> FontMap {
     let mut map = FontMap::new();
     let Some(resources) = resources else {
         return map;
@@ -1035,12 +1036,318 @@ fn font_map(data: &[u8], offsets: &BTreeMap<u32, usize>, resources: Option<&Obje
     map
 }
 
-/// A `/MediaBox` as width and height in points.
-fn media_box(
+/// Where every object in a file is.
+///
+/// Two kinds, because PDF 1.5 added a second. A *direct* object sits at a byte
+/// offset in the file. A *compressed* one sits inside an object stream, named
+/// by that stream's object number and its index within it -- so resolving it
+/// means finding, decoding and parsing another object first.
+#[derive(Debug, Default, Clone)]
+pub struct Xref {
+    direct: BTreeMap<u32, usize>,
+    compressed: BTreeMap<u32, (u32, u32)>,
+}
+
+impl Xref {
+    /// Record a direct object, unless a newer section already claimed it.
+    fn add_direct(&mut self, number: u32, offset: usize) {
+        if !self.compressed.contains_key(&number) {
+            self.direct.entry(number).or_insert(offset);
+        }
+    }
+
+    /// Record an object living inside an object stream.
+    fn add_compressed(&mut self, number: u32, stream: u32, index: u32) {
+        if !self.direct.contains_key(&number) {
+            self.compressed.entry(number).or_insert((stream, index));
+        }
+    }
+
+    /// Whether anything at all was found.
+    fn is_empty(&self) -> bool {
+        self.direct.is_empty() && self.compressed.is_empty()
+    }
+}
+
+/// Undo a PNG row predictor.
+///
+/// A cross-reference stream is usually `/Predictor 12`, which is PNG's `Up`
+/// filter applied per row: each row is one filter-type byte followed by
+/// `columns` bytes, and every byte is stored as its difference from the byte
+/// above. Reading the entries without undoing this yields differences rather
+/// than offsets -- numbers that are entirely plausible and entirely wrong.
+///
+/// All five PNG filters are handled because the filter type is per *row*, so a
+/// file may use `Up` for most rows and `Paeth` for one and still be ordinary.
+fn undo_png_predictor(data: &[u8], columns: usize) -> Option<Vec<u8>> {
+    if columns == 0 {
+        return None;
+    }
+    let stride = columns.checked_add(1)?;
+    let mut out: Vec<u8> = Vec::with_capacity(data.len());
+    let mut previous: Vec<u8> = vec![0; columns];
+    for row in data.chunks(stride) {
+        let (kind, body) = row.split_first()?;
+        let mut line: Vec<u8> = body.to_vec();
+        line.resize(columns, 0);
+        for i in 0..columns {
+            let left = if i == 0 {
+                0
+            } else {
+                line.get(i.saturating_sub(1)).copied().unwrap_or(0)
+            };
+            let up = previous.get(i).copied().unwrap_or(0);
+            let up_left = if i == 0 {
+                0
+            } else {
+                previous.get(i.saturating_sub(1)).copied().unwrap_or(0)
+            };
+            let raw = line.get(i).copied().unwrap_or(0);
+            let value = match kind {
+                0 => raw,
+                1 => raw.wrapping_add(left),
+                2 => raw.wrapping_add(up),
+                3 => {
+                    let average = (u16::from(left).saturating_add(u16::from(up))) / 2;
+                    raw.wrapping_add(u8::try_from(average & 0xff).unwrap_or(0))
+                }
+                4 => raw.wrapping_add(paeth(left, up, up_left)),
+                // An unknown filter type is not a row this can recover.
+                _ => return None,
+            };
+            if let Some(slot) = line.get_mut(i) {
+                *slot = value;
+            }
+        }
+        out.extend_from_slice(&line);
+        previous = line;
+    }
+    Some(out)
+}
+
+/// PNG's Paeth predictor.
+fn paeth(left: u8, up: u8, up_left: u8) -> u8 {
+    // Saturating throughout: three bytes widened to `i32` cannot overflow it,
+    // but the crate denies bare arithmetic so the next edit does not have to
+    // re-argue that.
+    let p = i32::from(left)
+        .saturating_add(i32::from(up))
+        .saturating_sub(i32::from(up_left));
+    let pa = p.saturating_sub(i32::from(left)).saturating_abs();
+    let pb = p.saturating_sub(i32::from(up)).saturating_abs();
+    let pc = p.saturating_sub(i32::from(up_left)).saturating_abs();
+    if pa <= pb && pa <= pc {
+        left
+    } else if pb <= pc {
+        up
+    } else {
+        up_left
+    }
+}
+
+/// A big-endian integer from `width` bytes, or the default when width is zero.
+///
+/// `/W` may give a field zero bytes, which means every entry takes the
+/// field's default rather than that the field is missing.
+fn xref_field(bytes: &[u8], at: usize, width: usize, default: u64) -> Option<(u64, usize)> {
+    if width == 0 {
+        return Some((default, at));
+    }
+    let end = at.checked_add(width)?;
+    let slice = bytes.get(at..end)?;
+    let mut value = 0u64;
+    for byte in slice {
+        value = value.checked_mul(256)?.checked_add(u64::from(*byte))?;
+    }
+    Some((value, end))
+}
+
+/// One cross-reference *stream*, PDF 1.5's replacement for the table.
+///
+/// Returns its dictionary -- which doubles as the trailer, carrying `/Root`
+/// and `/Prev` -- and the `/Prev` offset.
+fn read_xref_stream(
     data: &[u8],
-    offsets: &BTreeMap<u32, usize>,
-    dict: &BTreeMap<String, Object>,
-) -> Option<(f32, f32)> {
+    pos: usize,
+    xref: &mut Xref,
+) -> Result<(BTreeMap<String, Object>, Option<usize>), Error> {
+    let object = object_at(data, pos)?;
+    let Some(dict) = object.as_dict().cloned() else {
+        return Err(Error::Malformed("an xref offset pointing at no dictionary"));
+    };
+    if !matches!(dict.get("Type"), Some(Object::Name(t)) if t == "XRef") {
+        return Err(Error::NoXref);
+    }
+
+    // The stream's own `/Length` is always direct in a cross-reference stream
+    // -- it has to be, since resolving an indirect one would need the table
+    // this stream is.
+    let raw = stream_bytes(data, &object).map_err(|_| Error::NoXref)?;
+    let columns = dict
+        .get("DecodeParms")
+        .and_then(Object::as_dict)
+        .and_then(|d| d.get("Columns"))
+        .and_then(Object::as_f64)
+        .map_or(1usize, |c| c.max(1.0) as usize);
+    let predictor = dict
+        .get("DecodeParms")
+        .and_then(Object::as_dict)
+        .and_then(|d| d.get("Predictor"))
+        .and_then(Object::as_f64)
+        .map_or(1i64, |p| p as i64);
+    let bytes = if predictor >= 10 {
+        undo_png_predictor(&raw, columns).ok_or(Error::Malformed(
+            "a cross-reference stream this cannot unfilter",
+        ))?
+    } else {
+        raw
+    };
+
+    let widths: Vec<usize> = match dict.get("W") {
+        Some(Object::Array(items)) => items
+            .iter()
+            .map(|item| item.as_f64().map_or(0usize, |w| w.max(0.0) as usize))
+            .collect(),
+        _ => return Err(Error::Malformed("a cross-reference stream with no /W")),
+    };
+    let (w0, w1, w2) = (
+        widths.first().copied().unwrap_or(0),
+        widths.get(1).copied().unwrap_or(0),
+        widths.get(2).copied().unwrap_or(0),
+    );
+
+    // `/Index` is a list of (first object number, count) pairs; without one the
+    // whole file is a single run starting at zero.
+    let index: Vec<(u64, u64)> = match dict.get("Index") {
+        Some(Object::Array(items)) => items
+            .chunks_exact(2)
+            .filter_map(|pair| match pair {
+                [first, count] => Some((
+                    first.as_f64().map_or(0.0, |v| v.max(0.0)) as u64,
+                    count.as_f64().map_or(0.0, |v| v.max(0.0)) as u64,
+                )),
+                _ => None,
+            })
+            .collect(),
+        _ => {
+            let size = dict.get("Size").and_then(Object::as_f64).unwrap_or(0.0);
+            vec![(0, size.max(0.0) as u64)]
+        }
+    };
+
+    let mut at = 0usize;
+    for (first, count) in index {
+        for step in 0..count {
+            let Some((kind, next)) = xref_field(&bytes, at, w0, 1) else {
+                break;
+            };
+            let Some((field2, next)) = xref_field(&bytes, next, w1, 0) else {
+                break;
+            };
+            let Some((field3, next)) = xref_field(&bytes, next, w2, 0) else {
+                break;
+            };
+            at = next;
+            let Some(number) = first.checked_add(step).and_then(|n| u32::try_from(n).ok()) else {
+                continue;
+            };
+            match kind {
+                1 => {
+                    if let Ok(offset) = usize::try_from(field2) {
+                        if offset < data.len() {
+                            xref.add_direct(number, offset);
+                        }
+                    }
+                }
+                2 => {
+                    if let (Ok(stream), Ok(idx)) = (u32::try_from(field2), u32::try_from(field3)) {
+                        xref.add_compressed(number, stream, idx);
+                    }
+                }
+                // Type 0 is a free object: it is on the list precisely to say
+                // it is not there.
+                _ => {}
+            }
+        }
+    }
+
+    let prev = dict
+        .get("Prev")
+        .and_then(Object::as_f64)
+        .filter(|p| *p >= 0.0)
+        .and_then(|p| {
+            let as_usize = usize::try_from(p.min(4_294_967_295.0) as u64).ok()?;
+            (as_usize < data.len()).then_some(as_usize)
+        });
+    Ok((dict, prev))
+}
+
+/// The `index`-th object inside object stream `stream`.
+///
+/// An object stream holds `/N` objects after a header of `/N` number-offset
+/// pairs, with the bodies starting at `/First`. Everything in it is a plain
+/// object; what it saves is one `n g obj ... endobj` wrapper each and, since
+/// the whole thing is usually deflated, a great deal of room.
+fn object_in_stream(
+    data: &[u8],
+    xref: &Xref,
+    stream: u32,
+    index: u32,
+    depth: usize,
+) -> Result<Object, Error> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(Error::Malformed("an object stream chain that does not end"));
+    }
+    // An object stream is itself a direct object; one living inside another
+    // object stream is forbidden, and following it would be a cycle.
+    let Some(offset) = xref.direct.get(&stream) else {
+        return Ok(Object::Null);
+    };
+    let container = object_at(data, *offset)?;
+    let Some(dict) = container.as_dict() else {
+        return Ok(Object::Null);
+    };
+    let count = dict.get("N").and_then(Object::as_f64).unwrap_or(0.0);
+    let first = dict.get("First").and_then(Object::as_f64).unwrap_or(0.0);
+    if count <= 0.0 || first < 0.0 || f64::from(index) >= count {
+        return Ok(Object::Null);
+    }
+    let Ok(bytes) = stream_bytes_resolved(data, xref, &container) else {
+        return Ok(Object::Null);
+    };
+    let first = first as usize;
+
+    // The header: `/N` pairs of "object number, offset from /First".
+    let mut header = Lexer::new(&bytes);
+    let mut offset_in_body = None;
+    for step in 0..(count as u64) {
+        let Some(Object::Int(_number)) = parse_number(header.token()) else {
+            break;
+        };
+        let Some(Object::Int(at)) = parse_number(header.token()) else {
+            break;
+        };
+        if step == u64::from(index) {
+            offset_in_body = usize::try_from(at.max(0)).ok();
+            break;
+        }
+    }
+    let Some(offset_in_body) = offset_in_body else {
+        return Ok(Object::Null);
+    };
+    let Some(start) = first.checked_add(offset_in_body) else {
+        return Ok(Object::Null);
+    };
+    if start >= bytes.len() {
+        return Ok(Object::Null);
+    }
+    let mut body = Lexer::new(&bytes);
+    body.seek(start)?;
+    body.object()
+}
+
+/// A `/MediaBox` as width and height in points.
+fn media_box(data: &[u8], offsets: &Xref, dict: &BTreeMap<String, Object>) -> Option<(f32, f32)> {
     let raw = dict.get("MediaBox")?;
     let resolved = resolve(data, offsets, raw, 0).ok()?;
     let Object::Array(items) = resolved else {
@@ -1156,7 +1463,7 @@ fn filter_names(dict: &BTreeMap<String, Object>) -> Vec<String> {
 /// this the whole document read as 122 unreadable pages.
 fn stream_bytes_resolved(
     data: &[u8],
-    offsets: &BTreeMap<u32, usize>,
+    offsets: &Xref,
     object: &Object,
 ) -> Result<Vec<u8>, StreamError> {
     let Object::Stream { dict, start, len } = object else {
@@ -1868,16 +2175,95 @@ mod tests {
         assert_eq!(read(b"just some bytes"), Err(Error::NotAPdf));
     }
 
-    /// A cross-reference stream is named, not half-read.
+    /// A one-page PDF whose cross-reference is a *stream*, not a table.
     ///
-    /// The danger is silence: this file has a catalog and a page, so a reader
-    /// that shrugged at the table and found nothing would report a document of
-    /// zero pages, which is indistinguishable from an empty one.
+    /// Unfiltered and unpredicted, which is legal and keeps the fixture
+    /// readable: `/W [1 2 1]` is four bytes an entry -- type, a two-byte
+    /// offset, a one-byte generation.
+    fn pdf_with_xref_stream() -> Vec<u8> {
+        const NL: u8 = 10;
+        let mut out: Vec<u8> = Vec::new();
+        let mut offsets: Vec<usize> = Vec::new();
+        out.extend_from_slice(b"%PDF-1.5");
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj");
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(b"2 0 obj << /Type /Pages /Count 1 /Kids [3 0 R] >> endobj");
+        out.push(NL);
+
+        offsets.push(out.len());
+        out.extend_from_slice(
+            b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 400] >> endobj",
+        );
+        out.push(NL);
+
+        // Object 4 is the cross-reference stream itself, and must appear in
+        // its own table -- a file's own xref object is an object like any
+        // other.
+        let xref_at = out.len();
+        offsets.push(xref_at);
+
+        let mut entries: Vec<u8> = Vec::new();
+        // Object 0 is always free.
+        entries.extend_from_slice(&[0, 0, 0, 255]);
+        for off in &offsets {
+            let off = u16::try_from(*off).expect("fixture stays small");
+            entries.push(1);
+            entries.extend_from_slice(&off.to_be_bytes());
+            entries.push(0);
+        }
+        out.extend_from_slice(
+            format!(
+                "4 0 obj << /Type /XRef /Size 5 /W [1 2 1] /Root 1 0 R /Length {} >>",
+                entries.len()
+            )
+            .as_bytes(),
+        );
+        out.push(NL);
+        out.extend_from_slice(b"stream");
+        out.push(NL);
+        out.extend_from_slice(&entries);
+        out.push(NL);
+        out.extend_from_slice(b"endstream endobj");
+        out.push(NL);
+
+        out.extend_from_slice(b"startxref");
+        out.push(NL);
+        out.extend_from_slice(format!("{xref_at}").as_bytes());
+        out.push(NL);
+        out.extend_from_slice(b"%%EOF");
+        out
+    }
+
+    /// A cross-reference stream is read, where it used to be refused.
+    ///
+    /// This test asserted the refusal until the stream reader went in. The
+    /// refusal was the honest answer while nothing could read one -- a
+    /// document reported as having zero pages is a claim about the document --
+    /// but it was still two files in twenty on this machine that could not be
+    /// opened at all.
     #[test]
-    fn a_cross_reference_stream_is_refused_by_name() {
-        let mut file = build_pdf(&[(612, 792)], None);
-        // Point startxref at the catalog instead of the table, which is what a
-        // 1.5 file does: the offset leads to an object, not the word `xref`.
+    fn a_cross_reference_stream_is_read() {
+        let doc = read(&pdf_with_xref_stream()).expect("reads");
+        assert_eq!(doc.version, "1.5");
+        assert_eq!(doc.pages.len(), 1);
+        let page = doc.pages.first().expect("a page");
+        assert!((page.width - 200.0).abs() < 0.01, "from the stream's table");
+        assert!((page.height - 400.0).abs() < 0.01);
+    }
+
+    /// A `startxref` pointing at neither a table nor a cross-reference stream.
+    ///
+    /// Still refused, and this is what the old refusal test really covered: an
+    /// offset leading to an ordinary object. Reading on from there would
+    /// produce a document with no catalog rather than an error.
+    #[test]
+    fn a_startxref_pointing_at_an_ordinary_object_is_refused() {
+        let mut file = pdf_with_content(b"BT ET", false);
         let at = find(&file, b"startxref").expect("built with one");
         file.truncate(at);
         file.extend_from_slice(b"startxref");
@@ -1885,7 +2271,29 @@ mod tests {
         file.extend_from_slice(b"9");
         file.push(10);
         file.extend_from_slice(b"%%EOF");
-        assert_eq!(read(&file), Err(Error::XrefStream));
+        assert_eq!(read(&file), Err(Error::NoXref));
+    }
+
+    /// The PNG `Up` predictor is undone before the entries are read.
+    ///
+    /// Predictor 12 stores every byte as its difference from the byte above,
+    /// so reading the entries without undoing it yields differences -- numbers
+    /// that are entirely plausible and entirely wrong.
+    #[test]
+    fn the_up_predictor_is_undone() {
+        // Two rows of three columns. Filter byte 2 is `Up`.
+        let filtered = [
+            0u8, 10, 20, 30, // None: 10 20 30
+            2u8, 1, 2, 3, // Up: +1 +2 +3 over the row above
+        ];
+        let out = undo_png_predictor(&filtered, 3).expect("unfilters");
+        assert_eq!(out, vec![10, 20, 30, 11, 22, 33]);
+    }
+
+    /// A row naming a filter that does not exist is refused, not guessed.
+    #[test]
+    fn an_unknown_row_filter_is_refused() {
+        assert_eq!(undo_png_predictor(&[9u8, 1, 2, 3], 3), None);
     }
 
     /// A trailer chain that points at itself terminates.

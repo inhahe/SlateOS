@@ -1579,6 +1579,57 @@ safe direction to fail. As of today the module no longer *claims* the feature �
 its own documentation said it had autologin while doing nothing — so the only
 cost is a setting that does not do what its name says. `design-decisions.md`
 824 records why it was left undecided.
+
+## C-Q23 — [C] The feature list is wrong often enough that planning from it misleads. Re-check it, and how far? — Status: OPEN (raised 2026-09-16)
+
+**In short:** `roadmap-detailed.md` is the list of everything this system is
+meant to do, and work gets picked from it. Thirty of its items were checked
+against the code in one evening, and about half were wrong — most of them
+saying "not built" about things that are built and working. Nobody made a
+mistake; the list simply ages faster than anyone updates it. The question is
+whether to spend real time re-checking the rest, and how much.
+
+**The evidence, from the thirty checked** (`known-issues.md` →
+`TD-C-THE-FEATURE-INVENTORY-WAS-WRONG-IN-BOTH-DIRECTIONS`):
+
+| what the list said | what the code said | count |
+|---|---|---|
+| not built | built and working | 11 |
+| not built | built but no user can reach it | 2 |
+| not built | partly built, no record of which part | 5 |
+| not built | genuinely not built | 10 |
+| *nothing* | built and **contradicting the design** | 2 |
+
+The last row is the one that costs most: the file list was choosing columns by
+looking inside folders, which §4.1 forbids in bold, and nothing in the list
+could say so because nothing was missing.
+
+**Why it matters in practice.** Twice this evening I started work the list said
+was unstarted and found it finished — once after building a replacement for
+something that already existed. A list that says "not built" about built things
+sends people to rebuild; a list that cannot express "built but unreachable"
+sends them to write code that is already written.
+
+| Option | What changes |
+|---|---|
+| **A. Re-check the whole file** (~930 open items) | The list becomes trustworthy. Costs days of reading with no new features at the end of it. |
+| **B. Re-check one section at a time, as work is picked from it** | Nothing is re-checked speculatively; each section is corrected by whoever was about to work in it anyway. Slower to become trustworthy, and sections nobody visits stay wrong. |
+| **C. Re-check nothing; treat the list as a wish-list and verify per task** | No effort spent. Every future task pays the same few minutes I paid tonight, and the two design contradictions stay unfound until someone trips over them. |
+
+*What changes, in one line each:*
+- **A** — a week of no visible progress, then a file you can plan from.
+- **B** — planning stays unreliable, but never wastes effort on sections nobody uses.
+- **C** — nothing changes; the cost stays spread thin and permanent.
+
+**My recommendation: B**, with one addition — that a checked item records
+*that* it was checked, and on what date. Half tonight's cost was not knowing
+whether an empty box meant "absent" or "unexamined". That single convention
+makes B converge instead of repeating.
+
+**If this is never answered:** nothing breaks. The list stays a rough guide,
+work continues to be picked from it, and occasionally someone rebuilds
+something that exists — which happened twice tonight and cost an hour each
+time. It does not get worse on its own, but it does not improve either.
 ## B-Q9 — [B] We wrote our own copy of a shell because we could not build the original. We can now. Keep the copy, or switch to the original? — Status: OPEN
 
 **In short:** the *shell* is the program that runs the commands you type. SlateOS

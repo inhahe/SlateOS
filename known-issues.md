@@ -155178,9 +155178,25 @@ address bar's `set_path`, `IconAction::OpenPath`, the run dialog's comparisons
 the kept bytes.** None of them needs a new idea, only the pattern from the file
 dialog applied a second time.
 
-That also settles what "needs an API change" meant in those entries. It is not
-a redesign; it is one extra field beside the display string, which
-`guitk::pathbar` and `IconAction` each lack.
+That settles the scope for two of the three, and **not** for the pathbar --
+corrected here after checking rather than asserting twice in a row:
+
+* `IconAction::OpenPath` really is one field: hold a `PathBuf`, derive the
+  label. The saved layout's `path:{…}` key needs a byte-safe form with it.
+* The run dialog's two comparisons are one change each: compare `OsStr` to
+  `OsStr` instead of flattening both.
+* **`guitk::pathbar` is more than a field.** It holds `path: String` and
+  `edit_text: String` and touches them in sixty-four places; breadcrumb mode
+  *splits the path into clickable segments*, and edit mode is a text field the
+  user types into. Carrying exact bytes means the segment split and the
+  `Navigate(String)` event change with it. That is a contained refactor of one
+  widget and its one consumer, not a redesign and not a one-liner.
+
+Saying "one extra field" for all three was the same error as the entries it was
+correcting: a scope stated without being measured. The difference matters
+because it decides whether someone starts.
+
+
 
 **Do not sweep this blindly.** Two `env::var` calls in this lane are correct
 and must stay: `gui/compositor`'s `SLATE_DRM_CARD` parses to a `u32`, so a

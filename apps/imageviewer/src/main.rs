@@ -2582,7 +2582,7 @@ mod tests {
         let gif = dir.join("holiday.gif");
         // A real GIF signature and a logical screen descriptor: enough for
         // `ImageFormat::detect`, and nothing this system can decode.
-        std::fs::write(&gif, b"GIF89a     ").expect("write gif");
+        std::fs::write(&gif, b"GIF89a\x10\x00\x10\x00\x00\x00\x00").expect("write gif");
 
         let mut state = ViewerState::new(800.0, 600.0);
         assert!(!state.open_file(&gif));

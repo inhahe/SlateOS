@@ -8173,6 +8173,14 @@ fn gen_powerprofile() -> Vec<u8> {
     let mut out = String::new();
 
     let (count, active, switches, batt_pct, batt_state, ops) = super::powerprofile::stats();
+    // dd-945 disclosure at the point of reading: this file is a record of
+    // what was asked for, not of what is in force. `powerprofile` contains
+    // zero calls to `cpufreq::` and zero to `brightness::`, so selecting a
+    // profile changes no governor and no backlight.
+    out.push_str(
+        "NOTE: requested profile only -- no CPU governor or display \
+         brightness is set yet.\n",
+    );
     out.push_str(&format!("profiles: {}\n", count));
     out.push_str(&format!("active: {}\n", active));
     out.push_str(&format!("switches: {}\n", switches));
@@ -9359,7 +9367,15 @@ fn gen_gamemode() -> Vec<u8> {
     use super::gamemode;
     use alloc::format;
     let (game_count, total_acts, active, ops) = gamemode::stats();
-    let mut out = String::from("game_count: ");
+    // dd-945: `gamemode` contains zero calls to `sched::`, so no background
+    // task is blocked and no notification is suppressed. `active: 1` below
+    // means the mode was switched on, not that anything changed.
+    let mut out = String::new();
+    out.push_str(
+        "NOTE: recorded state only -- no notification is suppressed and no \
+         background task is blocked yet.\n",
+    );
+    out.push_str("game_count: ");
     out.push_str(&format!("{}\n", game_count));
     out.push_str(&format!("total_activations: {}\n", total_acts));
     out.push_str(&format!("active: {}\n", active));
@@ -10392,6 +10408,12 @@ fn gen_energysaver() -> Vec<u8> {
     out.push_str("=== Energy Saver ===\n");
     let (throttled_count, mode_changes, total_throttles, estimated_min, ops) =
         crate::fs::energysaver::stats();
+    // dd-945: `energysaver` contains zero calls to `sched::` and zero to
+    // `brightness::`, so nothing is throttled and no display is dimmed.
+    out.push_str(
+        "NOTE: recorded settings only -- no process is throttled and no \
+         display is dimmed yet.\n",
+    );
     out.push_str(&format!("throttled_count: {}\n", throttled_count));
     out.push_str(&format!("mode_changes: {}\n", mode_changes));
     out.push_str(&format!("total_throttles: {}\n", total_throttles));

@@ -39016,7 +39016,30 @@ not a compositor bug.
 
 **What.** `DrmScanout::new` reads the connected display's preferred mode and
 builds the compositor at that size. It never sets a mode, because
-`kernel/src/drm/` implements no `DRM_IOCTL_MODE_SETCRTC`. `PAGE_FLIP` works
+`kernel/src/drm/` implements no `DRM_IOCTL_MODE_SETCRTC`.
+
+**The Settings side, audited 2026-09-17 and not previously written down.** The
+Display page draws a Resolution dropdown and a Refresh Rate dropdown, and
+neither reaches anything at all -- not even a file. `resolution_index` and
+`refresh_rate_index` occur in exactly four places in `apps/settings`: the
+field, its default, the label the row shows, and the dropdown's own item list.
+There is no save and no request; choosing 2560x1440 changes a number in memory
+that is forgotten when the window closes. And `RESOLUTIONS` is a hardcoded
+list of eight common modes, not the modes the display reports -- the same
+invention the Network Status page had removed when it turned out this system
+cannot enumerate its interfaces.
+
+That is the standard the Mouse page sets in its own doc: a control drawn for
+something with no consumer "would save a value to a file, look exactly as
+though it had worked, and change nothing", which is what
+`TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING` was filed about. These two
+rows are below even that bar, since they do not reach a file either.
+
+Deliberately not removed here. The backend half below has moved -- `SETCRTC`
+works on the ATI backend now -- so the choice is between deleting two rows and
+finishing the path they need, and the remaining piece of that path (the buffer
+re-allocation before `SETCRTC`) is lane C's own. Deleting them first would be
+churn if that lands. `PAGE_FLIP` works
 without it — the CRTC is already scanning out the mode the firmware programmed —
 so this is a limitation rather than a blocker, but it means the mode we get is
 the mode we keep. The compositor binary reports `--size` as ignored on this path

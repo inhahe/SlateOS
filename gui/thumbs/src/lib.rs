@@ -1,4 +1,10 @@
-//! Thumbnail generation and caching for the file explorer's icon view.
+//! Thumbnails: generating them, caching them, and owning the image ids they
+//! are drawn under.
+//!
+//! Used by the file manager's icon view and by the photo library's grid. It
+//! lived inside `apps/explorer` as `mod thumbs` until the second caller
+//! arrived; nothing in it was ever explorer-specific, and it referenced none
+//! of that binary's types.
 //!
 //! Provides:
 //! - **Image thumbnails** (BMP/PNG/JPEG/GIF): header parsing for dimensions,
@@ -12,8 +18,17 @@
 //! file automatically invalidates.  An optional disk cache under
 //! `~/.cache/thumbs/` persists thumbnails across sessions.
 //!
-//! Background generation is supported via a request queue that can be polled
-//! for completed thumbnails, keeping the UI thread non-blocking.
+//! Generation is **deferred, not backgrounded**, and the difference is the
+//! whole of what a caller needs to know. Requests go on a queue, and
+//! [`ThumbnailGenerator::process_batch`] retires up to `batch_size` of them
+//! *synchronously, on the calling thread*. There is no worker thread in this
+//! module and nothing here is asynchronous.
+//!
+//! So the cost of a thumbnail is moved and capped, never removed: a frame pays
+//! for the thumbnails it retires, and `batch_size` is the size of that
+//! payment. Choosing it is a real decision -- a large batch over a directory
+//! of full-size photographs buys a shorter queue with a longer frame. The
+//! honest version of "non-blocking" here is "bounded".
 
 use guitk::canvas::Canvas;
 use guitk::color::Color;
@@ -1313,7 +1328,22 @@ pub struct ThumbnailGenerator {
     disk: Option<DiskCache>,
 }
 
+impl Default for ThumbnailGenerator {
+    /// The same thing [`ThumbnailGenerator::new`] makes: an empty queue and no
+    /// disk cache.
+    ///
+    /// Present because this is a library now. A `new()` taking no arguments is
+    /// expected to have a `Default` beside it, so that the type composes with
+    /// everything that derives or requires one -- which a caller outside this
+    /// crate can need and cannot add.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThumbnailGenerator {
+    /// A generator with nothing queued and no disk behind it.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             pending: VecDeque::new(),
@@ -1814,9 +1844,11 @@ fn read_file_header(path: &Path, n: usize) -> Option<Vec<u8>> {
 
 /// Read the first `max_lines` lines of a text file.
 ///
-/// `pub(crate)` for the preview pane, which shows the same lines this reads
-/// for a thumbnail — at a readable size instead of a 96-pixel minimap. One
-/// reader, so the panel and the icon cannot disagree about what is in a file.
+/// Public for the file manager's preview pane, which shows the same lines
+/// this reads for a thumbnail — at a readable size instead of a 96-pixel
+/// minimap. One reader, so the panel and the icon cannot disagree about what
+/// is in a file. It was `pub(crate)` while this was a module inside that
+/// binary; the crate boundary is what changed, not the intent.
 ///
 /// **A line that is not UTF-8 is dropped**, because `BufRead::lines` yields an
 /// error for it and this filters errors out. That is tolerable in a minimap,
@@ -1826,7 +1858,7 @@ fn read_file_header(path: &Path, n: usize) -> Option<Vec<u8>> {
 /// honest rendering, and `String::from_utf8_lossy` is what draws them, which
 /// `scripts/lossy-decode.py` governs — so it is a change with a gate to
 /// answer to and not one to slip in here.
-pub(crate) fn read_text_lines(path: &Path, max_lines: usize) -> Option<Vec<String>> {
+pub fn read_text_lines(path: &Path, max_lines: usize) -> Option<Vec<String>> {
     let bytes = read_file_header(path, TEXT_PREVIEW_MAX_BYTES)?;
     // Lossy on purpose, and this is the audited kind. A preview draws file
     // *contents* as text; a byte that is not text cannot be drawn as itself,

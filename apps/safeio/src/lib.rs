@@ -30,7 +30,7 @@
 //! it, whereas losing the file that existed before the save is not.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -209,26 +209,74 @@ impl CappedBytes {
 /// that is not UTF-8 -- reporting "stream did not contain valid UTF-8" about a
 /// file that is perfectly valid and simply not text.
 ///
+/// # What `max` bounds
+///
+/// The *allocation*, not merely the result. At most `max + 1` bytes are ever
+/// read or held, so asking for 64 KiB of a 40 GB file costs 64 KiB.
+///
+/// This function used to call `std::fs::read` and truncate the result. That
+/// bounded what the caller was handed and nothing else: the whole file was
+/// already in memory by the time the cap was applied, so the cap could not
+/// prevent the single failure a cap is for. It is the mistake
+/// `imagecodec::Limits` names in its own documentation -- "a limit applied
+/// afterwards is not a limit, it is a post-mortem" -- and every caller of this
+/// function had inherited it, including the picture viewers whose comments
+/// said they were protected.
+///
+/// The one byte past the cap is what makes "the file ended" distinguishable
+/// from "we stopped" without a second trip to the filesystem.
+///
 /// # Errors
 ///
-/// Whatever `std::fs::read` returns: the file is missing, or is not readable.
+/// Whatever opening and reading the file returns: it is missing, or is not
+/// readable.
 pub fn read_capped(path: &Path, max: usize) -> io::Result<CappedBytes> {
-    let bytes = std::fs::read(path)?;
-    let whole = bytes.len();
-    if whole <= max {
+    let mut file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(ceiling(max))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() <= max {
+        // The read stopped short of its own limit, so the file is exhausted
+        // and this is all of it.
+        let whole = bytes.len();
         return Ok(CappedBytes {
             bytes,
             whole,
             truncated: false,
         });
     }
-    let mut bytes = bytes;
     bytes.truncate(max);
     Ok(CappedBytes {
         bytes,
-        whole,
+        whole: whole_len(&file, max),
         truncated: true,
     })
+}
+
+/// One byte past `max`, as a count for [`Read::take`].
+///
+/// Saturating at both steps: a `max` of `usize::MAX` has no successor, and on
+/// a 32-bit target the cast is the narrowing one.
+fn ceiling(max: usize) -> u64 {
+    u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1)
+}
+
+/// The file's full length, for reporting how much was left unread.
+///
+/// Only called once the read has already stopped at the cap, so a failure here
+/// cannot cost data -- it costs the exact figure in a message. When the
+/// filesystem will not say, the answer falls back to `max + 1`, which is a
+/// *lower bound* rather than a guess: that many bytes were just read, so the
+/// file is at least that long. The same floor is applied to the reported
+/// length, because a size that contradicts what was already read would be
+/// worse than an imprecise one.
+fn whole_len(file: &fs::File, max: usize) -> usize {
+    let known = max.saturating_add(1);
+    file.metadata()
+        .ok()
+        .and_then(|m| usize::try_from(m.len()).ok())
+        .map_or(known, |len| len.max(known))
 }
 
 /// Read `path` as text, stopping after `max` bytes.
@@ -252,32 +300,71 @@ pub fn read_capped(path: &Path, max: usize) -> io::Result<CappedBytes> {
 /// and only the caller knows which. [`CappedRead::note`] offers the wording
 /// that suits most of them.
 ///
+/// # What `max` bounds
+///
+/// The *allocation*, for the reasons given on [`read_capped`]: at most
+/// `max + 1` bytes are read. This too used to read the whole file first.
+///
+/// # Validity is judged on what was read, not on what was skipped
+///
+/// A consequence of stopping at the cap, and an improvement: a 2 GB log whose
+/// last megabyte is binary junk now yields its first 64 KiB instead of failing
+/// with "stream did not contain valid UTF-8" about bytes the caller was never
+/// going to see. Only the returned prefix has to be text.
+///
 /// # Errors
 ///
-/// Whatever `std::fs::read_to_string` returns: the file is missing, is not
-/// readable, or is not UTF-8.
+/// The file is missing, is not readable, or *the part that was read* is not
+/// UTF-8.
 pub fn read_to_string_capped(path: &Path, max: usize) -> io::Result<CappedRead> {
-    let text = std::fs::read_to_string(path)?;
-    let whole = text.len();
-    if whole <= max {
+    let mut file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(ceiling(max))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() <= max {
+        let text = into_text(bytes)?;
+        let whole = text.len();
         return Ok(CappedRead {
             text,
             whole,
             truncated: false,
         });
     }
-    let mut end = max;
-    // Terminates: offset 0 is always a character boundary.
-    while end > 0 && !text.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    let mut text = text;
-    text.truncate(end);
+    bytes.truncate(max);
+    // Back the cut off a partial character. `error_len() == None` is precisely
+    // "the input ended in the middle of one", which is this cut rather than a
+    // defect in the file -- so keep what was whole before it. `Some` is a byte
+    // sequence that is invalid however much follows it, and that is the file's
+    // problem, reported as such.
+    let end = match std::str::from_utf8(&bytes) {
+        Ok(_) => bytes.len(),
+        Err(e) if e.error_len().is_none() => e.valid_up_to(),
+        Err(_) => return Err(not_utf8()),
+    };
+    bytes.truncate(end);
+    let whole = whole_len(&file, max);
     Ok(CappedRead {
-        text,
+        text: into_text(bytes)?,
         whole,
         truncated: true,
     })
+}
+
+/// Bytes to text, failing the way `std::fs::read_to_string` fails.
+///
+/// Callers already handle that error and some match on its wording, so a
+/// bounded read reports a non-text file identically to an unbounded one.
+fn into_text(bytes: Vec<u8>) -> io::Result<String> {
+    String::from_utf8(bytes).map_err(|_| not_utf8())
+}
+
+/// The error `std::fs::read_to_string` gives for a file that is not text.
+fn not_utf8() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "stream did not contain valid UTF-8",
+    )
 }
 
 pub fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -463,6 +550,94 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    /// The cap bounds the read, and the true length is still reported.
+    ///
+    /// The allocation bound itself cannot be asserted from inside the process
+    /// -- nothing here can watch a `Vec` that was never grown -- so what is
+    /// pinned is the contract that goes with it: exactly `max` bytes come
+    /// back, and `whole` is the file's real size rather than the read's.
+    #[test]
+    fn a_file_past_the_cap_returns_the_cap_and_reports_its_real_length() {
+        let dir = std::env::temp_dir().join("slateos-safeio-bounded");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("big.bin");
+        std::fs::write(&path, vec![7_u8; 4096]).expect("write");
+
+        let got = read_capped(&path, 10).expect("read");
+        assert_eq!(got.bytes.len(), 10, "the cap is what came back");
+        assert_eq!(got.whole, 4096, "and the file's real size is reported");
+        assert!(got.truncated);
+        assert_eq!(got.note(10), "INCOMPLETE (10 of 4096 bytes read): ");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A cut that lands inside a character keeps the character whole.
+    ///
+    /// The cap is 11 bytes into ten ASCII letters followed by `e`-acute, so it
+    /// falls between that character's two bytes. Reading is done on bytes now,
+    /// not on an already-decoded `String`, so this is the case that would
+    /// otherwise return a fragment that is not text at all.
+    #[test]
+    fn a_cut_inside_a_character_backs_up_to_the_one_before_it() {
+        let dir = std::env::temp_dir().join("slateos-safeio-bounded");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("accented.txt");
+        let contents = format!("{}{}", "a".repeat(10), "\u{e9}".repeat(5));
+        assert_eq!(
+            contents.len(),
+            20,
+            "ten ASCII bytes and five two-byte characters"
+        );
+        std::fs::write(&path, &contents).expect("write");
+
+        let got = read_to_string_capped(&path, 11).expect("read");
+        assert_eq!(got.text, "a".repeat(10), "the half character was dropped");
+        assert_eq!(got.whole, 20);
+        assert!(got.truncated);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Bytes that are not text, past the cap, no longer fail the read.
+    ///
+    /// This is the behaviour change that stopping at the cap brings, and it is
+    /// the one worth having: a log whose far end is binary junk is still
+    /// readable at the near end, which is the end the caller asked for.
+    #[test]
+    fn junk_past_the_cap_does_not_fail_a_bounded_read() {
+        let dir = std::env::temp_dir().join("slateos-safeio-bounded");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("tail-is-junk.log");
+        let mut contents = b"hello world".to_vec();
+        contents.extend_from_slice(&[0xFF, 0xFE, 0xFF]);
+        std::fs::write(&path, &contents).expect("write");
+
+        let got = read_to_string_capped(&path, 5).expect("the read succeeds");
+        assert_eq!(got.text, "hello");
+        assert!(got.truncated);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Bytes that are not text *within* the cap still fail, as before.
+    ///
+    /// The counterpart to the test above: relaxing what is checked past the
+    /// cap must not relax what is checked inside it, or a caller that asked
+    /// for a text file would be handed something else without a word.
+    #[test]
+    fn junk_inside_the_cap_still_fails_the_read() {
+        let dir = std::env::temp_dir().join("slateos-safeio-bounded");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("not-text.bin");
+        std::fs::write(&path, [0xFF_u8, 0xFE, 0xFF]).expect("write");
+
+        let err = read_to_string_capped(&path, 1024).expect_err("not text");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        let _ = std::fs::remove_file(&path);
+    }
 
     /// An under-cap read returns the file and says nothing was cut.
     #[test]

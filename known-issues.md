@@ -158180,6 +158180,33 @@ theory.** It performs real file I/O (19 `std::fs` references) and still has
 10 candidates, so absent I/O does not explain everything. Whatever its ten
 are, they are a different cause and want looking at on their own.
 
+**CORRECTION 2026-09-17: `photomanager` was measured wrong and does read
+files.** Its row above says it cannot open one. It can: `import_from_disk`
+reads through `std::fs::read`, parses the EXIF, and adds the photo to the
+library, reached from a file picker by `open_import_dialog`. The crate's own
+comment records the repair that put it there — "the whole of this
+application used to be a window over a library that was never read from
+anywhere".
+
+**How the measurement went wrong, which is the transferable part.** Two errors
+compounded. The survey inferred file access from a crate's *dependencies*, and
+`std::fs` needs none, so a crate reading files with the standard library looked
+inert. And the command that should have caught that was
+
+    grep -rcE "std::fs|..." apps/$c/src/*.rs | awk -F: '{s+=$2} END {print s+0}'
+
+which reports a bare count with no filename when the glob matches exactly one
+file — so `awk -F:` reads an empty second field and sums zero. Every
+single-file crate came back as zero regardless of what it contained. **I had
+identified that exact `grep -c` behaviour hours earlier, in this same session,
+and then reused the shape without thinking.** The corrected form is
+`grep -rHoE ... | wc -l`.
+
+Re-measured, production code only: `videoplayer`, `mediaconvert`, `email` and
+`ircclient` do open no files, so those rows stand. `undelete`'s row stands too,
+though by luck — its one apparent match is inside a doc comment.
+`photomanager`'s does not.
+
 **What this changes about the triage.** Work it crate by crate, and for each
 crate establish what it can do *before* judging its fields. Where the field
 is the state of an I/O the app never performs, the entry belongs in the
@@ -158187,6 +158214,38 @@ backlog as unfinished wiring, not in a deletion batch — and the same
 judgement that settled `archivemanager` applies: bare state deletes, a
 reasoned model gets asked about. Deleting `email`'s IMAP settings would
 delete the specification of the mail client.
+
+**FOLLOW-UP 2026-09-17: the real gap was decoding, and it is now half
+closed.** The row's underlying complaint was right about the symptom and
+wrong about the cause. `photomanager` reads files perfectly well; what it
+could not do was *decode* one. It had no `imagecodec` dependency at all, so
+every view drew a rounded card with the file's name printed in the middle of
+it over a photograph the application had genuinely loaded and parsed the EXIF
+out of.
+
+The single-photo view now decodes the selected photograph and draws it, at
+the picture's own proportions rather than the 4:3 it used to assume, and
+**the grid draws thumbnails** -- generated a few per frame through the
+`thumbs` crate, which was extracted from `apps/explorer` for the purpose
+rather than reimplemented. Both halves are done.
+
+The id lifecycle I expected to have to build turned out not to exist as a
+problem: `thumbs::image_id` derives an id by hashing the file's path,
+modification time and size, so there is no pool and no allocator to get
+wrong. What the cache does own is *eviction*, and the rule worth having
+inherited is that drops are announced before uploads -- the compositor
+checks its budget against `held - freed + incoming`, so a batch evicting as
+many thumbnails as it generates is refused precisely when the cache is
+working as designed.
+
+Two further claims in that crate's feature list failed for the same root
+reason -- nothing in the application had ever held a pixel. The adjustments
+(brightness, contrast, saturation, exposure, temperature) are stored per
+photograph and listed in the info panel, and no pixel has ever been changed
+by one. Zoom and pan were claimed in two separate entries; the only `Zoom` in
+the file is the name of a slideshow transition. Both now appear under a "What
+it does not do yet" heading in the module doc instead of in the feature
+list.
 
 ### [A] `check-fields-written-never-read.py` has never scanned `kernel/`: 169 fields, 39 of them correct by design -- 2026-09-17
 
@@ -158506,6 +158565,95 @@ gives a crate a capability, re-read its module doc in the *same* change. Every
 one of these was introduced by an edit that added something and left the
 header alone.
 
+## `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT` (lane C, 2026-09-17)
+
+**In short:** click a photograph and the window stops responding until the
+picture has been decoded -- about two thirds of a second for a photograph from
+a 21-megapixel camera. Nothing is lost and the result is correct; the window
+simply will not redraw, resize or take a click while it works. Fixing it means
+decoding somewhere other than the thread that draws, and the missing piece is
+not the worker -- it is a way for a finished decode to wake the event loop.
+
+**Where it lives.**
+
+| Crate | Call site | Runs on |
+|---|---|---|
+| `apps/photomanager` | `sync_picture`, called from `render` | the frame it is drawing |
+| `apps/imageviewer` | `display_image`, called from the event handler | the event being handled |
+
+Both call `imagecodec::decode` and wait. The two differ only in *which* part
+of the loop they stall, and photomanager's placement is deliberate for a
+separate reason (see design-decisions 861 and the doc on `sync_picture`):
+`App::take_images` is drained between the render and the submit, so a picture
+queued during a render reaches the compositor in time for the frame that names
+it. Moving the decode earlier would not make it asynchronous, only earlier.
+
+**Measured.** 669 ms in release for a 4000x5333 JPEG; 7.6 s for the same file
+in a debug build. The release figure is the one to quote -- the 11x gap
+between them is large enough to mislead anyone optimising against the wrong
+one, which is why the decoder's own benchmarks state the profile.
+
+**Why it has not bitten yet.** In both applications the decode is driven by a
+human moving a selection, so it happens at the speed of clicks rather than of
+frames, and `picture_for` in photomanager makes sure a photograph that fails
+to decode is attempted once rather than once per frame. A stall of this length
+is felt as sluggishness, not as a hang. It will bite properly when the grid
+decodes thumbnails, because that multiplies one stall by the number of visible
+cards -- see `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE`, whose other half is
+still open, and note that `imagecodec::decode_scaled` already exists and does
+the DCT-domain work that makes a thumbnail cheap. The grid should reach for
+that before it reaches for a thread.
+
+**What the proper fix looks like.** A worker thread that decodes and hands
+back finished pixels. Two thirds of the shape is already present: the pixels
+have a place to arrive (`App::take_images` is a per-frame queue, not a
+callback), and the decoder takes plain bytes and returns a plain `Image` with
+no borrow of the application state. What is missing is the wake -- an
+application cannot currently tell the event loop "something finished, draw
+again" from off-thread. `App::tick_interval` can be used to poll for it, which
+is the cheap version and worth measuring before building anything with a
+channel in it: a decode that takes 669 ms does not need to be noticed within
+16 ms.
+
+**What not to do.** Do not decode on a tick *instead* of fixing the wake, and
+call that asynchronous. A poll that runs the decode itself on the UI thread
+has moved the stall, not removed it, and it would then be hidden inside a
+handler nobody associates with pictures.
+
+**There is already a precedent in the tree, and it had made exactly that
+mistake in its documentation.** `apps/explorer/src/thumbs.rs` is a 3,241-line
+thumbnail cache -- LRU keyed on `(path, mtime, size)`, an optional disk cache,
+box-filter downscale -- and it retires work through
+`ThumbnailGenerator::process_batch(batch_size)`, which is *synchronous on the
+calling thread* and bounded per call. That is the cheap mitigation recommended
+above, built and working: the stall is capped per frame rather than removed.
+
+Its module doc nevertheless described the queue as "keeping the UI thread
+non-blocking", which is the sentence this entry was written to warn against.
+`process_batch`'s own doc, sixty lines below, was accurate throughout --
+it says "synchronously" and reasons about the caller "budgeting a frame". The
+module doc has been corrected to say *bounded*. Another instance for
+`TD-C-A-MODULE-DOC-IS-THE-ONE-CLAIM-NOTHING-CHECKS`, and a pointed one: the
+false claim was not careless, it was a summary written at the moment the
+design was still intended.
+
+**Consequences for photomanager's grid.** It should reach for this module
+rather than grow a second pool -- which makes the question whether `thumbs`
+becomes a shared crate, since nothing about it is explorer-specific. It uses
+`guitk`, `byteread`, `imagecodec` and `scratchdir`, every one of them already
+shared, and is a module rather than a crate purely by where it was first
+needed.
+
+*(An earlier revision of this paragraph said its only imports were `guitk` and
+`std`. That came from reading the `use` block, which is not the dependency
+set: the file reaches `imagecodec` and `byteread` through fully-qualified
+paths, ten and fourteen times respectively. Checked properly by testing every
+dependency in explorer's manifest against the file. The same shape as the
+other measurement errors in this file -- a cheap proxy read as the answer.)* The drop-before-upload ordering it already
+encodes is the part that would be got wrong by anyone rebuilding it: the
+compositor checks its image budget against `held - freed + incoming`, so
+uploading before dropping is refused at exactly the moment a cache is working
+as designed.
 ### [A] Module docs that link a subsystem the file never calls: 8 of 807 kernel modules, and one real new claim -- 2026-09-17
 
 Lane C's `TD-C-A-MODULE-DOC-IS-THE-ONE-CLAIM-NOTHING-CHECKS` says a `//!`
@@ -158586,6 +158734,115 @@ sentence implies, and a link scanner cannot see direction at all. Anyone
 tempted to gate this should filter on outbound verbs first and expect the
 remaining false positives to be sentences about architecture.
 
+## `TD-C-PIPING-A-TEST-RUN-THROUGH-GREP-STOPS-AT-THE-FIRST-ZERO-BYTE` (lane C, 2026-09-17)
+
+**In short:** if you pipe a build or test run through `grep` to pull out the
+interesting lines, and any test anywhere in the workspace prints a zero byte,
+`grep` decides the stream is binary, prints `Binary file (standard input)
+matches`, and **stops filtering**. Everything after that point is discarded --
+including the line that says whether the run passed. What is left on screen is
+a list of tests that passed, which is what a successful run also looks like.
+
+**How it presented.** A `cargo test --workspace` was run as
+
+    run-timeout.py ... cargo test --workspace | grep -E "test result:|..." | tail -30
+
+and came back with thirty `test result: ok` lines, no failures, and a
+task-notification reading *exit code 0*. All three signals were worthless:
+
+| Signal | Why it proved nothing |
+|---|---|
+| The `ok` lines | They are the lines before the abort, not the whole run. Summing them gave 1,523 tests where the workspace has tens of thousands. |
+| No `FAILED` line | `grep` had stopped looking long before the end. |
+| Exit code 0 | **A shell pipeline exits with the status of its *last* command.** That was `tail`, which succeeds whatever happens upstream. `cargo`'s own non-zero exit never reached it. |
+
+The `[run-timeout] child exited: PASS/FAIL` line -- the one piece of output
+that *is* a verdict -- was itself swallowed by the abort, because it arrives
+after the binary byte.
+
+**This is the `grep -c` mistake in a new costume,** and that one is written up
+two entries above: a measurement that silently stops short and is read as a
+result. The shared shape is a tool reporting "I could not look" in a way that
+is indistinguishable, at the shell, from "I looked and it was fine". It is
+worth recognising by shape, because the specific spelling changes every time.
+
+**What to do instead.** Send the output to a file and let the runner's own
+exit code be the verdict:
+
+    run-timeout.py ... cargo test --workspace > build/ws.log 2>&1; echo "RC=$?"
+
+`RC` is then `cargo`'s real status, because nothing is downstream of it. Read
+the log afterwards with **`grep -a`**, which forces text handling and does not
+abort. `build/` is gitignored, so the log costs nothing but disk and should be
+deleted when the run is done.
+
+**Do not "fix" this by adding `-a` to the pipeline and stopping there.** That
+restores the filtering but leaves the exit-code half untouched, and the exit
+code is the half that turns a red tree into a green-looking one.
+
+## `TD-C-A-COMMIT-MADE-DURING-THE-PRE-PUSH-HOOK-IS-PUBLISHED-UNGATED` (lane C, 2026-09-17)
+
+**In short:** the pre-push gates take several minutes to run. If you commit
+anything while they are running, that newer commit is what reaches the server
+-- but the gates were handed the older one and never looked at it. "The gates
+passed" then describes a commit that is not the commit now on the remote. With
+an agent that commits every few minutes and a gate run of four to ten, the
+window is wide open rather than theoretical.
+
+**Observed, on `lane-c`, with timestamps.**
+
+| Time | Event |
+|---|---|
+| 16:49:00 | commit `2f5f98d0e` |
+| ~16:49 | `git push origin lane-c` starts; the hook is handed `2f5f98d0e` on stdin |
+| 16:50:13 | commit `8ec3d9dc0` made while the hook is still running |
+| 16:52:26 | the push reports `9a4f42229..2f5f98d0e`, and the reflog records `update by push` to `2f5f98d0e` |
+| 16:52:31 | a `fetch` five seconds later fast-forwards `origin/lane-c` to **`8ec3d9dc0`** |
+
+`git ls-remote` confirms the server holds `8ec3d9dc0`. Nothing else pushed it:
+the only hook installed is `pre-push` (no post-commit), no scheduled job
+pushes, and no other `git push` was running.
+
+**What is established, and what is not.** Established: a commit created during
+the hook window reached the remote, while the hook was given the earlier SHA
+-- the gate's own record and the server's contents disagree. Not established:
+git's internal reason. The consistent reading is that the hook is fed the ref
+list computed *before* it runs, while the update sent afterwards resolves the
+branch again at transfer time; that fits every observation above, but it is
+inferred from behaviour, not from reading git's source. **The remedy below
+does not depend on which it is,** which is the point of preferring it to a
+diagnosis.
+
+**Why this matters more than it looks.** The gates' value is containment --
+they exist to stop one lane's breakage reaching the other two, which is what
+justifies every lane paying their cost on every push. A commit that slips past
+them is published into `lane-c`, and from there merges to `main` and into the
+other two lanes' next merge. The failure is silent at exactly the moment the
+mechanism is supposed to be earning its keep.
+
+In this instance nothing was harmed: `8ec3d9dc0` edits `known-issues.md` and
+nothing else, so no ungated code was published. That is luck, not design.
+
+**The remedy: push a pinned SHA.**
+
+    git push origin <sha>:lane-c
+
+Naming the commit explicitly means the thing sent cannot drift from the thing
+the gates were given, whatever git does with a slow hook in between. Verify
+afterwards against the server rather than the push's own output, which named
+the stale SHA here:
+
+    git ls-remote origin lane-c
+
+**The weaker rule, for when a pinned push is inconvenient:** do not commit
+while a push is in flight. Sound, but it depends on remembering, and the whole
+reason this was found is that the natural working rhythm -- read something,
+notice a mistake, fix it, commit -- fills exactly that window. Prefer the
+pinned SHA.
+
+**Do not conclude "the gates are broken".** They ran, and they ran correctly,
+on the commit they were given. What is broken is the inference from "the push
+succeeded" to "what is on the server has been checked".
 ### [A] 340 of 430 `kernel/src/fs` modules have no consumer but `/proc` -- and for a microkernel that is mostly right. The defect is what their docs say -- 2026-09-17
 
 **In short:** most of the kernel's "feature" modules keep a setting, show it

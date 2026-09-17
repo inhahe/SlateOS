@@ -204,7 +204,11 @@ IGNORE = (
     # missing, where a replacement character says exactly where the bytes
     # stopped being text. Nothing downstream consumes the rendering -- it is
     # drawn and dropped, and the path beside it is untouched.
-    ("apps/explorer/src/thumbs.rs",
+    # Moved 2026-09-17 from `apps/explorer/src/thumbs.rs`, which became the
+    # `thumbs` crate when the photo library needed the same machinery. The
+    # code is unchanged; only its address is, and the exemption is anchored on
+    # the line's text so it still describes exactly what was audited.
+    ("gui/thumbs/src/lib.rs",
      "let text = String::from_utf8_lossy(&bytes);",
      "the first 4 KiB of a previewed file, drawn as text; a file's contents "
      "declare no encoding, and dropping the undecodable lines instead -- "

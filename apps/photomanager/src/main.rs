@@ -3,20 +3,57 @@
 //! A photo library management application with:
 //! - Photo library with albums, collections, and smart albums
 //! - EXIF metadata parsing and display (camera, exposure, GPS, etc.)
-//! - Thumbnail grid view with multiple zoom levels
-//! - Single-photo view with zoom/pan
-//! - Basic image adjustments: brightness, contrast, saturation, exposure, temperature
+//! - Thumbnail grid view at four card sizes (80/120/160/200 px), cycled from
+//!   the toolbar, each card showing the photograph itself
+//! - Single-photo view: the photograph itself, decoded through `imagecodec`
+//!   and drawn at its own proportions
+//! - Per-photograph adjustment values: brightness, contrast, saturation,
+//!   exposure, temperature
 //! - Star ratings (0-5) and color labels
 //! - Tagging and keyword system
 //! - Face region detection placeholders
 //! - Timeline view grouping photos by date
 //! - Slideshow mode with configurable interval and transitions
-//! - Import from directory with date-based organization
-//! - Export with format/quality selection
-//! - Re-import detection by path and size (NOT by image content:
-//!   nothing here decodes a picture)
+//! - Import of a single file through a picker, with its EXIF read
+//! - Re-import detection by path and size, not by image content
 //! - Batch operations: tag, rate, move, delete
 //! - Multi-panel UI: sidebar, thumbnail grid, info panel
+//!
+//! # What it does not do yet
+//!
+//! Three claims in the list above used to say more than the code did, and they
+//! failed for one shared reason: nothing in this application had ever held a
+//! pixel. It could read a photograph -- `import_from_disk` has done that since
+//! the repair noted on it -- and then drew a card with the file's name on it.
+//! Two of the three are now true: the single-photo view decodes through
+//! `imagecodec`, and the grid generates thumbnails through `thumbs`. What
+//! follows is what is still owed.
+//!
+//! - **The adjustments are recorded, not applied.** They are stored per
+//!   photograph and listed in the info panel, and no pixel has ever been
+//!   changed by one. A settings page is built when something obeys it, not
+//!   when something stores it.
+//! - **Nothing is exported.** `ExportOptions` records a format, a quality and
+//!   a size, has a `Default` and a test, and is read by nothing: no function
+//!   in this crate writes a picture anywhere. The feature list offered
+//!   "Export with format/quality selection", which is the options without the
+//!   export -- a settings page is built when something obeys it.
+//! - **Import is one file at a time.** The list offered "import from directory
+//!   with date-based organization". There is no `read_dir` in this crate;
+//!   `import_from_disk` takes a single path from the picker, and nothing
+//!   organises anything by date.
+//! - **The library is not saved.** Every photograph imported in a session is
+//!   gone when the window closes: there is no file written anywhere, and no
+//!   code here reads one. Albums, ratings, tags and colour labels go with it.
+//!   This is the largest remaining gap and it is not a small one -- the whole
+//!   of what this application is *for* currently lasts until it is closed.
+//! - **The single-photo view has no zoom and no pan.** The list claimed
+//!   both. The only `Zoom` in this file is the name of a slideshow
+//!   transition. The grid's four card sizes, listed above, are a different
+//!   thing and are real -- I deleted that entry too on the first pass, having
+//!   judged it by the company it kept rather than by reading
+//!   `cycle_thumb_size`. A feature list is corrected one claim at a time or
+//!   not at all.
 //!
 //! Uses the guitk library for UI rendering.
 
@@ -974,12 +1011,9 @@ impl ImageAdjustments {
 }
 
 // ============================================================================
-// Perceptual hash for duplicate detection
+// Import identity: "have I already imported this exact file?"
 // ============================================================================
 
-/// A simple perceptual hash (average hash) for duplicate detection.
-/// In a real implementation this would operate on pixel data; here we hash the
-/// file path + size as a placeholder.
 /// An identity key for an imported file: its path and its size, hashed.
 ///
 /// **This was called `ImportKey` and it is not one.** It is FNV-1a over
@@ -1559,6 +1593,68 @@ pub enum SidebarItem {
 // ============================================================================
 
 /// The photo manager application.
+/// The image id the single-photo view draws under.
+///
+/// One fixed number rather than one per photograph, because exactly one
+/// picture is on screen here. A second id would buy nothing and cost a
+/// lifecycle: something would have to release the ids of photographs that
+/// have scrolled out of view, and nothing in this application is watching for
+/// that. The grid's thumbnails will need such a pool; this view does not, and
+/// borrowing the complexity early would be paying for it twice.
+const PHOTO_IMAGE_ID: u64 = 1;
+
+/// What the compositor is currently holding under [`PHOTO_IMAGE_ID`].
+///
+/// The pixels are deliberately not here. They are moved into the upload queue
+/// and thence to the compositor, which is the only thing that draws them; a
+/// retained copy would double this application's memory for a 24-megapixel
+/// photograph -- about 96 MB in this form -- to serve a reader that does not
+/// exist. What is kept is the pair of numbers the layout actually needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShownPicture {
+    /// The photograph it was decoded from, so a stale upload is never drawn
+    /// under a new selection.
+    photo: PhotoId,
+    width: u32,
+    height: u32,
+}
+
+/// A file's modification time, in seconds since the epoch, or zero.
+///
+/// Zero for a file that cannot be stat'ed, and that is a usable key rather
+/// than a failure: the thumbnail cached under it is invalidated the moment the
+/// file becomes readable and reports a real time, because the cache key
+/// carries the time it was made with.
+fn file_mtime(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The largest box with `w`:`h` proportions that fits within `max_w`/`max_h`.
+///
+/// Never enlarges. A small picture stretched to fill the pane is blurred in a
+/// way that reads as a fault in the decoder rather than as a small file, and
+/// the photograph's real size is information this view should not destroy.
+/// Photographs are almost always larger than the pane, so the clamp bites
+/// rarely and only where it helps.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "a pixel dimension is exact in f32 far beyond any real sensor"
+)]
+fn fit_within(w: u32, h: u32, max_w: f32, max_h: f32) -> (f32, f32) {
+    if w == 0 || h == 0 {
+        // Not reachable through `imagecodec`, which refuses a zero dimension,
+        // but the alternative to saying so is a division by zero.
+        return (max_w, max_h);
+    }
+    let (w, h) = (w as f32, h as f32);
+    let scale = (max_w / w).min(max_h / h).min(1.0);
+    (w * scale, h * scale)
+}
+
 pub struct PhotoApp {
     pub photos: Vec<Photo>,
     pub albums: Vec<Album>,
@@ -1601,6 +1697,41 @@ pub struct PhotoApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Pictures waiting to go to the compositor, drained by `App::take_images`.
+    pending_images: Vec<app::ImageChange>,
+    /// The photograph whose pixels are uploaded, once it has been decoded.
+    shown_picture: Option<ShownPicture>,
+    /// The photograph the two fields above were computed for, whether that
+    /// ended in a picture or in a reason.
+    ///
+    /// Separate from `shown_picture` because a failed decode has to be
+    /// remembered too. Without it, a photograph that cannot be decoded would
+    /// be retried on every single frame -- reading and failing to decode the
+    /// file sixty times a second for as long as it stayed selected.
+    picture_for: Option<PhotoId>,
+    /// Why the selected photograph is not on screen, when it is not.
+    ///
+    /// Shown in place of its dimensions. A failure that left the card blank
+    /// would be indistinguishable from one that had not been attempted yet.
+    picture_error: Option<String>,
+    /// The grid's thumbnails, and the image ids they are drawn under.
+    thumb_cache: thumbs::ThumbnailCache,
+    /// The queue that turns files into those thumbnails, a few per frame.
+    thumb_gen: thumbs::ThumbnailGenerator,
+    /// Which photographs have a thumbnail ready, and under what.
+    ///
+    /// The modification time is kept beside the id because the cache is keyed
+    /// on it, and re-reading it from the disk to draw a frame would be a stat
+    /// per visible card per frame.
+    thumb_ready: HashMap<PhotoId, (u64, u64)>,
+    /// Thumbnails waiting to go to the compositor.
+    thumb_uploads: Vec<(u64, thumbs::Thumbnail)>,
+    /// What the queue was last filled for.
+    ///
+    /// Requests are queued when the visible set changes, not every frame:
+    /// pushing the same request sixty times a second would grow the queue
+    /// without bound and starve the cards actually on screen behind it.
+    thumb_queued_for: Option<u64>,
 }
 
 impl Default for PhotoApp {
@@ -1614,6 +1745,15 @@ impl PhotoApp {
     pub fn new() -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            pending_images: Vec::new(),
+            shown_picture: None,
+            picture_for: None,
+            picture_error: None,
+            thumb_cache: thumbs::ThumbnailCache::default_capacity(),
+            thumb_gen: thumbs::ThumbnailGenerator::new(),
+            thumb_ready: HashMap::new(),
+            thumb_uploads: Vec::new(),
+            thumb_queued_for: None,
             photos: Vec::new(),
             albums: Vec::new(),
             smart_albums: Vec::new(),
@@ -1718,6 +1858,209 @@ impl PhotoApp {
     }
 
     /// Find a photo by ID.
+    /// Thumbnails generated per frame.
+    ///
+    /// Generation is synchronous -- `thumbs` has no worker thread -- so this
+    /// is a frame budget, not a rate. Small, because the cards it fills are
+    /// already on screen: four per frame fills a screenful in well under a
+    /// second while leaving each frame short enough to stay smooth, where one
+    /// batch of forty would be a visible stall on the first scroll.
+    const THUMB_BATCH: usize = 4;
+
+    /// A number that changes when the grid would draw a different set of
+    /// cards.
+    ///
+    /// Cheap and deliberately approximate: it may change when the visible set
+    /// has not (a sort that reorders identical photographs), which costs one
+    /// wasted pass over an already-full cache. The opposite error -- missing a
+    /// change -- would leave cards blank until something unrelated moved.
+    fn thumb_fingerprint(&self) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for pid in self.visible_photos() {
+            hash ^= pid;
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        for part in [
+            self.grid_scroll as u64,
+            self.thumb_size_idx as u64,
+            u64::from(self.view_mode == ViewMode::Grid),
+        ] {
+            hash ^= part;
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        hash
+    }
+
+    /// Queue a thumbnail for every photograph the grid will draw one for.
+    ///
+    /// Anything already in the cache is skipped: the key carries the file's
+    /// modification time and size, so a hit is a hit on *this* version of the
+    /// file and a miss after an edit is automatic.
+    fn queue_thumbnails(&mut self) {
+        self.thumb_gen.cancel_all();
+        if self.view_mode != ViewMode::Grid {
+            return;
+        }
+        let config = self.thumb_config();
+        let wanted: Vec<PhotoId> = self.visible_photos();
+        for pid in wanted {
+            let Some(photo) = self.find_photo(pid) else {
+                continue;
+            };
+            let path = std::path::PathBuf::from(&photo.file_path);
+            let size = photo.file_size;
+            // Read once here rather than per frame: this runs when the visible
+            // set changes, which is a scroll or a filter, not a repaint.
+            let mtime = file_mtime(&path);
+            if self.thumb_cache.peek(&path, mtime, size).is_some() {
+                self.thumb_ready
+                    .insert(pid, (mtime, thumbs::image_id(&path, mtime, size)));
+                continue;
+            }
+            self.thumb_gen.push(thumbs::ThumbnailRequest {
+                path,
+                mtime,
+                size,
+                config: config.clone(),
+            });
+        }
+    }
+
+    /// How a thumbnail should look: the user's colours, at the grid's size.
+    fn thumb_config(&self) -> thumbs::ThumbConfig {
+        thumbs::ThumbConfig {
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "every entry of THUMB_SIZES is a positive constant"
+            )]
+            size: self.current_thumb_size() as u32,
+            bg_color: self.palette.surface0,
+            text_color: self.palette.text,
+            ..thumbs::ThumbConfig::default()
+        }
+    }
+
+    /// Generate a few queued thumbnails and file the results.
+    ///
+    /// Each result lands in three places: the cache the renderer reads, the
+    /// upload list the compositor needs, and `thumb_ready`, which is what says
+    /// a card may stop drawing its placeholder.
+    fn pump_thumbnails(&mut self) {
+        self.thumb_gen.process_batch(Self::THUMB_BATCH);
+        for (req, thumb) in self.thumb_gen.take_completed() {
+            let id = thumbs::image_id(&req.path, req.mtime, req.size);
+            let owner = self
+                .photos
+                .iter()
+                .find(|p| std::path::Path::new(&p.file_path) == req.path)
+                .map(|p| p.id);
+            self.thumb_uploads.push((id, thumb.clone()));
+            self.thumb_cache
+                .insert(&req.path, req.mtime, req.size, thumb);
+            if let Some(pid) = owner {
+                self.thumb_ready.insert(pid, (req.mtime, id));
+            }
+        }
+    }
+
+    /// Keep the grid's thumbnails in step with what it is about to draw.
+    ///
+    /// Called from `render`, for the same reason `sync_picture` is: uploads
+    /// queued here are drained between this frame's render and its submit, so
+    /// a thumbnail generated now is held by the compositor before the frame
+    /// naming it arrives. That is what lets this draw a card's picture on the
+    /// frame it was generated, with no "generated but not yet uploaded" state
+    /// to carry -- a distinction the file manager does have to make, because
+    /// its uploads travel a different path.
+    fn sync_thumbnails(&mut self) {
+        let fingerprint = self.thumb_fingerprint();
+        if self.thumb_queued_for != Some(fingerprint) {
+            self.thumb_queued_for = Some(fingerprint);
+            self.queue_thumbnails();
+        }
+        self.pump_thumbnails();
+    }
+
+    /// The most bytes of picture file to read.
+    ///
+    /// Generous -- a lossless photograph from a full-frame sensor runs to tens
+    /// of megabytes -- and the point is not the number but that there is one.
+    const MAX_PICTURE_BYTES: usize = 256 * 1024 * 1024;
+
+    /// Decode the selected photograph, unless that is already what is uploaded.
+    ///
+    /// **Called from `render`, and it has to be.** `App::take_images` is
+    /// drained *between* the render and the submit, so a picture queued here
+    /// reaches the compositor in time for the very frame that names it.
+    /// Queued from an event handler it would also work, but every one of the
+    /// five places that move the selection would have to remember to do it.
+    /// Queued from `take_images` itself it would be uploaded after the frame
+    /// that wanted it and would not appear until something unrelated asked for
+    /// another -- the photograph would show up when the mouse next moved.
+    ///
+    /// Cheap when nothing has changed: one `Option<PhotoId>` comparison.
+    fn sync_picture(&mut self) {
+        if self.picture_for == self.selected_photo {
+            return;
+        }
+        self.picture_for = self.selected_photo;
+        self.shown_picture = None;
+        self.picture_error = None;
+
+        let Some(pid) = self.selected_photo else {
+            return;
+        };
+        // Copied out so the borrow of `self.photos` ends here; everything
+        // below writes back to `self`.
+        let Some(path) = self.find_photo(pid).map(|p| p.file_path.clone()) else {
+            return;
+        };
+
+        let read = match safeio::read_capped(std::path::Path::new(&path), Self::MAX_PICTURE_BYTES) {
+            Ok(read) => read,
+            Err(e) => {
+                self.picture_error = Some(format!("could not be read: {e}"));
+                return;
+            }
+        };
+        if read.truncated {
+            // Refused rather than decoded. A picture's tail is not optional --
+            // a JPEG's scan runs to the last byte of the file -- so a cut file
+            // decodes to something that is not the photograph, and would then
+            // be shown without a word about it.
+            self.picture_error = Some(format!(
+                "is larger than {} MiB",
+                Self::MAX_PICTURE_BYTES / (1024 * 1024)
+            ));
+            return;
+        }
+        let image = match imagecodec::decode(&read.bytes, imagecodec::Limits::default()) {
+            Ok(image) => image,
+            Err(e) => {
+                self.picture_error = Some(format!("could not be decoded: {e}"));
+                return;
+            }
+        };
+
+        self.shown_picture = Some(ShownPicture {
+            photo: pid,
+            width: image.width,
+            height: image.height,
+        });
+        // One id for whatever is on screen, so this replaces the last upload
+        // rather than queueing behind it. Anything still waiting here has been
+        // overtaken by this selection and has no frame left to appear in.
+        self.pending_images.clear();
+        self.pending_images.push(app::ImageChange::Upload {
+            id: PHOTO_IMAGE_ID,
+            width: image.width,
+            height: image.height,
+            stride: image.stride(),
+            format: oswindow::PixelFormat::Argb8888,
+            bytes: guitk::canvas::WireBytes::from_le_argb(&image.pixels),
+        });
+    }
+
     pub fn find_photo(&self, id: PhotoId) -> Option<&Photo> {
         self.photos.iter().find(|p| p.id == id)
     }
@@ -3504,6 +3847,20 @@ impl PhotoApp {
                 CORNER_RADIUS,
                 Surface::ControlTrack,
             );
+            // The photograph, inside the card rather than instead of it: the
+            // surface beneath shows through wherever the picture's proportions
+            // leave the square unfilled, and the border below is drawn after,
+            // so a selected card keeps its outline over its own picture.
+            if let Some(&(mtime, id)) = self.thumb_ready.get(&pid)
+                && let Some(photo) = self.find_photo(pid)
+                && let Some(picture) = self.thumb_cache.peek(
+                    std::path::Path::new(&photo.file_path),
+                    mtime,
+                    photo.file_size,
+                )
+            {
+                cmds.extend(thumbs::render_thumbnail(picture, id, cx, cy, thumb));
+            }
             cmds.push(RenderCommand::StrokeRect {
                 x: cx,
                 y: cy,
@@ -3594,55 +3951,90 @@ impl PhotoApp {
             return;
         };
 
-        // Large photo placeholder
-        let photo_w = width - 40.0;
-        let photo_h = height - 60.0;
-        let ratio = (photo_w / photo_h).min(4.0 / 3.0);
-        let display_w = photo_h * ratio;
-        let display_h = photo_h;
+        // The room a picture has, before its own shape is taken into account.
+        let area_w = width - 40.0;
+        let area_h = height - 60.0;
+
+        // Only the picture decoded for *this* photograph may be drawn: the
+        // upload outlives a change of selection by the frame it takes to
+        // replace it, and drawing it under the new name would put the wrong
+        // photograph on screen.
+        let shown = self.shown_picture.filter(|s| s.photo == pid);
+
+        // A real picture is drawn at its own proportions. The 4:3 this used to
+        // assume was a guess -- one that every portrait photograph falsified,
+        // and that nothing could correct because nothing here had opened the
+        // file.
+        let (display_w, display_h) = match shown {
+            Some(picture) => fit_within(picture.width, picture.height, area_w, area_h),
+            None => {
+                let ratio = (area_w / area_h).min(4.0 / 3.0);
+                (area_h * ratio, area_h)
+            }
+        };
         let display_x = x + (width - display_w) / 2.0;
         let display_y = y + 10.0;
 
-        self.palette.push_surface(
-            cmds,
-            display_x,
-            display_y,
-            display_w,
-            display_h,
-            CORNER_RADIUS,
-            Surface::Card,
-        );
-        cmds.push(RenderCommand::StrokeRect {
-            x: display_x,
-            y: display_y,
-            width: display_w,
-            height: display_h,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        if shown.is_some() {
+            cmds.push(RenderCommand::Image {
+                x: display_x,
+                y: display_y,
+                width: display_w,
+                height: display_h,
+                image_id: PHOTO_IMAGE_ID,
+            });
+        } else {
+            self.palette.push_surface(
+                cmds,
+                display_x,
+                display_y,
+                display_w,
+                display_h,
+                CORNER_RADIUS,
+                Surface::Card,
+            );
+            cmds.push(RenderCommand::StrokeRect {
+                x: display_x,
+                y: display_y,
+                width: display_w,
+                height: display_h,
+                color: self.palette.surface1,
+                line_width: 1.0,
+                corner_radii: CornerRadii::all(CORNER_RADIUS),
+            });
 
-        // Photo name and format
-        cmds.push(RenderCommand::Text {
-            x: display_x + display_w / 2.0 - 60.0,
-            y: display_y + display_h / 2.0 - 10.0,
-            text: photo.file_name.clone(),
-            color: self.palette.text,
-            font_size: 14.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(display_w - 40.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cmds.push(RenderCommand::Text {
-            x: display_x + display_w / 2.0 - 50.0,
-            y: display_y + display_h / 2.0 + 10.0,
-            text: format!("{} — {}", photo.exif.resolution_str(), photo.human_size()),
-            color: self.palette.subtext0,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(display_w - 40.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+            cmds.push(RenderCommand::Text {
+                x: display_x + display_w / 2.0 - 60.0,
+                y: display_y + display_h / 2.0 - 10.0,
+                text: photo.file_name.clone(),
+                color: self.palette.text,
+                font_size: 14.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(display_w - 40.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            // The reason takes the place of the dimensions, and takes the
+            // colour that says it is one: a card that simply stayed blank
+            // could not be told from one whose photograph had not been
+            // reached yet.
+            let (detail, color) = match self.picture_error.as_ref() {
+                Some(reason) => (reason.clone(), self.palette.red),
+                None => (
+                    format!("{} — {}", photo.exif.resolution_str(), photo.human_size()),
+                    self.palette.subtext0,
+                ),
+            };
+            cmds.push(RenderCommand::Text {
+                x: display_x + display_w / 2.0 - 50.0,
+                y: display_y + display_h / 2.0 + 10.0,
+                text: detail,
+                color,
+                font_size: 12.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(display_w - 40.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Bottom bar with nav hint
         cmds.push(RenderCommand::Text {
@@ -3914,12 +4306,61 @@ impl App for PhotoApp {
         }
     }
 
+    fn take_images(&mut self) -> Vec<app::ImageChange> {
+        // Drops first, and the order is load-bearing: the link checks its
+        // image budget against `held - freed + incoming`, so a batch that
+        // evicted as many thumbnails as it generated would be refused if it
+        // asked the compositor to hold both sets at once -- which is exactly
+        // the moment the cache is working as designed.
+        let mut changes: Vec<app::ImageChange> = self
+            .thumb_cache
+            .take_evicted_image_ids()
+            .into_iter()
+            .map(app::ImageChange::Drop)
+            .collect();
+        // An evicted thumbnail is no longer drawable, and a card that kept
+        // naming it would draw nothing at all: the compositor discards an
+        // `Image` command for an id it does not hold, and says nothing.
+        if !changes.is_empty() {
+            let dropped: Vec<u64> = changes
+                .iter()
+                .filter_map(|c| match c {
+                    app::ImageChange::Drop(id) => Some(*id),
+                    app::ImageChange::Upload { .. } => None,
+                })
+                .collect();
+            self.thumb_ready.retain(|_, (_, id)| !dropped.contains(id));
+        }
+        changes.append(&mut self.pending_images);
+        for (id, thumb) in std::mem::take(&mut self.thumb_uploads) {
+            let Some(bytes) = thumb.to_wire_bytes() else {
+                // Skipped rather than uploaded wrong; the card keeps its
+                // placeholder, which is what a card with no usable picture
+                // should show.
+                continue;
+            };
+            changes.push(app::ImageChange::Upload {
+                id,
+                width: thumb.width,
+                height: thumb.height,
+                stride: thumb.width.saturating_mul(4),
+                format: oswindow::PixelFormat::Argb8888,
+                bytes,
+            });
+        }
+        changes
+    }
+
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
         // The handed size wins over the recorded one: the first frame is drawn
         // before any `Event::Resize` arrives, so a window opened at another
         // size would be laid out for the size that was asked for, and every
         // hit box in it would name the wrong rectangle.
         self.set_window_size(width, height);
+        // Before the commands are built, so the frame that names the picture
+        // is the frame it is uploaded for. See `sync_picture`.
+        self.sync_picture();
+        self.sync_thumbnails();
         RenderTree {
             commands: self.render_commands(width, height),
         }
@@ -5410,6 +5851,309 @@ mod tests {
         }
         assert_eq!(app.photos.len(), 2, "the fixture did not import its photos");
         app
+    }
+
+    /// A fixture whose files are real pictures, not merely real files.
+    ///
+    /// `app_with_photos` above writes "a real file, if not a real png", which
+    /// was sufficient while nothing ever opened one. It is exactly what these
+    /// tests must not use: every one of them would pass on the placeholder.
+    fn app_with_pictures(tag: &str) -> PhotoApp {
+        let mut app = PhotoApp::new();
+        let dir = std::env::temp_dir().join("slateos-photomanager-pictures");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        for i in 0..2 {
+            let path = dir.join(format!("{tag}-{i}.png"));
+            std::fs::write(&path, imagecodec::testing::png_gradient(6, 4)).expect("write");
+            app.import_from_disk(&path);
+        }
+        assert_eq!(app.photos.len(), 2, "the fixture did not import its photos");
+        app.view_mode = ViewMode::Single;
+        app
+    }
+
+    /// A library of `n` real pictures, for the grid's tests.
+    fn app_with_n_pictures(tag: &str, n: usize) -> PhotoApp {
+        let mut app = PhotoApp::new();
+        let dir = std::env::temp_dir().join("slateos-photomanager-grid");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        for i in 0..n {
+            let path = dir.join(format!("{tag}-{i}.png"));
+            // Different sizes so the files differ, and so a thumbnail drawn
+            // under the wrong id would be visibly the wrong picture.
+            std::fs::write(
+                &path,
+                imagecodec::testing::png_gradient(
+                    6u32.saturating_add(u32::try_from(i).unwrap_or(0)),
+                    4,
+                ),
+            )
+            .expect("write");
+            app.import_from_disk(&path);
+        }
+        assert_eq!(app.photos.len(), n, "the fixture did not import its photos");
+        app.view_mode = ViewMode::Grid;
+        app
+    }
+
+    /// The grid draws the photographs, not cards with names on them.
+    ///
+    /// This is the increment. `sync_thumbnails` runs inside `render` and
+    /// before the commands are built, so a thumbnail generated for this frame
+    /// is drawable in this frame -- there is no state where a card has a
+    /// picture that cannot yet be named.
+    #[test]
+    fn the_grid_draws_the_photographs_once_their_thumbnails_exist() {
+        let mut app = app_with_n_pictures("drawn", 2);
+
+        let tree = app.render(900.0, 700.0);
+
+        let drawn = tree
+            .commands
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::Image { .. }))
+            .count();
+        assert!(drawn >= 2, "the grid drew {drawn} photographs, expected 2");
+        assert!(
+            !app.take_images().is_empty(),
+            "the pictures were drawn but never sent to the compositor"
+        );
+    }
+
+    /// More photographs than fit in one frame's budget still all arrive.
+    ///
+    /// The budget is what keeps a scroll smooth; the thing to prove is that it
+    /// bounds the work per frame without dropping any of it.
+    #[test]
+    fn a_screenful_fills_over_successive_frames() {
+        let n = PhotoApp::THUMB_BATCH + 3;
+        let mut app = app_with_n_pictures("fills", n);
+
+        let after_one = {
+            let _ = app.render(900.0, 700.0);
+            let _ = app.take_images();
+            app.thumb_ready.len()
+        };
+        assert_eq!(
+            after_one,
+            PhotoApp::THUMB_BATCH,
+            "one frame did exactly its budget, no more and no less"
+        );
+
+        for _ in 0..3 {
+            let _ = app.render(900.0, 700.0);
+            let _ = app.take_images();
+        }
+        assert_eq!(app.thumb_ready.len(), n, "the rest never arrived");
+    }
+
+    /// Drops are announced before uploads, which the image budget requires.
+    ///
+    /// The compositor checks `held - freed + incoming`, so a batch that
+    /// evicted as many thumbnails as it generated would be refused if it asked
+    /// for both sets at once -- at exactly the moment the cache is doing its
+    /// job. The cache here holds one, so importing two forces an eviction.
+    #[test]
+    fn an_eviction_is_announced_before_the_upload_that_caused_it() {
+        let mut app = app_with_n_pictures("order", 2);
+        app.thumb_cache = thumbs::ThumbnailCache::new(1);
+
+        let _ = app.render(900.0, 700.0);
+        let changes = app.take_images();
+
+        let first_upload = changes
+            .iter()
+            .position(|c| matches!(c, oswindow::app::ImageChange::Upload { .. }))
+            .expect("something was uploaded");
+        let last_drop = changes
+            .iter()
+            .rposition(|c| matches!(c, oswindow::app::ImageChange::Drop(_)))
+            .expect("the one-entry cache evicted something");
+        assert!(
+            last_drop < first_upload,
+            "a drop was announced after an upload: {last_drop} vs {first_upload}"
+        );
+    }
+
+    /// An evicted thumbnail stops being claimed as drawable.
+    ///
+    /// A card still naming a dropped id would draw nothing at all: the
+    /// compositor discards an `Image` command for an id it does not hold, and
+    /// says nothing about it. A placeholder is the honest fallback.
+    #[test]
+    fn an_evicted_thumbnail_is_no_longer_claimed_as_drawable() {
+        let mut app = app_with_n_pictures("evicted", 2);
+        app.thumb_cache = thumbs::ThumbnailCache::new(1);
+
+        let _ = app.render(900.0, 700.0);
+        let evicted = app
+            .take_images()
+            .iter()
+            .filter(|c| matches!(c, oswindow::app::ImageChange::Drop(_)))
+            .count();
+
+        assert_eq!(evicted, 1, "the control failed: nothing was evicted");
+        assert!(
+            app.thumb_ready.len() < 2,
+            "both photographs still claim a thumbnail after one was dropped"
+        );
+    }
+
+    /// Selecting a photograph decodes it and queues its pixels.
+    #[test]
+    fn the_selected_photograph_is_decoded_and_queued_for_upload() {
+        let mut app = app_with_pictures("upload");
+        app.selected_photo = app.photos.first().map(|p| p.id);
+
+        let _ = app.render(900.0, 700.0);
+
+        let queued = app.take_images();
+        assert_eq!(queued.len(), 1, "one photograph, one upload");
+        match queued.first().expect("the upload") {
+            oswindow::app::ImageChange::Upload {
+                id, width, height, ..
+            } => {
+                assert_eq!(*id, PHOTO_IMAGE_ID);
+                assert_eq!(
+                    (*width, *height),
+                    (6, 4),
+                    "the picture's own size, read from the file"
+                );
+            }
+            oswindow::app::ImageChange::Drop(id) => {
+                panic!("expected an upload, got a drop of {id}")
+            }
+        }
+    }
+
+    /// The single-photo view draws the photograph instead of a card.
+    ///
+    /// This is the whole increment. Until it passed, every view in this
+    /// application drew a rectangle with a file name in it over a file it had
+    /// genuinely read.
+    #[test]
+    fn the_single_view_draws_the_picture_rather_than_a_card() {
+        let mut app = app_with_pictures("drawn");
+        app.selected_photo = app.photos.first().map(|p| p.id);
+
+        let tree = app.render(900.0, 700.0);
+
+        let drawn = tree.commands.iter().any(
+            |c| matches!(c, RenderCommand::Image { image_id, .. } if *image_id == PHOTO_IMAGE_ID),
+        );
+        assert!(
+            drawn,
+            "a decoded photograph was still drawn as a placeholder"
+        );
+    }
+
+    /// A file that is not a picture says why, rather than looking unloaded.
+    #[test]
+    fn a_file_that_is_not_a_picture_says_why_instead_of_staying_blank() {
+        let mut app = PhotoApp::new();
+        app.view_mode = ViewMode::Single;
+        let dir = std::env::temp_dir().join("slateos-photomanager-pictures");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("not-really-a-picture.png");
+        std::fs::write(&path, b"this file is named .png and is not one").expect("write");
+        app.import_from_disk(&path);
+        app.selected_photo = app.photos.first().map(|p| p.id);
+
+        let tree = app.render(900.0, 700.0);
+
+        assert!(app.picture_error.is_some(), "no reason was recorded");
+        assert!(
+            app.take_images().is_empty(),
+            "nothing decodable, nothing uploaded"
+        );
+        let said = tree.commands.iter().any(|c| {
+            matches!(c, RenderCommand::Text { text, .. } if text.contains("could not be decoded"))
+        });
+        assert!(said, "the reason was recorded but never put on screen");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A photograph that cannot be decoded is attempted once, not every frame.
+    ///
+    /// Proved by deleting the file between the two frames: a retry would have
+    /// to open it again, and would report that it was missing rather than that
+    /// it was not a picture. Without `picture_for` this application would read
+    /// and fail to decode the same file for as long as it stayed selected --
+    /// sixty times a second.
+    #[test]
+    fn a_photograph_that_cannot_be_decoded_is_not_read_again_every_frame() {
+        let mut app = PhotoApp::new();
+        app.view_mode = ViewMode::Single;
+        let dir = std::env::temp_dir().join("slateos-photomanager-pictures");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("attempted-once.png");
+        std::fs::write(&path, b"not a picture either").expect("write");
+        app.import_from_disk(&path);
+        app.selected_photo = app.photos.first().map(|p| p.id);
+
+        let _ = app.render(900.0, 700.0);
+        let first = app.picture_error.clone();
+        assert!(
+            first.as_ref().is_some_and(|r| r.contains("decoded")),
+            "the control failed: {first:?}"
+        );
+
+        std::fs::remove_file(&path).expect("remove");
+        let _ = app.render(900.0, 700.0);
+
+        assert_eq!(
+            app.picture_error, first,
+            "the file was opened a second time, so every frame re-reads it"
+        );
+    }
+
+    /// A second selection replaces the upload rather than queueing behind it.
+    ///
+    /// The queue is deliberately not drained between the two frames, which is
+    /// what a click arriving before the compositor has taken the last picture
+    /// looks like. Both uploads carry the same id, so a queue holding both
+    /// would send pixels that are already stale.
+    #[test]
+    fn a_new_selection_replaces_the_upload_rather_than_queueing_behind_it() {
+        let mut app = app_with_pictures("replace");
+        let ids: Vec<PhotoId> = app.photos.iter().map(|p| p.id).collect();
+
+        app.selected_photo = ids.first().copied();
+        let _ = app.render(900.0, 700.0);
+        app.selected_photo = ids.get(1).copied();
+        let _ = app.render(900.0, 700.0);
+
+        assert_eq!(
+            app.take_images().len(),
+            1,
+            "the overtaken upload was still in the queue"
+        );
+    }
+
+    /// Fitting never enlarges a picture past its own size.
+    #[test]
+    fn fitting_a_small_picture_leaves_it_at_its_own_size() {
+        assert_eq!(fit_within(10, 10, 900.0, 700.0), (10.0, 10.0));
+    }
+
+    /// A portrait photograph is bounded by the height, not the width.
+    ///
+    /// The case the discarded 4:3 assumption got wrong: it gave every
+    /// photograph a landscape box regardless of which way the camera was held.
+    #[test]
+    fn a_portrait_picture_is_bounded_by_the_height() {
+        let (w, h) = fit_within(2000, 4000, 900.0, 700.0);
+        assert!((h - 700.0).abs() < 0.01, "height fills the pane: {h}");
+        assert!((w - 350.0).abs() < 0.01, "width follows the shape: {w}");
+    }
+
+    /// A landscape photograph is bounded by the width.
+    #[test]
+    fn a_landscape_picture_is_bounded_by_the_width() {
+        let (w, h) = fit_within(4000, 2000, 900.0, 700.0);
+        assert!((w - 900.0).abs() < 0.01, "width fills the pane: {w}");
+        assert!((h - 450.0).abs() < 0.01, "height follows the shape: {h}");
     }
 
     /// The slideshow keeps running while the picker is open.

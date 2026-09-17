@@ -995,12 +995,9 @@ impl ImageAdjustments {
 }
 
 // ============================================================================
-// Perceptual hash for duplicate detection
+// Import identity: "have I already imported this exact file?"
 // ============================================================================
 
-/// A simple perceptual hash (average hash) for duplicate detection.
-/// In a real implementation this would operate on pixel data; here we hash the
-/// file path + size as a placeholder.
 /// An identity key for an imported file: its path and its size, hashed.
 ///
 /// **This was called `ImportKey` and it is not one.** It is FNV-1a over

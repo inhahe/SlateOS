@@ -8,7 +8,7 @@ description = "SlateOS File Explorer — graphical file manager with tree view"
 # design-decisions 426's path escape. A crate rather than a copy in each
 # program, because 426 chose one escape so that two formats could not
 # drift, and two copies of it reintroduced exactly that.
-pathcodec = { path = "../pathcodec" }
+pathcodec = { path = "../../gui/pathcodec" }
 
 # Which program opens which kind of file. This crate is the one that *obeys*
 # the associations, so it reads them through the shared model rather than

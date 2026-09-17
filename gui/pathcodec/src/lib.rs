@@ -25,10 +25,27 @@
 //! one doc comment. Two copies of one decision is the risk the decision was
 //! taken to remove, so they now share this.
 //!
-//! It lives under `apps/` and depends on nothing, because `apps/backup` is a
-//! command-line program that must not link a widget library -- which rules out
-//! `guitk`, where the rest of this lane's shared code lives. `apps/safeio` is
-//! the precedent for a dependency-free library crate in this position.
+//! It depends on nothing, because `apps/backup` is a command-line program that
+//! must not link a widget library. That rules out putting it *in* `guitk`; it
+//! does not rule out living beside it, and a dependency on a crate with no
+//! dependencies pulls in no widgets.
+//!
+//! # Why `gui/` and not `apps/`
+//!
+//! It began under `apps/`, next to `apps/safeio`, because its first two users
+//! were both programs. That was the wrong place and the mistake is worth
+//! keeping written down: **136 crates under `apps/` depend on crates under
+//! `gui/`, and not one crate under `gui/` depends on anything in `apps/`.**
+//! The layering is one-directional across the whole tree.
+//!
+//! The next user is the wallpaper setting, which is written by `apps/settings`
+//! and read by `gui/desktop` -- so leaving this under `apps/` would have made
+//! that fix the first violation of a rule 136 crates observe, to reach a crate
+//! that has no dependencies and no business constraining anyone.
+//!
+//! `gui/` already holds the shared non-widget crates this lane owns:
+//! `gui/settingsfile` is where a settings file is read and written, and this is
+//! how a path is spelled inside one.
 
 #![deny(clippy::all, clippy::pedantic)]
 

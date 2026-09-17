@@ -20,7 +20,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
-// See `apps/pathcodec`: design-decisions 426's escape, shared rather than
+// See `gui/pathcodec`: design-decisions 426's escape, shared rather than
 // copied. This file and `apps/explorer/src/fileops.rs` held identical
 // implementations of these four functions until 2026-09-16 -- each under its
 // own doc comment explaining its own format, which is how two copies of one

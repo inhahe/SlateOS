@@ -244,7 +244,7 @@ pub struct ShellSession<T: Transport> {
     /// Whether the chrome needs repainting before the next block.
     dirty: bool,
     running: bool,
-    launches: Vec<PathBuf>,
+    launches: Vec<crate::hotkeys::Launch>,
     /// Whether this session can be locked at all.
     ///
     /// False when the account that logged in has no password, which is
@@ -874,9 +874,15 @@ impl<T: Transport> ShellSession<T> {
     /// Every other launch passes through untouched. The Run box, a start-menu
     /// click and a hotkey are the same ask and must stay indistinguishable to
     /// whoever drains them.
-    fn queue_launches(&mut self, wanted: Vec<PathBuf>) {
-        for path in wanted {
-            if !self.lockable && path.as_os_str() == crate::hotkeys::LOCK_COMMAND {
+    fn queue_launches(&mut self, wanted: Vec<crate::hotkeys::Launch>) {
+        for launch in wanted {
+            // Compared against the *program*, not the whole launch. The two
+            // were the same thing while every command was argument-free; they
+            // stopped being the same the moment a launch could carry
+            // arguments, and comparing a launch to a string would have made
+            // this silently stop matching -- taking design-decisions 818 with
+            // it, since that is the rule this line implements.
+            if !self.lockable && launch.program.as_os_str() == crate::hotkeys::LOCK_COMMAND {
                 // Not an error and not reported: 818 says the screen "simply
                 // does not appear". Telling the user their lock shortcut was
                 // refused would be describing a setting they did not make --
@@ -884,7 +890,7 @@ impl<T: Transport> ShellSession<T> {
                 // this is what that means.
                 continue;
             }
-            self.launches.push(path);
+            self.launches.push(launch);
         }
     }
 
@@ -901,7 +907,7 @@ impl<T: Transport> ShellSession<T> {
     /// filesystem path and our paths are byte strings — a browsed executable
     /// whose name has no UTF-8 spelling must reach the process server as the
     /// bytes that name it, not as a lossy rendering that names nothing.
-    pub fn take_launches(&mut self) -> Vec<PathBuf> {
+    pub fn take_launches(&mut self) -> Vec<crate::hotkeys::Launch> {
         core::mem::take(&mut self.launches)
     }
 
@@ -2074,7 +2080,10 @@ impl<T: Transport> ShellSession<T> {
             // account with no password, so an idle session that cannot be
             // locked simply is not.
             Event::SessionIdle => {
-                self.queue_launches(vec![std::path::PathBuf::from(crate::hotkeys::LOCK_COMMAND)]);
+                self.queue_launches(vec![crate::hotkeys::Launch {
+                    program: std::path::PathBuf::from(crate::hotkeys::LOCK_COMMAND),
+                    args: Vec::new(),
+                }]);
             }
             Event::ModifierChord { modifiers } => {
                 let outcome = self.shell.handle_modifier_chord(modifiers);
@@ -2497,7 +2506,12 @@ impl<T: Transport> ShellSession<T> {
             ShellAction::Pass => {}
             ShellAction::Consumed => self.dirty = true,
             ShellAction::Launch(path) => {
-                self.queue_launches(vec![path]);
+                // A program named by the start menu, which names programs
+                // and not invocations of them.
+                self.queue_launches(vec![crate::hotkeys::Launch {
+                    program: path,
+                    args: Vec::new(),
+                }]);
                 self.dirty = true;
             }
             ShellAction::Control(request) => self.request(request)?,

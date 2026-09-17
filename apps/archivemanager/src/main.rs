@@ -4,15 +4,24 @@
 //! - ZIP, TAR, TAR.GZ, TAR.BZ2, 7Z
 //! - Browse archive contents in a tree view
 //! - Extract all, extract selected, extract to folder
-//! - Create new archives from file lists
+//! - Create a new, empty archive, then add files to it
 //! - Add/remove files from existing archives
-//! - Compression level selection (store/fast/normal/best)
 //! - Progress tracking for operations
 //! - File list with sortable columns
 //! - Drag-and-drop model
-//! - Password/encryption for ZIP/7Z
-//! - Split archive support
+//! - Encrypted members are recognised and reported as needing a password
+//!   (this manager neither encrypts nor decrypts)
 //! - Archive testing/verification
+//!
+//! Four claims were removed from this list on 2026-09-17 because nothing
+//! backed them. `create_archive` calls `backend::create_empty`, which takes a
+//! path and no file list; the backend has no compression-level parameter at
+//! all; and there is no split handling anywhere. The `CompressionLevel`,
+//! `include_empty_dirs`, `store_full_paths`, `encrypt_filenames` and
+//! `is_split` fields that stood for them are set once and read nowhere --
+//! found by `scripts/never-read-probe.py`, which is worth pointing at
+//! documentation as well as at code: a field nobody reads is often a sentence
+//! in a feature list nobody can honour.
 //!
 //! Uses the guitk library for UI rendering.
 //!

@@ -261,6 +261,65 @@ costs the other two lanes their merges.
 the head-of-line witness entry: `socket.rs:356`, `netstack_client.rs:158`, and
 `services/netstack/src/main.rs:2594`.*
 
+## C-Q24 — [C] The design says to ship almost no keyboard shortcuts. We ship 31. Which ones stay? — Status: OPEN (raised 2026-09-17)
+
+**In short:** you wrote that SlateOS should come with very few keyboard
+shortcuts turned on, "or possibly no" — because "having hotkeys everywhere
+is a fucking pain in the ass". The desktop currently turns on **31** of them.
+Somebody should decide which ones survive. Nothing is broken either way; this
+is about what a new machine feels like on the first day.
+
+**Date raised:** 2026-09-17. **Lane:** C.
+
+**Where it comes from.** `design.txt` line 1320. The same file, a few lines
+later, carries a note headed PUSHBACK arguing that six are expected by
+everybody and should be on: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print
+Screen. So the file says both "almost none" and "these six". It does not say
+where the line is after that, and nothing in `design-decisions.md` records a
+decision — the 31 accumulated without one.
+
+**What is actually bound today.** They fall into four groups, and the groups
+matter more than the list:
+
+| Group | Examples | Count |
+|---|---|---|
+| Keys with one obvious meaning | Volume up/down/mute, brightness up/down, Print Screen | 6 |
+| The six the PUSHBACK note names | Alt+F4, Alt+Tab (and Alt+Shift+Tab) | 3 bound here; Ctrl+C/V/X and Ctrl+Z are **not** and should not be — they belong to whichever application has focus, and a global grab on them would break every one |
+| Window management chords | Snap left/right, minimise, maximise, show desktop, zone overlay | 8 |
+| Shell surfaces and desktops | Super (start menu), Super+R (run), Super+Tab (overview), next/previous desktop, notifications, task manager, settings, lock, shortcut card | 14 |
+
+**The reading that makes the spec consistent.** The complaint is about
+*chords* — Ctrl/Alt/Super combinations a user has to learn and can collide
+with an application. A dedicated Volume Up key is not "a hotkey everywhere";
+it is a key with one meaning, and leaving it unbound makes the hardware look
+broken. If that reading is right, the first group stays regardless and the
+argument is only about the last two.
+
+**The options.**
+
+| | *What changes* |
+|---|---|
+| **A. Ship the first two groups only** (9) | A new desktop has media keys, Alt+F4 and Alt+Tab. Super does nothing, there is no run box shortcut, no snapping, no desktop switching — each still available, each waiting to be bound. Closest to what the line says. |
+| **B. Ship A plus the shell's own surfaces** (about 14) | Adds Super, Super+R, Super+Tab, the shortcut card. The keys that open the things a user cannot otherwise find. Everything about window layout stays unbound. |
+| **C. Keep all 31, and record that the line has been overruled** | Nothing changes today; the spec stops being contradicted quietly. |
+| **D. Ship A, and put the rest behind one switch** ("enable the extra shortcuts") in the Hotkeys settings | Both audiences served, at the cost of a setting that exists to undo a decision. |
+
+**My recommendation: B.** A desktop whose Super key does nothing reads as
+broken rather than as restrained, and the start menu and run box have no other
+discoverable entry point. Window-management chords are exactly what the line
+is complaining about and are the ones people rebind anyway.
+
+**If it is never answered:** nothing breaks. The 31 stay, the spec goes on
+saying something the code does not do, and every future reader of that line
+has to work out for themselves whether it is stale or unimplemented. That is
+the real cost — not the shortcuts, the ambiguity.
+
+**Where it bites.** `gui/desktop/src/hotkeys.rs`, `register_defaults`.
+Trimming the list is a few minutes' work whichever way it goes; deciding is
+the part that needs you. Note that deleting a default now *sticks* —
+design-decisions 860 — so a user who dislikes any of the 31 can already
+remove it permanently.
+
 # Resolved` index at
 the bottom under your own lane's subheading. An answered question left in the
 body is pure clutter, and because it is older it sorts *first* — directly in

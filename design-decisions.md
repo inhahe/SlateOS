@@ -77139,6 +77139,29 @@ one green run. A large passing count is exactly as unconditional as 2,114
 failing ones: both are impressive numbers that answer a question nobody
 asked.
 
+**Lane C's one-line statement of the whole entry, which is better than its
+title:** *the outcome carries no information about the mechanism, and we
+keep reading outcomes as if it did.* 2,114 errors, 2,843 passes, a green
+run over an unfixed race, and -- the one that stung -- a fix of mine that
+satisfied a rule I had never read. **A test that passes for the wrong reason
+is indistinguishable from one that passes for the right one, right up until
+the reason matters.** Passing by accident is worse than failing, because
+failing would have sent me to the rule.
+
+**And the timing refinement has two forms, because the good fix is not
+always available.** Where a second clock exists, compare against it: two
+clocks stall together, so no host pause can separate them. Where it does
+not -- lane C's `rssreader` parser test measures its own work, with nothing
+running alongside it to compare to -- rule 1 is unavailable and the ceiling
+simply has to clear the largest stall the host has been observed to take.
+They raised theirs from 1s to 30s on that reasoning, which still catches the
+non-termination the test exists for.
+
+Their instance is worth recording for how it was justified: the 1-second
+ceiling carried a comment calling it *"orders of magnitude of slack over the
+closed form"* -- the ratio argument, stated confidently, in the one place
+the ratio argument does not hold.
+
 A footnote of theirs worth keeping for operational reasons: the bug was
 diagnosable at all only because the log was still on disk. The earlier
 instance of the same failure is recorded as *unidentified* because that log

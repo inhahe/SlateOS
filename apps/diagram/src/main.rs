@@ -749,8 +749,28 @@ impl Clipboard {
 // Main application state
 // ============================================================================
 
+/// Every key this program answers, and what it does.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`, which reads each label with
+/// `guitk::shortcut` and presses every key it names.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("R / E / D", "Add a rectangle / ellipse / diamond"),
+    ("F2 / Enter", "Name the selected box or arrow"),
+    ("Delete / Backspace", "Delete what is selected"),
+    ("G", "Show or hide the grid"),
+    ("S", "Snap to the grid, or not"),
+    ("P", "Show or hide the properties panel"),
+    ("= / -", "Zoom in / out"),
+    ("Ctrl+0", "Back to actual size"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+S", "Save"),
+    ("F1 / ?", "This list"),
+];
+
 /// The diagram editor application.
 #[derive(Debug)]
+
 pub struct DiagramApp {
     /// The save picker. Holds the dialog and the routing thirteen
     /// applications used to write out by hand.
@@ -825,6 +845,8 @@ pub struct DiagramApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut list is up.
+    show_help: bool,
 }
 
 /// What the window says about what it cannot do.
@@ -874,6 +896,7 @@ impl DiagramApp {
             drag_from: None,
             clipboard: Clipboard::default(),
             show_properties: true,
+            show_help: false,
             current_template: DiagramTemplate::Blank,
             rect_select_start: None,
             rect_select_end: None,
@@ -2207,6 +2230,29 @@ impl DiagramApp {
                 self.snap_to_grid = !self.snap_to_grid;
                 EventResult::Consumed
             }
+            // The third member of the group `G` and `S` are in.
+            // `show_properties` was `true` at construction with no writer
+            // anywhere, so the properties panel was permanent and the canvas
+            // beside it had that much less room. Found by
+            // `scripts/frozen-flag-survey.py`.
+            Key::P => {
+                self.show_properties = !self.show_properties;
+                EventResult::Consumed
+            }
+            // The shortcut list. The label editor above returns before this,
+            // so neither key can be taken out of somebody's typing.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Key::Slash if key.modifiers.shift => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Key::Escape if self.show_help => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
             // New shapes, at the middle of the view so they land somewhere
             // visible rather than at the canvas origin.
             Key::R => self.add_shape_in_view(NodeShape::Rectangle),
@@ -2296,6 +2342,18 @@ impl DiagramApp {
             self.picker
                 .render(&self.palette, self.window_w, self.window_h),
         );
+
+        // And the shortcut list over even that.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.window_w, self.window_h),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
 
         cmds
     }
@@ -4066,6 +4124,106 @@ mod tests {
             !shown.iter().any(|t| t == "Old"),
             "the old label is still drawn while it is being replaced"
         );
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table beside it here, which would be a third copy of the same fact.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states().iter_mut().any(|app| {
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Diagrams chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<DiagramApp> {
+        let empty = DiagramApp::new(1000.0, 700.0);
+
+        // A shape on the canvas and selected, which is what naming and
+        // deleting each need before they will act.
+        let mut drawn = DiagramApp::new(1000.0, 700.0);
+        drawn.handle_event(&press(Key::R));
+
+        // ...and something done, so undo has work; then undone, so redo does.
+        let mut undone = DiagramApp::new(1000.0, 700.0);
+        undone.handle_event(&press(Key::R));
+        undone.handle_event(&press_ctrl(Key::Z));
+
+        // ...and zoomed away from 100%, so `Ctrl+0` has somewhere to return
+        // from: setting the zoom to what it already is changes nothing, and
+        // nothing changing is how this app reports `Ignored`.
+        let mut zoomed = DiagramApp::new(1000.0, 700.0);
+        zoomed.handle_event(&press(Key::Equals));
+
+        vec![empty, drawn, undone, zoomed]
+    }
+
+    /// **The properties panel can be put away.**
+    ///
+    /// `show_properties` was `true` at construction and written nowhere, so
+    /// the panel was permanent and the canvas beside it had that much less
+    /// room -- the third member of the group `G` and `S` are in. Asserts the
+    /// effect rather than the answer, because `Consumed` cannot tell a toggle
+    /// from a fall-through.
+    #[test]
+    fn the_properties_panel_can_be_hidden() {
+        let mut app = DiagramApp::new(1000.0, 700.0);
+        let before = (app.show_properties, app.show_grid, app.snap_to_grid);
+
+        app.handle_event(&press(Key::P));
+
+        assert_ne!(app.show_properties, before.0, "P did not move the panel");
+        assert_eq!(
+            (app.show_grid, app.snap_to_grid),
+            (before.1, before.2),
+            "P moved one of its neighbours in the same group"
+        );
+    }
+
+    /// **The shortcut list reaches the window.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = DiagramApp::new(1000.0, 700.0);
+        assert!(
+            !drawn_help_text(&app).contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = drawn_help_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(*keys), "{keys:?} never reached the window");
+            assert!(shown.contains(*what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !drawn_help_text(&app).contains("F1 or ? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn drawn_help_text(app: &DiagramApp) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     fn press(k: Key) -> Event {

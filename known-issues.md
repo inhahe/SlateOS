@@ -160549,8 +160549,33 @@ Its snapshot is a struct now as well -- clippy refused the eleven-element tuple
 outright, which is the tooling reaching the same conclusion by a different
 road.
 
-**`apps/finance` and `apps/photomanager` decide redraws the same way** and have
-not been checked. The cheap way to check them is the
+**`apps/finance` had it too. `apps/photomanager` does not have the pattern at
+all** -- its `thumb_fingerprint` decides when to re-queue thumbnails, which is
+a different question, and it has no redraw gate. So the class is **three apps,
+not four**, and all three are now fixed.
+
+finance's gap was `search_query`. Typing is safe there -- that path answers
+`Consumed` outright, ahead of the comparison -- but `Backspace` comes through
+`handle_key`, changes only the query, and answered `Ignored`. The search bar
+draws the query with a caret after it, so **the deleted character stayed on
+screen**. One half of an edit repainting and the other half not is worse than
+neither repainting, because it reads as the key having failed.
+
+**All three snapshots are structs now**, and each arrived there by a different
+road: `jsonviewer` because Rust implements `PartialEq` for tuples only up to
+twelve and it needed sixteen, `flashcards` because clippy refused eleven, and
+`finance` because seven fields was the last legible size and the fix made it
+eight. Three independent signals that a positional list of heterogeneous state
+is the wrong shape -- and a reader adding a field to one has no way to check
+they put it in the right place, which is how all three came to be missing one.
+
+**A near-miss worth recording, because it is the fifteenth shape again.** While
+auditing finance I ran `grep -n search_query ... | head -6`, saw only a `clear`
+and a `pop`, and was a sentence away from filing "the search box can never
+contain anything -- it is decorative". The writer is at line 903,
+`search_query.push_str(text)`, seventh in the list. **The `head` truncated the
+evidence and I read the truncation as the answer**, which is shape 14 with
+`head` where that row has `tail`. The same command with no limit settled it. The cheap way to check them is the
 programme already running: give each one the shortcut overlay and its guard
 test, and any field missing from its snapshot shows up as a key that the list
 advertises and the program says it did not answer. **The discoverability sweep

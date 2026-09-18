@@ -520,7 +520,8 @@ def main(argv: list[str]) -> int:
     problems: list[str] = []
     checked: list[str] = []
     skipped: list[str] = []
-    subsets = 0
+    subsets: list[str] = []
+    total_in_fact: list[str] = []
 
     # One pass to collect every enum in the tree, so a list can name an enum
     # that lives in another file, plus every non-enum type -- the second table
@@ -577,7 +578,18 @@ def main(argv: list[str]) -> int:
             # thing worth reporting: a list claiming to be exhaustive that
             # nothing checked.
             if not TOTAL_RE.match(name):
-                subsets += actual is not None
+                if actual is None:
+                    continue
+                entry = f"{rel}:{line}: {name}: [{elem}; {declared}] -- {actual} variants"
+                subsets.append(entry)
+                # Exhaustive in fact, and not named as though it should stay
+                # that way. These are the interesting ones: nothing holds them
+                # to it, so the day somebody adds a variant they quietly stop
+                # being exhaustive with no error anywhere. Reported, not
+                # failed -- a list may be complete today by coincidence and
+                # have no duty to remain so, and only the author knows which.
+                if actual == declared:
+                    total_in_fact.append(entry)
                 continue
             if actual is None:
                 skipped.append(f"{rel}:{line}: {name}: not checked -- {why}")
@@ -594,6 +606,14 @@ def main(argv: list[str]) -> int:
         for c in checked:
             print(c)
         print()
+        # The subset-named lists, which this tool declines to check. They were
+        # counted and never named, so the one population a reader might want to
+        # examine -- the lists outside the gate's reach -- was the one it would
+        # not show. Lane A went looking for them on the strength of the summary
+        # line and found the line was true of the skips and false of these.
+        for entry in subsets:
+            print(f"(subset) {entry}")
+        print()
         for s in skipped:
             print(s)
         print()
@@ -601,8 +621,9 @@ def main(argv: list[str]) -> int:
         print(p)
     print(
         f"{len(checked)} exhaustive lists checked, {len(problems)} out of step; "
-        f"{subsets} named as subsets and not checked, "
-        f"{unresolved} skipped as unresolved (--list says which)"
+        f"{len(subsets)} named as subsets and not checked "
+        f"({len(total_in_fact)} of those are exhaustive in fact), "
+        f"{unresolved} skipped as unresolved; --list names all three groups"
     )
     return 1 if problems else 0
 

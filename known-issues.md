@@ -160489,6 +160489,48 @@ programs as broken. The entry they live in
 (`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
 says why the failure is systematic rather than a matter of care.
 
+## `TD-C-TWENTY-ONE-LISTS-ARE-EXHAUSTIVE-BY-ACCIDENT` (lane C, 2026-09-18)
+
+**In short:** 21 arrays in `apps/` name every variant of their enum today, and
+none of them is named as though it should stay that way. Nothing checks them,
+so the day somebody adds a variant it is silently dropped from the list --
+a dropdown missing an option, a game missing a difficulty -- with no error
+anywhere and nothing to notice.
+
+**Where this came from.** `scripts/check-variant-lists.py` checks every list
+whose *name* claims totality (`ALL`, `ALL_*`, `EVERY_*`). Lane A pointed out
+that this makes the gate's population a fact about what authors called things,
+and asked what happens to a list that ought to be total and is called
+`PRIMARY_COMMANDS`. Nothing happens to it, which is the problem -- and the
+tool could not even show which lists those were: `subsets` was a counter that
+was printed and never recorded, and the summary's "(--list says which)" was
+true of the three unresolved skips and false of the thirty-six subsets. It
+lists all three groups now.
+
+**The flag that makes it actionable** is "exhaustive in fact, not named so":
+declared length equals the variant count. That converts an unknowable question
+-- did the author *mean* this to be total? -- into an observable one, and the
+output separates the two kinds cleanly:
+
+| | |
+|---|---|
+| genuine subsets | `PROMOTION_KINDS: [PieceKind; 4]` of 6 -- you cannot promote a pawn to a king; `ALWAYS_DRAWN: [Target; 6]` of 19; `FIXED: [DropdownId; 10]` of 16 |
+| **total today, unnamed as such** | `FLEET: [ShipKind; 5]`, `LANGUAGES: [Language; 12]`, `VIEW_MODES: [ViewMode; 5]`, `COLOR_LABELS: [ColorLabel; 7]`, magnifier's `MODES`/`TRACKINGS`/`FILTERS`, four separate `[Difficulty; 3]` |
+
+**Why it is filed rather than fixed.** The fix is one judgment per list, and it
+is not "rename them all to `ALL_`": some are complete today by coincidence and
+have no duty to remain so, and only somebody who knows the app can say which.
+Renaming a list that *may* legitimately stay partial would replace a silent gap
+with a false guarantee. Twenty-one judgments, each cheap, none mechanical.
+
+**The general form** is the one worth carrying: a checker whose population is
+chosen by a name inherits the vocabulary of whoever wrote the code, and the
+cure is to define the population by something the type system fixes. For a key
+list that is `const NAME: ... (&str, &str)`; for this, "an array of an enum's
+variants, however named". Both tools were written the other way on the same
+afternoon by two different authors -- see the fifteenth row of
+`TD-C-SEVEN-WAYS-A-SEARCH-SAYS-NOTHING-AND-MEANS-NOTHING`.
+
 ## `TD-C-THE-WHEEL-AND-THE-GRID-COUNTED-DIFFERENT-COLUMNS` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** In `apps/explorer`'s icon view, with the preview panel open, the

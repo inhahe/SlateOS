@@ -160390,8 +160390,20 @@ otherwise: `S`, `O`, `L`, `A` and `I` add shapes outside this mode, so a title
 containing any of them would have littered the slide while being written. 93
 tests, up from 90.
 
-**Still open here:** the deck title is `"Untitled Presentation"` with no
-writer, and `export_as` names the file with it.
+**The deck title too, later the same day.** `Ctrl+Shift+T` names the deck --
+it had no writer, so every deck was "Untitled Presentation" in the window bar
+*and* in the filename `export_as` builds. It shares the text mode through an
+`EditTarget` enum rather than a second `Option`, since the deck's name is not
+an element and has no id. An empty name is refused rather than blanking the
+bar and exporting a file called ".pptx".
+
+**Getting it in took three attempts, all the same mistake in different
+costumes:** the enum went inside a `struct` body (I anchored on a field's doc
+comment), then between a `#[derive(Debug)]` and the struct it belonged to --
+which silently gave *my* enum that derive and produced a conflicting-impl
+error 300 lines from the cause. Earlier the same evening an `impl` block went
+inside another `impl`. **An anchor chosen by its text lands wherever that text
+is, and in Rust the space above an item is owned by the item.** 96 tests.
 ## `TD-C-NOTES-CANNOT-MAKE-A-NOTE` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** `apps/notes` starts empty and cannot create a note, title one, or

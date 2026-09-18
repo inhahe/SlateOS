@@ -780,6 +780,19 @@ enum Clipboard {
 // Slides application
 // ============================================================================
 
+/// What a typed string is going onto.
+///
+/// An enum because the deck's own name is not an element and has no id, and a
+/// second `Option` beside the first would be a state where both could be set
+/// at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditTarget {
+    /// A text box on the current slide.
+    Element(ElementId),
+    /// The deck's name, which the window bar and every export use.
+    DeckTitle,
+}
+
 /// The main presentation application state.
 #[derive(Debug)]
 pub struct SlidesApp {
@@ -815,7 +828,7 @@ pub struct SlidesApp {
     selected_element: Option<ElementId>,
     /// Whether the notes panel is visible.
     show_notes: bool,
-    /// The element being typed into, and what has been typed.
+    /// The thing being typed into, and what has been typed.
     ///
     /// This program could not put a word on a slide: there were zero
     /// assignments to `.text` anywhere in the crate, tests included, and zero
@@ -823,7 +836,7 @@ pub struct SlidesApp {
     /// forever. The buffer is held here rather than written straight into the
     /// element so that `Escape` and `Enter` can mean different things -- and
     /// the element is named by id, because the selection can move.
-    editing: Option<(ElementId, String)>,
+    editing: Option<(EditTarget, String)>,
     /// Title of the presentation.
     title: String,
     /// The user's colours, replaced whenever the theme changes.
@@ -1136,13 +1149,28 @@ impl SlidesApp {
         } else {
             text.clone()
         };
-        self.editing = Some((eid, seed));
+        self.editing = Some((EditTarget::Element(eid), seed));
+        EventResult::Consumed
+    }
+
+    /// Begin naming the deck.
+    ///
+    /// The name is not decoration: it is the window bar, and `export_as`
+    /// builds the filename from it -- so while it could not be changed, every
+    /// deck anyone exported was called "Untitled Presentation".
+    fn begin_deck_title(&mut self) -> EventResult {
+        let seed = if self.title == "Untitled Presentation" {
+            String::new()
+        } else {
+            self.title.clone()
+        };
+        self.editing = Some((EditTarget::DeckTitle, seed));
         EventResult::Consumed
     }
 
     /// Keys while a text box is being typed into.
     fn handle_editing_key(&mut self, key: &KeyEvent) -> EventResult {
-        let Some((eid, mut buf)) = self.editing.clone() else {
+        let Some((target, mut buf)) = self.editing.clone() else {
             return EventResult::Ignored;
         };
         match key.key {
@@ -1150,19 +1178,19 @@ impl SlidesApp {
             // because the exit key was the cancelling one is the worst thing
             // an editor can do, and `Escape` is how anyone leaves a box.
             Key::Escape | Key::Enter if !key.modifiers.shift => {
-                self.commit_editing(eid, &buf);
+                self.commit_editing(target, &buf);
                 self.editing = None;
                 EventResult::Consumed
             }
             // Shift+Enter is the second line.
             Key::Enter => {
                 buf.push('\n');
-                self.editing = Some((eid, buf));
+                self.editing = Some((target, buf));
                 EventResult::Consumed
             }
             Key::Backspace => {
                 buf.pop();
-                self.editing = Some((eid, buf));
+                self.editing = Some((target, buf));
                 EventResult::Consumed
             }
             _ => {
@@ -1170,20 +1198,31 @@ impl SlidesApp {
                     return EventResult::Ignored;
                 }
                 buf.push_str(&key.text);
-                self.editing = Some((eid, buf));
+                self.editing = Some((target, buf));
                 EventResult::Consumed
             }
         }
     }
 
-    /// Write the typed words into the element.
-    fn commit_editing(&mut self, eid: ElementId, buf: &str) {
-        self.undo_mgr.save(&self.slides, self.current_index);
-        let Some(slide) = self.slides.get_mut(self.current_index) else {
-            return;
-        };
-        if let Some(SlideElement::TextBox { text, .. }) = slide.element_by_id_mut(eid) {
-            *text = buf.to_owned();
+    /// Write the typed words where they were being typed.
+    fn commit_editing(&mut self, target: EditTarget, buf: &str) {
+        match target {
+            EditTarget::DeckTitle => {
+                // An empty name would leave the window bar blank and every
+                // export called ".pptx"; refusing keeps whatever it had.
+                if !buf.trim().is_empty() {
+                    self.title = buf.trim().to_owned();
+                }
+            }
+            EditTarget::Element(eid) => {
+                self.undo_mgr.save(&self.slides, self.current_index);
+                let Some(slide) = self.slides.get_mut(self.current_index) else {
+                    return;
+                };
+                if let Some(SlideElement::TextBox { text, .. }) = slide.element_by_id_mut(eid) {
+                    *text = buf.to_owned();
+                }
+            }
         }
     }
 
@@ -1638,6 +1677,9 @@ impl SlidesApp {
             // Before the unguarded `Key::T` below, which would otherwise
             // take Ctrl+T and add a textbox. The deck's look and the slide's
             // transition are both already printed in the window.
+            // Before the theme arm, which has no shift guard and would
+            // otherwise take this and cycle the theme instead.
+            Key::T if ctrl && key.modifiers.shift => self.begin_deck_title(),
             Key::T if ctrl => {
                 self.cycle_theme();
                 EventResult::Consumed
@@ -2231,7 +2273,7 @@ impl SlidesApp {
                 // drawing those would leave the user typing at a slide that
                 // never changes.
                 let live = match &self.editing {
-                    Some((eid, buf)) if eid == id => buf.clone(),
+                    Some((EditTarget::Element(eid), buf)) if eid == id => buf.clone(),
                     _ => text.clone(),
                 };
                 cmds.push(RenderCommand::Text {
@@ -3120,6 +3162,69 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    fn press_ctrl_shift(k: Key) -> Event {
+        let mut modifiers = Modifiers::ctrl();
+        modifiers.shift = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// The deck can be named, and the window bar says so.
+    ///
+    /// `title` had no writer, so every deck was "Untitled Presentation" --
+    /// in the window bar, and in the filename `export_as` builds.
+    #[test]
+    fn ctrl_shift_t_names_the_deck() {
+        let mut app = seeded();
+        assert_eq!(app.title, "Untitled Presentation", "control: the default");
+
+        app.handle_event(&press_ctrl_shift(Key::T));
+        for c in ["Q", "3"] {
+            app.handle_event(&types(c));
+        }
+        app.handle_event(&press(Key::Enter));
+
+        assert_eq!(app.title, "Q3", "the deck was not renamed");
+        assert!(
+            app.title().starts_with("Q3"),
+            "the window bar still says {:?}",
+            app.title()
+        );
+    }
+
+    /// Ctrl+Shift+T does not cycle the theme.
+    ///
+    /// `Key::T if ctrl` has no shift guard and sits in the same match, so an
+    /// arm order that put it first would have changed the theme and left the
+    /// name alone -- indistinguishable from a rename key that does nothing.
+    #[test]
+    fn ctrl_shift_t_does_not_cycle_the_theme() {
+        let mut app = seeded();
+        let theme = app.theme.name.clone();
+
+        app.handle_event(&press_ctrl_shift(Key::T));
+
+        assert_eq!(app.theme.name, theme, "Ctrl+Shift+T changed the theme");
+        assert!(app.editing.is_some(), "and did not start the rename");
+    }
+
+    /// An empty name is refused rather than blanking the window bar.
+    #[test]
+    fn an_empty_deck_name_is_refused() {
+        let mut app = seeded();
+        app.handle_event(&press_ctrl_shift(Key::T));
+        app.handle_event(&press(Key::Enter));
+
+        assert_eq!(
+            app.title, "Untitled Presentation",
+            "an empty name blanked the deck's name"
+        );
     }
 
     fn types(text: &str) -> Event {

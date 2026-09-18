@@ -2823,7 +2823,7 @@ confirms the order holds.
 
 | option | *What changes:* |
 |---|---|
-| **(a) Convert the non-leaf ones** (recommended) | the detector watches ~12-15 more lock orderings; a real inversion becomes a loud boot failure instead of a hang. Costs per-acquire tracking on those paths. |
+| **(a) Convert the non-leaf ones** (recommended) | the detector watches the orderings behind 89 distinct site pairs (measured 2026-09-17; the "12-15" here previously was extrapolated from a saturated cap); a real inversion becomes a loud boot failure instead of a hang. Costs per-acquire tracking on those paths. |
 | (b) Restate §70 honestly, accept the risk | nothing changes at runtime; §70 stops claiming a reason that is false and says the type is chosen for cost with ordering unchecked. The 1256 stay unwatched. |
 | (c) Convert only the cross-module pairs | the five cross-module orderings get watched; the same-module init-guard idiom (the bulk) stays as it is. |
 

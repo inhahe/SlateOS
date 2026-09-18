@@ -159481,3 +159481,106 @@ names the failing test, and the failing test is what was lost.
 should not be starting from here: the whole log, the test name from the
 `---- <name> stdout ----` block, and whether `cargo test -p <crate>` alone
 reproduces it.
+
+### [A] Eight security-named `fs/` modules claim to enforce something and nothing calls them; `sealing` is the worst of them -- 2026-09-17
+
+**In short:** the kernel has a feature that lets a program mark a file
+permanently unchangeable. You can set the mark, `/proc` will list the file as
+marked, and **nothing stops anyone writing to it.** The same shape covers
+seven other security-named modules. None of it is exploitable today because
+nothing uses any of it -- the danger is that the next thing to use it will
+believe the guarantee.
+
+A bounded subset of the 340-module pattern above, taken because a false
+security claim is materially worse than a display that does not dim, not
+because the pattern is different.
+
+| module | crypto/hw refs | callers outside `/proc`, `kshell`, own self-test |
+|---|---|---|
+| `faceunlock` | 0 | 0 |
+| `authbroker` | 0 | 0 |
+| `secpolicy` | 0 | 0 |
+| `secmod` | 0 | 0 |
+| `diskencrypt` | 0 | 0 |
+| `filevault` | 0 | 0 |
+| `immutable` | 0 | 0 |
+| `sealing` | 0 | 0 |
+| `integrity` | 5 | 2 |
+
+`integrity` is the control: same naming, same directory, and it does use
+crypto and has real callers. So the eight are not an artefact of how the
+question was asked.
+
+**The claims are not uniform, and the distinction matters.** Some are honest
+already:
+
+| module says | reading |
+|---|---|
+| `diskencrypt`: "Disk encryption **management** ... Manages encryption *status*, key slots ... **Provides the settings panel interface**" | honest. It manages status and says so. |
+| `authbroker`: "**Implements** a Plan 9 Factotum-inspired authentication broker. Programs never touch passwords or keys directly" | false. Nothing brokers anything. |
+| `filevault`: "**Provides** per-folder encryption with password-based key derivation" | false. Zero crypto references in the file. |
+| `sealing`: "provides a mechanism to place **irrevocable restrictions** on file operations" | false, and the worst of them. |
+
+**Why `sealing` is the worst.** Enumerated rather than asserted: every
+`sealing::` reference outside its own file is `procfs.rs` (`stats`,
+`list_sealed`) or `kshell.rs` (`add_seals`, `get_seals`). The write and
+truncate paths -- `fs/vfs.rs`, `fs/handle.rs` -- contain no reference to
+seals at all. So a seal can be set, `/proc/sealing` will list the file as
+sealed, and a write succeeds. An unenforced *irrevocable* restriction is
+worse than no restriction, because the word invites reliance.
+
+**And its `/proc` output makes the gap unreadable.** `sealing::stats()`
+reports a `denied` count, which can only ever be 0 because nothing checks a
+seal to deny anything. "0 denied" reads as *nobody has tried* rather than
+*nothing is enforced* -- dd-942 in the one place a reader would look to find
+out. Same shape as `binfmt`'s `stats()` returning zeros for an uninitialised
+table, and as the lock-context corpus reading `clean` over a population of
+its own fixtures.
+
+**What I am not doing.** Not implementing enforcement: seal checking belongs
+in the VFS write path and is a real feature with a capability story
+attached. Not sweeping the docs either -- but the security four
+(`authbroker`, `filevault`, `sealing`, `faceunlock`) are a defensible
+targeted correction rather than a sweep, because changing `provides` to
+`records` makes a doc match its code and is not the shared-convention
+rewrite dd-951 warns about. Recorded first so the finding exists
+independently of whether the wording gets fixed.
+
+### [A] The leaf-claim cap was reporting 27% of the truth: 89 distinct site pairs, not 24 -- 2026-09-17
+
+With the counting cap raised to 256 and the printing cap left at 24, boot
+`3a29fd0d2` reports:
+
+```
+[sync] leaf-claim check: 1256 acquisition(s) inside a PreemptSpinMutex, 89 distinct site pair(s) named above
+```
+
+and no `PAIR TABLE FULL` suffix, so **89 is a total rather than a floor**.
+Every previous boot said 24, which was the cap reading itself back.
+
+**Two things this settles that the saturated number could not.**
+
+*The control does not pollute the corpus -- now measured, not reasoned.* No
+report names `leaf-ctl-out` or `leaf-ctl-in`, the control's own locks. The
+previous commit had to state that the slot exclusion was verified only by
+construction, because a table at its cap reports the same figure whether or
+not a fixture occupies a slot. Headroom turned the count into the evidence.
+
+*The print/count split works.* 24 lines printed, 89 counted. A hundred lines
+of the same shape would not have been more informative; the number of them
+is.
+
+**And it corrects my own estimate in A-Q16.** I wrote there that 24 site
+pairs "is perhaps 12-15 distinct lock pairs", reasoning that several site
+pairs share an inner lock. The site count is 89, so that inference was built
+on a number that was itself a cap reading. dd-938: an artifact true when
+written does not say when it stopped being true -- except this one was never
+true, it was extrapolated from a saturated instrument. A-Q16 now carries the
+measured figure.
+
+What it means for dd-70's premise is a matter of degree rather than kind: the
+"true leaf" claim does not fail in a dozen places, it fails in 89 distinct
+code sites across 1256 acquisitions per boot. Still not a deadlock report --
+nothing here has been shown to form a cycle -- but the reason those locks are
+safe remains "no pair happens to be taken in both orders", and now that is
+unchecked in 89 places.

@@ -159368,6 +159368,31 @@ nine operations have somewhere to hang. Adding nine more keyboard shortcuts
 would reach them too, and would leave a program whose sidebar still does
 nothing when clicked.
 
+**PROGRESS 2026-09-17: four have a route, and the pointer layer is half
+built.** The version panel and the note list answer a click; the notebook
+sidebar still does not.
+
+| Operation | Route |
+|---|---|
+| restore a version | click it in the version panel |
+| delete a note | right-click the note |
+| move a note to another notebook | right-click, Move to |
+| tag a note | right-click, Add tag..., type, Enter |
+| remove a tag | **none** |
+| filter by tag | **none** |
+| delete a notebook | **none** |
+| rename a notebook | **none** |
+| retitle a note | **none** |
+| remove a checklist item | **none** |
+| resolve a wiki link | **none** |
+
+Three of the seven that remain want the notebook sidebar to answer a click,
+which is the third panel and the obvious next piece. Retitling and removing a
+checklist item want an edit inside the editor rather than a menu, and wiki
+links want the link text itself to be clickable -- a different shape again,
+and the only one of the seven that is not "hang it off a hit test that does
+not exist yet".
+
 **A smaller bug found while reading the version panel for a hit-test.** It
 computes how many rows fit with `(height - 30.0) / 24.0` and then advances
 `vy` by `28.0` per row. At a 740-pixel panel that is 29 rows drawn 28 apart in

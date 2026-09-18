@@ -159684,39 +159684,58 @@ nothing here has been shown to form a cycle -- but the reason those locks are
 safe remains "no pair happens to be taken in both orders", and now that is
 unchecked in 89 places.
 
-## `TD-C-RSSREADER-FOLDERS-ARRIVE-BY-IMPORT-AND-CANNOT-BE-REORGANISED` (lane C, 2026-09-18)
+## `TD-C-RSSREADER-FOLDERS-ARRIVE-BY-IMPORT-AND-CANNOT-BE-REORGANISED` -- **FIXED 2026-09-18** (lane C)
 
-**In short:** `apps/rssreader` has folders, and the only way to get one is to
-import an OPML file. Once they exist nothing can rearrange them: a feed cannot
-be moved between folders, a folder cannot be removed, and a feed cannot be
-renamed. All three operations are written and tested and have no caller
-outside the test module.
+**In short:** `apps/rssreader` could not move a feed between folders, remove a
+folder, or rename a feed. All three are now bound to keys. Chasing why they had
+no callers found the actual cause, which was larger than the three operations:
+**nothing in the app could select a feed**, and the help overlay was
+advertising twenty-one shortcuts of which about four worked.
 
-**Verified, each checked for another route.**
+**The root cause.** `sidebar_selection` -- the field naming which feed or
+folder is chosen -- had **no production writer**. It was `AllFeeds` from
+construction to exit. So:
 
-| Operation | State |
-|---|---|
-| create a folder | `add_folder` has five production callers -- but four are `populate_sample_data`, which is `#[cfg(test)]`, so **the one real caller is the OPML importer** (`import_opml_outline`). |
-| add a feed | `add_feed(title, url, folder_id)` has eight production callers and takes the folder, so an imported feed lands in the right place. |
-| move a feed to another folder | `move_feed_to_folder`: no production caller, and nothing else writes `feed.folder_id`. |
-| remove a folder | `remove_folder`: no production caller, and the only `folders.retain` is inside it. |
-| rename a feed | `rename_feed`: no production caller. `feed.title` is written in one other place -- the parser, setting it from the feed's own XML -- so a title updates itself and cannot be chosen. |
+- the `Feed`, `Folder` and `Starred` arms of the article filter were
+  unreachable: you could never narrow the list to one feed, which is what a
+  sidebar is *for*;
+- four highlight branches in the draw were dead;
+- tabbing to the sidebar changed only which pane was outlined;
+- and the three filed operations had no subject to act on, which is why nobody
+  had called them.
 
-Import is genuinely reachable: `O` opens the picker and the result goes to
-`import_opml`.
+`Folder::is_expanded`, `sidebar_visible` and `sort_order` had no writers
+either -- so folders could never be collapsed, the sidebar could never be
+hidden, and the window displayed "Sort: Date (newest first)", a label that
+could not say anything else, above a `sort_by` that genuinely worked.
 
-**Third of the twenty-one no-pointer applications examined, and a third
-distinct shape.** `notes` was wholesale -- a mouse-shaped UI and nine dead
-operations. `reminders` was specific and keyboard-driven, with two gaps now
-fixed. This one is neither: the feature is *reachable but one-way*. You can
-arrive at an organisation and not change it.
+**The overlay was the thing that made this a lie rather than a gap.** Pressing
+`?` listed twenty-one shortcuts. `R`, `Shift+R`, `Shift+J`, `Shift+K`, `B`,
+`O`, `F`, `D`, `V`, `Space`, `/`, `A`, `Ctrl+R` and `Ctrl+N` were named and
+bound to nothing, and three more named operations that existed **nowhere in
+the crate**: refresh (impossible -- this reader has no transport), open in
+browser (there is no browser), and quit (the framework gives an app no way to
+close its own window).
 
-**What the repair wants.** `rssreader` binds seventeen keys and is
-keyboard-driven by construction, like `reminders` -- so the answer is
-almost certainly a mode rather than a pointer layer, in the shape
-`apps/reminders`'s snooze prompt now uses: a key that offers the choices, a
-key that picks, any other key leaving. Three operations need three
-affordances, which is why this is filed rather than done in passing.
+**What was done.** All of the above are bound, over machinery that already
+existed and was already obeyed. The four impossible rows were removed from the
+overlay and four real ones it had never mentioned were added. Removals ask
+first and only `Y` confirms; removing a folder keeps its feeds. `A` adds a
+feed by address, so the app now has a whole subscription workflow -- add,
+rename, file into a folder, export OPML -- none of which needs the fetching it
+cannot do. 216 tests, up from 184.
+
+**The guard that keeps it fixed** is `every_advertised_shortcut_does_something`:
+it walks `ALL_KEY_ACTIONS` and asserts each row's key is answered. A new row
+must be given a binding, and a binding that disappears fails the test. **It
+caught one defect on its first run** -- `Space` was a silent no-op unless a
+folder was selected -- which is the argument for the pattern: the overlay and
+the handler are two lists that must agree, and nothing but a test makes them.
+
+**Worth copying.** Any app with a shortcut table should have this test. The
+failure mode is invisible by construction: a key that does nothing looks
+exactly like a key you pressed wrong, so users blame themselves and the bug is
+never reported.
 
 ## `TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY` -- **WITHDRAWN, was never a defect** (lane C, 2026-09-18)
 

@@ -3842,6 +3842,16 @@ impl SpreadsheetApp {
                     self.toggle_bold();
                     return EventResult::Consumed;
                 }
+                // `show_toolbar` gates the toolbar's draw and had no writer,
+                // so it could never be got out of the way of the grid.
+                //
+                // Ctrl, not a plain letter: the catch-all below starts editing
+                // the cell on any printable character, so a bare `T` would
+                // stop being typeable into a spreadsheet.
+                Key::T => {
+                    self.show_toolbar = !self.show_toolbar;
+                    return EventResult::Consumed;
+                }
                 Key::I => {
                     self.toggle_italic();
                     return EventResult::Consumed;
@@ -9343,6 +9353,37 @@ mod tests {
         *app.selection_mut() = Selection::single(CellAddr::new(20, 0));
         app.ensure_cell_visible(CellAddr::new(20, 0));
         assert!(app.scroll().x > 0.0);
+    }
+
+    /// Ctrl+T hides the toolbar, and a plain `T` still types into the cell.
+    ///
+    /// `show_toolbar` gates the toolbar's draw and had no writer. The key has
+    /// to carry Ctrl: the catch-all in this handler starts editing the cell on
+    /// any printable character, so a bare `T` would stop being typeable into a
+    /// spreadsheet -- a worse defect than the one being fixed.
+    #[test]
+    fn ctrl_t_hides_the_toolbar_and_plain_t_still_types() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        assert!(app.show_toolbar, "control: the toolbar starts shown");
+
+        let ev = |k: Key, ctrl: bool, text: &str| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl,
+                ..Modifiers::NONE
+            },
+            text: text.to_string(),
+        };
+
+        app.handle_key_event(&ev(Key::T, true, ""));
+        assert!(!app.show_toolbar, "Ctrl+T did not hide the toolbar");
+
+        app.handle_key_event(&ev(Key::T, false, "t"));
+        assert!(
+            matches!(app.mode, InteractionMode::Editing { .. }),
+            "a plain T no longer starts typing into the cell"
+        );
     }
 
     #[test]

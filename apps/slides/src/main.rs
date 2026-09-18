@@ -815,6 +815,15 @@ pub struct SlidesApp {
     selected_element: Option<ElementId>,
     /// Whether the notes panel is visible.
     show_notes: bool,
+    /// The element being typed into, and what has been typed.
+    ///
+    /// This program could not put a word on a slide: there were zero
+    /// assignments to `.text` anywhere in the crate, tests included, and zero
+    /// `key.text` sites, so every box said "New Text" or "Presentation Title"
+    /// forever. The buffer is held here rather than written straight into the
+    /// element so that `Escape` and `Enter` can mean different things -- and
+    /// the element is named by id, because the selection can move.
+    editing: Option<(ElementId, String)>,
     /// Title of the presentation.
     title: String,
     /// The user's colours, replaced whenever the theme changes.
@@ -850,6 +859,7 @@ impl SlidesApp {
             clipboard: Clipboard::Empty,
             selected_element: None,
             show_notes: true,
+            editing: None,
             title: String::from("Untitled Presentation"),
         }
     }
@@ -1082,6 +1092,101 @@ impl SlidesApp {
     // ---- Theme -------------------------------------------------------------
 
     /// Set the presentation theme and re-apply it to all slides.
+    /// The words a box is born holding: a prompt, not content.
+    ///
+    /// Typing into a new box must replace these rather than append to them:
+    /// nobody wants "New TextHi", and making the user delete the prompt first is
+    /// the friction that stops them writing at all. Every presentation tool on
+    /// earth behaves this way. The cost is that a user who genuinely wants a box
+    /// reading exactly "New Text" has to type it twice, which is a fair trade.
+    const PLACEHOLDER_TEXT: &[&str] = &[
+        "New Text",
+        "Presentation Title",
+        "Section Title",
+        "Slide Title",
+        "Subtitle goes here",
+        "Two Column Layout",
+        "Caption and description text goes here.",
+    ];
+
+    /// Begin typing into the selected text box, seeded with what it says.
+    ///
+    /// Seeded because editing is usually an edit: a blank box would make the
+    /// existing words something the user has to retype, and the words are
+    /// what they came for.
+    fn begin_editing(&mut self) -> EventResult {
+        let Some(eid) = self.selected_element else {
+            return EventResult::Ignored;
+        };
+        let Some(slide) = self.slides.get(self.current_index) else {
+            return EventResult::Ignored;
+        };
+        let Some(SlideElement::TextBox { text, .. }) =
+            slide.elements.iter().find(|e| e.id() == eid)
+        else {
+            // Shapes and images hold no words; saying so beats a mode that
+            // silently does nothing.
+            return EventResult::Ignored;
+        };
+        // A box still holding its prompt starts empty; one the user has
+        // written in starts with what they wrote, because editing is usually
+        // an edit and retyping it is not.
+        let seed = if Self::PLACEHOLDER_TEXT.contains(&text.as_str()) {
+            String::new()
+        } else {
+            text.clone()
+        };
+        self.editing = Some((eid, seed));
+        EventResult::Consumed
+    }
+
+    /// Keys while a text box is being typed into.
+    fn handle_editing_key(&mut self, key: &KeyEvent) -> EventResult {
+        let Some((eid, mut buf)) = self.editing.clone() else {
+            return EventResult::Ignored;
+        };
+        match key.key {
+            // Leaving keeps the words, on either key. Losing what was typed
+            // because the exit key was the cancelling one is the worst thing
+            // an editor can do, and `Escape` is how anyone leaves a box.
+            Key::Escape | Key::Enter if !key.modifiers.shift => {
+                self.commit_editing(eid, &buf);
+                self.editing = None;
+                EventResult::Consumed
+            }
+            // Shift+Enter is the second line.
+            Key::Enter => {
+                buf.push('\n');
+                self.editing = Some((eid, buf));
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                buf.pop();
+                self.editing = Some((eid, buf));
+                EventResult::Consumed
+            }
+            _ => {
+                if key.text.is_empty() || key.modifiers.ctrl {
+                    return EventResult::Ignored;
+                }
+                buf.push_str(&key.text);
+                self.editing = Some((eid, buf));
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Write the typed words into the element.
+    fn commit_editing(&mut self, eid: ElementId, buf: &str) {
+        self.undo_mgr.save(&self.slides, self.current_index);
+        let Some(slide) = self.slides.get_mut(self.current_index) else {
+            return;
+        };
+        if let Some(SlideElement::TextBox { text, .. }) = slide.element_by_id_mut(eid) {
+            *text = buf.to_owned();
+        }
+    }
+
     /// Move to the next theme in the set.
     ///
     /// `set_theme` had no caller, so the deck was permanently on Mocha and the
@@ -1448,6 +1553,12 @@ impl SlidesApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
+        // Typing into a box takes every key while it is up, or a title
+        // containing `s` would drop a rectangle on the slide behind it.
+        if self.editing.is_some() {
+            return self.handle_editing_key(key);
+        }
+
         let ctrl = key.modifiers.ctrl;
         match key.key {
             // The one key that lets a deck leave this window.
@@ -1539,6 +1650,9 @@ impl SlidesApp {
                 self.add_textbox();
                 EventResult::Consumed
             }
+            // Writing in the selected box. `F2` is the conventional rename
+            // key and `Enter` is what opens a thing; both are free here.
+            Key::Enter | Key::F2 => self.begin_editing(),
             // The rest of what a slide can hold. `add_shape` and
             // `add_image_placeholder` had no callers, so `T` was the only
             // thing that could put anything on a slide: this program made
@@ -1736,7 +1850,7 @@ impl SlidesApp {
         cmds.push(RenderCommand::Text {
             x: 740.0,
             y: 12.0,
-            text: format!("Theme: {}", self.theme.name),
+            text: format!("Theme: {} (Ctrl+T)", self.theme.name),
             color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
@@ -1816,7 +1930,7 @@ impl SlidesApp {
         });
 
         if let Some(slide) = self.slides.get(self.current_index) {
-            let trans = format!("Transition: {}", slide.transition.label());
+            let trans = format!("Transition: {} (Ctrl+R)", slide.transition.label());
             cmds.push(RenderCommand::Text {
                 x: 200.0,
                 y: y + 5.0,
@@ -2086,6 +2200,7 @@ impl SlidesApp {
     ) {
         match elem {
             SlideElement::TextBox {
+                id,
                 x,
                 y,
                 width,
@@ -2110,10 +2225,19 @@ impl SlidesApp {
                 let text_x = if *centered { fx + fw * 0.1 } else { fx };
                 let text_max = if *centered { Some(fw * 0.8) } else { Some(fw) };
 
+                // While this box is being typed into, draw the buffer and not
+                // the element: the commit happens when the mode is left, so
+                // the element still holds the old words until then, and
+                // drawing those would leave the user typing at a slide that
+                // never changes.
+                let live = match &self.editing {
+                    Some((eid, buf)) if eid == id => buf.clone(),
+                    _ => text.clone(),
+                };
                 cmds.push(RenderCommand::Text {
                     x: text_x,
                     y: fy,
-                    text: text.clone(),
+                    text: live,
                     color: *color,
                     font_size: fs,
                     font_weight: weight,
@@ -2347,7 +2471,14 @@ impl SlidesApp {
             y += 22.0;
 
             // Transition.
-            self.render_property_row(cmds, lx, y, val_w, "Transition", slide.transition.label());
+            self.render_property_row(
+                cmds,
+                lx,
+                y,
+                val_w,
+                "Transition (Ctrl+R)",
+                slide.transition.label(),
+            );
             y += 22.0;
 
             // Background.
@@ -2989,6 +3120,97 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    fn types(text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: text.to_owned(),
+        })
+    }
+
+    /// A user can put words on a slide.
+    ///
+    /// This program could not: zero assignments to `.text` anywhere in the
+    /// crate, tests included, and zero `key.text` sites, so every box said
+    /// "New Text" forever and a deck was always somebody else's placeholder.
+    ///
+    /// End-to-end on purpose. Every piece of this existed -- the element, the
+    /// accessor, the renderer -- and the program still could not be used, so
+    /// the assertion has to be that the words come out.
+    #[test]
+    fn a_user_can_put_words_on_a_slide() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::T));
+        let eid = app.selected_element.expect("adding a text box selects it");
+
+        app.handle_event(&press(Key::Enter));
+        assert!(app.editing.is_some(), "Enter did not begin typing");
+        for c in ["H", "i"] {
+            app.handle_event(&types(c));
+        }
+        app.handle_event(&press(Key::Escape));
+
+        assert!(app.editing.is_none(), "the mode did not close");
+        let slide = app.slides.get(app.current_index).expect("a slide");
+        let elem = slide
+            .elements
+            .iter()
+            .find(|e| e.id() == eid)
+            .expect("the box");
+        assert!(
+            format!("{elem:?}").contains("\"Hi\""),
+            "the words are not in the element: {elem:?}"
+        );
+    }
+
+    /// The slide shows the words as they are typed.
+    #[test]
+    fn the_slide_shows_the_words_as_they_are_typed() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::T));
+        app.handle_event(&press(Key::Enter));
+        for c in ["H", "i"] {
+            app.handle_event(&types(c));
+        }
+
+        let shown: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            shown.iter().any(|t| t == "Hi"),
+            "what is being typed is nowhere on the slide"
+        );
+    }
+
+    /// Typing a letter does not also drop a shape on the slide.
+    ///
+    /// `S`, `O`, `L`, `A` and `I` add shapes outside this mode; a title
+    /// containing any of them would otherwise litter the slide while being
+    /// written.
+    #[test]
+    fn typing_does_not_fire_the_shape_keys() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::T));
+        let before = element_count(&app);
+
+        app.handle_event(&press(Key::Enter));
+        for c in ["S", "a", "l", "e", "s"] {
+            app.handle_event(&types(c));
+        }
+
+        assert_eq!(
+            element_count(&app),
+            before,
+            "typing added elements to the slide"
+        );
     }
 
     fn press_ctrl(k: Key) -> Event {

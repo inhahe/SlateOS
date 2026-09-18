@@ -159916,7 +159916,7 @@ and has no writer anywhere in production:
 | `pdfviewer` | `dark_mode` | **`true`** | `page_color()` returns `rgb(40,42,54)` for every page, and `text_color` inverts with it. **Every document renders in inverted colours and no key restores the white page** -- though the comment beside it calls this "the viewer's own `dark_mode` for reading", which is a thing you would switch |
 | `calendar` | `week_starts_monday` | `true` | every month grid begins on Monday, for everyone, forever |
 | `hexeditor` | `case_sensitive` | `true` | search was always case-sensitive; there was no case-insensitive search in the program. **Fixed 2026-09-18:** `Ctrl+I` in the search bar toggles it and the bar says which way it is set, because a search that silently ignores case -- or silently insists on it -- turns a miss into "it is not in the file", which is a claim about the file. 198 tests |
-| `imageviewer` | `show_toolbar` | `true` | the toolbar cannot be hidden, including when looking at an image |
+| `imageviewer` | `show_toolbar` | `true` | the toolbar could not be hidden, including when looking at an image. **Fixed 2026-09-18** (`B`), with `show_status_bar` on `S` |
 
 `pdfviewer` is the one that matters most: a document reader that cannot show a
 document in the colours it was written in.
@@ -160002,9 +160002,9 @@ writer, and each is frozen at the value you would have chosen anyway:
 |---|---|---|
 | `markdowneditor` `autosave_enabled` | `true` | autosave is always on; it cannot be turned off, but nothing is lost by that |
 | `diskimager` `verify_after_write` | `true` | images are always verified; the window draws it as a checkbox that cannot be unchecked |
-| `imageviewer` `show_status_bar` | `true` | the status bar cannot be hidden |
-| `spreadsheet` `show_toolbar` | `true` | the toolbar cannot be hidden |
-| `mindmap` `show_sidebar` | `true` | the sidebar cannot be hidden |
+| `imageviewer` `show_status_bar` | `true` | **fixed** -- `S` |
+| `spreadsheet` `show_toolbar` | `true` | **fixed** -- and it had to be `Ctrl+T`, because this handler's catch-all starts editing the cell on any printable character, so a bare `T` would have stopped being typeable into a spreadsheet. A fix that breaks typing is worse than the panel it frees |
+| `mindmap` `show_sidebar` | `true` | **fixed** -- a plain `B`, safe here because the editing and search modes return before the main match |
 
 **So these are false offers, not hazards**, and that distinction is worth
 keeping: had `verify_after_write` been frozen at `false`, a tool that writes
@@ -160294,6 +160294,31 @@ behaviour come apart -- and they come apart most often in exactly the code
 worth examining, because a program doing something interesting is a program
 spelling it in some particular way.
 
+**The corollary, which outranks all seven** (from lane A, 2026-09-18, after
+it nearly cost them a false report that the kernel's file-immutability
+protection did not work): **"has no caller" and "nothing does this" are
+different sentences, and only the second survives a second implementation
+path.** Their call graph was clean and every step of it was true --
+`FileAttr::IMMUTABLE` is checked in `Vfs::is_writable`, whose only caller is
+inside `self_test()`. The conclusion was still false: enforcement does not go
+through that predicate at all, because `write_file`, `truncate` and `unlink`
+each refuse on their own paths. What settled it in one command was asking
+whether the **test passes** rather than where the call site is.
+
+Run against tonight's two findings, both survive, and the reason is that
+neither rests on a call graph: `slides` has **zero assignments to `.text`
+anywhere in the crate**, tests included, and `notes` has both its
+`notes.push` sites *inside* the two unreachable creators with no import. The
+mutation was checked, not the entry point. **A finding phrased as "no caller"
+should be re-phrased as "nothing writes it" before it is filed, and if it
+cannot be, it is not ready.**
+
+**Being wrong in this direction is the expensive one.** Recording a capability
+as missing when it exists tells a reader not to rely on something they can
+rely on -- which is what the withdrawn
+`TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY` did, and why it was withdrawn in place
+rather than deleted.
+
 **What actually works**, in order of how much it costs:
 
 1. **Ask for the writers, not the name.** "Does anything assign this?" survives
@@ -160302,9 +160327,13 @@ spelling it in some particular way.
    `rustlex.strip_noise(keep_literals=True)` for "is this a comment". Both
    exist because somebody already lost a day to 5 and to 4; the second one's
    own doc says so.
-3. **Check the render path, not the model.** The question "can this app show
-   anything" is answered by the draw and not by the fields -- see
-   `TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY`, withdrawn for exactly this.
+3. **Ask what the program does when run, not where the call site is.** This
+   belongs above the lexer and was written below it at first, which is
+   backwards: the lexer makes a *search* honest, running the thing makes a
+   *claim* true. For a GUI app that means the render tree -- "can this app
+   show anything" is answered by the draw and not by the fields, see
+   `TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY`, withdrawn for exactly this. For a
+   kernel subsystem it means the boot line. Same question, different output.
 4. **Then read the code.** Every genuine defect filed today --
    `rssreader`'s sidebar, `passwordgen`'s classes, `netscan`'s scan report,
    `podcast`'s timestamp, `markdowneditor`'s find panel -- was confirmed by
@@ -160317,6 +160346,274 @@ over-report, and a future session that trusts their output will file working
 programs as broken. The entry they live in
 (`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
 says why the failure is systematic rather than a matter of care.
+
+## `TD-C-KEYS-THAT-WORK-AND-NOTHING-MENTIONS` (lane C, 2026-09-18)
+
+**In short:** Several keys added on 2026-09-18 to reach features that had no
+way in are themselves undiscoverable. The feature is reachable now; finding it
+still requires reading the source. That is better than before and is not
+finished.
+
+**Where each new key stands:**
+
+| App | Key | Discoverable? |
+|---|---|---|
+| `rssreader` | eleven | **yes** -- `?` lists them, and a test asserts every listed row is answered |
+| `passwordgen` | `L`/`U`/`D`/`S`/`A` | **yes** -- the options panel reads "Lowercase (L): Yes" |
+| `metronome` | arrows, digits | **yes** -- "Practice Increment: +10 BPM (left/right)" |
+| `hexeditor` | `Ctrl+I` | **yes** -- the search bar reads "Case: on  Ctrl+I" |
+| `markdowneditor` | five | **yes** -- the panel's buttons were relabelled "Replace  Ctrl+Enter" |
+| `slides` | `Ctrl+T`, `Ctrl+R` | **yes** -- "Theme: Mocha (Ctrl+T)", "Transition: Fade (Ctrl+R)" |
+| `slides` | `S`/`O`/`L`/`A`/`I`, `Delete` | **no** |
+| `pdfviewer` | `D` | **no** |
+| `calendar` | `W` | **no** |
+| `imageviewer` | `B`, `S` | **no** |
+| `spreadsheet` | `Ctrl+T` | **no** |
+| `mindmap` | `B` | **no** |
+
+**The pattern that worked** is naming the key beside the thing it controls,
+which costs one format string wherever the app already draws the value. It
+does not apply to the six unlabelled cases: `pdfviewer` draws no reading-mode
+indicator, `calendar` draws no week-start indicator, and a toolbar cannot
+advertise the key that hides it, because once hidden the advertisement is gone
+with it.
+
+**Why this is filed rather than done.** The remaining six need a *new* element
+on screen -- a status hint or a help overlay -- in five layouts I have not
+read closely. Adding text to a layout I do not understand risks overlapping
+something that was fine, which is a worse defect than the one being fixed and
+harder to notice. `rssreader`'s `ALL_KEY_ACTIONS` overlay is the model worth
+copying, together with its guard test
+(`every_advertised_shortcut_does_something`), which is what keeps the list and
+the handler from drifting apart -- the failure that entry documents.
+
+**Do not treat this as cosmetic.** `apps/slides` could add four shapes and an
+image for hours before anyone found `S`, and the app it most resembles --
+before this change -- was one that could only make decks of textboxes.
+
+## `TD-C-A-PRESENTATION-EDITOR-THAT-CANNOT-TYPE` -- **FIXED 2026-09-18** (lane C)
+
+**In short:** `apps/slides` cannot put a single word on a slide. Every text box
+it creates says "New Text", every title slide says "Presentation Title", the
+deck is called "Untitled Presentation", and **there is no way to change any of
+them**. You can add slides, shapes and images, reorder them, copy and paste
+them, cycle the theme and the transition, and export the result -- a deck of
+placeholders.
+
+**Verified.** There is no text input anywhere in the program:
+
+| | |
+|---|---|
+| typing | `key.text` / `event.text` appear **zero** times in production; there is no `typed()`, no `types_text`, no edit buffer |
+| element text | **zero** assignments to `.text` anywhere |
+| the deck title | `title: String::from("Untitled Presentation")` at construction, **zero** writers |
+| a new text box | `add_textbox` seeds `text: String::from("New Text")` |
+| a new title slide | `Slide::new` seeds `text: String::from("Presentation Title")` |
+| the accessor an editor would need | `element_by_id_mut` exists, is `pub`, and **has no caller** |
+
+**This is not the same defect as an unreachable operation.** The operations
+this app is missing were never written: there is no `set_element_text` sitting
+callerless, because nobody wrote one. What is written is everything *around*
+authoring -- layouts, themes, transitions, undo, export, a sorter view -- and
+the hole is in the middle.
+
+**The uncomfortable part, recorded because it is the useful part.** Earlier the
+same day I fixed this app's *other* reachability gaps: `S`/`O`/`L`/`A`/`I` to
+add shapes and images, `Ctrl+T` and `Ctrl+R` for theme and transition,
+`Delete` for the selected element, and labels naming their keys. All of that
+was real and none of it was the thing that matters. **I checked which written
+operations had no caller, and that question cannot see a capability nobody
+wrote.** A sweep for unreachable functions finds the periphery of an app and is
+blind to a hole at its centre -- and the more thoroughly the periphery is
+built, the more finished the program looks. `apps/slides` has 90 tests and a
+sorter view.
+
+**The question that would have found it** is not "what is unreachable" but
+"what is this program *for*, and can a user do that". For a presentation
+editor that is one sentence: put words on a slide. It takes longer to answer
+than a grep, which is why it keeps being skipped.
+
+**What the repair wants.** A text-entry mode, on the pattern
+`apps/markdowneditor` and `apps/rssreader` now use: a key to begin editing the
+selected text box (`F2` and `Enter` are both conventional), characters routed
+into it via `element_by_id_mut`, `Backspace`, and `Escape`/`Enter` to finish.
+`Slide::new`'s placeholders then become what they read as -- prompts -- rather
+than permanent contents. The deck title wants the same treatment, and it is
+what `export_as` names the file with.
+
+
+**Fixed the same day.** `Enter` or `F2` types into the selected text box,
+`Shift+Enter` gives a second line, and leaving on either `Escape` or `Enter`
+keeps the words. The canvas draws the buffer while it is being typed, because
+the commit happens on the way out and drawing the element would leave the user
+typing at a slide that never changes.
+
+**The test found a defect the design had.** `begin_editing` seeded the buffer
+with the box's current text -- right for editing, wrong for a box that still
+holds its prompt, because the first thing anyone types produces "New TextHi"
+and they have to delete the prompt first. `PLACEHOLDER_TEXT` now lists the
+seven strings a box is born holding and a box still holding one starts empty.
+**A placeholder is a prompt, not content**, and the friction of deleting it
+first is exactly what stops someone writing at all. The cost is that a user
+who genuinely wants a box reading "New Text" types it twice.
+
+`typing_does_not_fire_the_shape_keys` is the one that would have bitten
+otherwise: `S`, `O`, `L`, `A` and `I` add shapes outside this mode, so a title
+containing any of them would have littered the slide while being written. 93
+tests, up from 90.
+
+**Still open here:** the deck title is `"Untitled Presentation"` with no
+writer, and `export_as` names the file with it.
+## `TD-C-NOTES-CANNOT-MAKE-A-NOTE` -- **FIXED 2026-09-18** (lane C)
+
+**In short:** `apps/notes` starts empty and cannot create a note, title one, or
+write a word in one. It can *export* notes -- to plain text, Markdown and HTML,
+all reachable. The empty view says **"No notes yet."**, which reads as "you
+have not made one", when the truth is that you cannot.
+
+**Verified, including the routes that would have made it untrue.**
+
+| | |
+|---|---|
+| `create_note` | **no production caller.** Both `notes.push` sites are inside it and inside `create_note_from_template`, which also has none |
+| `update_note_content` | no production caller; it is the only caller of `set_content` |
+| `update_note_title` | no production caller |
+| import | **there is none.** The only file machinery is `export_plain_text`, `export_markdown`, `export_html` and `save_selected_note`, each reachable -- this app exports notes it cannot create |
+| startup | `main` builds `NotesApp::new()`; `seed_sample_content` is called only from tests |
+| what it types | `TextEntry` covers `Search`, `Tag(String)` and `NotebookName(String)` -- a note's body is not among them |
+
+**Second instance of the shape filed an hour earlier for `apps/slides`**
+(`TD-C-A-PRESENTATION-EDITOR-THAT-CANNOT-TYPE`), and the pair is the argument
+that it is a class rather than an accident. Both are authoring programs. Both
+have the whole periphery built -- notebooks, tags, versions, search, three
+export formats, a note menu; slides has themes, transitions, a sorter view,
+undo. Both are missing only the act the program exists for.
+
+**"No notes yet." is the wrong sentence, by this lane's own rule.**
+design-decisions 862 says an app that *cannot* obtain its data must say so and
+an app that merely *has* none may stay quiet -- and it names `notes` in the
+second group, on the grounds that "you can make a note, so empty honestly means
+you haven't yet". **That was wrong about this app**, and the entry is being
+corrected rather than quietly left: the premise was checked against
+`TextEntry`, which does handle typing, but for tags and notebook names.
+`apps/finance` gets this exactly right in a comment on its own empty state --
+"the message implies data can be entered, which it cannot".
+
+**I built a pointer layer for this app.** Four panels, hit-testing for notes,
+notebooks, versions and tag chips, and seven of eleven operations made
+reachable. All of it was real. None of it was the act of writing a note, and I
+did not notice, because I was answering "which written operations have no
+caller" -- and nobody had written note authoring for that question to find.
+
+**What the repair wants.** `create_note` and `update_note_content` both exist
+and both take what they need; the missing piece is a mode that routes
+keystrokes into the selected note, on the pattern `apps/markdowneditor` now
+uses. Until then the empty view should say what `finance`'s does -- that notes
+cannot be created here -- because an empty list that invites you to add
+something is worse than one that admits it cannot.
+
+
+**Fixed the same day.** `Ctrl+N` asks for a title and makes the note,
+`Ctrl+Shift+N` makes a notebook, and `Enter` on a selected note writes in it --
+`Enter` inserting a newline there rather than committing, because a note is
+more than one line and `Enter` is how you get the second one.
+
+**Three decisions in it worth keeping:**
+
+- **The body commits when the mode is left, including on `Escape`.** Losing
+  what was typed because the exit key was the cancelling one is the worst
+  thing a text editor can do, and `Escape` is how anyone leaves a multi-line
+  box. Tested by `leaving_the_body_keeps_what_was_typed`.
+- **The editor draws the live buffer, not the stored note.** The commit cannot
+  happen per keystroke -- `set_content` snapshots a version on every call, so
+  that would file one version per character -- which means the note holds the
+  old text while typing, and drawing *that* would leave the user typing into a
+  panel that never changes.
+- **The first note creates a notebook to live in.** This app starts with no
+  notebooks at all and `create_note` needs an id, so without it the first note
+  anyone tried to make would have had nowhere to go -- and a refusal there is
+  indistinguishable from the defect being fixed.
+
+**The test that matters is `a_user_can_make_a_note_and_write_in_it`**, which
+starts from an empty app and asserts the artifact comes out: Ctrl+N, a title,
+Enter, a body of two lines, Escape, and then `note.content == "milk
+eggs"`.
+Deliberately end-to-end rather than "the key sets the field" -- every piece of
+this existed already and the program still could not be used. 120 tests, up
+from 116.
+## `TD-C-AUTHORING-APPS-THAT-CANNOT-AUTHOR` -- **ALL THREE FIXED 2026-09-18** (lane C)
+
+**In short:** Three of our content-creation programs cannot create content.
+You can add slides, notes and diagram nodes; you cannot put a word in any of
+them. Each has its whole periphery built -- themes, notebooks, templates,
+versions, export -- and is missing the one act it exists for.
+
+| App | What it can do | What it cannot |
+|---|---|---|
+| `slides` | add slides, four shapes, images; themes, transitions, sorter view, undo, export -- **and, since 2026-09-18, type** | ~~**type anything.**~~ *(fixed)* Zero assignments to `.text` in the crate, tests included; every element born "New Text" / "Presentation Title"; deck permanently "Untitled Presentation" |
+| `notes` | notebooks, tags, versions, search, export to text/Markdown/HTML -- **and, since 2026-09-18, make and write a note** | ~~**make a note.**~~ *(fixed)* `create_note`, `update_note_title`, `update_note_content` all callerless; both `notes.push` sites are inside the unreachable creators; there is no import. It exports notes it cannot create |
+| `diagram` | insert canned flowcharts and org charts, move and connect nodes, export SVG/JSON -- **and, since 2026-09-18, label a node or an edge** | ~~**label anything.**~~ *(fixed)* `set_node_label` and `set_edge_label` callerless, **zero** typing sites in the crate. The only writer of `.label` besides them is `add_template_node`, so every box says what the template said |
+
+**`diagram` is the one that shows what the class costs.** Its 32 reachable
+`add_template_node` calls build a flowchart reading Start → Process →
+Decision? → Action A → Action B → End, and an org chart of "CEO" and "VP Eng".
+Those labels are not placeholders; they are **somebody else's example**, and
+they are permanent. A user's diagram of their own system is always a diagram
+of ours.
+
+**Why a sweep for unreachable operations does not find this.** That sweep asks
+which *written* functions have no caller. Here the functions are missing
+outright -- nobody wrote `set_element_text` for slides, so there is nothing
+callerless to report -- or, in `diagram`'s case, they exist and the sweep does
+report them, but as two entries among fifteen, indistinguishable from
+`next_slide` (a redundant duplicate) and `light` (an unused theme
+constructor). **The periphery being thorough is what hides it:** 90 tests in
+slides, four panels and a version history in notes, templates and layers and
+alignment guides in diagram.
+
+**The question that finds it**, and it has to be asked per-app because the
+answer is never generic: *what is this program for, and can a user do that?*
+For these three it is one sentence each -- put words on a slide, write a note,
+say what the box means.
+
+**A caution against the obvious fix.** The repair is a text-entry mode in each,
+on the pattern `apps/markdowneditor` and `apps/rssreader` now use, and all
+three already have the accessor it needs (`element_by_id_mut`,
+`update_note_content`, `set_node_label`). But adding one and stopping is how
+this happened: every one of these apps looks finished from the inside because
+everything *around* the hole is built. The test worth writing is not "the key
+sets the field" but **"a user can produce the artifact the program is named
+after"** -- type into a new note, save it, and read it back.
+
+**All three fixed the same day**, each with an end-to-end test that asks for
+the artifact rather than for the field: `a_user_can_make_a_note_and_write_in_it`,
+`a_user_can_put_words_on_a_slide`, `a_user_can_label_a_node`.
+
+**Every one of the three end-to-end tests failed first, on something a unit
+test of the key handler would have passed.** `notes` needed a notebook
+invented for the first note, because the app starts with none and
+`create_note` takes an id. `slides` produced "New TextHi", because seeding the
+buffer from the box is right for an edit and wrong for a box still holding its
+prompt. `diagram` drew "New" on the canvas and "Old" in the properties panel
+at the same moment -- one value disagreeing with itself on one screen. **The
+assertion that catches all three is the same one: ask for the artifact and
+read what comes out.**
+
+**The near-miss in `diagram` is the one to remember.** `Backspace` is bound
+there to *delete the selection*, so a typo while naming a box would have
+deleted the box, with the undo stack the only record. The mode taking the
+keyboard first is what prevents it, and
+`backspace_while_labelling_does_not_delete_the_node` is what keeps it
+prevented -- the same shape as `rssreader`'s digits and `spreadsheet`'s bare
+`T`. **A text mode is not finished when it accepts text; it is finished when
+it stops the keys underneath it.**
+
+**Related.** `TD-C-A-PRESENTATION-EDITOR-THAT-CANNOT-TYPE`,
+`TD-C-NOTES-CANNOT-MAKE-A-NOTE`, and the method note
+`TD-C-SEVEN-WAYS-A-SEARCH-SAYS-NOTHING-AND-MEANS-NOTHING` -- particularly its
+corollary, since each row here is stated as *nothing writes this* rather than
+*this function has no caller*, which is the only form that survives a second
+implementation path.
 
 ### [A] `faceunlock::verify()` returns Matched unconditionally, and my first attempt to document that understated it -- 2026-09-17
 

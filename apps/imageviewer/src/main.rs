@@ -460,6 +460,8 @@ pub enum ViewerAction {
     ToggleSlideshow,
     ToggleInfo,
     ToggleThumbnails,
+    ToggleToolbar,
+    ToggleStatusBar,
     ToggleFullscreen,
     FirstImage,
     LastImage,
@@ -942,6 +944,15 @@ impl ViewerState {
             ViewerAction::ToggleThumbnails => {
                 self.show_thumbnails = !self.show_thumbnails;
             }
+            // Both of these gate a draw and had no writer, so the two bars
+            // could not be got out of the way of the picture -- which is the
+            // one thing a viewer is for.
+            ViewerAction::ToggleToolbar => {
+                self.show_toolbar = !self.show_toolbar;
+            }
+            ViewerAction::ToggleStatusBar => {
+                self.show_status_bar = !self.show_status_bar;
+            }
             ViewerAction::ToggleFullscreen => {
                 self.fullscreen = !self.fullscreen;
             }
@@ -1039,6 +1050,14 @@ impl ViewerState {
             }
             Key::T if !ctrl => {
                 self.execute_action(ViewerAction::ToggleThumbnails);
+                true
+            }
+            Key::B if !ctrl => {
+                self.execute_action(ViewerAction::ToggleToolbar);
+                true
+            }
+            Key::S if !ctrl => {
+                self.execute_action(ViewerAction::ToggleStatusBar);
                 true
             }
 
@@ -2677,6 +2696,38 @@ mod tests {
             None,
             "a chunk that ends mid-header must not yield a size"
         );
+    }
+
+    /// `B` and `S` hide the toolbar and the status bar.
+    ///
+    /// Both flags gate a draw and had no writer, so neither bar could be got
+    /// out of the way of the picture -- which is the one thing a viewer is
+    /// for.
+    #[test]
+    fn b_and_s_hide_the_two_bars() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.show_toolbar, "control: the toolbar starts shown");
+        assert!(
+            state.show_status_bar,
+            "control: the status bar starts shown"
+        );
+
+        let press = |k: Key| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+
+        state.handle_key_event(&press(Key::B));
+        assert!(!state.show_toolbar, "B did not hide the toolbar");
+        assert!(state.show_status_bar, "B hid the status bar as well");
+
+        state.handle_key_event(&press(Key::S));
+        assert!(!state.show_status_bar, "S did not hide the status bar");
+
+        state.handle_key_event(&press(Key::B));
+        assert!(state.show_toolbar, "B does not bring the toolbar back");
     }
 
     #[test]

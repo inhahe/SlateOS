@@ -1997,6 +1997,14 @@ impl MindMapApp {
         }
         let ctrl = key.modifiers.ctrl;
         match key.key {
+            // `show_sidebar` gates the sidebar's draw and had no writer, so
+            // the panel could never be closed. Safe as a plain key: the
+            // editing and search modes above return before reaching here, so
+            // this cannot swallow a letter meant for a node's text.
+            Key::B if !ctrl => {
+                self.show_sidebar = !self.show_sidebar;
+                EventResult::Consumed
+            }
             Key::S if ctrl => {
                 let name = sanitise_map_name(&self.active_map_ref().name);
                 self.picker.open_to_write(format!("{name}.outline"));
@@ -4990,6 +4998,25 @@ mod tests {
         let cr = app.corner_radii_for_shape(NodeShape::Ellipse, 8.0);
         let expected = CornerRadii::all(16.0);
         assert_eq!(cr, expected);
+    }
+
+    /// `B` closes the sidebar.
+    ///
+    /// `show_sidebar` gates the sidebar's draw and had no writer, so the panel
+    /// could never be closed.
+    #[test]
+    fn b_closes_the_sidebar() {
+        let mut app = MindMapApp::new();
+        assert!(app.show_sidebar, "control: the sidebar starts open");
+
+        app.handle_key(&KeyEvent {
+            key: Key::B,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::from("b"),
+        });
+
+        assert!(!app.show_sidebar, "B did not close the sidebar");
     }
 
     #[test]

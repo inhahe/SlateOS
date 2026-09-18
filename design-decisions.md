@@ -76892,10 +76892,20 @@ it cannot; an app which looked and found nothing may simply show nothing.
   normal view, and return. `apps/weather` does this in `render_cannot_fetch`;
   `apps/partmanager` in its `disks.is_empty()` branch.
 - **If the app can obtain data and currently has none**, draw the ordinary
-  empty view. `apps/notes`, `apps/reminders`, `apps/calendar` and
-  `apps/filesearch` are all correct to stay quiet: you can make a note, add a
-  reminder, add an event and run a search, so "empty" honestly means "you
-  haven't yet".
+  empty view. `apps/reminders`, `apps/calendar` and `apps/filesearch` are
+  correct to stay quiet: you can add a reminder, add an event and run a search,
+  so "empty" honestly means "you haven't yet".
+
+  **Correction, 2026-09-18 (same day): `apps/notes` was named here and does
+  not belong.** It cannot create a note -- `create_note`,
+  `update_note_title` and `update_note_content` all have no production caller,
+  and there is no import -- so its "No notes yet." falls in the *first* group
+  and should say it cannot. The premise was checked against its `TextEntry`,
+  which does handle typing, but only for search terms, tags and notebook
+  names. **The check this rule needs is not "does the app accept text" but
+  "can the user produce the thing the app is a list of"**, which is a question
+  about one specific object and cannot be answered by looking for an input
+  box. See `known-issues.md` -> `TD-C-NOTES-CANNOT-MAKE-A-NOTE`.
 
 **Deny the inference, not just the data.** The best of these lines do not stop
 at "no data"; they refuse the conclusion the blank space invites:

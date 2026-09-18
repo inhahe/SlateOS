@@ -591,6 +591,18 @@ pub enum InteractionMode {
 // Selection state
 // ============================================================================
 
+/// The thing a typed label is going onto.
+///
+/// An enum rather than two `Option`s: both set at once is a state with no
+/// meaning, and a label has to land on exactly one thing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LabelTarget {
+    /// A node's label.
+    Node(NodeId),
+    /// An edge's label.
+    Edge(EdgeId),
+}
+
 /// What the user currently has selected.
 #[derive(Clone, Debug, Default)]
 pub struct Selection {
@@ -759,6 +771,14 @@ pub struct DiagramApp {
     pub groups: Vec<Group>,
     /// Current selection.
     pub selection: Selection,
+    /// What is being relabelled, and what has been typed.
+    ///
+    /// This program could not label anything: `set_node_label` and
+    /// `set_edge_label` were written and callerless, and there were zero
+    /// `key.text` sites in the crate, so every box said what its template
+    /// said -- "Process", "Decision?", "CEO" -- permanently. A user's diagram
+    /// of their own system was always a diagram of ours.
+    pub editing: Option<(LabelTarget, String)>,
     /// Current interaction mode.
     pub mode: InteractionMode,
     /// Whether to snap to grid.
@@ -840,6 +860,7 @@ impl DiagramApp {
             layers,
             groups: Vec::new(),
             selection: Selection::default(),
+            editing: None,
             mode: InteractionMode::Select,
             snap_to_grid: true,
             grid_size: DEFAULT_GRID_SIZE,
@@ -963,6 +984,74 @@ impl DiagramApp {
     }
 
     /// Set the label text for a node.
+    /// Begin labelling the one selected node or edge.
+    ///
+    /// Exactly one: a label typed once cannot sensibly land on three boxes,
+    /// and picking one of them silently would be a guess.
+    pub fn begin_labelling(&mut self) -> EventResult {
+        let target = match (
+            self.selection.nodes.as_slice(),
+            self.selection.edges.as_slice(),
+        ) {
+            ([id], []) => LabelTarget::Node(*id),
+            ([], [id]) => LabelTarget::Edge(*id),
+            _ => return EventResult::Ignored,
+        };
+        // Seeded with what it says, because relabelling is usually an edit --
+        // and unlike `apps/slides` these are not prompts: "Process" is what
+        // the template meant, so a user renaming it to "Process payment"
+        // should not retype the word.
+        let existing = match target {
+            LabelTarget::Node(id) => self
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .map(|n| n.label.clone()),
+            LabelTarget::Edge(id) => self
+                .edges
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.label.clone()),
+        };
+        let Some(existing) = existing else {
+            return EventResult::Ignored;
+        };
+        self.editing = Some((target, existing));
+        EventResult::Consumed
+    }
+
+    /// Keys while a label is being typed.
+    fn handle_label_key(&mut self, key: &KeyEvent) -> EventResult {
+        let Some((target, mut buf)) = self.editing.clone() else {
+            return EventResult::Ignored;
+        };
+        match key.key {
+            // Both keys keep the label: losing the typing because the exit
+            // key was the cancelling one is the worst thing an editor can do.
+            Key::Escape | Key::Enter => {
+                match target {
+                    LabelTarget::Node(id) => self.set_node_label(id, buf),
+                    LabelTarget::Edge(id) => self.set_edge_label(id, buf),
+                }
+                self.editing = None;
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                buf.pop();
+                self.editing = Some((target, buf));
+                EventResult::Consumed
+            }
+            _ => {
+                if key.text.is_empty() || key.modifiers.ctrl {
+                    return EventResult::Ignored;
+                }
+                buf.push_str(&key.text);
+                self.editing = Some((target, buf));
+                EventResult::Consumed
+            }
+        }
+    }
+
     pub fn set_node_label(&mut self, id: NodeId, label: String) {
         self.save_undo();
         if let Some(node) = self.find_node_mut(id) {
@@ -2060,6 +2149,13 @@ impl DiagramApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
+        // Relabelling takes every key while it is up. `Backspace` is
+        // bound to *delete the selection* out here, so without this a typo
+        // while naming a box would delete the box.
+        if self.editing.is_some() {
+            return self.handle_label_key(key);
+        }
+
         let ctrl = key.modifiers.ctrl;
         match key.key {
             Key::S if ctrl => {
@@ -2080,6 +2176,9 @@ impl DiagramApp {
                 self.redo();
                 EventResult::Consumed
             }
+            // Naming the selected box or arrow. F2 is the conventional
+            // rename key; Enter is what opens a thing.
+            Key::F2 | Key::Enter => self.begin_labelling(),
             Key::Delete | Key::Backspace => self.delete_selection_reporting(),
             // Zoom.
             Key::Equals => {
@@ -2968,7 +3067,13 @@ impl DiagramApp {
             cmds.push(RenderCommand::Text {
                 x: cx - w * 0.4,
                 y: cy - fs / 2.0,
-                text: node.label.clone(),
+                // The buffer while this node is being relabelled: the
+                // commit is on the way out, so the node still holds the old
+                // word until then.
+                text: match &self.editing {
+                    Some((LabelTarget::Node(id), buf)) if *id == node.id => buf.clone(),
+                    _ => node.label.clone(),
+                },
                 color: self.palette.text,
                 font_size: fs,
                 font_weight: FontWeightHint::Regular,
@@ -3077,7 +3182,10 @@ impl DiagramApp {
             cmds.push(RenderCommand::Text {
                 x: mx,
                 y: my - 10.0,
-                text: edge.label.clone(),
+                text: match &self.editing {
+                    Some((LabelTarget::Edge(id), buf)) if *id == edge.id => buf.clone(),
+                    _ => edge.label.clone(),
+                },
                 color: self.palette.subtext0,
                 font_size: 11.0 * z,
                 font_weight: FontWeightHint::Regular,
@@ -3180,7 +3288,15 @@ impl DiagramApp {
             let nid = self.selection.nodes.first().copied().unwrap_or(0);
             if let Some(node) = self.find_node(nid) {
                 self.render_property_row(cmds, px, &mut row_y, "Shape", node.shape.label());
-                self.render_property_row(cmds, px, &mut row_y, "Label", &node.label);
+                // The buffer, not the node, while it is being relabelled. The
+                // canvas already shows the typing; a properties panel still
+                // reading the old word beside it is the same value disagreeing
+                // with itself on one screen.
+                let shown_label = match &self.editing {
+                    Some((LabelTarget::Node(id), buf)) if *id == node.id => buf.as_str(),
+                    _ => node.label.as_str(),
+                };
+                self.render_property_row(cmds, px, &mut row_y, "Label", shown_label);
                 self.render_property_row(cmds, px, &mut row_y, "X", &format!("{:.0}", node.x));
                 self.render_property_row(cmds, px, &mut row_y, "Y", &format!("{:.0}", node.y));
                 self.render_property_row(
@@ -3785,6 +3901,94 @@ mod tests {
         let mut app = DiagramApp::new(1280.0, 800.0);
         app.load_template(DiagramTemplate::Flowchart);
         app
+    }
+
+    fn types(text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: text.to_owned(),
+        })
+    }
+
+    /// A user can say what a box means.
+    ///
+    /// This program could not: `set_node_label` and `set_edge_label` were
+    /// written and callerless, and there were zero `key.text` sites in the
+    /// crate, so every box said what its template said -- "Process",
+    /// "Decision?", "CEO" -- permanently. A user's diagram of their own
+    /// system was always a diagram of ours.
+    #[test]
+    fn a_user_can_label_a_node() {
+        let mut app = DiagramApp::new(800.0, 600.0);
+        let id = app.add_node(NodeShape::Rectangle, 100.0, 100.0);
+        app.selection.nodes = vec![id];
+
+        app.handle_event(&press(Key::F2));
+        assert!(app.editing.is_some(), "F2 did not begin labelling");
+        for c in ["P", "a", "y"] {
+            app.handle_event(&types(c));
+        }
+        app.handle_event(&press(Key::Escape));
+
+        let node = app.nodes.iter().find(|n| n.id == id).expect("the node");
+        assert!(node.label.ends_with("Pay"), "the label is {:?}", node.label);
+    }
+
+    /// Backspace while labelling deletes a character, not the box.
+    ///
+    /// Outside this mode `Backspace` is bound to delete the selection, so
+    /// without the mode taking the keyboard first a typo while naming a box
+    /// would delete the box -- and the undo stack is the only thing that
+    /// would have told anyone.
+    #[test]
+    fn backspace_while_labelling_does_not_delete_the_node() {
+        let mut app = DiagramApp::new(800.0, 600.0);
+        let id = app.add_node(NodeShape::Rectangle, 100.0, 100.0);
+        app.selection.nodes = vec![id];
+        let before = app.nodes.len();
+
+        app.handle_event(&press(Key::F2));
+        app.handle_event(&types("x"));
+        app.handle_event(&press(Key::Backspace));
+
+        assert_eq!(app.nodes.len(), before, "Backspace deleted the node");
+        assert!(app.editing.is_some(), "and left the mode");
+    }
+
+    /// The canvas shows the label as it is typed.
+    #[test]
+    fn the_canvas_shows_the_label_as_it_is_typed() {
+        let mut app = DiagramApp::new(800.0, 600.0);
+        let id = app.add_node(NodeShape::Rectangle, 100.0, 100.0);
+        app.set_node_label(id, String::from("Old"));
+        app.selection.nodes = vec![id];
+
+        app.handle_event(&press(Key::F2));
+        for _ in 0..3 {
+            app.handle_event(&press(Key::Backspace));
+        }
+        for c in ["N", "e", "w"] {
+            app.handle_event(&types(c));
+        }
+
+        let shown: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            shown.iter().any(|t| t == "New"),
+            "the label being typed is nowhere on the canvas"
+        );
+        assert!(
+            !shown.iter().any(|t| t == "Old"),
+            "the old label is still drawn while it is being replaced"
+        );
     }
 
     fn press(k: Key) -> Event {

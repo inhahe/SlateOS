@@ -159844,8 +159844,12 @@ Practice Measures: 4
 ```
 
 The first is adjustable and says so. `practice_increment` and
-`practice_measures` **have no writers**, so practice mode always speeds up by
-ten every four measures. The line above them advertising its own keys is what
+`practice_measures` **had no writers**, so practice mode always sped up by ten
+every four measures. **Fixed 2026-09-18:** in the settings panel, `Left` and
+`Right` move the increment and a digit names the measure count outright --
+stepping to nine with an arrow is eight keypresses for a number the user
+already knows. Both labels now name their keys, as the target line already
+did. 74 tests, up from 69. The line above them advertising its own keys is what
 makes the other two read as settings rather than as a description -- they are
 laid out as a group, and one third of the group works.
 

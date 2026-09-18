@@ -159075,3 +159075,44 @@ Budget for discovering, not for plumbing.
 exports one file at a time: `photomanager` (import a directory of
 photographs), `musicplayer` and `podcast` (a library folder), `backup` (a
 source directory). None of them is blocked on anything else.
+
+## `TD-C-NOTES-CANNOT-TAG-OR-DELETE-A-NOTE` (lane C, 2026-09-17)
+
+**In short:** `apps/notes` offers "Tagging system with tag-based filtering" in
+its feature list, and there is no way to put a tag on a note. There is also no
+way to delete one. Both operations are written, tested, and have no caller
+outside the test module -- the same shape as `apps/photomanager`, which took a
+session to wire up and had the same list of symptoms.
+
+**Verified, not inferred:**
+
+| Claim | State |
+|---|---|
+| tags on a note | `NotesApp::add_tag_to_note` and `remove_tag_from_note` have no production caller. The only other writer of `Note::tags` is `Note::add_tag`, reached from that method and from `seed_sample_content`, which is itself test-only. |
+| tag filtering | `set_tag_filter` is the only writer of `active_tag_filter`, and has no production caller. |
+| deleting a note | `delete_note` has no production caller. The only other route is `delete_notebook`'s cascade, which has no production caller either. |
+
+**The trap, which is the transferable part.** The probe that found these also
+flagged `pub fn search` as test-only, and search *works*. The application
+filters through a different path -- `search_query` is written directly by the
+key handler at lines 2029 and 2039 and read by `matches_search` -- so the
+unreachable method is a second door to a room that already has one.
+
+**An unreachable method does not imply an unreachable feature.** Going the
+other way is safe (a feature with no reachable writer is genuinely dead), but
+the method-level measurement is a *candidate list*, and each candidate has to
+be chased to the feature before it means anything. I nearly filed "notes
+cannot search", which is false.
+
+**The method, for whoever picks this up.** For each `pub fn` on the app type,
+count call sites before the `^mod tests` line. Note `^mod tests` and not the
+first `#[cfg(test)]`: an item-level attribute appears hundreds of lines
+earlier in several of these files, and cutting there hides most of the
+application -- see the entry above about three checkers doing exactly that.
+
+**Not verified, and still candidates:** `restore_version`, `resolve_links`,
+`build_backlinks`, `rename_notebook`, `move_note`, `update_note_title`,
+`remove_checklist_item`. Each is listed by the probe as test-only and each
+needs the same chase before it can be called a defect. The feature list claims
+version history with restore, and wiki-style `[[Note Title]]` linking, so two
+of those are worth starting with.

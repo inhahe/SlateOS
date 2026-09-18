@@ -160230,6 +160230,16 @@ not "be careful" -- it is knowing the specific shapes.
 
 | 8 | **One file vs the crate.** Every sweep run on 2026-09-18 globbed `apps/*/src/main.rs`. **12 of 141 apps have more than one source file** -- `explorer` has 8, `settings` 5, `editor` 4. | Concluded `apps/editor` "has zero typing sites" and could not be typed in. Its typing lives in `input.rs`. A text editor was one sentence away from being filed as unable to accept text. |
 
+| 9 | **A function used as a value.** `self.moving(shift, Document::move_up)` passes the function; it never writes `move_up(`. Every "who calls this" query here counts `name(`, so a callback looks dead. | Concluded `apps/editor`'s cursor could not move up or down. It moves. Its arrow keys pass the movement functions to a shared `moving` helper, which is *better* code than calling each directly -- so the query is most wrong about the tidiest implementations. |
+
+**The ninth was found the same way as the eighth -- by reading an app the query
+had just accused** -- and it prompted an audit of every "no caller" claim acted
+on that day (`notes`, `slides`, `diagram`, `explorer`, `rssreader`, `netscan`,
+`pdfviewer`: 15 functions). **None is passed as a value anywhere**, so all of
+them hold. The check is one line and belongs in any future sweep: count
+occurrences of the bare name against occurrences of `name(`, and read the
+difference.
+
 **The eighth is the one that should worry a reader of this entry most**, because
 it silently narrows every other row: a search that is *correct* about the file
 it read is still wrong about the program when the program is bigger than the

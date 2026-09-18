@@ -33,6 +33,39 @@ use std::process::ExitCode;
 // ============================================================================
 
 const TOOLBAR_HEIGHT: f32 = 40.0;
+
+/// Every key this program answers, and what it does.
+///
+/// Twenty-one bindings and, until this list existed, no way to learn one but
+/// reading the source. `B` and `S` are the worst of them: each is the only way
+/// to bring back the bar it hides, so pressing one once removes the thing that
+/// would have said how to undo it. A toolbar cannot advertise the key that
+/// hides the toolbar.
+///
+/// **Each row is a key this program actually answers**, which is not a
+/// property the list has on its own: `every_advertised_key_does_something`
+/// walks it, reads each label with `guitk::shortcut` and presses every key it
+/// names. `apps/rssreader` shipped an overlay of twenty-one shortcuts of which
+/// about four worked.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Left / Right", "Previous / next image"),
+    ("Home / End", "First / last image"),
+    ("Ctrl+= / Ctrl+-", "Zoom in / out"),
+    ("Ctrl+0", "Fit the image to the window"),
+    ("Ctrl+1", "Actual size"),
+    ("Ctrl+R / Ctrl+Shift+R", "Rotate right / left"),
+    ("Ctrl+H / Ctrl+V", "Flip across / down"),
+    ("I", "Show or hide the image details"),
+    ("T", "Show or hide the thumbnails"),
+    ("B", "Show or hide the toolbar"),
+    ("S", "Show or hide the status bar"),
+    ("F5", "Start or stop the slideshow"),
+    ("Space", "Pause or resume the slideshow"),
+    ("F11", "Full screen"),
+    ("Delete", "Delete this image"),
+    ("Escape", "Leave full screen or the slideshow"),
+    ("F1 / ?", "This list"),
+];
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 const INFO_PANEL_WIDTH: f32 = 280.0;
 const THUMBNAIL_STRIP_HEIGHT: f32 = 80.0;
@@ -501,6 +534,8 @@ pub struct ViewerState {
     pub show_info_panel: bool,
     pub show_thumbnails: bool,
     pub show_toolbar: bool,
+    /// Whether the shortcut list is up.
+    pub show_help: bool,
     pub show_status_bar: bool,
 
     // Slideshow
@@ -556,6 +591,7 @@ impl ViewerState {
             show_info_panel: false,
             show_thumbnails: false,
             show_toolbar: true,
+            show_help: false,
             show_status_bar: true,
             slideshow: SlideshowState::default(),
             dragging: false,
@@ -1083,6 +1119,27 @@ impl ViewerState {
                 true
             }
 
+            // `?`, which is Shift and the slash key.
+            // The shortcut list. `F1` raises it in every app in this tree,
+            // including `apps/spreadsheet`, where `?` is a character the
+            // program has to be able to type into a cell -- so somebody who
+            // has learned one key is never stuck. `?` as well, wherever the
+            // program is not obliged to type one.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                true
+            }
+            Key::Slash if shift => {
+                self.show_help = !self.show_help;
+                true
+            }
+            // Before the plain `Escape` arm below, which would otherwise take
+            // this and leave the list up while exiting fullscreen.
+            Key::Escape if self.show_help => {
+                self.show_help = false;
+                true
+            }
+
             // Escape exits fullscreen or slideshow
             Key::Escape => {
                 if self.slideshow.active {
@@ -1257,6 +1314,20 @@ pub fn render(state: &ViewerState) -> RenderTree {
     // Status bar (hidden in fullscreen)
     if state.show_status_bar && !state.fullscreen {
         render_status_bar(state, &mut tree, status_y);
+    }
+
+    // The shortcut list over everything, because it is the one thing a reader
+    // asked for explicitly -- and because two of the keys it names hide the
+    // bars it would otherwise have to fit between.
+    if state.show_help {
+        guitk::shortcut::render_card(
+            &mut tree,
+            &state.palette,
+            (state.window_width, state.window_height),
+            0.0,
+            SHORTCUTS,
+            "F1 or ? closes this",
+        );
     }
 
     tree
@@ -2061,6 +2132,99 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// A list on screen and the handler behind it are two copies of one fact,
+    /// and they drift: `apps/rssreader` shipped an overlay of twenty-one
+    /// shortcuts of which about four worked. The label is read by
+    /// `guitk::shortcut` rather than matched against a table written beside it
+    /// here -- that table would be a third copy, drifting from both.
+    ///
+    /// The property is "some reachable state answers this key", not "this key
+    /// is taken right now": `Escape` means nothing until there is a full
+    /// screen or a slideshow to leave, and declining from its own arm is
+    /// answering.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|state| state.handle_key_event(&stroke));
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and no viewer answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Viewers chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<ViewerState> {
+        let plain = ViewerState::new(1024.0, 768.0);
+
+        // Full screen, which is the one state `Escape` has anything to leave.
+        let mut full = ViewerState::new(1024.0, 768.0);
+        full.fullscreen = true;
+
+        vec![plain, full]
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/netscan`'s `wol_note` was written by the
+    /// model and drawn by nothing for three commits with every model-level
+    /// test passing.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert!(
+            !help_text(&state).contains("? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        let mut ask = KeyEvent {
+            key: Key::Slash,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+        ask.modifiers.shift = true;
+        assert!(state.handle_key_event(&ask));
+
+        let shown = help_text(&state);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        assert!(state.handle_key_event(&KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }));
+        assert!(
+            !help_text(&state).contains("? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn help_text(state: &ViewerState) -> String {
+        render(state)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
 
     /// Every colour the viewer's chrome draws comes from the user's palette.
     ///

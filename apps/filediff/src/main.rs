@@ -811,6 +811,44 @@ pub enum Side {
     Right,
 }
 
+/// Every key this program answers, and what it does.
+///
+/// Twenty-six bindings, none of them anywhere on screen. `J` and `K` are the
+/// two worst: they are vim's movement keys, which is a thing you either
+/// already know or cannot possibly guess, and nothing in the window hinted
+/// that this program had opinions about vim. The `Alt` merge keys are next --
+/// accepting a side is the reason a diff tool with a merge mode exists, and it
+/// was reachable only by somebody who had read the handler.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`, which reads each label with
+/// `guitk::shortcut` and presses every key it names.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Up / Down", "Scroll a line"),
+    ("K / J", "Scroll a line, the vim way"),
+    ("PageUp / PageDown", "Scroll a screen"),
+    ("Ctrl+Home / Ctrl+End", "Jump to the top / bottom"),
+    ("F7 / F8", "Previous / next change"),
+    ("Ctrl+P / Ctrl+N", "Previous / next change"),
+    ("Tab", "Next hunk, for merging"),
+    (
+        "Alt+Left / Alt+Right",
+        "Take this hunk from the left / right side",
+    ),
+    ("Alt+B", "Take both sides of this hunk"),
+    ("Ctrl+O", "Open a file into the left pane"),
+    (
+        "Ctrl+1 / Ctrl+2 / Ctrl+3",
+        "Side by side / inline / unified view",
+    ),
+    ("Ctrl+Shift+S", "Scroll the two panes together, or not"),
+    ("Ctrl+F", "Search"),
+    ("F3", "Find the next match"),
+    ("Alt+W", "Ignore whitespace, or stop ignoring it"),
+    ("Alt+C", "Ignore case, or stop ignoring it"),
+    ("F1", "This list"),
+];
+
 pub struct FileDiffApp {
     /// The open picker.
     ///
@@ -866,6 +904,8 @@ pub struct FileDiffApp {
     pub scroll_right: f32,
     /// Whether scroll is synchronized between panels.
     pub sync_scroll: bool,
+    /// Whether the shortcut list is up.
+    pub show_help: bool,
     /// Index of the current change being viewed.
     pub current_change_index: usize,
     /// Indices of change edits in the edit list (for navigation).
@@ -927,6 +967,7 @@ impl FileDiffApp {
             scroll_left: 0.0,
             scroll_right: 0.0,
             sync_scroll: true,
+            show_help: false,
             current_change_index: 0,
             change_indices: Vec::new(),
             ignore_opts: IgnoreOptions::default(),
@@ -1195,6 +1236,17 @@ impl FileDiffApp {
 
     /// Handle keyboard input.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // The shortcut list, before the search box below can turn the
+        // keystroke into text. `F1` rather than `?`, because the search box
+        // takes `key.typed()` and a `?` belongs in somebody's query.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if key.key == Key::Escape && self.show_help {
+            self.show_help = false;
+            return EventResult::Consumed;
+        }
         if self.search.visible {
             return self.handle_search_key(key);
         }
@@ -1541,6 +1593,19 @@ impl FileDiffApp {
 
         // The picker last, so it draws over both panes rather than under them.
         tree.extend(self.picker.render(&self.palette, self.width, self.height));
+
+        // And the shortcut list over even that, because it is the one thing a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (self.width, self.height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         tree
     }
@@ -4872,6 +4937,132 @@ mod tests {
             plain + current > 0,
             "the hit is still there, and still drawn"
         );
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table beside it here -- a third copy of the same fact drifts from both
+    /// the list and the handler, which is how `apps/rssreader` came to
+    /// advertise twenty-one shortcuts of which about four worked.
+    ///
+    /// The property is "some reachable state answers this key", not "this key
+    /// is taken right now". This program opens with *no files*, where nothing
+    /// can scroll and there are no changes to step through, so the states
+    /// below load a comparison first: a guard run against a fresh window would
+    /// have called most of this program dead.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|app| app.handle_key(&stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Comparisons chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<FileDiffApp> {
+        // Two files that differ, long enough to scroll, on a short window so
+        // there is somewhere to scroll *to*.
+        let differing = || {
+            let mut app = FileDiffApp::new();
+            let mut left = String::new();
+            let mut right = String::new();
+            for i in 0..200 {
+                left.push_str(
+                    "same
+",
+                );
+                right.push_str(if i % 40 == 7 {
+                    "changed
+"
+                } else {
+                    "same
+"
+                });
+            }
+            app.load_files("a", &left, "b", &right);
+            app.height = TOOLBAR_HEIGHT + STATUS_BAR_HEIGHT + LINE_HEIGHT * 10.0;
+            app
+        };
+
+        let top = differing();
+
+        // ...scrolled down, so `Up`, `K`, `PageUp` and `Ctrl+Home` have
+        // somewhere to go back to.
+        let mut scrolled = differing();
+        for _ in 0..30 {
+            scrolled.handle_key(&key(Key::Down));
+        }
+
+        // ...in another view, so `Ctrl+1` has one to return from: setting the
+        // mode already in force is declined, and side-by-side is the default.
+        let mut inline = differing();
+        inline.handle_key(&ctrl(Key::Num2));
+
+        // ...searching, with a query that matches, which is the one state
+        // `F3` can act in.
+        let mut searching = differing();
+        searching.search.visible = true;
+        searching.search.query = "changed".to_string();
+        searching.rerun_search();
+
+        vec![top, scrolled, inline, searching]
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/rssreader`'s overlay drew twenty of its
+    /// twenty-one rows for weeks, because its box was a third quantity
+    /// agreeing with neither the list nor the handler.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = FileDiffApp::new();
+        assert!(
+            !help_text(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_key(&key(Key::F1));
+        let shown = help_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        app.handle_key(&key(Key::Escape));
+        assert!(
+            !help_text(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn help_text(app: &FileDiffApp) -> String {
+        app.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// A key with Ctrl held.
+    fn ctrl(k: Key) -> KeyEvent {
+        let mut ev = key(k);
+        ev.modifiers.ctrl = true;
+        ev
     }
 
     fn key(k: Key) -> KeyEvent {

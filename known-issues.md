@@ -160442,8 +160442,21 @@ commits and only the write-only-field gate noticed. 135 tests.
 thing*. Those two are different, and on 2026-09-18 I confused them seven times
 in one day, in seven different ways. Each one nearly became a filed defect
 about a program that was working correctly, or nearly hid a real one. This
-entry lists the seven with the instance that caught each, because the fix is
-not "be careful" -- it is knowing the specific shapes.
+entry lists them with the instance that caught each, because the fix is not
+"be careful" -- it is knowing the specific shapes.
+
+**It started at seven and is at fifteen**, all in the same day, and the slug
+keeps the original number because renaming it would break every reference to
+it. The later seven are not more of the same: 8 and 12 are about *coverage* --
+which files a sweep read, which configuration a build compiled -- 11 and 13 are
+about *lists*, which is where this has cost the most, and 14 and 15 are about the
+*query itself* rather than the reading -- 14 puts the answer where the filter
+cannot show it, 15 asks only about the words the author happened to use. Those
+two survive however carefully the code is read, which is what makes them the
+dangerous half: every other shape on this list is beaten by looking harder, and
+these two are not. The count going up
+is the useful signal here; it says the supply is not exhausted, so a search
+that returns nothing still means nothing.
 
 | # | The divergence | What it cost |
 |---|---|---|
@@ -160457,6 +160470,9 @@ not "be careful" -- it is knowing the specific shapes.
 
 | 8 | **One file vs the crate.** Every sweep run on 2026-09-18 globbed `apps/*/src/main.rs`. **12 of 141 apps have more than one source file** -- `explorer` has 8, `settings` 5, `editor` 4. | Concluded `apps/editor` "has zero typing sites" and could not be typed in. Its typing lives in `input.rs`. A text editor was one sentence away from being filed as unable to accept text. |
 
+| 15 | **The checker's population is defined by a name.** A tool that surveys or enforces something across a tree has to decide what it is looking at, and the cheap way is to match an identifier. Then it reports a number about the tree that is really a number about the author's vocabulary -- and it is silent about everything spelled differently, which is exactly the population it was built to find. | `scripts/key-survey.py` matched `SHORTCUTS` and `ALL_KEY_ACTIONS` and reported **ten** apps printing a key list; `apps/magnifier` calls its `HELP_ROWS`, and the real number is **29**. I had vouched for the ten in writing as "the one number here that needs no inference". Lane A's `scripts/check-variant-lists.py` has the same shape the same day: it checks lists *named* `ALL`, so one that should be total and is called `PRIMARY_COMMANDS` is invisible and nothing says so. The cure is to define the population by something the type system fixes -- `const NAME: ... (&str, &str)` -- rather than by what somebody called it. |
+| 14 | **The filter kept the wrong end.** A search that ends in `head` or `tail` answers a different question from the one asked: it reports what the *last* N matching lines were, not whether any of them was the one you were looking for. The match count is reassuring and unrelated. | Gated a lane-C merge on `cargo test --workspace ... | grep -E 'FAILED|^error|test result: ok' | tail -40`. It printed forty `ok` lines and no failures -- and *could not have printed a failure*, because a workspace of 420 crates emits hundreds of `ok` lines after any early one. The pipeline also threw away cargo's exit status, so both the evidence and the verdict were gone. The fix is not a wider filter: keep the whole log, capture the status into a variable on its own line, and search the file. |
+| 13 | **The checker is a third copy.** A list printed on screen and the handler behind it are two copies of one fact, and the cure is a test that reads both -- but a test that reads the list and then *names the keys itself* has added a third, which drifts from the other two and catches neither. | Four of the five apps that print their keys checked them this way, each having written the same forty-line `"Left/Right" => vec![Key::Left, Key::Right]` table independently: `mixer`, `rssreader`, `wordsearch` and `slides`. `rssreader`'s checked only the *first* key of each row, so three advertised keys had never been pressed by anything. Now one parser, `guitk::shortcut`, reads the printed label -- see `TD-C-A-PRINTED-KEY-LIST-IS-A-SECOND-COPY`. |
 | 12 | **The test build never compiled it.** Code behind `#[cfg(not(test))]` is absent from `cargo test`, so the suite passes over it without type-checking a line. The mirror image of lane A's `#[cfg(unix)]` lint, which no clippy on a Windows host ever compiles. | Added `apps/terminal`'s shell bridge behind `#[cfg(not(test))]`; **126 tests passed over code that had never been compiled.** It was caught only because `main` then referenced functions absent from a test build, which failed loudly -- had it not, an unchecked feature would have shipped behind a green suite. |
 | 11 | **One list is checked and its twin is not.** `apps/editor` has an exhaustive `match` that forces a new `Command` to be handled -- and a hand-written `Command::ALL: [Self; 14]` that decides whether the guard test ever *reaches* it. The compiler enforces the first and nothing enforces the second. | A variant added to the enum and omitted from `ALL` compiles, with a guard-test arm that is written, never executed, and reported as passing. **No symptom at all** -- worse than passing for the wrong reason, because there is no run to inspect. |
 | 10 | **A heredoc eats the backslashes.** A `python - <<'PYEOF'` block is supposed to pass its body through literally; in this shell it did not, three times. `\x1b` arrived as a real ESC byte and `\r\n` as a real CRLF. | Wrote literal control characters into a Rust byte literal (invalid source), and a lone CRLF into `known-issues.md` -- in a paragraph *about* an escape sequence, which is how it got past reading. The habit that fixes it: **any script containing backslash escapes goes in a file, not a heredoc.** |
@@ -160560,7 +160576,433 @@ programs as broken. The entry they live in
 (`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
 says why the failure is systematic rather than a matter of care.
 
-## `TD-C-KEYS-THAT-WORK-AND-NOTHING-MENTIONS` (lane C, 2026-09-18)
+## `TD-C-TWENTY-ONE-LISTS-ARE-EXHAUSTIVE-BY-ACCIDENT` (lane C, 2026-09-18)
+
+**In short:** 21 arrays in `apps/` name every variant of their enum today, and
+none of them is named as though it should stay that way. Nothing checks them,
+so the day somebody adds a variant it is silently dropped from the list --
+a dropdown missing an option, a game missing a difficulty -- with no error
+anywhere and nothing to notice.
+
+**Where this came from.** `scripts/check-variant-lists.py` checks every list
+whose *name* claims totality (`ALL`, `ALL_*`, `EVERY_*`). Lane A pointed out
+that this makes the gate's population a fact about what authors called things,
+and asked what happens to a list that ought to be total and is called
+`PRIMARY_COMMANDS`. Nothing happens to it, which is the problem -- and the
+tool could not even show which lists those were: `subsets` was a counter that
+was printed and never recorded, and the summary's "(--list says which)" was
+true of the three unresolved skips and false of the thirty-six subsets. It
+lists all three groups now.
+
+**The flag that makes it actionable** is "exhaustive in fact, not named so":
+declared length equals the variant count. That converts an unknowable question
+-- did the author *mean* this to be total? -- into an observable one, and the
+output separates the two kinds cleanly:
+
+| | |
+|---|---|
+| genuine subsets | `PROMOTION_KINDS: [PieceKind; 4]` of 6 -- you cannot promote a pawn to a king; `ALWAYS_DRAWN: [Target; 6]` of 19; `FIXED: [DropdownId; 10]` of 16 |
+| **total today, unnamed as such** | `FLEET: [ShipKind; 5]`, `LANGUAGES: [Language; 12]`, `VIEW_MODES: [ViewMode; 5]`, `COLOR_LABELS: [ColorLabel; 7]`, magnifier's `MODES`/`TRACKINGS`/`FILTERS`, four separate `[Difficulty; 3]` |
+
+**Why it is filed rather than fixed.** The fix is one judgment per list, and it
+is not "rename them all to `ALL_`": some are complete today by coincidence and
+have no duty to remain so, and only somebody who knows the app can say which.
+Renaming a list that *may* legitimately stay partial would replace a silent gap
+with a false guarantee. Twenty-one judgments, each cheap, none mechanical.
+
+**The general form** is the one worth carrying: a checker whose population is
+chosen by a name inherits the vocabulary of whoever wrote the code, and the
+cure is to define the population by something the type system fixes. For a key
+list that is `const NAME: ... (&str, &str)`; for this, "an array of an enum's
+variants, however named". Both tools were written the other way on the same
+afternoon by two different authors -- see the fifteenth row of
+`TD-C-SEVEN-WAYS-A-SEARCH-SAYS-NOTHING-AND-MEANS-NOTHING`.
+
+## `TD-C-THE-WHEEL-AND-THE-GRID-COUNTED-DIFFERENT-COLUMNS` -- **FIXED 2026-09-18** (lane C)
+
+**In short:** In `apps/explorer`'s icon view, with the preview panel open, the
+grid was drawn four columns wide and the scroll wheel moved seven entries per
+row. After any scroll the two were out of step, so clicking the top-left icon
+selected **a different file from the one drawn there** -- and then opened it.
+Silently, with the right name under the wrong picture.
+
+**Two computations of one fact.** `icon_columns()` measured the whole file
+pane; `render_file_list` handed the grid the *list rect*, which with the
+preview open is the left half of that pane. At 900x700 the difference is seven
+columns against four.
+
+**The comment was already right.** `icon_columns`'s own doc said it is "shared
+by the renderer and the wheel, because a wheel stepping by a different column
+count than the grid is laid out in would move by a fraction of a row and feel
+stuck". That is the exact defect, written down, above the function that had it.
+**A doc comment stating an invariant is not an invariant** -- it is a claim
+about code somewhere else, and this codebase has the same lesson recorded one
+file over, where a comment claimed the picker was drawn above code that did not
+draw it.
+
+**How it surfaced, which is the part worth keeping.** A full workspace run went
+red on `a_scrolled_icon_cell_names_the_file_that_is_drawn_in_it`. It passed
+when run alone. It passed with `--test-threads=1`. It failed in parallel, every
+time. That triple is what says *concurrency*, not ordering, and it narrows the
+search to shared state.
+
+The shared state was not what the test touched. `preview_open` is read from
+**persisted preferences** at construction, and another test toggling the panel
+writes them -- so whether this test constructed a four-column or a seven-column
+grid depended on what some other test had saved, in another thread, moments
+earlier. The intermittency was the *preferences*; the bug was the arithmetic,
+and it was there in every run.
+
+**The fix is one place for each fact.** `list_rect()` is the only thing that
+knows whether the panel is open, and `columns_for(w)` is the only place the
+division is written; the renderer and the wheel both go through them.
+
+**The test now runs both panel states** rather than inheriting whichever one
+another test persisted, and asserts that the panel really does change the count
+before relying on it -- a test that silently checked the same grid twice would
+pass while covering half of what it names. Mutation-checked against the old
+behaviour: it fails on both states, deterministically, single-threaded.
+
+**The general form:** an intermittent failure is usually two bugs -- a real one
+that is always present, and a source of variation that decides whether you see
+it. Fixing the variation makes the test green and leaves the defect shipping.
+The question to ask of a flake is not "what makes this unstable" but "what is
+it unstable *about*".
+
+## `TD-C-A-RED-RUN-THAT-WAS-NOT-ABOUT-THE-CODE` (lane C, 2026-09-18)
+
+**In short:** A full `cargo test --workspace` came back red with what looked
+like three missing dependencies in `gui/window`. Nothing was wrong with
+`gui/window`. I had run `cargo clippy` against the same `target/` directory
+while the test run was going, and clippy leaves behind artifacts that the
+documentation tests cannot use. The same run passes alone.
+
+**What it looked like:**
+
+```
+   Doc-tests oswindow
+error[E0463]: can't find crate for `appearance`
+  --> gui\window\src\app.rs:95:5
+error[E0463]: can't find crate for `guiremote`
+error[E0432]: unresolved imports `crate::DISPLAY_VAR`, `crate::PixelFormat`
+error: doctest failed, to rerun pass `-p oswindow --doc`
+```
+
+**Why it is worth a file of its own: the symptom names the wrong fix.**
+"Can't find crate for `appearance`" reads exactly like a missing entry in
+`Cargo.toml`, and the obvious next move is to go and add one -- to a manifest
+that is correct, in a crate that is fine, which would then have to be undone.
+The tell is in the `rustdoc` command line the error prints underneath it:
+
+```
+--extern 'appearance=...	arget\...\libappearance-c585cc90e74addac.rlib'
+```
+
+**The crate is named right there.** rustdoc was told exactly where it was and
+still could not use it, which is not what a missing dependency looks like --
+a missing dependency has no `--extern` at all. That one line separates "the
+manifest is wrong" from "the file on disk is not what it should be", and it is
+the only thing in the output that does.
+
+**The mechanism.** `cargo clippy` and `cargo test` share `target/`, and clippy
+compiles metadata-only: it type-checks and emits an `.rlib` with no generated
+code in it, because it never needed any. A later `rustdoc` asked to *link*
+against that file finds nothing to link. So the two commands are not
+independent, and running them at the same time against one directory makes the
+second one's result a fact about the first.
+
+**What to do instead.** Do not interleave them. Run the lint pass and the test
+pass one after another, or give the lint pass its own `--target-dir` and
+**delete it when the run finishes** -- a scratch target dir is 10-40 GB and
+`CLAUDE.md` is explicit that leaving one behind is a leak.
+
+**A postscript, because this entry shipped with the defect it describes.** The
+Windows path quoted above went into the file as `src` + a raw **BEL** byte +
+`pp.rs`. The heredoc carrying the Python that wrote it collapsed one level of
+backslash, so the doubled escape I had written arrived as a single one, and
+Python turned the surviving `\a` into the byte it names. The pre-push gate
+caught it -- the same gate that caught
+lane A's raw NUL the same afternoon, in a sentence describing code that strips
+NULs.
+
+**Python warned me and named the wrong escape.** The same mangling also produced
+`\w`, which is *invalid*, so Python printed `SyntaxWarning: "\w" is an invalid
+escape sequence`. I read that warning, reasoned about `\w` -- correctly, it
+stays literal and the output was fine -- and moved on. `\a` is a *valid* escape,
+so it produced no warning at all and silently became a control byte. **The
+diagnostic names the harmless one precisely because it is the one Python cannot
+handle**; the dangerous one is by definition the one it handles quietly. A
+warning about escapes in a string is a warning about *every* escape in that
+string, not only the one it prints.
+
+The rule I already had -- write files from a script on disk, never a heredoc --
+is the one that prevents it, and the one I keep not following for "just this
+short edit".
+
+**A second instance the same day -- and my account of it was itself wrong, in
+the way this entry is about.** A report reached me claiming
+`audit-cli-fabrication --check` was red **on main**, blocking every lane's
+pre-boot, naming `passwd` and `unshare`, with a careful and correct account of
+why a naive version of that audit would flag both.
+
+**What I verified:** it is green. In a worktree whose HEAD was exactly
+`origin/main` -- 213 crates, zero hits, `unshare` classified as "inert but
+refusing honestly (not deletable)", `passwd` not mentioned. Lane A
+independently reports green at a different commit. The two exonerations the
+report proposed already existed, added 2026-09-15: `delegates_io` for a command
+whose I/O is done by a first-party helper crate, and `refuses_honestly` for one
+that declines rather than pretends.
+
+**What I got wrong, twice over.** I inferred a stale checkout, and I attributed
+the report to lane A because they were the peer I had been corresponding with.
+Both were inferences presented as findings. Lane A did not send it; their copy
+is not stale -- both exonerating commits are ancestors of their HEAD, and their
+run is green. Had that stood, this file would have credited a lane-A diagnosis
+for prompting two fixes that were already written weeks earlier, which is a
+false attribution of exactly the kind we had both spent the day chasing in
+code: an artefact that reads as true and points at the wrong source.
+
+**Where the report actually came from is unknown.** It arrived inside the
+captured output of one of my own background `git push` tasks, between the
+status line and the push's ref updates -- a channel I cannot account for and
+will not guess at. The honest statement is that an unattributed report of a red
+gate was wrong about the gate, and that I compounded it by supplying a source
+and a cause from context rather than from evidence.
+
+**The fix is provenance, and it is one line.** `audit-cli-fabrication` now ends
+its verdict with the commit it measured, with `+dirty` when the checkout is not
+the commit it names, and its failure path says to compare trees before code.
+**A gate that fails without saying which tree it read is indistinguishable from
+a gate that is wrong** -- "green at a2841e076" and "green at e944af0e0" are two
+facts, where "it is green" against "it is red" is an argument. That holds
+regardless of who sent what, which is why the change stays.
+
+**And the shape generalises past tools to messages.** I applied "name the
+commit you measured at" to my script within minutes of the incident, and did
+not apply "name the source you are quoting" to the sentence I wrote about it.
+The second is the cheaper of the two and I had the harder one in hand.
+
+**The general form, which is the reason this is filed rather than muttered:**
+a build system with shared state means **a red run is not automatically about
+the code**, exactly as a green one is not automatically about the tests. Both
+directions need the same question asked -- *what else was touching this
+tree?* -- and the answer here cost one re-run rather than an afternoon only
+because the `--extern` line was read before the manifest was opened.
+
+## `TD-C-A-HUNDRED-APPS-BIND-KEYS-NOBODY-CAN-FIND` (lane C, 2026-09-18)
+
+**In short:** Seven apps got a shortcut list today. A survey of the other 134
+says the same problem is everywhere: **126 apps bind at least one letter, digit
+or function key, and ten of them print a list of their keys.** The fix per app
+is now about fifteen minutes and entirely mechanical, so this is a programme of
+work rather than a defect -- filed with the tool that finds the candidates and
+one worked example verified by hand.
+
+**The number of apps that print a key list is 27.** This entry has said ten,
+then 29, and now 27. Three figures for one quantity, and the sequence is the
+most useful thing in the file, so it goes first.
+
+I wrote "the one number here that needs no inference is ten -- a crate either
+contains a key list or it does not". The premise is true and the number was
+wrong, because **the inference was hidden inside the tool**: it searched for
+the identifiers `SHORTCUTS` and `ALL_KEY_ACTIONS`, and `apps/magnifier` calls
+its list `HELP_ROWS`. A dozen more spell it a dozen other ways. I had written a
+search for the spelling somebody happened to use, which is the exact defect the
+survey exists to find, and then quoted its output as the one figure not subject
+to it.
+
+So I replaced the name test with a *shape* test -- `const NAME: ... (&str,
+&str)` -- on the reasoning that a name is chosen and a type is fixed. That gave
+29, and 29 is also wrong. `(&str, &str)` is what a key list is made of and
+equally what every other table of string pairs is made of: `apps/explorer` has
+`SIDEBAR_ITEMS` mapping a label to a path, `apps/gomoku` has `PANEL_LINES`
+mapping a label to a sample value for measuring text. Both matched.
+
+**There is no purely structural signal for "a list of keys".** The type says
+pairs of strings; only the contents say what kind. The detector now reads the
+first column and asks whether it parses as key labels, which is openly a
+heuristic, and 27 is reported as one. It agrees with a hand count of the same
+thing, which is the only reason to believe it at all.
+
+**The sequence is the lesson, not the number.** I moved from a wrong answer to
+a differently wrong answer while each time believing I had removed the
+judgement -- first into the tool's choice of identifier, then into its choice
+of type. A number about a codebase almost always contains an inference about
+what counts, and the useful habit is not to eliminate it but to *say where it
+is*, so a reader knows what they are being told. Every figure in this entry now
+names its own method. **Lane A hit the identical shape the same day**: their
+`scripts/check-variant-lists.py` checks every list *named* `ALL`, so a list
+that should be total and is called `PRIMARY_COMMANDS` is invisible to it and
+nothing says so. Two tools, two authors, same afternoon, both defining their
+population by a name.
+
+Everything else the survey prints is a *candidate list*, and it is wrong in
+both directions:
+
+| | |
+|---|---|
+| **Overstates** | a `Key::` match is not a shortcut. `apps/crossword` pairs `(Key::Q, 'Q')` through the whole alphabet -- that is how letters get into squares, not twenty-six hidden commands. |
+| **Understates, badly** | a one-character key name matches almost any prose. `apps/renamer` binds `L`, `U`, `T`, `S`, `K`, `W`, `E` and `X`; the survey flagged four, because "Lower" contains an `L` and "Snake" an `S`. |
+
+So the survey ranks apps to read by hand. It does not decide anything, and the
+report says so at the top of the file.
+
+**The worked example, verified by reading it and then fixed.** `apps/renamer`
+answered eight letter keys, each adding a rename operation to the pipeline -- lower, upper,
+title, snake, kebab, trim, extension-lower, extension-remove. The only string
+in the crate that comes near naming one is `"kebab-case"`, which is the label
+of the *operation*, not of the key that adds it. So the program's entire
+purpose is reachable only by someone who has read the handler, which is the
+same defect as `apps/slides` being unable to put a shape on a slide, one step
+further out: the operation is reachable, and the way in is not. It now prints
+the list on `F1` or `?`. `apps/hexeditor` and `apps/filediff` followed -- thirteen chords and a
+page of navigation, `Ctrl+B`/`Ctrl+N`/`Ctrl+P` worst of all, because bookmarks
+are invisible until one is set and so the feature could not be found by looking
+at the window in any state. That leaves the survey's count at 126 apps binding
+an unguessable key and 27 printing one -- a gap of roughly a hundred, not the
+hundred and sixteen the first count implied.
+
+**A gate for this was considered and declined, which is worth saying so nobody
+builds it twice.** The obvious move is a ratchet: baseline today's list, fail
+when an app joins it, the way `lossy-decode` reports "26 file(s) baselined,
+none worse". Two things argue against it. The battery those gates live in runs
+on **push**, not commit, and a push in this tree already takes thirty to forty
+minutes -- it is the throughput bottleneck, and adding to it costs all three
+lanes on every push to catch a defect in one lane's tree. And the thing it
+would prevent is a *new* app being written without a key list, in a tree that
+already has 141 of them and is not gaining many. The tool is `scripts/key-survey.py`,
+it runs in about a second, and running it is one line. If apps start being
+added in numbers again, the ratchet becomes worth its cost and this paragraph
+is the argument for building it then.
+
+**Four things the program had never written down** turned up while building the
+states its guard test needs, each found by a red test rather than by reading
+the source, and they are the reason the per-app cost is fifteen minutes rather
+than five: `Up` declines at the top of the list; adding a rule selects it, and
+the newest is last, so no single state has a rule with room both above and
+below it; `execute_rename` records nothing unless a name actually moves on
+disk; and files arrive *already selected*, so a helpful `Ctrl+A` in the setup
+saw everything selected, did its opposite, and renamed nothing. The last was
+caught only by an assertion written into the state helper for exactly that
+case. Without it the suite would have been green over a `Ctrl+Z` pressed at an
+app with nothing to undo -- **a test that checks nothing passes exactly as
+loudly as one that checks everything.**
+
+**Why this is filed rather than done.** There are of the order of a hundred
+apps in it, at roughly fifteen minutes each. That is not a task, and doing a
+handful more would leave the entry saying the same thing with a smaller number
+in it. What makes it worth filing rather than merely noting is that everything
+expensive is already built: `guitk::shortcut::keystrokes` reads the labels,
+the overlay is forty lines that cannot disturb a layout it does not understand,
+and the two tests each app needs are written once and copied --
+`every_advertised_key_does_something` against the handler and
+`the_shortcut_list_reaches_the_window` against the screen.
+
+**Order to work in**, when somebody picks this up: the survey's letter and
+function-key columns first and its digit column last. Digits are nearly always
+a size, a level or a view, and an app that draws "Levels 1-8" has named all
+eight to a reader while naming two to a substring search.
+
+## `TD-C-A-PRINTED-KEY-LIST-IS-A-SECOND-COPY` -- **FIXED 2026-09-18** (lane C)
+
+**In short:** Five apps print a list of their keys on screen. That list is a
+second copy of something the key handler already knows, and two copies of a
+fact drift apart -- `apps/rssreader` once shipped an overlay of twenty-one
+shortcuts of which about four worked. Only two of the five checked the list
+against the handler, and **both did it through a third copy**. All five now
+read the printed label itself, so there are two copies and a test that reads
+both.
+
+**Where each app stood before this.**
+
+| App | Prints | Checked? |
+|---|---|---|
+| `minesweeper` | six keys, in a footer | that the footer was **complete** -- nothing about whether it was **true** |
+| `wordsearch` | two tables, footer | six keys named **by hand** in the test; a seventh row would not have been checked |
+| `mixer` | two tables, footer | both directions, but through a local `fn keys_named(label)` -- a match arm per label |
+| `rssreader` | twenty-one rows, `?` overlay | a 21-arm `probe(action) -> Event`, first key of each row only |
+| `slides` | twenty rows, `?` overlay | a 40-line `event_for(spec)` table, written the same day |
+
+**The third copy is the part worth naming.** A printed list and a handler are
+two copies, and the cure is a test that reads both. But a test that reads the
+list and then *names the keys itself* has added a third, which drifts from the
+other two and fails to catch either. Four of the five had exactly that, and
+each wrote it independently -- `"Left/Right" => vec![Key::Left, Key::Right]`
+appears in `mixer` and, in different words, in `rssreader`, `wordsearch` and
+`slides`. Nobody was being careless: the check is obvious and the parser is
+forty dull lines, so each author wrote the forty lines again.
+
+**The fix is `guitk::shortcut::keystrokes(label)`**, which turns a printed
+label back into the keystrokes it names -- `"Ctrl+PageUp / Ctrl+PageDown"` into
+two strokes -- and refuses by name what it cannot read. It lives in the toolkit
+because the *labels* are not app-specific: `Esc` versus `Escape` is not a fact
+about a mixer. Each app keeps only what is genuinely its own, which is the set
+of states to try the key in.
+
+**Two things this turned up that were not visible from any one app.**
+
+`rssreader`'s probe checked only the first key of each row, so the `Down` in
+`"J / Down"`, the `Enter` in `"R / Enter"` and the `Shift+Tab` in
+`"Tab / Shift+Tab"` were advertised to users and never once pressed by a test.
+They all work. **Nothing knew that**, which is a different state from working.
+
+And the new splitter dropped the second `/` of `rssreader`'s `"Ctrl+F / /"`,
+where the slash is both the separator and a key. That is the failure this
+whole entry is about, reproduced inside the fix for it: the guard test would
+have checked one key where it meant to check two, **and passed**. A `/` with
+nothing but blanks before it is now the key. The corpus test that should have
+caught it was reading four apps' labels and not the fifth -- the eighth way a
+search says nothing, "one file was read and the crate was not", in its
+list-of-apps form.
+
+**The property to assert is "some reachable state answers this key",** not
+"this key is taken right now". The `slides` guard failed on its first run, on
+its first row, and the app was right: `Left` at the first slide returns
+`Ignored` on purpose, as do `1` for a view already open, `Ctrl+V` with nothing
+copied, `C` on a number whose flags are missing, and `Esc` with no mark open.
+**Declining from its own arm is answering.** The defect to catch is a row that
+falls through to the catch-all in *every* state, so each guard offers its keys
+to a small set of prepared states -- three decks, three boards, two grids --
+and requires one of them to take it.
+
+**Both new guards were mutation-checked**, since a guard test that has only
+ever been green is a decoration: one row retyped to a key the program does not
+answer (`B` to plain `C` in slides, `F` to `Q` in minesweeper), and each failed
+naming the row. The first `slides` failure had been about *state* rather than a
+missing handler, which is exactly why the deliberate one was worth running.
+
+**2026-09-18, later: there is a third thing that can disagree, and it is the
+box.** `apps/rssreader` -- the app this entry is named after -- was drawing
+twenty of its twenty-one rows. The overlay's height was a hand-picked `520.0`
+with a `break` when the rows ran past the bottom, so it drew as many as fitted
+and stopped. **The row it dropped was `ShowHelp`: the overlay did not list the
+key that closes it**, and had not since it was written.
+
+Neither existing check could see it. The guard test reads the list against the
+key handler, and *both of those were right* -- every one of the twenty-one keys
+works and every one is in the list. The overlay's own size was a third
+quantity, agreeing with neither, and the only thing that can catch a third
+quantity is a reader that looks at the screen. So the pair of tests each app
+needs is not one test done twice; it is:
+
+| | Reads | Catches |
+|---|---|---|
+| `every_advertised_key_does_something` | the list against the handler | a row nothing answers |
+| `the_shortcut_list_reaches_the_window` | the list against the *screen* | a row nothing draws |
+
+rssreader had the first and not the second, because it already had an overlay
+when the pattern was written and I checked the thing that was new rather than
+the thing that was old. **The app that taught me a list and a handler drift
+apart was itself silently dropping a row**, and the fix is that
+`guitk::shortcut::render_card` computes its height from `rows.len()` instead of
+being told a number -- the same cure as the description column, one line up.
+
+**What is still open is the other half**, tracked in
+`TD-C-KEYS-THAT-WORK-AND-NOTHING-MENTIONS`: five apps print no list at all, so
+there is nothing to check. A list that is absent cannot be false, and is still
+a user who cannot find the key.
+
+## `TD-C-KEYS-THAT-WORK-AND-NOTHING-MENTIONS` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** Several keys added on 2026-09-18 to reach features that had no
 way in are themselves undiscoverable. The feature is reachable now; finding it
@@ -160577,12 +161019,12 @@ finished.
 | `hexeditor` | `Ctrl+I` | **yes** -- the search bar reads "Case: on  Ctrl+I" |
 | `markdowneditor` | five | **yes** -- the panel's buttons were relabelled "Replace  Ctrl+Enter" |
 | `slides` | `Ctrl+T`, `Ctrl+R` | **yes** -- "Theme: Mocha (Ctrl+T)", "Transition: Fade (Ctrl+R)" |
-| `slides` | `S`/`O`/`L`/`A`/`I`, `Delete` | **no** |
-| `pdfviewer` | `D` | **no** |
-| `calendar` | `W` | **no** |
-| `imageviewer` | `B`, `S` | **no** |
-| `spreadsheet` | `Ctrl+T` | **no** |
-| `mindmap` | `B` | **no** |
+| `slides` | `S`/`O`/`L`/`A`/`I`, `Delete` | **yes** -- `?` lists all twenty, and a test asserts every listed key is answered |
+| `pdfviewer` | `D` | **yes** -- `?` lists eleven, and the guard presses `on_event` -- four of them live a layer above `handle_event` |
+| `calendar` | `W` | **yes** -- `?` lists twelve, and a `?` typed into the search box stays a `?` |
+| `imageviewer` | `B`, `S` | **yes** -- `?` lists seventeen, drawn over the two bars those keys hide |
+| `spreadsheet` | `Ctrl+T` | **yes** -- **F1** lists fifteen -- `?` is a character a spreadsheet must be able to type |
+| `mindmap` | `B` | **yes** -- `?` lists seventeen |
 
 **2026-09-18, later: the authoring keys were given the same treatment as they
 landed**, so the three fixes did not widen this entry. `notes` says "No notes
@@ -160599,21 +161041,81 @@ the canvas and the old text in the panel. No test covered edges to say so.
 `a_user_can_label_an_edge` does now. **A fix applied to one of a pair is a
 fix that looks complete from the diff.**
 
-**The pattern that worked** is naming the key beside the thing it controls,
-which costs one format string wherever the app already draws the value. It
-does not apply to the six unlabelled cases: `pdfviewer` draws no reading-mode
-indicator, `calendar` draws no week-start indicator, and a toolbar cannot
-advertise the key that hides it, because once hidden the advertisement is gone
-with it.
+**2026-09-18, later still: `apps/slides` got the overlay.** It had the most
+undiscoverable keys of any app here -- twenty bindings and, until `?` existed,
+no way to learn one but reading the source, including the five that put shapes
+on a slide, which are the ones somebody wants first. `SHORTCUTS` is twenty
+rows; `?` toggles a card over the slide and `Escape` closes it;
+`every_advertised_key_does_something` walks the list and presses each key.
 
-**Why this is filed rather than done.** The remaining six need a *new* element
-on screen -- a status hint or a help overlay -- in five layouts I have not
-read closely. Adding text to a layout I do not understand risks overlapping
-something that was fine, which is a worse defect than the one being fixed and
-harder to notice. `rssreader`'s `ALL_KEY_ACTIONS` overlay is the model worth
-copying, together with its guard test
-(`every_advertised_shortcut_does_something`), which is what keeps the list and
-the handler from drifting apart -- the failure that entry documents.
+**The guard test taught something the rssreader one had not.** Its first run
+failed on the very first row -- `Left`, "Previous / next slide" -- and the app
+was right and the test was wrong. `advance(-1)` at the first slide returns
+`Ignored` on purpose, as does `1` when the edit view is already up, and
+`Ctrl+V` with nothing copied. So the property a shortcut list actually claims
+is **"some reachable state answers this key"**, not "this key is taken right
+now": *declining from its own arm is answering*, and the defect the test exists
+to catch is a row that falls through to the catch-all in every state. The test
+now offers each key to three decks -- a fresh one, one in the sorter view, and
+one mid-deck holding a copied slide and a selected text box -- and requires one
+of them to take it. Between them every advertised key has something it could
+do, which is the only reason three is enough.
+
+**It was then mutated to check it could fail for its own reason**, since the
+first failure had been about state rather than about a missing handler: one row
+retyped from `B` to plain `C` (the app answers only `Ctrl+C`), which the test
+rejected by name. A guard test that has only ever been green is a decoration.
+
+**The event is derived from each row's key text rather than looked up in a
+table beside it.** A parallel table would be a second list to keep in step --
+the eleventh way a search says nothing, rebuilt inside the test written to
+prevent it.
+
+**The pattern that worked** is naming the key beside the thing it controls,
+which costs one format string wherever the app already draws the value. It did
+not apply to the last five: `pdfviewer` draws no reading-mode indicator,
+`calendar` draws no week-start indicator, and **a toolbar cannot advertise the
+key that hides it**, because once hidden the advertisement is gone with it --
+which is the case `imageviewer` `B`/`S` and `spreadsheet` `Ctrl+T` all are.
+
+**2026-09-18, last: the other five got an overlay, and this entry is closed.**
+The reason it had been filed rather than done was that a status hint needs a
+*new element* in a layout I had not read, and getting it wrong overlaps
+something that was fine -- a worse defect than the one being fixed, and harder
+to notice. **An overlay dissolves that objection entirely**: it is drawn last,
+over everything, centred, and only when asked for, so it cannot disturb a
+layout it does not understand. That was true the whole time the entry said
+otherwise.
+
+| App | Key | Rows | Note |
+|---|---|---|---|
+| `mindmap` | `?` | 17 | |
+| `imageviewer` | `?` | 17 | drawn over the two bars `B` and `S` hide |
+| `spreadsheet` | **`F1`** | 15 | `?` is a character a spreadsheet must be able to type into a cell |
+| `calendar` | `?` | 12 | a `?` typed into the search box stays a `?` |
+| `pdfviewer` | `?` | 11 | the guard presses `on_event`; four keys live above `handle_event` |
+
+**Three things the work turned up that no plan predicted.**
+
+`apps/spreadsheet` could not use `?` at all. Its key handler ends in a
+catch-all that starts editing the cell on any printable character, so binding
+`?` to help would have taken a character out of a program whose whole job is
+holding characters -- a worse defect than the one being fixed, arriving by a
+different road than the one I had been watching. `F1` there, and a test named
+`a_question_mark_is_typed_into_the_cell_not_swallowed_as_help` to hold it.
+
+`apps/pdfviewer` answers four of its keys one layer up, in `on_event` rather
+than `handle_event`. A guard test pressing the inner function would have
+reported `Ctrl+Q`, `Ctrl+F`, `Ctrl+T` and `Ctrl+W` as dead and invited somebody
+to "fix" four keys that work. **The door a test presses is part of what it
+tests**; this one presses `on_event`, which is where a real keystroke arrives.
+
+And the overlays needed a *second* test each. `every_advertised_key_does_something`
+reads the list against the handler; `the_shortcut_list_reaches_the_window`
+reads it against the screen. `apps/netscan`'s `wol_note` was written by the
+model and drawn by nothing for three commits with every model-level test
+passing, so an overlay that never draws is a defect with a green suite behind
+it. Both questions get asked in all seven apps that now have a list.
 
 **Do not treat this as cosmetic.** `apps/slides` could add four shapes and an
 image for hours before anyone found `S`, and the app it most resembles --

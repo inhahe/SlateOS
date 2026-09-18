@@ -81,6 +81,37 @@ const MIN_ROW_HEIGHT: f32 = 16.0;
 const ROW_HEADER_WIDTH: f32 = 50.0;
 const COL_HEADER_HEIGHT: f32 = 24.0;
 const TOOLBAR_HEIGHT: f32 = 36.0;
+
+/// Every key this program answers, and what it does.
+///
+/// **Raised by `F1`, not by `?`.** Every other help overlay in this tree opens
+/// on `?`, and this one cannot: the key handler ends in a catch-all that
+/// starts editing the cell on any printable character, so `?` is a character
+/// a spreadsheet has to be able to put in a cell. A help key that ate it
+/// would be a worse defect than the one this list fixes.
+///
+/// **Each row is a key this program actually answers**, which is not a
+/// property the list has on its own: `every_advertised_key_does_something`
+/// walks it, reads each label with `guitk::shortcut` and presses every key it
+/// names. `apps/rssreader` shipped an overlay of twenty-one shortcuts of which
+/// about four worked.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows", "Move the selection"),
+    ("Tab / Shift+Tab", "One cell right / left"),
+    ("Enter / Shift+Enter", "One cell down / up"),
+    ("Home / End", "First / last column of this row"),
+    ("PageUp / PageDown", "One screen up / down"),
+    ("F2", "Edit this cell"),
+    ("Delete", "Clear the selected cells"),
+    ("Escape", "Stop editing, keeping what was there"),
+    ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy / cut / paste"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+B / Ctrl+I", "Bold / italic"),
+    ("Ctrl+F / Ctrl+H", "Find / find and replace"),
+    ("Ctrl+O / Ctrl+S", "Open / save"),
+    ("Ctrl+T", "Show or hide the toolbar"),
+    ("F1", "This list"),
+];
 const FORMULA_BAR_HEIGHT: f32 = 28.0;
 const SHEET_TAB_HEIGHT: f32 = 28.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
@@ -2800,6 +2831,8 @@ pub struct SpreadsheetApp {
     pub show_formula_bar: bool,
     /// Whether to show the toolbar.
     pub show_toolbar: bool,
+    /// Whether the shortcut list is up.
+    pub show_help: bool,
     /// Whether to show the status bar.
     pub show_status_bar: bool,
     /// The user's colours, replaced whenever the theme changes.
@@ -2828,6 +2861,7 @@ impl SpreadsheetApp {
             show_gridlines: true,
             show_formula_bar: true,
             show_toolbar: true,
+            show_help: false,
             show_status_bar: true,
         }
     }
@@ -3930,6 +3964,18 @@ impl SpreadsheetApp {
                 self.begin_editing();
                 EventResult::Consumed
             }
+            // The shortcut list. `F1` rather than `?`, which this program has
+            // to be able to type into a cell.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            // Before the unguarded `Key::Escape` below, which would otherwise
+            // take this and cancel an edit while the list stayed up.
+            Key::Escape if self.show_help => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
             Key::Delete => {
                 self.delete_selection();
                 EventResult::Consumed
@@ -4686,6 +4732,19 @@ impl SpreadsheetApp {
             self.picker
                 .render(&self.palette, self.window_width, self.window_height),
         );
+
+        // And the shortcut list over even that, because it is the one thing a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.window_width, self.window_height),
+                TOOLBAR_HEIGHT,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         cmds
     }
@@ -6368,6 +6427,7 @@ mod tests {
     // Only the tests build events by hand; production code reads the fields of
     // the ones it is handed.
     use guitk::event::Modifiers;
+    use guitk::shortcut::keystrokes;
 
     use super::*;
     /// The picker is not merely open: it is DRAWN.
@@ -8979,6 +9039,99 @@ mod tests {
             buffer.move_right();
         }
         buffer
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// A list on screen and the handler behind it are two copies of one fact,
+    /// and they drift: `apps/rssreader` shipped an overlay of twenty-one
+    /// shortcuts of which about four worked. The label is read by
+    /// `guitk::shortcut` rather than matched against a table written beside it
+    /// here -- that table would be a third copy, drifting from both.
+    ///
+    /// One sheet is enough here, where other apps need several: every arm in
+    /// this handler returns `Consumed` whatever the state, down to `Left` in
+    /// column A. That is worth stating rather than leaving implied, because it
+    /// is also what makes the check weaker here than elsewhere -- it proves the
+    /// key reaches an arm, not that the arm did anything.
+    ///
+    /// The strokes carry no text, which matters more in this program than in
+    /// any other: the handler ends in a catch-all that starts editing the cell
+    /// on any printable character. A stroke carrying `"q"` would be `Consumed`
+    /// by that catch-all, and every letter in the alphabet would pass this
+    /// test whether or not the program bound it.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                assert!(
+                    stroke.text.is_empty(),
+                    "a stroke carrying text would be eaten by the edit catch-all"
+                );
+                let mut app = SpreadsheetApp::new(1280.0, 800.0);
+                assert_eq!(
+                    app.handle_event(&Event::Key(stroke.clone())),
+                    EventResult::Consumed,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/netscan`'s `wol_note` was written by the
+    /// model and drawn by nothing for three commits with every model-level
+    /// test passing.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        assert!(
+            !drawn_text(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&Event::Key(key(Key::F1, None)));
+        let shown = drawn_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&Event::Key(key(Key::Escape, None)));
+        assert!(
+            !drawn_text(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// `?` stays a character, because a spreadsheet has to be able to hold one.
+    #[test]
+    fn a_question_mark_is_typed_into_the_cell_not_swallowed_as_help() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.handle_event(&Event::Key(key(Key::Slash, Some('?'))));
+        assert!(
+            !drawn_text(&app).contains("F1 closes this"),
+            "`?` opened the help overlay in a program that has to type it"
+        );
+        assert!(
+            matches!(app.mode, InteractionMode::Editing { .. }),
+            "`?` did not start editing the cell"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn drawn_text(app: &SpreadsheetApp) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     fn key(key: Key, text: Option<char>) -> KeyEvent {

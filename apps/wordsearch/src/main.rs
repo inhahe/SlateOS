@@ -1893,6 +1893,7 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use guitk::probe::{self, ctrl, press, press_with};
+    use guitk::shortcut::keystrokes;
 
     // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -3648,24 +3649,51 @@ mod tests {
                 }
             }
         }
-        // Every key the footer promises really does something.
-        let mut a = game(71);
-        for k in [Key::Enter, Key::Escape, Key::H, Key::D, Key::C, Key::F2] {
-            let mut fresh = game(71);
-            if k == Key::Escape {
-                key(&mut fresh, Key::Enter);
+        // Every key the footer promises really does something -- read off the
+        // tables themselves rather than out of a list written beside them.
+        //
+        // That list is what this replaces: six keys named by hand, plus a
+        // separate line for one arrow. It could not have caught a *seventh*
+        // row, which is the whole failure mode -- a list and a handler drift
+        // apart when something is added, and a checker that names its own keys
+        // is a third copy that drifts with them. `apps/rssreader` shipped an
+        // overlay of twenty-one shortcuts of which about four worked.
+        //
+        // The property is "some reachable state answers this key", not "this
+        // key is taken right now": `Esc` means nothing until a mark is open,
+        // an arrow at the edge declines on purpose, and declining from its own
+        // arm is answering.
+        for table in [SHORTCUTS, SELECTING_SHORTCUTS] {
+            for (label, what) in table {
+                for stroke in keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                    let answered = states().into_iter().any(|mut a| {
+                        handle_event(&mut a, &Event::Key(stroke.clone())) == EventResult::Consumed
+                    });
+                    assert!(
+                        answered,
+                        "the footer names {label:?} for {what:?}, and no board answers it"
+                    );
+                }
             }
-            assert_eq!(
-                key(&mut fresh, k),
-                EventResult::Consumed,
-                "{k:?} does nothing"
-            );
         }
-        assert_eq!(
-            key(&mut a, Key::Right),
-            EventResult::Consumed,
-            "Arrows do nothing"
-        );
+    }
+
+    /// Boards chosen so that between them every key either table names has
+    /// work to do. A key none of them takes is a key nothing acts on.
+    fn states() -> Vec<WordSearchApp> {
+        // Cursor off the edges, so all four arrows have somewhere to go.
+        let mut roaming = game(71);
+        for k in [Key::Down, Key::Down, Key::Right, Key::Right] {
+            key(&mut roaming, k);
+        }
+
+        // Mid-mark, which is the only state the second table describes at all.
+        let mut selecting = game(71);
+        for k in [Key::Down, Key::Down, Key::Right, Key::Right, Key::Enter] {
+            key(&mut selecting, k);
+        }
+
+        vec![roaming, selecting]
     }
 
     #[test]

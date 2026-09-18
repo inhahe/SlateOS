@@ -1458,6 +1458,8 @@ pub struct HexEditor {
     pub search: SearchState,
     /// Whether the data inspector panel is visible.
     pub show_inspector: bool,
+    /// Whether the shortcut list is up.
+    pub show_help: bool,
     /// Recent file paths.
     pub recent_files: VecDeque<String>,
     /// The picker. Holds the dialog and the routing thirteen
@@ -1500,6 +1502,39 @@ pub struct HexEditor {
     palette: Palette,
 }
 
+/// Every key this program answers, and what it does.
+///
+/// Thirteen chords and a page of navigation, none of which appeared anywhere
+/// on screen. `Ctrl+B`, `Ctrl+N` and `Ctrl+P` are the worst of them: bookmarks
+/// are invisible until one is set, so the feature could not be found by
+/// looking at the window in any state.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`, which reads each label with
+/// `guitk::shortcut` and presses every key it names.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows", "Move the cursor"),
+    ("PageUp / PageDown", "One screen up / down"),
+    ("Home / End", "Start / end of the line"),
+    ("Ctrl+Home / Ctrl+End", "Start / end of the file"),
+    ("Tab", "Swap between the hex and text panes"),
+    ("0-9, A-F", "Type a byte, in the hex pane"),
+    (
+        "Delete / Backspace",
+        "Delete the byte at / before the cursor",
+    ),
+    ("Ctrl+O", "Open a file"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+C / Ctrl+V", "Copy / paste the selection"),
+    ("Ctrl+F", "Find"),
+    ("Ctrl+I", "Match case, while the search bar is up"),
+    ("Ctrl+G", "Go to an offset"),
+    ("Ctrl+B", "Set or clear a bookmark here"),
+    ("Ctrl+N / Ctrl+P", "Next / previous bookmark"),
+    ("Ctrl+Tab", "Next tab"),
+    ("F1", "This list"),
+];
+
 impl HexEditor {
     /// Create a new hex editor with one empty document.
     pub fn new(width: f32, height: f32) -> Self {
@@ -1509,6 +1544,7 @@ impl HexEditor {
             active_tab: 0,
             search: SearchState::default(),
             show_inspector: true,
+            show_help: false,
             recent_files: VecDeque::new(),
             picker: FilePicker::new(),
             last_open: None,
@@ -1784,6 +1820,22 @@ impl HexEditor {
     pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
         if !key.pressed {
             return EventResult::Ignored;
+        }
+
+        // The shortcut list, before anything else.
+        //
+        // `F1` rather than `?`: the ASCII pane writes `key.typed()` straight
+        // into the file, and the search and go-to boxes both take text, so `?`
+        // is a character in three different places here. Ahead of every one of
+        // them, because a key that is sometimes help and sometimes a byte
+        // written into somebody's file is worse than no key at all.
+        if key.key == Key::F1 && !key.modifiers.ctrl {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if key.key == Key::Escape && self.show_help {
+            self.show_help = false;
+            return EventResult::Consumed;
         }
 
         // Global shortcuts (regardless of focus).
@@ -3481,6 +3533,19 @@ impl App for HexEditor {
         // of it.
         tree.commands
             .extend(self.picker.render(&self.palette, width, height));
+
+        // And the shortcut list over even that, because it is the one thing a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
         tree
     }
 }
@@ -3553,6 +3618,122 @@ mod tests {
             *first = doc;
         }
         editor
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table written beside it here -- that table would be a third copy of the
+    /// same fact, drifting from both the list and the handler.
+    ///
+    /// The property is "some reachable state answers this key", not "this key
+    /// is taken right now". This program opens on an *empty document*, where
+    /// almost nothing can act, which is why the states below load bytes first:
+    /// a guard run against a fresh window would call most of this program dead.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|ed| ed.handle_key(&stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Editors chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<HexEditor> {
+        // 256 bytes, cursor at the start.
+        let plain = loaded();
+
+        // ...and away from the start, so `Left`, `Up`, `Backspace` and the
+        // keys that go *back* have somewhere to go.
+        let mut moved = loaded();
+        for _ in 0..40 {
+            moved.handle_key(&key_press(Key::Right, Modifiers::NONE));
+        }
+        for _ in 0..3 {
+            moved.handle_key(&key_press(Key::Down, Modifiers::NONE));
+        }
+
+        // ...with a bookmark set, which is the only state `Ctrl+N` and
+        // `Ctrl+P` can act in -- and bookmarks are invisible until one exists,
+        // so this is also the state a user cannot discover by looking.
+        let mut marked = loaded();
+        for _ in 0..16 {
+            marked.handle_key(&key_press(Key::Right, Modifiers::NONE));
+        }
+        marked.handle_key(&key_press(Key::B, Modifiers::ctrl()));
+        for _ in 0..16 {
+            marked.handle_key(&key_press(Key::Right, Modifiers::NONE));
+        }
+
+        // ...with the search bar up, which is the only state `Ctrl+I` means
+        // anything in.
+        let mut searching = loaded();
+        searching.handle_key(&key_press(Key::F, Modifiers::ctrl()));
+
+        vec![plain, moved, marked, searching]
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/rssreader`'s overlay drew twenty of its
+    /// twenty-one rows for weeks -- the list and the handler agreed, and the
+    /// box was a third quantity agreeing with neither.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut editor = loaded();
+        assert!(
+            !help_text(&mut editor).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        editor.handle_key(&key_press(Key::F1, Modifiers::NONE));
+        let shown = help_text(&mut editor);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        editor.handle_key(&key_press(Key::Escape, Modifiers::NONE));
+        assert!(
+            !help_text(&mut editor).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// `?` stays a byte, because the ASCII pane has to be able to write one.
+    #[test]
+    fn a_question_mark_is_not_the_help_key_here() {
+        let mut editor = loaded();
+        let mut ask = key_press(Key::Slash, Modifiers::NONE);
+        ask.modifiers.shift = true;
+        editor.handle_key(&ask);
+        assert!(
+            !help_text(&mut editor).contains("F1 closes this"),
+            "`?` opened the list in a program that writes it into a file"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn help_text(editor: &mut HexEditor) -> String {
+        editor
+            .render(1200.0, 800.0)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     fn key(k: Key) -> Event {

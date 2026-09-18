@@ -780,6 +780,40 @@ enum Clipboard {
 // Slides application
 // ============================================================================
 
+/// Every key this program answers, and what it does.
+///
+/// Twenty bindings and, until this list existed, no way to learn any of them
+/// but reading the source -- including the five that put shapes on a slide,
+/// which are the ones somebody wants first.
+///
+/// **Each row is a key this program actually answers**, which is not a
+/// property the list has on its own: `every_advertised_key_does_something`
+/// walks it and asserts each one is taken. `apps/rssreader` shipped an
+/// overlay of twenty-one shortcuts of which about four worked, and the only
+/// thing that keeps a list and a handler together is a test that reads both.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Left / Right", "Previous / next slide"),
+    ("Home / End", "First / last slide"),
+    ("1 / 2", "Edit view / sorter view"),
+    ("Tab", "Cycle the view"),
+    ("Ctrl+N", "New slide"),
+    ("Ctrl+D", "Duplicate this slide"),
+    ("Ctrl+C / Ctrl+V", "Copy / paste a slide"),
+    ("Ctrl+PageUp / Ctrl+PageDown", "Move this slide up / down"),
+    ("T", "Add a text box"),
+    ("S / O / L / A", "Add a rectangle / ellipse / line / arrow"),
+    ("I", "Add an image placeholder"),
+    ("Enter / F2", "Type into the selected text box"),
+    ("Delete", "Delete the selected element, or the slide"),
+    ("Shift+Delete", "Delete the slide"),
+    ("Ctrl+T", "Next theme"),
+    ("Ctrl+Shift+T", "Name the deck"),
+    ("Ctrl+R", "Next transition"),
+    ("B", "Show or hide the speaker notes"),
+    ("Ctrl+E", "Export"),
+    ("F1 / ?", "This list"),
+];
+
 /// What a typed string is going onto.
 ///
 /// An enum because the deck's own name is not an element and has no id, and a
@@ -828,6 +862,8 @@ pub struct SlidesApp {
     selected_element: Option<ElementId>,
     /// Whether the notes panel is visible.
     show_notes: bool,
+    /// Whether the shortcut list is up.
+    show_help: bool,
     /// The thing being typed into, and what has been typed.
     ///
     /// This program could not put a word on a slide: there were zero
@@ -872,6 +908,7 @@ impl SlidesApp {
             clipboard: Clipboard::Empty,
             selected_element: None,
             show_notes: true,
+            show_help: false,
             editing: None,
             title: String::from("Untitled Presentation"),
         }
@@ -1727,6 +1764,25 @@ impl SlidesApp {
                 self.show_notes = !self.show_notes;
                 EventResult::Consumed
             }
+            // `?`, which is Shift and the slash key. Escape closes it, because
+            // that is what Escape means over anything laid on top.
+            // The shortcut list. `F1` raises it in every app in this tree,
+            // including `apps/spreadsheet`, where `?` is a character the
+            // program has to be able to type into a cell -- so somebody who
+            // has learned one key is never stuck. `?` as well, wherever the
+            // program is not obliged to type one.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Key::Slash if key.modifiers.shift => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Key::Escape if self.show_help => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -1791,11 +1847,24 @@ impl SlidesApp {
             ViewMode::Sorter => self.render_sorter_mode(&mut cmds),
         }
 
-        // The picker last, so it draws over the slide rather than under it.
+        // The picker over the slide rather than under it.
         cmds.extend(
             self.picker
                 .render(&self.palette, self.window_width, self.window_height),
         );
+
+        // And the shortcut list over everything, because it is the one thing
+        // a reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.window_width, self.window_height),
+                TOOLBAR_HEIGHT,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
 
         cmds
     }
@@ -3160,6 +3229,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     use guitk::event::Modifiers;
+    use guitk::shortcut::keystrokes;
 
     fn seeded() -> SlidesApp {
         let mut app = SlidesApp::new(1280.0, 720.0);
@@ -3262,6 +3332,122 @@ mod tests {
             app.title, "Untitled Presentation",
             "an empty name blanked the deck's name"
         );
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// `apps/rssreader` shipped an overlay of twenty-one shortcuts of which
+    /// about four worked, and three named operations that existed nowhere in
+    /// the crate. A list and a handler are two things that must agree, and
+    /// nothing keeps them agreeing except a test that reads both.
+    ///
+    /// Two things this test deliberately does *not* do.
+    ///
+    /// The event is built from the row's own key text by `guitk::shortcut`,
+    /// rather than looked up in a parallel table of events. A second table
+    /// would be a second list to keep in step -- the defect this test exists
+    /// to prevent, rebuilt inside the test. It started as exactly that table,
+    /// forty lines of `"Left" => Key::Left`, and `apps/mixer` turned out to
+    /// have written the same forty lines already.
+    ///
+    /// And the claim checked is "some reachable state answers this key", not
+    /// "this key is taken right now". Several of these decline on purpose:
+    /// `Left` at the first slide, `1` when the edit view is already up, `Ctrl+V`
+    /// with nothing copied. Declining from its own arm *is* answering -- the
+    /// defect is a row that falls through to the catch-all in every state. So
+    /// each key is offered to three decks and has to be taken by one.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (row, what) in SHORTCUTS {
+            for stroke in keystrokes(row).unwrap_or_else(|e| panic!("{e}")) {
+                let event = Event::Key(stroke.clone());
+                let taken = states()
+                    .iter_mut()
+                    .any(|app| app.handle_event(&event) == EventResult::Consumed);
+                assert!(
+                    taken,
+                    "the list advertises {row:?} for {what:?}, and no state answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Three decks, chosen so that between them every advertised key has
+    /// something it could do. A key no one of them takes is a key nothing acts
+    /// on.
+    fn states() -> Vec<SlidesApp> {
+        let plain = seeded();
+
+        // The other view, so `1` has somewhere to return from.
+        let mut sorter = seeded();
+        sorter.handle_event(&press(Key::Tab));
+
+        // Mid-deck, holding a copied slide and a selected text box: what the
+        // paging, paste and element keys each need before they will act.
+        let mut working = seeded();
+        working.handle_event(&press_ctrl(Key::N));
+        working.handle_event(&press(Key::Home));
+        working.handle_event(&press(Key::Right));
+        working.handle_event(&press_ctrl(Key::C));
+        working.handle_event(&press(Key::T));
+
+        vec![plain, sorter, working]
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// `every_advertised_key_does_something` reads the list and the handler;
+    /// this reads the list and the *screen*. They are different questions, and
+    /// `apps/netscan`'s `wol_note` is why both get asked: it was written by the
+    /// model and drawn by nothing for three commits, and every model-level test
+    /// passed throughout. A help overlay that never draws is the same defect
+    /// with the same green suite.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = seeded();
+        let quiet = drawn_text(&app);
+        assert!(
+            !quiet.contains("? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press_shift(Key::Slash));
+        let shown = drawn_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !drawn_text(&app).contains("? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn drawn_text(app: &SlidesApp) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// A key with Shift held, which is how `?` is typed.
+    fn press_shift(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.shift = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
     }
 
     fn types(text: &str) -> Event {

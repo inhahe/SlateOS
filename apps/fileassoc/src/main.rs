@@ -4276,6 +4276,19 @@ mod tests {
         settingsfile::testing::with_scratch_config(tag, |_| body())
     }
 
+    /// A scratch directory, resolved while holding the environment lock.
+    ///
+    /// `ScratchDir::new` calls `std::env::temp_dir()`, which READS the
+    /// environment, and this binary also WRITES it -- `with_scratch_config`
+    /// above `remove_var`s `HOME`. Concurrent read-and-write of the process
+    /// environment is undefined, and the tests are threads in one process.
+    /// The same defect was fixed in `gui/desktop` and `apps/explorer` on
+    /// 2026-09-18 after it produced two red workspace runs.
+    fn guarded_scratch(label: &str) -> scratchdir::ScratchDir {
+        let _turn = settingsfile::testing::config_turn();
+        scratchdir::ScratchDir::new(label)
+    }
+
     #[test]
     fn test_ui_confirm_open_with() {
         writing("confirm_open_with", || {
@@ -5024,7 +5037,7 @@ mod tests {
     /// file back off the disk.
     #[test]
     fn export_writes_the_associations_to_the_chosen_file() {
-        let dir = scratchdir::ScratchDir::new("fileassoc_export");
+        let dir = guarded_scratch("fileassoc_export");
         let mut ui = FileAssocUI::new();
 
         probe::click(&mut ui, Target::ExportButton);
@@ -5065,7 +5078,7 @@ mod tests {
     #[test]
     fn an_association_survives_export_and_import_into_another_copy() {
         writing("fileassoc_transfer", || {
-            let dir = scratchdir::ScratchDir::new("fileassoc_transfer");
+            let dir = guarded_scratch("fileassoc_transfer");
 
             let mut from = FileAssocUI::new();
             from.registry
@@ -5124,7 +5137,7 @@ mod tests {
     /// proven by `an_association_survives_export_and_import_into_another_copy`.
     #[test]
     fn an_unreadable_import_says_so_instead_of_failing_silently() {
-        let dir = scratchdir::ScratchDir::new("fileassoc_missing");
+        let dir = guarded_scratch("fileassoc_missing");
         let mut ui = FileAssocUI::new();
         ui.transfer = Transfer::Import;
 

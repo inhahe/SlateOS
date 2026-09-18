@@ -77177,6 +77177,31 @@ inserts a shell helper and then patches two call sites, and its anchors
 so insert-then-patch is safe *here* -- verified by simulating both steps
 and counting matches, not by reasoning about it.
 
+**The eleventh costume has no tool in it, and it sharpens with experience.**
+Reading a four-line failure cluster, I took the last line -- *"persistent
+userspace netstack startup failed"* -- for the cause, when the first line
+(`listen failed`) was the cause and the last was the report of the cascade.
+The log was correct, complete and in causal order. **The error was entirely
+in the reading**, and the thing that produced it -- a prior model of how
+these failures usually go -- is the same asset that makes someone able to
+read a 45,000-line log at all. Lane C's observation, which is why this is
+its own row rather than folded in: every other costume is a *tool*
+answering a different question than the one asked; this one has no tool,
+and **a novice with no expectations would have read line one first.**
+
+The mitigation is mechanical rather than attitudinal, which is the only
+kind that survives being tired: read a failure log in timestamp order and
+state the first anomaly before reading the rest, because a summary line is
+the *last* thing that happened and reads like a conclusion. Built into
+`build/scan-guest-output.py` rather than resolved to remember.
+
+And building it produced the same error immediately: the first version
+printed the globally-earliest hit as "read this before anything below",
+which implied a netstack cascade was downstream of a `getcwd` error 24,000
+lines earlier. It now clusters by proximity and implies nothing across
+clusters -- and its docstring states that it cannot see kernel-prefixed
+lines at all, so "first of the cluster" means first of what it can see.
+
 *A partial fix must say it is partial.* They swept five crates for the
 environment race and deliberately left `apps/explorer` half done: the path
 that actually reproduced now holds the lock, while 35 further sites in five

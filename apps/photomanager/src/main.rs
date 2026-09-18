@@ -11,8 +11,8 @@
 //!   and drawn at its own proportions
 //! - Per-photograph adjustment values: brightness, contrast, saturation,
 //!   exposure, temperature
-//! - Star ratings (0-5), applied to every selected photograph; colour
-//!   labels exist as a model only
+//! - Star ratings (0-5) and colour labels, both applied to every selected
+//!   photograph
 //! - Several photographs at once, with Shift and an arrow
 //! - Tagging: right-click a photograph, "Add tag...", and the tag goes on
 //!   everything selected
@@ -184,6 +184,28 @@ impl SidebarRow {
         }
     }
 }
+
+/// Every colour label, in the order the menu offers them.
+///
+/// Written out rather than derived, because the menu's order is a design
+/// choice and an enum's declaration order is not one -- reordering the enum
+/// for any other reason should not silently reorder a menu.
+const COLOR_LABELS: [ColorLabel; 7] = [
+    ColorLabel::None,
+    ColorLabel::Red,
+    ColorLabel::Orange,
+    ColorLabel::Yellow,
+    ColorLabel::Green,
+    ColorLabel::Blue,
+    ColorLabel::Purple,
+];
+
+/// The first of the menu ids that mean a colour label rather than an album.
+///
+/// The top of the `u64` range, like [`MENU_ADD_TAG`], and for the same reason:
+/// album ids come from an `IdGen` counting up, so the top is unreachable by
+/// construction rather than merely unused so far.
+const MENU_COLOR_BASE: u64 = u64::MAX - 8;
 
 /// The album menu's id for "Add tag...", which is not an album.
 ///
@@ -3148,7 +3170,7 @@ impl PhotoApp {
                     .and_then(|m| m.handle_click(event.x, event.y));
                 self.photo_menu = None;
                 if let Some(id) = chosen {
-                    self.choose_album_from_menu(id);
+                    self.choose_from_photo_menu(id);
                 }
                 // Consumed either way: a click that dismisses a menu should
                 // not also land on whatever was behind it.
@@ -3345,6 +3367,30 @@ impl PhotoApp {
         };
         let mut items = items;
         items.push(MenuItem::Separator);
+        items.push(MenuItem::Submenu {
+            id: MENU_COLOR_BASE,
+            label: "Colour label".to_owned(),
+            icon: None,
+            enabled: true,
+            children: COLOR_LABELS
+                .iter()
+                .enumerate()
+                .map(|(i, label)| MenuItem::Action {
+                    id: MENU_COLOR_BASE.saturating_add(i as u64),
+                    label: label.label().to_owned(),
+                    shortcut: None,
+                    icon: None,
+                    enabled: true,
+                    // A tick against the one the photograph already has, so the
+                    // menu answers "what is it now" as well as offering to
+                    // change it.
+                    checked: Some(
+                        self.find_photo(pid)
+                            .is_some_and(|p| p.color_label == *label),
+                    ),
+                })
+                .collect(),
+        });
         items.push(MenuItem::Action {
             id: MENU_ADD_TAG,
             label: "Add tag...".to_owned(),
@@ -3359,11 +3405,36 @@ impl PhotoApp {
         self.menu_photo = Some(pid);
     }
 
-    /// Put the menu's photograph into the album that was chosen.
-    fn choose_album_from_menu(&mut self, album_id: AlbumId) {
+    /// Act on whatever the menu's row meant.
+    ///
+    /// The id is an album's, or one of the reserved values at the top of the
+    /// range that mean a colour label or a tag. One function because the menu
+    /// hands back one id and the caller should not have to know which kind it
+    /// is before asking.
+    fn choose_from_photo_menu(&mut self, album_id: AlbumId) {
         let Some(pid) = self.menu_photo else {
             return;
         };
+        if let Some(offset) = album_id.checked_sub(MENU_COLOR_BASE)
+            && let Some(label) = COLOR_LABELS.get(usize::try_from(offset).unwrap_or(usize::MAX))
+        {
+            let ids = self.acting_on();
+            let mut n = 0usize;
+            for target in ids {
+                if self.set_color_label(target, *label) {
+                    n = n.saturating_add(1);
+                }
+            }
+            if n > 0 {
+                self.status_message = Some(match (n, *label) {
+                    (1, ColorLabel::None) => "Label cleared".to_owned(),
+                    (1, l) => format!("Labelled {}", l.label()),
+                    (_, ColorLabel::None) => format!("Cleared {n} labels"),
+                    (_, l) => format!("Labelled {n} photos {}", l.label()),
+                });
+            }
+            return;
+        }
         if album_id == MENU_ADD_TAG {
             // The selection is whatever it was when the menu went up, and
             // `commit_tag` reads it again on Enter -- which is the same set,
@@ -5803,6 +5874,118 @@ mod tests {
         })
     }
 
+    /// The menu id for a colour label, by its place in `COLOR_LABELS`.
+    fn colour_id(label: ColorLabel) -> u64 {
+        let i = COLOR_LABELS
+            .iter()
+            .position(|l| *l == label)
+            .expect("a label that is offered");
+        MENU_COLOR_BASE.saturating_add(u64::try_from(i).unwrap_or(0))
+    }
+
+    /// A colour chosen from the menu is applied.
+    ///
+    /// `set_color_label` has existed with no production caller, so every
+    /// photograph's label has always been `None` and the swatch the grid draws
+    /// for it has always been the same colour.
+    #[test]
+    fn a_colour_chosen_from_the_menu_is_applied() {
+        let mut app = app_with_n_pictures("colour", 1);
+        app.set_window_size(900.0, 700.0);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+        assert_eq!(
+            app.find_photo(pid).expect("one").color_label,
+            ColorLabel::None,
+            "the control failed"
+        );
+        let cell = app.thumb_rect(0).expect("a card");
+        app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
+
+        app.choose_from_photo_menu(colour_id(ColorLabel::Red));
+
+        assert_eq!(
+            app.find_photo(pid).expect("one").color_label,
+            ColorLabel::Red,
+            "the label was not applied"
+        );
+        assert_eq!(app.status_message.as_deref(), Some("Labelled Red"));
+    }
+
+    /// Choosing None clears the label, and says so in those words.
+    ///
+    /// "Labelled None" would be a sentence about a colour that is really the
+    /// absence of one.
+    #[test]
+    fn choosing_none_clears_the_label() {
+        let mut app = app_with_n_pictures("clearcolour", 1);
+        app.set_window_size(900.0, 700.0);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+        assert!(
+            app.set_color_label(pid, ColorLabel::Blue),
+            "the control failed"
+        );
+        let cell = app.thumb_rect(0).expect("a card");
+        app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
+
+        app.choose_from_photo_menu(colour_id(ColorLabel::None));
+
+        assert_eq!(
+            app.find_photo(pid).expect("one").color_label,
+            ColorLabel::None
+        );
+        assert_eq!(app.status_message.as_deref(), Some("Label cleared"));
+    }
+
+    /// The label goes on everything selected.
+    #[test]
+    fn a_colour_goes_on_the_whole_selection() {
+        let mut app = app_with_n_pictures("colourall", 3);
+        app.set_window_size(900.0, 700.0);
+        app.selected_photo = app.visible_photos().first().copied();
+        app.handle_event(&shift_key(Key::Right));
+        let chosen = app.selected_photos.clone();
+        assert_eq!(chosen.len(), 2, "the control failed");
+        let cell = app.thumb_rect(0).expect("a card");
+        app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
+
+        app.choose_from_photo_menu(colour_id(ColorLabel::Green));
+
+        for pid in &chosen {
+            assert_eq!(
+                app.find_photo(*pid).expect("a photo").color_label,
+                ColorLabel::Green,
+                "photograph {pid} was not labelled"
+            );
+        }
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Labelled 2 photos Green")
+        );
+    }
+
+    /// A reserved id is not mistaken for an album.
+    ///
+    /// The ids in that menu are album ids, and these three sit at the top of
+    /// the `u64` range because an `IdGen` counting up cannot reach it. If that
+    /// ever stopped being true, a colour would silently add to an album.
+    #[test]
+    fn the_reserved_menu_ids_cannot_collide_with_an_album() {
+        let mut app = PhotoApp::new();
+        let mut ids = Vec::new();
+        for i in 0..64 {
+            ids.push(app.create_album(&format!("album {i}")));
+        }
+        let reserved = MENU_ADD_TAG;
+        let lowest_colour = MENU_COLOR_BASE;
+        assert!(
+            ids.iter().all(|id| *id < lowest_colour && *id != reserved),
+            "an album id reached the reserved range: {:?}",
+            ids.iter().max()
+        );
+    }
+
     /// The tag being typed, if that is what has the keyboard.
     fn tagging(app: &PhotoApp) -> Option<&str> {
         match &app.text_entry {
@@ -5825,7 +6008,7 @@ mod tests {
         let cell = app.thumb_rect(0).expect("a card");
         app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
 
-        app.choose_album_from_menu(MENU_ADD_TAG);
+        app.choose_from_photo_menu(MENU_ADD_TAG);
         assert_eq!(tagging(&app), Some(""), "the menu did not start a tag");
 
         for (k, ch) in [(Key::P, 'p'), (Key::I, 'i'), (Key::E, 'e'), (Key::R, 'r')] {
@@ -6075,7 +6258,7 @@ mod tests {
         // Raise it on one of the selected cards.
         let cell = app.thumb_rect(0).expect("a first card");
         app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
-        app.choose_album_from_menu(album);
+        app.choose_from_photo_menu(album);
 
         let in_album = app
             .albums
@@ -6137,7 +6320,7 @@ mod tests {
         let (x, y) = first_card_point(&app);
         app.handle_event(&right_click(x, y));
 
-        app.choose_album_from_menu(album);
+        app.choose_from_photo_menu(album);
 
         let in_album = app
             .albums
@@ -6210,7 +6393,7 @@ mod tests {
         app.handle_event(&right_click(x, y));
 
         // Choosing it anyway must not duplicate the entry.
-        app.choose_album_from_menu(album);
+        app.choose_from_photo_menu(album);
         let in_album = app
             .albums
             .iter()

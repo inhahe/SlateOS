@@ -24,7 +24,7 @@
 //!
 //! The version panel and the note list answer a click: clicking a version
 //! restores it, clicking a note selects it, and right-clicking one offers to
-//! delete it or move it to another notebook. **The notebook sidebar still
+//! tag it, delete it, or move it to another notebook. **The notebook sidebar still
 //! does not.** It is drawn, it looks like a list, and the pointer does nothing
 //! over it. The repair is the same one -- a hit test derived from the function
 //! the renderer already reads, as `note_rows`, `version_rows` and
@@ -89,6 +89,23 @@ const SIDEBAR_WIDTH: f32 = 200.0;
 const NOTE_LIST_WIDTH: f32 = 260.0;
 const TOOLBAR_HEIGHT: f32 = 36.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
+
+/// What the keyboard is typing into, when it is typing into something.
+///
+/// One field rather than a `bool` per box. There was one -- `searching` --
+/// and a tag would have made two, each needing to clear the other at every
+/// place that takes focus. `apps/photomanager` reached three before that was
+/// collected; this is the same collection, done at two.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextEntry {
+    /// The search box. Filters as it is typed, so its text is `search_query`.
+    Search,
+    /// A tag for the note the menu was raised on, applied when committed.
+    Tag(String),
+}
+
+/// The note menu's id for "Add tag...", which is not a notebook either.
+const MENU_ADD_TAG: u64 = u64::MAX - 1;
 
 /// The note menu's id for "Delete note", which is not a notebook.
 ///
@@ -1360,7 +1377,8 @@ pub struct NotesApp {
     ///
     /// Without it, typing "s" to search would re-sort the list under the box.
     /// The app had no input at all, so nothing had needed the distinction.
-    pub searching: bool,
+    /// What the keyboard is typing into, if anything.
+    pub text_entry: Option<TextEntry>,
     /// The open or save picker. Holds the dialog, the saving flag and
     /// the routing eleven applications used to write out by hand.
     pub picker: FilePicker,
@@ -1405,7 +1423,7 @@ impl NotesApp {
             sort_order: SortOrder::DateModified,
             active_panel: ActivePanel::NoteList,
             show_favorites_only: false,
-            searching: false,
+            text_entry: None,
             picker: FilePicker::new(),
             last_save: None,
             note_menu: None,
@@ -1570,14 +1588,24 @@ impl NotesApp {
 
     /// Raise the note menu over a note.
     fn open_note_menu(&mut self, id: NoteId, x: f32, y: f32) {
-        let mut items = vec![MenuItem::Action {
-            id: MENU_DELETE_NOTE,
-            label: "Delete note".to_owned(),
-            shortcut: None,
-            icon: None,
-            enabled: true,
-            checked: None,
-        }];
+        let mut items = vec![
+            MenuItem::Action {
+                id: MENU_ADD_TAG,
+                label: "Add tag...".to_owned(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            },
+            MenuItem::Action {
+                id: MENU_DELETE_NOTE,
+                label: "Delete note".to_owned(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            },
+        ];
         // Moving somewhere it already is would be a no-op dressed as a
         // choice, so the notebook it is in is offered ticked and disabled.
         let current = self.find_note(id).map(|n| n.notebook_id);
@@ -1613,6 +1641,10 @@ impl NotesApp {
         let Some(id) = self.menu_note else {
             return false;
         };
+        if chosen == MENU_ADD_TAG {
+            self.text_entry = Some(TextEntry::Tag(String::new()));
+            return true;
+        }
         if chosen == MENU_DELETE_NOTE {
             return self.delete_note(id);
         }
@@ -2208,8 +2240,8 @@ impl NotesApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
-        if self.searching {
-            return self.handle_key_search(key);
+        if self.text_entry.is_some() {
+            return self.handle_text_entry_key(key);
         }
         let ctrl = key.modifiers.ctrl;
         match key.key {
@@ -2232,11 +2264,11 @@ impl NotesApp {
             // plain `/` require Ctrl as well, and the search box could not be
             // opened the way every other program opens it.
             Key::Slash => {
-                self.searching = true;
+                self.text_entry = Some(TextEntry::Search);
                 EventResult::Consumed
             }
             Key::F if ctrl => {
-                self.searching = true;
+                self.text_entry = Some(TextEntry::Search);
                 EventResult::Consumed
             }
             Key::S if ctrl => {
@@ -2271,27 +2303,64 @@ impl NotesApp {
     ///
     /// It comes first in `handle_key` because otherwise typing "s" to search
     /// for something would re-sort the list under the search box.
-    fn handle_key_search(&mut self, key: &KeyEvent) -> EventResult {
+    fn handle_text_entry_key(&mut self, key: &KeyEvent) -> EventResult {
+        let Some(entry) = self.text_entry.clone() else {
+            return EventResult::Ignored;
+        };
         match key.key {
             Key::Escape | Key::Enter => {
-                self.searching = false;
+                self.text_entry = None;
+                if let TextEntry::Tag(tag) = entry
+                    && key.key == Key::Enter
+                {
+                    self.commit_tag(&tag);
+                }
                 EventResult::Consumed
             }
             Key::Backspace => {
-                if self.search_query.pop().is_none() {
-                    return EventResult::Ignored;
+                match entry {
+                    TextEntry::Search => {
+                        if self.search_query.pop().is_none() {
+                            return EventResult::Ignored;
+                        }
+                        self.reanchor_selection();
+                    }
+                    TextEntry::Tag(mut tag) => {
+                        tag.pop();
+                        self.text_entry = Some(TextEntry::Tag(tag));
+                    }
                 }
-                self.reanchor_selection();
                 EventResult::Consumed
             }
             _ => {
                 if key.text.is_empty() || key.modifiers.ctrl {
                     return EventResult::Ignored;
                 }
-                self.search_query.push_str(&key.text);
-                self.reanchor_selection();
+                match entry {
+                    TextEntry::Search => {
+                        self.search_query.push_str(&key.text);
+                        self.reanchor_selection();
+                    }
+                    TextEntry::Tag(mut tag) => {
+                        tag.push_str(&key.text);
+                        self.text_entry = Some(TextEntry::Tag(tag));
+                    }
+                }
                 EventResult::Consumed
             }
+        }
+    }
+
+    /// Put the typed tag on the note the menu was raised over.
+    ///
+    /// An empty tag cancels rather than adding one called nothing.
+    fn commit_tag(&mut self, typed: &str) {
+        let tag = typed.trim().to_owned();
+        if tag.is_empty() {
+            return;
+        }
+        if let Some(id) = self.menu_note {
+            self.add_tag_to_note(id, &tag);
         }
     }
 
@@ -2426,10 +2495,30 @@ impl NotesApp {
         let editor_w = width - editor_x;
         self.render_editor_area(&mut cmds, editor_x, content_y, editor_w, content_h);
 
+        // A tag being typed, where the save line goes and outranking it: this
+        // entry has no box of its own, so without somewhere to show the
+        // characters the user is typing into nothing they can see.
+        if let Some(TextEntry::Tag(typed)) = &self.text_entry {
+            cmds.push(RenderCommand::Text {
+                x: 8.0,
+                y: 24.0,
+                text: format!("Tag: {typed}|"),
+                color: self.palette.ink(self.palette.blue),
+                font_size: 9.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((width - 16.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
         // What the last save did, where the empty-state banner sits. This is
         // the one place the user's work leaves the process, so a save that
         // reports nothing is a save they cannot rely on.
-        if let Some(note) = &self.last_save {
+        if let Some(note) = self
+            .last_save
+            .as_ref()
+            .filter(|_| self.text_entry.is_none())
+        {
             let avail = (width - 16.0).max(0.0);
             if avail > 0.0 {
                 cmds.push(RenderCommand::Text {
@@ -3883,13 +3972,13 @@ mod tests {
         let mut app = seeded();
         let order = app.sort_order;
         assert_eq!(app.handle_event(&press(Key::Slash)), EventResult::Consumed);
-        assert!(app.searching);
+        assert_eq!(app.text_entry, Some(TextEntry::Search));
         app.handle_event(&typed('s'));
         app.handle_event(&typed('p'));
         assert_eq!(app.search_query, "sp");
         assert_eq!(app.sort_order, order, "the sort order changed while typing");
         app.handle_event(&press(Key::Enter));
-        assert!(!app.searching);
+        assert_eq!(app.text_entry, None);
         // And now the same key sorts again.
         app.handle_event(&press(Key::S));
         assert_ne!(app.sort_order, order);
@@ -4461,6 +4550,120 @@ mod tests {
         })
     }
 
+    /// The tag being typed, if that is what has the keyboard.
+    fn tagging(app: &NotesApp) -> Option<&str> {
+        match &app.text_entry {
+            Some(TextEntry::Tag(text)) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The menu offers a tag, and typing one puts it on the note.
+    ///
+    /// `add_tag_to_note` is written and tested and had no caller: there was no
+    /// pointer, and no keyboard shortcut for it either.
+    #[test]
+    fn a_tag_typed_from_the_menu_reaches_the_note() {
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        let (_, row_y) = *app.note_rows().first().expect("a row");
+        app.handle_event(&right_click_at(SIDEBAR_WIDTH + 20.0, row_y + 4.0));
+
+        assert!(app.choose_from_note_menu(MENU_ADD_TAG), "the menu refused");
+        assert_eq!(tagging(&app), Some(""), "no tag entry was started");
+
+        for ch in ["p", "i", "e", "r"] {
+            app.handle_event(&typed_key(ch));
+        }
+        app.handle_event(&plain_key(Key::Enter));
+
+        assert_eq!(
+            app.find_note(nid).expect("the note").tags,
+            vec!["pier".to_owned()],
+            "the tag never reached the note"
+        );
+        assert!(tagging(&app).is_none(), "still taking typing");
+    }
+
+    /// The tag being typed is on screen.
+    #[test]
+    fn the_tag_being_typed_is_shown() {
+        let (mut app, _, _, _) = app_with_two_notebooks();
+        app.text_entry = Some(TextEntry::Tag("pi".to_owned()));
+
+        let tree = app.render(app.window_width, app.window_height);
+
+        let shown = tree
+            .commands
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Tag: pi")));
+        assert!(shown, "the tag being typed is nowhere on screen");
+    }
+
+    /// Escape abandons the tag without adding it.
+    #[test]
+    fn escape_abandons_the_tag() {
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        app.menu_note = Some(nid);
+        app.text_entry = Some(TextEntry::Tag("half".to_owned()));
+
+        app.handle_event(&plain_key(Key::Escape));
+
+        assert!(tagging(&app).is_none(), "still taking typing");
+        assert!(
+            app.find_note(nid).expect("the note").tags.is_empty(),
+            "escape added the tag anyway"
+        );
+    }
+
+    /// An empty tag adds nothing.
+    #[test]
+    fn enter_on_an_empty_tag_adds_nothing() {
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        app.menu_note = Some(nid);
+        app.text_entry = Some(TextEntry::Tag(String::new()));
+
+        app.handle_event(&plain_key(Key::Enter));
+
+        assert!(
+            app.find_note(nid).expect("the note").tags.is_empty(),
+            "an empty tag was added"
+        );
+    }
+
+    /// Searching still works, which the entry refactor could have broken.
+    #[test]
+    fn the_search_box_still_takes_typing() {
+        let (mut app, _, _, _) = app_with_two_notebooks();
+        app.handle_event(&plain_key(Key::Slash));
+        assert_eq!(
+            app.text_entry,
+            Some(TextEntry::Search),
+            "slash did not open search"
+        );
+
+        app.handle_event(&typed_key("a"));
+
+        assert_eq!(app.search_query, "a", "the search box lost its typing");
+    }
+
+    fn plain_key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn typed_key(text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: text.to_owned(),
+        })
+    }
+
     fn right_click_at(x: f32, y: f32) -> Event {
         Event::Mouse(MouseEvent {
             x,
@@ -4544,9 +4747,13 @@ mod tests {
         app.handle_event(&right_click_at(SIDEBAR_WIDTH + 20.0, first_y + 4.0));
         app.selected_note = Some(nid);
 
-        // Far from the menu, over the other note's row.
-        let (_, second_y) = *rows.get(1).expect("a second row");
-        let consumed = app.handle_event(&click_at(SIDEBAR_WIDTH + 20.0, second_y + 4.0));
+        // Genuinely outside the menu. The menu is drawn *at* the point it was
+        // raised from and extends right and down, so the row below is inside
+        // it -- an earlier version of this test clicked there, and when a row
+        // was added to the menu the item under that point became Delete and
+        // the click deleted the note it was meant to miss.
+        let (_, first_row_y) = *rows.first().expect("a row");
+        let consumed = app.handle_event(&click_at(20.0, first_row_y + 4.0));
 
         assert_eq!(consumed, EventResult::Consumed);
         assert!(app.note_menu.is_none(), "the menu is still up");

@@ -159890,6 +159890,22 @@ direction** -- a probe that under-reports wastes an afternoon, while one that
 over-reports gets working programs filed as broken. Of the 40, the two read so
 far were both wrong.
 
+**A fourth probe, built after the authoring finds, and it is the clearest
+result of the four.** The question that found `notes` -- *can the user produce
+the thing the app is a list of?* -- was mechanised as "app-struct `Vec` fields
+with no live `push`". It returns **92 collections across 48 apps**, and the
+three most promising rows were all false positives on inspection:
+`launcher`'s `apps` comes from `builtin_app_database()`, `dictionary`'s
+`entries` from `build_dictionary()`, `colorpicker`'s `palettes` from
+`vec![default_palette]` -- **assigned wholesale, which a search for `.push`
+cannot see.** Most of the rest are derived lists (`legal_moves_for_selected`,
+`cached_blocks`, `treemap_rects`) that no user is supposed to produce.
+
+**The question is good and the mechanisation is not**, which is the whole
+lesson in one line. `notes`, `slides` and `diagram` were found by asking what
+three programs are *for* -- a sentence each, written by hand -- and no query
+written afterwards reproduces that. **Stop building these; read the app.**
+
 **The conclusion for anyone picking this up:** the probes in this entry are
 worth running once, as a way of choosing what to read. **They are not worth
 believing.** Every defect recorded here was confirmed by reading the code, and

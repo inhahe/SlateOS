@@ -160776,3 +160776,47 @@ naming), and **detection on read** -- if any line begins with a tab, the file
 uses tabs. Without the second, opening a Makefile and typing still corrupts
 it, which is the case the whole finding is about.
 
+## `TD-C-THE-TERMINAL-ECHOES-AND-RUNS-NOTHING` (lane C, 2026-09-18)
+
+**In short:** `apps/terminal` has no shell and starts no process. Typing works
+and the characters appear -- the PTY's cooked-mode line discipline echoes them
+locally -- and pressing Enter queues the line to a slave end that **nothing
+reads**. Nothing in the window says so, and the module doc says the opposite.
+
+**Verified.**
+
+| | |
+|---|---|
+| processes started | **none.** `Command::new`, `spawn(` and `exec(` appear zero times in the crate |
+| why typing still shows | `PtyInner` defaults to `PtyTerminalMode::Cooked`, whose line discipline "buffers input, echoes characters, and translates control keys" |
+| where a line goes | `queue_to_slave`, into a `ByteChannel` with no reader |
+| what the doc claims | *"keystrokes go to a child through `pty::PtyMaster` and its output comes back"* |
+| what the window admits | nothing -- the only "cannot"/"nothing" strings in the crate are test assertion messages |
+
+**The echo is what makes this worth filing rather than shrugging at.** An empty
+window that does nothing reads as unfinished. A window that *responds to
+typing* reads as working, so the first thing a user does is type a command and
+press Enter -- and the silence that follows is indistinguishable from a command
+that produced no output. `ls` returning nothing looks exactly like `ls` in an
+empty directory.
+
+**`pty.rs` is not the problem and should not be touched.** It is a careful,
+complete implementation -- master/slave channels, line discipline, cooked and
+raw modes, signal translation, queueing rather than dropping on a full channel
+-- and its own doc is honest about the boundary: the emulator "can then deliver
+these to the child process via the OS's ..." That sentence describes work not
+done. `main.rs`'s doc is where it became a claim that it was.
+
+**Same shape as `apps/editor`'s `use_spaces` comment**, filed hours earlier: a
+doc sentence describing a mechanism that does not exist, written by somebody
+wiring up the half that does. There it was "set when a file is read" over a
+crate with no indent detection; here it is "keystrokes go to a child" over a
+crate that starts no child. **Both were written truthfully about the
+*intention* and read as claims about the *program*.**
+
+**What the repair wants, in order.** The window should say it has no shell --
+one line, on the §862 pattern, since a terminal that silently swallows commands
+is the most convincing wrong answer this app can give. The module doc should
+describe the emulator it is rather than the one it will be. Spawning a real
+process is a much larger piece of work and is not a prerequisite for either.
+

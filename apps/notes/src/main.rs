@@ -110,6 +110,20 @@ pub enum TextEntry {
     Tag(String),
     /// A new name for the notebook the menu was raised on.
     NotebookName(String),
+    /// A title for a note that does not exist yet.
+    ///
+    /// The title is asked for first because `create_note` takes one and a
+    /// note with no title cannot be picked out of the list afterwards.
+    NewNote(String),
+    /// A name for a notebook that does not exist yet.
+    NewNotebook(String),
+    /// The body of a note, committed when the mode is left.
+    ///
+    /// `Enter` inserts a newline here rather than committing, because a note
+    /// is more than one line and `Enter` is how you get the second one. That
+    /// is why this carries the note's id: the commit has to know which note
+    /// it is writing even though the selection may have moved.
+    NoteBody(NoteId, String),
 }
 
 /// What an open menu is about.
@@ -2462,6 +2476,22 @@ impl NotesApp {
                 self.active_panel = next;
                 EventResult::Consumed
             }
+            // Making things. This app could not create a note at all:
+            // `create_note`, `update_note_title` and `update_note_content`
+            // were written, tested and callerless, both `notes.push` sites
+            // were inside the two unreachable creators, and there is no
+            // import -- so it exported notes it could not create.
+            Key::N if ctrl && key.modifiers.shift => {
+                self.text_entry = Some(TextEntry::NewNotebook(String::new()));
+                EventResult::Consumed
+            }
+            Key::N if ctrl => {
+                self.text_entry = Some(TextEntry::NewNote(String::new()));
+                EventResult::Consumed
+            }
+            // Writing in the selected note. `Enter` because that is what
+            // opens a thing, and the body mode leaves on `Escape`.
+            Key::Enter => self.begin_note_body(),
             // Selection within whichever panel has focus.
             Key::Up => self.step_selection(-1),
             Key::Down => self.step_selection(1),
@@ -2509,18 +2539,97 @@ impl NotesApp {
     ///
     /// It comes first in `handle_key` because otherwise typing "s" to search
     /// for something would re-sort the list under the search box.
+    /// The notebook a new note should go in.
+    ///
+    /// Creates one when there are none, because this app starts with no
+    /// notebooks at all and `create_note` needs an id: without this the first
+    /// note a user ever tries to make would have nowhere to go, and refusing
+    /// it would be indistinguishable from the defect this replaces.
+    fn notebook_for_new_note(&mut self) -> NotebookId {
+        if let Some(id) = self.selected_notebook {
+            return id;
+        }
+        if let Some(nb) = self.notebooks.first() {
+            return nb.id;
+        }
+        let id = self.create_notebook("Notes");
+        self.selected_notebook = Some(id);
+        id
+    }
+
+    /// Make the note the title was typed for, and select it.
+    ///
+    /// Selected rather than merely created: a note that appears somewhere in
+    /// the list without the selection following it is one the user has to go
+    /// and find, and the next thing they want is to type in it.
+    fn commit_new_note(&mut self, title: &str) {
+        let title = title.trim();
+        if title.is_empty() {
+            return;
+        }
+        let notebook = self.notebook_for_new_note();
+        let id = self.create_note(title, notebook);
+        self.selected_note = Some(id);
+        self.active_panel = ActivePanel::Editor;
+    }
+
+    /// Make the notebook the name was typed for, and select it.
+    fn commit_new_notebook(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let id = self.create_notebook(name);
+        self.selected_notebook = Some(id);
+    }
+
+    /// Begin writing in the selected note, seeded with what it already says.
+    ///
+    /// Seeded because editing a note is usually adding to it, and a blank box
+    /// would make the existing text something the user has to retype.
+    fn begin_note_body(&mut self) -> EventResult {
+        let Some(id) = self.selected_note else {
+            return EventResult::Ignored;
+        };
+        let Some(note) = self.notes.iter().find(|n| n.id == id) else {
+            return EventResult::Ignored;
+        };
+        let body = note.content.clone();
+        self.text_entry = Some(TextEntry::NoteBody(id, body));
+        self.active_panel = ActivePanel::Editor;
+        EventResult::Consumed
+    }
+
     fn handle_text_entry_key(&mut self, key: &KeyEvent) -> EventResult {
         let Some(entry) = self.text_entry.clone() else {
             return EventResult::Ignored;
         };
         match key.key {
+            // A newline in the body, before the arm that would commit on it.
+            Key::Enter if matches!(entry, TextEntry::NoteBody(..)) => {
+                if let TextEntry::NoteBody(id, mut body) = entry {
+                    body.push('\n');
+                    self.text_entry = Some(TextEntry::NoteBody(id, body));
+                }
+                EventResult::Consumed
+            }
             Key::Escape | Key::Enter => {
                 self.text_entry = None;
+                // The body commits on the way out either way: Escape is how
+                // you leave a multi-line box, and losing what was typed
+                // because the exit key was the cancelling one is the worst
+                // thing a text editor can do.
+                if let TextEntry::NoteBody(id, body) = &entry {
+                    self.update_note_content(*id, body);
+                    return EventResult::Consumed;
+                }
                 if key.key == Key::Enter {
                     match entry {
                         TextEntry::Tag(tag) => self.commit_tag(&tag),
                         TextEntry::NotebookName(name) => self.commit_notebook_name(&name),
-                        TextEntry::Search => {}
+                        TextEntry::NewNote(title) => self.commit_new_note(&title),
+                        TextEntry::NewNotebook(name) => self.commit_new_notebook(&name),
+                        TextEntry::Search | TextEntry::NoteBody(..) => {}
                     }
                 }
                 EventResult::Consumed
@@ -2541,6 +2650,18 @@ impl NotesApp {
                         name.pop();
                         self.text_entry = Some(TextEntry::NotebookName(name));
                     }
+                    TextEntry::NewNote(mut title) => {
+                        title.pop();
+                        self.text_entry = Some(TextEntry::NewNote(title));
+                    }
+                    TextEntry::NewNotebook(mut name) => {
+                        name.pop();
+                        self.text_entry = Some(TextEntry::NewNotebook(name));
+                    }
+                    TextEntry::NoteBody(id, mut body) => {
+                        body.pop();
+                        self.text_entry = Some(TextEntry::NoteBody(id, body));
+                    }
                 }
                 EventResult::Consumed
             }
@@ -2560,6 +2681,18 @@ impl NotesApp {
                     TextEntry::NotebookName(mut name) => {
                         name.push_str(&key.text);
                         self.text_entry = Some(TextEntry::NotebookName(name));
+                    }
+                    TextEntry::NewNote(mut title) => {
+                        title.push_str(&key.text);
+                        self.text_entry = Some(TextEntry::NewNote(title));
+                    }
+                    TextEntry::NewNotebook(mut name) => {
+                        name.push_str(&key.text);
+                        self.text_entry = Some(TextEntry::NewNotebook(name));
+                    }
+                    TextEntry::NoteBody(id, mut body) => {
+                        body.push_str(&key.text);
+                        self.text_entry = Some(TextEntry::NoteBody(id, body));
                     }
                 }
                 EventResult::Consumed
@@ -2717,6 +2850,14 @@ impl NotesApp {
         let prompt = match &self.text_entry {
             Some(TextEntry::Tag(typed)) => Some(format!("Tag: {typed}|")),
             Some(TextEntry::NotebookName(typed)) => Some(format!("Notebook name: {typed}|")),
+            Some(TextEntry::NewNote(typed)) => Some(format!("New note: {typed}|  (Enter)")),
+            Some(TextEntry::NewNotebook(typed)) => Some(format!("New notebook: {typed}|  (Enter)")),
+            // The body has the editor panel to show its text in; this line
+            // says how to leave, which is the part a multi-line box has to
+            // state because Enter no longer means "done".
+            Some(TextEntry::NoteBody(..)) => {
+                Some("Writing -- Enter for a new line, Esc to finish".to_owned())
+            }
             // The search box has a box of its own to show its text in.
             Some(TextEntry::Search) | None => None,
         };
@@ -3570,7 +3711,17 @@ impl NotesApp {
         _height: f32,
     ) {
         let mut ly = y + EDITOR_PADDING;
-        for line in note.content.lines() {
+        // While the body is being typed, show the buffer rather than the
+        // stored note. The commit happens on the way out -- `set_content`
+        // snapshots a version on every call, so committing per keystroke
+        // would file one version per character -- and until then the note
+        // still holds the old text. Drawing that would leave the user typing
+        // into a panel that never changes.
+        let live = match &self.text_entry {
+            Some(TextEntry::NoteBody(id, buf)) if *id == note.id => buf.as_str(),
+            _ => note.content.as_str(),
+        };
+        for line in live.lines() {
             cmds.push(RenderCommand::Text {
                 x: x + EDITOR_PADDING,
                 y: ly,
@@ -5077,6 +5228,145 @@ mod tests {
         app.handle_event(&typed_key("a"));
 
         assert_eq!(app.search_query, "a", "the search box lost its typing");
+    }
+
+    fn ctrl_key(k: Key, shift: bool) -> Event {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = true;
+        modifiers.shift = shift;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// A user can make a note and write in it, from an empty app.
+    ///
+    /// This is the whole point of the program and it could not be done:
+    /// `create_note`, `update_note_title` and `update_note_content` were
+    /// written, tested and callerless, both `notes.push` sites were inside
+    /// the two unreachable creators, and there is no import -- so this app
+    /// exported notes it could not create.
+    ///
+    /// Deliberately end-to-end rather than "the key sets the field": every
+    /// piece of this existed already and the program still could not be used,
+    /// so the assertion has to be that the artifact comes out.
+    #[test]
+    fn a_user_can_make_a_note_and_write_in_it() {
+        let mut app = NotesApp::new();
+        assert!(
+            app.notes.is_empty(),
+            "control: the app starts with no notes"
+        );
+        assert!(
+            app.notebooks.is_empty(),
+            "control: and with no notebook to put one in"
+        );
+
+        // Make it.
+        app.handle_event(&ctrl_key(Key::N, false));
+        for c in ["S", "h", "o", "p"] {
+            app.handle_event(&typed_key(c));
+        }
+        app.handle_event(&plain_key(Key::Enter));
+
+        assert_eq!(app.notes.len(), 1, "no note was created");
+        let id = app.notes[0].id;
+        assert_eq!(app.notes[0].title, "Shop", "the title never arrived");
+        assert_eq!(app.selected_note, Some(id), "the new note was not selected");
+        assert_eq!(
+            app.notebooks.len(),
+            1,
+            "a notebook should have been made to hold it"
+        );
+
+        // Write in it.
+        app.handle_event(&plain_key(Key::Enter));
+        assert!(app.text_entry.is_some(), "Enter did not begin writing");
+        for c in ["m", "i", "l", "k"] {
+            app.handle_event(&typed_key(c));
+        }
+        app.handle_event(&plain_key(Key::Enter));
+        for c in ["e", "g", "g", "s"] {
+            app.handle_event(&typed_key(c));
+        }
+        app.handle_event(&plain_key(Key::Escape));
+
+        // Read it back.
+        let note = app.notes.iter().find(|n| n.id == id).expect("the note");
+        assert_eq!(
+            note.content, "milk\neggs",
+            "what was typed is not what the note holds"
+        );
+    }
+
+    /// While writing, the editor shows what is being typed.
+    ///
+    /// The commit happens on the way out, so the note still holds the old
+    /// text until then; drawing that would leave the user typing into a panel
+    /// that never changes.
+    #[test]
+    fn the_editor_shows_the_body_as_it_is_typed() {
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("NB");
+        let id = app.create_note("Note", nb);
+        app.selected_note = Some(id);
+
+        app.handle_event(&plain_key(Key::Enter));
+        for c in ["h", "i"] {
+            app.handle_event(&typed_key(c));
+        }
+
+        let shown: Vec<String> = app
+            .render(1200.0, 800.0)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            shown.iter().any(|t| t == "hi"),
+            "the text being typed is nowhere on screen: {shown:?}"
+        );
+    }
+
+    /// Escape keeps what was typed rather than discarding it.
+    ///
+    /// Escape is how you leave a multi-line box, and losing the work because
+    /// the exit key was the cancelling one is the worst thing a text editor
+    /// can do.
+    #[test]
+    fn leaving_the_body_keeps_what_was_typed() {
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("NB");
+        let id = app.create_note("Note", nb);
+        app.selected_note = Some(id);
+
+        app.handle_event(&plain_key(Key::Enter));
+        app.handle_event(&typed_key("x"));
+        app.handle_event(&plain_key(Key::Escape));
+
+        let note = app.notes.iter().find(|n| n.id == id).expect("the note");
+        assert_eq!(note.content, "x", "Escape threw the writing away");
+    }
+
+    /// Ctrl+Shift+N makes a notebook.
+    #[test]
+    fn ctrl_shift_n_makes_a_notebook() {
+        let mut app = NotesApp::new();
+
+        app.handle_event(&ctrl_key(Key::N, true));
+        for c in ["W", "o", "r", "k"] {
+            app.handle_event(&typed_key(c));
+        }
+        app.handle_event(&plain_key(Key::Enter));
+
+        assert_eq!(app.notebooks.len(), 1, "no notebook was created");
+        assert_eq!(app.notebooks[0].name, "Work", "the name never arrived");
     }
 
     fn plain_key(k: Key) -> Event {

@@ -160354,7 +160354,7 @@ into it via `element_by_id_mut`, `Backspace`, and `Escape`/`Enter` to finish.
 than permanent contents. The deck title wants the same treatment, and it is
 what `export_as` names the file with.
 
-## `TD-C-NOTES-CANNOT-MAKE-A-NOTE` (lane C, 2026-09-18)
+## `TD-C-NOTES-CANNOT-MAKE-A-NOTE` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** `apps/notes` starts empty and cannot create a note, title one, or
 write a word in one. It can *export* notes -- to plain text, Markdown and HTML,
@@ -160402,6 +160402,35 @@ uses. Until then the empty view should say what `finance`'s does -- that notes
 cannot be created here -- because an empty list that invites you to add
 something is worse than one that admits it cannot.
 
+
+**Fixed the same day.** `Ctrl+N` asks for a title and makes the note,
+`Ctrl+Shift+N` makes a notebook, and `Enter` on a selected note writes in it --
+`Enter` inserting a newline there rather than committing, because a note is
+more than one line and `Enter` is how you get the second one.
+
+**Three decisions in it worth keeping:**
+
+- **The body commits when the mode is left, including on `Escape`.** Losing
+  what was typed because the exit key was the cancelling one is the worst
+  thing a text editor can do, and `Escape` is how anyone leaves a multi-line
+  box. Tested by `leaving_the_body_keeps_what_was_typed`.
+- **The editor draws the live buffer, not the stored note.** The commit cannot
+  happen per keystroke -- `set_content` snapshots a version on every call, so
+  that would file one version per character -- which means the note holds the
+  old text while typing, and drawing *that* would leave the user typing into a
+  panel that never changes.
+- **The first note creates a notebook to live in.** This app starts with no
+  notebooks at all and `create_note` needs an id, so without it the first note
+  anyone tried to make would have had nowhere to go -- and a refusal there is
+  indistinguishable from the defect being fixed.
+
+**The test that matters is `a_user_can_make_a_note_and_write_in_it`**, which
+starts from an empty app and asserts the artifact comes out: Ctrl+N, a title,
+Enter, a body of two lines, Escape, and then `note.content == "milk
+eggs"`.
+Deliberately end-to-end rather than "the key sets the field" -- every piece of
+this existed already and the program still could not be used. 120 tests, up
+from 116.
 ## `TD-C-AUTHORING-APPS-THAT-CANNOT-AUTHOR` (lane C, 2026-09-18)
 
 **In short:** Three of our content-creation programs cannot create content.
@@ -160412,7 +160441,7 @@ versions, export -- and is missing the one act it exists for.
 | App | What it can do | What it cannot |
 |---|---|---|
 | `slides` | add slides, four shapes, images; themes, transitions, sorter view, undo, export | **type anything.** Zero assignments to `.text` in the crate, tests included; every element born "New Text" / "Presentation Title"; deck permanently "Untitled Presentation" |
-| `notes` | notebooks, tags, versions, search, export to text/Markdown/HTML | **make a note.** `create_note`, `update_note_title`, `update_note_content` all callerless; both `notes.push` sites are inside the unreachable creators; there is no import. It exports notes it cannot create |
+| `notes` | notebooks, tags, versions, search, export to text/Markdown/HTML -- **and, since 2026-09-18, make and write a note** | ~~**make a note.**~~ *(fixed)* `create_note`, `update_note_title`, `update_note_content` all callerless; both `notes.push` sites are inside the unreachable creators; there is no import. It exports notes it cannot create |
 | `diagram` | insert canned flowcharts and org charts, move and connect nodes, export SVG/JSON | **label anything.** `set_node_label` and `set_edge_label` callerless, **zero** typing sites in the crate. The only writer of `.label` besides them is `add_template_node`, so every box says what the template said |
 
 **`diagram` is the one that shows what the class costs.** Its 32 reachable

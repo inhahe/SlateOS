@@ -160884,6 +160884,33 @@ echoed and then goes nowhere. Silence after Enter is not a command that
 produced no output." The module doc's "keystrokes go to a child" claim and the
 absence of a real process remain; those are the larger half.
 
+**The remaining half is feasible, and that was checked rather than assumed.**
+This entry first said spawning a process is "a much larger piece of work"
+without establishing whether it was possible at all. It is:
+
+| | |
+|---|---|
+| a shell to run | `userspace/shell` exists |
+| spawning works here | 4 real sites -- `apps/launcher`, `apps/explorer`, `gui/desktop`, `apps/installer` |
+| the pattern | `launcher::spawn_program` is `Command::new(path).spawn()`, whose own comment notes that waiting on the child "would make the launcher behave like a terminal" |
+
+So the work is not "can a process be started" but **connecting a child's stdio
+to the PTY that already exists**: piped stdin and stdout, a reader feeding
+`feed()`, and a decision about process lifetime. `pty.rs` is already the right
+shape for it -- master and slave ends, a line discipline, queueing rather than
+dropping. It is a real piece of work with concurrency in it, not a small one,
+and it is not blocked on anything.
+
+**A hazard this entry created, worth naming.** The sentence above recording
+that "`Command::new`, `spawn(` and `exec(` appear zero times" put those three
+names *into the file*, so `apps/terminal/src/main.rs` now matches a grep for
+the very thing it does not do. Checking which apps spawn processes returned
+terminal as a hit, from this comment. **Documenting an absence makes the file
+match searches for the thing that is absent** -- and the fix is the one this
+file already prescribes: run such questions through
+`rustlex.strip_noise(keep_literals=True)`, which blanks comments and left four
+real sites out of six candidate files.
+
 **What the repair wants, in order.** The window should say it has no shell --
 one line, on the §862 pattern, since a terminal that silently swallows commands
 is the most convincing wrong answer this app can give. The module doc should

@@ -161401,3 +161401,63 @@ against a constant. That converts a wall-clock ceiling into a comparison
 between two clocks that stall together, which no host pause can break.
 
 Not applied yet: a boot is building, and `fs/freeze.rs` is in it.
+
+### [A] `listen()` fails with `InternalError` about one boot in twenty, reds the run, and was recorded nowhere -- 2026-09-18
+**Status:** OPEN (reproduction rate measured, cause not yet identified)
+
+**In short:** roughly one boot in twenty fails because opening a network
+listening socket returns an error, on a socket that was created and bound
+successfully a line earlier. It has been happening for at least a day. It
+was in no entry of `known-issues.md` or `todo.txt`, because a failure that
+happens one run in twenty is invisible to anyone reading the run in front
+of them.
+
+**The evidence**, from `20260918T022810Z-fb66a2a2a-rc1.txt`:
+
+```
+[netsock]   FAIL: head-of-line setup step listen failed: InternalError
+[spawn]   FAIL: net::socket head-of-line witness (InternalError) -- a listener's
+          accepted connections are serialising again
+WARNING: net::socket head-of-line self-test failed: InternalError
+WARNING: persistent userspace netstack (ring 3) startup failed: InternalError
+```
+
+**Read the order carefully, because I read it backwards first.** The
+`listen` is the *first* line, not the last: `listen()` failed, which failed
+the witness, which failed the netstack startup report. My first reading was
+that an environmental netstack blip had cascaded into the witness -- the
+opposite causation, and it would have sent me to the daemon instead of to
+the socket layer.
+
+`kernel/src/net/socket.rs` runs the sequence
+`create(2)` -> `bind_stream(srv, PORT)` -> `listen(srv, 2)`, each wrapped in
+a `step!` macro that names itself on failure. The first two succeeded. Only
+`listen` failed, and only in this one run.
+
+**Rate: 1 of 20 archived serial logs.** Measured, not estimated -- the other
+nineteen contain neither line.
+
+**It reds the boot**, which is correct and worth stating because it means
+this is already costing runs. `scripts/boot-test.sh:353` greps the serial
+log case-insensitively for `self-test failed` and `:8987` turns a hit into
+*"Boot test FAILED (marker reached but a self-test failed)"*. So the kernel
+reaches `BOOT_OK` and the harness fails the run anyway -- exactly the design
+recorded when that witness was wired, working as intended.
+
+**How it was found, which is the reusable part.** `build/scan-guest-output.py`
+was written this morning after bash's `getcwd` error turned up four lines
+from an `OK`. I ran it on the newest log, found that, and stopped -- the
+site where the failure was seen. Lane C's rule the same evening (*a remedy
+applied where the failure was seen does not reach the places it was not*)
+prompted running it over all twenty. Nineteen of them contain only the
+`getcwd` line; one contains this as well.
+
+A one-in-twenty failure is precisely the shape a per-run reader cannot see
+and a corpus can. It cost one command over logs that were already on disk.
+
+**Next step, not taken yet.** Establish what `listen()` can return
+`InternalError` for at all, and whether the port is still held from an
+earlier test in the same boot -- a plausible hypothesis given `PORT` is a
+constant and this witness runs after a good deal of other network activity,
+but a hypothesis and not a finding. The cause is unknown; only the rate and
+the failing call are established.

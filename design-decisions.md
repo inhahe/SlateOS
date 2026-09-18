@@ -77162,6 +77162,31 @@ ceiling carried a comment calling it *"orders of magnitude of slack over the
 closed form"* -- the ratio argument, stated confidently, in the one place
 the ratio argument does not hold.
 
+**Two more from lane C, both operational rather than epistemic.**
+
+*Rewrite the call sites before adding the definition.* They inserted a
+guarded helper and then textually rewrote the calls it was meant to
+replace -- so the rewrite caught the helper's own body and made it recurse
+into itself. `warning: function cannot return without recursing` found it in
+a minute. **To a textual replace, a definition added first is
+indistinguishable from a call site**, which is the same tool-operates-on-text /
+question-is-about-structure shape as everything above. Checked my own staged
+applier against it rather than assuming: `build/add-contention-notice.py`
+inserts a shell helper and then patches two call sites, and its anchors
+(`GATES_START_EPOCH=...`, the QEMU echo) appear nowhere in the helper text,
+so insert-then-patch is safe *here* -- verified by simulating both steps
+and counting matches, not by reasoning about it.
+
+*A partial fix must say it is partial.* They swept five crates for the
+environment race and deliberately left `apps/explorer` half done: the path
+that actually reproduced now holds the lock, while 35 further sites in five
+modules bypass that helper and remain exposed. Rather than either doing a
+38-site mechanical change in the minutes before a merge, or quietly
+shipping the narrow fix, the entry says **"partly fixed"** and lists the
+five files. That is the direct antidote to the fix-coverage row above: a
+sweep that stops is fine, and a sweep that stops *silently* leaves a
+silence which reads as completion.
+
 A footnote of theirs worth keeping for operational reasons: the bug was
 diagnosable at all only because the log was still on disk. The earlier
 instance of the same failure is recorded as *unidentified* because that log

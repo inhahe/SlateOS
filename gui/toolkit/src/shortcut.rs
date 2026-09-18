@@ -86,6 +86,7 @@ impl Error for UnknownKey {}
 /// | `?` | `Shift` and the slash key, which is what produces it |
 /// | `Ctrl+/` | one stroke — a `/` straight after `+` is a key, not a separator |
 /// | `Ctrl+F / /` | two strokes — the second `/` is the key, not an empty part |
+/// | `0-9, A-F` | sixteen strokes — a range, and `,` separates like `/` does |
 ///
 /// Modifier names are matched without case, as are key names of more than one
 /// character; a single-character name is a key cap (`A` and `a` are the same
@@ -112,6 +113,14 @@ pub fn keystrokes(label: &str) -> Result<Vec<KeyEvent>, UnknownKey> {
             }
             continue;
         }
+        // `0-9`, `A-F`, `1-8`: a run of keys written the way a person writes
+        // one. Apps reach for this constantly -- a hex editor's digits, a
+        // game's eight levels -- and spelling it out as `0 / 1 / 2 / ...`
+        // to satisfy a parser would be the list bending to the checker.
+        if let Some(run) = span(chord) {
+            strokes.extend(run);
+            continue;
+        }
         let Some(one) = chord_to_stroke(chord) else {
             return Err(UnknownKey {
                 label: label.to_owned(),
@@ -127,6 +136,43 @@ pub fn keystrokes(label: &str) -> Result<Vec<KeyEvent>, UnknownKey> {
         });
     }
     Ok(strokes)
+}
+
+/// The keys a range like `0-9` or `A-F` names, if it is one.
+///
+/// Only an exact `X-Y` of two alphanumerics, so the `-` key itself (`Ctrl+-`,
+/// or a bare `-`) is never mistaken for a range: those are one character or
+/// carry a `+`, and neither matches.
+///
+/// Reversed or mixed ranges (`9-0`, `A-3`) are not ranges and fall through to
+/// be reported as an unknown key, which is what they are. Silently returning
+/// nothing for them would be this module's own failure mode -- a short list
+/// where a longer one was asked for.
+fn span(chord: &str) -> Option<Vec<KeyEvent>> {
+    let mut chars = chord.chars();
+    let from = chars.next()?;
+    if chars.next()? != '-' {
+        return None;
+    }
+    let to = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    let (from, to) = (from.to_ascii_uppercase(), to.to_ascii_uppercase());
+    if from.is_ascii_digit() != to.is_ascii_digit() || from > to {
+        return None;
+    }
+    if !from.is_ascii_alphanumeric() || !to.is_ascii_alphanumeric() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for cap in from..=to {
+        let (key, shifted) = single_key(cap)?;
+        let mut modifiers = Modifiers::NONE;
+        modifiers.shift = shifted;
+        out.push(stroke(key, modifiers));
+    }
+    Some(out)
 }
 
 /// Split a label on the `/` that separates alternatives.
@@ -146,7 +192,7 @@ fn split_alternatives(label: &str) -> Vec<&str> {
     let mut previous = '\0';
     for (at, ch) in label.char_indices() {
         let blank_so_far = label.get(start..at).is_none_or(|s| s.trim().is_empty());
-        if ch == '/' && previous != '+' && !blank_so_far {
+        if (ch == '/' || ch == ',') && previous != '+' && !blank_so_far {
             if let Some(piece) = label.get(start..at) {
                 parts.push(piece);
             }
@@ -659,6 +705,47 @@ mod tests {
         assert_eq!(digits.first(), Some(&Key::Num0));
         assert_eq!(digits.get(7), Some(&Key::Num7));
         assert_eq!(digits.last(), Some(&Key::Num9));
+    }
+
+    #[test]
+    fn a_range_is_every_key_between_its_ends() {
+        assert_eq!(
+            keys("A-F"),
+            vec![Key::A, Key::B, Key::C, Key::D, Key::E, Key::F]
+        );
+        assert_eq!(keys("0-9").len(), 10);
+        assert_eq!(keys("0-9").first(), Some(&Key::Num0));
+        assert_eq!(keys("0-9").last(), Some(&Key::Num9));
+        assert_eq!(keys("1-8").len(), 8, "the shape apps print for levels");
+        // A hex editor's byte entry, which is what this was written for.
+        assert_eq!(keys("0-9, A-F").len(), 16);
+    }
+
+    #[test]
+    fn a_comma_separates_alternatives_like_a_slash() {
+        assert_eq!(keys("A, B"), vec![Key::A, Key::B]);
+        assert_eq!(keys("Home, End"), vec![Key::Home, Key::End]);
+        // ...but a comma that *is* the key still is one, by the same rule that
+        // saves the slash: nothing but blanks before it.
+        assert_eq!(keys(","), vec![Key::Comma]);
+        assert_eq!(keys("Ctrl+,"), vec![Key::Comma]);
+    }
+
+    #[test]
+    fn a_dash_that_is_not_a_range_is_still_the_minus_key() {
+        assert_eq!(keys("-"), vec![Key::Minus]);
+        assert_eq!(keys("Ctrl+-"), vec![Key::Minus]);
+        assert_eq!(keys("Ctrl+= / Ctrl+-"), vec![Key::Equals, Key::Minus]);
+    }
+
+    #[test]
+    fn a_backwards_or_mixed_range_is_refused_rather_than_silently_short() {
+        // Returning nothing for these would be this module's own failure mode:
+        // a guard test handed a shorter list than it asked for passes while
+        // checking less.
+        for bad in ["9-0", "F-A", "A-3", "3-A"] {
+            assert!(keystrokes(bad).is_err(), "{bad:?} was accepted as a range");
+        }
     }
 
     #[test]

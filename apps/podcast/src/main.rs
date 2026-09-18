@@ -2300,6 +2300,13 @@ impl PodcastApp {
                 self.cycle_speed();
                 true
             }
+            // `auto_play_next` was `true` at construction with no writer
+            // anywhere: the window drew "Auto-play: On", in green, and could
+            // only ever say On. Found by `scripts/frozen-flag-survey.py`.
+            'a' => {
+                self.auto_play_next = !self.auto_play_next;
+                true
+            }
             'q' => self.queue_selected_episode(),
             'd' => self.download_selected_episode(),
             'm' => self.toggle_played_on_selection(),
@@ -3466,8 +3473,11 @@ impl PodcastApp {
         cmds.push(RenderCommand::Text {
             x: content_x + 16.0,
             y: HEADER_HEIGHT + 12.0,
+            // The key is named beside the value it controls, which is the
+            // cheapest discoverable place for it: the line is already on
+            // screen and already changes when the setting does.
             text: format!(
-                "Auto-play: {}",
+                "Auto-play: {} (a)",
                 if self.auto_play_next { "On" } else { "Off" }
             ),
             color: if self.auto_play_next {
@@ -6867,6 +6877,53 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: ch.to_string(),
         })
+    }
+
+    /// **Auto-play can be turned off, and the window says how.**
+    ///
+    /// `auto_play_next` was `true` at construction and written nowhere, so the
+    /// header drew "Auto-play: On" in green and could only ever say On -- a
+    /// setting displayed and not offered. Found by
+    /// `scripts/frozen-flag-survey.py`.
+    ///
+    /// Asserts the drawn line as well as the field, because naming the key
+    /// beside the value is the whole reason this needs no overlay: if the
+    /// label stops carrying it, the key is undiscoverable again and nothing
+    /// else in the app would notice.
+    #[test]
+    fn auto_play_can_be_turned_off_and_the_line_names_the_key() {
+        let mut app = PodcastApp::with_sample_data(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(app.auto_play_next, "the fixture should start with it on");
+
+        // The indicator lives in the queue view, behind an empty-queue early
+        // return -- so the label is only on screen where a queue is. That is
+        // worth knowing and is why this test puts the app there rather than
+        // asserting against a window that never draws the line.
+        app.handle_event(&typed(Key::Q, 'q'));
+        app.main_view = MainView::Queue;
+        assert!(!app.play_queue.is_empty(), "nothing was queued to look at");
+
+        let drawn = |app: &PodcastApp| -> String {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        assert!(
+            drawn(&app).contains("Auto-play: On (a)"),
+            "the indicator does not name the key that changes it"
+        );
+
+        app.handle_event(&typed(Key::A, 'a'));
+        assert!(!app.auto_play_next, "`a` did not turn auto-play off");
+        assert!(
+            drawn(&app).contains("Auto-play: Off (a)"),
+            "the indicator did not follow the setting"
+        );
     }
 
     fn click_at(x: f32, y: f32) -> Event {

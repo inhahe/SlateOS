@@ -159886,7 +159886,7 @@ check that works is the per-app one `rssreader` now carries --
 offers, the program answers. That is worth copying to any app with a settings
 panel: **draw the option, then assert something can change it.**
 
-## `TD-C-A-FIND-AND-REPLACE-PANEL-THAT-OPENS-AND-DOES-NOTHING` (lane C, 2026-09-18)
+## `TD-C-A-FIND-AND-REPLACE-PANEL-THAT-OPENS-AND-DOES-NOTHING` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** In `apps/markdowneditor`, Ctrl+H opens a Find & Replace panel.
 The panel has a "Find:" box, a "Replace:" box and three buttons. **Nothing you
@@ -159941,3 +159941,22 @@ spelling of a thing and reading the silence as absence.** The check that
 settled it was for *writers* of the field under any receiver, which is the
 question that was actually being asked.
 
+
+
+**Fixed the same day.** `handle_find_key` routes the keyboard into the panel
+while it is open: letters reach the focused box, `Tab` moves between Find and
+Replace, `Enter` and `Shift+Enter` walk the matches, `Ctrl+Enter` replaces and
+`Ctrl+Shift+Enter` replaces every match, `Escape` closes. The panel takes every
+key while it is up, for the reason every text mode in this tree does -- a query
+containing `s` must not save the document behind it, which there is now a test
+for.
+
+`Enter` also puts the *cursor* on the match rather than only counting it, which
+is the half of "find" that is not searching -- and is the only caller
+`go_to_line` has ever had. The three buttons now read "Replace  Ctrl+Enter",
+"Replace All  Ctrl+Shift+Enter" and "Close  Esc": in an app that handles no
+pointer events a button can only ever tell you what to press, so it should say
+so. `find_state.case_sensitive` remains frozen and stays filed under
+`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`; the panel draws no
+control for it, so it is a smaller matter than the rest. 225 tests, up from
+217.

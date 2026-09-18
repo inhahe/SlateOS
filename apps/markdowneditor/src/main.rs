@@ -1846,6 +1846,12 @@ pub struct FindReplaceState {
     pub matches: Vec<(usize, usize, usize)>,
     /// Index of the currently highlighted match.
     pub current_match: usize,
+    /// Whether typing goes to the replacement box rather than the query box.
+    ///
+    /// The panel has two text boxes and this app has no pointer, so there has
+    /// to be something that says which one a keystroke belongs to. `Tab`
+    /// moves between them.
+    pub focus_replacement: bool,
 }
 
 impl Default for FindReplaceState {
@@ -1864,6 +1870,7 @@ impl FindReplaceState {
             case_sensitive: false,
             matches: Vec::new(),
             current_match: 0,
+            focus_replacement: false,
         }
     }
 
@@ -4280,7 +4287,13 @@ pub fn render_find_replace(
 
     // Action buttons.
     let btn_x = x + 70.0 + width * 0.4 + 12.0;
-    let btn_labels = ["Replace", "Replace All", "Close"];
+    // Labels for keys, not targets for a pointer: this app handles no
+    // pointer events, so a button here can only ever tell you what to press.
+    let btn_labels = [
+        "Replace  Ctrl+Enter",
+        "Replace All  Ctrl+Shift+Enter",
+        "Close  Esc",
+    ];
     let mut bx = btn_x;
     for label in &btn_labels {
         let bw = text::width(label, SMALL_BUTTON_FONT_SIZE) + 16.0;
@@ -5412,7 +5425,127 @@ pub enum Key {
 }
 
 /// Handle a key press event in the application.
+/// Recompute the matches against the document as it stands.
+///
+/// The lines are moved out and back rather than cloned: `find_all` needs them
+/// by reference while `find_state` is borrowed mutably, and both live on
+/// `App`.
+fn refresh_matches(app: &mut App) {
+    let lines = std::mem::take(&mut app.active_document_mut().lines);
+    app.find_state.find_all(&lines);
+    app.active_document_mut().lines = lines;
+}
+
+/// Put the cursor on the match the panel is pointing at.
+///
+/// Without this the panel counts matches it will not show you, which is the
+/// half of "find" that is not searching. It is also the only caller
+/// `go_to_line` has ever had.
+fn show_current_match(app: &mut App) {
+    let Some((line, _, _)) = app.find_state.current_match_info() else {
+        return;
+    };
+    app.active_document_mut().go_to_line(line);
+    let visible = compute_visible_lines(app);
+    app.active_document_mut().ensure_cursor_visible(visible);
+}
+
+/// Replace the current match, or every match.
+fn replace_in_active(app: &mut App, all: bool) {
+    let mut lines = std::mem::take(&mut app.active_document_mut().lines);
+    let changed = if all {
+        app.find_state.replace_all(&mut lines) > 0
+    } else {
+        app.find_state.replace_current(&mut lines)
+    };
+    app.active_document_mut().lines = lines;
+    if changed {
+        app.active_document_mut().modified = true;
+        app.refresh_cache();
+    }
+}
+
+/// Keys while the find and replace panel is open.
+///
+/// The panel takes the keyboard for the reason every text mode in this tree
+/// does: a query containing `s` must not save the document behind it. Returns
+/// whether the key was used here.
+///
+/// Before this, **nothing in production wrote `query` or `replacement`**, so
+/// the panel opened with two boxes that could never hold a character and three
+/// buttons that could not be clicked -- this app handles no pointer events at
+/// all. `replace_current`, `replace_all`, `next_match` and `prev_match` each
+/// appeared exactly once in the crate: their own definition.
+fn handle_find_key(app: &mut App, key: Key, modifiers: Modifiers) -> bool {
+    if modifiers.ctrl {
+        return match key {
+            // The keys that opened it close it again.
+            Key::Char('h' | 'H' | 'f' | 'F') => {
+                app.find_state.visible = false;
+                true
+            }
+            // Replace, and replace every match. On the buttons the panel
+            // draws, which are labels for these keys rather than targets for
+            // a pointer that does not exist.
+            Key::Enter => {
+                replace_in_active(app, modifiers.shift);
+                refresh_matches(app);
+                show_current_match(app);
+                true
+            }
+            _ => false,
+        };
+    }
+    match key {
+        Key::Escape => {
+            app.find_state.visible = false;
+            true
+        }
+        Key::Tab => {
+            app.find_state.focus_replacement = !app.find_state.focus_replacement;
+            true
+        }
+        Key::Enter => {
+            if modifiers.shift {
+                app.find_state.prev_match();
+            } else {
+                app.find_state.next_match();
+            }
+            show_current_match(app);
+            true
+        }
+        Key::Backspace => {
+            if app.find_state.focus_replacement {
+                app.find_state.replacement.pop();
+            } else {
+                app.find_state.query.pop();
+                refresh_matches(app);
+            }
+            true
+        }
+        Key::Char(c) => {
+            if app.find_state.focus_replacement {
+                app.find_state.replacement.push(c);
+            } else {
+                app.find_state.query.push(c);
+                // On every keystroke rather than on Enter: the panel reports a
+                // match count, and a count that lags what is typed is worse
+                // than none.
+                refresh_matches(app);
+                show_current_match(app);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) {
+    // The find panel takes the keyboard while it is open.
+    if app.find_state.visible && handle_find_key(app, key, modifiers) {
+        return;
+    }
+
     // Global shortcuts.
     if modifiers.ctrl {
         match key {
@@ -7318,6 +7451,195 @@ mod tests {
         app.refresh_cache();
         assert!(!app.cached_blocks.is_empty());
         assert!(!app.cached_toc.is_empty());
+    }
+
+    // --- Find and replace ---
+
+    fn ctrl(shift: bool) -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            shift,
+            alt: false,
+        }
+    }
+
+    /// An app holding one document with three lines of known text.
+    fn app_with_text() -> App {
+        let mut app = App::new(1280.0, 800.0);
+        {
+            let doc = app.active_document_mut();
+            doc.lines = vec![
+                "alpha beta".to_string(),
+                "beta gamma".to_string(),
+                "delta".to_string(),
+            ];
+        }
+        app.refresh_cache();
+        app
+    }
+
+    /// Typing reaches the find box, and the matches follow what is typed.
+    ///
+    /// Nothing in production wrote `query` or `replacement`, so the panel
+    /// opened with two boxes that could never hold a character.
+    #[test]
+    fn typing_reaches_the_find_box() {
+        let mut app = app_with_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+        assert!(app.find_state.visible, "control: Ctrl+H opens the panel");
+
+        for c in "beta".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+
+        assert_eq!(app.find_state.query, "beta", "the letters never arrived");
+        assert_eq!(
+            app.find_state.matches.len(),
+            2,
+            "the matches did not follow"
+        );
+    }
+
+    /// While the panel is open, typing does not reach the document behind it.
+    #[test]
+    fn typing_into_the_panel_does_not_edit_the_document() {
+        let mut app = app_with_text();
+        let before = app.active_document().full_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+
+        for c in "beta".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+
+        assert_eq!(
+            app.active_document().full_text(),
+            before,
+            "the query was typed into the document"
+        );
+    }
+
+    /// Tab moves to the replacement box.
+    #[test]
+    fn tab_moves_between_the_two_boxes() {
+        let mut app = app_with_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+        handle_key(&mut app, Key::Char('x'), Modifiers::default());
+
+        handle_key(&mut app, Key::Tab, Modifiers::default());
+        handle_key(&mut app, Key::Char('y'), Modifiers::default());
+
+        assert_eq!(app.find_state.query, "x", "the query changed after Tab");
+        assert_eq!(
+            app.find_state.replacement, "y",
+            "Tab did not reach the second box"
+        );
+    }
+
+    /// Enter puts the cursor on the match, rather than only counting it.
+    ///
+    /// This is also the only caller `go_to_line` has ever had.
+    #[test]
+    fn enter_moves_the_cursor_to_the_match() {
+        let mut app = app_with_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+        for c in "gamma".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+
+        handle_key(&mut app, Key::Enter, Modifiers::default());
+
+        let (line, _, _) = app
+            .find_state
+            .current_match_info()
+            .expect("there is a match to be on");
+        assert_eq!(line, 1, "gamma is on the second line");
+        assert_eq!(
+            app.active_document().cursor_line,
+            line,
+            "the cursor stayed where it was"
+        );
+    }
+
+    /// Ctrl+Enter replaces the current match in the document.
+    #[test]
+    fn ctrl_enter_replaces_the_current_match() {
+        let mut app = app_with_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+        for c in "beta".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+        handle_key(&mut app, Key::Tab, Modifiers::default());
+        for c in "ZZ".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+
+        handle_key(&mut app, Key::Enter, ctrl(false));
+
+        let text = app.active_document().full_text();
+        assert!(text.contains("ZZ"), "nothing was replaced: {text}");
+        assert_eq!(text.matches("beta").count(), 1, "it replaced more than one");
+        assert!(
+            app.active_document().modified,
+            "the document is not marked modified"
+        );
+    }
+
+    /// Ctrl+Shift+Enter replaces every match.
+    #[test]
+    fn ctrl_shift_enter_replaces_every_match() {
+        let mut app = app_with_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+        for c in "beta".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+        handle_key(&mut app, Key::Tab, Modifiers::default());
+        for c in "ZZ".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+
+        handle_key(&mut app, Key::Enter, ctrl(true));
+
+        let text = app.active_document().full_text();
+        assert_eq!(text.matches("beta").count(), 0, "a match survived: {text}");
+        assert_eq!(
+            text.matches("ZZ").count(),
+            2,
+            "not every match was replaced"
+        );
+    }
+
+    /// Backspace deletes from the focused box.
+    #[test]
+    fn backspace_deletes_from_the_focused_box() {
+        let mut app = app_with_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+        for c in "beta".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+
+        handle_key(&mut app, Key::Backspace, Modifiers::default());
+
+        assert_eq!(
+            app.find_state.query, "bet",
+            "backspace did not reach the box"
+        );
+    }
+
+    /// Escape closes the panel and the keyboard goes back to the document.
+    #[test]
+    fn escape_closes_the_panel_and_returns_the_keyboard() {
+        let mut app = app_with_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+        handle_key(&mut app, Key::Char('q'), Modifiers::default());
+
+        handle_key(&mut app, Key::Escape, Modifiers::default());
+        assert!(!app.find_state.visible, "Escape did not close the panel");
+
+        handle_key(&mut app, Key::Char('q'), Modifiers::default());
+        assert!(
+            app.active_document().full_text().contains('q'),
+            "the document did not get the keyboard back"
+        );
     }
 
     // --- Keyboard shortcut tests ---

@@ -160553,7 +160553,7 @@ documentation tests cannot use. The same run passes alone.
 ```
    Doc-tests oswindow
 error[E0463]: can't find crate for `appearance`
-  --> gui\window\srcpp.rs:95:5
+  --> gui\window\src\app.rs:95:5
 error[E0463]: can't find crate for `guiremote`
 error[E0432]: unresolved imports `crate::DISPLAY_VAR`, `crate::PixelFormat`
 error: doctest failed, to rerun pass `-p oswindow --doc`
@@ -160586,6 +160586,29 @@ second one's result a fact about the first.
 pass one after another, or give the lint pass its own `--target-dir` and
 **delete it when the run finishes** -- a scratch target dir is 10-40 GB and
 `CLAUDE.md` is explicit that leaving one behind is a leak.
+
+**A postscript, because this entry shipped with the defect it describes.** The
+Windows path quoted above went into the file as `src` + a raw **BEL** byte +
+`pp.rs`. The heredoc carrying the Python that wrote it collapsed one level of
+backslash, so the doubled escape I had written arrived as a single one, and
+Python turned the surviving `\a` into the byte it names. The pre-push gate
+caught it -- the same gate that caught
+lane A's raw NUL the same afternoon, in a sentence describing code that strips
+NULs.
+
+**Python warned me and named the wrong escape.** The same mangling also produced
+`\w`, which is *invalid*, so Python printed `SyntaxWarning: "\w" is an invalid
+escape sequence`. I read that warning, reasoned about `\w` -- correctly, it
+stays literal and the output was fine -- and moved on. `\a` is a *valid* escape,
+so it produced no warning at all and silently became a control byte. **The
+diagnostic names the harmless one precisely because it is the one Python cannot
+handle**; the dangerous one is by definition the one it handles quietly. A
+warning about escapes in a string is a warning about *every* escape in that
+string, not only the one it prints.
+
+The rule I already had -- write files from a script on disk, never a heredoc --
+is the one that prevents it, and the one I keep not following for "just this
+short edit".
 
 **The general form, which is the reason this is filed rather than muttered:**
 a build system with shared state means **a red run is not automatically about

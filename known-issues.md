@@ -160652,6 +160652,33 @@ The rule I already had -- write files from a script on disk, never a heredoc --
 is the one that prevents it, and the one I keep not following for "just this
 short edit".
 
+**A second instance the same day, and this one cost two lanes an hour.** A
+peer reported `audit-cli-fabrication --check` red **on main**, blocking every
+lane's pre-boot, naming `passwd` and `unshare`, with a careful and correct
+diagnosis of why a naive version of that audit would flag both. It was green on
+main. Measured in a worktree whose HEAD was exactly `origin/main`: *213 crates,
+zero hits, `unshare` classified as "inert but refusing honestly (not
+deletable)", `passwd` not mentioned*. Their checkout predated the two commits
+(2026-09-15) that added precisely the two exonerations they were proposing --
+`delegates_io` for a command whose I/O is done by a first-party helper crate,
+and `refuses_honestly` for one that declines rather than pretends.
+
+So the report was about a **checkout**, not about the tree and not about the
+tool. It is the same shape as the clippy-artifact case above with the variable
+moved: there, another *process* had touched the directory; here, another
+*commit* had. And it ran the other way an hour earlier, with me telling the
+same peer that an invariant was unenforced by a gate I had written myself and
+forgotten.
+
+**The fix is provenance, and it is one line.** `audit-cli-fabrication` now ends
+its verdict with the commit it measured -- `OK (... 213 crate(s) scanned at
+a2841e076)`, with `+dirty` when the checkout is not the commit it names -- and
+its failure path adds "compare trees before code: a hit the current script
+exonerates is a stale checkout, not a finding". **A gate that fails without
+saying which tree it read is indistinguishable from a gate that is wrong**, and
+the whole exchange would have been one line long if either report had carried
+a sha.
+
 **The general form, which is the reason this is filed rather than muttered:**
 a build system with shared state means **a red run is not automatically about
 the code**, exactly as a green one is not automatically about the tests. Both

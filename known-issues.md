@@ -159829,7 +159829,7 @@ and has no writer anywhere in production:
 | `pdfviewer` | `dark_mode` | **`true`** | `page_color()` returns `rgb(40,42,54)` for every page, and `text_color` inverts with it. **Every document renders in inverted colours and no key restores the white page** -- though the comment beside it calls this "the viewer's own `dark_mode` for reading", which is a thing you would switch |
 | `calendar` | `week_starts_monday` | `true` | every month grid begins on Monday, for everyone, forever |
 | `hexeditor` | `case_sensitive` | `true` | search was always case-sensitive; there was no case-insensitive search in the program. **Fixed 2026-09-18:** `Ctrl+I` in the search bar toggles it and the bar says which way it is set, because a search that silently ignores case -- or silently insists on it -- turns a miss into "it is not in the file", which is a claim about the file. 198 tests |
-| `imageviewer` | `show_toolbar` | `true` | the toolbar cannot be hidden, including when looking at an image |
+| `imageviewer` | `show_toolbar` | `true` | the toolbar could not be hidden, including when looking at an image. **Fixed 2026-09-18** (`B`), with `show_status_bar` on `S` |
 
 `pdfviewer` is the one that matters most: a document reader that cannot show a
 document in the colours it was written in.
@@ -159915,9 +159915,9 @@ writer, and each is frozen at the value you would have chosen anyway:
 |---|---|---|
 | `markdowneditor` `autosave_enabled` | `true` | autosave is always on; it cannot be turned off, but nothing is lost by that |
 | `diskimager` `verify_after_write` | `true` | images are always verified; the window draws it as a checkbox that cannot be unchecked |
-| `imageviewer` `show_status_bar` | `true` | the status bar cannot be hidden |
-| `spreadsheet` `show_toolbar` | `true` | the toolbar cannot be hidden |
-| `mindmap` `show_sidebar` | `true` | the sidebar cannot be hidden |
+| `imageviewer` `show_status_bar` | `true` | **fixed** -- `S` |
+| `spreadsheet` `show_toolbar` | `true` | **fixed** -- and it had to be `Ctrl+T`, because this handler's catch-all starts editing the cell on any printable character, so a bare `T` would have stopped being typeable into a spreadsheet. A fix that breaks typing is worse than the panel it frees |
+| `mindmap` `show_sidebar` | `true` | **fixed** -- a plain `B`, safe here because the editing and search modes return before the main match |
 
 **So these are false offers, not hazards**, and that distinction is worth
 keeping: had `verify_after_write` been frozen at `false`, a tool that writes

@@ -6316,7 +6316,7 @@ mod tests {
         let before = a.sort_order;
         let label_before = format!("Sort: {}", before.label());
         assert!(
-            drawn_text(&a).iter().any(|t| *t == label_before),
+            drawn_text(&a).contains(&label_before),
             "control: the sort indicator is on screen"
         );
 
@@ -6325,7 +6325,7 @@ mod tests {
         assert_ne!(a.sort_order, before, "O did not change the sort order");
         let label_after = format!("Sort: {}", a.sort_order.label());
         assert!(
-            drawn_text(&a).iter().any(|t| *t == label_after),
+            drawn_text(&a).contains(&label_after),
             "the indicator still shows the old order"
         );
     }

@@ -5856,6 +5856,23 @@ mod tests {
     }
 
     fn temp_dir(label: &str) -> ScratchDir {
+        // `ScratchDir::new` calls `std::env::temp_dir()`, which READS the
+        // environment -- and five tests in this binary call
+        // `settingsfile::testing::with_scratch_config`, which WRITES it
+        // (`remove_var("HOME")`, `set_var("XDG_CONFIG_HOME")`). The
+        // environment is process-global and these tests are threads, so a
+        // scratch directory could be resolved while another thread was
+        // rewriting the block.
+        //
+        // `ENV_LOCK` only serialises the tests that take it, and a reader is
+        // the side that forgets -- the same defect fixed in
+        // `gui/desktop/src/icons.rs` tonight, and the likely mechanism behind
+        // `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE`, whose
+        // signature was this crate's own suite with exactly one failure.
+        //
+        // The guard only has to span the resolution: once the directory is
+        // named, nothing later re-reads the environment.
+        let _turn = settingsfile::testing::config_turn();
         ScratchDir::new(&format!("explorer_test_{label}"))
     }
 

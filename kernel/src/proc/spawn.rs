@@ -84,6 +84,28 @@ fn pathz_skip(rung: core::fmt::Arguments<'_>, missing: &str) {
     );
 }
 
+/// Skip a rung because a prerequisite is present but cannot be used.
+///
+/// The third of these on purpose. [`pathz_skip`] says *prerequisite
+/// missing* and [`pathz_skip_unknown`] says *could not tell*; neither
+/// describes a file that is there and will not load. Part 61 reused
+/// `pathz_skip` for a 22.5 MB binary the buddy allocator could not find a
+/// 32 MiB contiguous block for, and the boot log then told a reader that
+/// `/mnt/bin/cmake` was missing when it was present -- which sends them to
+/// the rootfs instead of to the allocator.
+///
+/// Counted into the same `PATHZ_SKIPPED` tally, because the coverage is
+/// lost either way and an uncounted skip is the failure dd-942 is about.
+fn pathz_skip_unusable(rung: core::fmt::Arguments<'_>, path: &str, why: &str) {
+    PATHZ_SKIPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    serial_println!(
+        "[spawn]   SKIP: {} — {} is present but unusable here: {}",
+        rung,
+        path,
+        why
+    );
+}
+
 /// Skip a rung because the VFS could not say whether a prerequisite is there.
 ///
 /// Distinct from [`pathz_skip`] on purpose. Both gates below used to ask
@@ -34803,9 +34825,12 @@ pub fn self_test_linux_slateos_cmake() -> KernelResult<()> {
         // recorded on 2026-09-18: "complete -- 0 rungs skipped" over a rung
         // that quietly did nothing.
         Err(crate::error::KernelError::OutOfMemory) => {
-            pathz_skip(
-                format_args!("{RUNG} -- no 32 MiB contiguous block for a 22.5 MB binary"),
+            pathz_skip_unusable(
+                format_args!("{RUNG}"),
                 CMAKE,
+                "no 32 MiB contiguous block (the buddy allocator rounds a \
+                 22.5 MB request up to 2048 frames); fragmentation at this \
+                 point in the boot, not a missing file",
             );
             return Ok(());
         }

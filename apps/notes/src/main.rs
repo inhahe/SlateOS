@@ -22,12 +22,12 @@
 //! they could not be reached at all -- see
 //! `TD-C-NOTES-CANNOT-TAG-OR-DELETE-A-NOTE`.
 //!
-//! The version panel answers a click now, and clicking a version restores it.
-//! **The notebook sidebar and the note list still do not.** They are drawn,
-//! they look like lists, and the pointer does nothing over either; selecting a
-//! note is Up/Down. The repair is the same in both cases -- a hit test derived
-//! from the function the renderer already reads, as `version_panel_bounds` and
-//! `version_rows` are here.
+//! The version panel and the note list answer a click: clicking a version
+//! restores it, and clicking a note selects it. **The notebook sidebar still
+//! does not.** It is drawn, it looks like a list, and the pointer does nothing
+//! over it. The repair is the same one -- a hit test derived from the function
+//! the renderer already reads, as `note_rows`, `version_rows` and
+//! `version_panel_bounds` are here.
 //!
 //! Uses the guitk library for UI rendering.
 
@@ -87,6 +87,12 @@ const SIDEBAR_WIDTH: f32 = 200.0;
 const NOTE_LIST_WIDTH: f32 = 260.0;
 const TOOLBAR_HEIGHT: f32 = 36.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
+
+/// How tall one row of the note list is.
+///
+/// Was a local `item_h` inside the renderer, which is where a number has to
+/// stop living once a click has to agree with it.
+const NOTE_ROW_H: f32 = 52.0;
 
 /// How wide the version-history panel down the editor's right edge is.
 const VERSION_PANEL_W: f32 = 160.0;
@@ -1524,6 +1530,38 @@ impl NotesApp {
     }
 
     /// Find a note by ID.
+    /// The note rows the list can show, as `(id, the y it is drawn at)`.
+    ///
+    /// The renderer walks this and so does the click. The list stops where it
+    /// runs out of panel rather than drawing past the bottom, and because both
+    /// read the same function, a row that is not drawn cannot be clicked
+    /// either.
+    fn note_rows(&self) -> Vec<(NoteId, f32)> {
+        let content_y = TOOLBAR_HEIGHT;
+        let content_h = self.window_height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT;
+        let mut iy = content_y + HEADER_HEIGHT + 2.0;
+        let mut rows = Vec::new();
+        for nid in self.visible_notes() {
+            if iy + NOTE_ROW_H > content_y + content_h {
+                break;
+            }
+            rows.push((nid, iy));
+            iy += NOTE_ROW_H;
+        }
+        rows
+    }
+
+    /// Which note a point is on, if it is on one.
+    pub fn note_at(&self, x: f32, y: f32) -> Option<NoteId> {
+        if x < SIDEBAR_WIDTH || x >= SIDEBAR_WIDTH + NOTE_LIST_WIDTH {
+            return None;
+        }
+        self.note_rows()
+            .into_iter()
+            .find(|(_, row_y)| y >= *row_y && y < row_y + NOTE_ROW_H)
+            .map(|(id, _)| id)
+    }
+
     /// Where the version panel is drawn, whether or not anything is in it.
     ///
     /// The renderer and the click read this same function. The editor's own
@@ -2059,6 +2097,10 @@ impl NotesApp {
     fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
         if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
             return EventResult::Ignored;
+        }
+        if let Some(id) = self.note_at(event.x, event.y) {
+            self.selected_note = Some(id);
+            return EventResult::Consumed;
         }
         if let Some(index) = self.version_at(event.x, event.y)
             && self.restore_selected_version(index)
@@ -2805,15 +2847,15 @@ impl NotesApp {
         });
 
         // Note items
-        let visible = self.visible_notes();
-        let mut iy = content_y + HEADER_HEIGHT + 2.0;
-        let item_h = 52.0; // taller items to show subtitle
-
-        for nid in &visible {
-            if iy + item_h > content_y + content_h {
-                break;
-            }
-            if let Some(note) = self.find_note(*nid) {
+        // The rows come from `note_rows`, which the click reads too: a row the
+        // renderer decides not to draw is a row the click must not find.
+        let item_h = NOTE_ROW_H;
+        for (nid, iy) in self.note_rows() {
+            let nid = &nid;
+            {
+                let Some(note) = self.find_note(*nid) else {
+                    continue;
+                };
                 let is_selected = self.selected_note == Some(*nid);
 
                 // Background for selected
@@ -2945,8 +2987,6 @@ impl NotesApp {
                     color: self.palette.surface0,
                     width: 1.0,
                 });
-
-                iy += item_h;
             }
         }
 
@@ -4322,6 +4362,90 @@ mod tests {
             y,
             kind: MouseEventKind::Press(MouseButton::Left),
         })
+    }
+
+    /// Clicking a note in the list selects it.
+    #[test]
+    fn clicking_a_note_selects_it() {
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("NB");
+        let first = app.create_note("First", nb);
+        let second = app.create_note("Second", nb);
+        app.window_width = 1280.0;
+        app.window_height = 800.0;
+        app.selected_note = Some(first);
+
+        let rows = app.note_rows();
+        assert_eq!(rows.len(), 2, "the control failed: {rows:?}");
+        let (wanted, row_y) = *rows
+            .iter()
+            .find(|(id, _)| *id != first)
+            .expect("a row for the other note");
+        assert_eq!(wanted, second);
+
+        let consumed = app.handle_event(&click_at(SIDEBAR_WIDTH + 20.0, row_y + 4.0));
+
+        assert_eq!(consumed, EventResult::Consumed);
+        assert_eq!(
+            app.selected_note,
+            Some(second),
+            "the click selected nothing"
+        );
+    }
+
+    /// A click left of the note list is not a note click.
+    ///
+    /// The notebook sidebar is there and still does nothing; what matters is
+    /// that it does not accidentally select a note either.
+    #[test]
+    fn a_click_in_the_sidebar_is_not_a_note_click() {
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("NB");
+        let first = app.create_note("First", nb);
+        app.window_width = 1280.0;
+        app.window_height = 800.0;
+        app.selected_note = Some(first);
+        let (_, row_y) = *app.note_rows().first().expect("a row");
+
+        let consumed = app.handle_event(&click_at(SIDEBAR_WIDTH - 20.0, row_y + 4.0));
+
+        assert_eq!(consumed, EventResult::Ignored);
+    }
+
+    /// A row the list does not draw cannot be clicked.
+    ///
+    /// Both read `note_rows`, so this holds by construction rather than by two
+    /// bounds checks agreeing. The window is made short enough that most of
+    /// the notes have nowhere to go.
+    #[test]
+    fn a_row_past_the_bottom_of_the_list_is_not_clickable() {
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("NB");
+        for i in 0..40 {
+            app.create_note(&format!("Note {i}"), nb);
+        }
+        app.window_width = 1280.0;
+        app.window_height = 300.0;
+
+        let rows = app.note_rows();
+        assert!(
+            rows.len() < 40,
+            "the control failed: every note fitted, so nothing was cut"
+        );
+        let content_bottom = app.window_height - STATUS_BAR_HEIGHT;
+        for (id, row_y) in &rows {
+            assert!(
+                row_y + NOTE_ROW_H <= content_bottom,
+                "row for {id:?} is drawn past the bottom of the list"
+            );
+        }
+        // A point below the last drawn row is on no note.
+        let (_, last_y) = *rows.last().expect("a row");
+        assert_eq!(
+            app.note_at(SIDEBAR_WIDTH + 20.0, last_y + NOTE_ROW_H + 4.0),
+            None,
+            "a click below the drawn rows found a note"
+        );
     }
 
     /// Clicking a version restores it.

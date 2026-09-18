@@ -11,10 +11,11 @@
 //!   and drawn at its own proportions
 //! - Per-photograph adjustment values: brightness, contrast, saturation,
 //!   exposure, temperature
-//! - Star ratings (0-5), applied to every selected photograph; colour
-//!   labels exist as a model only
+//! - Star ratings (0-5) and colour labels, both applied to every selected
+//!   photograph
 //! - Several photographs at once, with Shift and an arrow
-//! - Tagging and keyword system
+//! - Tagging: right-click a photograph, "Add tag...", and the tag goes on
+//!   everything selected
 //! - Timeline view grouping photos by date
 //! - Slideshow mode with configurable interval and transitions
 //! - Import of a single file through a picker, with its EXIF read
@@ -49,10 +50,6 @@
 //!   way to record one.)
 //! - **Face regions are never detected.** `Photo::faces` is constructed empty
 //!   and nothing ever pushes to it.
-//! - **`batch_tag` is still unreachable.** Selecting several photographs and
-//!   rating them, or putting them all in an album, both work now; tagging
-//!   does not, because there is nowhere to type a tag. The function is
-//!   written and tested and waiting for a text field.
 //! - **Smart albums cannot be made either.** `create_smart_album` and the
 //!   rule matching behind it are tested and unreachable, exactly as ordinary
 //!   albums were until now.
@@ -186,6 +183,53 @@ impl SidebarRow {
             Self::Item { .. } | Self::Action { .. } => ITEM_HEIGHT,
         }
     }
+}
+
+/// Every colour label, in the order the menu offers them.
+///
+/// Written out rather than derived, because the menu's order is a design
+/// choice and an enum's declaration order is not one -- reordering the enum
+/// for any other reason should not silently reorder a menu.
+const COLOR_LABELS: [ColorLabel; 7] = [
+    ColorLabel::None,
+    ColorLabel::Red,
+    ColorLabel::Orange,
+    ColorLabel::Yellow,
+    ColorLabel::Green,
+    ColorLabel::Blue,
+    ColorLabel::Purple,
+];
+
+/// The first of the menu ids that mean a colour label rather than an album.
+///
+/// The top of the `u64` range, like [`MENU_ADD_TAG`], and for the same reason:
+/// album ids come from an `IdGen` counting up, so the top is unreachable by
+/// construction rather than merely unused so far.
+const MENU_COLOR_BASE: u64 = u64::MAX - 8;
+
+/// The album menu's id for "Add tag...", which is not an album.
+///
+/// `u64::MAX` rather than 0: the menu's ids are album ids, and 0 is what an
+/// `IdGen` that has not been advanced would hand out. A sentinel has to be a
+/// value the real space cannot reach, not merely one it has not reached yet.
+const MENU_ADD_TAG: u64 = u64::MAX;
+
+/// What the keyboard is typing into, when it is typing into something.
+///
+/// One field rather than one flag per box. There were two -- a `bool` for the
+/// search box and an `Option<String>` for a new album's name -- and each new
+/// one had to remember to clear the others, at every place that could take
+/// focus. Two rows both showing a caret leaves no way to tell where the next
+/// character is going, and the bookkeeping that prevents it is exactly the
+/// kind nobody remembers on the fourth occasion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextEntry {
+    /// The toolbar's search box. Filters as it is typed.
+    Search,
+    /// A new album's name, in the sidebar row it will become.
+    AlbumName(String),
+    /// A tag, applied to the selection when it is committed.
+    Tag(String),
 }
 
 /// Something a sidebar row does, rather than somewhere it goes.
@@ -1824,12 +1868,8 @@ pub struct PhotoApp {
     /// Without this the digits would still rate the selected photograph and
     /// `f` would still flag it, so searching for "flag5" would silently change
     /// the library while the user thought they were typing.
-    search_focused: bool,
-    /// The name being typed for a new album, when one is being made.
-    ///
-    /// `None` when nothing is being named. An empty `Some` is a row waiting
-    /// for its first character, which is why this is not just a `String`.
-    naming_album: Option<String>,
+    /// What the keyboard is typing into, if anything.
+    text_entry: Option<TextEntry>,
     /// The album menu, while it is open.
     ///
     /// Rebuilt on every opening rather than kept and updated, because its
@@ -1869,8 +1909,7 @@ impl PhotoApp {
             last_written: None,
             library_note: None,
             library_unread: 0,
-            search_focused: false,
-            naming_album: None,
+            text_entry: None,
             photo_menu: None,
             menu_photo: None,
             photos: Vec::new(),
@@ -2790,10 +2829,10 @@ impl PhotoApp {
             // The row is the input while a name is being typed, rather than a
             // dialog over the top: the album will appear in this list, so this
             // is where it should be born.
-            label: self
-                .naming_album
-                .as_ref()
-                .map_or_else(|| "+  New Album".to_owned(), |typed| format!("{typed}|")),
+            label: match &self.text_entry {
+                Some(TextEntry::AlbumName(typed)) => format!("{typed}|"),
+                _ => "+  New Album".to_owned(),
+            },
             action: SidebarAction::NewAlbum,
         });
         rows.push(SidebarRow::Gap(12.0));
@@ -3131,7 +3170,7 @@ impl PhotoApp {
                     .and_then(|m| m.handle_click(event.x, event.y));
                 self.photo_menu = None;
                 if let Some(id) = chosen {
-                    self.choose_album_from_menu(id);
+                    self.choose_from_photo_menu(id);
                 }
                 // Consumed either way: a click that dismisses a menu should
                 // not also land on whatever was behind it.
@@ -3153,11 +3192,10 @@ impl PhotoApp {
         // the search box being pressed. Done here rather than in each of the
         // branches below so that a control added later cannot forget it.
         let pressed = self.toolbar_control_at(event.x, event.y);
-        self.search_focused = pressed == Some(ToolbarControl::Search);
-        if self.search_focused {
-            // One text field at a time.
-            self.naming_album = None;
-        }
+        // One assignment: to the search box if that is what was pressed, and
+        // out of whatever held it otherwise. A text field added later cannot
+        // forget to be cleared here, because there is nothing to remember.
+        self.text_entry = (pressed == Some(ToolbarControl::Search)).then_some(TextEntry::Search);
         if let Some(control) = pressed {
             self.press_toolbar(control);
             return true;
@@ -3169,9 +3207,8 @@ impl PhotoApp {
             return true;
         }
         if let Some(target) = self.sidebar_item_at(event.x, event.y) {
-            // Clicking somewhere else abandons a half-typed name, the same way
-            // clicking away from the search box abandons the search.
-            self.naming_album = None;
+            // No clearing here: the assignment at the top of this function
+            // already took the keyboard out of whatever had it.
             self.select_sidebar(target);
             return true;
         }
@@ -3232,41 +3269,67 @@ impl PhotoApp {
         self.selected_photos.clear();
     }
 
-    /// Typing while the search box has the keyboard.
+    /// Typing while a text field has the keyboard.
     ///
-    /// Returns whether the event was consumed. Everything is consumed while
-    /// the box is focused, including keys this does not act on: a shortcut
-    /// that fired mid-word would edit the library under a user who believed
-    /// they were typing a query.
-    fn handle_search_key(&mut self, event: &KeyEvent) -> bool {
+    /// **Consumes every key, including the ones it ignores.** The digits rate
+    /// the selected photograph and `f` flags it, so a query or an album name
+    /// or a tag containing one would otherwise rewrite the library as it was
+    /// typed. Three fields, one rule, one place to get it right.
+    fn handle_text_entry_key(&mut self, event: &KeyEvent) -> bool {
+        let Some(entry) = self.text_entry.clone() else {
+            return false;
+        };
         match event.key {
             Key::Escape => {
-                // Escape abandons the search rather than merely leaving the
-                // box, because a filter left in place by an emptied box is a
-                // library that looks half-missing for no visible reason.
-                self.search_focused = false;
-                self.set_search("");
+                self.text_entry = None;
+                if matches!(entry, TextEntry::Search) {
+                    // Escape abandons the search rather than merely leaving
+                    // the box: a filter still applied by a box that no longer
+                    // looks active is a library that appears half-missing with
+                    // nothing on screen to say why.
+                    self.set_search("");
+                }
                 true
             }
             Key::Enter => {
-                self.search_focused = false;
+                self.text_entry = None;
+                match entry {
+                    // The filter is already applied; Enter just puts the
+                    // keyboard down.
+                    TextEntry::Search => {}
+                    TextEntry::AlbumName(name) => self.commit_album_name(&name),
+                    TextEntry::Tag(tag) => self.commit_tag(&tag),
+                }
                 true
             }
             Key::Backspace => {
-                let mut query = self.search_query.clone();
-                query.pop();
-                self.set_search(&query);
+                self.edit_entry(|text| {
+                    text.pop();
+                });
                 true
             }
             _ => {
                 let typed: String = event.typed().collect();
-                if !typed.is_empty() {
-                    let mut query = self.search_query.clone();
-                    query.push_str(&typed);
-                    self.set_search(&query);
-                }
+                self.edit_entry(|text| text.push_str(&typed));
                 true
             }
+        }
+    }
+
+    /// Change the text being typed, wherever it lives.
+    ///
+    /// The search box is the odd one out: its text is `search_query`, because
+    /// the filter reads that on every frame, and a second copy would be a
+    /// second answer to the same question.
+    fn edit_entry(&mut self, change: impl FnOnce(&mut String)) {
+        if matches!(self.text_entry, Some(TextEntry::Search)) {
+            let mut query = self.search_query.clone();
+            change(&mut query);
+            self.set_search(&query);
+            return;
+        }
+        if let Some(TextEntry::AlbumName(text) | TextEntry::Tag(text)) = self.text_entry.as_mut() {
+            change(text);
         }
     }
 
@@ -3302,17 +3365,83 @@ impl PhotoApp {
                 })
                 .collect()
         };
+        let mut items = items;
+        items.push(MenuItem::Separator);
+        items.push(MenuItem::Submenu {
+            id: MENU_COLOR_BASE,
+            label: "Colour label".to_owned(),
+            icon: None,
+            enabled: true,
+            children: COLOR_LABELS
+                .iter()
+                .enumerate()
+                .map(|(i, label)| MenuItem::Action {
+                    id: MENU_COLOR_BASE.saturating_add(i as u64),
+                    label: label.label().to_owned(),
+                    shortcut: None,
+                    icon: None,
+                    enabled: true,
+                    // A tick against the one the photograph already has, so the
+                    // menu answers "what is it now" as well as offering to
+                    // change it.
+                    checked: Some(
+                        self.find_photo(pid)
+                            .is_some_and(|p| p.color_label == *label),
+                    ),
+                })
+                .collect(),
+        });
+        items.push(MenuItem::Action {
+            id: MENU_ADD_TAG,
+            label: "Add tag...".to_owned(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: None,
+        });
         let mut menu = ContextMenu::new(items);
         menu.show(x, y, (self.window_width, self.window_height));
         self.photo_menu = Some(menu);
         self.menu_photo = Some(pid);
     }
 
-    /// Put the menu's photograph into the album that was chosen.
-    fn choose_album_from_menu(&mut self, album_id: AlbumId) {
+    /// Act on whatever the menu's row meant.
+    ///
+    /// The id is an album's, or one of the reserved values at the top of the
+    /// range that mean a colour label or a tag. One function because the menu
+    /// hands back one id and the caller should not have to know which kind it
+    /// is before asking.
+    fn choose_from_photo_menu(&mut self, album_id: AlbumId) {
         let Some(pid) = self.menu_photo else {
             return;
         };
+        if let Some(offset) = album_id.checked_sub(MENU_COLOR_BASE)
+            && let Some(label) = COLOR_LABELS.get(usize::try_from(offset).unwrap_or(usize::MAX))
+        {
+            let ids = self.acting_on();
+            let mut n = 0usize;
+            for target in ids {
+                if self.set_color_label(target, *label) {
+                    n = n.saturating_add(1);
+                }
+            }
+            if n > 0 {
+                self.status_message = Some(match (n, *label) {
+                    (1, ColorLabel::None) => "Label cleared".to_owned(),
+                    (1, l) => format!("Labelled {}", l.label()),
+                    (_, ColorLabel::None) => format!("Cleared {n} labels"),
+                    (_, l) => format!("Labelled {n} photos {}", l.label()),
+                });
+            }
+            return;
+        }
+        if album_id == MENU_ADD_TAG {
+            // The selection is whatever it was when the menu went up, and
+            // `commit_tag` reads it again on Enter -- which is the same set,
+            // because the menu consumed the click that would have changed it.
+            self.text_entry = Some(TextEntry::Tag(String::new()));
+            return;
+        }
         // The whole selection when the menu was raised on part of it, and that
         // photograph alone otherwise -- right-clicking a card outside the
         // selection is a statement about that card, not about the set.
@@ -3340,40 +3469,30 @@ impl PhotoApp {
 
     /// Start naming a new album.
     fn begin_naming_album(&mut self) {
-        // One text field at a time: two rows both showing a caret would leave
-        // no way to tell where the next character is going.
-        self.search_focused = false;
-        self.naming_album = Some(String::new());
+        // Assigning the field is what takes the keyboard off whatever had it.
+        self.text_entry = Some(TextEntry::AlbumName(String::new()));
     }
 
-    /// Typing while a new album is being named.
+    /// Put the typed tag on everything selected.
     ///
-    /// Consumes every key for the same reason the search box does: the digits
-    /// rate the selected photograph and `f` flags it, so an album called
-    /// "5 star" would otherwise rewrite the library as it was typed.
-    fn handle_album_name_key(&mut self, event: &KeyEvent) -> bool {
-        match event.key {
-            Key::Escape => {
-                self.naming_album = None;
-                true
-            }
-            Key::Enter => {
-                self.commit_album_name();
-                true
-            }
-            Key::Backspace => {
-                if let Some(name) = self.naming_album.as_mut() {
-                    name.pop();
-                }
-                true
-            }
-            _ => {
-                let typed: String = event.typed().collect();
-                if let Some(name) = self.naming_album.as_mut() {
-                    name.push_str(&typed);
-                }
-                true
-            }
+    /// `batch_tag` has been written and tested since this crate existed, and
+    /// had no caller outside the test module: the feature list offered a
+    /// "tagging and keyword system" with no way to type a tag.
+    ///
+    /// An empty tag cancels, for the same reason an empty album name does.
+    fn commit_tag(&mut self, typed: &str) {
+        let tag = typed.trim().to_owned();
+        if tag.is_empty() {
+            return;
+        }
+        let ids = self.acting_on();
+        let n = self.batch_tag(&ids, &tag);
+        if n > 0 {
+            self.status_message = Some(if n == 1 {
+                format!("Tagged {tag}")
+            } else {
+                format!("Tagged {n} photos {tag}")
+            });
         }
     }
 
@@ -3382,15 +3501,12 @@ impl PhotoApp {
     /// An empty name cancels rather than making an album called nothing --
     /// pressing Enter on a row you have not typed into is much more likely to
     /// be a change of mind than a request for a nameless album.
-    fn commit_album_name(&mut self) {
-        let Some(name) = self.naming_album.take() else {
-            return;
-        };
-        let name = name.trim().to_owned();
+    fn commit_album_name(&mut self, typed: &str) {
+        let name = typed.trim();
         if name.is_empty() {
             return;
         }
-        let id = self.create_album(&name);
+        let id = self.create_album(name);
         // Show it. A new album that did not become the view would leave the
         // user looking at the same screen, with the only evidence of success
         // one more row in a list.
@@ -3399,11 +3515,8 @@ impl PhotoApp {
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
-        if self.naming_album.is_some() {
-            return self.handle_album_name_key(event);
-        }
-        if self.search_focused {
-            return self.handle_search_key(event);
+        if self.text_entry.is_some() {
+            return self.handle_text_entry_key(event);
         }
         if self.view_mode == ViewMode::Slideshow {
             return self.handle_slideshow_key(event);
@@ -3786,7 +3899,7 @@ impl PhotoApp {
             CORNER_RADIUS,
             Surface::Card,
         );
-        if self.search_focused {
+        if matches!(self.text_entry, Some(TextEntry::Search)) {
             // Where the typing is going. Without it a focused empty box and an
             // unfocused empty box are the same picture, and the only way to
             // find out which one is in front of you is to type and see what
@@ -3802,14 +3915,14 @@ impl PhotoApp {
             });
         }
         let search_text = if self.search_query.is_empty() {
-            if self.search_focused {
+            if matches!(self.text_entry, Some(TextEntry::Search)) {
                 // The placeholder would read as text already typed once a
                 // caret is beside it.
                 "|".to_owned()
             } else {
                 "Search photos...".to_owned()
             }
-        } else if self.search_focused {
+        } else if matches!(self.text_entry, Some(TextEntry::Search)) {
             format!("{}|", self.search_query)
         } else {
             self.search_query.clone()
@@ -3949,9 +4062,16 @@ impl PhotoApp {
         // "the user is told", which is the exact mistake design-decisions 856
         // names -- a thing is built when something obeys it, not when
         // something stores it.
-        let status_text = self
-            .library_note
+        // A tag being typed outranks both: a text field the user cannot see is
+        // one they are typing into blind, and this one has no box of its own
+        // to put a caret in.
+        let tag_prompt = match &self.text_entry {
+            Some(TextEntry::Tag(typed)) => Some(format!("Tag: {typed}|")),
+            _ => None,
+        };
+        let status_text = tag_prompt
             .as_ref()
+            .or(self.library_note.as_ref())
             .or(self.status_message.as_ref())
             .map_or_else(
                 || {
@@ -3971,7 +4091,9 @@ impl PhotoApp {
             x: 12.0,
             y: bar_y + 6.0,
             text: status_text,
-            color: if self.library_note.is_some() {
+            color: if tag_prompt.is_some() {
+                self.palette.ink(self.palette.blue)
+            } else if self.library_note.is_some() {
                 self.palette.ink(self.palette.red)
             } else {
                 self.palette.subtext0
@@ -4040,7 +4162,7 @@ impl PhotoApp {
                     // search box is: an empty row waiting for a name and an
                     // idle row offering to take one are otherwise the same
                     // picture.
-                    let color = if self.naming_album.is_some() {
+                    let color = if matches!(self.text_entry, Some(TextEntry::AlbumName(_))) {
                         self.palette.blue
                     } else {
                         self.palette.subtext0
@@ -5752,6 +5874,258 @@ mod tests {
         })
     }
 
+    /// The menu id for a colour label, by its place in `COLOR_LABELS`.
+    fn colour_id(label: ColorLabel) -> u64 {
+        let i = COLOR_LABELS
+            .iter()
+            .position(|l| *l == label)
+            .expect("a label that is offered");
+        MENU_COLOR_BASE.saturating_add(u64::try_from(i).unwrap_or(0))
+    }
+
+    /// A colour chosen from the menu is applied.
+    ///
+    /// `set_color_label` has existed with no production caller, so every
+    /// photograph's label has always been `None` and the swatch the grid draws
+    /// for it has always been the same colour.
+    #[test]
+    fn a_colour_chosen_from_the_menu_is_applied() {
+        let mut app = app_with_n_pictures("colour", 1);
+        app.set_window_size(900.0, 700.0);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+        assert_eq!(
+            app.find_photo(pid).expect("one").color_label,
+            ColorLabel::None,
+            "the control failed"
+        );
+        let cell = app.thumb_rect(0).expect("a card");
+        app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
+
+        app.choose_from_photo_menu(colour_id(ColorLabel::Red));
+
+        assert_eq!(
+            app.find_photo(pid).expect("one").color_label,
+            ColorLabel::Red,
+            "the label was not applied"
+        );
+        assert_eq!(app.status_message.as_deref(), Some("Labelled Red"));
+    }
+
+    /// Choosing None clears the label, and says so in those words.
+    ///
+    /// "Labelled None" would be a sentence about a colour that is really the
+    /// absence of one.
+    #[test]
+    fn choosing_none_clears_the_label() {
+        let mut app = app_with_n_pictures("clearcolour", 1);
+        app.set_window_size(900.0, 700.0);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+        assert!(
+            app.set_color_label(pid, ColorLabel::Blue),
+            "the control failed"
+        );
+        let cell = app.thumb_rect(0).expect("a card");
+        app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
+
+        app.choose_from_photo_menu(colour_id(ColorLabel::None));
+
+        assert_eq!(
+            app.find_photo(pid).expect("one").color_label,
+            ColorLabel::None
+        );
+        assert_eq!(app.status_message.as_deref(), Some("Label cleared"));
+    }
+
+    /// The label goes on everything selected.
+    #[test]
+    fn a_colour_goes_on_the_whole_selection() {
+        let mut app = app_with_n_pictures("colourall", 3);
+        app.set_window_size(900.0, 700.0);
+        app.selected_photo = app.visible_photos().first().copied();
+        app.handle_event(&shift_key(Key::Right));
+        let chosen = app.selected_photos.clone();
+        assert_eq!(chosen.len(), 2, "the control failed");
+        let cell = app.thumb_rect(0).expect("a card");
+        app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
+
+        app.choose_from_photo_menu(colour_id(ColorLabel::Green));
+
+        for pid in &chosen {
+            assert_eq!(
+                app.find_photo(*pid).expect("a photo").color_label,
+                ColorLabel::Green,
+                "photograph {pid} was not labelled"
+            );
+        }
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Labelled 2 photos Green")
+        );
+    }
+
+    /// A reserved id is not mistaken for an album.
+    ///
+    /// The ids in that menu are album ids, and these three sit at the top of
+    /// the `u64` range because an `IdGen` counting up cannot reach it. If that
+    /// ever stopped being true, a colour would silently add to an album.
+    #[test]
+    fn the_reserved_menu_ids_cannot_collide_with_an_album() {
+        let mut app = PhotoApp::new();
+        let mut ids = Vec::new();
+        for i in 0..64 {
+            ids.push(app.create_album(&format!("album {i}")));
+        }
+        let reserved = MENU_ADD_TAG;
+        let lowest_colour = MENU_COLOR_BASE;
+        assert!(
+            ids.iter().all(|id| *id < lowest_colour && *id != reserved),
+            "an album id reached the reserved range: {:?}",
+            ids.iter().max()
+        );
+    }
+
+    /// The tag being typed, if that is what has the keyboard.
+    fn tagging(app: &PhotoApp) -> Option<&str> {
+        match &app.text_entry {
+            Some(TextEntry::Tag(text)) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The menu offers a tag, and typing one applies it.
+    ///
+    /// `batch_tag` has been written and tested since this crate existed, with
+    /// every caller in the test module: the feature list offered a "tagging
+    /// and keyword system" and there was nowhere to type a tag.
+    #[test]
+    fn a_tag_typed_from_the_menu_reaches_the_photograph() {
+        let mut app = app_with_n_pictures("tagging", 1);
+        app.set_window_size(900.0, 700.0);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+        let cell = app.thumb_rect(0).expect("a card");
+        app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
+
+        app.choose_from_photo_menu(MENU_ADD_TAG);
+        assert_eq!(tagging(&app), Some(""), "the menu did not start a tag");
+
+        for (k, ch) in [(Key::P, 'p'), (Key::I, 'i'), (Key::E, 'e'), (Key::R, 'r')] {
+            app.handle_event(&typed(k, ch));
+        }
+        app.handle_event(&key(Key::Enter));
+
+        assert_eq!(
+            app.find_photo(pid).expect("one").tags,
+            vec!["pier".to_owned()],
+            "the tag never reached the photograph"
+        );
+        assert!(tagging(&app).is_none(), "still taking typing");
+    }
+
+    /// The tag being typed is on screen.
+    ///
+    /// It has no box of its own, so without this the user types blind.
+    #[test]
+    fn the_tag_being_typed_is_shown() {
+        let mut app = app_with_n_pictures("tagshown", 1);
+        app.set_window_size(900.0, 700.0);
+        app.selected_photo = app.photos.first().map(|p| p.id);
+        app.text_entry = Some(TextEntry::Tag("pi".to_owned()));
+
+        let tree = app.render(900.0, 700.0);
+
+        let shown = tree
+            .commands
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Tag: pi")));
+        assert!(shown, "the tag being typed is nowhere on screen");
+    }
+
+    /// A digit typed into a tag does not rate a photograph.
+    #[test]
+    fn a_digit_typed_into_a_tag_does_not_rate_a_photograph() {
+        let mut app = app_with_n_pictures("tagdigit", 1);
+        app.set_window_size(900.0, 700.0);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+
+        // Control: unfocused, the digit rates.
+        app.handle_event(&typed(Key::Num5, '5'));
+        assert_eq!(
+            app.find_photo(pid).expect("one").rating,
+            5,
+            "the control failed: digits do not rate, so this proves nothing"
+        );
+
+        app.text_entry = Some(TextEntry::Tag(String::new()));
+        app.handle_event(&typed(Key::Num3, '3'));
+
+        assert_eq!(
+            app.find_photo(pid).expect("one").rating,
+            5,
+            "typing a tag changed a photograph's rating"
+        );
+        assert_eq!(tagging(&app), Some("3"));
+    }
+
+    /// An empty tag makes no tag.
+    #[test]
+    fn enter_on_an_empty_tag_does_nothing() {
+        let mut app = app_with_n_pictures("emptytag", 1);
+        app.set_window_size(900.0, 700.0);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+        app.text_entry = Some(TextEntry::Tag(String::new()));
+
+        app.handle_event(&key(Key::Enter));
+
+        assert!(
+            app.find_photo(pid).expect("one").tags.is_empty(),
+            "an empty tag was added"
+        );
+    }
+
+    /// A tag goes on everything selected.
+    #[test]
+    fn a_tag_goes_on_the_whole_selection() {
+        let mut app = app_with_n_pictures("tagall", 3);
+        app.set_window_size(900.0, 700.0);
+        app.selected_photo = app.visible_photos().first().copied();
+        app.handle_event(&shift_key(Key::Right));
+        let chosen = app.selected_photos.clone();
+        assert_eq!(chosen.len(), 2, "the control failed");
+
+        app.text_entry = Some(TextEntry::Tag("holiday".to_owned()));
+        app.handle_event(&key(Key::Enter));
+
+        for pid in &chosen {
+            assert_eq!(
+                app.find_photo(*pid).expect("a photo").tags,
+                vec!["holiday".to_owned()],
+                "photograph {pid} was not tagged"
+            );
+        }
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Tagged 2 photos holiday")
+        );
+    }
+
+    /// The album name being typed, if that is what has the keyboard.
+    fn naming_album(app: &PhotoApp) -> Option<&str> {
+        match &app.text_entry {
+            Some(TextEntry::AlbumName(text)) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Whether the search box has the keyboard.
+    fn searching(app: &PhotoApp) -> bool {
+        matches!(app.text_entry, Some(TextEntry::Search))
+    }
+
     fn shift_key(k: Key) -> Event {
         Event::Key(KeyEvent {
             key: k,
@@ -5884,7 +6258,7 @@ mod tests {
         // Raise it on one of the selected cards.
         let cell = app.thumb_rect(0).expect("a first card");
         app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
-        app.choose_album_from_menu(album);
+        app.choose_from_photo_menu(album);
 
         let in_album = app
             .albums
@@ -5946,7 +6320,7 @@ mod tests {
         let (x, y) = first_card_point(&app);
         app.handle_event(&right_click(x, y));
 
-        app.choose_album_from_menu(album);
+        app.choose_from_photo_menu(album);
 
         let in_album = app
             .albums
@@ -6019,7 +6393,7 @@ mod tests {
         app.handle_event(&right_click(x, y));
 
         // Choosing it anyway must not duplicate the entry.
-        app.choose_album_from_menu(album);
+        app.choose_from_photo_menu(album);
         let in_album = app
             .albums
             .iter()
@@ -6048,7 +6422,7 @@ mod tests {
         let y = new_album_row_y(app);
         app.handle_event(&click(20.0, y));
         assert!(
-            app.naming_album.is_some(),
+            naming_album(app).is_some(),
             "the click did not start naming an album"
         );
     }
@@ -6096,7 +6470,10 @@ mod tests {
             SidebarItem::Album(album.id),
             "the new album did not become the view"
         );
-        assert!(app.naming_album.is_none(), "the row is still taking typing");
+        assert!(
+            naming_album(&app).is_none(),
+            "the row is still taking typing"
+        );
     }
 
     /// A digit typed into an album name does not rate a photograph.
@@ -6126,7 +6503,7 @@ mod tests {
             5,
             "typing an album name changed a photograph's rating"
         );
-        assert_eq!(app.naming_album.as_deref(), Some("3"));
+        assert_eq!(naming_album(&app), Some("3"));
     }
 
     /// Escape abandons a half-typed name.
@@ -6138,7 +6515,7 @@ mod tests {
 
         app.handle_event(&key(Key::Escape));
 
-        assert!(app.naming_album.is_none(), "still naming");
+        assert!(naming_album(&app).is_none(), "still naming");
         assert!(app.albums.is_empty(), "escape made an album anyway");
     }
 
@@ -6153,7 +6530,10 @@ mod tests {
         app.handle_event(&key(Key::Enter));
 
         assert!(app.albums.is_empty(), "an album with no name was made");
-        assert!(app.naming_album.is_none(), "the row is still taking typing");
+        assert!(
+            naming_album(&app).is_none(),
+            "the row is still taking typing"
+        );
     }
 
     /// Only one text field takes the keyboard at a time.
@@ -6166,7 +6546,7 @@ mod tests {
         focus_search(&mut app);
 
         assert!(
-            app.naming_album.is_none(),
+            naming_album(&app).is_none(),
             "two rows would both have been showing a caret"
         );
     }
@@ -6202,7 +6582,7 @@ mod tests {
             .map(|(_, r)| r)
             .expect("the search box is a control");
         app.handle_event(&click(hit.x + 4.0, hit.y + 4.0));
-        assert!(app.search_focused, "the click did not take the keyboard");
+        assert!(searching(app), "the click did not take the keyboard");
     }
 
     /// Typing filters the library, which is what the box has always promised.
@@ -6306,7 +6686,7 @@ mod tests {
 
         app.handle_event(&key(Key::Escape));
 
-        assert!(!app.search_focused, "escape left the keyboard in the box");
+        assert!(!searching(&app), "escape left the keyboard in the box");
         assert!(
             app.search_query.is_empty(),
             "escape left the query in place"
@@ -6333,7 +6713,7 @@ mod tests {
             .expect("sort is a control");
         app.handle_event(&click(sort.x + 4.0, sort.y + 4.0));
 
-        assert!(!app.search_focused, "the keyboard stayed in the search box");
+        assert!(!searching(&app), "the keyboard stayed in the search box");
     }
 
     /// A library of `n` photos, all visible.

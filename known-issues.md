@@ -159253,3 +159253,231 @@ answers it, and an unchanged control (`devpower` at 362 both sides) made it
 specific. Same instrument, different question, opposite verdict on its
 fitness. The error was not using a proxy; it was not asking what the proxy
 was a proxy *for*.
+## `TD-C-THE-TOOLKIT-CAN-SELECT-A-FOLDER-AND-NO-APPLICATION-ASKS-IT-TO` (lane C, 2026-09-17)
+
+**In short:** guitk's file dialog knows how to choose a *folder*. It has a
+named constructor for it, `FileDialog::select_folder()`, and the mode is
+handled in four places in the dialog's own logic -- the listing, the
+confirmation, the button label, the navigation. No application has ever raised
+one. Every picker in the tree opens to read or to write a file.
+
+**Found by** asking what it would take to give `apps/photomanager` the
+"import from directory" its feature list used to claim. The answer turned out
+to be "call a function that already exists", which is the recurring shape in
+this file, one layer further down than usual: not a feature that was never
+built, but one built and never *asked for*.
+
+**Why it is worth writing down rather than just doing.** Whoever wires it will
+be the mode's first caller, so they are not integrating a known-good
+component -- they are finding out whether it works end to end. Four handling
+sites and a constructor is a lot of implemented behaviour with no user, and
+the parts most likely to be wrong are the ones no test exercises: what
+`Picked::Chose` carries for a folder, whether the confirm button enables on a
+directory rather than a file, what happens when the chosen folder is empty.
+Budget for discovering, not for plumbing.
+
+**The applications that would want it,** each of which currently imports or
+exports one file at a time: `photomanager` (import a directory of
+photographs), `musicplayer` and `podcast` (a library folder), `backup` (a
+source directory). None of them is blocked on anything else.
+
+## `TD-C-NOTES-CANNOT-TAG-OR-DELETE-A-NOTE` (lane C, 2026-09-17)
+
+**In short:** `apps/notes` offers "Tagging system with tag-based filtering" in
+its feature list, and there is no way to put a tag on a note. There is also no
+way to delete one. Both operations are written, tested, and have no caller
+outside the test module -- the same shape as `apps/photomanager`, which took a
+session to wire up and had the same list of symptoms.
+
+**Verified, not inferred:**
+
+| Claim | State |
+|---|---|
+| tags on a note | `NotesApp::add_tag_to_note` and `remove_tag_from_note` have no production caller. The only other writer of `Note::tags` is `Note::add_tag`, reached from that method and from `seed_sample_content`, which is itself test-only. |
+| tag filtering | `set_tag_filter` is the only writer of `active_tag_filter`, and has no production caller. |
+| deleting a note | `delete_note` has no production caller. The only other route is `delete_notebook`'s cascade, which has no production caller either. |
+
+**The trap, which is the transferable part.** The probe that found these also
+flagged `pub fn search` as test-only, and search *works*. The application
+filters through a different path -- `search_query` is written directly by the
+key handler at lines 2029 and 2039 and read by `matches_search` -- so the
+unreachable method is a second door to a room that already has one.
+
+**An unreachable method does not imply an unreachable feature.** Going the
+other way is safe (a feature with no reachable writer is genuinely dead), but
+the method-level measurement is a *candidate list*, and each candidate has to
+be chased to the feature before it means anything. I nearly filed "notes
+cannot search", which is false.
+
+**The method, for whoever picks this up.** For each `pub fn` on the app type,
+count call sites before the `^mod tests` line. Note `^mod tests` and not the
+first `#[cfg(test)]`: an item-level attribute appears hundreds of lines
+earlier in several of these files, and cutting there hides most of the
+application -- see the entry above about three checkers doing exactly that.
+
+**The other seven, chased the same way.** All unreachable, each checked for an
+alternative route rather than counted:
+
+| Operation | The only writer, and where it is reached from |
+|---|---|
+| rename a notebook | `nb.name = ...` inside `rename_notebook`. No caller. |
+| move a note | `note.notebook_id = ...` inside `move_note`. No caller. |
+| retitle a note | `note.title = ...` inside `update_note_title`; the only other assignment is in `seed_sample_content`, which is test-only. |
+| remove a checklist item | `checklist.remove` inside `Note::remove_checklist_item`, reached only from the app method of the same name. No caller. |
+| resolve a wiki link | `resolve_links` and `build_backlinks`. No callers, and nothing else in the file mentions backlinks -- so `[[Note Title]]` is text that never becomes a link. |
+| restore a version | see below. |
+
+**Version history is the sharpest one, because it nearly works.** Versions are
+genuinely recorded: `Note::set_content` snapshots the old text and it has a
+production caller, so editing a note really does accumulate history. The
+sidebar that lists them is drawn -- `render_version_sidebar`. And
+`restore_version` has no caller, so the application shows you a history you
+cannot restore from. Everything except the last click is built.
+
+**Tally for the claims in the module doc.** Of fourteen listed features, four
+are contradicted: tagging with tag-based filtering, wiki-style linking,
+version history *with snapshot restore*, and notebook organisation to the
+extent that a notebook cannot be renamed and a note cannot be moved between
+notebooks. "Full-text search" is real. The rest were not examined.
+
+**They are not nine oversights. The application has no mouse.**
+
+`apps/notes` handles `Event::Key`, `Event::Resize` and `Event::CloseRequested`,
+and nothing else. It imports no `MouseEvent`, no `MouseButton`, no
+`MouseEventKind`; `grep -c "Event::Mouse\|MouseEvent"` is 0, and there is not
+one hit-test function in the file. It draws a notebook sidebar, a note list
+and an editor -- three panels, none of which can be clicked anywhere.
+
+So every operation must be a keyboard shortcut, and the keyboard covers about
+eight of them: Tab, Up/Down, `/` and Ctrl+F for search, Ctrl+S and S to save,
+P to pin, V to favourite, B for bold, Escape/Enter, Backspace. The nine in the
+table above have neither a key nor a click. That is the whole of the defect,
+and it explains why the list reads like a cross-section of the application
+rather than a set of related gaps.
+
+**It is not a documented keyboard-only design.** There is no comment saying
+so, the module doc advertises a "Multi-panel UI", and three mentions of a
+shortcut in the whole of the production code is not a keyboard-driven
+application either. It is an application with a mouse-shaped interface and no
+mouse.
+
+**So the repair is not nine wires.** It is a pointer layer -- hit-tests for
+the three panels, mirroring the way `apps/photomanager` derives every
+clickable rectangle from one function the renderer also reads -- and then the
+nine operations have somewhere to hang. Adding nine more keyboard shortcuts
+would reach them too, and would leave a program whose sidebar still does
+nothing when clicked.
+
+**A smaller bug found while reading the version panel for a hit-test.** It
+computes how many rows fit with `(height - 30.0) / 24.0` and then advances
+`vy` by `28.0` per row. At a 740-pixel panel that is 29 rows drawn 28 apart in
+812 pixels, so the last few are drawn past the bottom of the panel they are
+in. One of the two numbers is wrong and they should be one constant.
+
+## `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED` (lane C, 2026-09-17)
+
+**In short:** twenty-one applications draw a graphical interface and handle no
+mouse events at all. Not "handle clicks badly" -- they never receive one:
+`Event::Mouse` appears nowhere in them, they import no `MouseEvent`, and they
+have no hit-test function. Whatever they draw, the pointer does nothing over
+any of it.
+
+**Measured across all 139 apps with a `main.rs`:**
+
+| | count |
+|---|---|
+| handle no mouse event of any kind | 24 |
+| ...of those, not GUI applications at all (`installer`, `indexer`, `backup` -- no `App` impl, zero `RenderCommand`) | 3 |
+| **draw a GUI and cannot be clicked** | **21** |
+
+    weather 96   rssreader 95   reminders 82   markdowneditor 79
+    habits 70    pinball 68     notes 65       slides 61
+    flashcards 61 finance 58    logviewer 51   qrcode 48
+    mediaconvert 44 tmux 43     regextester 43 torrent 41
+    soundrecorder 39 renamer 37 email 36       metronome 24
+    filesearch 23
+
+(the number is `RenderCommand::` sites, as a rough measure of how much
+interface each one draws)
+
+**Verified in depth for exactly one.** `apps/notes` is written up in the entry
+above: three panels drawn, none clickable, and nine operations -- delete a
+note, tag one, rename a notebook, restore a version -- that have neither a
+keyboard shortcut nor a click, because every route to them was a click that
+never arrives. The other twenty are *candidates measured the same way*, not
+confirmed defects, and the check for each is the one this file keeps having to
+repeat: does the thing it draws look like something you would click?
+
+**Two are plausibly legitimate** and should be read before being counted.
+`tmux` is a terminal multiplexer and `pinball` is a game; both have a case for
+being keyboard-driven by design. The case has to be *in the file*, though --
+`notes` had no such comment, advertised a "Multi-panel UI" in its module doc,
+and had three keyboard shortcuts in the whole of its production code, which is
+not a keyboard-driven application either.
+
+**Why this is worth a single entry rather than twenty-one.** The repair is the
+same shape every time and it is not "add a click handler": it is hit-tests
+derived from the same functions the renderer already reads, so the law a click
+obeys and the law the drawing obeys cannot drift. `apps/photomanager` and
+`apps/explorer` both do it that way and are worth copying. The failure this
+prevents is the one `photomanager`'s search box had for its whole existence --
+a control drawn at coordinates the click handler had never heard of.
+
+**The measurement, which is one command:**
+
+    grep -c "Event::Mouse\|MouseEvent" apps/*/src/main.rs
+
+## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17)
+
+**In short:** a `cargo test --workspace` failed with exactly one failing test,
+and the same command on the same tree passed on the next run. Something in the
+suite fails occasionally and not reproducibly. It is not fixed, and it is not
+even identified, because I deleted the log before reading it.
+
+**What is known.**
+
+| | |
+|---|---|
+| exit | `CARGO_RC=101`, `child exited: FAIL (exit 101), 226s elapsed` |
+| the failing crate's suite | `424 passed; 1 failed` |
+| re-run, same tree, no changes | `PASS, 580s`, 61,752 passed, nothing failed |
+| the crate | almost certainly `apps/explorer`, which has exactly 425 tests -- and which passes 425/425 when run on its own |
+
+**Why the name is missing, which is the part worth not repeating.** The command
+that read the verdict also ran `rm -f build/wsD.log`, unconditionally, in the
+same line. It was written for the case where the run passes. The failure
+summary was on screen for one moment and the file holding the test name was
+gone before I thought to look for it. Same shape as the `open("w")`
+truncation recorded above: a destructive step sequenced before the thing that
+decides whether it is safe.
+
+**Delete a log only after reading a PASS out of it.**
+
+**The likely cause, stated as a hypothesis and not a finding.** The crate
+passes alone and failed under the workspace run, which is the shape this tree
+already has a gate for: `scripts/check-config-turn-guards.py` exists because
+`settingsfile::testing::with_scratch_config` repoints `XDG_CONFIG_HOME` for
+the whole *process*, and `cargo test` runs a crate's tests as threads of one
+process -- so a test that drives an event loop can see the directory change
+under it and repaint when it counted frames. That gate reports `0 unguarded`
+today.
+
+**Correction, checked afterwards: that gate is not about this.** Its
+`HARNESS_CALLS` are `testing::desktop()` and `ShellSession::start`, and
+`apps/explorer` uses neither -- its tests call `handle_event` directly. So its
+`0 unguarded` is not a miss, and calling this "a case the gate does not
+recognise" implied a coverage gap that does not exist. explorer was never in
+that gate's corpus.
+
+What survives is the mechanism, not the gate. `explorer` calls
+`with_scratch_config` 32 times and `config_turn` zero times. `settingsfile`'s
+`ENV_LOCK` serialises *writers* of `XDG_CONFIG_HOME` against each other, and
+`config_turn` is how a *reader* takes that same lock -- so 32 writers and an
+unguarded reader in one crate, whose tests are threads of one process, is a
+real race whatever any gate's scope is. A lead, not a diagnosis: none of this
+names the failing test, and the failing test is what was lost.
+
+**What to capture when it happens again**, since it will and the next person
+should not be starting from here: the whole log, the test name from the
+`---- <name> stdout ----` block, and whether `cargo test -p <crate>` alone
+reproduces it.

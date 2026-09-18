@@ -160358,8 +160358,7 @@ not "be careful" -- it is knowing the specific shapes.
 
 | 8 | **One file vs the crate.** Every sweep run on 2026-09-18 globbed `apps/*/src/main.rs`. **12 of 141 apps have more than one source file** -- `explorer` has 8, `settings` 5, `editor` 4. | Concluded `apps/editor` "has zero typing sites" and could not be typed in. Its typing lives in `input.rs`. A text editor was one sentence away from being filed as unable to accept text. |
 
-| 10 | **A heredoc eats the backslashes.** A `python - <<'PYEOF'` block is supposed to pass its body through literally; in this shell it did not, three times. `` arrived as a real ESC byte and `
-` as a real CRLF. | Wrote literal control characters into a Rust byte literal (invalid source), and a lone CRLF into `known-issues.md` -- in a paragraph *about* an escape sequence, which is how it got past reading. The habit that fixes it: **any script containing backslash escapes goes in a file, not a heredoc.** |
+| 10 | **A heredoc eats the backslashes.** A `python - <<'PYEOF'` block is supposed to pass its body through literally; in this shell it did not, three times. `\x1b` arrived as a real ESC byte and `\r\n` as a real CRLF. | Wrote literal control characters into a Rust byte literal (invalid source), and a lone CRLF into `known-issues.md` -- in a paragraph *about* an escape sequence, which is how it got past reading. The habit that fixes it: **any script containing backslash escapes goes in a file, not a heredoc.** |
 
 | 9 | **A function used as a value.** `self.moving(shift, Document::move_up)` passes the function; it never writes `move_up(`. Every "who calls this" query here counts `name(`, so a callback looks dead. | Concluded `apps/editor`'s cursor could not move up or down. It moves. Its arrow keys pass the movement functions to a shared `moving` helper, which is *better* code than calling each directly -- so the query is most wrong about the tidiest implementations. |
 

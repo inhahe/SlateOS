@@ -77202,6 +77202,41 @@ lines earlier. It now clusters by proximity and implies nothing across
 clusters -- and its docstring states that it cannot see kernel-prefixed
 lines at all, so "first of the cluster" means first of what it can see.
 
+**The filter kept the wrong end.** Lane C gated a merge on
+`cargo test --workspace ... | grep -E "FAILED|^error|test result: ok" | tail -40`.
+It printed forty `test result: ok` lines and no failures, and it **could not
+have printed a failure**: a 420-crate workspace emits hundreds of `ok` lines
+after any early one, so `tail -40` is guaranteed to show the clean end. The
+count was reassuring and unrelated to the question, and the pipe discarded
+cargo's exit status on top -- so the evidence and the verdict were both gone.
+The fix is not a wider filter: it is `cargo test > log 2>&1; RC=$?` on its
+own line, then search the file.
+
+My version of it was `cargo clippy | grep ... | head -20`, where `head -20`
+could have cut a real error and the grep's `error:` pattern matched
+`crate::error::KernelResult`. Audited the committed tooling afterwards rather
+than assuming: `build/chain.sh` and `build/sweep.sh` put no filter between a
+command and its verdict -- full output appended, `RC` captured on its own
+line, the gate a `grep -q "^..._RC=0"` against that line. The convention
+held, which I know because I looked.
+
+**Never infer a verdict from a log's emptiness; infer it only from a line the
+run wrote on purpose.** Lane C's sharpening of the boot-log fix below, after
+they read a 0-byte task output as "still running" and happened to be right.
+Truncating at start is what makes emptiness *safe* -- absence rather than a
+stale wrong answer -- but emptiness is still not evidence. The positive
+signal is the `BOOT_RC=` line the chain writes deliberately.
+
+**And the sh/Python boundary, which is not symmetric.** `sh` reads a script
+incrementally and keeps a byte offset, so inserting lines above the current
+position shifts everything below it and the shell resumes mid-token -- which
+is why editing `chain.sh` while it ran was luck rather than safety. Python
+compiles a whole module before executing any of it, so editing a running
+`.py` cannot affect the run in progress. So "put the change in a script"
+buys safety in Python that it does not buy in `sh`, and for shell the rule
+has to be the stronger one: **never edit a script that is executing; put the
+change in a new file.**
+
 **The checker is a third copy** -- lane C's, and the strongest of the
 operational ones. Five of their apps print a list of their keyboard
 shortcuts on screen. That printed list and the key handler are **two copies

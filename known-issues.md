@@ -159717,3 +159717,47 @@ almost certainly a mode rather than a pointer layer, in the shape
 `apps/reminders`'s snooze prompt now uses: a key that offers the choices, a
 key that picks, any other key leaving. Three operations need three
 affordances, which is why this is filed rather than done in passing.
+
+## `TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY` (lane C, 2026-09-18)
+
+**In short:** `apps/weather` starts with no location, no conditions and no
+forecast, and there is no way to give it any. Every one of its five location
+operations -- add, remove, reorder, set default, set update interval -- is
+written, tested, and has no production caller. It draws ninety-six render
+sites over nothing.
+
+**Verified.**
+
+| | |
+|---|---|
+| `main` | calls `WeatherApp::new`, which sets `current: None` and leaves `hourly`, `daily`, `alerts` and `locations` empty |
+| the only writer of `current` | line 967, inside `with_sample_weather`, which is `#[cfg(test)]` |
+| `add_location` | no production caller; the only `locations.push` is inside it |
+| `remove_location`, `reorder_location`, `set_default_location`, `set_update_interval` | the same |
+
+**This is the fabrication cleanup, half-finished.** A comment in `new` records
+what happened: *"`locations` went with the rest: it defaulted to 'New York,
+NY'"*. The invented cities were removed, which was right -- an app showing
+weather for somewhere you never chose is worse than an empty one. But nothing
+replaced them with a way to choose, so the app went from *wrong* to *empty*
+and the module doc still says "Multiple saved locations with default
+selection".
+
+**That is the shape worth naming**, because this project has been here before.
+`TD-C-ONE-HUNDRED-AND-FIFTEEN-OF-THE-HUNDRED-AND-THIRTY-NINE-APPS-CANNOT-OPEN-A-FILE`
+records three authors independently writing "so the first window is not an
+empty grid" to justify invented data. Removing the invented data answers the
+dishonesty and leaves the emptiness -- and the emptiness was the reason
+somebody invented data in the first place. **A removal is finished when the
+capability exists, not when the lie is gone.**
+
+**Fourth of the twenty-one no-pointer applications examined, and a fourth
+shape.** `notes` was wholesale, `reminders` specific, `rssreader` one-way.
+This one is *empty by construction*: seventeen keys are bound and every one of
+them navigates or toggles a view over data that cannot arrive.
+
+**What the repair wants.** A way to name a location -- this app is
+keyboard-driven, so a text-entry mode in the shape `apps/reminders`'s snooze
+prompt or `apps/notes`'s tag entry now uses -- and then `add_location` has a
+caller and the rest follow. The simulated forecast is honest and documented
+("All weather data is simulated locally"), so nothing needs a network first.

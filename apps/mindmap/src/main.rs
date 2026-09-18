@@ -76,6 +76,39 @@ const NODE_COLORS: [Color; 8] = [
 
 /// Height of the top toolbar.
 const TOOLBAR_HEIGHT: f32 = 40.0;
+
+/// Every key this program answers, and what it does.
+///
+/// Nineteen bindings and, until this list existed, no way to learn one but
+/// reading the source. `B` is the worst of them: it is the only way to bring
+/// the sidebar back, so a user who pressed it once had hidden a panel with no
+/// way to find out how to return it -- a toolbar cannot advertise the key that
+/// hides it.
+///
+/// **Each row is a key this program actually answers**, which is not a
+/// property the list has on its own: `every_advertised_key_does_something`
+/// walks it, reads each label with `guitk::shortcut` and presses every key it
+/// names. `apps/rssreader` shipped an overlay of twenty-one shortcuts of which
+/// about four worked.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Up / Down", "Select the parent / the first child"),
+    ("Left / Right", "Select the previous / next sibling"),
+    ("Tab", "Add a child to this node"),
+    ("Enter", "Add a sibling beside this node"),
+    ("F2", "Rename this node"),
+    ("Delete", "Delete this node and everything under it"),
+    ("Space", "Collapse or expand this node"),
+    ("C", "Next colour"),
+    ("S", "Next shape"),
+    ("L", "Lay the map out again"),
+    ("B", "Show or hide the sidebar"),
+    ("= / -", "Zoom in / out"),
+    ("Ctrl+0", "Reset the view"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+F", "Find a node"),
+    ("Ctrl+O / Ctrl+S", "Open / save an outline"),
+    ("?", "This list"),
+];
 /// Height of the bottom status bar.
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 /// Width the status bar's "Selected: … (ID: n)" line is drawn into.
@@ -1024,6 +1057,8 @@ pub struct MindMapApp {
 
     /// Whether the sidebar is visible.
     pub show_sidebar: bool,
+    /// Whether the shortcut list is up.
+    pub show_help: bool,
     /// Whether the search bar is visible.
     pub show_search: bool,
 
@@ -1081,6 +1116,7 @@ impl MindMapApp {
             search_results: Vec::new(),
             search_index: 0,
             show_sidebar: true,
+            show_help: false,
             show_search: false,
             edit_buffer: String::new(),
             editing_node: None,
@@ -2005,6 +2041,16 @@ impl MindMapApp {
                 self.show_sidebar = !self.show_sidebar;
                 EventResult::Consumed
             }
+            // `?`, which is Shift and the slash key. Escape closes it, because
+            // that is what Escape means over anything laid on top.
+            Key::Slash if key.modifiers.shift => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Key::Escape if self.show_help => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
             Key::S if ctrl => {
                 let name = sanitise_map_name(&self.active_map_ref().name);
                 self.picker.open_to_write(format!("{name}.outline"));
@@ -2244,7 +2290,63 @@ impl MindMapApp {
                 .render(&self.palette, self.win_width, self.win_height),
         );
 
+        // And the shortcut list over even that, because it is the one thing a
+        // reader asked for explicitly.
+        if self.show_help {
+            self.render_help(&mut cmds);
+        }
+
         cmds
+    }
+
+    /// The shortcut list, laid over the map.
+    fn render_help(&self, cmds: &mut Vec<RenderCommand>) {
+        let w = (self.win_width * 0.72).min(560.0);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "seventeen rows is far below f32's integer-exact range"
+        )]
+        let h = (SHORTCUTS.len() as f32).mul_add(20.0, 56.0);
+        let x = (self.win_width - w) / 2.0;
+        let y = ((self.win_height - h) / 2.0).max(TOOLBAR_HEIGHT);
+
+        self.palette
+            .push_surface(cmds, x, y, w, h, PANEL_CORNER, Surface::Card);
+        cmds.push(RenderCommand::Text {
+            x: x + 16.0,
+            y: y + 12.0,
+            text: String::from("Keys  --  ? closes this"),
+            color: self.palette.ink(self.palette.blue),
+            font_size: 13.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(w - 32.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        let mut row_y = y + 38.0;
+        for (keys, what) in SHORTCUTS {
+            cmds.push(RenderCommand::Text {
+                x: x + 16.0,
+                y: row_y,
+                text: (*keys).to_string(),
+                color: self.palette.ink(self.palette.peach),
+                font_size: 11.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(150.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            cmds.push(RenderCommand::Text {
+                x: x + 176.0,
+                y: row_y,
+                text: (*what).to_string(),
+                color: self.palette.subtext0,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w - 192.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            row_y += 20.0;
+        }
     }
 
     // ------ Toolbar ------
@@ -3176,6 +3278,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     use guitk::event::Modifiers;
+    use guitk::shortcut::keystrokes;
 
     fn press(k: Key) -> Event {
         Event::Key(KeyEvent {
@@ -3191,6 +3294,127 @@ mod tests {
             key: k,
             pressed: true,
             modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// A list on screen and the handler behind it are two copies of one fact,
+    /// and they drift: `apps/rssreader` shipped an overlay of twenty-one
+    /// shortcuts of which about four worked. The label is read by
+    /// `guitk::shortcut` rather than matched against a table written beside it
+    /// here, because that table would be a third copy drifting from both.
+    ///
+    /// The property is "some reachable state answers this key", not "this key
+    /// is taken right now". `Up` at the root, `Delete` with nothing selected
+    /// and `Ctrl+Y` with nothing undone all decline on purpose, and declining
+    /// from its own arm is answering.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let event = Event::Key(stroke.clone());
+                let answered = states()
+                    .iter_mut()
+                    .any(|app| app.handle_event(&event) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and no map answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Maps chosen so that between them every advertised key has work to do.
+    fn states() -> Vec<MindMapApp> {
+        // Untouched.
+        let fresh = MindMapApp::new();
+
+        // A node with a child under it, which is the one state `Down` has
+        // anywhere to descend to. Two `Tab`s and an `Up`, because adding a
+        // child selects the child -- a new map is a root on its own, and the
+        // selection is never above a node that has one.
+        let mut budded = MindMapApp::new();
+        for k in [Key::Tab, Key::Tab, Key::Up] {
+            budded.handle_event(&press(k));
+        }
+
+        // Two siblings, standing on the *second*: a sibling behind it for
+        // `Left`, a parent above it for `Up`, and a node under the cursor that
+        // may be deleted or renamed.
+        let mut second = MindMapApp::new();
+        for k in [Key::Tab, Key::Enter] {
+            second.handle_event(&press(k));
+        }
+
+        // ...and standing on the first, because `Right` needs one ahead of it
+        // and `Left` needs one behind, and no single selection has both.
+        let mut first = MindMapApp::new();
+        for k in [Key::Tab, Key::Enter, Key::Left] {
+            first.handle_event(&press(k));
+        }
+
+        // Something done and then undone, so redo has work.
+        let mut undone = MindMapApp::new();
+        undone.handle_event(&press(Key::Tab));
+        undone.handle_event(&press_ctrl(Key::Z));
+
+        vec![fresh, budded, second, first, undone]
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// `every_advertised_key_does_something` reads the list and the handler;
+    /// this reads the list and the *screen*. They are different questions, and
+    /// `apps/netscan`'s `wol_note` is why both get asked: it was written by the
+    /// model and drawn by nothing for three commits, and every model-level test
+    /// passed throughout. A help overlay that never draws is the same defect
+    /// with the same green suite.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = MindMapApp::new();
+        let quiet = drawn_text(&app);
+        assert!(
+            !quiet.contains("? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press_shift(Key::Slash));
+        let shown = drawn_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !drawn_text(&app).contains("? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn drawn_text(app: &MindMapApp) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// A key with Shift held, which is how `?` is typed.
+    fn press_shift(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.shift = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
             text: String::new(),
         })
     }

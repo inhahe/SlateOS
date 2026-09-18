@@ -3429,6 +3429,61 @@ mod tests {
         vec![plain, sorter, working]
     }
 
+    /// **The shortcut list reaches the window.**
+    ///
+    /// `every_advertised_key_does_something` reads the list and the handler;
+    /// this reads the list and the *screen*. They are different questions, and
+    /// `apps/netscan`'s `wol_note` is why both get asked: it was written by the
+    /// model and drawn by nothing for three commits, and every model-level test
+    /// passed throughout. A help overlay that never draws is the same defect
+    /// with the same green suite.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = seeded();
+        let quiet = drawn_text(&app);
+        assert!(
+            !quiet.contains("? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press_shift(Key::Slash));
+        let shown = drawn_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !drawn_text(&app).contains("? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn drawn_text(app: &SlidesApp) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// A key with Shift held, which is how `?` is typed.
+    fn press_shift(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.shift = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
     fn types(text: &str) -> Event {
         Event::Key(KeyEvent {
             key: Key::A,

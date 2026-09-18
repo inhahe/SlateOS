@@ -427,14 +427,17 @@ pub fn render_card<S: CommandSink + ?Sized>(
     } else {
         // One line goes to the count, so `shown` is one shorter than `fits`.
         let keep = fits.saturating_sub(1);
-        (rows.get(..keep).unwrap_or(&[]), rows.len() - keep)
+        (
+            rows.get(..keep).unwrap_or(&[]),
+            rows.len().saturating_sub(keep),
+        )
     };
 
     #[expect(
         clippy::cast_precision_loss,
         reason = "a shortcut list is tens of rows, far below f32's integer-exact range"
     )]
-    let drawn_rows = (shown.len() + usize::from(hidden > 0)) as f32;
+    let drawn_rows = shown.len().saturating_add(usize::from(hidden > 0)) as f32;
     let h = drawn_rows.mul_add(ROW_HEIGHT, HEAD_HEIGHT + FOOT_HEIGHT);
     let x = ((window_w - w) / 2.0).max(0.0);
     let y = ((window_h - h) / 2.0).max(keep_clear);

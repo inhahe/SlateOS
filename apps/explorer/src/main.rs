@@ -3714,10 +3714,11 @@ impl ExplorerState {
         // rows and the divider cannot be computed against different widths --
         // which would drop a file into the folder next to the one it was
         // dragged onto.
-        let (list_rect, preview_rect) = match self.preview_panes() {
-            Some((list, preview)) => (list, Some(preview)),
-            None => (self.pane_rect(), None),
-        };
+        // Both from `list_rect`, which is the one place that knows the panel
+        // is open. The listing's width used to be decided here and again in
+        // `icon_columns`, and the two disagreed.
+        let list_rect = self.list_rect();
+        let preview_rect = self.preview_panes().map(|(_, preview)| preview);
         let (list_x, list_y, list_w, list_h) = (list_rect.x, list_rect.y, list_rect.w, list_rect.h);
 
         // The pane itself is the fallback target: anything inside it that is
@@ -4145,8 +4146,36 @@ impl ExplorerState {
     /// wheel stepping by a different column count than the grid is laid out in
     /// would move by a fraction of a row and feel stuck.
     fn icon_columns(&self) -> usize {
-        let pane_w = (self.window_width as f32 - self.sidebar_width).max(0.0);
-        ((pane_w / ICON_CELL_W) as usize).max(1)
+        Self::columns_for(self.list_rect().w)
+    }
+
+    /// The part of the pane the *listing* gets.
+    ///
+    /// With the preview panel open that is the left half, not the whole pane,
+    /// and the difference is not small: at 900x700 the grid goes from seven
+    /// columns to four. Both the renderer and [`icon_columns`](Self::icon_columns)
+    /// come here, because they used to disagree -- `icon_columns` measured the
+    /// whole pane while `render_file_list` handed the grid the narrower list
+    /// rect, so **with the preview open the wheel stepped seven entries per
+    /// row through a grid four wide**, and the top-left cell reported whichever
+    /// file the wheel's arithmetic thought was there. `icon_columns`'s own doc
+    /// comment already said the two must not disagree; nothing held them to it
+    /// until this existed.
+    fn list_rect(&self) -> Rect {
+        match self.preview_panes() {
+            Some((list, _)) => list,
+            None => self.pane_rect(),
+        }
+    }
+
+    /// How many icon cells fit across `w`.
+    ///
+    /// One formula, called by the renderer and by the wheel. At least one
+    /// column however narrow: a zero would make the row index a division by
+    /// zero, and a pane too narrow for a cell should clip one rather than draw
+    /// none.
+    fn columns_for(w: f32) -> usize {
+        ((w / ICON_CELL_W) as usize).max(1)
     }
 
     /// The icon view: a grid of thumbnail cells, each captioned with its name.
@@ -4169,10 +4198,7 @@ impl ExplorerState {
         w: f32,
         h: f32,
     ) {
-        // At least one column, however narrow the pane: a zero here would make
-        // the row index a division by zero, and a pane too narrow for a cell
-        // should clip one cell rather than draw none.
-        let cols = ((w / ICON_CELL_W) as usize).max(1);
+        let cols = Self::columns_for(w);
         // The offset is kept in *entries*, one number for all three views, so
         // changing view mode lands you at roughly the same place rather than
         // back at the top. The grid rounds it down to a whole row of icons:
@@ -6136,29 +6162,72 @@ mod tests {
         // the listing, and using one number for both means the first cell
         // after a scroll claims to be the first file in the folder. A click
         // would then open the wrong file, silently.
-        let dir = crate::guarded_scratch("explorer-icons-zones");
-        dir_with_files(&dir.path(""), 60);
+        //
+        // **Run with the preview panel shut and open**, because those are two
+        // different grids -- seven columns and four at this size -- and the
+        // program used to measure one and draw the other. With the panel open
+        // the wheel stepped seven entries per row through a grid four wide,
+        // and the top-left cell reported whichever file that arithmetic landed
+        // on. This test found it *intermittently* before it took the panel in
+        // hand: `preview_open` is read from persisted preferences at
+        // construction, so whether the bug showed up depended on what some
+        // other test had saved, in another thread, moments earlier.
+        for open in [false, true] {
+            let dir = crate::guarded_scratch("explorer-icons-zones");
+            dir_with_files(&dir.path(""), 60);
+            let mut state = state_at(&dir.path(""));
+            state.view_mode = ViewMode::Icons;
+            state.preview_open = open;
+
+            let cols = state.icon_columns();
+            state.viewport.scroll_by(cols as isize, state.entries.len());
+
+            // Through the real path: render to register the zones, then click
+            // the top-left cell and see which file the program thinks was hit.
+            drop(state.render());
+            let first_drawn = (state.viewport.first_visible() / cols) * cols;
+            assert_ne!(
+                first_drawn, 0,
+                "the grid did not scroll with the preview {open}, so this proves nothing"
+            );
+
+            let clicked = state.click_at(state.sidebar_width + 10.0, 64.0 + 10.0);
+            assert!(clicked, "the top-left cell was not clickable");
+            assert_eq!(
+                state.selected_indices.as_slice(),
+                [first_drawn],
+                "with the preview {open}, the top-left cell named file {:?}, not the one drawn in it",
+                state.selected_indices
+            );
+        }
+    }
+
+    /// The wheel and the grid count the same columns.
+    ///
+    /// `icon_columns` measured the whole pane while the grid was drawn in the
+    /// narrower list rect, and its own doc comment already said the two must
+    /// not disagree -- nothing held them to it. The panel has to actually
+    /// change the count for this to be checking anything, so it asserts that
+    /// first.
+    #[test]
+    fn the_preview_panel_narrows_the_grid_for_the_wheel_too() {
+        let dir = crate::guarded_scratch("explorer-icons-preview-cols");
+        dir_with_files(&dir.path(""), 12);
         let mut state = state_at(&dir.path(""));
         state.view_mode = ViewMode::Icons;
-        let cols = state.icon_columns();
-        state.viewport.scroll_by(cols as isize, state.entries.len());
 
-        // Through the real path: render to register the zones, then click
-        // the top-left cell and see which file the program thinks was hit.
-        drop(state.render());
-        let first_drawn = (state.viewport.first_visible() / cols) * cols;
-        assert_ne!(
-            first_drawn, 0,
-            "the grid did not scroll, so this proves nothing"
+        state.preview_open = false;
+        let wide = state.icon_columns();
+        state.preview_open = true;
+        let narrow = state.icon_columns();
+        assert!(
+            narrow < wide,
+            "the preview panel did not narrow the listing ({wide} -> {narrow}), so this checks nothing"
         );
-
-        let clicked = state.click_at(state.sidebar_width + 10.0, 64.0 + 10.0);
-        assert!(clicked, "the top-left cell was not clickable");
         assert_eq!(
-            state.selected_indices.as_slice(),
-            [first_drawn],
-            "the top-left cell named file {:?} instead of the one drawn in it",
-            state.selected_indices
+            narrow,
+            ExplorerState::columns_for(state.list_rect().w),
+            "the wheel counts columns across a different width than the grid"
         );
     }
 

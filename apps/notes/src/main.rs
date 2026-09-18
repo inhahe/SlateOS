@@ -14,6 +14,21 @@
 //! - Multi-panel UI: notebook sidebar, note list, editor/preview
 //! - Word count and reading time statistics
 //!
+//! # What the pointer reaches
+//!
+//! Until 2026-09-17 this application received no mouse event of any kind: it
+//! drew three panels and a version history and every one of them ignored a
+//! click. Nine operations had neither a shortcut nor a clickable control, so
+//! they could not be reached at all -- see
+//! `TD-C-NOTES-CANNOT-TAG-OR-DELETE-A-NOTE`.
+//!
+//! The version panel answers a click now, and clicking a version restores it.
+//! **The notebook sidebar and the note list still do not.** They are drawn,
+//! they look like lists, and the pointer does nothing over either; selecting a
+//! note is Up/Down. The repair is the same in both cases -- a hit test derived
+//! from the function the renderer already reads, as `version_panel_bounds` and
+//! `version_rows` are here.
+//!
 //! Uses the guitk library for UI rendering.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
@@ -35,7 +50,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::dialog::{FilePicker, Picked};
-use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -72,6 +87,20 @@ const SIDEBAR_WIDTH: f32 = 200.0;
 const NOTE_LIST_WIDTH: f32 = 260.0;
 const TOOLBAR_HEIGHT: f32 = 36.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
+
+/// How wide the version-history panel down the editor's right edge is.
+const VERSION_PANEL_W: f32 = 160.0;
+
+/// How tall one version row is.
+///
+/// **One constant where there were two.** The panel decided how many rows
+/// fitted with `(height - 30.0) / 24.0` and then advanced by `28.0` per row,
+/// so on a 740-pixel panel it drew 29 rows into 812 pixels and the last few
+/// landed past its own bottom edge. A row's height is one fact.
+const VERSION_ROW_H: f32 = 28.0;
+
+/// The panel's heading, above the first row.
+const VERSION_HEADER_H: f32 = 28.0;
 const ITEM_HEIGHT: f32 = 28.0;
 const HEADER_HEIGHT: f32 = 32.0;
 const TAG_HEIGHT: f32 = 20.0;
@@ -1495,6 +1524,74 @@ impl NotesApp {
     }
 
     /// Find a note by ID.
+    /// Where the version panel is drawn, whether or not anything is in it.
+    ///
+    /// The renderer and the click read this same function. The editor's own
+    /// rectangle is derived from the layout constants and the window size, and
+    /// the panel sits at its right edge -- so this is that arithmetic, once,
+    /// rather than once in `render_commands` and again in a hit test that has
+    /// to agree with it.
+    fn version_panel_bounds(&self) -> (f32, f32, f32, f32) {
+        (
+            self.window_width - VERSION_PANEL_W,
+            TOOLBAR_HEIGHT,
+            VERSION_PANEL_W,
+            self.window_height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT,
+        )
+    }
+
+    /// The versions the panel can show, as `(index, the y it is drawn at)`.
+    ///
+    /// The list is trimmed from the *front* when it does not fit, because the
+    /// newest versions are the ones somebody is looking for.
+    fn version_rows(note: &Note, panel_y: f32, panel_h: f32) -> Vec<(usize, f32)> {
+        let usable = (panel_h - VERSION_HEADER_H).max(0.0);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a row count from a window height is small and positive"
+        )]
+        let max_display = (usable / VERSION_ROW_H) as usize;
+        let start = note.versions.len().saturating_sub(max_display);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a row index is far below f32's integer-exact range"
+        )]
+        (start..note.versions.len())
+            .enumerate()
+            .map(|(n, i)| (i, panel_y + VERSION_HEADER_H + n as f32 * VERSION_ROW_H))
+            .collect()
+    }
+
+    /// Which version a point is on, if it is on one.
+    pub fn version_at(&self, x: f32, y: f32) -> Option<usize> {
+        let note = self.find_note(self.selected_note?)?;
+        if note.versions.is_empty() {
+            return None;
+        }
+        let (px, py, pw, ph) = self.version_panel_bounds();
+        if x < px || x >= px + pw || y < py || y >= py + ph {
+            return None;
+        }
+        Self::version_rows(note, py, ph)
+            .into_iter()
+            .find(|(_, row_y)| y >= *row_y && y < row_y + VERSION_ROW_H)
+            .map(|(index, _)| index)
+    }
+
+    /// Put the selected note back to one of its earlier versions.
+    ///
+    /// `Note::restore_version` has existed, tested, with no caller: the panel
+    /// listed versions and nothing could act on one.
+    pub fn restore_selected_version(&mut self, version_idx: usize) -> bool {
+        let timestamp = self.tick();
+        let Some(id) = self.selected_note else {
+            return false;
+        };
+        self.find_note_mut(id)
+            .is_some_and(|note| note.restore_version(version_idx, timestamp))
+    }
+
     pub fn find_note(&self, id: NoteId) -> Option<&Note> {
         self.notes.iter().find(|n| n.id == id)
     }
@@ -1887,6 +1984,7 @@ impl NotesApp {
         }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
+            Event::Mouse(mouse_ev) => self.handle_mouse(mouse_ev),
             Event::Resize { width, height } => {
                 #[allow(
                     clippy::cast_precision_loss,
@@ -1950,6 +2048,27 @@ impl NotesApp {
             // opposite states and only one of them is safe to close on.
             Err(err) => format!("{SAVE_FAILED_PREFIX} {}: {err}", path.display()),
         }
+    }
+
+    /// The first pointer input this application has ever taken.
+    ///
+    /// It drew three panels and a version history and received no mouse event
+    /// of any kind, so everything it could do had to be a keyboard shortcut
+    /// and most of it had none. This is one panel's worth; the note list and
+    /// the notebook sidebar still do nothing when clicked.
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
+            return EventResult::Ignored;
+        }
+        if let Some(index) = self.version_at(event.x, event.y)
+            && self.restore_selected_version(index)
+        {
+            // No message: the editor's text changes under the cursor, which is
+            // the feedback, and a line in the status bar saying so would be
+            // quieter than the thing it described.
+            return EventResult::Consumed;
+        }
+        EventResult::Ignored
     }
 
     pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
@@ -2978,7 +3097,13 @@ impl NotesApp {
 
         // Version history panel on the right edge
         if !note.versions.is_empty() {
-            self.render_version_sidebar(cmds, note, x + width - 160.0, editor_y, 160.0, editor_h);
+            // The rectangle comes from `version_panel_bounds`, which the click
+            // reads too. It used to be derived here from the editor's own
+            // rectangle, which happened to agree -- `editor_x + editor_w` is
+            // the window width -- and would have stopped agreeing the first
+            // time either was adjusted.
+            let (px, py, pw, ph) = self.version_panel_bounds();
+            self.render_version_sidebar(cmds, note, px, py, pw, ph);
         }
     }
 
@@ -3375,10 +3500,10 @@ impl NotesApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        let mut vy = y + 28.0;
-        let max_display = ((height - 30.0) / 24.0) as usize;
-        let start = note.versions.len().saturating_sub(max_display);
-        for (i, ver) in note.versions.iter().enumerate().skip(start) {
+        for (i, vy) in Self::version_rows(note, y, height) {
+            let Some(ver) = note.versions.get(i) else {
+                continue;
+            };
             let label = format!("v{} ({})", i.saturating_add(1), ver.timestamp);
             cmds.push(RenderCommand::Text {
                 x: x + 8.0,
@@ -3402,7 +3527,6 @@ impl NotesApp {
                 max_width: Some(width - 16.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            vy += 28.0;
         }
     }
 }
@@ -4177,6 +4301,99 @@ mod tests {
         let note = app.find_note(nid).unwrap();
         assert_eq!(note.content, "Version 3");
         assert_eq!(note.versions.len(), 2); // v1 and v2 saved
+    }
+
+    /// A note with two earlier versions, selected, in a sized window.
+    fn app_with_versions() -> (NotesApp, NoteId) {
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("NB");
+        let nid = app.create_note("Note", nb);
+        app.update_note_content(nid, "Original content");
+        app.update_note_content(nid, "Modified content");
+        app.selected_note = Some(nid);
+        app.window_width = 1280.0;
+        app.window_height = 800.0;
+        (app, nid)
+    }
+
+    fn click_at(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// Clicking a version restores it.
+    ///
+    /// `Note::restore_version` was written and tested and had no caller, and
+    /// the application received no mouse event of any kind -- so the panel
+    /// listed versions that nothing could act on.
+    #[test]
+    fn clicking_a_version_restores_it() {
+        let (mut app, nid) = app_with_versions();
+        assert_eq!(
+            app.find_note(nid).expect("the note").content,
+            "Modified content",
+            "the control failed"
+        );
+        let (px, py, _, ph) = app.version_panel_bounds();
+        let rows = NotesApp::version_rows(app.find_note(nid).expect("the note"), py, ph);
+        let (index, row_y) = *rows.first().expect("a version row");
+
+        let consumed = app.handle_event(&click_at(px + 8.0, row_y + 4.0));
+
+        assert_eq!(consumed, EventResult::Consumed, "the click did nothing");
+        // Only two versions, so none is trimmed and the first row is index 0.
+        assert_eq!(index, 0, "the first row is not the first version");
+        assert_eq!(
+            app.find_note(nid).expect("the note").content,
+            "Original content",
+            "the version was not restored"
+        );
+    }
+
+    /// A click outside the panel restores nothing.
+    #[test]
+    fn a_click_outside_the_version_panel_restores_nothing() {
+        let (mut app, nid) = app_with_versions();
+        let (px, py, _, _) = app.version_panel_bounds();
+
+        // Well to the left of the panel: over the editor.
+        let consumed = app.handle_event(&click_at(px - 40.0, py + 40.0));
+
+        assert_eq!(consumed, EventResult::Ignored);
+        assert_eq!(
+            app.find_note(nid).expect("the note").content,
+            "Modified content",
+            "a click over the editor restored a version"
+        );
+    }
+
+    /// Every row the panel offers is inside the panel.
+    ///
+    /// It used to decide how many rows fitted with one number and advance by
+    /// another -- `(height - 30.0) / 24.0` rows, drawn 28 apart -- so the last
+    /// few were drawn past its own bottom edge. A click could never reach
+    /// those, which is how a hit test finds a drawing bug.
+    #[test]
+    fn every_version_row_is_inside_the_panel() {
+        let (mut app, nid) = app_with_versions();
+        // Many versions, so the list is longer than the panel is tall.
+        for i in 0..200 {
+            app.update_note_content(nid, &format!("edit {i}"));
+        }
+        let (_, py, _, ph) = app.version_panel_bounds();
+        let rows = NotesApp::version_rows(app.find_note(nid).expect("the note"), py, ph);
+
+        assert!(!rows.is_empty(), "the control failed: no rows at all");
+        for (index, row_y) in rows {
+            assert!(
+                row_y + VERSION_ROW_H <= py + ph,
+                "row {index} is drawn at {row_y}, past the panel's bottom at {}",
+                py + ph
+            );
+        }
     }
 
     #[test]

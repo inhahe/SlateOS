@@ -34789,6 +34789,26 @@ pub fn self_test_linux_slateos_cmake() -> KernelResult<()> {
             serial_println!("[spawn]   cmake: {} is {} bytes", CMAKE, b.len());
             b
         }
+        // An OutOfMemory here is an ENVIRONMENT fact, not a cmake defect,
+        // and the split matches `pathz_fixtures_missing`'s: absent source
+        // skips, present-but-broken fails. This binary is 22.5 MB, and the
+        // buddy allocator rounds a request to a power-of-two frame count,
+        // so loading it needs a 32 MiB CONTIGUOUS block. A 20.5 MB file is
+        // the same order and loads fine -- whether the block exists depends
+        // on fragmentation at this point in the boot, not on the file.
+        //
+        // So this skips rather than reds the boot, and it skips through
+        // `pathz_skip` so the lost coverage is COUNTED. A rung that
+        // silently returned Ok here would be the Path-Z verdict problem
+        // recorded on 2026-09-18: "complete -- 0 rungs skipped" over a rung
+        // that quietly did nothing.
+        Err(crate::error::KernelError::OutOfMemory) => {
+            pathz_skip(
+                format_args!("{RUNG} -- no 32 MiB contiguous block for a 22.5 MB binary"),
+                CMAKE,
+            );
+            return Ok(());
+        }
         Err(e) => {
             serial_println!("[spawn]   FAIL: cmake: reading {} failed: {:?}", CMAKE, e);
             return Err(KernelError::InternalError);

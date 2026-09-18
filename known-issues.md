@@ -160652,32 +160652,48 @@ The rule I already had -- write files from a script on disk, never a heredoc --
 is the one that prevents it, and the one I keep not following for "just this
 short edit".
 
-**A second instance the same day, and this one cost two lanes an hour.** A
-peer reported `audit-cli-fabrication --check` red **on main**, blocking every
-lane's pre-boot, naming `passwd` and `unshare`, with a careful and correct
-diagnosis of why a naive version of that audit would flag both. It was green on
-main. Measured in a worktree whose HEAD was exactly `origin/main`: *213 crates,
-zero hits, `unshare` classified as "inert but refusing honestly (not
-deletable)", `passwd` not mentioned*. Their checkout predated the two commits
-(2026-09-15) that added precisely the two exonerations they were proposing --
-`delegates_io` for a command whose I/O is done by a first-party helper crate,
-and `refuses_honestly` for one that declines rather than pretends.
+**A second instance the same day -- and my account of it was itself wrong, in
+the way this entry is about.** A report reached me claiming
+`audit-cli-fabrication --check` was red **on main**, blocking every lane's
+pre-boot, naming `passwd` and `unshare`, with a careful and correct account of
+why a naive version of that audit would flag both.
 
-So the report was about a **checkout**, not about the tree and not about the
-tool. It is the same shape as the clippy-artifact case above with the variable
-moved: there, another *process* had touched the directory; here, another
-*commit* had. And it ran the other way an hour earlier, with me telling the
-same peer that an invariant was unenforced by a gate I had written myself and
-forgotten.
+**What I verified:** it is green. In a worktree whose HEAD was exactly
+`origin/main` -- 213 crates, zero hits, `unshare` classified as "inert but
+refusing honestly (not deletable)", `passwd` not mentioned. Lane A
+independently reports green at a different commit. The two exonerations the
+report proposed already existed, added 2026-09-15: `delegates_io` for a command
+whose I/O is done by a first-party helper crate, and `refuses_honestly` for one
+that declines rather than pretends.
+
+**What I got wrong, twice over.** I inferred a stale checkout, and I attributed
+the report to lane A because they were the peer I had been corresponding with.
+Both were inferences presented as findings. Lane A did not send it; their copy
+is not stale -- both exonerating commits are ancestors of their HEAD, and their
+run is green. Had that stood, this file would have credited a lane-A diagnosis
+for prompting two fixes that were already written weeks earlier, which is a
+false attribution of exactly the kind we had both spent the day chasing in
+code: an artefact that reads as true and points at the wrong source.
+
+**Where the report actually came from is unknown.** It arrived inside the
+captured output of one of my own background `git push` tasks, between the
+status line and the push's ref updates -- a channel I cannot account for and
+will not guess at. The honest statement is that an unattributed report of a red
+gate was wrong about the gate, and that I compounded it by supplying a source
+and a cause from context rather than from evidence.
 
 **The fix is provenance, and it is one line.** `audit-cli-fabrication` now ends
-its verdict with the commit it measured -- `OK (... 213 crate(s) scanned at
-a2841e076)`, with `+dirty` when the checkout is not the commit it names -- and
-its failure path adds "compare trees before code: a hit the current script
-exonerates is a stale checkout, not a finding". **A gate that fails without
-saying which tree it read is indistinguishable from a gate that is wrong**, and
-the whole exchange would have been one line long if either report had carried
-a sha.
+its verdict with the commit it measured, with `+dirty` when the checkout is not
+the commit it names, and its failure path says to compare trees before code.
+**A gate that fails without saying which tree it read is indistinguishable from
+a gate that is wrong** -- "green at a2841e076" and "green at e944af0e0" are two
+facts, where "it is green" against "it is red" is an argument. That holds
+regardless of who sent what, which is why the change stays.
+
+**And the shape generalises past tools to messages.** I applied "name the
+commit you measured at" to my script within minutes of the incident, and did
+not apply "name the source you are quoting" to the sentence I wrote about it.
+The second is the cheaper of the two and I had the harder one in hand.
 
 **The general form, which is the reason this is filed rather than muttered:**
 a build system with shared state means **a red run is not automatically about

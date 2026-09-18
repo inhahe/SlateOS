@@ -2417,6 +2417,76 @@ impl RssReaderApp {
         }
     }
 
+    /// The sidebar's rows, top to bottom, exactly as the sidebar draws them.
+    ///
+    /// Selection steps through this list rather than through `feeds`, because
+    /// the sidebar interleaves four kinds of row -- the two standing entries,
+    /// each folder, the feeds inside an open folder, and the feeds in no
+    /// folder -- so a feed's position depends on which folder holds it and
+    /// whether that folder is open. Deriving the order in one place is what
+    /// keeps "down" meaning the row below rather than the next feed in
+    /// `feeds`, which is a different row entirely once folders exist.
+    pub fn sidebar_rows(&self) -> Vec<SidebarSelection> {
+        let mut rows = vec![SidebarSelection::AllFeeds, SidebarSelection::Starred];
+        for folder in &self.folders {
+            rows.push(SidebarSelection::Folder(folder.id));
+            if folder.is_expanded {
+                rows.extend(
+                    self.feeds
+                        .iter()
+                        .filter(|f| f.folder_id == Some(folder.id))
+                        .map(|f| SidebarSelection::Feed(f.id)),
+                );
+            }
+        }
+        rows.extend(
+            self.feeds
+                .iter()
+                .filter(|f| f.folder_id.is_none())
+                .map(|f| SidebarSelection::Feed(f.id)),
+        );
+        rows
+    }
+
+    /// Move the sidebar selection by `delta` rows, stopping at either end.
+    ///
+    /// Stops rather than wraps: the list is short and visible in full, so
+    /// wrapping past the end would move the highlight the length of the
+    /// sidebar in response to one keypress.
+    pub fn step_sidebar(&mut self, delta: isize) {
+        let rows = self.sidebar_rows();
+        let here = rows
+            .iter()
+            .position(|r| *r == self.sidebar_selection)
+            .unwrap_or(0);
+        let Some(next) = here.checked_add_signed(delta) else {
+            return;
+        };
+        let Some(selection) = rows.get(next).copied() else {
+            return;
+        };
+        self.sidebar_selection = selection;
+        // The article list is filtered by this selection, so an index into the
+        // previous list points at an unrelated article in the new one.
+        self.selected_article_index = 0;
+        self.content_scroll_offset = 0.0;
+    }
+
+    /// Open or close the selected folder. Reports whether it did.
+    ///
+    /// `Folder::is_expanded` had no writer in production, so every folder was
+    /// permanently open and the "closed" indicator could not be drawn.
+    pub fn toggle_selected_folder(&mut self) -> bool {
+        let SidebarSelection::Folder(id) = self.sidebar_selection else {
+            return false;
+        };
+        let Some(folder) = self.folders.iter_mut().find(|f| f.id == id) else {
+            return false;
+        };
+        folder.is_expanded = !folder.is_expanded;
+        true
+    }
+
     /// Perform a search and store results.
     pub fn perform_search(&mut self) {
         if self.search_query.is_empty() {
@@ -2713,14 +2783,35 @@ impl RssReaderApp {
                 };
                 EventResult::Consumed
             }
-            // Through the articles. `next_article` and `prev_article` were
-            // written, tested, and had no key.
+            // Through the articles -- or through the sidebar, when that is
+            // the active pane. `sidebar_selection` previously had no writer at
+            // all: the sidebar highlighted "All Feeds" forever, its Feed,
+            // Folder and Starred arms were unreachable, and tabbing to it
+            // changed only which pane was outlined.
             Key::Down | Key::J => {
-                self.next_article();
+                if self.active_pane == ActivePane::Sidebar {
+                    self.step_sidebar(1);
+                } else {
+                    self.next_article();
+                }
                 EventResult::Consumed
             }
             Key::Up | Key::K => {
-                self.prev_article();
+                if self.active_pane == ActivePane::Sidebar {
+                    self.step_sidebar(-1);
+                } else {
+                    self.prev_article();
+                }
+                EventResult::Consumed
+            }
+            // On a folder, `Enter` opens or closes it. This arm must precede
+            // the one below, which would otherwise swallow `Enter` into
+            // "mark read" while the sidebar is focused.
+            Key::Enter
+                if self.active_pane == ActivePane::Sidebar
+                    && matches!(self.sidebar_selection, SidebarSelection::Folder(_)) =>
+            {
+                self.toggle_selected_folder();
                 EventResult::Consumed
             }
             // Read and starred. Both had a test each and no caller, so an
@@ -5248,6 +5339,150 @@ mod tests {
 
     fn app() -> RssReaderApp {
         RssReaderApp::with_sample_data(1200.0, 800.0)
+    }
+
+    /// Shift-Tab reaches the sidebar and Down moves its selection.
+    ///
+    /// `sidebar_selection` had no writer in production: it was `AllFeeds` from
+    /// construction to exit, so the Feed, Folder and Starred arms of the
+    /// article filter were unreachable and four highlight branches were dead.
+    #[test]
+    fn down_in_the_sidebar_moves_the_sidebar() {
+        let mut a = app();
+        assert_eq!(
+            a.sidebar_selection,
+            SidebarSelection::AllFeeds,
+            "control: the app starts on All Feeds"
+        );
+
+        a.handle_event(&key_ev(Key::Tab, false, true));
+        assert_eq!(a.active_pane, ActivePane::Sidebar, "Shift-Tab missed the sidebar");
+        a.handle_event(&press(Key::Down));
+
+        assert_eq!(
+            a.sidebar_selection,
+            SidebarSelection::Starred,
+            "Down did not move the sidebar selection"
+        );
+    }
+
+    /// Down still moves through articles when the sidebar is not focused.
+    #[test]
+    fn down_outside_the_sidebar_still_moves_through_articles() {
+        let mut a = app();
+        a.active_pane = ActivePane::ArticleList;
+        assert!(a.filtered_article_indices().len() > 1, "control: need two articles");
+        a.selected_article_index = 0;
+
+        a.handle_event(&press(Key::Down));
+
+        assert_eq!(a.selected_article_index, 1, "Down stopped moving articles");
+        assert_eq!(
+            a.sidebar_selection,
+            SidebarSelection::AllFeeds,
+            "and it moved the sidebar instead"
+        );
+    }
+
+    /// Selecting a feed filters the article list to that feed.
+    ///
+    /// This is the whole point of the sidebar, and the arm of
+    /// `filtered_article_indices` that could not previously be reached.
+    #[test]
+    fn selecting_a_feed_filters_the_articles_to_it() {
+        let mut a = app();
+        let all = a.filtered_article_indices().len();
+        let feed_id = a
+            .sidebar_rows()
+            .into_iter()
+            .find_map(|r| match r {
+                SidebarSelection::Feed(id) => Some(id),
+                _ => None,
+            })
+            .expect("the fixture has a feed");
+
+        a.active_pane = ActivePane::Sidebar;
+        while a.sidebar_selection != SidebarSelection::Feed(feed_id) {
+            let before = a.sidebar_selection;
+            a.handle_event(&press(Key::Down));
+            assert_ne!(a.sidebar_selection, before, "the selection stopped moving");
+        }
+
+        let mine = a.filtered_article_indices();
+        assert!(!mine.is_empty(), "the feed's own articles vanished");
+        assert!(mine.len() < all, "selecting a feed did not narrow the list");
+        assert!(
+            mine.iter().all(|i| a.articles[*i].feed_id == feed_id),
+            "an article from another feed survived the filter"
+        );
+    }
+
+    /// Enter closes a folder, and its feeds leave the sidebar.
+    ///
+    /// `Folder::is_expanded` had no production writer, so every folder was
+    /// open forever and the "closed" indicator could never be drawn.
+    #[test]
+    fn enter_on_a_folder_closes_it() {
+        let mut a = app();
+        let folder_id = a.folders.first().expect("the fixture has a folder").id;
+        let inside: Vec<_> = a
+            .feeds
+            .iter()
+            .filter(|f| f.folder_id == Some(folder_id))
+            .map(|f| SidebarSelection::Feed(f.id))
+            .collect();
+        assert!(!inside.is_empty(), "control: the folder needs a feed in it");
+        assert!(
+            inside.iter().all(|r| a.sidebar_rows().contains(r)),
+            "control: an open folder shows its feeds"
+        );
+
+        a.active_pane = ActivePane::Sidebar;
+        a.sidebar_selection = SidebarSelection::Folder(folder_id);
+        a.handle_event(&press(Key::Enter));
+
+        assert!(
+            !a.folders.iter().any(|f| f.id == folder_id && f.is_expanded),
+            "the folder is still open"
+        );
+        assert!(
+            inside.iter().all(|r| !a.sidebar_rows().contains(r)),
+            "a closed folder still lists its feeds"
+        );
+    }
+
+    /// Enter in the article list still marks read, rather than being eaten.
+    #[test]
+    fn enter_outside_the_sidebar_still_marks_read() {
+        let mut a = app();
+        a.active_pane = ActivePane::ArticleList;
+        let idx = *a.filtered_article_indices().first().expect("an article");
+        a.selected_article_index = 0;
+        let before = a.articles[idx].is_read;
+
+        a.handle_event(&press(Key::Enter));
+
+        assert_ne!(a.articles[idx].is_read, before, "Enter no longer marks read");
+    }
+
+    /// The selection stops at the ends instead of wrapping or panicking.
+    #[test]
+    fn the_sidebar_selection_stops_at_both_ends() {
+        let mut a = app();
+        a.active_pane = ActivePane::Sidebar;
+
+        a.handle_event(&press(Key::Up));
+        assert_eq!(
+            a.sidebar_selection,
+            SidebarSelection::AllFeeds,
+            "Up from the first row wrapped or moved"
+        );
+
+        let last = *a.sidebar_rows().last().expect("rows exist");
+        for _ in 0..a.sidebar_rows().len() + 4 {
+            a.handle_event(&press(Key::Down));
+        }
+        assert_eq!(a.sidebar_selection, last, "Down ran off the end");
     }
 
     /// One feed is filled by parsing real RSS rather than by a constructor, so

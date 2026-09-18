@@ -160217,6 +160217,18 @@ not "be careful" -- it is knowing the specific shapes.
 | 6 | **Method mutation.** A field with no `=` anywhere may still be written by its own methods: `self.volume.increase(5)`. | Nearly filed `videoplayer`'s volume as frozen. |
 | 7 | **Sub-field assignment.** `self.password_opts.use_symbols = x` is invisible to a search for `.use_symbols` on the app struct, and `self.time_signature = sig` makes `beats_per_measure` *look* frozen when it is not. | Missed `passwordgen` on the first pass; nearly filed `metronome`'s time signature, which works. |
 
+| 8 | **One file vs the crate.** Every sweep run on 2026-09-18 globbed `apps/*/src/main.rs`. **12 of 141 apps have more than one source file** -- `explorer` has 8, `settings` 5, `editor` 4. | Concluded `apps/editor` "has zero typing sites" and could not be typed in. Its typing lives in `input.rs`. A text editor was one sentence away from being filed as unable to accept text. |
+
+**The eighth is the one that should worry a reader of this entry most**, because
+it silently narrows every other row: a search that is *correct* about the file
+it read is still wrong about the program when the program is bigger than the
+file. Two of the apps fixed on 2026-09-18 -- `imageviewer` and `pdfviewer` --
+are on that twelve, and their frozen-field findings were made from `main.rs`
+alone. **They were re-checked across `video.rs` and `pdf.rs` after this was
+noticed**, and hold: the only writers of `show_toolbar`, `show_status_bar` and
+`dark_mode` are the ones added by the fixes. That is luck rather than method,
+and the method is `pathlib.Path(f'apps/{app}/src').glob('*.rs')`.
+
 **The shape they share** is that a search reports on *text* and the question
 was about *behaviour*. Every one of these is a case where the text and the
 behaviour come apart -- and they come apart most often in exactly the code

@@ -1136,9 +1136,24 @@ static LEAF_SELFTEST_NESTINGS: AtomicU64 = AtomicU64::new(0);
 /// Total nestings observed inside a leaf critical section.
 static LEAF_NESTINGS: AtomicU64 = AtomicU64::new(0);
 
-/// Cap on *distinct* reports. The count above keeps rising after the
-/// reports stop, so the number stays honest.
-const MAX_LEAF_REPORTS: usize = 24;
+/// How many distinct site pairs can be *counted*.
+///
+/// Separate from how many get printed, because the two answer different
+/// questions and 24 was serving both. The live tree saturates 24, so the
+/// reported figure was a floor wearing the clothes of a count -- and
+/// saturation also hid whether the self-test control was consuming a slot,
+/// since a table at its cap reports the same number either way. 256 pairs is
+/// 4 KiB of statics and the scan only runs on a violation.
+const MAX_LEAF_PAIRS: usize = 256;
+
+/// How many distinct pairs get a serial line. The rest are counted and
+/// silent: a hundred lines of the same shape is not more informative than
+/// twenty-four, but the *number* of them is.
+const MAX_LEAF_PRINTED: u64 = 24;
+
+/// Distinct pairs printed so far, so the printing cap is independent of the
+/// table's occupancy.
+static LEAF_PRINTED: AtomicU64 = AtomicU64::new(0);
 
 /// Site pairs already reported, so each distinct nesting is named once.
 ///
@@ -1152,9 +1167,9 @@ const MAX_LEAF_REPORTS: usize = 24;
 /// The lock-context check already reports once per class
 /// (`CLASS_CTX_REPORTED`) for exactly this reason. Not carrying that across
 /// was the same rule applied in one of the two places it belongs.
-static LEAF_SEEN: [(AtomicUsize, AtomicUsize); MAX_LEAF_REPORTS] = {
+static LEAF_SEEN: [(AtomicUsize, AtomicUsize); MAX_LEAF_PAIRS] = {
     const ZERO: (AtomicUsize, AtomicUsize) = (AtomicUsize::new(0), AtomicUsize::new(0));
-    [ZERO; MAX_LEAF_REPORTS]
+    [ZERO; MAX_LEAF_PAIRS]
 };
 
 /// Claim a slot for this (outer, inner) site pair, or report it as already
@@ -1299,6 +1314,14 @@ fn note_leaf_nesting(inner: &'static [u8]) {
     if !leaf_pair_is_new(outer_site, inner_site) {
         return;
     }
+    // Counted above by claiming a slot; printed only for the first
+    // MAX_LEAF_PRINTED of them. Before this split, a full table stopped the
+    // counting and the printing together, so the figure could not exceed the
+    // cap and there was no way to tell a tree with 24 distinct nestings from
+    // one with 240.
+    if LEAF_PRINTED.fetch_add(1, Ordering::Relaxed) >= MAX_LEAF_PRINTED {
+        return;
+    }
     crate::serial_println!(
         concat!(
             "[sync] LEAF CLAIM BROKEN: {:?} acquired while {:?} is held, at ",
@@ -1410,8 +1433,8 @@ pub fn report_leaf_claims() {
         ),
         total,
         named,
-        if named >= MAX_LEAF_REPORTS {
-            " (AT THE CAP -- there may be more)"
+        if named >= MAX_LEAF_PAIRS {
+            " (PAIR TABLE FULL -- the count is a floor, not a total)"
         } else {
             ""
         }

@@ -160490,7 +160490,7 @@ finished.
 | `hexeditor` | `Ctrl+I` | **yes** -- the search bar reads "Case: on  Ctrl+I" |
 | `markdowneditor` | five | **yes** -- the panel's buttons were relabelled "Replace  Ctrl+Enter" |
 | `slides` | `Ctrl+T`, `Ctrl+R` | **yes** -- "Theme: Mocha (Ctrl+T)", "Transition: Fade (Ctrl+R)" |
-| `slides` | `S`/`O`/`L`/`A`/`I`, `Delete` | **no** |
+| `slides` | `S`/`O`/`L`/`A`/`I`, `Delete` | **yes** -- `?` lists all twenty, and a test asserts every listed key is answered |
 | `pdfviewer` | `D` | **no** |
 | `calendar` | `W` | **no** |
 | `imageviewer` | `B`, `S` | **no** |
@@ -160512,6 +160512,36 @@ the canvas and the old text in the panel. No test covered edges to say so.
 `a_user_can_label_an_edge` does now. **A fix applied to one of a pair is a
 fix that looks complete from the diff.**
 
+**2026-09-18, later still: `apps/slides` got the overlay.** It had the most
+undiscoverable keys of any app here -- twenty bindings and, until `?` existed,
+no way to learn one but reading the source, including the five that put shapes
+on a slide, which are the ones somebody wants first. `SHORTCUTS` is twenty
+rows; `?` toggles a card over the slide and `Escape` closes it;
+`every_advertised_key_does_something` walks the list and presses each key.
+
+**The guard test taught something the rssreader one had not.** Its first run
+failed on the very first row -- `Left`, "Previous / next slide" -- and the app
+was right and the test was wrong. `advance(-1)` at the first slide returns
+`Ignored` on purpose, as does `1` when the edit view is already up, and
+`Ctrl+V` with nothing copied. So the property a shortcut list actually claims
+is **"some reachable state answers this key"**, not "this key is taken right
+now": *declining from its own arm is answering*, and the defect the test exists
+to catch is a row that falls through to the catch-all in every state. The test
+now offers each key to three decks -- a fresh one, one in the sorter view, and
+one mid-deck holding a copied slide and a selected text box -- and requires one
+of them to take it. Between them every advertised key has something it could
+do, which is the only reason three is enough.
+
+**It was then mutated to check it could fail for its own reason**, since the
+first failure had been about state rather than about a missing handler: one row
+retyped from `B` to plain `C` (the app answers only `Ctrl+C`), which the test
+rejected by name. A guard test that has only ever been green is a decoration.
+
+**The event is derived from each row's key text rather than looked up in a
+table beside it.** A parallel table would be a second list to keep in step --
+the eleventh way a search says nothing, rebuilt inside the test written to
+prevent it.
+
 **The pattern that worked** is naming the key beside the thing it controls,
 which costs one format string wherever the app already draws the value. It
 does not apply to the six unlabelled cases: `pdfviewer` draws no reading-mode
@@ -160519,8 +160549,8 @@ indicator, `calendar` draws no week-start indicator, and a toolbar cannot
 advertise the key that hides it, because once hidden the advertisement is gone
 with it.
 
-**Why this is filed rather than done.** The remaining six need a *new* element
-on screen -- a status hint or a help overlay -- in five layouts I have not
+**Why this is filed rather than done.** The remaining five need a *new* element
+on screen -- a status hint or a help overlay -- in four layouts I have not
 read closely. Adding text to a layout I do not understand risks overlapping
 something that was fine, which is a worse defect than the one being fixed and
 harder to notice. `rssreader`'s `ALL_KEY_ACTIONS` overlay is the model worth

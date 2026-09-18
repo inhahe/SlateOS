@@ -780,6 +780,40 @@ enum Clipboard {
 // Slides application
 // ============================================================================
 
+/// Every key this program answers, and what it does.
+///
+/// Twenty bindings and, until this list existed, no way to learn any of them
+/// but reading the source -- including the five that put shapes on a slide,
+/// which are the ones somebody wants first.
+///
+/// **Each row is a key this program actually answers**, which is not a
+/// property the list has on its own: `every_advertised_key_does_something`
+/// walks it and asserts each one is taken. `apps/rssreader` shipped an
+/// overlay of twenty-one shortcuts of which about four worked, and the only
+/// thing that keeps a list and a handler together is a test that reads both.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Left / Right", "Previous / next slide"),
+    ("Home / End", "First / last slide"),
+    ("1 / 2", "Edit view / sorter view"),
+    ("Tab", "Cycle the view"),
+    ("Ctrl+N", "New slide"),
+    ("Ctrl+D", "Duplicate this slide"),
+    ("Ctrl+C / Ctrl+V", "Copy / paste a slide"),
+    ("Ctrl+PageUp / Ctrl+PageDown", "Move this slide up / down"),
+    ("T", "Add a text box"),
+    ("S / O / L / A", "Add a rectangle / ellipse / line / arrow"),
+    ("I", "Add an image placeholder"),
+    ("Enter / F2", "Type into the selected text box"),
+    ("Delete", "Delete the selected element, or the slide"),
+    ("Shift+Delete", "Delete the slide"),
+    ("Ctrl+T", "Next theme"),
+    ("Ctrl+Shift+T", "Name the deck"),
+    ("Ctrl+R", "Next transition"),
+    ("B", "Show or hide the speaker notes"),
+    ("Ctrl+E", "Export"),
+    ("?", "This list"),
+];
+
 /// What a typed string is going onto.
 ///
 /// An enum because the deck's own name is not an element and has no id, and a
@@ -828,6 +862,8 @@ pub struct SlidesApp {
     selected_element: Option<ElementId>,
     /// Whether the notes panel is visible.
     show_notes: bool,
+    /// Whether the shortcut list is up.
+    show_help: bool,
     /// The thing being typed into, and what has been typed.
     ///
     /// This program could not put a word on a slide: there were zero
@@ -872,6 +908,7 @@ impl SlidesApp {
             clipboard: Clipboard::Empty,
             selected_element: None,
             show_notes: true,
+            show_help: false,
             editing: None,
             title: String::from("Untitled Presentation"),
         }
@@ -1727,6 +1764,16 @@ impl SlidesApp {
                 self.show_notes = !self.show_notes;
                 EventResult::Consumed
             }
+            // `?`, which is Shift and the slash key. Escape closes it, because
+            // that is what Escape means over anything laid on top.
+            Key::Slash if key.modifiers.shift => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Key::Escape if self.show_help => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -1791,16 +1838,72 @@ impl SlidesApp {
             ViewMode::Sorter => self.render_sorter_mode(&mut cmds),
         }
 
-        // The picker last, so it draws over the slide rather than under it.
+        // The picker over the slide rather than under it.
         cmds.extend(
             self.picker
                 .render(&self.palette, self.window_width, self.window_height),
         );
 
+        // And the shortcut list over everything, because it is the one thing
+        // a reader asked for explicitly.
+        if self.show_help {
+            self.render_help(&mut cmds);
+        }
+
         cmds
     }
 
     /// Render the toolbar at the top.
+    /// The shortcut list, laid over the slide.
+    fn render_help(&self, cmds: &mut Vec<RenderCommand>) {
+        let w = (self.window_width * 0.72).min(560.0);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "twenty rows is far below f32's integer-exact range"
+        )]
+        let h = (SHORTCUTS.len() as f32).mul_add(20.0, 56.0);
+        let x = (self.window_width - w) / 2.0;
+        let y = ((self.window_height - h) / 2.0).max(TOOLBAR_HEIGHT);
+
+        self.palette
+            .push_surface(cmds, x, y, w, h, 6.0, Surface::Card);
+        cmds.push(RenderCommand::Text {
+            x: x + 16.0,
+            y: y + 12.0,
+            text: String::from("Keys  --  ? closes this"),
+            color: self.palette.ink(self.palette.blue),
+            font_size: 13.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(w - 32.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        let mut row_y = y + 38.0;
+        for (keys, what) in SHORTCUTS {
+            cmds.push(RenderCommand::Text {
+                x: x + 16.0,
+                y: row_y,
+                text: (*keys).to_string(),
+                color: self.palette.ink(self.palette.peach),
+                font_size: 11.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(170.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            cmds.push(RenderCommand::Text {
+                x: x + 196.0,
+                y: row_y,
+                text: (*what).to_string(),
+                color: self.palette.subtext0,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w - 212.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            row_y += 20.0;
+        }
+    }
+
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
         // Toolbar background.
         self.palette.push_surface(
@@ -3262,6 +3365,108 @@ mod tests {
             app.title, "Untitled Presentation",
             "an empty name blanked the deck's name"
         );
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// `apps/rssreader` shipped an overlay of twenty-one shortcuts of which
+    /// about four worked, and three named operations that existed nowhere in
+    /// the crate. A list and a handler are two things that must agree, and
+    /// nothing keeps them agreeing except a test that reads both.
+    ///
+    /// Two things this test deliberately does *not* do.
+    ///
+    /// The event is built from the row's own key text rather than looked up in
+    /// a parallel table of events. A second table would be a second list to
+    /// keep in step -- the defect this test exists to prevent, rebuilt inside
+    /// the test.
+    ///
+    /// And the claim checked is "some reachable state answers this key", not
+    /// "this key is taken right now". Several of these decline on purpose:
+    /// `Left` at the first slide, `1` when the edit view is already up, `Ctrl+V`
+    /// with nothing copied. Declining from its own arm *is* answering -- the
+    /// defect is a row that falls through to the catch-all in every state. So
+    /// each key is offered to three decks and has to be taken by one.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (row, what) in SHORTCUTS {
+            for spec in row.split(" / ") {
+                let event = event_for(spec);
+                let taken = states()
+                    .iter_mut()
+                    .any(|app| app.handle_event(&event) == EventResult::Consumed);
+                assert!(
+                    taken,
+                    "the list advertises {spec:?} for {what:?} and no state answers it"
+                );
+            }
+        }
+    }
+
+    /// Three decks, chosen so that between them every advertised key has
+    /// something it could do. A key no one of them takes is a key nothing acts
+    /// on.
+    fn states() -> Vec<SlidesApp> {
+        let plain = seeded();
+
+        // The other view, so `1` has somewhere to return from.
+        let mut sorter = seeded();
+        sorter.handle_event(&press(Key::Tab));
+
+        // Mid-deck, holding a copied slide and a selected text box: what the
+        // paging, paste and element keys each need before they will act.
+        let mut working = seeded();
+        working.handle_event(&press_ctrl(Key::N));
+        working.handle_event(&press(Key::Home));
+        working.handle_event(&press(Key::Right));
+        working.handle_event(&press_ctrl(Key::C));
+        working.handle_event(&press(Key::T));
+
+        vec![plain, sorter, working]
+    }
+
+    /// The event a shortcut row describes.
+    fn event_for(spec: &str) -> Event {
+        let name = spec.rsplit('+').next().unwrap_or(spec);
+        let key = match name {
+            "Left" => Key::Left,
+            "Right" => Key::Right,
+            "Home" => Key::Home,
+            "End" => Key::End,
+            "Tab" => Key::Tab,
+            "PageUp" => Key::PageUp,
+            "PageDown" => Key::PageDown,
+            "Delete" => Key::Delete,
+            "Enter" => Key::Enter,
+            "F2" => Key::F2,
+            "?" => Key::Slash,
+            "1" => Key::Num1,
+            "2" => Key::Num2,
+            "A" => Key::A,
+            "B" => Key::B,
+            "C" => Key::C,
+            "D" => Key::D,
+            "E" => Key::E,
+            "I" => Key::I,
+            "L" => Key::L,
+            "N" => Key::N,
+            "O" => Key::O,
+            "R" => Key::R,
+            "S" => Key::S,
+            "T" => Key::T,
+            "V" => Key::V,
+            other => panic!("the list names {other:?}, which this test cannot press"),
+        };
+        let mut modifiers = Modifiers::NONE;
+        modifiers.ctrl = spec.contains("Ctrl+");
+        // `?` is the shifted slash key; nothing else here is shifted implicitly.
+        modifiers.shift = spec.contains("Shift+") || spec == "?";
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
     }
 
     fn types(text: &str) -> Event {

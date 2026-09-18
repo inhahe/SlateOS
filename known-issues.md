@@ -160615,6 +160615,32 @@ answer (`B` to plain `C` in slides, `F` to `Q` in minesweeper), and each failed
 naming the row. The first `slides` failure had been about *state* rather than a
 missing handler, which is exactly why the deliberate one was worth running.
 
+**2026-09-18, later: there is a third thing that can disagree, and it is the
+box.** `apps/rssreader` -- the app this entry is named after -- was drawing
+twenty of its twenty-one rows. The overlay's height was a hand-picked `520.0`
+with a `break` when the rows ran past the bottom, so it drew as many as fitted
+and stopped. **The row it dropped was `ShowHelp`: the overlay did not list the
+key that closes it**, and had not since it was written.
+
+Neither existing check could see it. The guard test reads the list against the
+key handler, and *both of those were right* -- every one of the twenty-one keys
+works and every one is in the list. The overlay's own size was a third
+quantity, agreeing with neither, and the only thing that can catch a third
+quantity is a reader that looks at the screen. So the pair of tests each app
+needs is not one test done twice; it is:
+
+| | Reads | Catches |
+|---|---|---|
+| `every_advertised_key_does_something` | the list against the handler | a row nothing answers |
+| `the_shortcut_list_reaches_the_window` | the list against the *screen* | a row nothing draws |
+
+rssreader had the first and not the second, because it already had an overlay
+when the pattern was written and I checked the thing that was new rather than
+the thing that was old. **The app that taught me a list and a handler drift
+apart was itself silently dropping a row**, and the fix is that
+`guitk::shortcut::render_card` computes its height from `rows.len()` instead of
+being told a number -- the same cure as the description column, one line up.
+
 **What is still open is the other half**, tracked in
 `TD-C-KEYS-THAT-WORK-AND-NOTHING-MENTIONS`: five apps print no list at all, so
 there is nothing to check. A list that is absent cannot be false, and is still

@@ -4942,8 +4942,21 @@ impl RssReaderApp {
     }
 
     /// Render the keyboard shortcuts help overlay.
+    ///
+    /// The card itself is `guitk::shortcut::render_card`, which sizes itself
+    /// from the number of rows. What stood here was a dialog of a fixed 520
+    /// pixels with a `break` when the rows ran past the bottom, so it drew as
+    /// many as fitted and stopped -- twenty of twenty-one. The row it dropped
+    /// was `ShowHelp`, so **the overlay did not list the key that closes it**,
+    /// and it had been that way since the overlay was written.
+    ///
+    /// Nothing could have noticed. The guard test reads the list against the
+    /// key handler and both were right; the overlay's own height was the third
+    /// thing, agreeing with neither. `every_row_of_the_overlay_reaches_the_window`
+    /// is the check that was missing, and it reads the screen.
     fn render_help_overlay(&self, cmds: &mut Vec<RenderCommand>) {
-        // Dimmed background
+        // Dimmed behind it, which is this app's own idea and worth keeping:
+        // the card is a modal thing and the dimming says so.
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
@@ -4953,104 +4966,18 @@ impl RssReaderApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        let dialog_width: f32 = 450.0;
-        let dialog_height: f32 = 520.0;
-        let dx = (self.width - dialog_width) / 2.0;
-        let dy = (self.height - dialog_height) / 2.0;
-
-        // Dialog background
-        self.palette.push_surface(
+        let rows: Vec<(&str, &str)> = ALL_KEY_ACTIONS
+            .iter()
+            .map(|a| (a.key_hint(), a.description()))
+            .collect();
+        guitk::shortcut::render_card(
             cmds,
-            dx,
-            dy,
-            dialog_width,
-            dialog_height,
-            12.0,
-            Surface::Panel,
+            &self.palette,
+            (self.width, self.height),
+            0.0,
+            &rows,
+            "F1 or ? closes this",
         );
-
-        // Dialog border
-        cmds.push(RenderCommand::StrokeRect {
-            x: dx,
-            y: dy,
-            width: dialog_width,
-            height: dialog_height,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(12.0),
-        });
-
-        // Title
-        cmds.push(RenderCommand::Text {
-            x: dx + 20.0,
-            y: dy + 16.0,
-            text: "Keyboard Shortcuts".to_string(),
-            font_size: 16.0,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Close hint
-        cmds.push(RenderCommand::Text {
-            x: dx + dialog_width - 80.0,
-            y: dy + 18.0,
-            text: "F1 or ? to close".to_string(),
-            font_size: 10.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Separator
-        cmds.push(RenderCommand::Line {
-            x1: dx + 20.0,
-            y1: dy + 44.0,
-            x2: dx + dialog_width - 20.0,
-            y2: dy + 44.0,
-            color: self.palette.surface1,
-            width: 1.0,
-        });
-
-        // Shortcut list
-        let mut row_y = dy + 56.0;
-        let row_height: f32 = 22.0;
-
-        for action in ALL_KEY_ACTIONS {
-            if row_y + row_height > dy + dialog_height - 10.0 {
-                break;
-            }
-
-            // Key hint
-            self.palette
-                .push_surface(cmds, dx + 20.0, row_y, 120.0, 18.0, 3.0, Surface::Panel);
-            cmds.push(RenderCommand::Text {
-                x: dx + 26.0,
-                y: row_y + 2.0,
-                text: action.key_hint().to_string(),
-                font_size: 11.0,
-                color: self.palette.ink(self.palette.peach),
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(110.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Description
-            cmds.push(RenderCommand::Text {
-                x: dx + 152.0,
-                y: row_y + 2.0,
-                text: action.description().to_string(),
-                font_size: 12.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(dialog_width - 180.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            row_y += row_height;
-        }
     }
 
     /// Render the "Add Feed" dialog overlay.
@@ -5849,6 +5776,42 @@ mod tests {
     ///
     /// This test is the reason that cannot come back: a new row must be given
     /// a key here, and a key that stops being bound fails it.
+    /// **Every row of the overlay reaches the window.**
+    ///
+    /// `every_advertised_shortcut_does_something` reads the list against the
+    /// handler. This reads it against the *screen*, and they are different
+    /// questions: a row can be answered by the program and never drawn. This
+    /// app is where that difference bit -- the overlay's height was a fixed
+    /// 520 with a `break` when the rows ran past it, so the twenty-first of
+    /// twenty-one was silently dropped, and the one dropped was `ShowHelp`
+    /// itself. The overlay did not list the key that closes it.
+    #[test]
+    fn every_row_of_the_overlay_reaches_the_window() {
+        let mut a = app();
+        a.show_help = true;
+        let drawn: Vec<String> = a
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        let all = drawn.join(" | ");
+        for action in ALL_KEY_ACTIONS {
+            assert!(
+                all.contains(action.key_hint()),
+                "the overlay never drew {:?} for {action:?}",
+                action.key_hint()
+            );
+            assert!(
+                all.contains(action.description()),
+                "the overlay never drew {:?}",
+                action.description()
+            );
+        }
+    }
+
     #[test]
     fn every_advertised_shortcut_does_something() {
         // The events come from each row's own printed hint, read by

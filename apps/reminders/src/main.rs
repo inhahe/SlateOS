@@ -2134,6 +2134,30 @@ impl RemindersApp {
         // Main task list
         self.render_task_list(&mut cmds, main_x, content_y, main_w, content_h);
 
+        // What the last open or save did.
+        //
+        // `last_file_action` was written on every open and save and read by
+        // nothing, so a save that failed said so to no one -- in the one place
+        // this application's data leaves the process. Its own doc comment
+        // said "for the banner line"; the banner line was never written.
+        //
+        // Neither instrument caught it: `dead_code` is silent on it even with
+        // the field private, and `check-fields-written-never-read` reports
+        // only fields a *test* reads, deliberately leaving "read by nothing"
+        // to `dead_code`. It fell in the seam between the two.
+        if let Some(action) = &self.last_file_action {
+            cmds.push(RenderCommand::Text {
+                x: 12.0,
+                y: self.height - 18.0,
+                text: action.clone(),
+                color: self.palette.ink(self.palette.subtext0),
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((self.width - 24.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
         // Last, so it is above everything.
         cmds.extend(self.picker.render(&self.palette, self.width, self.height));
 
@@ -5844,6 +5868,24 @@ mod tests {
     ///
     /// Asserted on the rectangles emitted, not on the `palette` field: a field
     /// that was assigned proves nothing a user would see.
+    /// What a save or an open did reaches the screen.
+    ///
+    /// `last_file_action` was written on every one and read by nothing, so a
+    /// failed save reported itself to no one. Asserting the field is set
+    /// would reproduce the bug; this asserts the words are drawn.
+    #[test]
+    fn the_last_file_action_is_shown() {
+        let mut app = RemindersApp::new(1200.0, 800.0, make_now());
+        app.last_file_action = Some("Saved 3 reminders".to_owned());
+
+        let tree = app.render(app.width, app.height);
+
+        let shown = tree.commands.iter().any(
+            |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Saved 3 reminders")),
+        );
+        assert!(shown, "the save result is nowhere on screen");
+    }
+
     #[test]
     fn the_window_draws_in_the_theme_it_is_given() {
         fn theme(

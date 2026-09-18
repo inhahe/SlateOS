@@ -1714,66 +1714,17 @@ impl CalendarApp {
         // And the shortcut list over even that, because it is the one thing a
         // reader asked for explicitly.
         if self.show_help {
-            self.draw_help(&mut frame, &layout);
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (layout.window.w, layout.window.h),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
         }
 
         frame
-    }
-
-    /// The shortcut list, laid over the calendar.
-    fn draw_help(&self, frame: &mut Frame, layout: &Layout) {
-        let w = (layout.window.w * 0.72).min(560.0);
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "twelve rows is far below f32's integer-exact range"
-        )]
-        let h = (SHORTCUTS.len() as f32).mul_add(20.0, 56.0);
-        let x = layout.window.x + (layout.window.w - w) / 2.0;
-        let y = layout.window.y + ((layout.window.h - h) / 2.0).max(0.0);
-
-        frame.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        frame.push(RenderCommand::Text {
-            x: x + 16.0,
-            y: y + 12.0,
-            text: String::from("Keys  --  F1 or ? closes this"),
-            color: self.palette.ink(self.palette.blue),
-            font_size: 13.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(w - 32.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let mut row_y = y + 38.0;
-        for (keys, what) in SHORTCUTS {
-            frame.push(RenderCommand::Text {
-                x: x + 16.0,
-                y: row_y,
-                text: (*keys).to_string(),
-                color: self.palette.ink(self.palette.peach),
-                font_size: 11.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(170.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            frame.push(RenderCommand::Text {
-                x: x + 196.0,
-                y: row_y,
-                text: (*what).to_string(),
-                color: self.palette.subtext0,
-                font_size: 11.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w - 212.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            row_y += 20.0;
-        }
     }
 
     fn draw_top_bar(&self, frame: &mut Frame, layout: &Layout) {

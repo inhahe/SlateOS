@@ -1856,63 +1856,20 @@ impl SlidesApp {
         // And the shortcut list over everything, because it is the one thing
         // a reader asked for explicitly.
         if self.show_help {
-            self.render_help(&mut cmds);
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.window_width, self.window_height),
+                TOOLBAR_HEIGHT,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
         }
 
         cmds
     }
 
     /// Render the toolbar at the top.
-    /// The shortcut list, laid over the slide.
-    fn render_help(&self, cmds: &mut Vec<RenderCommand>) {
-        let w = (self.window_width * 0.72).min(560.0);
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "twenty rows is far below f32's integer-exact range"
-        )]
-        let h = (SHORTCUTS.len() as f32).mul_add(20.0, 56.0);
-        let x = (self.window_width - w) / 2.0;
-        let y = ((self.window_height - h) / 2.0).max(TOOLBAR_HEIGHT);
-
-        self.palette
-            .push_surface(cmds, x, y, w, h, 6.0, Surface::Card);
-        cmds.push(RenderCommand::Text {
-            x: x + 16.0,
-            y: y + 12.0,
-            text: String::from("Keys  --  F1 or ? closes this"),
-            color: self.palette.ink(self.palette.blue),
-            font_size: 13.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(w - 32.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let mut row_y = y + 38.0;
-        for (keys, what) in SHORTCUTS {
-            cmds.push(RenderCommand::Text {
-                x: x + 16.0,
-                y: row_y,
-                text: (*keys).to_string(),
-                color: self.palette.ink(self.palette.peach),
-                font_size: 11.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(170.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cmds.push(RenderCommand::Text {
-                x: x + 196.0,
-                y: row_y,
-                text: (*what).to_string(),
-                color: self.palette.subtext0,
-                font_size: 11.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w - 212.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            row_y += 20.0;
-        }
-    }
-
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
         // Toolbar background.
         self.palette.push_surface(

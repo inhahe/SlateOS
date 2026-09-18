@@ -1320,60 +1320,17 @@ pub fn render(state: &ViewerState) -> RenderTree {
     // asked for explicitly -- and because two of the keys it names hide the
     // bars it would otherwise have to fit between.
     if state.show_help {
-        render_help(state, &mut tree);
+        guitk::shortcut::render_card(
+            &mut tree,
+            &state.palette,
+            (state.window_width, state.window_height),
+            0.0,
+            SHORTCUTS,
+            "F1 or ? closes this",
+        );
     }
 
     tree
-}
-
-/// The shortcut list, laid over the image.
-fn render_help(state: &ViewerState, tree: &mut RenderTree) {
-    let w = (state.window_width * 0.72).min(560.0);
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "seventeen rows is far below f32's integer-exact range"
-    )]
-    let h = (SHORTCUTS.len() as f32).mul_add(20.0, 56.0);
-    let x = (state.window_width - w) / 2.0;
-    let y = ((state.window_height - h) / 2.0).max(0.0);
-
-    tree.fill_rect(x, y, w, h, state.palette.surface0);
-    tree.fill_rect(x, y, w, 1.0, state.palette.border);
-    tree.push(RenderCommand::Text {
-        x: x + 16.0,
-        y: y + 12.0,
-        text: String::from("Keys  --  F1 or ? closes this"),
-        color: state.palette.text,
-        font_size: 13.0,
-        font_weight: FontWeightHint::Bold,
-        max_width: Some(w - 32.0),
-        overflow: TextOverflow::Ellipsis,
-    });
-
-    let mut row_y = y + 38.0;
-    for (keys, what) in SHORTCUTS {
-        tree.push(RenderCommand::Text {
-            x: x + 16.0,
-            y: row_y,
-            text: (*keys).to_string(),
-            color: state.palette.text,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(180.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        tree.push(RenderCommand::Text {
-            x: x + 206.0,
-            y: row_y,
-            text: (*what).to_string(),
-            color: state.palette.subtext0,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(w - 222.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        row_y += 20.0;
-    }
 }
 
 /// Render the toolbar with action buttons.

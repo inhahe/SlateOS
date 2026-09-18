@@ -38,6 +38,10 @@ use std::error::Error;
 use std::fmt;
 
 use crate::event::{Key, KeyEvent, Modifiers};
+use crate::palette::Palette;
+use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
+use crate::surface::{CommandSink, Surface};
+use crate::text;
 
 /// A part of a shortcut label that names no key this module can press.
 ///
@@ -300,6 +304,108 @@ fn stroke(key: Key, modifiers: Modifiers) -> KeyEvent {
     }
 }
 
+// ── Drawing one ────────────────────────────────────────────────────────────
+
+/// The height of one row of the card.
+const ROW_HEIGHT: f32 = 20.0;
+
+/// Room above the first row for the heading.
+const HEAD_HEIGHT: f32 = 38.0;
+
+/// Room below the last row, so the final row is not against the edge.
+const FOOT_HEIGHT: f32 = 18.0;
+
+/// The gap between the key column and the description column.
+const COLUMN_GAP: f32 = 26.0;
+
+/// Where the card's text starts, in from its left edge.
+const PAD: f32 = 16.0;
+
+/// Draw `rows` as a card laid over the window.
+///
+/// Written once because it had been written eight times. Every app that grew a
+/// shortcut overlay on 2026-09-18 carried its own forty-line copy of this, and
+/// the copies had already drifted in the one number none of them could check:
+/// the x the description column starts at was a hand-picked constant -- 176,
+/// 196, 206, 216 -- guessed per app from the longest key label somebody
+/// eyeballed. Here it is *measured*, so a row reading `Ctrl+Shift+PageDown`
+/// cannot overlap its own description.
+///
+/// `keep_clear` is the lowest `y` the card may start at: an app with a toolbar
+/// passes its height so the card cannot cover it. The card is centred in what
+/// is left.
+///
+/// Emits into anything a draw site already has -- `Vec<RenderCommand>`,
+/// `Frame`, `RenderTree` -- through [`CommandSink`].
+pub fn render_card<S: CommandSink + ?Sized>(
+    out: &mut S,
+    palette: &Palette,
+    window: (f32, f32),
+    keep_clear: f32,
+    rows: &[(&str, &str)],
+    closing: &str,
+) {
+    let (window_w, window_h) = window;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a shortcut list is tens of rows, far below f32's integer-exact range"
+    )]
+    let rows_h = rows.len() as f32 * ROW_HEIGHT;
+
+    // The key column is as wide as the widest key label, not as wide as
+    // somebody guessed. A `max_width` that is too small elides the key itself,
+    // which is the one string on the card that must be readable exactly.
+    let keys_w = rows
+        .iter()
+        .map(|(keys, _)| text::measure(keys, 11.0, FontWeightHint::Bold))
+        .fold(0.0_f32, f32::max);
+
+    let w = (keys_w + COLUMN_GAP + 220.0 + PAD * 2.0)
+        .max(320.0)
+        .min(window_w * 0.86);
+    let h = rows_h + HEAD_HEIGHT + FOOT_HEIGHT;
+    let x = ((window_w - w) / 2.0).max(0.0);
+    let y = ((window_h - h) / 2.0).max(keep_clear);
+
+    palette.push_surface(out, x, y, w, h, 6.0, Surface::Card);
+    out.emit(RenderCommand::Text {
+        x: x + PAD,
+        y: y + 12.0,
+        text: format!("Keys  --  {closing}"),
+        color: palette.ink(palette.blue),
+        font_size: 13.0,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(w - PAD * 2.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+
+    let what_x = x + PAD + keys_w + COLUMN_GAP;
+    let mut row_y = y + HEAD_HEIGHT;
+    for (keys, what) in rows {
+        out.emit(RenderCommand::Text {
+            x: x + PAD,
+            y: row_y,
+            text: (*keys).to_string(),
+            color: palette.ink(palette.peach),
+            font_size: 11.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(keys_w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        out.emit(RenderCommand::Text {
+            x: what_x,
+            y: row_y,
+            text: (*what).to_string(),
+            color: palette.subtext0,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((x + w - PAD - what_x).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        row_y += ROW_HEIGHT;
+    }
+}
+
 const LETTERS: [Key; 26] = [
     Key::A,
     Key::B,
@@ -380,6 +486,150 @@ mod tests {
             .into_iter()
             .map(|s| s.key)
             .collect()
+    }
+
+    // ── The card ───────────────────────────────────────────────────────────
+
+    use super::render_card;
+    use crate::palette::Palette;
+    use crate::render::RenderCommand;
+
+    const ROWS: &[(&str, &str)] = &[
+        ("F1 / ?", "This list"),
+        ("Ctrl+Shift+PageDown", "Move this slide down"),
+        ("T", "Add a text box"),
+    ];
+
+    fn drawn() -> Vec<RenderCommand> {
+        let mut cmds = Vec::new();
+        render_card(
+            &mut cmds,
+            &Palette::for_mode(false),
+            (1280.0, 720.0),
+            40.0,
+            ROWS,
+            "F1 or ? closes this",
+        );
+        cmds
+    }
+
+    fn texts(cmds: &[RenderCommand]) -> Vec<(f32, f32, String)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { x, y, text, .. } => Some((*x, *y, text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_row_reaches_the_card() {
+        let placed = texts(&drawn());
+        let all = placed
+            .iter()
+            .map(|(_, _, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(all.contains("F1 or ? closes this"), "no heading: {all}");
+        for (keys, what) in ROWS {
+            assert!(all.contains(keys), "{keys:?} is not on the card");
+            assert!(all.contains(what), "{what:?} is not on the card");
+        }
+    }
+
+    #[test]
+    fn the_rows_are_stacked_rather_than_heaped() {
+        // Reading the strings back proves every row was *drawn*; it says
+        // nothing about where. Drawn at one y they are a single illegible
+        // smear, and a test that only joins the texts together passes exactly
+        // as loudly. `apps/minesweeper` has the same test over its footer for
+        // the same reason.
+        let placed = texts(&drawn());
+        let mut ys: Vec<f32> = placed
+            .iter()
+            .filter(|(_, _, t)| ROWS.iter().any(|(k, _)| k == t))
+            .map(|(_, y, _)| *y)
+            .collect();
+        assert_eq!(ys.len(), ROWS.len(), "not every key reached the card");
+        ys.sort_by(f32::total_cmp);
+        for pair in ys.windows(2) {
+            let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else {
+                continue;
+            };
+            assert!(b - a >= 12.0, "rows at {a} and {b} overlap");
+        }
+    }
+
+    #[test]
+    fn the_description_column_clears_the_longest_key() {
+        // The number this function exists to get right. Eight apps each
+        // guessed it -- 176, 196, 206, 216 -- from the longest key label
+        // somebody eyeballed, and a row like "Ctrl+Shift+PageDown" runs under
+        // its own description in the ones that guessed low.
+        let placed = texts(&drawn());
+        let longest = "Ctrl+Shift+PageDown";
+        let (key_x, _, _) = placed
+            .iter()
+            .find(|(_, _, t)| t == longest)
+            .expect("the long key is drawn")
+            .clone();
+        let width = crate::text::measure(longest, 11.0, crate::render::FontWeightHint::Bold);
+        for (x, _, t) in &placed {
+            if ROWS.iter().any(|(_, w)| w == t) {
+                assert!(
+                    *x >= key_x + width,
+                    "the description {t:?} starts at {x}, inside a key ending at {}",
+                    key_x + width
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_card_stays_inside_the_window_and_clear_of_the_toolbar() {
+        let mut cmds = Vec::new();
+        render_card(
+            &mut cmds,
+            &Palette::for_mode(false),
+            (1280.0, 720.0),
+            40.0,
+            ROWS,
+            "x",
+        );
+        for cmd in &cmds {
+            if let RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } = cmd
+            {
+                assert!(*x >= -0.01 && *y >= 40.0 - 0.01, "card at {x},{y}");
+                assert!(x + width <= 1280.01, "card runs off the right");
+                assert!(y + height <= 720.01, "card runs off the bottom");
+            }
+        }
+    }
+
+    #[test]
+    fn a_short_window_still_gets_a_card_below_the_toolbar() {
+        // The centring is `max(keep_clear)`, so a window shorter than the card
+        // pins it under the toolbar rather than drawing it over one.
+        let mut cmds = Vec::new();
+        render_card(
+            &mut cmds,
+            &Palette::for_mode(false),
+            (400.0, 120.0),
+            40.0,
+            ROWS,
+            "x",
+        );
+        let placed = texts(&cmds);
+        assert!(!placed.is_empty(), "nothing was drawn at all");
+        for (_, y, t) in &placed {
+            assert!(*y >= 40.0, "{t:?} was drawn at {y}, over the toolbar");
+        }
     }
 
     #[test]

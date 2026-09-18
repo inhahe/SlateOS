@@ -28850,6 +28850,8 @@ stand and neither has been done:
 
 ### [A] B-BENCH-RUN-CONTAMINATED-BY-ANOTHER-LANE-PRUNING-ITS-TARGET-DIR — 2026-08-15 — attribution recorded
 
+**Status:** OPEN
+
 **Why this entry exists.** The bench run at `e384f46a2` reported three
 regressions. It also, by luck, is the first run where the contaminating host
 activity was *identified* rather than merely suspected — so it is worth writing
@@ -28901,6 +28903,8 @@ the host is busy elsewhere, so it reads its cleanest possible verdict on exactly
 the runs that are most disturbed.
 
 ### [A] TOOLING-A-A-TRAILING-AMPERSAND-BACKGROUNDS-THE-WHOLE-&&-CHAIN-INCLUDING-THE-cd — 2026-08-15 — ⚠️ HIT, recovered
+
+**Status:** OPEN
 
 **What I ran** (intending: background a sampler, then run the benchmark in my
 own lane):
@@ -45609,6 +45613,8 @@ that is P22(b)/(c), still unmeasured. §229 stands either way.
 
 ### [A] The contamination verdict said `Canary OK` on run 3 — the positional model is the more sensitive instrument, not a refinement of it — 2026-08-19
 
+**Status:** OPEN
+
 **In short:** the suite has two ways of noticing that other activity on the
 machine spoiled its measurements. On the run where we deliberately spoiled them,
 the *older and more authoritative* one — the one whose word decides whether a
@@ -45709,6 +45715,8 @@ that a check which cannot fire is indistinguishable from one that passes.
   measurement comes first.
 
 ### [A] Three scorecard benchmarks emit no `MEASURED-AS` line, so they cannot be used as load-window bounds — 2026-08-19
+
+**Status:** OPEN
 
 **In short:** the load-window tool needs a benchmark name to mark where a
 disturbance starts or stops. Three of the suite's 86 scored benchmarks —
@@ -47285,6 +47293,8 @@ individual hooks, is where the fix belongs.
 ---
 
 ### [A] CORRECTION — "zero KASAN reports" in the `B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` closure was verified with a matcher that could not fire — 2026-08-19
+
+**Status:** OPEN
 
 **In short:** When I closed that bug I wrote in `roadmap.md` that two instrumented
 boots reached `BOOT_OK` with "zero KASAN reports". The check behind that claim
@@ -157068,6 +157078,8 @@ of its entries and wrong about one, which is the hardest shape to notice.
 
 ### [A] The rule that an IRQ-reachable lock must never be taken with a plain `lock()` is load-bearing prose, and this bug has now happened three times in five weeks -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** if a lock can be grabbed by an interrupt handler, then every
 *other* place that grabs it has to switch interrupts off first. Otherwise an
 interrupt can arrive while an ordinary task is holding the lock, and the
@@ -157261,6 +157273,8 @@ believed: three of the five named locks whose try_lock path is the
 
 ### [A] Operational, for all three lanes: stopping a backgrounded shell script does not stop the script -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** if you background a shell script that runs long jobs and then
 stop it, the tool reports success and the job keeps running. Start a
 replacement and you now have two, racing each other in the same worktree.
@@ -157394,6 +157408,8 @@ than three rows that do not work: the first looks like a feature that works.
 
 ### [A] The line that exists to prevent a vacuous verdict was counting its own controls -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** a check prints how many things it examined, so that finding
 nothing wrong cannot be confused with looking at nothing. On its first
 honest boot it printed `over 2 class(es) -- clean`. Both of those two were
@@ -157431,6 +157447,8 @@ number was made of, which is the same question 942 is about, pointed at my
 own output instead of somebody else's.
 
 ### [A] Why that corpus is near-empty, and what it makes the check worth -- 2026-09-17
+
+**Status:** OPEN
 
 Having found that the lock-context check's population was two synthetic
 classes, the next question is whether the *real* number can be anything but
@@ -157483,6 +157501,8 @@ Not done yet; recorded so the zero is not mistaken for completeness.
 
 ### [A] Confirmed on boot `4e9595a63`: the lock-context check has been reporting nothing about nothing -- 2026-09-17
 
+**Status:** OPEN
+
 With the controls excluded from the population, the line reads:
 
 ```
@@ -157499,6 +157519,8 @@ future regression, and the `VACUOUS` word is what stops it reading as a
 clean bill of health in the meantime.
 
 ### [A] The leaf-claim check's first real boot: four sites in `fs/notify.rs`, and a report I cannot act on yet -- 2026-09-17
+
+**Status:** OPEN
 
 It fired 8 times (its cap) across **four distinct sites**, all in one file:
 `fs/notify.rs` lines 330, 394, 440, 481.
@@ -157536,6 +157558,8 @@ next boot names the outer lock -- and on this session's record (five findings,
 five false) they should not be assumed real.
 
 ### [A] dd-70 split the lock types on cost, and never benchmarked the type it created -- 2026-09-17
+
+**Status:** OPEN
 
 `bench_lock_primitives` has four arms. `RAW` is a bare `spin::Mutex`;
 `TRACKED` and `TRACKED_B` are `crate::sync::Mutex`. There is **no**
@@ -158249,6 +158273,8 @@ list.
 
 ### [A] `check-fields-written-never-read.py` has never scanned `kernel/`: 169 fields, 39 of them correct by design -- 2026-09-17
 
+**Status:** OPEN
+
 Prompted by lane C's
 `TD-C-A-FIELD-ONLY-EVER-INITIALISED-IS-INVISIBLE-TO-EVERY-CHECK-WE-HAVE`,
 which found 347 candidates in `gui/` and `apps/`. The obvious next question
@@ -158294,6 +158320,8 @@ Triaging those 130 is ordinary lane A work and needs no gate. Recorded here
 so the number is not rediscovered from scratch.
 
 ### [A] dd-70's "leaf" premise is not occasionally wrong, it is systematically wrong: 1256 nested acquisitions per boot -- 2026-09-17
+
+**Status:** OPEN
 
 Boot `eb764a380`, with the reports deduped by site pair:
 
@@ -158356,6 +158384,8 @@ already written down: that is `open-questions.md`, not a unilateral sweep.
 
 ### [A] `devpower` reports device power states it never applies, and `/proc` published them undisclosed -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** a kernel module says it manages the power state of PCI
 devices. It keeps a table of which device is in which power state, shows
 that table in `/proc`, and never writes a single power register. So a reader
@@ -158414,6 +158444,8 @@ not dead state.
 
 ### [A] The power-management family: four modules that claim to act, actuate nothing, and publish it through `/proc` -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** the kernel has four modules for saving power -- device power
 states, power profiles, an energy saver and a game mode. Between them they
 promise to set the CPU governor, dim the display, throttle apps and suppress
@@ -158464,6 +158496,8 @@ reading is what dd-945 requires, and it is cheap; wiring the actuation is a
 real feature and is not claimed to be in scope.
 
 ### [A] DRM plane geometry is write-only: an atomic commit can move or scale a plane and nothing happens -- 2026-09-17
+
+**Status:** OPEN
 
 **In short:** a graphics "plane" is a layer the display hardware can place
 and scale on screen -- how a cursor or a video overlay gets positioned. The
@@ -158656,6 +158690,8 @@ uploading before dropping is refused at exactly the moment a cache is working
 as designed.
 ### [A] Module docs that link a subsystem the file never calls: 8 of 807 kernel modules, and one real new claim -- 2026-09-17
 
+**Status:** OPEN
+
 Lane C's `TD-C-A-MODULE-DOC-IS-THE-ONE-CLAIM-NOTHING-CHECKS` says a `//!`
 feature list is the one claim in the tree with no instrument, because both
 existing scanners read strings the program *draws*. True, and I had already
@@ -158844,6 +158880,8 @@ pinned SHA.
 on the commit they were given. What is broken is the inference from "the push
 succeeded" to "what is on the server has been checked".
 ### [A] 340 of 430 `kernel/src/fs` modules have no consumer but `/proc` -- and for a microkernel that is mostly right. The defect is what their docs say -- 2026-09-17
+
+**Status:** OPEN
 
 **In short:** most of the kernel's "feature" modules keep a setting, show it
 in `/proc`, and do nothing else. That sounds alarming and mostly is not: this
@@ -159063,6 +159101,8 @@ and is worth doing properly rather than papering over at the call site.
 
 ### [A] Twice in one day a lane-C gate went out green from lane C and red from lane A, and where the gate sits decided what it cost -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** a check that only runs late catches mistakes after they have
 been shared, so the person who pays is whoever tries to build next -- never
 the person who made the mistake. It happened twice today with the same lane's
@@ -159155,6 +159195,8 @@ stop calling it, not to concentrate harder.
 
 ### [A] `check-selftest-reinit`'s rule is right and one case short: "empty and live" is still broken for a table something registers into at boot -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** a self-test that wipes its module's table must switch the table
 back on before it finishes, and a checker enforces that across 273 call
 sites. But "switched back on and empty" is only harmless if the table fills
@@ -159204,6 +159246,8 @@ Recorded so the next person wiring a stats module reads it before choosing a
 call site, which is the cheapest place for this to be known.
 
 ### [A] The byte count I used as proof was anti-correlated with the truth -- 2026-09-17
+
+**Status:** OPEN
 
 The strongest single piece of evidence this session produced for its own
 recurring lesson, and it is against me.
@@ -159560,6 +159604,8 @@ a reader that was never wired up. That one the gate *did* find. This one it
 did not, and the difference between the two is the thing worth knowing.
 ### [A] Eight security-named `fs/` modules claim to enforce something and nothing calls them; `sealing` is the worst of them -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** the kernel has a feature that lets a program mark a file
 permanently unchangeable. You can set the mark, `/proc` will list the file as
 marked, and **nothing stops anyone writing to it.** The same shape covers
@@ -159624,6 +159670,8 @@ independently of whether the wording gets fixed.
 
 ### [A] The leaf-claim cap was reporting 27% of the truth: 89 distinct site pairs, not 24 -- 2026-09-17
 
+**Status:** OPEN
+
 With the counting cap raised to 256 and the printing cap left at 24, boot
 `3a29fd0d2` reports:
 
@@ -159662,6 +159710,8 @@ safe remains "no pair happens to be taken in both orders", and now that is
 unchecked in 89 places.
 
 ### [A] `faceunlock::verify()` returns Matched unconditionally, and my first attempt to document that understated it -- 2026-09-17
+
+**Status:** OPEN
 
 **In short:** the face-unlock check does not check anything. For any enrolled
 user it returns "matched" without comparing a face, a template, or a number
@@ -159714,3 +159764,193 @@ I justified.
 stack; seal enforcement needs the VFS write path and a capability story.
 Those are features, and dd-950's point is that these modules are the outline
 of them rather than dead weight.
+
+### [A] Two implementations of file immutability: one real and tested, one decorative -- and I nearly recorded the real one as fake -- 2026-09-18
+**Status:** OPEN
+
+**In short:** the kernel can mark a file unchangeable, and that genuinely
+works -- writes, truncates and deletes are all refused, checked on every
+boot. There is also a *second* module for the same feature which does
+nothing, and whose opening comment describes it as the mechanism. A reader
+who finds that one first concludes the protection is missing.
+
+**The working one.** `vfs::FileAttr::IMMUTABLE`, checked at `vfs.rs:5206`
+(`is_writable`) and `:5249` (the `W_OK` access path), honoured by FAT as
+`ATTR_READ_ONLY` (`fat.rs:3312`, `:4430`), and verified by self-tests on
+every boot:
+
+```
+[ext4]   immutable: write, truncate and unlink are all refused, and allowed again once cleared: OK
+[memfs]  immutable write rejected: OK
+[memfs]  immutable remove rejected: OK
+```
+
+**The decorative one.** `kernel/src/fs/immutable.rs`: zero `vfs::`
+references, so it shares nothing with the mechanism above; its only caller
+outside `/proc` and `kshell` is its own self-test dispatch in `main.rs`. Its
+doc says it *"Provides `chattr`-style file flags that restrict
+modifications"* and that *"Only a privileged user can set/clear the flag"* --
+and `set_flags` contains no capability, uid or privilege check of any kind.
+So both halves of that sentence are false, while an identically-named,
+actually-enforced attribute lives one module away.
+
+This is lane C's shape, not a new one: their
+`c-a-two-desktop-icon-models-and-mine-cannot-be-wired-until-we-pick` is the
+same problem -- two models for one concept, where the question is which to
+keep rather than what to build.
+
+#### The near-miss, which is worth more than the finding
+
+I was one command from recording that **neither** mechanism was enforced.
+The reasoning that got me there was not careless, which is what makes it
+worth writing down:
+
+1. `grep FileAttr kernel/src/fs/vfs.rs` found the check inside
+   `Vfs::is_writable`.
+2. `grep Vfs::is_writable` found exactly one caller, `vfs.rs:7304`.
+3. That line is inside `pub fn self_test()` -- so the only caller of the
+   predicate that checks IMMUTABLE is a test.
+
+Every step is true, and the conclusion -- "the immutable check has no
+caller" -- is false, because enforcement does not go through that predicate
+at all. `write_file`, `truncate` and `unlink` refuse on their own paths, and
+`is_writable` is a separate convenience that happens to share the check.
+
+**What settled it in one command was asking whether the TEST PASSES**, not
+where the call site is. `[ext4] immutable: write, truncate and unlink are all
+refused ... OK` on every boot is direct evidence of the behaviour; a call-site
+search is evidence about one route to it. I had spent the day insisting that
+a green verdict needs its corpus examined, and then nearly took a *call-graph
+absence* as proof of a behavioural absence -- the same substitution in the
+other direction.
+
+It also matters which way the error pointed. Recording a missing protection
+that exists tells a reader to build something already built, and worse, tells
+them not to rely on something they can rely on. Lane C's rule about
+understatement applies to protections as much as to features: an
+understatement is believed, so nobody checks.
+
+**Action taken:** none to the code. Which of the two immutable models
+survives is a consolidation decision with a caller (`fat.rs`, `ext4`) on one
+side and a `/proc` file on the other, and it is not a decision one lane
+should take silently. The doc claim in `immutable.rs` is the part that
+actively misleads and is the first thing to fix; the duplication itself can
+wait for someone who wants the feature.
+
+### [A] A timing self-test panicked the kernel over a 988ms sleep, and the boot it failed differed from the green one before it only in comment text -- 2026-09-18
+**Status:** FIXED 2026-09-18 (retry + real-time deadline; awaiting a boot test)
+
+**In short:** the kernel checks at startup that asking to sleep for 20
+milliseconds really does take about 20 milliseconds. On one boot it took 988,
+so the check killed the boot. Nothing in the kernel had changed that could
+affect timing -- the only difference from the previous working boot was
+comment text -- and two compilers were running on the host at the time. The
+check could not tell "the machine was busy" from "the timer is broken", and
+treated the first as the second.
+
+**The evidence that it is not a regression**, in the order it was gathered:
+
+| question | answer |
+|---|---|
+| what changed since the last boot? | `git diff 3a29fd0d2..a17b8e0fa -- kernel/`: 4 files, 50 insertions, **all `//!` doc comment text** in `fs/{authbroker,faceunlock,filevault,sealing}.rs` |
+| anything touching the timer? | no match for `hrtimer`, `apic`, `sched`, `timer`, `sync.rs` or `lockdep` in the changed-file list |
+| is 988ms within normal spread? | no. Across the 19 prior boots that logged it: min 20.768ms, median 22.083ms, max 32.826ms. 988ms is **30x the observed maximum** |
+| were neighbouring measurements also inflated? | no. A deliberately forced ~10ms spin measured 13ms 2,700 lines later; the `[multiwait]` waits all landed at 22-50ms |
+| could the host inflate it? | yes, directly. `boot-test.sh` passes neither `-icount` nor `-rtc clock=vm`, so the guest clock follows host wall time -- and two `cargo` processes were running while QEMU booted |
+
+Comment text cannot alter runtime timing, so the change set exonerates itself.
+
+#### The second defect, which is the one worth keeping
+
+The test's two bounds were **written in different units, and its message
+asserted they were the same one.** The wait budget was
+`apic::tick_count().saturating_add(50)` while the panic attached to it read
+*"did not complete within 500ms"* -- equal only if a tick is exactly 10ms.
+
+That is not academic: on this boot the tick budget outlasted the 988ms
+overshoot, so the guard meant to cap the wait never fired, and the elapsed
+assertion downstream is what caught it. Had the tick guard fired, it would
+have reported "500ms" about a wait of some other length. A bound whose
+message is in units it does not measure is a bound that lies exactly when it
+is needed. Found only because the two assertions *disagreed* -- `done != 0`
+passed while elapsed said 988ms -- which is impossible if both are 500ms.
+
+#### The fix is a retry, not a looser ceiling
+
+Raising the bound is the obvious move and the wrong one: the ceiling is the
+only reader of this signal, and widening it trades away the sole thing the
+test detects (dd-951 -- enumerate a signal's readers before relaxing it).
+
+A one-off host stall does not repeat; a timer that is not firing overshoots
+every attempt. So the test now measures up to 3 times, passes on the first
+that lands under the ceiling, and panics only if **all** overshoot -- printing
+all three numbers, because the single retried figure that is never shown is
+dd-942 again. The too-short assertion still fails on attempt one: host load
+cannot make a sleep return early, so an early return is a real bug with no
+benign reading. The wait budget is now `now_ns()`-based, which reads the HPET
+or TSC -- both free-running, so the deadline still expires when the APIC timer
+is the broken thing.
+
+**What is still unresolved:** whether that 988ms was host contention or a
+latent timer stall. The retry does not answer it, it makes the boot survive
+it -- and makes the answer legible next time, since three overshoots now
+print three numbers instead of killing the boot on one. The boot lock
+serialises QEMU between lanes but does **not** stop another lane compiling
+while a boot runs, which is the contention path that remains open.
+
+### [A] The heading convention `known-issues.md` documents is invisible to every triage count taken of it, and 48 of the uncounted entries were mine -- 2026-09-18
+**Status:** OPEN (lane A's 25 stamped; the gate rule and lanes B/C's 8 remain)
+
+**In short:** this file asks each entry to carry a one-line status so anyone
+can count what is still broken. The counting is done by a text search that
+only recognises the *older* of the two heading styles in use -- so entries
+written in the style the instructions actually ask for are missed. Most of
+the missed ones are mine, and none of them had the status line either.
+
+**Three nested populations, none of them the file's contents.** Measured, not
+estimated:
+
+| what | count | what it misses |
+|---|---|---|
+| `grep -c '^## TD-'` -- the triage grep named in `check-known-issues-index.py`'s own docstring | 429 | 36 backticked `` ## `TD- `` headings, and all 62 `### [lane]` ones |
+| the checker's own pattern, `^## (TD-[A-Z]-.*)$` | 356 | additionally 73 single-agent-era subsystem names (`TD-FONT-`, `TD-COMPOSITOR-`, `TD-KASAN-`) |
+| entries in the documented current style, `### [A]` / `### [B]` / `### [C]` | 62 | seen by **neither** |
+
+So the checker's uniqueness and uppercase-marker rules -- both written after a
+firing, both correct -- run over 356 of 518 entries, and the 62 written in the
+style `roadmap.md`:379 prescribes (`### [C] ...`) are outside every count.
+
+**And the status line those 62 were supposed to carry was mostly absent.**
+`known-issues.md`'s own preamble: *"Put a `**Status:** ...` line immediately
+under the heading -- `OPEN` / `FIXED <date>` / `RESOLVED <date>`"*. On finding
+this, 6 of 62 had one. **48 of the 56 missing were lane A's -- mine.** I wrote
+the rule's violation 48 times while writing entries about verdicts taken over
+the wrong population.
+
+**Why a blanket stamp was the wrong fix, and what was done instead.** The 55
+lane-A entries are not one kind of thing:
+
+| shape | n | status meaningful? |
+|---|---|---|
+| plain issue, no status anywhere | 25 | yes -- stamped `OPEN` |
+| status word IS the heading (`### [A] RESOLVED -- ...`) | 12 | already greppable; left alone |
+| experiment log (`PREDICTION P22`, `RESULT P23`) | 9 | no -- a verdict, not a status |
+| already compliant | 7 | -- |
+| correction record | 2 | no -- nothing to close |
+
+The 25 were stamped `OPEN`, deliberately, including 6 whose bodies claim a
+fix: on reading, every one of those is a **doc-level** fix (`devpower`'s
+`/proc` header, `syshealth.rs:18`, `faceunlock`'s "docs only") while the
+feature gap the entry is about remains. `OPEN` is also the safe direction: a
+wrong `OPEN` costs someone an investigation and then self-corrects, whereas a
+wrong `FIXED` is never revisited. The 11 non-issues were left unstamped rather
+than forced into a vocabulary with no slot for them -- which is the part that
+still needs deciding.
+
+**What is deliberately NOT done: extending the checker.** The obvious fix is
+to make `check-known-issues-index.py` enforce the `### [lane]` convention
+too. That gate would immediately fail on lane B's 7 and lane C's 1 unstamped
+entries -- reddening two trees over a rule they have not been told about,
+which is exactly what cost lane A two pre-flight runs (658s and 2022s) on
+2026-09-17 when lane C's new gates fired on lane A's tree. The order has to
+be: notify, let them stamp, then gate.

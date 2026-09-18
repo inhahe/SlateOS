@@ -110,6 +110,9 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+F / Ctrl+H", "Find / find and replace"),
     ("Ctrl+O / Ctrl+S", "Open / save"),
     ("Ctrl+T", "Show or hide the toolbar"),
+    ("Ctrl+G", "Show or hide the gridlines"),
+    ("Ctrl+Shift+F", "Show or hide the formula bar"),
+    ("Ctrl+Shift+S", "Show or hide the status bar"),
     ("F1", "This list"),
 ];
 const FORMULA_BAR_HEIGHT: f32 = 28.0;
@@ -3864,6 +3867,13 @@ impl SpreadsheetApp {
                     self.redo();
                     return EventResult::Consumed;
                 }
+                // Before the unguarded `Key::S` below, which would
+                // otherwise take this and open the save dialog. A guard
+                // narrows only the arm it is on.
+                Key::S if event.modifiers.shift => {
+                    self.show_status_bar = !self.show_status_bar;
+                    return EventResult::Consumed;
+                }
                 Key::S => {
                     self.open_file_dialog(true);
                     return EventResult::Consumed;
@@ -3888,6 +3898,20 @@ impl SpreadsheetApp {
                 }
                 Key::I => {
                     self.toggle_italic();
+                    return EventResult::Consumed;
+                }
+                // The three view toggles the window drew from and could never
+                // change: `show_gridlines`, `show_formula_bar` and
+                // `show_status_bar` were `true` at construction with no writer
+                // anywhere, so the grid always had lines and both bars were
+                // permanent. Found by `scripts/frozen-flag-survey.py`.
+                Key::G => {
+                    self.show_gridlines = !self.show_gridlines;
+                    return EventResult::Consumed;
+                }
+                // Likewise before the unguarded `Key::F`, which is find.
+                Key::F if event.modifiers.shift => {
+                    self.show_formula_bar = !self.show_formula_bar;
                     return EventResult::Consumed;
                 }
                 Key::F => {
@@ -6921,6 +6945,49 @@ mod tests {
     // type into the second field, nothing could press any of the buttons, and
     // `replace_current`/`replace_all` had no caller at all.
     // ------------------------------------------------------------------
+
+    /// **The three view toggles change the view, and nothing else.**
+    ///
+    /// `Ctrl+Shift+S` and `Ctrl+Shift+F` sit directly above `Ctrl+S` (save)
+    /// and `Ctrl+F` (find), and a guard narrows only the arm it is on -- so if
+    /// the shifted arms were below their unshifted twins, the chord would open
+    /// a dialog instead. **That mistake is invisible to
+    /// `every_advertised_key_does_something`**, which asks only whether the
+    /// key was consumed, and opening a save dialog consumes it just as
+    /// thoroughly as toggling a bar. The outcome carries no information about
+    /// the mechanism; only the effect does.
+    #[test]
+    fn the_view_toggles_toggle_the_view_and_open_nothing() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        let before = (
+            app.show_gridlines,
+            app.show_formula_bar,
+            app.show_status_bar,
+        );
+
+        app.handle_event(&ctrl(Key::G));
+        assert_ne!(
+            app.show_gridlines, before.0,
+            "Ctrl+G did not move the gridlines"
+        );
+
+        app.handle_event(&ctrl_shift(Key::F));
+        assert_ne!(
+            app.show_formula_bar, before.1,
+            "Ctrl+Shift+F did not move the formula bar"
+        );
+
+        app.handle_event(&ctrl_shift(Key::S));
+        assert_ne!(
+            app.show_status_bar, before.2,
+            "Ctrl+Shift+S did not move the status bar"
+        );
+
+        assert!(
+            !app.picker.is_open(),
+            "a view toggle fell through to the save dialog"
+        );
+    }
 
     fn ctrl(k: Key) -> Event {
         Event::Key(KeyEvent {

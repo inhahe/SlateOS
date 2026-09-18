@@ -160181,3 +160181,53 @@ asserted the title *did* report a finding. A fifth,
 `wol_note` in this same file was written and drawn by nothing for three
 commits and only the write-only-field gate noticed. 135 tests.
 
+## `TD-C-SEVEN-WAYS-A-SEARCH-SAYS-NOTHING-AND-MEANS-NOTHING` (lane C, 2026-09-18)
+
+**In short:** When you grep a codebase and find nothing, you have learned that
+*that text* is not there. You have not learned that the *code does not do the
+thing*. Those two are different, and on 2026-09-18 I confused them seven times
+in one day, in seven different ways. Each one nearly became a filed defect
+about a program that was working correctly, or nearly hid a real one. This
+entry lists the seven with the instance that caught each, because the fix is
+not "be careful" -- it is knowing the specific shapes.
+
+| # | The divergence | What it cost |
+|---|---|---|
+| 1 | **Spelling.** The same key is `Key::H` in one app and `Key::Char('h')` in another. | Concluded `markdowneditor`'s Ctrl+H was unbound. It is bound. |
+| 2 | **Receiver.** A field is `self.find_state.query` in the app and `state.query` inside a function taking the struct by reference. | Nearly filed a live find-panel as dead code. |
+| 3 | **Case.** `grep 'cannot'` does not match `"Cannot trace a route"`. | Claimed `netscan` had "zero honest admissions". It has five. |
+| 4 | **Prose.** `grep guitk Cargo.toml` matches a *comment* reading "must not link a widget library... rather than through `guitk`". | Nearly recorded `backup` as a GUI app when its manifest says the opposite. |
+| 5 | **Structure.** Cutting production code at `#[cfg(test)]` includes every test-only item that precedes the last one. | A date sweep reported **50 hits across 12 apps**; the real answer via `rustlex.live_code` is **18 across 11**, and `devicemanager` went from 23 to 1. |
+| 6 | **Method mutation.** A field with no `=` anywhere may still be written by its own methods: `self.volume.increase(5)`. | Nearly filed `videoplayer`'s volume as frozen. |
+| 7 | **Sub-field assignment.** `self.password_opts.use_symbols = x` is invisible to a search for `.use_symbols` on the app struct, and `self.time_signature = sig` makes `beats_per_measure` *look* frozen when it is not. | Missed `passwordgen` on the first pass; nearly filed `metronome`'s time signature, which works. |
+
+**The shape they share** is that a search reports on *text* and the question
+was about *behaviour*. Every one of these is a case where the text and the
+behaviour come apart -- and they come apart most often in exactly the code
+worth examining, because a program doing something interesting is a program
+spelling it in some particular way.
+
+**What actually works**, in order of how much it costs:
+
+1. **Ask for the writers, not the name.** "Does anything assign this?" survives
+   1, 3 and 4, because assignment has a syntax and prose does not.
+2. **Use the lexer.** `rustlex.live_code` for "is this production code" and
+   `rustlex.strip_noise(keep_literals=True)` for "is this a comment". Both
+   exist because somebody already lost a day to 5 and to 4; the second one's
+   own doc says so.
+3. **Check the render path, not the model.** The question "can this app show
+   anything" is answered by the draw and not by the fields -- see
+   `TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY`, withdrawn for exactly this.
+4. **Then read the code.** Every genuine defect filed today --
+   `rssreader`'s sidebar, `passwordgen`'s classes, `netscan`'s scan report,
+   `podcast`'s timestamp, `markdowneditor`'s find panel -- was confirmed by
+   reading it. **No probe found one that reading did not.** The probes were
+   worth running only as a way of choosing what to read.
+
+**Why this is filed rather than merely learned.** The three probes written
+today (frozen fields, displayed-but-unchangeable labels, admit-yet-claim) all
+over-report, and a future session that trusts their output will file working
+programs as broken. The entry they live in
+(`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
+says why the failure is systematic rather than a matter of care.
+

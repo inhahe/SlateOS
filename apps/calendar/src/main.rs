@@ -1237,6 +1237,8 @@ pub struct CalendarApp {
 
     // UI state
     pub sidebar_visible: bool,
+    /// Whether the shortcut list is up.
+    pub show_help: bool,
     pub search_query: String,
     pub search_results: Vec<u64>,
     pub selected_event_id: Option<u64>,
@@ -1283,6 +1285,7 @@ impl CalendarApp {
             last_file_action: None,
             store: EventStore::new(),
             sidebar_visible: true,
+            show_help: false,
             search_query: String::new(),
             search_results: Vec::new(),
             selected_event_id: None,
@@ -1708,7 +1711,69 @@ impl CalendarApp {
                 .render(&self.palette, layout.window.w, layout.window.h),
         );
 
+        // And the shortcut list over even that, because it is the one thing a
+        // reader asked for explicitly.
+        if self.show_help {
+            self.draw_help(&mut frame, &layout);
+        }
+
         frame
+    }
+
+    /// The shortcut list, laid over the calendar.
+    fn draw_help(&self, frame: &mut Frame, layout: &Layout) {
+        let w = (layout.window.w * 0.72).min(560.0);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "twelve rows is far below f32's integer-exact range"
+        )]
+        let h = (SHORTCUTS.len() as f32).mul_add(20.0, 56.0);
+        let x = layout.window.x + (layout.window.w - w) / 2.0;
+        let y = layout.window.y + ((layout.window.h - h) / 2.0).max(0.0);
+
+        frame.push(RenderCommand::FillRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::all(6.0),
+        });
+        frame.push(RenderCommand::Text {
+            x: x + 16.0,
+            y: y + 12.0,
+            text: String::from("Keys  --  ? closes this"),
+            color: self.palette.ink(self.palette.blue),
+            font_size: 13.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(w - 32.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        let mut row_y = y + 38.0;
+        for (keys, what) in SHORTCUTS {
+            frame.push(RenderCommand::Text {
+                x: x + 16.0,
+                y: row_y,
+                text: (*keys).to_string(),
+                color: self.palette.ink(self.palette.peach),
+                font_size: 11.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(170.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            frame.push(RenderCommand::Text {
+                x: x + 196.0,
+                y: row_y,
+                text: (*what).to_string(),
+                color: self.palette.subtext0,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w - 212.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            row_y += 20.0;
+        }
     }
 
     fn draw_top_bar(&self, frame: &mut Frame, layout: &Layout) {
@@ -2794,6 +2859,34 @@ pub fn handle_event(state: &mut CalendarApp, event: &Event) -> EventResult {
     }
 }
 
+/// Every key this program answers, and what it does.
+///
+/// Sixteen bindings and, until this list existed, no way to learn one but
+/// reading the source. `W` is the worst of them: it decides which day a week
+/// begins on, which is a question with no universally right answer, and it was
+/// answered once at compile time until the key existed and then answerable
+/// only by someone who had read the handler.
+///
+/// **Each row is a key this program actually answers**, which is not a
+/// property the list has on its own: `every_advertised_key_does_something`
+/// walks it, reads each label with `guitk::shortcut` and presses every key it
+/// names. `apps/rssreader` shipped an overlay of twenty-one shortcuts of which
+/// about four worked.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("1 / 2 / 3", "Month / week / day"),
+    ("4 / 5", "Year / agenda"),
+    ("Left / Right", "Back / forward one period"),
+    ("PageUp / PageDown", "Back / forward one period"),
+    ("Home", "Go to today"),
+    ("Up / Down", "Scroll the day or week"),
+    ("W", "Start the week on Monday or Sunday"),
+    ("Escape", "Clear the selected event"),
+    ("Ctrl+F", "Search"),
+    ("Ctrl+B", "Show or hide the sidebar"),
+    ("Ctrl+O / Ctrl+S", "Import / export a calendar file"),
+    ("?", "This list"),
+];
+
 /// The view a digit key selects, by its index in [`CalendarView::all`].
 fn view_for_digit(key: Key) -> Option<usize> {
     match key {
@@ -2966,6 +3059,19 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
         Key::Down => {
             state.content_scroll += WEEK_HOUR_H;
             state.clamp_scroll();
+            EventResult::Consumed
+        }
+        // `?`, which is Shift and the slash key. The search branch above
+        // returns first when the box has focus, so this cannot swallow a `?`
+        // somebody is typing into a query.
+        Key::Slash if key.modifiers.shift => {
+            state.show_help = !state.show_help;
+            EventResult::Consumed
+        }
+        // Before the plain `Escape` arm below, which would otherwise take this
+        // and clear the selection while the list stayed up.
+        Key::Escape if state.show_help => {
+            state.show_help = false;
             EventResult::Consumed
         }
         Key::Escape => {
@@ -5146,6 +5252,106 @@ mod tests {
             scroll(&mut app, 1.0);
         }
         assert_eq!(app.content_scroll, 0.0);
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// A list on screen and the handler behind it are two copies of one fact,
+    /// and they drift: `apps/rssreader` shipped an overlay of twenty-one
+    /// shortcuts of which about four worked. The label is read by
+    /// `guitk::shortcut` rather than matched against a table written beside it
+    /// here -- that table would be a third copy, drifting from both.
+    ///
+    /// A fresh calendar per keystroke, because `Ctrl+O` and `Ctrl+S` each put
+    /// a file picker up that would take the next key.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut app = sample_app(june_2024());
+                assert_eq!(
+                    handle_event(&mut app, &Event::Key(stroke.clone())),
+                    EventResult::Consumed,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/netscan`'s `wol_note` was written by the
+    /// model and drawn by nothing for three commits with every model-level
+    /// test passing.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = sample_app(june_2024());
+        assert!(
+            !help_text(&app).contains("? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        let ask = guitk::shortcut::keystrokes("?").unwrap_or_else(|e| panic!("{e}"));
+        for stroke in &ask {
+            handle_event(&mut app, &Event::Key(stroke.clone()));
+        }
+
+        let shown = help_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        handle_event(
+            &mut app,
+            &Event::Key(KeyEvent {
+                key: Key::Escape,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: String::new(),
+            }),
+        );
+        assert!(
+            !help_text(&app).contains("? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// A `?` typed into the search box stays a `?`.
+    #[test]
+    fn a_question_mark_in_the_search_box_is_not_the_help_key() {
+        let mut app = sample_app(june_2024());
+        app.search_focused = true;
+        handle_event(
+            &mut app,
+            &Event::Key(KeyEvent {
+                key: Key::Slash,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: String::from("?"),
+            }),
+        );
+        assert!(
+            !help_text(&app).contains("? closes this"),
+            "the help key was taken out of somebody's search query"
+        );
+        assert!(app.search_query.contains('?'), "the `?` was dropped");
+    }
+
+    /// Every string the window is drawing, joined.
+    fn help_text(app: &CalendarApp) -> String {
+        app.frame(DEFAULT_WIDTH, DEFAULT_HEIGHT)
+            .into_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     #[test]

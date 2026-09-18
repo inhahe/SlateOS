@@ -134,6 +134,32 @@ const DEFAULT_PAGE_HEIGHT: f32 = 792.0;
 
 /// The window this app asks for when it opens.
 const WINDOW_WIDTH: f32 = 1100.0;
+
+/// Every key this program answers, and what it does.
+///
+/// **Four of these live one layer up.** `Ctrl+Q`, `Ctrl+F`, `Ctrl+T` and
+/// `Ctrl+W` are taken in `on_event` before `handle_event` ever sees them, so a
+/// guard test that pressed the inner door would report four working keys as
+/// dead. `every_advertised_key_does_something` presses `on_event`, which is
+/// the door a real keystroke comes through -- the list describes the program,
+/// not one of its functions.
+///
+/// **Each row is a key this program actually answers**, which is not a
+/// property the list has on its own. `apps/rssreader` shipped an overlay of
+/// twenty-one shortcuts of which about four worked.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Right / Down / Space", "Next page"),
+    ("Left / Up", "Previous page"),
+    ("PageDown / PageUp", "Next / previous page"),
+    ("Home / End", "First / last page"),
+    ("D", "Light or dark page colours"),
+    ("Ctrl+O", "Open a document"),
+    ("Ctrl+F", "Find"),
+    ("Ctrl+T / Ctrl+W", "New tab / close this tab"),
+    ("Ctrl+Q", "Quit"),
+    ("Escape", "Close the search bar or this list"),
+    ("?", "This list"),
+];
 const WINDOW_HEIGHT: f32 = 780.0;
 
 /// How far one scrolled *row* moves the document, in points at 1x zoom.
@@ -1407,6 +1433,8 @@ pub struct PdfViewerApp {
     /// exists.
     pub print_job: PrintJob,
     pub dark_mode: bool,
+    /// Whether the shortcut list is up.
+    pub show_help: bool,
     pub window_width: f32,
     pub window_height: f32,
     pub id_gen: IdGenerator,
@@ -1437,6 +1465,7 @@ impl std::fmt::Debug for PdfViewerApp {
             .field("open_error", &self.open_error)
             .field("print_job", &self.print_job)
             .field("dark_mode", &self.dark_mode)
+            .field("show_help", &self.show_help)
             .field("window_width", &self.window_width)
             .field("window_height", &self.window_height)
             .field("id_gen", &self.id_gen)
@@ -1462,6 +1491,7 @@ impl PdfViewerApp {
             recent_files: RecentFilesList::default(),
             print_job: PrintJob::default(),
             dark_mode: true,
+            show_help: false,
             picker: FilePicker::default(),
             open_error: None,
             window_width: width,
@@ -1699,7 +1729,69 @@ impl PdfViewerApp {
             frame.push(command);
         }
 
+        // And the shortcut list over even that, because it is the one thing a
+        // reader asked for explicitly.
+        if self.show_help {
+            self.draw_help(&mut frame, &layout);
+        }
+
         frame
+    }
+
+    /// The shortcut list, laid over the page.
+    fn draw_help(&self, frame: &mut Frame, layout: &Layout) {
+        let w = (layout.window.w * 0.72).min(560.0);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "eleven rows is far below f32's integer-exact range"
+        )]
+        let h = (SHORTCUTS.len() as f32).mul_add(20.0, 56.0);
+        let x = (layout.window.w - w) / 2.0;
+        let y = ((layout.window.h - h) / 2.0).max(0.0);
+
+        frame.push(RenderCommand::FillRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::all(6.0),
+        });
+        frame.push(RenderCommand::Text {
+            x: x + 16.0,
+            y: y + 12.0,
+            text: String::from("Keys  --  ? closes this"),
+            color: self.palette.ink(self.palette.blue),
+            font_size: 13.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(w - 32.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        let mut row_y = y + 38.0;
+        for (keys, what) in SHORTCUTS {
+            frame.push(RenderCommand::Text {
+                x: x + 16.0,
+                y: row_y,
+                text: (*keys).to_string(),
+                color: self.palette.ink(self.palette.peach),
+                font_size: 11.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(190.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            frame.push(RenderCommand::Text {
+                x: x + 216.0,
+                y: row_y,
+                text: (*what).to_string(),
+                color: self.palette.subtext0,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w - 232.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            row_y += 20.0;
+        }
     }
 
     /// Render the toolbar.
@@ -4072,6 +4164,13 @@ impl PdfViewerApp {
             return self.handle_print_key(event);
         }
 
+        // Escape closes the shortcut list before anything else, because it is
+        // drawn over everything else: Escape closes the topmost thing.
+        if event.key == Key::Escape && self.show_help {
+            self.show_help = false;
+            return true;
+        }
+
         // Escape closes the search bar from anywhere, focused or not, because
         // the whole point of Escape on an overlay is that you do not have to
         // find it first.
@@ -4105,6 +4204,13 @@ impl PdfViewerApp {
             // in is not offering a reading mode; it only has the one mode.
             Key::D => {
                 self.dark_mode = !self.dark_mode;
+                true
+            }
+            // `?`, which is Shift and the slash key. The search branch above
+            // returns first when the box has focus, so this cannot swallow a
+            // `?` somebody is typing into a query.
+            Key::Slash if event.modifiers.shift => {
+                self.show_help = !self.show_help;
                 true
             }
             Key::Home => {
@@ -4440,6 +4546,95 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// Pressed through `on_event`, which is the door a real keystroke comes
+    /// through. That matters here more than in any other app in this tree:
+    /// `Ctrl+Q`, `Ctrl+F`, `Ctrl+T` and `Ctrl+W` are taken in `on_event`
+    /// before `handle_event` sees them, so a guard on the inner function would
+    /// have called four working keys dead and invited somebody to "fix" them.
+    ///
+    /// `Response::Idle` is the program saying nothing happened, so anything
+    /// else is an answer -- including `Exit`, which is what `Ctrl+Q` means.
+    /// It is a weaker statement than `EventResult::Consumed`: an event can be
+    /// consumed without changing anything visible. Weaker and honest beats
+    /// stronger and pressed at the wrong door.
+    ///
+    /// The property is "some reachable state answers this key", not "this key
+    /// is taken right now": `Escape` means nothing until there is a search bar
+    /// or a list to close.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|app| app.on_event(&Event::Key(stroke.clone())) != Response::Idle);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and no viewer answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Viewers chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<PdfViewerApp> {
+        let plain = PdfViewerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+
+        // Searching, which is the one state `Escape` has anything to close.
+        let mut searching = PdfViewerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        searching.handle_target(Target::SearchToggle);
+
+        vec![plain, searching]
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/netscan`'s `wol_note` was written by the
+    /// model and drawn by nothing for three commits with every model-level
+    /// test passing.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = PdfViewerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(
+            !help_text(&app).contains("? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        for stroke in guitk::shortcut::keystrokes("?").unwrap_or_else(|e| panic!("{e}")) {
+            app.on_event(&Event::Key(stroke.clone()));
+        }
+
+        let shown = help_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        app.on_event(&Event::Key(probe::press(Key::Escape)));
+        assert!(
+            !help_text(&app).contains("? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn help_text(app: &PdfViewerApp) -> String {
+        app.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .into_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
 
     /// The empty state says how to open a file, and the sentence is true.
     ///

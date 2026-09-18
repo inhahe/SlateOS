@@ -160157,6 +160157,20 @@ returning `None` rather than a fallback date, because a row saying "time
 unknown" is awkward and true and one saying 1 January 1970 is neither. 201
 tests.
 
+**A fourth scanner was attempted for this class and abandoned, which is worth
+one paragraph.** The four existing finders miss it by construction:
+`find-silent-incapacity.py` asks whether a program admits it cannot reach
+anything, and netscan *does* -- for three of its four operations. The gap is
+**internal inconsistency**, so the query was "apps that admit an incapacity and
+still claim a result". It found 38, then 34 after blanking comments with
+`rustlex.strip_noise(keep_literals=True)` -- whose own doc says an earlier
+query had counted doc comments quoting the lines they replaced, which is
+exactly the mistake I made before reading it. What is left is almost entirely
+**enum labels**: `PeerStatus::Connected`, `EpisodeStatus::Downloaded`,
+`"Completed"`. A label naming a state is not a claim that the state was
+reached, and telling the two apart needs the code. **netscan was found by
+reading it, not by a query**, and no scanner is proposed here.
+
 **Four tests changed rather than deleted**, and the changes are the record:
 `test_app_start_scan` asserted `results.is_some()` and `!history.is_empty()`,
 both true and both the defect;

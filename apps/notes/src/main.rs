@@ -23,7 +23,8 @@
 //! `TD-C-NOTES-CANNOT-TAG-OR-DELETE-A-NOTE`.
 //!
 //! The version panel and the note list answer a click: clicking a version
-//! restores it, and clicking a note selects it. **The notebook sidebar still
+//! restores it, clicking a note selects it, and right-clicking one offers to
+//! delete it or move it to another notebook. **The notebook sidebar still
 //! does not.** It is drawn, it looks like a list, and the pointer does nothing
 //! over it. The repair is the same one -- a hit test derived from the function
 //! the renderer already reads, as `note_rows`, `version_rows` and
@@ -51,6 +52,7 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::menu::{ContextMenu, MenuItem};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -87,6 +89,13 @@ const SIDEBAR_WIDTH: f32 = 200.0;
 const NOTE_LIST_WIDTH: f32 = 260.0;
 const TOOLBAR_HEIGHT: f32 = 36.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
+
+/// The note menu's id for "Delete note", which is not a notebook.
+///
+/// The top of the `u64` range: the other ids in that menu are notebook ids
+/// from an `IdGen` counting up, so this is unreachable by construction rather
+/// than merely unused so far.
+const MENU_DELETE_NOTE: u64 = u64::MAX;
 
 /// How tall one row of the note list is.
 ///
@@ -1357,6 +1366,12 @@ pub struct NotesApp {
     pub picker: FilePicker,
     /// What the last save attempt did, for the status line.
     pub last_save: Option<String>,
+    /// The note menu, while it is open. Rebuilt on each opening, because its
+    /// rows are the notebooks and those change underneath it.
+    note_menu: Option<ContextMenu>,
+    /// The note the open menu is about, so nothing can move the answer while
+    /// it is up.
+    menu_note: Option<NoteId>,
     pub window_width: f32,
     pub window_height: f32,
     note_id_gen: IdGen,
@@ -1393,6 +1408,8 @@ impl NotesApp {
             searching: false,
             picker: FilePicker::new(),
             last_save: None,
+            note_menu: None,
+            menu_note: None,
             window_width: 1280.0,
             window_height: 800.0,
             note_id_gen: IdGen::new(1),
@@ -1549,6 +1566,57 @@ impl NotesApp {
             iy += NOTE_ROW_H;
         }
         rows
+    }
+
+    /// Raise the note menu over a note.
+    fn open_note_menu(&mut self, id: NoteId, x: f32, y: f32) {
+        let mut items = vec![MenuItem::Action {
+            id: MENU_DELETE_NOTE,
+            label: "Delete note".to_owned(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: None,
+        }];
+        // Moving somewhere it already is would be a no-op dressed as a
+        // choice, so the notebook it is in is offered ticked and disabled.
+        let current = self.find_note(id).map(|n| n.notebook_id);
+        if !self.notebooks.is_empty() {
+            items.push(MenuItem::Separator);
+            items.push(MenuItem::Submenu {
+                id: 0,
+                label: "Move to".to_owned(),
+                icon: None,
+                enabled: true,
+                children: self
+                    .notebooks
+                    .iter()
+                    .map(|nb| MenuItem::Action {
+                        id: nb.id,
+                        label: nb.name.clone(),
+                        shortcut: None,
+                        icon: None,
+                        enabled: current != Some(nb.id),
+                        checked: Some(current == Some(nb.id)),
+                    })
+                    .collect(),
+            });
+        }
+        let mut menu = ContextMenu::new(items);
+        menu.show(x, y, (self.window_width, self.window_height));
+        self.note_menu = Some(menu);
+        self.menu_note = Some(id);
+    }
+
+    /// Act on whatever row of the note menu was chosen.
+    pub fn choose_from_note_menu(&mut self, chosen: u64) -> bool {
+        let Some(id) = self.menu_note else {
+            return false;
+        };
+        if chosen == MENU_DELETE_NOTE {
+            return self.delete_note(id);
+        }
+        self.move_note(id, chosen)
     }
 
     /// Which note a point is on, if it is on one.
@@ -2095,6 +2163,29 @@ impl NotesApp {
     /// and most of it had none. This is one panel's worth; the note list and
     /// the notebook sidebar still do nothing when clicked.
     fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        // An open menu takes the press before anything under it, and consumes
+        // it either way: a click that dismisses a menu must not also land on
+        // whatever was behind it.
+        if self.note_menu.is_some() {
+            if let MouseEventKind::Press(_) = event.kind {
+                let chosen = self
+                    .note_menu
+                    .as_mut()
+                    .and_then(|m| m.handle_click(event.x, event.y));
+                self.note_menu = None;
+                if let Some(row) = chosen {
+                    self.choose_from_note_menu(row);
+                }
+                return EventResult::Consumed;
+            }
+        }
+        if matches!(event.kind, MouseEventKind::Press(MouseButton::Right))
+            && let Some(id) = self.note_at(event.x, event.y)
+        {
+            self.selected_note = Some(id);
+            self.open_note_menu(id, event.x, event.y);
+            return EventResult::Consumed;
+        }
         if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
             return EventResult::Ignored;
         }
@@ -2360,6 +2451,12 @@ impl NotesApp {
 
         // Last, so it is above everything -- the same order in which
         // `handle_event` gives it the keystroke.
+        // Over the window, under the picker: the picker is modal, and a menu
+        // raised before it opened has no business on top of it.
+        if let Some(menu) = &self.note_menu {
+            cmds.extend(menu.render(&self.palette));
+        }
+
         cmds.extend(self.picker.render(&self.palette, width, height));
 
         cmds
@@ -4362,6 +4459,119 @@ mod tests {
             y,
             kind: MouseEventKind::Press(MouseButton::Left),
         })
+    }
+
+    fn right_click_at(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        })
+    }
+
+    /// A note with two notebooks, so "Move to" has somewhere to offer.
+    fn app_with_two_notebooks() -> (NotesApp, NoteId, NotebookId, NotebookId) {
+        let mut app = NotesApp::new();
+        let home = app.create_notebook("Home");
+        let work = app.create_notebook("Work");
+        let nid = app.create_note("A note", home);
+        app.window_width = 1280.0;
+        app.window_height = 800.0;
+        app.selected_note = Some(nid);
+        (app, nid, home, work)
+    }
+
+    /// Right-clicking a note raises a menu about that note.
+    #[test]
+    fn right_clicking_a_note_raises_a_menu_about_it() {
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        let (_, row_y) = *app.note_rows().first().expect("a row");
+
+        let consumed = app.handle_event(&right_click_at(SIDEBAR_WIDTH + 20.0, row_y + 4.0));
+
+        assert_eq!(consumed, EventResult::Consumed);
+        assert!(app.note_menu.is_some(), "no menu appeared");
+        assert_eq!(app.menu_note, Some(nid), "the menu is about the wrong note");
+    }
+
+    /// Choosing Delete deletes the note.
+    ///
+    /// `delete_note` has been written and tested since the crate existed and
+    /// had no caller: there was no pointer and it has no keyboard shortcut.
+    #[test]
+    fn choosing_delete_deletes_the_note() {
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        let (_, row_y) = *app.note_rows().first().expect("a row");
+        app.handle_event(&right_click_at(SIDEBAR_WIDTH + 20.0, row_y + 4.0));
+
+        assert!(
+            app.choose_from_note_menu(MENU_DELETE_NOTE),
+            "delete refused"
+        );
+
+        assert!(app.find_note(nid).is_none(), "the note is still there");
+    }
+
+    /// Choosing a notebook moves the note into it.
+    #[test]
+    fn choosing_a_notebook_moves_the_note() {
+        let (mut app, nid, home, work) = app_with_two_notebooks();
+        assert_eq!(
+            app.find_note(nid).expect("the note").notebook_id,
+            home,
+            "the control failed"
+        );
+        let (_, row_y) = *app.note_rows().first().expect("a row");
+        app.handle_event(&right_click_at(SIDEBAR_WIDTH + 20.0, row_y + 4.0));
+
+        assert!(app.choose_from_note_menu(work), "move refused");
+
+        assert_eq!(
+            app.find_note(nid).expect("the note").notebook_id,
+            work,
+            "the note did not move"
+        );
+    }
+
+    /// A click while the menu is up dismisses it and does not fall through.
+    #[test]
+    fn a_click_dismisses_the_note_menu_without_falling_through() {
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        let other = app.create_note("Another", app.notebooks.first().expect("a notebook").id);
+        let rows = app.note_rows();
+        assert_eq!(rows.len(), 2, "the control failed");
+        let (_, first_y) = *rows.first().expect("a row");
+        app.handle_event(&right_click_at(SIDEBAR_WIDTH + 20.0, first_y + 4.0));
+        app.selected_note = Some(nid);
+
+        // Far from the menu, over the other note's row.
+        let (_, second_y) = *rows.get(1).expect("a second row");
+        let consumed = app.handle_event(&click_at(SIDEBAR_WIDTH + 20.0, second_y + 4.0));
+
+        assert_eq!(consumed, EventResult::Consumed);
+        assert!(app.note_menu.is_none(), "the menu is still up");
+        assert_eq!(
+            app.selected_note,
+            Some(nid),
+            "the dismissing click also selected the note behind it"
+        );
+        assert!(app.find_note(other).is_some(), "the other note vanished");
+    }
+
+    /// The notebook a note is already in is offered, disabled, not hidden.
+    ///
+    /// Hiding it would make the menu's contents depend on where the note is,
+    /// so the same gesture would put a different row under the cursor.
+    #[test]
+    fn the_current_notebook_is_offered_but_refused() {
+        let (mut app, nid, home, _) = app_with_two_notebooks();
+        let (_, row_y) = *app.note_rows().first().expect("a row");
+        app.handle_event(&right_click_at(SIDEBAR_WIDTH + 20.0, row_y + 4.0));
+
+        // Choosing it is a no-op rather than an error, and leaves it put.
+        app.choose_from_note_menu(home);
+
+        assert_eq!(app.find_note(nid).expect("the note").notebook_id, home);
     }
 
     /// Clicking a note in the list selects it.

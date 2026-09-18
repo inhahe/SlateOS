@@ -160511,6 +160511,28 @@ That is the same defect as `apps/passwordgen`'s frozen options and
 2026-09-18 by reading one app at a time. `scripts/frozen-flag-survey.py` is
 that reading, mechanised.
 
+**Fixed 2026-09-18, and reading it turned up two more defects behind the
+first.** Wiring the toggles meant checking each flag actually did something,
+and one did not: **`multiline` was declared, constructed, drawn, asserted in a
+test, and read by the matcher nowhere.** The anchor arm was `pos == 0` and
+`pos == len` whatever the flag said. Offering a toggle for it would have been
+the worse defect -- a button that moves and changes nothing is a claim, where a
+frozen button is merely a gap -- so the flag now reaches the matcher and `^`
+and `$` match at every line boundary, with a test that asserts the *result*
+rather than the field.
+
+The second was one line: `let _ = tooltip; // used for hover tooltip`, in a
+crate with no hover tooltip in it. A comment describing what a value is *for*,
+directly above the line throwing it away. Lane A hit the identical shape the
+same day (`let _ = before; // Used to verify timing sanity.`), which suggests
+the form is worth naming: **a discard with a justification reads as considered,
+and is the easiest place for an unfinished feature to come to rest.** The three
+strings live in `SHORTCUTS` now, where the `F1` card draws them and the guard
+test presses them.
+
+`F1` and not `?`, because every printable character is typed into whichever
+field has focus -- the same reason as `apps/spreadsheet` and `apps/hexeditor`.
+
 **Why no compiler or existing gate catches it.** `dead_code` is silent because
 the field is read. `check-fields-written-never-read.py` looks for the mirror
 image -- written and never read -- and `check-unreachable-mutators.py` finds a

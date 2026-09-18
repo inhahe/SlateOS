@@ -16,6 +16,16 @@
 //! - Multi-panel UI: source list, settings panel, queue
 //!
 //! Uses the guitk library for UI rendering.
+//!
+//! **This program cannot read or convert media files, and the window says so.**
+//! It has no filesystem access, so no source has been opened and no output can
+//! be written. The queue is the dangerous part, and it is labelled:
+//! *"Nothing will ever reach Completed here -- do not delete an original on the
+//! strength of this queue."* A conversion queue is acted on -- somebody clears
+//! the originals once it says done -- so a queue that cannot finish must never
+//! look as though it did.
+//!
+//! The list above is what the layouts draw when something supplies a model.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow

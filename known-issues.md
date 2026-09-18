@@ -160558,6 +160558,26 @@ and they want three different things:
 | `apps/spreadsheet` `show_gridlines`, `show_formula_bar`, `show_status_bar` | **a key.** View toggles in an app that already has an `F1` list to advertise them on. |
 | `apps/lockscreen` `show_clock_seconds`, `show_date` | **a settings file, not a key.** `main` passes `LockScreenConfig::default()`, so a lock screen can never show seconds and always shows the date -- but a lock screen is a security surface where every keystroke belongs to the password field, and adding shortcuts to it would be the wrong repair. This one is blocked on where its configuration should live, which is a question for the operator rather than a line of code. |
 
+**Down to 51 in 23 apps** as of the spreadsheet and logviewer fixes, and
+`apps/passwordgen` dropped off the list entirely when its options were wired --
+which is the tool tracking reality rather than a number in a file.
+
+Two more verified by hand and worth doing next, both in apps that already carry
+an `F1` list to advertise the new key on:
+
+| | |
+|---|---|
+| `apps/calendar` `use_24h` | `false` at construction, read twice, no writer. **The calendar can only ever show 12-hour time.** It already has `W` for the week-start question, which is the same kind of preference, so a key is consistent. |
+| `apps/hexeditor` `show_inspector` | `true` at construction, read twice, no writer. The inspector panel is permanent. |
+
+And the list's own noise is now legible enough to describe: entries like
+`ctrl`, `shift`, `bold`, `expandable` and `is_directory` are **data** -- a
+recorded keystroke's modifiers, a tree node's shape, a listing entry's kind --
+immutable because that is what they are. They sit in the app struct because the
+app struct holds a copy of the thing, not because anyone meant them to be
+settings. A reader working the list should expect roughly a third of it to be
+that.
+
 So the survey's output is a list of *questions about intent*, not a list of
 patches. A flag frozen because nobody wired the toggle and a flag frozen
 because its home is a configuration file that does not exist yet look identical

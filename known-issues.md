@@ -160921,3 +160921,51 @@ today in a way nobody can see from `/proc`.
 the correct order of `enter_irq` relative to EOI and `softirq::process_pending`
 is the kind of thing that is obvious in review and wrong at runtime. It
 needs its own boot, not a ride on one already in flight.
+
+#### Corrected within the hour: consolidation is the WRONG fix, and the reason is a real one
+
+Reading the two counters properly instead of comparing their shapes turns
+this from "a duplicate to merge" into "two things that look alike". Both
+points came out of the code, not from reconsidering:
+
+**1. `enter_hardirq_for_test()` fabricates interrupt context on purpose.**
+It exists so lockdep's negative control can fire -- a check that has never
+fired is indistinguishable from one that cannot. If `in_hardirq()` read
+`cputime::irq_depth()`, that helper would enter `enter_irq`, which does
+`if prev_depth == 0 { irq_enter_tsc.store(now); irq_count.fetch_add(1) }`
+and charges a cycle delta on the matching exit. **A self-test would inject
+fake interrupts and fake IRQ cycles into `/proc`.** Merging the counters
+would corrupt the accounting with the lockdep control's own fixtures --
+dd-942's corpus problem, caused by the merge that was supposed to tidy up.
+
+**2. The two have different correctness directions.** A lock-context marker
+must be *conservative*: if unsure, say interrupt context, because a missed
+report is a missed deadlock. Cycle accounting must be *exact*: over-count
+and `/proc` lies. Those pull opposite ways, and one counter cannot serve
+both once they ever disagree.
+
+**And the merge had a live hazard I would have shipped.** The nesting cap at
+`apic.rs:1006` reads `irq_depth() > 1`. Moving `enter_irq` into
+`dispatch_vector` **without** removing `apic.rs:989` leaves depth at 2 for an
+ordinary, non-nested timer tick -- so the cap would treat *every* timer
+interrupt as nested and throttle it. That is not a subtle regression, and I
+only saw it while writing down the ordering.
+
+**Revised plan, which keeps both and makes the split deliberate:**
+
+| counter | becomes | change |
+|---|---|---|
+| `idt::HARDIRQ_DEPTH` | the **interrupt-context marker** -- conservative, spans softirq, includes the test helper | none; document why it is not the accounting counter |
+| `cputime::irq_depth` | **cycle accounting** only | extend the bracket to vectors 251/252/255 so attribution stops charging IRQ time to the interrupted task |
+
+So the attribution gap is still worth fixing and the duplicate is not a
+duplicate. What was genuinely wrong was that I added the second counter
+without writing down why a second one was needed -- which is what made it
+read as an accident an hour later, to me.
+
+**The lesson is the one from this morning, pointed at myself twice.** I
+compared the two counters by *shape* -- both per-CPU, both `AtomicU64`, both
+counting interrupt nesting -- and concluded duplicate. The distinguishing
+fact was in neither name nor type but in one caller and one doc sentence.
+Same as `secmod` and `authbroker`: identical caller profiles, opposite
+verdicts, and only line 1 separates them.

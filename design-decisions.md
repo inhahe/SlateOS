@@ -77202,6 +77202,46 @@ lines earlier. It now clusters by proximity and implies nothing across
 clusters -- and its docstring states that it cannot see kernel-prefixed
 lines at all, so "first of the cluster" means first of what it can see.
 
+**A Python escape warning is evidence about the escapes Python does not
+recognise, and about nothing else.** Lane C's, and it is a new mechanism
+rather than a fifth costume, which is why it is here after I stopped adding
+instances. Their heredoc collapsed a backslash and produced two damaged
+escapes at once:
+
+| escape | Python's view | outcome |
+|---|---|---|
+| the invalid one (`w`) | unrecognised | **SyntaxWarning, naming it precisely** |
+| the valid one (`a`) | recognised | **silently became BEL, naming nothing** |
+
+So the diagnostic named the harmless one *because* it is the one Python
+cannot handle, and said nothing about the one that put a control byte in a
+tracked file. A clean run -- or a warning about some other escape -- is not
+evidence that the escapes you cared about survived.
+
+**I had one, in the comment explaining a filter that did not work.**
+`build/scan-guest-output.py` held a literal 0x08 where `fail` followed by
+backslash-b was meant, the regex word boundary I was documenting. The
+collapse corrupted the sentence describing the collapse -- the third time in
+one day that a paragraph about a byte acquired the byte (my NUL, lane C's
+CRLF, lane C's BEL).
+
+**And the way I found it is the part worth keeping.** My detection loop
+searched for the two-character sequence backslash-b, written in a heredoc as
+an escaped backslash -- which collapsed, so it searched for the *byte* and
+found the byte. Had the heredoc behaved, the search would have found nothing
+and reported the file clean. **The bug in the detector is the only reason
+the detector worked**, which is as clear a statement as I will get of why a
+green result from an instrument is not evidence about the thing until the
+instrument is evidence about itself.
+
+Practical rules, both cheap: build a replacement from `chr()` rather than
+from an escape when the subject *is* an escape; and assert the absence of
+**all** control bytes after an edit rather than the one you were thinking
+about, because the collapse that produced one can produce another you did
+not look for. All six tracked shared documents were verified clean by
+byte-class scan, not by eye -- a control byte is invisible in every viewer,
+which is the whole reason the check has to be a count.
+
 **Check whether the remedy already exists, before proposing one.** Three
 times on 2026-09-18 the thing I was about to build or file was already
 there:

@@ -159255,7 +159255,22 @@ already has a gate for: `scripts/check-config-turn-guards.py` exists because
 the whole *process*, and `cargo test` runs a crate's tests as threads of one
 process -- so a test that drives an event loop can see the directory change
 under it and repaint when it counted frames. That gate reports `0 unguarded`
-today, so if this is that, it is a case the gate does not recognise.
+today.
+
+**Correction, checked afterwards: that gate is not about this.** Its
+`HARNESS_CALLS` are `testing::desktop()` and `ShellSession::start`, and
+`apps/explorer` uses neither -- its tests call `handle_event` directly. So its
+`0 unguarded` is not a miss, and calling this "a case the gate does not
+recognise" implied a coverage gap that does not exist. explorer was never in
+that gate's corpus.
+
+What survives is the mechanism, not the gate. `explorer` calls
+`with_scratch_config` 32 times and `config_turn` zero times. `settingsfile`'s
+`ENV_LOCK` serialises *writers* of `XDG_CONFIG_HOME` against each other, and
+`config_turn` is how a *reader* takes that same lock -- so 32 writers and an
+unguarded reader in one crate, whose tests are threads of one process, is a
+real race whatever any gate's scope is. A lead, not a diagnosis: none of this
+names the failing test, and the failing test is what was lost.
 
 **What to capture when it happens again**, since it will and the next person
 should not be starting from here: the whole log, the test name from the

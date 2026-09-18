@@ -160555,7 +160555,7 @@ missing handler, which is exactly why the deliberate one was worth running.
 there is nothing to check. A list that is absent cannot be false, and is still
 a user who cannot find the key.
 
-## `TD-C-KEYS-THAT-WORK-AND-NOTHING-MENTIONS` (lane C, 2026-09-18)
+## `TD-C-KEYS-THAT-WORK-AND-NOTHING-MENTIONS` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** Several keys added on 2026-09-18 to reach features that had no
 way in are themselves undiscoverable. The feature is reachable now; finding it
@@ -160573,11 +160573,11 @@ finished.
 | `markdowneditor` | five | **yes** -- the panel's buttons were relabelled "Replace  Ctrl+Enter" |
 | `slides` | `Ctrl+T`, `Ctrl+R` | **yes** -- "Theme: Mocha (Ctrl+T)", "Transition: Fade (Ctrl+R)" |
 | `slides` | `S`/`O`/`L`/`A`/`I`, `Delete` | **yes** -- `?` lists all twenty, and a test asserts every listed key is answered |
-| `pdfviewer` | `D` | **no** |
-| `calendar` | `W` | **no** |
-| `imageviewer` | `B`, `S` | **no** |
-| `spreadsheet` | `Ctrl+T` | **no** |
-| `mindmap` | `B` | **no** |
+| `pdfviewer` | `D` | **yes** -- `?` lists eleven, and the guard presses `on_event` -- four of them live a layer above `handle_event` |
+| `calendar` | `W` | **yes** -- `?` lists twelve, and a `?` typed into the search box stays a `?` |
+| `imageviewer` | `B`, `S` | **yes** -- `?` lists seventeen, drawn over the two bars those keys hide |
+| `spreadsheet` | `Ctrl+T` | **yes** -- **F1** lists fifteen -- `?` is a character a spreadsheet must be able to type |
+| `mindmap` | `B` | **yes** -- `?` lists seventeen |
 
 **2026-09-18, later: the authoring keys were given the same treatment as they
 landed**, so the three fixes did not widen this entry. `notes` says "No notes
@@ -160625,20 +160625,50 @@ the eleventh way a search says nothing, rebuilt inside the test written to
 prevent it.
 
 **The pattern that worked** is naming the key beside the thing it controls,
-which costs one format string wherever the app already draws the value. It
-does not apply to the six unlabelled cases: `pdfviewer` draws no reading-mode
-indicator, `calendar` draws no week-start indicator, and a toolbar cannot
-advertise the key that hides it, because once hidden the advertisement is gone
-with it.
+which costs one format string wherever the app already draws the value. It did
+not apply to the last five: `pdfviewer` draws no reading-mode indicator,
+`calendar` draws no week-start indicator, and **a toolbar cannot advertise the
+key that hides it**, because once hidden the advertisement is gone with it --
+which is the case `imageviewer` `B`/`S` and `spreadsheet` `Ctrl+T` all are.
 
-**Why this is filed rather than done.** The remaining five need a *new* element
-on screen -- a status hint or a help overlay -- in four layouts I have not
-read closely. Adding text to a layout I do not understand risks overlapping
-something that was fine, which is a worse defect than the one being fixed and
-harder to notice. `rssreader`'s `ALL_KEY_ACTIONS` overlay is the model worth
-copying, together with its guard test
-(`every_advertised_shortcut_does_something`), which is what keeps the list and
-the handler from drifting apart -- the failure that entry documents.
+**2026-09-18, last: the other five got an overlay, and this entry is closed.**
+The reason it had been filed rather than done was that a status hint needs a
+*new element* in a layout I had not read, and getting it wrong overlaps
+something that was fine -- a worse defect than the one being fixed, and harder
+to notice. **An overlay dissolves that objection entirely**: it is drawn last,
+over everything, centred, and only when asked for, so it cannot disturb a
+layout it does not understand. That was true the whole time the entry said
+otherwise.
+
+| App | Key | Rows | Note |
+|---|---|---|---|
+| `mindmap` | `?` | 17 | |
+| `imageviewer` | `?` | 17 | drawn over the two bars `B` and `S` hide |
+| `spreadsheet` | **`F1`** | 15 | `?` is a character a spreadsheet must be able to type into a cell |
+| `calendar` | `?` | 12 | a `?` typed into the search box stays a `?` |
+| `pdfviewer` | `?` | 11 | the guard presses `on_event`; four keys live above `handle_event` |
+
+**Three things the work turned up that no plan predicted.**
+
+`apps/spreadsheet` could not use `?` at all. Its key handler ends in a
+catch-all that starts editing the cell on any printable character, so binding
+`?` to help would have taken a character out of a program whose whole job is
+holding characters -- a worse defect than the one being fixed, arriving by a
+different road than the one I had been watching. `F1` there, and a test named
+`a_question_mark_is_typed_into_the_cell_not_swallowed_as_help` to hold it.
+
+`apps/pdfviewer` answers four of its keys one layer up, in `on_event` rather
+than `handle_event`. A guard test pressing the inner function would have
+reported `Ctrl+Q`, `Ctrl+F`, `Ctrl+T` and `Ctrl+W` as dead and invited somebody
+to "fix" four keys that work. **The door a test presses is part of what it
+tests**; this one presses `on_event`, which is where a real keystroke arrives.
+
+And the overlays needed a *second* test each. `every_advertised_key_does_something`
+reads the list against the handler; `the_shortcut_list_reaches_the_window`
+reads it against the screen. `apps/netscan`'s `wol_note` was written by the
+model and drawn by nothing for three commits with every model-level test
+passing, so an overlay that never draws is a defect with a green suite behind
+it. Both questions get asked in all seven apps that now have a list.
 
 **Do not treat this as cosmetic.** `apps/slides` could add four shapes and an
 image for hours before anyone found `S`, and the app it most resembles --

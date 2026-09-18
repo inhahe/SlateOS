@@ -160734,7 +160734,7 @@ corollary, since each row here is stated as *nothing writes this* rather than
 *this function has no caller*, which is the only form that survives a second
 implementation path.
 
-## `TD-C-THE-TEXT-EDITOR-CANNOT-TYPE-A-TAB` (lane C, 2026-09-18)
+## `TD-C-THE-TEXT-EDITOR-CANNOT-TYPE-A-TAB` -- **PARTLY FIXED 2026-09-18** (lane C)
 
 **In short:** `apps/editor` indents with spaces and cannot be told otherwise.
 `Document::use_spaces` is `true` at construction and **has no production
@@ -160771,6 +160771,19 @@ set `use_spaces` both ways and assert both behaviours, so the tab-indent path
 is covered, correct and impossible to reach from the program. That is the same
 shape as `apps/slides`'s themes and `apps/explorer`'s view modes: **complete
 machinery, tested, with no way in.**
+
+**Detection landed (2026-09-18), which is the half that matters.**
+`Document::from_file` now decides indentation from the file, beside the
+line-ending detection it mirrors -- both are properties of the document rather
+than preferences of the program. The first indented line decides: a leading tab
+means tabs, a leading space means spaces, an unindented file defaults to
+spaces. A file that mixes them is already inconsistent and no answer serves it;
+following the first is what an editor can defend. Opening a Makefile and typing
+no longer corrupts it. 210 tests, up from 207.
+
+**Still missing: the toggle**, so a *new* file cannot be told to use tabs --
+only an existing tab-indented one is honoured. The status bar already draws the
+value, so it needs a key and a name beside it, not new machinery.
 
 **What the repair wants.** Two things, and the second is the one that matters:
 a key to toggle it (the status bar already draws the value, so it only needs

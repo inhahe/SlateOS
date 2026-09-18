@@ -376,6 +376,29 @@ impl Document {
             lines
         };
 
+        // Which way this file indents, decided by the file rather than by a
+        // default -- the same move as `line_ending` above, and for the same
+        // reason: it is a property of the document, not a preference of the
+        // program.
+        //
+        // `use_spaces` had no production writer at all until now, so every
+        // file was treated as space-indented and a typed Tab inserted spaces.
+        // **That silently corrupts a Makefile**, where a literal tab is the
+        // syntax rather than a style, and the corruption is invisible in the
+        // editor that caused it.
+        //
+        // The first indented line decides. A file that mixes both is already
+        // inconsistent and there is no answer that serves it; following the
+        // first is what an editor can defend.
+        let use_spaces = lines
+            .iter()
+            .find_map(|line| match line.as_bytes().first() {
+                Some(b'\t') => Some(false),
+                Some(b' ') => Some(true),
+                _ => None,
+            })
+            .unwrap_or(true);
+
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -391,6 +414,7 @@ impl Document {
 
         Ok(Self {
             lines,
+            use_spaces,
             path: Some(path.to_path_buf()),
             name,
             modified: false,
@@ -405,7 +429,6 @@ impl Document {
             redo_stack: VecDeque::new(),
             line_ending,
             tab_width: 4,
-            use_spaces: true,
             language,
             sync,
             hl_entry: RefCell::new(Vec::new()),
@@ -5086,6 +5109,61 @@ mod external_merge_tests {
     fn disk_changed_unchanged_when_no_path() {
         let d = loaded_doc("hello");
         assert_eq!(d.disk_changed(), DiskChange::Unchanged);
+    }
+
+    /// A tab-indented file is opened as a tab-indented file.
+    ///
+    /// `use_spaces` had no production writer, so every document was
+    /// space-indented whatever it contained, and a typed Tab inserted spaces.
+    /// **That silently corrupts a Makefile**, where a literal tab is the
+    /// syntax rather than a style.
+    #[test]
+    fn a_tab_indented_file_is_read_as_tab_indented() {
+        let (_scratch, path) = temp_path("indent_tabs");
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp");
+            f.write_all(b"all:\t\n\techo hi\n").expect("write");
+        }
+
+        let doc = Document::from_file(&path).expect("load");
+
+        assert!(
+            !doc.use_spaces,
+            "a file whose first indented line begins with a tab was read as \
+             space-indented"
+        );
+    }
+
+    /// A space-indented file is opened as a space-indented file.
+    #[test]
+    fn a_space_indented_file_is_read_as_space_indented() {
+        let (_scratch, path) = temp_path("indent_spaces");
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp");
+            f.write_all(b"fn main() {\n    let x = 1;\n}\n")
+                .expect("write");
+        }
+
+        let doc = Document::from_file(&path).expect("load");
+
+        assert!(doc.use_spaces, "a space-indented file was read as tabbed");
+    }
+
+    /// A file with no indentation at all still opens, defaulting to spaces.
+    #[test]
+    fn an_unindented_file_defaults_to_spaces() {
+        let (_scratch, path) = temp_path("indent_none");
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp");
+            f.write_all(b"one\ntwo\n").expect("write");
+        }
+
+        let doc = Document::from_file(&path).expect("load");
+
+        assert!(
+            doc.use_spaces,
+            "an unindented file should default to spaces"
+        );
     }
 
     #[test]

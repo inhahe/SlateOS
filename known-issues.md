@@ -160402,3 +160402,54 @@ uses. Until then the empty view should say what `finance`'s does -- that notes
 cannot be created here -- because an empty list that invites you to add
 something is worse than one that admits it cannot.
 
+## `TD-C-AUTHORING-APPS-THAT-CANNOT-AUTHOR` (lane C, 2026-09-18)
+
+**In short:** Three of our content-creation programs cannot create content.
+You can add slides, notes and diagram nodes; you cannot put a word in any of
+them. Each has its whole periphery built -- themes, notebooks, templates,
+versions, export -- and is missing the one act it exists for.
+
+| App | What it can do | What it cannot |
+|---|---|---|
+| `slides` | add slides, four shapes, images; themes, transitions, sorter view, undo, export | **type anything.** Zero assignments to `.text` in the crate, tests included; every element born "New Text" / "Presentation Title"; deck permanently "Untitled Presentation" |
+| `notes` | notebooks, tags, versions, search, export to text/Markdown/HTML | **make a note.** `create_note`, `update_note_title`, `update_note_content` all callerless; both `notes.push` sites are inside the unreachable creators; there is no import. It exports notes it cannot create |
+| `diagram` | insert canned flowcharts and org charts, move and connect nodes, export SVG/JSON | **label anything.** `set_node_label` and `set_edge_label` callerless, **zero** typing sites in the crate. The only writer of `.label` besides them is `add_template_node`, so every box says what the template said |
+
+**`diagram` is the one that shows what the class costs.** Its 32 reachable
+`add_template_node` calls build a flowchart reading Start → Process →
+Decision? → Action A → Action B → End, and an org chart of "CEO" and "VP Eng".
+Those labels are not placeholders; they are **somebody else's example**, and
+they are permanent. A user's diagram of their own system is always a diagram
+of ours.
+
+**Why a sweep for unreachable operations does not find this.** That sweep asks
+which *written* functions have no caller. Here the functions are missing
+outright -- nobody wrote `set_element_text` for slides, so there is nothing
+callerless to report -- or, in `diagram`'s case, they exist and the sweep does
+report them, but as two entries among fifteen, indistinguishable from
+`next_slide` (a redundant duplicate) and `light` (an unused theme
+constructor). **The periphery being thorough is what hides it:** 90 tests in
+slides, four panels and a version history in notes, templates and layers and
+alignment guides in diagram.
+
+**The question that finds it**, and it has to be asked per-app because the
+answer is never generic: *what is this program for, and can a user do that?*
+For these three it is one sentence each -- put words on a slide, write a note,
+say what the box means.
+
+**A caution against the obvious fix.** The repair is a text-entry mode in each,
+on the pattern `apps/markdowneditor` and `apps/rssreader` now use, and all
+three already have the accessor it needs (`element_by_id_mut`,
+`update_note_content`, `set_node_label`). But adding one and stopping is how
+this happened: every one of these apps looks finished from the inside because
+everything *around* the hole is built. The test worth writing is not "the key
+sets the field" but **"a user can produce the artifact the program is named
+after"** -- type into a new note, save it, and read it back.
+
+**Related.** `TD-C-A-PRESENTATION-EDITOR-THAT-CANNOT-TYPE`,
+`TD-C-NOTES-CANNOT-MAKE-A-NOTE`, and the method note
+`TD-C-SEVEN-WAYS-A-SEARCH-SAYS-NOTHING-AND-MEANS-NOTHING` -- particularly its
+corollary, since each row here is stated as *nothing writes this* rather than
+*this function has no caller*, which is the only form that survives a second
+implementation path.
+

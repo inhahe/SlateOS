@@ -160370,6 +160370,7 @@ not "be careful" -- it is knowing the specific shapes.
 
 | 8 | **One file vs the crate.** Every sweep run on 2026-09-18 globbed `apps/*/src/main.rs`. **12 of 141 apps have more than one source file** -- `explorer` has 8, `settings` 5, `editor` 4. | Concluded `apps/editor` "has zero typing sites" and could not be typed in. Its typing lives in `input.rs`. A text editor was one sentence away from being filed as unable to accept text. |
 
+| 11 | **One list is checked and its twin is not.** `apps/editor` has an exhaustive `match` that forces a new `Command` to be handled -- and a hand-written `Command::ALL: [Self; 14]` that decides whether the guard test ever *reaches* it. The compiler enforces the first and nothing enforces the second. | A variant added to the enum and omitted from `ALL` compiles, with a guard-test arm that is written, never executed, and reported as passing. **No symptom at all** -- worse than passing for the wrong reason, because there is no run to inspect. |
 | 10 | **A heredoc eats the backslashes.** A `python - <<'PYEOF'` block is supposed to pass its body through literally; in this shell it did not, three times. `\x1b` arrived as a real ESC byte and `\r\n` as a real CRLF. | Wrote literal control characters into a Rust byte literal (invalid source), and a lone CRLF into `known-issues.md` -- in a paragraph *about* an escape sequence, which is how it got past reading. The habit that fixes it: **any script containing backslash escapes goes in a file, not a heredoc.** |
 
 | 9 | **A function used as a value.** `self.moving(shift, Document::move_up)` passes the function; it never writes `move_up(`. Every "who calls this" query here counts `name(`, so a callback looks dead. | Concluded `apps/editor`'s cursor could not move up or down. It moves. Its arrow keys pass the movement functions to a shared `moving` helper, which is *better* code than calling each directly -- so the query is most wrong about the tidiest implementations. |
@@ -160381,6 +160382,16 @@ on that day (`notes`, `slides`, `diagram`, `explorer`, `rssreader`, `netscan`,
 them hold. The check is one line and belongs in any future sweep: count
 occurrences of the bare name against occurrences of `name(`, and read the
 difference.
+
+**The eleventh is the one to look for in any codebase with a guard test.**
+The pattern "an exhaustive `match` plus an array of every variant" is a good
+design -- `apps/editor`'s comment is right that it makes the compiler ask the
+question at the one moment somebody holds the answer. But the array is the
+half that decides whether the test *runs*, and it is the half the compiler
+cannot check. Anywhere the two are separate, adding a case can produce a test
+that is written and dead. The tell is a length annotation: `[Self; 14]` is a
+hand-maintained count, and a hand-maintained count is a second list wearing a
+number.
 
 **The eighth is the one that should worry a reader of this entry most**, because
 it silently narrows every other row: a search that is *correct* about the file

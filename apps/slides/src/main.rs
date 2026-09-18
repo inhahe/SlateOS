@@ -1736,7 +1736,7 @@ impl SlidesApp {
         cmds.push(RenderCommand::Text {
             x: 740.0,
             y: 12.0,
-            text: format!("Theme: {}", self.theme.name),
+            text: format!("Theme: {} (Ctrl+T)", self.theme.name),
             color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
@@ -1816,7 +1816,7 @@ impl SlidesApp {
         });
 
         if let Some(slide) = self.slides.get(self.current_index) {
-            let trans = format!("Transition: {}", slide.transition.label());
+            let trans = format!("Transition: {} (Ctrl+R)", slide.transition.label());
             cmds.push(RenderCommand::Text {
                 x: 200.0,
                 y: y + 5.0,
@@ -2347,7 +2347,14 @@ impl SlidesApp {
             y += 22.0;
 
             // Transition.
-            self.render_property_row(cmds, lx, y, val_w, "Transition", slide.transition.label());
+            self.render_property_row(
+                cmds,
+                lx,
+                y,
+                val_w,
+                "Transition (Ctrl+R)",
+                slide.transition.label(),
+            );
             y += 22.0;
 
             // Background.

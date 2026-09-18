@@ -160231,3 +160231,47 @@ programs as broken. The entry they live in
 (`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
 says why the failure is systematic rather than a matter of care.
 
+## `TD-C-KEYS-THAT-WORK-AND-NOTHING-MENTIONS` (lane C, 2026-09-18)
+
+**In short:** Several keys added on 2026-09-18 to reach features that had no
+way in are themselves undiscoverable. The feature is reachable now; finding it
+still requires reading the source. That is better than before and is not
+finished.
+
+**Where each new key stands:**
+
+| App | Key | Discoverable? |
+|---|---|---|
+| `rssreader` | eleven | **yes** -- `?` lists them, and a test asserts every listed row is answered |
+| `passwordgen` | `L`/`U`/`D`/`S`/`A` | **yes** -- the options panel reads "Lowercase (L): Yes" |
+| `metronome` | arrows, digits | **yes** -- "Practice Increment: +10 BPM (left/right)" |
+| `hexeditor` | `Ctrl+I` | **yes** -- the search bar reads "Case: on  Ctrl+I" |
+| `markdowneditor` | five | **yes** -- the panel's buttons were relabelled "Replace  Ctrl+Enter" |
+| `slides` | `Ctrl+T`, `Ctrl+R` | **yes** -- "Theme: Mocha (Ctrl+T)", "Transition: Fade (Ctrl+R)" |
+| `slides` | `S`/`O`/`L`/`A`/`I`, `Delete` | **no** |
+| `pdfviewer` | `D` | **no** |
+| `calendar` | `W` | **no** |
+| `imageviewer` | `B`, `S` | **no** |
+| `spreadsheet` | `Ctrl+T` | **no** |
+| `mindmap` | `B` | **no** |
+
+**The pattern that worked** is naming the key beside the thing it controls,
+which costs one format string wherever the app already draws the value. It
+does not apply to the six unlabelled cases: `pdfviewer` draws no reading-mode
+indicator, `calendar` draws no week-start indicator, and a toolbar cannot
+advertise the key that hides it, because once hidden the advertisement is gone
+with it.
+
+**Why this is filed rather than done.** The remaining six need a *new* element
+on screen -- a status hint or a help overlay -- in five layouts I have not
+read closely. Adding text to a layout I do not understand risks overlapping
+something that was fine, which is a worse defect than the one being fixed and
+harder to notice. `rssreader`'s `ALL_KEY_ACTIONS` overlay is the model worth
+copying, together with its guard test
+(`every_advertised_shortcut_does_something`), which is what keeps the list and
+the handler from drifting apart -- the failure that entry documents.
+
+**Do not treat this as cosmetic.** `apps/slides` could add four shapes and an
+image for hours before anyone found `S`, and the app it most resembles --
+before this change -- was one that could only make decks of textboxes.
+

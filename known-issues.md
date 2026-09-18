@@ -159683,3 +159683,37 @@ code sites across 1256 acquisitions per boot. Still not a deadlock report --
 nothing here has been shown to form a cycle -- but the reason those locks are
 safe remains "no pair happens to be taken in both orders", and now that is
 unchecked in 89 places.
+
+## `TD-C-RSSREADER-FOLDERS-ARRIVE-BY-IMPORT-AND-CANNOT-BE-REORGANISED` (lane C, 2026-09-18)
+
+**In short:** `apps/rssreader` has folders, and the only way to get one is to
+import an OPML file. Once they exist nothing can rearrange them: a feed cannot
+be moved between folders, a folder cannot be removed, and a feed cannot be
+renamed. All three operations are written and tested and have no caller
+outside the test module.
+
+**Verified, each checked for another route.**
+
+| Operation | State |
+|---|---|
+| create a folder | `add_folder` has five production callers -- but four are `populate_sample_data`, which is `#[cfg(test)]`, so **the one real caller is the OPML importer** (`import_opml_outline`). |
+| add a feed | `add_feed(title, url, folder_id)` has eight production callers and takes the folder, so an imported feed lands in the right place. |
+| move a feed to another folder | `move_feed_to_folder`: no production caller, and nothing else writes `feed.folder_id`. |
+| remove a folder | `remove_folder`: no production caller, and the only `folders.retain` is inside it. |
+| rename a feed | `rename_feed`: no production caller. `feed.title` is written in one other place -- the parser, setting it from the feed's own XML -- so a title updates itself and cannot be chosen. |
+
+Import is genuinely reachable: `O` opens the picker and the result goes to
+`import_opml`.
+
+**Third of the twenty-one no-pointer applications examined, and a third
+distinct shape.** `notes` was wholesale -- a mouse-shaped UI and nine dead
+operations. `reminders` was specific and keyboard-driven, with two gaps now
+fixed. This one is neither: the feature is *reachable but one-way*. You can
+arrive at an organisation and not change it.
+
+**What the repair wants.** `rssreader` binds seventeen keys and is
+keyboard-driven by construction, like `reminders` -- so the answer is
+almost certainly a mode rather than a pointer layer, in the shape
+`apps/reminders`'s snooze prompt now uses: a key that offers the choices, a
+key that picks, any other key leaving. Three operations need three
+affordances, which is why this is filed rather than done in passing.

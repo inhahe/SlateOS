@@ -797,7 +797,6 @@ mod tests {
     )]
 
     use super::*;
-    use scratchdir::ScratchDir;
     use std::fs;
 
     // ------------------------------------------------------------------
@@ -904,7 +903,7 @@ mod tests {
         // This test used to pass against a *made-up* path because the check it
         // rested on compared first components and never touched the disk --
         // which is exactly the bug. See `crate::drives`.
-        let scratch = ScratchDir::new("dropzone_same_drive");
+        let scratch = crate::guarded_scratch("dropzone_same_drive");
         let root = scratch.dir().to_path_buf();
         fs::write(root.join("file.txt"), "x").unwrap();
 
@@ -981,7 +980,7 @@ mod tests {
 
     #[test]
     fn operation_folder_target() {
-        let scratch = ScratchDir::new("dropzone_folder_target");
+        let scratch = crate::guarded_scratch("dropzone_folder_target");
         let root = scratch.dir().to_path_buf();
         fs::write(root.join("file.txt"), "x").unwrap();
         fs::create_dir(root.join("Documents")).unwrap();
@@ -1047,7 +1046,7 @@ mod tests {
         // process, and the clock they read only advances on a timer interrupt,
         // so a nanosecond tag is shared by every test that starts in the same
         // tick and they would scribble on each other's trees.
-        let scratch = scratchdir::ScratchDir::new("dropzone_nested");
+        let scratch = crate::guarded_scratch("dropzone_nested");
         let dir = scratch.dir();
         let project = dir.join("project");
         std::fs::create_dir_all(project.join("sub")).expect("tree");
@@ -1126,7 +1125,7 @@ mod tests {
 
     #[test]
     fn handle_drop_valid() {
-        let scratch = ScratchDir::new("dropzone_handle_drop");
+        let scratch = crate::guarded_scratch("dropzone_handle_drop");
         let root = scratch.dir().to_path_buf();
         fs::write(root.join("file.txt"), "x").unwrap();
 

@@ -78,10 +78,16 @@ use std::collections::HashMap;
 
 /// What the window says before anything has been written.
 ///
+/// The first line names the key, because until 2026-09-18 this app could not
+/// make a note at all and "No notes yet." was read as "you have not made one"
+/// -- which was not the reason. Now that it can, the empty state is where
+/// somebody is looking when they want to start, so it is where the key
+/// belongs.
+///
 /// The second line is the one that matters for a notes app and it is not
 /// about the fabrication: nothing here survives the window closing.
 const NOTHING_YET_LINES: [&str; 2] = [
-    "No notes yet.",
+    "No notes yet -- Ctrl+N makes one.",
     "Notebooks are not kept between runs, but Ctrl+S writes the selected note to a file.",
 ];
 
@@ -3580,7 +3586,7 @@ impl NotesApp {
             cmds.push(RenderCommand::Text {
                 x: x + width / 2.0 - 80.0,
                 y: y + height / 2.0 - 10.0,
-                text: "Select a note to edit".to_owned(),
+                text: "Select a note, then Enter to write in it".to_owned(),
                 color: self.palette.subtext0,
                 font_size: 16.0,
                 font_weight: FontWeightHint::Light,

@@ -6822,10 +6822,24 @@ mod tests {
         }
         // Not a timing assertion so much as a liveness one: the old code did
         // not finish the first of these at all, so any bound at all is the
-        // difference being tested. A second is orders of magnitude of slack
-        // over the closed form.
+        // difference being tested.
+        //
+        // The bound was one second, justified as "orders of magnitude of slack
+        // over the closed form". **That reasoning is wrong, and lane A
+        // measured why** (2026-09-18): a ratio bound assumes the noise is
+        // proportional, so a slower machine stretches the work and the ceiling
+        // together and the bound survives. A descheduled VM does not stretch,
+        // it *stops* -- for an absolute number of milliseconds -- and an
+        // absolute stall blows through any ceiling smaller than itself however
+        // large the ratio is. Their observed stall on this machine was 988ms
+        // against a one-second ceiling: twelve milliseconds of margin on a
+        // test whose ratio looked like a thousandfold.
+        //
+        // Thirty seconds is above any stall this host has been seen to take,
+        // still catches the non-termination this test exists for, and is a
+        // fraction of the harness timeout that would catch it anyway.
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
+            started.elapsed() < std::time::Duration::from_secs(30),
             "parsing four impossible dates should be instant, took {:?}",
             started.elapsed()
         );

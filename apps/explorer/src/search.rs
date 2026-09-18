@@ -248,8 +248,6 @@ pub fn describe(found: &Found, query: &str) -> String {
 mod tests {
     use super::*;
 
-    use scratchdir::ScratchDir;
-
     /// Build `root/<rel>` files, creating parents as needed.
     fn make(root: &Path, rels: &[&str]) {
         for rel in rels {
@@ -264,7 +262,7 @@ mod tests {
     /// The walk descends, and finds a match in a subfolder.
     #[test]
     fn a_match_below_the_starting_folder_is_found() {
-        let scratch = ScratchDir::new("explorer-search-nested");
+        let scratch = crate::guarded_scratch("explorer-search-nested");
         let root = scratch.dir();
         make(
             root,
@@ -285,7 +283,7 @@ mod tests {
     /// near ones.
     #[test]
     fn results_arrive_shallowest_first() {
-        let scratch = ScratchDir::new("explorer-search-order");
+        let scratch = crate::guarded_scratch("explorer-search-order");
         let root = scratch.dir();
         make(root, &["a/b/c/match-deep.txt", "match-top.txt"]);
 
@@ -301,7 +299,7 @@ mod tests {
     /// A hidden file is skipped unless hidden files are being shown.
     #[test]
     fn hidden_files_follow_the_view_setting() {
-        let scratch = ScratchDir::new("explorer-search-hidden");
+        let scratch = crate::guarded_scratch("explorer-search-hidden");
         let root = scratch.dir();
         make(root, &[".hidden-report.txt", "plain-report.txt"]);
 
@@ -316,7 +314,7 @@ mod tests {
     /// asks for and is invisible in a listing of the folder itself.
     #[test]
     fn a_hidden_folder_is_not_descended() {
-        let scratch = ScratchDir::new("explorer-search-hiddendir");
+        let scratch = crate::guarded_scratch("explorer-search-hiddendir");
         let root = scratch.dir();
         make(root, &[".git/config-report.txt", "visible-report.txt"]);
 
@@ -328,7 +326,7 @@ mod tests {
     /// An empty query walks nothing at all.
     #[test]
     fn an_empty_query_does_not_walk() {
-        let scratch = ScratchDir::new("explorer-search-empty");
+        let scratch = crate::guarded_scratch("explorer-search-empty");
         let root = scratch.dir();
         make(root, &["a.txt", "b.txt"]);
 
@@ -338,7 +336,7 @@ mod tests {
     /// A folder that is not there is reported as unreadable, not as empty.
     #[test]
     fn a_missing_root_is_unreadable_rather_than_empty() {
-        let scratch = ScratchDir::new("explorer-search-missing");
+        let scratch = crate::guarded_scratch("explorer-search-missing");
         let found = find(&scratch.dir().join("no-such-folder"), "x", false);
         assert_eq!(found.unreadable, 1);
         assert!(found.paths.is_empty());
@@ -347,7 +345,7 @@ mod tests {
     /// A query with a separator matches the path, not just the name.
     #[test]
     fn a_path_query_finds_a_file_by_its_folder() {
-        let scratch = ScratchDir::new("explorer-search-pathquery");
+        let scratch = crate::guarded_scratch("explorer-search-pathquery");
         let root = scratch.dir();
         make(root, &["sub/notes.txt", "other/notes.txt"]);
 
@@ -368,7 +366,7 @@ mod tests {
     /// folder called `sub`, which is a path match and useless as a default.
     #[test]
     fn a_bare_query_does_not_match_a_parent_folders_name() {
-        let scratch = ScratchDir::new("explorer-search-barequery");
+        let scratch = crate::guarded_scratch("explorer-search-barequery");
         let root = scratch.dir();
         make(root, &["sub/notes.txt", "sub/other.txt"]);
 
@@ -386,7 +384,7 @@ mod tests {
     /// green suite, broken search, on the machine that matters.
     #[test]
     fn a_path_query_uses_a_forward_slash_on_every_host() {
-        let scratch = ScratchDir::new("explorer-search-sep");
+        let scratch = crate::guarded_scratch("explorer-search-sep");
         let root = scratch.dir();
         make(root, &["a/b/deep.txt"]);
 

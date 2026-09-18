@@ -218,12 +218,11 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
-    use scratchdir::ScratchDir;
     use std::fs;
 
     #[test]
     fn two_paths_in_one_directory_are_on_one_drive() {
-        let scratch = ScratchDir::new("drives_same");
+        let scratch = crate::guarded_scratch("drives_same");
         let root = scratch.dir();
         fs::write(root.join("a.txt"), "a").unwrap();
         fs::write(root.join("b.txt"), "b").unwrap();
@@ -237,7 +236,7 @@ mod tests {
     /// The destination of a copy does not exist yet, and must still resolve.
     #[test]
     fn a_path_that_does_not_exist_yet_resolves_through_its_parent() {
-        let scratch = ScratchDir::new("drives_future");
+        let scratch = crate::guarded_scratch("drives_future");
         let root = scratch.dir();
         fs::write(root.join("here.txt"), "x").unwrap();
         let not_yet = root.join("deeper/and/deeper/new.txt");
@@ -250,7 +249,7 @@ mod tests {
     /// A directory and a file inside it are on one drive.
     #[test]
     fn a_directory_and_its_contents_are_on_one_drive() {
-        let scratch = ScratchDir::new("drives_parent");
+        let scratch = crate::guarded_scratch("drives_parent");
         let root = scratch.dir();
         fs::create_dir(root.join("sub")).unwrap();
         fs::write(root.join("sub/file.txt"), "x").unwrap();
@@ -277,7 +276,7 @@ mod tests {
 
     #[test]
     fn two_operations_under_one_directory_share_its_drive() {
-        let scratch = ScratchDir::new("driveset_share");
+        let scratch = crate::guarded_scratch("driveset_share");
         let root = scratch.dir();
         fs::write(root.join("a.txt"), "a").unwrap();
         fs::write(root.join("b.txt"), "b").unwrap();
@@ -291,7 +290,7 @@ mod tests {
     /// An operation that touches nothing is in nothing's way.
     #[test]
     fn an_empty_set_shares_with_nothing() {
-        let scratch = ScratchDir::new("driveset_empty");
+        let scratch = crate::guarded_scratch("driveset_empty");
         let root = scratch.dir();
         fs::write(root.join("a.txt"), "a").unwrap();
 
@@ -310,7 +309,7 @@ mod tests {
     /// one disk is what the rule exists to prevent.
     #[test]
     fn an_unresolved_path_collides_with_everything() {
-        let scratch = ScratchDir::new("driveset_unknown");
+        let scratch = crate::guarded_scratch("driveset_unknown");
         let root = scratch.dir();
         fs::write(root.join("a.txt"), "a").unwrap();
 
@@ -325,7 +324,7 @@ mod tests {
     /// And one known side is not enough either.
     #[test]
     fn one_known_side_still_answers_nothing() {
-        let scratch = ScratchDir::new("drives_half");
+        let scratch = crate::guarded_scratch("drives_half");
         let root = scratch.dir();
         fs::write(root.join("real.txt"), "x").unwrap();
 

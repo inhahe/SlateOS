@@ -159580,6 +159580,146 @@ should not be starting from here: the whole log, the test name from the
 `---- <name> stdout ----` block, and whether `cargo test -p <crate>` alone
 reproduces it.
 
+
+## The second one, identified and FIXED the same day (2026-09-18)
+
+**Identified, with the mechanism.** A `cargo test --workspace` failed on
+`gui/desktop`'s `icons::tests::populate_defaults_creates_four_icons` --
+`left: 2, right: 4`. The same test passes alone (`1 passed`) and the whole
+`desktop` suite passes on its own (`2843 passed`). It is a race on the process
+environment.
+
+| | |
+|---|---|
+| what the test needs | `populate_defaults` adds "Documents" and "Home" **only if `HOME` is set**, so the count is 4 with it and 2 without |
+| who moves `HOME` | `settingsfile::testing` -- `config_turn`/`with_scratch_config` point `HOME` and `XDG_CONFIG_HOME` at a scratch directory and restore them in `Drop` with `set_var`/`remove_var` |
+| why `desktop` is exposed | it depends on `settingsfile` with `features = ["testing"]`, and `gui/desktop/src/idle_lock.rs` calls `with_scratch_config` in four tests |
+| why the lock does not help | `ENV_LOCK` serialises the tests that **take** it. `populate_defaults_creates_four_icons` does not take it, so it reads `HOME` while another thread is writing it |
+
+**This is not the flake recorded above.** That one was a 424-test crate --
+`apps/explorer`'s size at the time -- and its log was deleted before it was
+read. This is a different test in a different crate, and the only reason it
+could be diagnosed is that **the log was still on disk**: `build/wsV.log` held
+the assertion, the counts and the crate. The rule that produced that
+difference is the one in this file already -- *delete a log only after reading
+a PASS* -- and it is worth the disk.
+
+**The fix is on the test, not the code.** `populate_defaults` reading `HOME` is
+correct: a desktop with a home directory should offer it. The test has to
+serialise against the writers, which means taking the same lock --
+`settingsfile::testing::config_turn()` for the duration, or running the body
+inside `with_scratch_config`, which also makes the expected count independent
+of whether the developer's machine has `HOME` at all.
+
+**Fixed.** `icons.rs` now takes `settingsfile::testing::config_turn()` at the
+four places that reach `populate_defaults` -- three tests and, more
+importantly, the `populated()` helper, which **eight further tests call**. The
+guard only has to span the call, because the environment is read once while
+the icons are built and the assertions afterwards read the built list.
+
+**A green run does not prove a race is fixed**, and this one is not being
+claimed on that basis: 2843 tests passed afterwards, but they passed before
+too, four times tonight. The argument is structural -- the reader now takes the
+same lock as the writers, so the two cannot overlap.
+
+**This class already had an entry and a remedy.**
+`TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS`
+records it, `config_turn()` was built for it, and 23 of 27 `oswindow` tests
+were converted. `gui/desktop/src/icons.rs` was missed -- and the crate's own
+`session/tests.rs` uses `config_turn()` in four places, so the idiom was
+already in the building. **A remedy applied where the failure was seen does
+not reach the places it was not**, which is the same shape as the node/edge
+property row earlier today: a fix looks complete from the diff.
+
+## The first one, caught at last -- with a weaker diagnosis, said so (2026-09-18)
+
+**The original flake reproduced**, in the same workspace run discipline that
+caught the second: `apps/explorer`, `426 passed; 1 failed`, which is this
+crate's suite and matches the `424 passed; 1 failed` recorded above at its size
+then. The failing test is
+`the_icon_grid_wraps_and_survives_a_pane_narrower_than_a_cell`, panicking on
+`text_y(&tree, "a.txt").expect("a")` -- the render did not contain a file the
+test had just written.
+
+**Same class as the second, and this crate is exposed the same way:** five
+tests here call `settingsfile::testing::with_scratch_config`, which
+`remove_var("HOME")`s and `set_var`s `XDG_CONFIG_HOME` under `ENV_LOCK`, while
+`ScratchDir::new` -- reached by every scratch-using test through the local
+`temp_dir` helper -- calls `std::env::temp_dir()`, which **reads** the
+environment without taking that lock.
+
+**This diagnosis is weaker than the second one and should be read as such.**
+For `gui/desktop` the chain was complete and checkable: `HOME` absent gives two
+icons instead of four, which is exactly the assertion that failed. Here the
+chain is *plausible but unproven* -- a scratch directory resolved while another
+thread rewrites the environment block could land somewhere other than where the
+files were written, which would produce exactly this symptom, but **it has not
+been observed doing so.** `std::env::set_var` is `unsafe` in Rust 2024 because
+concurrent read-and-write of the environment is undefined, so "undefined" is
+the honest description of the mechanism rather than a specific wrong value.
+
+**The fix is right regardless of whether that is the mechanism**, which is why
+it was applied: a reader of the environment in a binary that also writes it
+should hold the same lock, and `temp_dir` is the one place every scratch-using
+test in this crate passes through. If the flake recurs after this, the
+hypothesis is wrong and the log will say so -- which is the point of keeping
+them.
+
+## The population, swept rather than waited for (2026-09-18)
+
+**Two of these were found by a test failing. The rest were looked for.** The
+query is: which test binaries both WRITE the environment (any call to
+`settingsfile::testing`) and READ it (`env::var_os`, `env::temp_dir`, or
+`ScratchDir::new`, which calls `temp_dir` internally)? Five crates write it:
+
+| crate | writers | readers | guards | state |
+|---|---|---|---|---|
+| `gui/desktop` | 59 | 6 | 8 | fixed tonight |
+| `apps/settings` | 16 | 2 | 9 | already guarded |
+| `gui/window` | 2 | 0 | 1 | no readers |
+| `apps/fileassoc` | 1 | 3 | 0 | **fixed tonight** -- three `ScratchDir::new` calls with no guard at all |
+| `apps/explorer` | 34 | 41 | 1 | **fully fixed 2026-09-18** -- see below |
+
+**`apps/explorer` is now done (2026-09-18).** All 38 scratch-directory
+creations across `main.rs`, `columns.rs`, `drives.rs`, `dropzone.rs`,
+`fileops.rs` and `search.rs` are routed through one `#[cfg(test)]
+pub(crate) guarded_scratch` in the crate root, which takes `config_turn()`
+before calling `ScratchDir::new`. **One place, so the lock cannot be omitted by
+a new test that copies an old one** -- which is how 35 of the 38 came to lack it
+in the first place. Three now-unused `ScratchDir` imports were removed. 427
+tests.
+
+The paragraph below is what it said while the work was outstanding, kept
+because the reasoning for stopping was sound and the note did its job:
+
+**`apps/explorer` was left partly done, deliberately.** The failure that was
+actually observed goes through `dir_of` -> `temp_dir`, which now holds the
+lock, so the reproduced case is covered. **35 further `ScratchDir::new` calls
+in `columns.rs`, `drives.rs`, `dropzone.rs`, `fileops.rs` and `search.rs`
+bypass that helper** and are exposed to the same race. They want routing
+through one guarded helper -- `#[cfg(test)] pub(crate)` in the crate root, so
+the module test files can reach it -- which is a 38-site mechanical change
+across six files, and not something to do in the minutes before a merge with
+another lane mid-boot. It is a focused change with a clear shape, and this is
+the note that says so rather than a silence that implies the work is finished.
+
+**One mistake worth keeping from the `fileassoc` fix:** the helper was inserted
+*before* the call sites were rewritten, so the rewrite caught the helper's own
+call and made it call itself. `warning: function cannot return without
+recursing` is a good compiler message and it cost a minute -- but the general
+form is worth naming, because it will recur in any insert-and-rewrite edit:
+**rewrite the call sites first, then add the definition.** A definition added
+first is indistinguishable from a call site to a textual replace.
+
+**The wider point, which applies beyond this test.** `std::env::set_var` is
+`unsafe` in Rust 2024 precisely because the environment is process-global and
+tests are threads. Any test that reads an environment variable is racing every
+test that writes one, in the same binary, whether or not either knows about
+the other -- and the failure surfaces as a wrong *value*, not a crash, so it
+reads as a logic bug in whatever happened to be looking. **A lock only works
+when both sides take it**, and the side that merely reads is the one that will
+forget.
+
 ## `TD-C-A-WRITE-ONLY-FIELD-THE-FIELD-GATE-DOES-NOT-REPORT` (lane C, 2026-09-17)
 
 **In short:** `apps/reminders`'s `last_file_action` was written on every open
@@ -159921,6 +160061,17 @@ and has no writer anywhere in production:
 `pdfviewer` is the one that matters most: a document reader that cannot show a
 document in the colours it was written in.
 
+**`explorer`, found only by the whole-crate re-read (2026-09-18, fixed).** The
+file manager has three view modes -- `Details`, `List`, `Icons` -- and
+`set_view_mode` was the only writer of `view_mode` and had no caller, so the
+window was permanently in `Details`. The other two are not stubs: they are
+obeyed by the layout, the navigation step size, the header and the item
+renderer, and could never be seen. `1`/`2`/`3` select them now, with a test
+that the *drawing* differs and not merely the field.
+
+This one is the argument for re-reading whole crates: `explorer` has **eight**
+source files, and every sweep before this read `main.rs` alone.
+
 **`metronome`, and the strongest form of the signal.** Its practice panel
 draws three lines:
 
@@ -159976,6 +160127,22 @@ which matches any drawing call that happens to take the field as an argument.
 direction** -- a probe that under-reports wastes an afternoon, while one that
 over-reports gets working programs filed as broken. Of the 40, the two read so
 far were both wrong.
+
+**A fourth probe, built after the authoring finds, and it is the clearest
+result of the four.** The question that found `notes` -- *can the user produce
+the thing the app is a list of?* -- was mechanised as "app-struct `Vec` fields
+with no live `push`". It returns **92 collections across 48 apps**, and the
+three most promising rows were all false positives on inspection:
+`launcher`'s `apps` comes from `builtin_app_database()`, `dictionary`'s
+`entries` from `build_dictionary()`, `colorpicker`'s `palettes` from
+`vec![default_palette]` -- **assigned wholesale, which a search for `.push`
+cannot see.** Most of the rest are derived lists (`legal_moves_for_selected`,
+`cached_blocks`, `treemap_rects`) that no user is supposed to produce.
+
+**The question is good and the mechanisation is not**, which is the whole
+lesson in one line. `notes`, `slides` and `diagram` were found by asking what
+three programs are *for* -- a sentence each, written by hand -- and no query
+written afterwards reproduces that. **Stop building these; read the app.**
 
 **The conclusion for anyone picking this up:** the probes in this entry are
 worth running once, as a way of choosing what to read. **They are not worth
@@ -160288,6 +160455,52 @@ not "be careful" -- it is knowing the specific shapes.
 | 6 | **Method mutation.** A field with no `=` anywhere may still be written by its own methods: `self.volume.increase(5)`. | Nearly filed `videoplayer`'s volume as frozen. |
 | 7 | **Sub-field assignment.** `self.password_opts.use_symbols = x` is invisible to a search for `.use_symbols` on the app struct, and `self.time_signature = sig` makes `beats_per_measure` *look* frozen when it is not. | Missed `passwordgen` on the first pass; nearly filed `metronome`'s time signature, which works. |
 
+| 8 | **One file vs the crate.** Every sweep run on 2026-09-18 globbed `apps/*/src/main.rs`. **12 of 141 apps have more than one source file** -- `explorer` has 8, `settings` 5, `editor` 4. | Concluded `apps/editor` "has zero typing sites" and could not be typed in. Its typing lives in `input.rs`. A text editor was one sentence away from being filed as unable to accept text. |
+
+| 12 | **The test build never compiled it.** Code behind `#[cfg(not(test))]` is absent from `cargo test`, so the suite passes over it without type-checking a line. The mirror image of lane A's `#[cfg(unix)]` lint, which no clippy on a Windows host ever compiles. | Added `apps/terminal`'s shell bridge behind `#[cfg(not(test))]`; **126 tests passed over code that had never been compiled.** It was caught only because `main` then referenced functions absent from a test build, which failed loudly -- had it not, an unchecked feature would have shipped behind a green suite. |
+| 11 | **One list is checked and its twin is not.** `apps/editor` has an exhaustive `match` that forces a new `Command` to be handled -- and a hand-written `Command::ALL: [Self; 14]` that decides whether the guard test ever *reaches* it. The compiler enforces the first and nothing enforces the second. | A variant added to the enum and omitted from `ALL` compiles, with a guard-test arm that is written, never executed, and reported as passing. **No symptom at all** -- worse than passing for the wrong reason, because there is no run to inspect. |
+| 10 | **A heredoc eats the backslashes.** A `python - <<'PYEOF'` block is supposed to pass its body through literally; in this shell it did not, three times. `\x1b` arrived as a real ESC byte and `\r\n` as a real CRLF. | Wrote literal control characters into a Rust byte literal (invalid source), and a lone CRLF into `known-issues.md` -- in a paragraph *about* an escape sequence, which is how it got past reading. The habit that fixes it: **any script containing backslash escapes goes in a file, not a heredoc.** |
+
+| 9 | **A function used as a value.** `self.moving(shift, Document::move_up)` passes the function; it never writes `move_up(`. Every "who calls this" query here counts `name(`, so a callback looks dead. | Concluded `apps/editor`'s cursor could not move up or down. It moves. Its arrow keys pass the movement functions to a shared `moving` helper, which is *better* code than calling each directly -- so the query is most wrong about the tidiest implementations. |
+
+**The ninth was found the same way as the eighth -- by reading an app the query
+had just accused** -- and it prompted an audit of every "no caller" claim acted
+on that day (`notes`, `slides`, `diagram`, `explorer`, `rssreader`, `netscan`,
+`pdfviewer`: 15 functions). **None is passed as a value anywhere**, so all of
+them hold. The check is one line and belongs in any future sweep: count
+occurrences of the bare name against occurrences of `name(`, and read the
+difference.
+
+**Eight and twelve are the same question asked of different axes**, and
+together they say what a green run actually covers: shape 8 is *which files*
+were read, shape 12 is *which configuration* was built. A suite is silent about
+every line outside both. The practical form is two questions to ask of any
+passing run -- **did it read the whole crate, and did it build the
+configuration the user gets?** -- and on this project the answers differ from
+the obvious one often enough to be worth asking aloud: 12 of 141 apps have more
+than one source file, and `cargo test` builds `cfg(test)` while the shipped
+binary is `cfg(not(test))`.
+
+**The eleventh is the one to look for in any codebase with a guard test.**
+The pattern "an exhaustive `match` plus an array of every variant" is a good
+design -- `apps/editor`'s comment is right that it makes the compiler ask the
+question at the one moment somebody holds the answer. But the array is the
+half that decides whether the test *runs*, and it is the half the compiler
+cannot check. Anywhere the two are separate, adding a case can produce a test
+that is written and dead. The tell is a length annotation: `[Self; 14]` is a
+hand-maintained count, and a hand-maintained count is a second list wearing a
+number.
+
+**The eighth is the one that should worry a reader of this entry most**, because
+it silently narrows every other row: a search that is *correct* about the file
+it read is still wrong about the program when the program is bigger than the
+file. Two of the apps fixed on 2026-09-18 -- `imageviewer` and `pdfviewer` --
+are on that twelve, and their frozen-field findings were made from `main.rs`
+alone. **They were re-checked across `video.rs` and `pdf.rs` after this was
+noticed**, and hold: the only writers of `show_toolbar`, `show_status_bar` and
+`dark_mode` are the ones added by the fixes. That is luck rather than method,
+and the method is `pathlib.Path(f'apps/{app}/src').glob('*.rs')`.
+
 **The shape they share** is that a search reports on *text* and the question
 was about *behaviour*. Every one of these is a case where the text and the
 behaviour come apart -- and they come apart most often in exactly the code
@@ -160370,6 +160583,21 @@ finished.
 | `imageviewer` | `B`, `S` | **no** |
 | `spreadsheet` | `Ctrl+T` | **no** |
 | `mindmap` | `B` | **no** |
+
+**2026-09-18, later: the authoring keys were given the same treatment as they
+landed**, so the three fixes did not widen this entry. `notes` says "No notes
+yet -- Ctrl+N makes one." where the user is already looking, and its editor
+placeholder reads "Select a note, then Enter to write in it"; `diagram`'s
+properties panel reads "Label (F2)" for both a node and an edge. **The empty
+state is the best place a primary action can be named** -- it is on screen
+exactly when somebody wants to start and has nothing else to read.
+
+Fixing that also turned up an asymmetry worth recording: `diagram` draws the
+label in *two* property rows, node and edge, and the live-buffer fix had gone
+into only the node one -- so an edge being relabelled showed the new text on
+the canvas and the old text in the panel. No test covered edges to say so.
+`a_user_can_label_an_edge` does now. **A fix applied to one of a pair is a
+fix that looks complete from the diff.**
 
 **The pattern that worked** is naming the key beside the thing it controls,
 which costs one format string wherever the app already draws the value. It
@@ -160462,8 +160690,20 @@ otherwise: `S`, `O`, `L`, `A` and `I` add shapes outside this mode, so a title
 containing any of them would have littered the slide while being written. 93
 tests, up from 90.
 
-**Still open here:** the deck title is `"Untitled Presentation"` with no
-writer, and `export_as` names the file with it.
+**The deck title too, later the same day.** `Ctrl+Shift+T` names the deck --
+it had no writer, so every deck was "Untitled Presentation" in the window bar
+*and* in the filename `export_as` builds. It shares the text mode through an
+`EditTarget` enum rather than a second `Option`, since the deck's name is not
+an element and has no id. An empty name is refused rather than blanking the
+bar and exporting a file called ".pptx".
+
+**Getting it in took three attempts, all the same mistake in different
+costumes:** the enum went inside a `struct` body (I anchored on a field's doc
+comment), then between a `#[derive(Debug)]` and the struct it belonged to --
+which silently gave *my* enum that derive and produced a conflicting-impl
+error 300 lines from the cause. Earlier the same evening an `impl` block went
+inside another `impl`. **An anchor chosen by its text lands wherever that text
+is, and in Rust the space above an item is owned by the item.** 96 tests.
 ## `TD-C-NOTES-CANNOT-MAKE-A-NOTE` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** `apps/notes` starts empty and cannot create a note, title one, or
@@ -160614,6 +160854,194 @@ it stops the keys underneath it.**
 corollary, since each row here is stated as *nothing writes this* rather than
 *this function has no caller*, which is the only form that survives a second
 implementation path.
+
+## `TD-C-THE-TEXT-EDITOR-CANNOT-TYPE-A-TAB` -- **PARTLY FIXED 2026-09-18** (lane C)
+
+**In short:** `apps/editor` indents with spaces and cannot be told otherwise.
+`Document::use_spaces` is `true` at construction and **has no production
+writer**, so pressing Tab always inserts spaces, and the status bar's
+indentation readout can only ever say "Spaces: N" and never "Tab width: N".
+**A Makefile cannot be edited correctly in it**, because `make` requires a
+literal tab, and the same goes for Go.
+
+**Verified.**
+
+| | |
+|---|---|
+| the field | `pub use_spaces: bool`, set `true` at both constructors |
+| writers in production | **none.** The three assignments (`d.use_spaces = true`, `doc.use_spaces = true`, `doc.use_spaces = false`) are all inside the test module -- `rustlex.live_code` blanks all three |
+| what obeys it | `ch == '\t' && doc.use_spaces` converts a typed tab to spaces, and `let indent = if doc.use_spaces` picks the indent string |
+| what displays it | the status bar, `format!("Spaces: {}", doc.tab_width)` versus `format!("Tab width: {}", doc.tab_width)` |
+
+**The comment is the part worth keeping.** Beside the status-bar code stands:
+
+> Indentation mode. The document already knows both halves -- `use_spaces` and
+> `tab_width` are set when a file is read -- and `roadmap-detailed.md` §4.4
+> asks for it in this bar; it was simply never drawn.
+
+**Nothing sets `use_spaces` when a file is read.** There is no indent detection
+anywhere in the crate -- no scan for leading tabs, no heuristic, nothing. The
+comment describes a mechanism that does not exist, and it was written by
+somebody *adding* the readout, who reasonably assumed the value behind it was
+real because it had a name and a type. **A comment asserting a mechanism is
+worse than silence**: it answers the next reader's question wrongly, and it
+answered mine -- I nearly stopped looking when I read it.
+
+**The tests are why the `false` branch is well-built and unreachable.** They
+set `use_spaces` both ways and assert both behaviours, so the tab-indent path
+is covered, correct and impossible to reach from the program. That is the same
+shape as `apps/slides`'s themes and `apps/explorer`'s view modes: **complete
+machinery, tested, with no way in.**
+
+**Detection landed (2026-09-18), which is the half that matters.**
+`Document::from_file` now decides indentation from the file, beside the
+line-ending detection it mirrors -- both are properties of the document rather
+than preferences of the program. The first indented line decides: a leading tab
+means tabs, a leading space means spaces, an unindented file defaults to
+spaces. A file that mixes them is already inconsistent and no answer serves it;
+following the first is what an editor can defend. Opening a Makefile and typing
+no longer corrupts it. 210 tests, up from 207.
+
+**The toggle landed too (2026-09-18), so this is now fully fixed.** `Ctrl+T`
+switches the active document, the status bar names the key beside the value it
+already drew, and the menu row reads "Tabs or Spaces".
+
+**Adding one command touched nine places**, and the crate caught five of them
+for me: the compiler demanded a menu label, a shortcut string, an enabled
+predicate, a dispatch arm and an arm in the guard test
+`every_shortcut_a_menu_advertises_is_really_bound`, whose inner match is
+exhaustive *on purpose* -- its comment says a new command should stop the file
+compiling "until someone says what pressing its advertised key should do". Two
+more were manual lists that do not fail loudly: `Command::ALL`, which decides
+whether the guard test arm ever runs, and a `letter_key` name-to-key mapping
+that panicked with "no key is named T".
+
+**`Command::ALL` is the interesting one.** The exhaustive match forces the arm
+to be *written*; `ALL` decides whether it is *run*. A variant left out of that
+array compiles, with a test arm that never executes -- passing by accident, in
+its purest form. The two have to be changed together and nothing makes that
+true except noticing.
+
+~~**Still missing: the toggle**~~, so a *new* file cannot be told to use tabs --
+only an existing tab-indented one is honoured. The status bar already draws the
+value, so it needs a key and a name beside it, not new machinery.
+
+**What the repair wants.** Two things, and the second is the one that matters:
+a key to toggle it (the status bar already draws the value, so it only needs
+naming), and **detection on read** -- if any line begins with a tab, the file
+uses tabs. Without the second, opening a Makefile and typing still corrupts
+it, which is the case the whole finding is about.
+
+## `TD-C-THE-TERMINAL-ECHOES-AND-RUNS-NOTHING` -- **FIXED 2026-09-18** (lane C)
+
+**In short:** `apps/terminal` has no shell and starts no process. Typing works
+and the characters appear -- the PTY's cooked-mode line discipline echoes them
+locally -- and pressing Enter queues the line to a slave end that **nothing
+reads**. Nothing in the window says so, and the module doc says the opposite.
+
+**Verified.**
+
+| | |
+|---|---|
+| processes started | **none.** `Command::new`, `spawn(` and `exec(` appear zero times in the crate |
+| why typing still shows | `PtyInner` defaults to `PtyTerminalMode::Cooked`, whose line discipline "buffers input, echoes characters, and translates control keys" |
+| where a line goes | `queue_to_slave`, into a `ByteChannel` with no reader |
+| what the doc claims | *"keystrokes go to a child through `pty::PtyMaster` and its output comes back"* |
+| what the window admits | nothing -- the only "cannot"/"nothing" strings in the crate are test assertion messages |
+
+**The echo is what makes this worth filing rather than shrugging at.** An empty
+window that does nothing reads as unfinished. A window that *responds to
+typing* reads as working, so the first thing a user does is type a command and
+press Enter -- and the silence that follows is indistinguishable from a command
+that produced no output. `ls` returning nothing looks exactly like `ls` in an
+empty directory.
+
+**`pty.rs` is not the problem and should not be touched.** It is a careful,
+complete implementation -- master/slave channels, line discipline, cooked and
+raw modes, signal translation, queueing rather than dropping on a full channel
+-- and its own doc is honest about the boundary: the emulator "can then deliver
+these to the child process via the OS's ..." That sentence describes work not
+done. `main.rs`'s doc is where it became a claim that it was.
+
+**Same shape as `apps/editor`'s `use_spaces` comment**, filed hours earlier: a
+doc sentence describing a mechanism that does not exist, written by somebody
+wiring up the half that does. There it was "set when a file is read" over a
+crate with no indent detection; here it is "keystrokes go to a child" over a
+crate that starts no child. **Both were written truthfully about the
+*intention* and read as claims about the *program*.**
+
+**Worse than filed: it drew a shell prompt.** `main` fed
+`"Welcome to Slate OS Terminal\r\n$ "`, so the window opened with a `$ `
+waiting. **A prompt is not decoration; it is a claim that a shell is waiting
+for a command** -- the single most direct way this app could assert the thing
+it cannot do. Found only by opening `main` to place the fix.
+
+**Fixed (2026-09-18):** the prompt is gone and the greeting says why -- "There
+is no shell here. Nothing in this program starts a process, so what you type is
+echoed and then goes nowhere. Silence after Enter is not a command that
+produced no output." The module doc's "keystrokes go to a child" claim and the
+absence of a real process remain; those are the larger half.
+
+**The remaining half landed (2026-09-18).** `main` now starts the shell from
+`$SHELL` (or `/bin/sh`) and bridges its pipes to the slave end of the PTY the
+emulator already drains. Two threads copy bytes in each direction, because
+`std` has no portable non-blocking read of a child's stdout -- a read must
+block somewhere, and a thread is the only place it can block without stopping
+the frame.
+
+**The tested seam did not change**, which is why this adds no flake risk on a
+night spent removing them: `drain_child` still reads the master and the
+existing tests still write to the slave directly. The threads are a thin I/O
+bridge with no new assertions hanging off them.
+
+**Three outcomes, three things said**, because they are three different
+situations for whoever is looking at the window:
+
+| | |
+|---|---|
+| the shell started | nothing -- it will greet them itself |
+| the shell failed | "No shell." plus the program and the error, then the echo warning |
+| there is no pty | "No terminal device." -- nothing can be connected at all |
+
+**What is verified and what is not, plainly.** The seam, the greeting logic and
+both targets' clippy are checked; 126 tests pass. **That a real shell actually
+appears in the window is not covered by a test** -- it needs a process, a
+window and a shell on the machine running it, which is an integration test this
+lane does not have. The failure path is the one that matters for honesty and it
+is the one exercised on a host with no `/bin/sh`: the window says why.
+
+**The feasibility check that preceded it, kept because it was the useful part.**
+This entry first said spawning a process is "a much larger piece of work"
+without establishing whether it was possible at all. It is:
+
+| | |
+|---|---|
+| a shell to run | `userspace/shell` exists |
+| spawning works here | 4 real sites -- `apps/launcher`, `apps/explorer`, `gui/desktop`, `apps/installer` |
+| the pattern | `launcher::spawn_program` is `Command::new(path).spawn()`, whose own comment notes that waiting on the child "would make the launcher behave like a terminal" |
+
+So the work is not "can a process be started" but **connecting a child's stdio
+to the PTY that already exists**: piped stdin and stdout, a reader feeding
+`feed()`, and a decision about process lifetime. `pty.rs` is already the right
+shape for it -- master and slave ends, a line discipline, queueing rather than
+dropping. It is a real piece of work with concurrency in it, not a small one,
+and it is not blocked on anything.
+
+**A hazard this entry created, worth naming.** The sentence above recording
+that "`Command::new`, `spawn(` and `exec(` appear zero times" put those three
+names *into the file*, so `apps/terminal/src/main.rs` now matches a grep for
+the very thing it does not do. Checking which apps spawn processes returned
+terminal as a hit, from this comment. **Documenting an absence makes the file
+match searches for the thing that is absent** -- and the fix is the one this
+file already prescribes: run such questions through
+`rustlex.strip_noise(keep_literals=True)`, which blanks comments and left four
+real sites out of six candidate files.
+
+**What the repair wants, in order.** The window should say it has no shell --
+one line, on the §862 pattern, since a terminal that silently swallows commands
+is the most convincing wrong answer this app can give. The module doc should
+describe the emulator it is rather than the one it will be. Spawning a real
+process is a much larger piece of work and is not a prerequisite for either.
 
 ### [A] `faceunlock::verify()` returns Matched unconditionally, and my first attempt to document that understated it -- 2026-09-17
 

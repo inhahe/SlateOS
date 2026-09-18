@@ -77238,7 +77238,7 @@ a plain `str.replace` would have silently edited the wrong one.
 
 *(Audited my own 58 appliers against that: 54 pair every `.replace` with a
 count assertion. The four that do not are `.replace("_", "")` on a string,
-`replace(microsecond=0)` on a datetime, `.replace(b" ", b"")` stripping
+`replace(microsecond=0)` on a datetime, `.replace(b"\x00", b"")` stripping
 NULs, and one already-applied script -- none of them anchored edits. The
 convention held, which I only know because I checked it rather than
 assuming I had followed it.)*

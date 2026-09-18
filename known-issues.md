@@ -161890,6 +161890,62 @@ constant and this witness runs after a good deal of other network activity,
 but a hypothesis and not a finding. The cause is unknown; only the rate and
 the failing call are established.
 
+#### Root-caused the same day: `submit_and_reap` polls the completion queue exactly once
+
+**The hypothesis above is wrong, and the code says so plainly.** A port
+still held returns `KernelError::AddrInUse` from `listen()`, which is a
+distinct arm -- so whatever happened, it was not port reuse. Following the
+`InternalError` instead of the guess:
+
+`net::socket::listen` delegates to `netstack_client::listen`, which is two
+statements: `attach_ring()?` and `submit_and_reap(&ring, &sqe)`. Three
+`InternalError` sites exist between them, and one is the mechanism:
+
+```rust
+if !ring.sq_push(sqe) { return Err(KernelError::ResourceExhausted); }
+self.submit_round()?;                  // the control round-trip
+self.session_open = true;
+let cqe = ring.cq_pop().ok_or(KernelError::InternalError)?;   // <-- here
+```
+
+**`cq_pop()` is called exactly once.** There is no retry, no bounded spin
+and no yield. If `submit_round()` returns before the daemon's completion is
+visible to this CPU, `listen` fails with `InternalError` -- and the function
+doc says what it assumes in as many words: *"run one control round-trip, and
+reap exactly one completion"*. A single poll against another process's
+producer is a race by construction, and a race that lands roughly one boot
+in twenty is exactly what a single poll with a usually-sufficient delay in
+front of it looks like.
+
+The other two `InternalError`s in the same function are consistency checks
+(`user_data` mismatch, a second unexpected completion), and `attach_ring`'s
+is a genuinely absent ring. Any of the three would be reported identically
+at the call site, which is worth noting on its own: **four distinct
+conditions arrive at the rung as one word.**
+
+**So both of my earlier readings were wrong, in different ways.** First I
+read the cluster's last line and concluded a netstack-startup blip had
+cascaded into the witness -- wrong direction. Then I corrected that to
+"`listen` is first, so `listen` is the root" -- right about the order and
+still wrong, because the root is a mechanism *inside* the first observable.
+
+**Which sharpens the causal-order rule built into
+`build/scan-guest-output.py` this morning.** "Read the first anomaly of a
+cluster before the rest" is correct and insufficient: the first anomaly is
+the first **observable**, and the root may be an unreported precondition or
+a single line inside that observable. The rule gets you to the right
+function; it does not get you to the right line, and stopping there is how
+I recorded a wrong hypothesis with a right-sounding provenance.
+
+**The fix, not applied.** Replace the single `cq_pop()` with a bounded
+retry -- poll, yield, poll, up to a small budget -- and return a
+*distinguishable* error on exhaustion rather than sharing `InternalError`
+with three unrelated conditions. Not applied here because it is in the
+control path every `netstack_client` call uses, not just `listen`, so it
+wants its own boot rather than a ride on one already in flight; and because
+the consistency checks below it should get their own error values in the
+same change, which is a slightly larger edit than it first appears.
+
 ### [A] Reading a large file panics the kernel, my cmake rung found it, and I had printed the number that predicted it -- 2026-09-18
 **Status:** FIXED 2026-09-18 (both read paths return an error; the rung skips and counts it) -- awaiting a boot
 

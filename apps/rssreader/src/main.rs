@@ -1826,6 +1826,20 @@ impl ActivePane {
 // Sidebar selection model
 // ============================================================================
 
+/// What the one-line prompt at the foot of the window is collecting.
+///
+/// One mode for both, rather than a flag each, because the two differ only
+/// in what is done with the finished string -- and because a second bare
+/// `bool` beside `search_active` is how a window ends up in two text modes
+/// at once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextEntry {
+    /// A new title for this feed.
+    RenameFeed(FeedId),
+    /// A name for a folder that does not exist yet.
+    NewFolder,
+}
+
 /// What is selected in the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarSelection {
@@ -2110,6 +2124,10 @@ pub struct RssReaderApp {
     pub filter_mode: FilterMode,
     pub search_query: String,
     pub search_active: bool,
+    /// The prompt at the foot of the window, if one is up.
+    pub text_entry: Option<TextEntry>,
+    /// What has been typed into that prompt.
+    pub text_buffer: String,
     pub search_results: Vec<SearchResult>,
 
     // Display state
@@ -2160,6 +2178,8 @@ impl RssReaderApp {
             filter_mode: FilterMode::All,
             search_query: String::new(),
             search_active: false,
+            text_entry: None,
+            text_buffer: String::new(),
             search_results: Vec::new(),
             show_help: false,
             show_add_feed_dialog: false,
@@ -2783,6 +2803,11 @@ impl RssReaderApp {
             return self.handle_search_key(key);
         }
 
+        // As does the rename/new-folder prompt, for the same reason.
+        if self.text_entry.is_some() {
+            return self.handle_text_entry_key(key);
+        }
+
         if key.modifiers.ctrl {
             return match key.key {
                 Key::F => {
@@ -2797,6 +2822,17 @@ impl RssReaderApp {
                 }
                 Key::O => {
                     self.open_file_dialog(false);
+                    EventResult::Consumed
+                }
+                // Both named in the help overlay and bound to nothing.
+                // `rename_feed` and `add_folder` existed; `rename_feed` had no
+                // caller at all, and `add_folder`'s only production caller was
+                // the OPML importer, so a folder could arrive by import and
+                // never be made.
+                Key::R => self.begin_rename_feed(),
+                Key::N => {
+                    self.text_buffer.clear();
+                    self.text_entry = Some(TextEntry::NewFolder);
                     EventResult::Consumed
                 }
                 Key::S => {
@@ -2976,6 +3012,84 @@ impl RssReaderApp {
                 EventResult::Consumed
             }
         }
+    }
+
+    /// Keys while the one-line prompt is up.
+    ///
+    /// The prompt takes every key, as the search box does: a folder named
+    /// "Books" must not hide the sidebar on its `b` and cycle the sort order
+    /// on its `o`.
+    fn handle_text_entry_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => {
+                self.text_entry = None;
+                self.text_buffer.clear();
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                self.commit_text_entry();
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                self.text_buffer.pop();
+                EventResult::Consumed
+            }
+            _ => {
+                let typed: String = key.typed().collect();
+                if typed.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.text_buffer.push_str(&typed);
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Do what the prompt was collecting a string for.
+    ///
+    /// An empty string cancels rather than committing: renaming a feed to ""
+    /// leaves a blank row in the sidebar that cannot be selected by name, and
+    /// there is no undo here to get the title back.
+    fn commit_text_entry(&mut self) {
+        let Some(entry) = self.text_entry.take() else {
+            return;
+        };
+        let text = self.text_buffer.trim().to_string();
+        self.text_buffer.clear();
+        if text.is_empty() {
+            return;
+        }
+        match entry {
+            TextEntry::RenameFeed(id) => {
+                self.rename_feed(id, &text);
+                self.status_message = format!("Renamed to {text}");
+            }
+            TextEntry::NewFolder => {
+                let id = self.add_folder(&text);
+                // Select what was just made: a new folder that appears
+                // somewhere in the sidebar without the selection following it
+                // is a folder the user has to go and find.
+                self.sidebar_selection = SidebarSelection::Folder(id);
+                self.status_message = format!("Created folder {text}");
+            }
+        }
+    }
+
+    /// Begin renaming the selected feed, seeded with its current title.
+    ///
+    /// Seeded rather than blank because a rename is usually an edit -- and a
+    /// blank box makes the old title something you have to remember.
+    fn begin_rename_feed(&mut self) -> EventResult {
+        let SidebarSelection::Feed(id) = self.sidebar_selection else {
+            self.status_message = "Select a feed in the sidebar to rename it".to_string();
+            return EventResult::Consumed;
+        };
+        let Some(feed) = self.feeds.iter().find(|f| f.id == id) else {
+            return EventResult::Ignored;
+        };
+        self.text_buffer = feed.title.clone();
+        self.text_entry = Some(TextEntry::RenameFeed(id));
+        EventResult::Consumed
     }
 
     /// Keep the selection inside the list the current filter shows.
@@ -4522,8 +4636,24 @@ impl RssReaderApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Status message
-        if !self.status_message.is_empty() {
+        // The prompt outranks the status message: it is a question waiting
+        // for an answer, and they share the one line.
+        if let Some(entry) = &self.text_entry {
+            let label = match entry {
+                TextEntry::RenameFeed(_) => "Rename feed",
+                TextEntry::NewFolder => "New folder",
+            };
+            cmds.push(RenderCommand::Text {
+                x: self.width / 2.0,
+                y: y + 7.0,
+                text: format!("{label}: {}_  (Enter to accept, Esc to cancel)", self.text_buffer),
+                font_size: 11.0,
+                color: self.palette.ink(self.palette.blue),
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(self.width / 2.0 - 120.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        } else if !self.status_message.is_empty() {
             cmds.push(RenderCommand::Text {
                 x: self.width / 2.0,
                 y: y + 7.0,
@@ -5434,6 +5564,135 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Ctrl+R renames the selected feed. It was advertised and bound to
+    /// nothing, and `rename_feed` had no caller at all.
+    #[test]
+    fn ctrl_r_renames_the_selected_feed() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&key_ev(Key::R, true, false));
+        assert_eq!(
+            a.text_buffer,
+            a.feeds.iter().find(|f| f.id == id).unwrap().title,
+            "the box did not open seeded with the current title"
+        );
+
+        a.text_buffer.clear();
+        for c in "Morning news".chars() {
+            a.handle_event(&types(c));
+        }
+        a.handle_event(&press(Key::Enter));
+
+        assert_eq!(
+            a.feeds.iter().find(|f| f.id == id).unwrap().title,
+            "Morning news",
+            "the feed was not renamed"
+        );
+        assert!(a.text_entry.is_none(), "the prompt is still up");
+    }
+
+    /// Escape leaves the title alone.
+    #[test]
+    fn escape_cancels_a_rename() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        let before = a.feeds.first().unwrap().title.clone();
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&key_ev(Key::R, true, false));
+        for c in "Discarded".chars() {
+            a.handle_event(&types(c));
+        }
+        a.handle_event(&press(Key::Escape));
+
+        assert_eq!(
+            a.feeds.iter().find(|f| f.id == id).unwrap().title,
+            before,
+            "cancelling renamed it anyway"
+        );
+        assert!(a.text_entry.is_none(), "the prompt is still up");
+    }
+
+    /// An empty box does not blank the title, which nothing could undo.
+    #[test]
+    fn an_empty_rename_leaves_the_title_alone() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        let before = a.feeds.first().unwrap().title.clone();
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&key_ev(Key::R, true, false));
+        a.text_buffer.clear();
+        a.handle_event(&press(Key::Enter));
+
+        assert_eq!(
+            a.feeds.iter().find(|f| f.id == id).unwrap().title,
+            before,
+            "the feed was renamed to nothing"
+        );
+    }
+
+    /// While the prompt is up, its letters are text and not shortcuts.
+    ///
+    /// "Books" would otherwise hide the sidebar on its `b` and cycle the sort
+    /// order on its `o` while being typed.
+    #[test]
+    fn typing_into_the_prompt_does_not_fire_shortcuts() {
+        let mut a = app();
+        let sort_before = a.sort_order;
+        a.handle_event(&key_ev(Key::N, true, false));
+        assert!(a.text_entry.is_some(), "control: the prompt must be up");
+
+        for c in "Books".chars() {
+            a.handle_event(&types(c));
+        }
+
+        assert!(a.sidebar_visible, "typing hid the sidebar");
+        assert_eq!(a.sort_order, sort_before, "typing changed the sort order");
+        assert_eq!(a.text_buffer, "Books", "the letters did not reach the box");
+    }
+
+    /// Ctrl+N makes a folder and selects it.
+    ///
+    /// `add_folder`'s only production caller was the OPML importer, so a
+    /// folder could arrive by importing a file and never be made by hand.
+    #[test]
+    fn ctrl_n_creates_a_folder_and_selects_it() {
+        let mut a = app();
+        let before = a.folders.len();
+
+        a.handle_event(&key_ev(Key::N, true, false));
+        for c in "Reading".chars() {
+            a.handle_event(&types(c));
+        }
+        a.handle_event(&press(Key::Enter));
+
+        assert_eq!(a.folders.len(), before + 1, "no folder was created");
+        let made = a.folders.iter().find(|f| f.name == "Reading").expect("the folder");
+        assert_eq!(
+            a.sidebar_selection,
+            SidebarSelection::Folder(made.id),
+            "the new folder was not selected"
+        );
+    }
+
+    /// The prompt is on screen while it is up.
+    #[test]
+    fn the_prompt_is_drawn() {
+        let mut a = app();
+        a.handle_event(&key_ev(Key::N, true, false));
+        for c in "Reading".chars() {
+            a.handle_event(&types(c));
+        }
+
+        assert!(
+            drawn_text(&a).iter().any(|t| t.contains("New folder: Reading")),
+            "the prompt is nowhere on screen"
+        );
     }
 
     /// `R` marks read, which the overlay has always said and nothing did.

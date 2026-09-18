@@ -6702,6 +6702,16 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 crate::sync::self_test(),
             );
+            // The leaf-claim control, beside the Mutex self-test rather
+            // than inside it: both need the scheduler alive (every
+            // acquisition here disables preemption), and this one wants
+            // its own PASS/FAIL line so a reader can tell which of the
+            // two failed.
+            selftest::dispatch_debug(
+                "Leaf-claim",
+                selftest::Severity::Diagnostic,
+                crate::sync::self_test_leaf_claim(),
+            );
         }
         case();
     }

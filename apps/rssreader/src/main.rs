@@ -1690,23 +1690,23 @@ pub enum KeyAction {
     PrevArticle,
     NextFeed,
     PrevFeed,
+    CyclePane,
     ToggleRead,
     ToggleStar,
-    RefreshCurrent,
-    RefreshAll,
     Search,
     CycleSortOrder,
     CycleFilter,
     ToggleSidebar,
     MarkAllRead,
-    OpenInBrowser,
     AddFeed,
     RemoveFeed,
     RenameFeed,
     NewFolder,
+    MoveToFolder,
     ToggleFolderExpand,
+    ImportOpml,
+    ExportOpml,
     ShowHelp,
-    Quit,
 }
 
 impl KeyAction {
@@ -1717,23 +1717,23 @@ impl KeyAction {
             Self::PrevArticle => "Previous article",
             Self::NextFeed => "Next feed",
             Self::PrevFeed => "Previous feed",
+            Self::CyclePane => "Move between panes",
             Self::ToggleRead => "Toggle read/unread",
             Self::ToggleStar => "Toggle star",
-            Self::RefreshCurrent => "Refresh current feed",
-            Self::RefreshAll => "Refresh all feeds",
             Self::Search => "Search articles",
             Self::CycleSortOrder => "Cycle sort order",
             Self::CycleFilter => "Cycle filter mode",
             Self::ToggleSidebar => "Toggle sidebar",
             Self::MarkAllRead => "Mark all as read",
-            Self::OpenInBrowser => "Open in browser",
             Self::AddFeed => "Add new feed",
             Self::RemoveFeed => "Remove feed",
             Self::RenameFeed => "Rename feed",
             Self::NewFolder => "New folder",
+            Self::MoveToFolder => "Move feed to folder",
             Self::ToggleFolderExpand => "Toggle folder expand",
+            Self::ImportOpml => "Import subscriptions (OPML)",
+            Self::ExportOpml => "Export subscriptions (OPML)",
             Self::ShowHelp => "Show keyboard shortcuts",
-            Self::Quit => "Quit",
         }
     }
 
@@ -1744,50 +1744,60 @@ impl KeyAction {
             Self::PrevArticle => "K / Up",
             Self::NextFeed => "Shift+J",
             Self::PrevFeed => "Shift+K",
-            Self::ToggleRead => "R",
+            Self::CyclePane => "Tab / Shift+Tab",
+            Self::ToggleRead => "R / Enter",
             Self::ToggleStar => "S",
-            Self::RefreshCurrent => "F5",
-            Self::RefreshAll => "Shift+F5",
             Self::Search => "Ctrl+F / /",
             Self::CycleSortOrder => "O",
             Self::CycleFilter => "F",
             Self::ToggleSidebar => "B",
             Self::MarkAllRead => "Shift+R",
-            Self::OpenInBrowser => "Enter / O",
             Self::AddFeed => "A",
             Self::RemoveFeed => "D",
             Self::RenameFeed => "Ctrl+R",
             Self::NewFolder => "Ctrl+N",
+            Self::MoveToFolder => "V",
             Self::ToggleFolderExpand => "Space",
+            Self::ImportOpml => "Ctrl+O",
+            Self::ExportOpml => "Ctrl+S",
             Self::ShowHelp => "?",
-            Self::Quit => "Q",
         }
     }
 }
 
 /// All available keyboard shortcuts.
+/// Every row of the help overlay, in the order it is drawn.
+///
+/// **Each of these must be a key this program actually binds.** Four entries
+/// were removed on 2026-09-18 -- "F5 Refresh current feed", "Shift+F5 Refresh
+/// all feeds", "Enter / O Open in browser" and "Q Quit" -- because no such
+/// operation existed anywhere in the crate. The first two cannot exist while
+/// this reader has no transport (see the module doc), there is no browser to
+/// open anything in, and the framework offers no way for an app to close its
+/// own window. An overlay is the one place a user goes to be told what the
+/// keys are, so a row here that does nothing is worse than no overlay.
 pub const ALL_KEY_ACTIONS: &[KeyAction] = &[
     KeyAction::NextArticle,
     KeyAction::PrevArticle,
     KeyAction::NextFeed,
     KeyAction::PrevFeed,
+    KeyAction::CyclePane,
     KeyAction::ToggleRead,
     KeyAction::ToggleStar,
-    KeyAction::RefreshCurrent,
-    KeyAction::RefreshAll,
     KeyAction::Search,
     KeyAction::CycleSortOrder,
     KeyAction::CycleFilter,
     KeyAction::ToggleSidebar,
     KeyAction::MarkAllRead,
-    KeyAction::OpenInBrowser,
     KeyAction::AddFeed,
     KeyAction::RemoveFeed,
     KeyAction::RenameFeed,
     KeyAction::NewFolder,
+    KeyAction::MoveToFolder,
     KeyAction::ToggleFolderExpand,
+    KeyAction::ImportOpml,
+    KeyAction::ExportOpml,
     KeyAction::ShowHelp,
-    KeyAction::Quit,
 ];
 
 // ============================================================================
@@ -1838,6 +1848,8 @@ pub enum TextEntry {
     RenameFeed(FeedId),
     /// A name for a folder that does not exist yet.
     NewFolder,
+    /// The address of a feed to subscribe to.
+    AddFeed,
 }
 
 /// A question at the foot of the window waiting on one keypress.
@@ -2543,12 +2555,27 @@ impl RssReaderApp {
         self.content_scroll_offset = 0.0;
     }
 
-    /// Open or close the selected folder. Reports whether it did.
+    /// Open or close the folder the selection is in. Reports whether it did.
     ///
     /// `Folder::is_expanded` had no writer in production, so every folder was
     /// permanently open and the "closed" indicator could not be drawn.
+    ///
+    /// A selected *feed* closes the folder holding it, which is what closing
+    /// means in a tree: you are in this folder and you want it shut. The
+    /// alternative -- doing nothing, because the highlight is on a feed -- is
+    /// a key that works or not depending on which row you are on, with no way
+    /// to tell which case you are in.
     pub fn toggle_selected_folder(&mut self) -> bool {
-        let SidebarSelection::Folder(id) = self.sidebar_selection else {
+        let target = match self.sidebar_selection {
+            SidebarSelection::Folder(id) => Some(id),
+            SidebarSelection::Feed(id) => self
+                .feeds
+                .iter()
+                .find(|f| f.id == id)
+                .and_then(|f| f.folder_id),
+            SidebarSelection::AllFeeds | SidebarSelection::Starred => None,
+        };
+        let Some(id) = target else {
             return false;
         };
         let Some(folder) = self.folders.iter_mut().find(|f| f.id == id) else {
@@ -2948,9 +2975,22 @@ impl RssReaderApp {
                 }
                 EventResult::Consumed
             }
-            // The overlay says Space opens and closes a folder.
-            Key::Space if matches!(self.sidebar_selection, SidebarSelection::Folder(_)) => {
-                self.toggle_selected_folder();
+            // The overlay's "Add new feed". `add_feed` had eight production
+            // callers and every one of them was the OPML importer, so a
+            // subscription could arrive in a file and never be typed.
+            Key::A => {
+                self.text_buffer.clear();
+                self.text_entry = Some(TextEntry::AddFeed);
+                EventResult::Consumed
+            }
+            // The overlay says Space opens and closes a folder. On a feed it
+            // closes the folder that feed is in; with nothing foldable
+            // selected it says so, rather than being a key that silently does
+            // nothing on some rows.
+            Key::Space => {
+                if !self.toggle_selected_folder() {
+                    self.status_message = "Select a folder, or a feed inside one".to_string();
+                }
                 EventResult::Consumed
             }
             // On a folder, `Enter` opens or closes it. This arm must precede
@@ -3204,6 +3244,23 @@ impl RssReaderApp {
             TextEntry::RenameFeed(id) => {
                 self.rename_feed(id, &text);
                 self.status_message = format!("Renamed to {text}");
+            }
+            TextEntry::AddFeed => {
+                // The address stands in as the title until something can
+                // fetch the feed and learn its real one -- which nothing here
+                // can. A row reading "https://..." is ugly and true, and
+                // `Ctrl+R` renames it; a row reading "New Feed" would be
+                // neither.
+                let folder = match self.sidebar_selection {
+                    SidebarSelection::Folder(id) => Some(id),
+                    SidebarSelection::Feed(id) => {
+                        self.feeds.iter().find(|f| f.id == id).and_then(|f| f.folder_id)
+                    }
+                    SidebarSelection::AllFeeds | SidebarSelection::Starred => None,
+                };
+                let id = self.add_feed(&text, &text, folder);
+                self.sidebar_selection = SidebarSelection::Feed(id);
+                self.status_message = "Feed added. Ctrl+R renames it.".to_string();
             }
             TextEntry::NewFolder => {
                 let id = self.add_folder(&text);
@@ -4816,6 +4873,7 @@ impl RssReaderApp {
             let label = match entry {
                 TextEntry::RenameFeed(_) => "Rename feed",
                 TextEntry::NewFolder => "New folder",
+                TextEntry::AddFeed => "Add feed (address)",
             };
             cmds.push(RenderCommand::Text {
                 x: self.width / 2.0,
@@ -5740,6 +5798,91 @@ mod tests {
             .collect()
     }
 
+    /// `A` subscribes to a feed by address.
+    ///
+    /// `add_feed` had eight production callers and every one was the OPML
+    /// importer, so a subscription could arrive in a file and never be typed.
+    #[test]
+    fn a_adds_a_feed_by_address() {
+        let mut a = app();
+        let before = a.feeds.len();
+
+        a.handle_event(&press(Key::A));
+        for c in "https://example.com/feed.xml".chars() {
+            a.handle_event(&types(c));
+        }
+        a.handle_event(&press(Key::Enter));
+
+        assert_eq!(a.feeds.len(), before + 1, "no feed was added");
+        let made = a
+            .feeds
+            .iter()
+            .find(|f| f.url == "https://example.com/feed.xml")
+            .expect("the feed");
+        assert_eq!(
+            a.sidebar_selection,
+            SidebarSelection::Feed(made.id),
+            "the new feed was not selected"
+        );
+    }
+
+    /// Every row of the help overlay is a key this program answers.
+    ///
+    /// The overlay used to list twenty-one shortcuts of which about four
+    /// worked; three named operations that existed nowhere in the crate. It is
+    /// the one place a user goes to be told what the keys are, so a row that
+    /// does nothing is worse than no overlay at all.
+    ///
+    /// This test is the reason that cannot come back: a new row must be given
+    /// a key here, and a key that stops being bound fails it.
+    #[test]
+    fn every_advertised_shortcut_does_something() {
+        // One representative event per row. Where a row names two keys
+        // ("R / Enter"), the first is the one checked.
+        let probe = |action: KeyAction| -> Event {
+            match action {
+                KeyAction::NextArticle => press(Key::J),
+                KeyAction::PrevArticle => press(Key::K),
+                KeyAction::NextFeed => key_ev(Key::J, false, true),
+                KeyAction::PrevFeed => key_ev(Key::K, false, true),
+                KeyAction::CyclePane => press(Key::Tab),
+                KeyAction::ToggleRead => press(Key::R),
+                KeyAction::ToggleStar => press(Key::S),
+                KeyAction::Search => press(Key::Slash),
+                KeyAction::CycleSortOrder => press(Key::O),
+                KeyAction::CycleFilter => press(Key::F),
+                KeyAction::ToggleSidebar => press(Key::B),
+                KeyAction::MarkAllRead => key_ev(Key::R, false, true),
+                KeyAction::AddFeed => press(Key::A),
+                KeyAction::RemoveFeed => press(Key::D),
+                KeyAction::RenameFeed => key_ev(Key::R, true, false),
+                KeyAction::NewFolder => key_ev(Key::N, true, false),
+                KeyAction::MoveToFolder => press(Key::V),
+                KeyAction::ToggleFolderExpand => press(Key::Space),
+                KeyAction::ImportOpml => key_ev(Key::O, true, false),
+                KeyAction::ExportOpml => key_ev(Key::S, true, false),
+                KeyAction::ShowHelp => key_ev(Key::Slash, false, true),
+            }
+        };
+
+        for action in ALL_KEY_ACTIONS {
+            // A fresh app per row: several of these open a prompt or a dialog
+            // that would swallow the next row's key.
+            let mut a = app();
+            // Both of these act on a sidebar row, and say so rather than
+            // acting when nothing is selected -- which is still answering.
+            a.sidebar_selection = SidebarSelection::Feed(a.feeds.first().expect("a feed").id);
+
+            assert_eq!(
+                a.handle_event(&probe(*action)),
+                EventResult::Consumed,
+                "the overlay advertises {:?} ({}) and nothing answers it",
+                action,
+                action.key_hint()
+            );
+        }
+    }
+
     /// `D` then `Y` removes the selected feed and its articles.
     ///
     /// `remove_feed`'s only production caller was inside `remove_folder`, so
@@ -6065,6 +6208,26 @@ mod tests {
         assert!(
             a.articles.iter().all(|x| x.is_read),
             "Shift+R left something unread"
+        );
+    }
+
+    /// Space on a feed closes the folder that feed is in.
+    #[test]
+    fn space_on_a_feed_closes_its_folder() {
+        let mut a = app();
+        let feed = a
+            .feeds
+            .iter()
+            .find(|f| f.folder_id.is_some())
+            .expect("a feed in a folder");
+        let (fid, folder) = (feed.id, feed.folder_id.expect("its folder"));
+        a.sidebar_selection = SidebarSelection::Feed(fid);
+
+        a.handle_event(&press(Key::Space));
+
+        assert!(
+            !a.folders.iter().any(|f| f.id == folder && f.is_expanded),
+            "the folder holding the selected feed is still open"
         );
     }
 

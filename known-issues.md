@@ -160576,6 +160576,199 @@ programs as broken. The entry they live in
 (`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
 says why the failure is systematic rather than a matter of care.
 
+## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18)
+
+**In short:** 60 boolean fields across 25 apps are read by the program and
+never written by it. The renderer draws from them, the behaviour depends on
+them, and no keystroke, click or setting can change one. A user sees a toggle
+that does not work, or more often a choice that was made for them and never
+offered -- which is why none of these has ever been reported.
+
+**The verified example.** `apps/regextester` draws three flag toggles along the
+top -- `("i", self.flags.case_insensitive, "Case insensitive")`, `g` for
+global, `m` for multiline -- and compiles the pattern with
+`RegexCompiler::new(&self.pattern, self.flags.case_insensitive)`. The only
+assignment to any of them in the whole crate is
+`app.flags.case_insensitive = true;` **inside a test**. So the flags are drawn,
+are read, decide the result, and cannot be changed: a regular-expression tester
+whose case sensitivity is fixed at compile time.
+
+That is the same defect as `apps/passwordgen`'s frozen options and
+`apps/mindmap`'s `show_sidebar`, eight of which were fixed by hand on
+2026-09-18 by reading one app at a time. `scripts/frozen-flag-survey.py` is
+that reading, mechanised.
+
+**Fixed 2026-09-18, and reading it turned up two more defects behind the
+first.** Wiring the toggles meant checking each flag actually did something,
+and one did not: **`multiline` was declared, constructed, drawn, asserted in a
+test, and read by the matcher nowhere.** The anchor arm was `pos == 0` and
+`pos == len` whatever the flag said. Offering a toggle for it would have been
+the worse defect -- a button that moves and changes nothing is a claim, where a
+frozen button is merely a gap -- so the flag now reaches the matcher and `^`
+and `$` match at every line boundary, with a test that asserts the *result*
+rather than the field.
+
+The second was one line: `let _ = tooltip; // used for hover tooltip`, in a
+crate with no hover tooltip in it. A comment describing what a value is *for*,
+directly above the line throwing it away. Lane A hit the identical shape the
+same day (`let _ = before; // Used to verify timing sanity.`), which suggests
+the form is worth naming: **a discard with a justification reads as considered,
+and is the easiest place for an unfinished feature to come to rest.** The three
+strings live in `SHORTCUTS` now, where the `F1` card draws them and the guard
+test presses them.
+
+`F1` and not `?`, because every printable character is typed into whichever
+field has focus -- the same reason as `apps/spreadsheet` and `apps/hexeditor`.
+
+**Why no compiler or existing gate catches it.** `dead_code` is silent because
+the field is read. `check-fields-written-never-read.py` looks for the mirror
+image -- written and never read -- and `check-unreachable-mutators.py` finds a
+mutator nothing calls, which requires the mutator to exist; here there usually
+is none. The program is *consistent*, which is precisely what makes it
+invisible: nothing is ever wrong on screen, there is simply one behaviour where
+two were designed.
+
+**What the number is worth, stated with its method.** Booleans only, in the
+struct behind `impl App for X`, in live code across every file of the crate,
+with construction not counting as a write. Restricted to `bool` because a
+field of a struct type can be mutated by a method without ever being assigned
+(`self.viewport.scroll_by(..)`), so "never assigned" means nothing there; for a
+`bool` it means exactly what it says.
+
+It is still a candidate list. Some of the 60 are data rather than settings --
+`is_directory` on a listing entry is immutable because that is what it is --
+and the survey says so rather than pretending otherwise. The first run reported
+**197 in 67 apps** before the app-struct restriction, and most of that was
+furniture.
+
+**A tool bug worth recording, because it is the third escape today.** That
+first 197 did not change when the restriction was added, and the reason was a
+literal `0x08` byte sitting in the regex where `backslash-b` should have been: the
+heredoc carrying the patch collapsed one backslash level, and `backslash-b` is a
+*valid* Python escape, so it became the byte it names and the pattern silently
+never matched. `backslash-a` did the same thing to `known-issues.md` an hour earlier
+and `backslash-w` -- being *invalid* -- merely warned. **The escapes that warn are the
+harmless ones**; the dangerous ones are by definition the ones the language
+handles quietly. Regexes do not go through heredocs any more.
+
+**And the repair was worse than the bug for about ninety seconds.** Fixing the
+mangled paragraph, I reached for a blanket replace across the whole file --
+every occurrence of the two-character sequence, no count, no scope -- on a
+document of 160,000 lines shared by three lanes. It corrupted **seven unrelated
+places**: a Windows path in a kernel entry, a grep example, a cfg-matching
+pattern, a regex in a layout rule. All of them pre-existing, none of them mine,
+and the file had no other reader to notice.
+
+Caught only because I listed the remaining matches instead of trusting the
+count, and repaired one at a time with `git diff` as the check -- the diff is
+zero deletions now, which is the property that actually proves nothing else moved.
+
+The tool for this already existed and I bypassed it: every other edit in this
+session goes through a helper that asserts the match count *before* replacing
+and aborts otherwise, precisely so a broad pattern cannot quietly hit more than
+it was aimed at. **A safety rail abandoned under time pressure is a safety rail
+that was never there.** The rule earns its keep most exactly when the edit
+feels too small to need it.
+
+## `TD-C-THE-REDRAW-SIGNAL-WAS-A-THIRD-LIST` -- **FIXED 2026-09-18** (lane C)
+
+**In short:** `apps/jsonviewer` decides whether to draw a frame by comparing a
+snapshot of its state before and after each event. Three kinds of change were
+missing from that snapshot, so the program made them and then did not repaint:
+**expanding a node**, **scrolling the raw or diff view**, and **editing the
+document** -- deleting a node or committing a new value. The work happened and
+the screen kept the old picture.
+
+**The shape.** `handle_key` returns nothing, so the snapshot *is* the answer to
+"did anything happen"; `handle_event` returns `Consumed` exactly when the
+snapshot moved. That makes the snapshot a third list beside the state and the
+renderer, and it drifts from both the same way a printed key list drifts from
+its handler. A field nobody added is a change nobody can see.
+
+**The comment was already right, again.** The snapshot's own comment read
+"Scrolling and expanding are document state, and a wheel event that moved the
+view has to read as a redraw" -- above a tuple containing neither a scroll
+offset nor anything about expansion. That is the second time today a comment in
+this tree stated an invariant the code beneath it did not keep; the first was
+`apps/explorer`'s `icon_columns`, whose doc said it must not disagree with the
+renderer while it did. **A doc comment stating an invariant is not an
+invariant.**
+
+**How it was found: by a test for something else.** The guard test for the new
+shortcut overlay presses every key the list advertises and asserts the program
+answers. `Enter` -- "expand or collapse" -- answered nothing, because expansion
+was invisible to the snapshot. Then `Delete` for the same reason once edit mode
+was on. Neither key was suspected of anything; the overlay work simply pressed
+every key in the app with an honest definition of "answered", and three
+redraw bugs fell out. **A guard test written for discoverability turned out to
+be a redraw audit**, because both questions reduce to "does this key do
+anything a user can perceive".
+
+**The fixes, each at the level the fact lives at:**
+
+| Change | Signal |
+|---|---|
+| expanding a node | the *count* of expanded paths -- one event toggles at most one, so the count always moves, and cloning a `Vec<Vec<PathSegment>>` per keystroke buys nothing |
+| scrolling | the three scroll offsets, which are `f32` and compare fine |
+| editing | a `revision` counter bumped in `invalidate_caches`, the one choke point every content change already passes through |
+
+The revision counter is the one worth explaining: `input.len()` would have been
+cheaper and wrong, because editing a `1` to a `2` changes no length. An exact
+O(1) counter at a choke point beats a cheap proxy that is right about most
+edits.
+
+**`apps/flashcards` had it too, and worse.** Checked immediately on the
+strength of the pattern, and its snapshot held `study_session.is_some()` --
+whether a session *exists*, which is true from the first card to the last. So
+`Space` set `flipped`, every field compared equal, and **the answer stayed
+hidden**: in a flashcards program, the one interaction it is for. Cycling the
+tag filter and shuffling the deck were invisible for the same reason. Found by
+reading the snapshot rather than by using the app, which is the whole argument
+for treating this as a class rather than three bugs.
+
+Its snapshot is a struct now as well -- clippy refused the eleven-element tuple
+outright, which is the tooling reaching the same conclusion by a different
+road.
+
+**`apps/finance` had it too. `apps/photomanager` does not have the pattern at
+all** -- its `thumb_fingerprint` decides when to re-queue thumbnails, which is
+a different question, and it has no redraw gate. So the class is **three apps,
+not four**, and all three are now fixed.
+
+finance's gap was `search_query`. Typing is safe there -- that path answers
+`Consumed` outright, ahead of the comparison -- but `Backspace` comes through
+`handle_key`, changes only the query, and answered `Ignored`. The search bar
+draws the query with a caret after it, so **the deleted character stayed on
+screen**. One half of an edit repainting and the other half not is worse than
+neither repainting, because it reads as the key having failed.
+
+**All three snapshots are structs now**, and each arrived there by a different
+road: `jsonviewer` because Rust implements `PartialEq` for tuples only up to
+twelve and it needed sixteen, `flashcards` because clippy refused eleven, and
+`finance` because seven fields was the last legible size and the fix made it
+eight. Three independent signals that a positional list of heterogeneous state
+is the wrong shape -- and a reader adding a field to one has no way to check
+they put it in the right place, which is how all three came to be missing one.
+
+**A near-miss worth recording, because it is the fifteenth shape again.** While
+auditing finance I ran `grep -n search_query ... | head -6`, saw only a `clear`
+and a `pop`, and was a sentence away from filing "the search box can never
+contain anything -- it is decorative". The writer is at line 903,
+`search_query.push_str(text)`, seventh in the list. **The `head` truncated the
+evidence and I read the truncation as the answer**, which is shape 14 with
+`head` where that row has `tail`. The same command with no limit settled it. The cheap way to check them is the
+programme already running: give each one the shortcut overlay and its guard
+test, and any field missing from its snapshot shows up as a key that the list
+advertises and the program says it did not answer. **The discoverability sweep
+doubles as a redraw audit on exactly the apps that need one**, which is a
+better reason to prioritise those three than their key counts.
+
+**The snapshot is a struct now, not a sixteen-tuple.** It had to become one --
+Rust implements `PartialEq` for tuples up to twelve -- but it was past readable
+well before it was past legal: `(usize, String, usize, bool, bool, bool,
+String, usize, ...)` gives somebody adding a field no way to check they put it
+in the right place, which is precisely how three fields came to be missing.
+
 ## `TD-C-TWENTY-ONE-LISTS-ARE-EXHAUSTIVE-BY-ACCIDENT` (lane C, 2026-09-18)
 
 **In short:** 21 arrays in `apps/` name every variant of their enum today, and
@@ -160762,12 +160955,30 @@ for prompting two fixes that were already written weeks earlier, which is a
 false attribution of exactly the kind we had both spent the day chasing in
 code: an artefact that reads as true and points at the wrong source.
 
-**Where the report actually came from is unknown.** It arrived inside the
-captured output of one of my own background `git push` tasks, between the
-status line and the push's ref updates -- a channel I cannot account for and
-will not guess at. The honest statement is that an unattributed report of a red
-gate was wrong about the gate, and that I compounded it by supplying a source
-and a cause from context rather than from evidence.
+**Where the report actually came from is unknown, and the evidence says it is
+a mechanism rather than a correspondent.** It arrived inside the captured
+output of one of my own background `git push` tasks, between the status line
+and the push's ref updates -- and then arrived **again, byte-identical, in the
+same position, in the next push task**. A correspondent does not resend the
+same paragraph to the same byte; a channel does. Searched for and not found in
+the tracked tree (`git grep`), in `scripts/`, or in the pre-push hook chain, so
+it is not something the push itself prints.
+
+**Lane A looked and did not find it**, which is a real negative rather than a
+silence: 549 captured background-task outputs in their session searched for the
+paragraph's distinctive phrases, including their own `git push` tasks -- the
+same kind of task, and the same position in the output, where mine appeared
+twice. Zero hits. So a harness-wide mechanism should have produced it there too
+and did not, which points at something local to this session rather than to the
+tool we both run. One observer failing to reproduce is not proof of absence,
+and the asymmetry is the whole content: two identical sightings here, none
+there.
+
+That is as far as the evidence goes, and the entry stops there. The honest
+statement is that an unattributed report of a red gate was wrong about the
+gate, and that I compounded it by supplying a source and a cause from context
+rather than from evidence. Naming the one remaining peer would be the identical
+move with a different name in the slot.
 
 **The fix is provenance, and it is one line.** `audit-cli-fabrication` now ends
 its verdict with the commit it measured, with `+dirty` when the checkout is not

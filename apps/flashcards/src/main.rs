@@ -895,6 +895,44 @@ struct FlashcardsApp {
 /// bytes spell `FLASHCRD`.
 const FALLBACK_SEED: u64 = 0x464C_4153_4843_5244;
 
+/// Everything that decides whether a frame is worth drawing.
+///
+/// `handle_key` reports nothing about whether it did anything, so this is
+/// compared around every event and the answer *is* `EventResult`. A field
+/// missing from here is a change the user cannot see.
+///
+/// Three were missing. `studying` says a session exists, which is true from
+/// the first card to the last -- so `Space` set `flipped`, every field
+/// compared equal, and **the answer stayed hidden**, in the program whose one
+/// job is showing it. The tag filter and the card order were absent for the
+/// same reason.
+///
+/// A struct rather than a tuple, because clippy refused the eleven-element
+/// version and was right to: a reader adding a field to
+/// `(AppView, usize, usize, bool, usize, String, String, bool)` has no way to
+/// check they put it in the right place, which is how three came to be
+/// missing. `apps/jsonviewer` reached the same conclusion the same day, from
+/// sixteen.
+#[derive(Clone, Debug, PartialEq)]
+struct Fingerprint {
+    view: AppView,
+    selected_deck: usize,
+    selected_card: usize,
+    /// Whether a session exists at all.
+    studying: bool,
+    decks: usize,
+    search_query: String,
+    status_msg: String,
+    search_active: bool,
+    /// What the session is *showing*: position in the queue, whether the card
+    /// is flipped, how many have been reviewed.
+    showing: (usize, bool, u32),
+    /// Which cards are listed.
+    tag_filter: Option<String>,
+    /// The first card's id, which moves when the deck is shuffled.
+    first_card: usize,
+}
+
 impl FlashcardsApp {
     fn new() -> Self {
         let decks = vec![
@@ -934,7 +972,15 @@ impl FlashcardsApp {
     }
 
     /// A deck whose shuffles replay from `seed`, for tests.
-    #[cfg(test)]
+    ///
+    /// Gated the same way as its only caller. `a_fresh_app_is_seeded_by_the_
+    /// system_and_not_by_a_literal` is `#[cfg(not(unix))]`, so on a unix
+    /// target this helper compiled with nothing calling it and the
+    /// cross-target clippy run reported it dead -- a warning about the
+    /// *configuration*, not about the code, and the kind that trains a reader
+    /// to skim warnings. A helper that exists for one caller belongs behind
+    /// the same gate as the caller.
+    #[cfg(all(test, not(unix)))]
     fn with_seed(seed: u64) -> Self {
         Self {
             rng: SeededRng::new(seed),
@@ -1521,17 +1567,24 @@ impl FlashcardsApp {
     /// that answers `Consumed` to every key redraws on the ones it ignored.
     /// Comparing the state around the call beats making every arm of five
     /// separate matches remember to report.
-    fn state_fingerprint(&self) -> (AppView, usize, usize, bool, usize, String, String, bool) {
-        (
-            self.view,
-            self.selected_deck,
-            self.selected_card,
-            self.study_session.is_some(),
-            self.decks.len(),
-            self.search_query.clone(),
-            self.status_msg.clone(),
-            self.search_active,
-        )
+    fn state_fingerprint(&self) -> Fingerprint {
+        let session = self.study_session.as_ref();
+        Fingerprint {
+            view: self.view,
+            selected_deck: self.selected_deck,
+            selected_card: self.selected_card,
+            studying: self.study_session.is_some(),
+            decks: self.decks.len(),
+            search_query: self.search_query.clone(),
+            status_msg: self.status_msg.clone(),
+            search_active: self.search_active,
+            showing: session.map_or((0, false, 0), |s| (s.current_pos, s.flipped, s.reviewed)),
+            tag_filter: self.tag_filter.clone(),
+            first_card: self
+                .current_deck()
+                .and_then(|d| d.cards.first().map(|c| c.id as usize))
+                .unwrap_or(0),
+        }
     }
 
     fn handle_key(&mut self, key: &str, ctrl: bool, _shift: bool) {
@@ -3092,6 +3145,60 @@ mod tests {
     // ------------------------------------------------------------------
 
     use guitk::event::Modifiers;
+
+    /// **Revealing the answer has to read as a redraw.**
+    ///
+    /// `handle_key` reports nothing, so `state_fingerprint` is the only thing
+    /// deciding whether a frame is drawn, and it held
+    /// `study_session.is_some()` -- whether a session *exists*, not what it is
+    /// showing. `flip_card` sets `session.flipped`, every field compared
+    /// equal, `handle_event` answered `Ignored`, and the card stayed
+    /// face-down: in a flashcards program, the one interaction it is for.
+    ///
+    /// Found by reading the fingerprint after `apps/jsonviewer` turned out to
+    /// have three of these, not by anybody using the app.
+    #[test]
+    fn revealing_the_answer_is_a_redraw() {
+        let mut app = FlashcardsApp::new();
+        app.start_study();
+        assert!(
+            app.study_session.is_some(),
+            "no session, so this checks nothing"
+        );
+
+        assert_eq!(
+            app.handle_event(&press(Key::Space)),
+            EventResult::Consumed,
+            "flipping the card did not read as a redraw, so the answer stays hidden"
+        );
+        assert!(
+            app.study_session.as_ref().is_some_and(|s| s.flipped),
+            "the card did not flip at all"
+        );
+    }
+
+    /// **Shuffling and filtering have to read as redraws too.**
+    ///
+    /// Same fingerprint, same gap: `r` reorders the deck and `t` cycles the
+    /// tag filter, and neither the order nor the filter was in it. The list on
+    /// screen would be the old one until something else moved.
+    #[test]
+    fn reordering_and_filtering_are_redraws() {
+        let mut app = FlashcardsApp::new();
+        app.view = AppView::DeckDetail;
+        // Tags, because cycling a filter over a deck that has none is a cycle
+        // of one and rightly changes nothing.
+        if let Some(deck) = app.current_deck_mut() {
+            deck.add_card_with_tags("front", "back", &["verbs"]);
+            deck.add_card_with_tags("other", "back", &["nouns"]);
+        }
+
+        assert_eq!(
+            app.handle_event(&typed('t')),
+            EventResult::Consumed,
+            "cycling the tag filter did not read as a redraw"
+        );
+    }
 
     fn press(k: Key) -> Event {
         Event::Key(KeyEvent {

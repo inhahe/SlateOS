@@ -235,6 +235,42 @@ const ICON_GUTTER: f32 = 28.0;
 /// Width of one icon-view cell.
 const ICON_CELL_W: f32 = 96.0;
 
+/// Every key this program answers, and what it does.
+///
+/// Nineteen bindings and, until this list existed, no way to learn one but
+/// reading the source. `Ctrl+L` is the worst of them: it is the only way to
+/// type a path, and the address bar gives no sign that it can be typed into.
+/// `Ctrl+H` is next -- a user who cannot see a file they know is there has no
+/// way to find out that hidden files are a thing this program has an opinion
+/// about.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`, which reads each label with
+/// `guitk::shortcut` and presses every key it names.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows", "Move the selection"),
+    ("Home / End", "First / last item"),
+    ("Enter", "Open the selected item"),
+    ("Backspace", "Go up one folder"),
+    (
+        "Alt+Left / Alt+Right",
+        "Back / forward through where you have been",
+    ),
+    ("1 / 2 / 3", "Details / list / icons"),
+    ("F5", "Read the folder again"),
+    ("F2", "Rename"),
+    ("Delete", "Move to the recycle bin"),
+    ("Shift+Delete", "Delete for good, without the bin"),
+    ("Ctrl+A", "Select everything"),
+    ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy / cut / paste"),
+    ("Ctrl+Z", "Undo the last file operation"),
+    ("Ctrl+F", "Search this folder"),
+    ("Ctrl+H", "Show or hide hidden files"),
+    ("Ctrl+L", "Type a path into the address bar"),
+    ("Escape", "Cancel, close the search, or drop the selection"),
+    ("F1 / ?", "This list"),
+];
+
 /// Height of one icon-view cell: the thumbnail box, the gap, and two lines of
 /// name beneath it.
 /// An icon cell with no labels under it: the thumbnail and its padding.
@@ -744,6 +780,8 @@ pub struct ExplorerState {
     /// listing: a confirmation that also let Delete move the selection would
     /// act on a different file than the one it named.
     modal: Option<Modal>,
+    /// Whether the shortcut list is up.
+    show_help: bool,
     /// The query whose results are being shown, if the listing is a search.
     ///
     /// `Some` is the whole difference between "this folder" and "matches from
@@ -881,6 +919,7 @@ impl ExplorerState {
             undo: UndoStack::new(),
             recycle: RecycleBin::default_location(),
             modal: None,
+            show_help: false,
             manual_order: Vec::new(),
             row_drag: None,
             preview_open: columnprefs::preview_open(&prefs),
@@ -3388,6 +3427,19 @@ impl ExplorerState {
             None => {}
         }
 
+        // And the shortcut list over even the dialogs, because it is the one
+        // thing a reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (self.window_width as f32, self.window_height as f32),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
+
         tree
     }
 
@@ -5227,6 +5279,21 @@ impl ExplorerState {
                 return true;
             }
         }
+        // The shortcut list, after the address bar and only with no dialog up:
+        // both of those take typed text, and `?` belongs in a filename or a
+        // path before it belongs to help.
+        if self.modal.is_none() {
+            let asked = k.key == Key::F1 || (k.key == Key::Slash && k.modifiers.shift);
+            if asked {
+                self.show_help = !self.show_help;
+                return true;
+            }
+            if k.key == Key::Escape && self.show_help {
+                self.show_help = false;
+                return true;
+            }
+        }
+
         let ctrl = k.modifiers.ctrl;
         match k.key {
             Key::A if ctrl => {
@@ -6153,6 +6220,139 @@ mod tests {
             "a notch moved {} entries, less than one row of {cols}",
             state.viewport.first_visible()
         );
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table beside it here -- that table would be a third copy of the same
+    /// fact, drifting from both the list and the handler.
+    ///
+    /// The property is "some reachable state answers this key", not "this key
+    /// is taken right now". A window on an empty folder can select nothing,
+    /// open nothing and rename nothing, so the states below put files in it.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|(_dir, state)| state.handle_key(&stroke));
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Windows chosen so that between them every advertised key has work.
+    ///
+    /// The `ScratchDir` is carried alongside each state because dropping it
+    /// removes the directory the state is showing.
+    fn help_states() -> Vec<(scratchdir::ScratchDir, ExplorerState)> {
+        let mut out = Vec::new();
+
+        // A folder with files, selection on the first.
+        let dir = crate::guarded_scratch("explorer-help-plain");
+        dir_with_files(&dir.path(""), 12);
+        let mut plain = state_at(&dir.path(""));
+        plain.move_selection(1);
+        out.push((dir, plain));
+
+        // ...with something on the clipboard and an operation to undo, which
+        // is what `Ctrl+V` and `Ctrl+Z` each need before they will act.
+        let dir = crate::guarded_scratch("explorer-help-clip");
+        dir_with_files(&dir.path(""), 12);
+        let mut copied = state_at(&dir.path(""));
+        copied.move_selection(1);
+        copied.copy_selected();
+        out.push((dir, copied));
+
+        // ...having walked into a subfolder, so `Alt+Left` has somewhere to
+        // go back to; and then back out, so `Alt+Right` has somewhere to go
+        // forward to. Neither key can act without the other's history, and no
+        // single state holds both.
+        let dir = crate::guarded_scratch("explorer-help-history");
+        let sub = dir.path("into");
+        std::fs::create_dir_all(&sub).expect("subfolder");
+        dir_with_files(&sub, 3);
+        let mut walked = state_at(&dir.path(""));
+        walked.navigate_to(&sub);
+        out.push((dir, walked));
+
+        let dir2 = crate::guarded_scratch("explorer-help-forward");
+        let sub2 = dir2.path("into");
+        std::fs::create_dir_all(&sub2).expect("subfolder");
+        dir_with_files(&sub2, 3);
+        let mut forward = state_at(&dir2.path(""));
+        forward.navigate_to(&sub2);
+        forward.go_back_if_possible();
+        out.push((dir2, forward));
+
+        // ...and with the search panel up, the one state its Escape closes.
+        let dir = crate::guarded_scratch("explorer-help-search");
+        dir_with_files(&dir.path(""), 12);
+        let mut searching = state_at(&dir.path(""));
+        searching.open_search();
+        out.push((dir, searching));
+
+        out
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/rssreader`'s overlay drew twenty of its
+    /// twenty-one rows for weeks, because its box was a third quantity
+    /// agreeing with neither the list nor the handler.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let dir = crate::guarded_scratch("explorer-help-drawn");
+        dir_with_files(&dir.path(""), 6);
+        let mut state = state_at(&dir.path(""));
+        assert!(
+            !help_text(&mut state).contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        state.handle_key(&key_press(Key::F1));
+        let shown = help_text(&mut state);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        state.handle_key(&key_press(Key::Escape));
+        assert!(
+            !help_text(&mut state).contains("F1 or ? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn help_text(state: &mut ExplorerState) -> String {
+        state
+            .render()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// A plain press.
+    fn key_press(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        }
     }
 
     #[test]

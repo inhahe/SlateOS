@@ -72,6 +72,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -859,6 +860,30 @@ pub enum GameStatus {
 }
 
 /// The whole game.
+/// Every key this program answers, and what it does.
+///
+/// Seventeen bindings and nothing on screen naming one. The footer shows how
+/// many games you have solved and your best time -- facts about the past --
+/// while `H` for a hint, `N` for pencil marks and `P` for pause were reachable
+/// only by reading the source.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`, which reads each label with
+/// `guitk::shortcut` and presses every key it names.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows", "Move around the grid"),
+    ("1-9", "Write a number in this square"),
+    ("Delete / Backspace", "Clear this square"),
+    ("N", "Pencil marks on or off"),
+    ("H", "Fill this square in for me"),
+    ("P", "Pause, and hide the grid"),
+    ("D", "Next difficulty"),
+    ("Ctrl+1 / Ctrl+2 / Ctrl+3", "Easy / medium / hard"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("F2", "New puzzle"),
+    ("F1 / ?", "This list"),
+];
+
 pub struct SudokuApp {
     cells: [Cell; TOTAL_CELLS],
     solution: [u8; TOTAL_CELLS],
@@ -872,6 +897,8 @@ pub struct SudokuApp {
     stats: Stats,
     seed_counter: u64,
     size: (f32, f32),
+    /// Whether the shortcut list is up.
+    show_help: bool,
 }
 
 impl SudokuApp {
@@ -920,6 +947,7 @@ impl SudokuApp {
             stats: Stats::default(),
             seed_counter: 0,
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            show_help: false,
         }
     }
 
@@ -1386,6 +1414,17 @@ impl SudokuApp {
         if key.modifiers.alt || key.modifiers.super_key {
             return EventResult::Ignored;
         }
+        // The shortcut list, before the chords: `F1` carries no modifier and
+        // `?` is Shift and the slash key, so neither reaches the Ctrl block
+        // below, and nothing in this program turns a keystroke into text.
+        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if key.key == Key::Escape && self.show_help {
+            self.show_help = false;
+            return EventResult::Consumed;
+        }
         if key.modifiers.ctrl {
             let intent = match key.key {
                 Key::Z => Intent::Undo,
@@ -1849,6 +1888,24 @@ impl SudokuApp {
         self.draw_board(&mut f, &l);
         self.draw_keypad(&mut f, &l);
         self.draw_footer(&mut f, &l);
+
+        // And the shortcut list over the board, because it is the one thing a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                // This app draws from twelve hardcoded `Color` constants --
+                // `BASE` is Mocha's base -- rather than from the user's
+                // palette, so the card is built for the same mode and matches
+                // the window around it. If sudoku is ever themed, this becomes
+                // `&self.palette` and the mismatch disappears with it.
+                &Palette::for_mode(false),
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
         f
     }
 
@@ -2286,6 +2343,120 @@ mod tests {
     fn select(a: &mut SudokuApp, row: usize, col: usize) {
         a.apply(Intent::Select(row, col));
         assert_eq!(a.selected(), (row, col), "the selection did not move");
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table beside it here -- a third copy of the same fact drifts from both
+    /// the list and the handler, which is how `apps/rssreader` came to
+    /// advertise twenty-one shortcuts of which about four worked.
+    ///
+    /// The property is "some reachable state answers this key", not "this key
+    /// is taken right now": `Ctrl+Z` declines with nothing done, `Ctrl+Y` with
+    /// nothing undone, and a digit declines on a clue square the puzzle gave
+    /// you. Declining from its own arm is answering.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|a| handle_event(a, &Event::Key(stroke.clone())) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and no board answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Boards chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<SudokuApp> {
+        // A fresh puzzle, cursor in the middle.
+        let plain = SudokuApp::new();
+
+        // ...standing on an empty square, so a digit and `Delete` can act.
+        let mut writable = SudokuApp::new();
+        let (r, c) = first_empty(&writable);
+        select(&mut writable, r, c);
+
+        // ...with that digit written, so `Ctrl+Z` has something to undo.
+        let mut written = SudokuApp::new();
+        let (r, c) = first_empty(&written);
+        select(&mut written, r, c);
+        key(&mut written, Key::Num1);
+
+        // ...and that undone, so `Ctrl+Y` has something to redo.
+        let mut undone = SudokuApp::new();
+        let (r, c) = first_empty(&undone);
+        select(&mut undone, r, c);
+        key(&mut undone, Key::Num1);
+        handle_event(&mut undone, &Event::Key(ctrl_press(Key::Z)));
+
+        vec![plain, writable, written, undone]
+    }
+
+    /// The first square the player is allowed to write in.
+    fn first_empty(a: &SudokuApp) -> (usize, usize) {
+        for row in 0..9 {
+            for col in 0..9 {
+                if a.cell(row, col).value == 0 {
+                    return (row, col);
+                }
+            }
+        }
+        panic!("a fresh puzzle with no empty square");
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/rssreader`'s overlay drew twenty of its
+    /// twenty-one rows for weeks, because its box was a third quantity
+    /// agreeing with neither the list nor the handler.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut a = SudokuApp::new();
+        assert!(
+            !help_text(&a).contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        key(&mut a, Key::F1);
+        let shown = help_text(&a);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        key(&mut a, Key::Escape);
+        assert!(
+            !help_text(&a).contains("F1 or ? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn help_text(a: &SudokuApp) -> String {
+        a.frame(a.size().0, a.size().1)
+            .into_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// A key with Ctrl held.
+    fn ctrl_press(k: Key) -> KeyEvent {
+        let mut ev = press(k);
+        ev.modifiers.ctrl = true;
+        ev
     }
 
     fn tick(a: &mut SudokuApp, ms: u64) -> EventResult {

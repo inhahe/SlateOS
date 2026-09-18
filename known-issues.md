@@ -159536,6 +159536,46 @@ should not be starting from here: the whole log, the test name from the
 `---- <name> stdout ----` block, and whether `cargo test -p <crate>` alone
 reproduces it.
 
+
+## The second one, and this time it was caught with its log (2026-09-18)
+
+**Identified, with the mechanism.** A `cargo test --workspace` failed on
+`gui/desktop`'s `icons::tests::populate_defaults_creates_four_icons` --
+`left: 2, right: 4`. The same test passes alone (`1 passed`) and the whole
+`desktop` suite passes on its own (`2843 passed`). It is a race on the process
+environment.
+
+| | |
+|---|---|
+| what the test needs | `populate_defaults` adds "Documents" and "Home" **only if `HOME` is set**, so the count is 4 with it and 2 without |
+| who moves `HOME` | `settingsfile::testing` -- `config_turn`/`with_scratch_config` point `HOME` and `XDG_CONFIG_HOME` at a scratch directory and restore them in `Drop` with `set_var`/`remove_var` |
+| why `desktop` is exposed | it depends on `settingsfile` with `features = ["testing"]`, and `gui/desktop/src/idle_lock.rs` calls `with_scratch_config` in four tests |
+| why the lock does not help | `ENV_LOCK` serialises the tests that **take** it. `populate_defaults_creates_four_icons` does not take it, so it reads `HOME` while another thread is writing it |
+
+**This is not the flake recorded above.** That one was a 424-test crate --
+`apps/explorer`'s size at the time -- and its log was deleted before it was
+read. This is a different test in a different crate, and the only reason it
+could be diagnosed is that **the log was still on disk**: `build/wsV.log` held
+the assertion, the counts and the crate. The rule that produced that
+difference is the one in this file already -- *delete a log only after reading
+a PASS* -- and it is worth the disk.
+
+**The fix is on the test, not the code.** `populate_defaults` reading `HOME` is
+correct: a desktop with a home directory should offer it. The test has to
+serialise against the writers, which means taking the same lock --
+`settingsfile::testing::config_turn()` for the duration, or running the body
+inside `with_scratch_config`, which also makes the expected count independent
+of whether the developer's machine has `HOME` at all.
+
+**The wider point, which applies beyond this test.** `std::env::set_var` is
+`unsafe` in Rust 2024 precisely because the environment is process-global and
+tests are threads. Any test that reads an environment variable is racing every
+test that writes one, in the same binary, whether or not either knows about
+the other -- and the failure surfaces as a wrong *value*, not a crash, so it
+reads as a logic bug in whatever happened to be looking. **A lock only works
+when both sides take it**, and the side that merely reads is the one that will
+forget.
+
 ## `TD-C-A-WRITE-ONLY-FIELD-THE-FIELD-GATE-DOES-NOT-REPORT` (lane C, 2026-09-17)
 
 **In short:** `apps/reminders`'s `last_file_action` was written on every open

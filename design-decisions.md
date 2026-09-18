@@ -77016,9 +77016,17 @@ afterwards.
 | a module's **name** (`binfmt`) plus its signatures | what it is for | line 1 says *statistics*; I called it a registry |
 | a gate's note about the **default** invocation ("`cargo clippy` runs for a Windows target") | what any invocation can reach | `x86_64-unknown-linux-gnu` is installed; the check takes one flag |
 | a **search returning nothing** (lane C's: `grep cannot`) | what the program admits | it says `Cannot`; there were five |
+| a **wall of 2114 compile errors** (lane C's) | a font crate being broken | `--target` was omitted, so cargo built for the bare-metal default and every `std` import failed |
 
 Declaration vs call site. Name vs line 1. Default vs possible. Silence vs
-absence. The last is lane C's, from their
+absence. **Volume vs evidence** -- lane C's sharpest: *a wall of errors is as
+unconditional as a label.* All 2114 of their messages were true, and
+together they said only that the question had been misconfigured; nobody
+doubts 2114 errors, which is exactly what makes the count persuasive and
+uninformative at once. The same family as an output line that states its
+conclusion regardless of the data -- I wrote `count; echo "(0 = torn
+down)"` three times in one day and it printed its claim over a count of 4.
+The silence row is also lane C's, from their
 `TD-C-SEVEN-WAYS-A-SEARCH-SAYS-NOTHING-AND-MEANS-NOTHING`, which has seven
 more of the family that I did not have.
 

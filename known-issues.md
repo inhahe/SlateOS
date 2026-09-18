@@ -160668,9 +160668,9 @@ is now about fifteen minutes and entirely mechanical, so this is a programme of
 work rather than a defect -- filed with the tool that finds the candidates and
 one worked example verified by hand.
 
-**The number of apps that print a key list is 29**, and the first version of
-this entry said ten. That correction is the most useful thing in the file, so
-it goes first.
+**The number of apps that print a key list is 27.** This entry has said ten,
+then 29, and now 27. Three figures for one quantity, and the sequence is the
+most useful thing in the file, so it goes first.
 
 I wrote "the one number here that needs no inference is ten -- a crate either
 contains a key list or it does not". The premise is true and the number was
@@ -160681,9 +160681,26 @@ search for the spelling somebody happened to use, which is the exact defect the
 survey exists to find, and then quoted its output as the one figure not subject
 to it.
 
-It now matches the *shape* -- `const NAME: ... (&str, &str)` -- which is what a
-list of keys and their descriptions is whatever its author called it. A name is
-chosen; a type is fixed. **Lane A hit the identical shape the same day**: their
+So I replaced the name test with a *shape* test -- `const NAME: ... (&str,
+&str)` -- on the reasoning that a name is chosen and a type is fixed. That gave
+29, and 29 is also wrong. `(&str, &str)` is what a key list is made of and
+equally what every other table of string pairs is made of: `apps/explorer` has
+`SIDEBAR_ITEMS` mapping a label to a path, `apps/gomoku` has `PANEL_LINES`
+mapping a label to a sample value for measuring text. Both matched.
+
+**There is no purely structural signal for "a list of keys".** The type says
+pairs of strings; only the contents say what kind. The detector now reads the
+first column and asks whether it parses as key labels, which is openly a
+heuristic, and 27 is reported as one. It agrees with a hand count of the same
+thing, which is the only reason to believe it at all.
+
+**The sequence is the lesson, not the number.** I moved from a wrong answer to
+a differently wrong answer while each time believing I had removed the
+judgement -- first into the tool's choice of identifier, then into its choice
+of type. A number about a codebase almost always contains an inference about
+what counts, and the useful habit is not to eliminate it but to *say where it
+is*, so a reader knows what they are being told. Every figure in this entry now
+names its own method. **Lane A hit the identical shape the same day**: their
 `scripts/check-variant-lists.py` checks every list *named* `ALL`, so a list
 that should be total and is called `PRIMARY_COMMANDS` is invisible to it and
 nothing says so. Two tools, two authors, same afternoon, both defining their
@@ -160712,8 +160729,8 @@ the list on `F1` or `?`. `apps/hexeditor` and `apps/filediff` followed -- thirte
 page of navigation, `Ctrl+B`/`Ctrl+N`/`Ctrl+P` worst of all, because bookmarks
 are invisible until one is set and so the feature could not be found by looking
 at the window in any state. That leaves the survey's count at 126 apps binding
-an unguessable key and 29 printing one -- a gap of roughly a hundred, not the
-hundred and fourteen the first count implied.
+an unguessable key and 27 printing one -- a gap of roughly a hundred, not the
+hundred and sixteen the first count implied.
 
 **A gate for this was considered and declined, which is worth saying so nobody
 builds it twice.** The obvious move is a ratchet: baseline today's list, fail

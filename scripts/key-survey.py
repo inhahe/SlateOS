@@ -137,6 +137,52 @@ LIST_RE = re.compile(
     r"\(\s*&(?:'static\s+)?str\s*,\s*&(?:'static\s+)?str\s*\)"
 )
 
+# ...and then the first column has to look like keys.
+#
+# The shape alone is not enough, and finding that out is the second correction
+# this detector has needed. `(&str, &str)` is what a key list is made of and
+# also what every other table of string pairs is made of: `apps/explorer` has
+# `SIDEBAR_ITEMS` mapping a label to a path, `apps/gomoku` has `PANEL_LINES`
+# mapping a label to a sample value for measuring. Both matched, and the count
+# went from a wrong 10 (by name) to a wrong 29 (by type) before this.
+#
+# **There is no purely structural signal for "a list of keys".** The type says
+# "pairs of strings"; only the contents say what kind. So this is openly a
+# heuristic -- the first column of at least half the rows has to parse as a
+# key label -- and the number it produces is reported as one.
+KEYISH = re.compile(
+    r"""^\s*
+    (?: (?:Ctrl|Control|Alt|Option|Shift|Super|Cmd|Win|Meta) \+ )*
+    (?:
+        F[1-9][0-2]?                      # function keys
+      | PageUp|PageDown|PgUp|PgDn         # named keys
+      | Home|End|Left|Right|Up|Down
+      | Enter|Return|Esc|Escape|Tab|Space|Spacebar
+      | Delete|Del|Backspace|Bksp|Insert|Ins
+      | Arrows
+      | [A-Za-z0-9]\s*-\s*[A-Za-z0-9]     # a range, 0-9 or A-F
+      | .                                 # a single key cap
+    )
+    \s*$""",
+    re.VERBOSE,
+)
+
+# The first element of each row of a list literal: ("Ctrl+N", "New slide").
+ROW_KEY_RE = re.compile(r'\(\s*"((?:[^"\\]|\\.)*)"\s*,')
+
+
+def is_key_list(body: str) -> bool:
+    """Does the first column of this list literal read as key labels?"""
+    keys = ROW_KEY_RE.findall(body)
+    if not keys:
+        return False
+    keyish = sum(
+        1
+        for k in keys
+        if k and all(KEYISH.match(part) for part in re.split(r"\s*[/,]\s*", k) if part)
+    )
+    return keyish * 2 >= len(keys)
+
 
 def crate_sources(crate: Path) -> list[Path]:
     return sorted(p for p in (crate / "src").rglob("*.rs"))
@@ -157,8 +203,13 @@ def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
         except (OSError, UnicodeDecodeError):
             continue
         live, _test = rustlex.live_code(src)
-        if LIST_RE.search(live):
-            has_list = True
+        for m in LIST_RE.finditer(live):
+            # The literal that follows the declaration, up to its closing
+            # bracket -- enough of it to read the first column.
+            body = live[m.end() : m.end() + 4000]
+            if is_key_list(body):
+                has_list = True
+                break
         # Comments and literals blanked before the key scan: a key named in
         # a comment is the fourth way a search says nothing, and my own
         # comment about Command::new once poisoned a grep for it.

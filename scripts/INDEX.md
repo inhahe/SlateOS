@@ -202,6 +202,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/join-probe.py` | Ad-hoc measurement of GNU `join`. Not part of the build; kept only so the |
 | `scripts/kasan-build.sh` | kasan-build.sh — build the kernel with LLVM's KernelAddressSanitizer. |
 | `scripts/kasan-check-preshadow.py` | kasan-check-preshadow.py — prove the pre-shadow window is uninstrumented. |
+| `scripts/key-survey.py` | Which apps answer keys they never name on screen? |
 | `scripts/ki_archive.py` | Move lane B's resolved entries from `known-issues.md` into the archive. |
 | `scripts/ki_dupes.py` | Detect entries that exist in BOTH `known-issues.md` and its resolved archive. |
 | `scripts/ki_split.py` | Fence-aware structural scanner for `known-issues.md`. |
@@ -391,4 +392,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_381 scripts._
+_382 scripts._

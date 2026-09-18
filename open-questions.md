@@ -2823,7 +2823,7 @@ confirms the order holds.
 
 | option | *What changes:* |
 |---|---|
-| **(a) Convert the non-leaf ones** (recommended) | the detector watches ~12-15 more lock orderings; a real inversion becomes a loud boot failure instead of a hang. Costs per-acquire tracking on those paths. |
+| **(a) Convert the non-leaf ones** (recommended) | the detector watches the orderings behind 89 distinct site pairs (measured 2026-09-17; the "12-15" here previously was extrapolated from a saturated cap); a real inversion becomes a loud boot failure instead of a hang. Costs per-acquire tracking on those paths. |
 | (b) Restate §70 honestly, accept the risk | nothing changes at runtime; §70 stops claiming a reason that is false and says the type is chosen for cost with ordering unchecked. The 1256 stay unwatched. |
 | (c) Convert only the cross-module pairs | the five cross-module orderings get watched; the same-module init-guard idiom (the bulk) stays as it is. |
 
@@ -2914,6 +2914,64 @@ harder.
 sets a plane rectangle. It gets worse with time in a specific way: the first
 real compositor to try it will spend a while looking for a bug in its own
 code, since every call it makes returns success.
+
+
+## A-Q18 — [A] Three lanes all append to the end of `known-issues.md` and it conflicted eleven times today. Should it get a per-lane seam like the other shared documents? — Status: OPEN
+
+**In short:** the three agents keep one shared file of known bugs. All three
+add new entries to the bottom, so any two that write between merges collide
+at the same spot. Today that happened eleven times. Every collision is
+trivial to fix -- keep both entries -- but each one stops a build pipeline
+that has to be started again from the beginning.
+
+**The other two shared documents already solve this, differently each.**
+
+| document | seam | conflicts today |
+|---|---|---|
+| `design-decisions.md` | per-lane numbering bands; 426 numbered sections, each lane inserting in its own range | 0 |
+| `open-questions.md` | per-lane question ids (`A-Q`/`B-Q`/`C-Q`); 31 open entries | 0 |
+| `known-issues.md` | none -- everyone appends at EOF | **11** |
+
+`roadmap.md` rule 3 says the per-lane conventions exist to make the merge
+clean, and for the two documents that have one it works: `design-decisions.md`
+auto-merged across a 72-commit divergence with zero conflicts. This file
+never got the same treatment.
+
+**Why it costs more than the fix suggests.** The resolution is mechanical --
+both sides are additive -- but it is not *always* mechanical, and that is the
+part worth knowing before choosing. Three times today the winning order
+mattered, because one side was an amendment (`### MOSTLY FIXED ... and the
+mechanism above was wrong`, `### TRIAGE ...`, my own `### Correction ...`)
+whose meaning depends on sitting directly under the entry it amends. A
+marker-deletion resolution silently re-parents such an amendment onto
+whatever the other lane appended. Twice it was lane C's amendment at risk and
+once it was mine.
+
+| option | *What changes:* |
+|---|---|
+| **(a) Per-lane append sections** (recommended) | each lane appends inside its own `## Lane A / B / C` section, so two lanes writing between merges no longer touch the same lines. New entries land in a different place than today. |
+| (b) Per-lane files, indexed | `known-issues-a.md` etc. with the existing index across them. No shared seam at all, but a reader needs three files, and cross-lane entries (of which there are many) need a home. |
+| (c) Leave it | nothing changes; the collisions stay mechanical and frequent, and the amendment-ordering hazard stays live. |
+
+**My recommendation is (a)**, because it matches what already works twice in
+this tree and needs no new tooling -- `check-known-issues-index` already
+walks the headings and would keep working. (b) is cleaner in principle and
+worse in practice: today's most useful entries are the cross-lane ones, where
+lane C's finding and mine turned out to be the same shape, and splitting the
+file makes that harder to notice.
+
+**Why it is yours and not mine.** It changes the layout of a document all
+three lanes write, so one lane reorganising it unilaterally is exactly the
+shared-word redefinition design-decisions 951 is about. It also wants a halt
+to do safely -- moving existing entries into sections while two other agents
+are appending would conflict with everything at once.
+
+**If never answered:** nothing breaks. The cost is steady rather than
+growing: roughly one chain restart per collision, plus the standing risk that
+an amendment gets re-parented by a resolution that looks correct because no
+conflict markers remain. I now assert adjacency (`parent < amendment <
+other`) rather than marker-absence, which covers my own resolutions and not
+anyone else's.
 
 
 

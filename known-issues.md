@@ -159446,6 +159446,29 @@ being keyboard-driven by design. The case has to be *in the file*, though --
 and had three keyboard shortcuts in the whole of its production code, which is
 not a keyboard-driven application either.
 
+**UPDATE 2026-09-18: a second one examined, and it is a different case.**
+`apps/reminders` is on this list and is *not* `notes`. It binds fifteen keys,
+its number keys are view filters, `Space`/`Enter` completes the selected
+reminder and `Escape` dismisses notifications -- so it is a genuinely
+keyboard-driven program that happens also to take no pointer. Its defects were
+specific rather than wholesale: snoozing could not be reached at all (the one
+thing a reminder app is for besides listing), and `last_file_action` recorded
+what every save did and was drawn nowhere. Both are fixed; neither needed a
+pointer layer.
+
+**So the number in this entry is "applications that draw and take no
+pointer", and it is not a defect count.** Two examined so far:
+
+| | finding |
+|---|---|
+| `notes` | wholesale -- a mouse-shaped UI with three shortcuts, nine operations unreachable. A pointer layer was the repair. |
+| `reminders` | specific -- keyboard-driven by construction, two unreachable things, no pointer layer needed. |
+
+Nineteen unexamined. The question to ask of each is not "does it handle a
+click" but **"can everything it offers be reached by something"** -- which is
+a different question, and the reason the first is only a way of finding
+candidates for the second.
+
 **Why this is worth a single entry rather than twenty-one.** The repair is the
 same shape every time and it is not "add a click handler": it is hit-tests
 derived from the same functions the renderer already reads, so the law a click

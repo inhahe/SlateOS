@@ -160275,3 +160275,53 @@ the handler from drifting apart -- the failure that entry documents.
 image for hours before anyone found `S`, and the app it most resembles --
 before this change -- was one that could only make decks of textboxes.
 
+## `TD-C-A-PRESENTATION-EDITOR-THAT-CANNOT-TYPE` (lane C, 2026-09-18)
+
+**In short:** `apps/slides` cannot put a single word on a slide. Every text box
+it creates says "New Text", every title slide says "Presentation Title", the
+deck is called "Untitled Presentation", and **there is no way to change any of
+them**. You can add slides, shapes and images, reorder them, copy and paste
+them, cycle the theme and the transition, and export the result -- a deck of
+placeholders.
+
+**Verified.** There is no text input anywhere in the program:
+
+| | |
+|---|---|
+| typing | `key.text` / `event.text` appear **zero** times in production; there is no `typed()`, no `types_text`, no edit buffer |
+| element text | **zero** assignments to `.text` anywhere |
+| the deck title | `title: String::from("Untitled Presentation")` at construction, **zero** writers |
+| a new text box | `add_textbox` seeds `text: String::from("New Text")` |
+| a new title slide | `Slide::new` seeds `text: String::from("Presentation Title")` |
+| the accessor an editor would need | `element_by_id_mut` exists, is `pub`, and **has no caller** |
+
+**This is not the same defect as an unreachable operation.** The operations
+this app is missing were never written: there is no `set_element_text` sitting
+callerless, because nobody wrote one. What is written is everything *around*
+authoring -- layouts, themes, transitions, undo, export, a sorter view -- and
+the hole is in the middle.
+
+**The uncomfortable part, recorded because it is the useful part.** Earlier the
+same day I fixed this app's *other* reachability gaps: `S`/`O`/`L`/`A`/`I` to
+add shapes and images, `Ctrl+T` and `Ctrl+R` for theme and transition,
+`Delete` for the selected element, and labels naming their keys. All of that
+was real and none of it was the thing that matters. **I checked which written
+operations had no caller, and that question cannot see a capability nobody
+wrote.** A sweep for unreachable functions finds the periphery of an app and is
+blind to a hole at its centre -- and the more thoroughly the periphery is
+built, the more finished the program looks. `apps/slides` has 90 tests and a
+sorter view.
+
+**The question that would have found it** is not "what is unreachable" but
+"what is this program *for*, and can a user do that". For a presentation
+editor that is one sentence: put words on a slide. It takes longer to answer
+than a grep, which is why it keeps being skipped.
+
+**What the repair wants.** A text-entry mode, on the pattern
+`apps/markdowneditor` and `apps/rssreader` now use: a key to begin editing the
+selected text box (`F2` and `Enter` are both conventional), characters routed
+into it via `element_by_id_mut`, `Backspace`, and `Escape`/`Enter` to finish.
+`Slide::new`'s placeholders then become what they read as -- prompts -- rather
+than permanent contents. The deck title wants the same treatment, and it is
+what `export_as` names the file with.
+

@@ -159168,3 +159168,56 @@ computes how many rows fit with `(height - 30.0) / 24.0` and then advances
 `vy` by `28.0` per row. At a 740-pixel panel that is 29 rows drawn 28 apart in
 812 pixels, so the last few are drawn past the bottom of the panel they are
 in. One of the two numbers is wrong and they should be one constant.
+
+## `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED` (lane C, 2026-09-17)
+
+**In short:** twenty-one applications draw a graphical interface and handle no
+mouse events at all. Not "handle clicks badly" -- they never receive one:
+`Event::Mouse` appears nowhere in them, they import no `MouseEvent`, and they
+have no hit-test function. Whatever they draw, the pointer does nothing over
+any of it.
+
+**Measured across all 139 apps with a `main.rs`:**
+
+| | count |
+|---|---|
+| handle no mouse event of any kind | 24 |
+| ...of those, not GUI applications at all (`installer`, `indexer`, `backup` -- no `App` impl, zero `RenderCommand`) | 3 |
+| **draw a GUI and cannot be clicked** | **21** |
+
+    weather 96   rssreader 95   reminders 82   markdowneditor 79
+    habits 70    pinball 68     notes 65       slides 61
+    flashcards 61 finance 58    logviewer 51   qrcode 48
+    mediaconvert 44 tmux 43     regextester 43 torrent 41
+    soundrecorder 39 renamer 37 email 36       metronome 24
+    filesearch 23
+
+(the number is `RenderCommand::` sites, as a rough measure of how much
+interface each one draws)
+
+**Verified in depth for exactly one.** `apps/notes` is written up in the entry
+above: three panels drawn, none clickable, and nine operations -- delete a
+note, tag one, rename a notebook, restore a version -- that have neither a
+keyboard shortcut nor a click, because every route to them was a click that
+never arrives. The other twenty are *candidates measured the same way*, not
+confirmed defects, and the check for each is the one this file keeps having to
+repeat: does the thing it draws look like something you would click?
+
+**Two are plausibly legitimate** and should be read before being counted.
+`tmux` is a terminal multiplexer and `pinball` is a game; both have a case for
+being keyboard-driven by design. The case has to be *in the file*, though --
+`notes` had no such comment, advertised a "Multi-panel UI" in its module doc,
+and had three keyboard shortcuts in the whole of its production code, which is
+not a keyboard-driven application either.
+
+**Why this is worth a single entry rather than twenty-one.** The repair is the
+same shape every time and it is not "add a click handler": it is hit-tests
+derived from the same functions the renderer already reads, so the law a click
+obeys and the law the drawing obeys cannot drift. `apps/photomanager` and
+`apps/explorer` both do it that way and are worth copying. The failure this
+prevents is the one `photomanager`'s search box had for its whole existence --
+a control drawn at coordinates the click handler had never heard of.
+
+**The measurement, which is one command:**
+
+    grep -c "Event::Mouse\|MouseEvent" apps/*/src/main.rs

@@ -1742,7 +1742,7 @@ impl CalendarApp {
         frame.push(RenderCommand::Text {
             x: x + 16.0,
             y: y + 12.0,
-            text: String::from("Keys  --  ? closes this"),
+            text: String::from("Keys  --  F1 or ? closes this"),
             color: self.palette.ink(self.palette.blue),
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
@@ -2884,7 +2884,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+F", "Search"),
     ("Ctrl+B", "Show or hide the sidebar"),
     ("Ctrl+O / Ctrl+S", "Import / export a calendar file"),
-    ("?", "This list"),
+    ("F1 / ?", "This list"),
 ];
 
 /// The view a digit key selects, by its index in [`CalendarView::all`].
@@ -3064,6 +3064,15 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
         // `?`, which is Shift and the slash key. The search branch above
         // returns first when the box has focus, so this cannot swallow a `?`
         // somebody is typing into a query.
+        // The shortcut list. `F1` raises it in every app in this tree,
+        // including `apps/spreadsheet`, where `?` is a character the
+        // program has to be able to type into a cell -- so somebody who
+        // has learned one key is never stuck. `?` as well, wherever the
+        // program is not obliged to type one.
+        Key::F1 => {
+            state.show_help = !state.show_help;
+            EventResult::Consumed
+        }
         Key::Slash if key.modifiers.shift => {
             state.show_help = !state.show_help;
             EventResult::Consumed

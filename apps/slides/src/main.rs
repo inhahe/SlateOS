@@ -811,7 +811,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+R", "Next transition"),
     ("B", "Show or hide the speaker notes"),
     ("Ctrl+E", "Export"),
-    ("?", "This list"),
+    ("F1 / ?", "This list"),
 ];
 
 /// What a typed string is going onto.
@@ -1766,6 +1766,15 @@ impl SlidesApp {
             }
             // `?`, which is Shift and the slash key. Escape closes it, because
             // that is what Escape means over anything laid on top.
+            // The shortcut list. `F1` raises it in every app in this tree,
+            // including `apps/spreadsheet`, where `?` is a character the
+            // program has to be able to type into a cell -- so somebody who
+            // has learned one key is never stuck. `?` as well, wherever the
+            // program is not obliged to type one.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
             Key::Slash if key.modifiers.shift => {
                 self.show_help = !self.show_help;
                 EventResult::Consumed
@@ -1870,7 +1879,7 @@ impl SlidesApp {
         cmds.push(RenderCommand::Text {
             x: x + 16.0,
             y: y + 12.0,
-            text: String::from("Keys  --  ? closes this"),
+            text: String::from("Keys  --  F1 or ? closes this"),
             color: self.palette.ink(self.palette.blue),
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,

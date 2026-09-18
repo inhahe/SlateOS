@@ -158,7 +158,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+T / Ctrl+W", "New tab / close this tab"),
     ("Ctrl+Q", "Quit"),
     ("Escape", "Close the search bar or this list"),
-    ("?", "This list"),
+    ("F1 / ?", "This list"),
 ];
 const WINDOW_HEIGHT: f32 = 780.0;
 
@@ -1760,7 +1760,7 @@ impl PdfViewerApp {
         frame.push(RenderCommand::Text {
             x: x + 16.0,
             y: y + 12.0,
-            text: String::from("Keys  --  ? closes this"),
+            text: String::from("Keys  --  F1 or ? closes this"),
             color: self.palette.ink(self.palette.blue),
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
@@ -4209,6 +4209,15 @@ impl PdfViewerApp {
             // `?`, which is Shift and the slash key. The search branch above
             // returns first when the box has focus, so this cannot swallow a
             // `?` somebody is typing into a query.
+            // The shortcut list. `F1` raises it in every app in this tree,
+            // including `apps/spreadsheet`, where `?` is a character the
+            // program has to be able to type into a cell -- so somebody who
+            // has learned one key is never stuck. `?` as well, wherever the
+            // program is not obliged to type one.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                true
+            }
             Key::Slash if event.modifiers.shift => {
                 self.show_help = !self.show_help;
                 true

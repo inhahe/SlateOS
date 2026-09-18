@@ -1760,7 +1760,7 @@ impl KeyAction {
             Self::ToggleFolderExpand => "Space",
             Self::ImportOpml => "Ctrl+O",
             Self::ExportOpml => "Ctrl+S",
-            Self::ShowHelp => "?",
+            Self::ShowHelp => "F1 / ?",
         }
     }
 }
@@ -3039,6 +3039,15 @@ impl RssReaderApp {
                 } else {
                     EventResult::Ignored
                 }
+            }
+            // `F1` raises the list in every app in this tree, including
+            // `apps/spreadsheet`, where `?` is a character the program has to
+            // be able to type into a cell -- so somebody who has learned one
+            // key is never stuck. `?` as well, here, where nothing is obliged
+            // to type one.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
             }
             Key::Slash if key.modifiers.shift => {
                 self.show_help = !self.show_help;
@@ -4987,7 +4996,7 @@ impl RssReaderApp {
         cmds.push(RenderCommand::Text {
             x: dx + dialog_width - 80.0,
             y: dy + 18.0,
-            text: "Press ? to close".to_string(),
+            text: "F1 or ? to close".to_string(),
             font_size: 10.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,

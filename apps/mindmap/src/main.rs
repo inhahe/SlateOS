@@ -107,7 +107,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
     ("Ctrl+F", "Find a node"),
     ("Ctrl+O / Ctrl+S", "Open / save an outline"),
-    ("?", "This list"),
+    ("F1 / ?", "This list"),
 ];
 /// Height of the bottom status bar.
 const STATUS_BAR_HEIGHT: f32 = 24.0;
@@ -2043,6 +2043,15 @@ impl MindMapApp {
             }
             // `?`, which is Shift and the slash key. Escape closes it, because
             // that is what Escape means over anything laid on top.
+            // The shortcut list. `F1` raises it in every app in this tree,
+            // including `apps/spreadsheet`, where `?` is a character the
+            // program has to be able to type into a cell -- so somebody who
+            // has learned one key is never stuck. `?` as well, wherever the
+            // program is not obliged to type one.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
             Key::Slash if key.modifiers.shift => {
                 self.show_help = !self.show_help;
                 EventResult::Consumed
@@ -2315,7 +2324,7 @@ impl MindMapApp {
         cmds.push(RenderCommand::Text {
             x: x + 16.0,
             y: y + 12.0,
-            text: String::from("Keys  --  ? closes this"),
+            text: String::from("Keys  --  F1 or ? closes this"),
             color: self.palette.ink(self.palette.blue),
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,

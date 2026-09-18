@@ -159718,69 +159718,53 @@ almost certainly a mode rather than a pointer layer, in the shape
 key that picks, any other key leaving. Three operations need three
 affordances, which is why this is filed rather than done in passing.
 
-## `TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY` (lane C, 2026-09-18)
+## `TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY` -- **WITHDRAWN, was never a defect** (lane C, 2026-09-18)
 
-**In short:** `apps/weather` starts with no location, no conditions and no
-forecast, and there is no way to give it any. Every one of its five location
-operations -- add, remove, reorder, set default, set update interval -- is
-written, tested, and has no production caller. It draws ninety-six render
-sites over nothing.
+**In short:** I filed this saying `apps/weather` draws a full dashboard over
+an empty model. It does not. When it has no weather it draws four lines
+saying it cannot fetch any, and returns before the dashboard. The app was
+already doing the right thing, and had been since the invented cities were
+deleted. Nothing here needed fixing; the entry is kept because the *way* I got
+it wrong is worth more than the finding would have been.
 
-**Verified.**
+**What is actually true**, and all of it is fine:
 
 | | |
 |---|---|
-| `main` | calls `WeatherApp::new`, which sets `current: None` and leaves `hourly`, `daily`, `alerts` and `locations` empty |
-| the only writer of `current` | line 967, inside `with_sample_weather`, which is `#[cfg(test)]` |
-| `add_location` | no production caller; the only `locations.push` is inside it |
-| `remove_location`, `reorder_location`, `set_default_location`, `set_update_interval` | the same |
-| every generator of weather | `sample_current_weather`, `sample_hourly_forecast`, `sample_daily_forecast`, `sample_alerts` and `default_locations` are **all `#[cfg(test)]`** |
+| the model is empty in production | yes -- `new` holds nothing and every generator is `#[cfg(test)]` |
+| the five location operations are unreachable | yes -- and irrelevant, since there is no weather to attach to a location |
+| it draws the dashboard over that emptiness | **no.** `render_commands` does `let Some(current) = self.current.clone() else { self.render_cannot_fetch(...); return cmds; }` |
+| it says so on screen | yes, in `CANNOT_FETCH_LINES`, and better than I would have written it |
 
-**This is the fabrication cleanup, half-finished.** A comment in `new` records
-what happened: *"`locations` went with the rest: it defaulted to 'New York,
-NY'"*. The invented cities were removed, which was right -- an app showing
-weather for somewhere you never chose is worse than an empty one. But nothing
-replaced them with a way to choose, so the app went from *wrong* to *empty*
-and the module doc still says "Multiple saved locations with default
-selection".
+The fourth of those lines is the one to keep: **"It cannot deliver
+severe-weather alerts either. Silence here is not an all-clear."** An empty
+alerts banner is not a neutral absence -- it is read as "no warnings in
+force", which is a claim about the world. `apps/partmanager` makes the same
+move for disks ("This is not a finding that you have none"), so this is a
+settled pattern in the lane, not one app being careful.
 
-**That is the shape worth naming**, because this project has been here before.
-`TD-C-ONE-HUNDRED-AND-FIFTEEN-OF-THE-HUNDRED-AND-THIRTY-NINE-APPS-CANNOT-OPEN-A-FILE`
-records three authors independently writing "so the first window is not an
-empty grid" to justify invented data. Removing the invented data answers the
-dishonesty and leaves the emptiness -- and the emptiness was the reason
-somebody invented data in the first place. **A removal is finished when the
-capability exists, not when the lie is gone.**
+**How I got it wrong, twice, on one entry.**
 
-**Fourth of the twenty-one no-pointer applications examined, and a fourth
-shape.** `notes` was wholesale, `reminders` specific, `rssreader` one-way.
-This one is *empty by construction*: seventeen keys are bound and every one of
-them navigates or toggles a view over data that cannot arrive.
+1. I checked `main`'s constructor, checked `current`'s only writer, checked
+   `add_location`'s callers -- and filed. Every one of those checks was
+   correct. I never read the render path, which is the only place that could
+   answer the question I was actually asking.
+2. Told the first version was wrong about the *generators*, I corrected that
+   and still did not read the render path -- so the correction repeated the
+   same false premise in stronger words, and I put it in the source file too
+   ("draws its chrome over an empty model", since removed).
 
-**CORRECTION (same day, before this was acted on).** The paragraph that stood
-here said the repair was a text-entry mode, because "the simulated forecast is
-honest and documented, so nothing needs a network first". **That was wrong, and
-wrong in the direction that would have wasted the work.** Every generator is
-`#[cfg(test)]`, not just the location list -- so a text-entry mode would let a
-user name a city and then show them an empty dashboard, which is the current
-behaviour with more steps. `new`'s own comment says it plainly: *"Nothing here
-can reach a weather service."*
+**The lesson is not "check more things".** It is that *"can this app show
+anything"* is a question about the **render path**, and I answered it from the
+**model**. A model check tells you what the app has; only the draw tells you
+what the app claims. Those differ exactly when the app is handling emptiness
+well -- so my method was blindest precisely where the code was best, and would
+have gone on reporting careful apps as broken ones.
 
-I filed the first version after checking `add_location` and `current` and not
-checking the other four generators. **The lesson is the one this project keeps
-relearning: a route to a feature is not a feature.** I confirmed the door was
-locked and inferred there was a room behind it.
+**Concretely, for the remaining no-pointer sweep:** before filing "app X shows
+nothing", grep its render entry point for an early return on the empty case.
+`weather` and `partmanager` both have one. A test-only data generator is not
+evidence of a defect -- it is the normal state of an app whose real source is
+not built yet, and the presence of an honest-empty path is what tells the two
+apart.
 
-**So the module doc's "All weather data is simulated locally (no network
-required)" is also false in production** -- there is no simulation there
-either. That line should go whichever way the question below is answered.
-
-**What the repair actually wants is a decision, not a keybinding.** A weather
-app needs weather, the invented weather was deliberately deleted, and
-re-inventing it is the one thing nobody should do. That is an operator
-question (data source, provider, privacy) and is filed in `open-questions.md`
-as **C-Q26**. Until it is answered the honest interim is for the app to *say*
-it has no weather source rather than draw an empty dashboard over the
-absence -- which is a change worth making on its own, since an empty dashboard
-reads as a broken app and a stated "no weather source configured" reads as an
-unfinished one, and only the second is true.

@@ -261,40 +261,6 @@ costs the other two lanes their merges.
 the head-of-line witness entry: `socket.rs:356`, `netstack_client.rs:158`, and
 `services/netstack/src/main.rs:2594`.*
 
-## C-Q26 — [C] The weather app has no weather, and making some up was already rejected once. What should it show? — Status: OPEN (raised 2026-09-18)
-
-**In short:** Our weather app draws a full dashboard — current conditions, an
-hourly strip, a seven-day table, alerts — over nothing at all. It has no saved
-places, no forecast, and no way to get either. It used to open showing New
-York, London and Tokyo with invented numbers; somebody deleted that, correctly,
-because a weather app showing you confident temperatures it made up is worse
-than one showing you nothing. But nothing replaced it, and we cannot fetch real
-weather yet: our HTTP library can build a request and cannot send it (it has no
-transport — no code that opens a network connection). So the question is what
-the app should do in the meantime.
-
-| Option | What it means | *What changes* |
-|---|---|---|
-| **A. Say it has no source (recommended)** | The window states plainly that no weather source is configured, instead of drawing empty panels. Roadmap gains the real task. | *The app reads as unfinished instead of broken — one honest sentence instead of a dashboard of blank boxes.* |
-| **B. Put the made-up weather back, labelled** | Restore the sample forecast, visibly marked as demo data. | *You see a plausible-looking forecast for New York with a "sample data" badge — and every screenshot of our OS from now on contains fake weather.* |
-| **C. Remove the app until there is a source** | Delete it from the shipped set; keep the code. | *One fewer app in the launcher; nothing misleading ships.* |
-| **D. Build the transport and fetch real weather** | Write the network send path, pick a provider, handle keys and privacy. | *Real weather — after real work in the net stack, and after you choose a provider that sees our users' locations.* |
-
-**Why this needs you and not me.** B and D are user-visible policy: B decides
-that shipping invented data is acceptable if it is labelled, and D decides that
-an OS component may talk to a named third party about where the user lives.
-Neither is mine to choose. A and C are reversible and cheap.
-
-**If this is never answered:** nothing gets worse and nothing is blocked — the
-app is inert and harmless, just embarrassing. The one active harm is the
-module doc, which claims "Multiple saved locations" and "All weather data is
-simulated locally"; both are false in the shipped binary and I will fix that
-text regardless of which option you pick.
-
-**My recommendation is A**, because it is true today, it costs nothing, and it
-does not foreclose D. The full evidence is in `known-issues.md` →
-`TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY`.
-
 ## C-Q25 — [C] The password manager can write your passwords to a plain file, or write a "backup" that restores nothing. Which? — Status: OPEN (raised 2026-09-17)
 
 **In short:** the credential manager holds logins you have typed in, and

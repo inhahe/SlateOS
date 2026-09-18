@@ -1,25 +1,25 @@
 //! Slate OS Weather Application
 //!
-//! # This app has no weather in it
+//! **This program cannot fetch weather, and says so in the window.** It has
+//! no network access and no data source: `WeatherApp::new` -- what `main`
+//! builds -- holds no conditions, forecast, alerts or locations, every
+//! generator here is `#[cfg(test)]`, and so is every way to add a place.
+//! `render_commands` therefore stops at `render_cannot_fetch` and draws
+//! `CANNOT_FETCH_LINES` instead of the dashboard, so no panel ever shows a
+//! default that would be read as a reading. The fourth of those lines is the
+//! one that matters most: *silence here is not an all-clear* -- an empty
+//! alerts banner must not be mistaken for "no warnings in force".
 //!
-//! Read this before the feature list, because the list describes *layouts*
-//! and not things a user can see. `WeatherApp::new` -- which is what `main`
-//! builds -- holds no conditions, no forecast, no alerts and no locations,
-//! and nothing in production writes any of them. Every generator here
-//! (`sample_current_weather`, `sample_hourly_forecast`, `sample_daily_forecast`,
-//! `sample_alerts`, `default_locations`) is `#[cfg(test)]`, and so is every
-//! way to add a place to look at. In a real window this program draws its
-//! chrome over an empty model.
+//! It used to open on invented weather for New York, London and Tokyo, which
+//! is a confident lie about something people make decisions with. Deleting
+//! that was right, and the honest-empty state was put in at the same time.
+//! What is still missing is a real source: our HTTP library parses and
+//! serialises and has no transport, so there is nowhere to fetch from yet.
+//! That is tracked in `deferred-questions.md`, not as a live question, since
+//! nothing can act on it until the transport exists.
 //!
-//! It is this way on purpose and the purpose was right: it used to open on
-//! invented weather for New York, London and Tokyo, which is a confident lie
-//! about something people make decisions with. Deleting that was correct.
-//! What has not happened is replacing it -- our HTTP library parses and
-//! serialises and has no transport, so there is nowhere to get real weather
-//! from yet. See `open-questions.md` C-Q26 for the decision that unblocks
-//! this, and `known-issues.md` for the evidence.
-//!
-//! The layouts below are real, tested, and waiting for a model to draw:
+//! The layouts below are real and tested, and draw when a model is supplied
+//! (which today only tests do):
 //! - Current conditions with detailed metrics
 //! - Hourly forecast (24 hours) with horizontal strip layout
 //! - 7-day daily forecast in a table layout

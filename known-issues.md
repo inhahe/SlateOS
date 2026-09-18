@@ -159221,3 +159221,43 @@ a control drawn at coordinates the click handler had never heard of.
 **The measurement, which is one command:**
 
     grep -c "Event::Mouse\|MouseEvent" apps/*/src/main.rs
+
+## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17)
+
+**In short:** a `cargo test --workspace` failed with exactly one failing test,
+and the same command on the same tree passed on the next run. Something in the
+suite fails occasionally and not reproducibly. It is not fixed, and it is not
+even identified, because I deleted the log before reading it.
+
+**What is known.**
+
+| | |
+|---|---|
+| exit | `CARGO_RC=101`, `child exited: FAIL (exit 101), 226s elapsed` |
+| the failing crate's suite | `424 passed; 1 failed` |
+| re-run, same tree, no changes | `PASS, 580s`, 61,752 passed, nothing failed |
+| the crate | almost certainly `apps/explorer`, which has exactly 425 tests -- and which passes 425/425 when run on its own |
+
+**Why the name is missing, which is the part worth not repeating.** The command
+that read the verdict also ran `rm -f build/wsD.log`, unconditionally, in the
+same line. It was written for the case where the run passes. The failure
+summary was on screen for one moment and the file holding the test name was
+gone before I thought to look for it. Same shape as the `open("w")`
+truncation recorded above: a destructive step sequenced before the thing that
+decides whether it is safe.
+
+**Delete a log only after reading a PASS out of it.**
+
+**The likely cause, stated as a hypothesis and not a finding.** The crate
+passes alone and failed under the workspace run, which is the shape this tree
+already has a gate for: `scripts/check-config-turn-guards.py` exists because
+`settingsfile::testing::with_scratch_config` repoints `XDG_CONFIG_HOME` for
+the whole *process*, and `cargo test` runs a crate's tests as threads of one
+process -- so a test that drives an event loop can see the directory change
+under it and repaint when it counted frames. That gate reports `0 unguarded`
+today, so if this is that, it is a case the gate does not recognise.
+
+**What to capture when it happens again**, since it will and the next person
+should not be starting from here: the whole log, the test name from the
+`---- <name> stdout ----` block, and whether `cargo test -p <crate>` alone
+reproduces it.

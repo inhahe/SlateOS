@@ -160489,6 +160489,78 @@ programs as broken. The entry they live in
 (`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
 says why the failure is systematic rather than a matter of care.
 
+## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18)
+
+**In short:** 60 boolean fields across 25 apps are read by the program and
+never written by it. The renderer draws from them, the behaviour depends on
+them, and no keystroke, click or setting can change one. A user sees a toggle
+that does not work, or more often a choice that was made for them and never
+offered -- which is why none of these has ever been reported.
+
+**The verified example.** `apps/regextester` draws three flag toggles along the
+top -- `("i", self.flags.case_insensitive, "Case insensitive")`, `g` for
+global, `m` for multiline -- and compiles the pattern with
+`RegexCompiler::new(&self.pattern, self.flags.case_insensitive)`. The only
+assignment to any of them in the whole crate is
+`app.flags.case_insensitive = true;` **inside a test**. So the flags are drawn,
+are read, decide the result, and cannot be changed: a regular-expression tester
+whose case sensitivity is fixed at compile time.
+
+That is the same defect as `apps/passwordgen`'s frozen options and
+`apps/mindmap`'s `show_sidebar`, eight of which were fixed by hand on
+2026-09-18 by reading one app at a time. `scripts/frozen-flag-survey.py` is
+that reading, mechanised.
+
+**Why no compiler or existing gate catches it.** `dead_code` is silent because
+the field is read. `check-fields-written-never-read.py` looks for the mirror
+image -- written and never read -- and `check-unreachable-mutators.py` finds a
+mutator nothing calls, which requires the mutator to exist; here there usually
+is none. The program is *consistent*, which is precisely what makes it
+invisible: nothing is ever wrong on screen, there is simply one behaviour where
+two were designed.
+
+**What the number is worth, stated with its method.** Booleans only, in the
+struct behind `impl App for X`, in live code across every file of the crate,
+with construction not counting as a write. Restricted to `bool` because a
+field of a struct type can be mutated by a method without ever being assigned
+(`self.viewport.scroll_by(..)`), so "never assigned" means nothing there; for a
+`bool` it means exactly what it says.
+
+It is still a candidate list. Some of the 60 are data rather than settings --
+`is_directory` on a listing entry is immutable because that is what it is --
+and the survey says so rather than pretending otherwise. The first run reported
+**197 in 67 apps** before the app-struct restriction, and most of that was
+furniture.
+
+**A tool bug worth recording, because it is the third escape today.** That
+first 197 did not change when the restriction was added, and the reason was a
+literal `0x08` byte sitting in the regex where `backslash-b` should have been: the
+heredoc carrying the patch collapsed one backslash level, and `backslash-b` is a
+*valid* Python escape, so it became the byte it names and the pattern silently
+never matched. `backslash-a` did the same thing to `known-issues.md` an hour earlier
+and `backslash-w` -- being *invalid* -- merely warned. **The escapes that warn are the
+harmless ones**; the dangerous ones are by definition the ones the language
+handles quietly. Regexes do not go through heredocs any more.
+
+**And the repair was worse than the bug for about ninety seconds.** Fixing the
+mangled paragraph, I reached for a blanket replace across the whole file --
+every occurrence of the two-character sequence, no count, no scope -- on a
+document of 160,000 lines shared by three lanes. It corrupted **seven unrelated
+places**: a Windows path in a kernel entry, a grep example, a cfg-matching
+pattern, a regex in a layout rule. All of them pre-existing, none of them mine,
+and the file had no other reader to notice.
+
+Caught only because I listed the remaining matches instead of trusting the
+count, and repaired one at a time with `git diff` as the check -- the diff is
+zero deletions now, which is the property that actually proves nothing else moved.
+
+The tool for this already existed and I bypassed it: every other edit in this
+session goes through a helper that asserts the match count *before* replacing
+and aborts otherwise, precisely so a broad pattern cannot quietly hit more than
+it was aimed at. **A safety rail abandoned under time pressure is a safety rail
+that was never there.** The rule earns its keep most exactly when the edit
+feels too small to need it.
+
 ## `TD-C-THE-REDRAW-SIGNAL-WAS-A-THIRD-LIST` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** `apps/jsonviewer` decides whether to draw a frame by comparing a

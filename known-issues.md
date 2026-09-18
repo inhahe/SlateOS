@@ -160478,6 +160478,49 @@ That is the *where* twin of dd-937/938: an artifact true when written does
 not say when it stopped being true, and one true where written does not say
 where it stops being true.
 
+#### Measured one level deeper 2026-09-18: the divergence is not only the artifact
+
+Three caches with three different scopes, which is why this is structural
+rather than an oversight:
+
+| thing | scope | set by |
+|---|---|---|
+| source tarballs | **shared** between lanes | `SLATE_ZIG_CACHE=$HOME/.cache/slateos` |
+| spike artifacts (`*-slateos.elf`) | **per-lane** | `SLATE_SPIKE=$SLATE_ROOT/build/spike` |
+| `zig` itself | **per-lane if present, else shared** | declared `SLATE_ZIG=$SLATE_SPIKE/zig/zig`, but `slate_ensure_zig` reassigns it to the shared cache when no pinned per-worktree copy exists |
+| `toolchain/sysroot/lib/libc.a` | **per-lane** | gitignored at `.gitignore:68` |
+
+So `cmake-4.4.3.tar.gz` was downloaded once (2026-09-11, cached, still
+there) while the binary built from it exists in exactly one tree. And the
+last row is the one that matters most: **the thing the spike proves a claim
+about is itself per-lane.** "cmake links clean against our `libc.a`" is a
+statement about one lane's libc at one moment, not about the project.
+
+*(Corrected within the hour: the `zig` row first said flatly "per-lane",
+which I took from the variable's declaration at `worktree.sh:90` without
+accounting for `slate_ensure_zig` reassigning it at lines 306/314/348. It
+prefers a pinned per-worktree copy and falls back to the shared cache; in
+this tree it resolved to the shared one, `build/spike/zig` does not exist,
+and the function reported `/home/inhahe/.cache/slateos/zig-.../zig`. Reading
+a declaration and not the call is the same error as reading a name and not
+line 1 -- caught here only because I ran the function and read where the
+file actually landed.)*
+
+**Concretely, and this is why copying is not the shortcut it looks like:**
+
+| | timestamp |
+|---|---|
+| `os-lane-b/build/spike/cmake-slateos.elf` | 22,525,984 bytes, 2026-09-15 19:31 |
+| `os-lane-a/toolchain/sysroot/lib/libc.a` | 11,782,644 bytes, 2026-09-16 02:16 |
+
+Lane B's binary predates my libc by about seven hours, so copying it would
+trip `create-ext4-rootfs.sh`'s own guard -- *"cmake-slateos.elf is OLDER
+than the sysroot libc.a -- it links a stale libc and proves nothing about
+the current one"* -- and a rung built on it would report a green verdict
+about a libc that is not the one in this tree. The guard is right and it is
+the reason the build has to be local. Worth recording that the shortcut was
+considered and refused on evidence, not skipped on principle.
+
 **Proper fix, in two parts.** (a) Add the cmake rung -- which converts a
 silently missing artifact into a counted skip, and is wanted on its own
 merits (`requests/b-a-cmake-needs-a-ring-3-rung-like-the-other-three.md`).

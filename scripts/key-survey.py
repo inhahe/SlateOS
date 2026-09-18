@@ -117,6 +117,26 @@ IGNORE = {
 
 KEY_RE = re.compile(r"\bKey::([A-Za-z][A-Za-z0-9]*)")
 
+# A printed key list, found by its *shape* rather than its name.
+#
+# This looked for the identifiers `SHORTCUTS` and `ALL_KEY_ACTIONS`, which is
+# how the first run of this survey reported ten apps with a key list when the
+# real number is far higher: `apps/magnifier` calls its `HELP_ROWS`, and a
+# dozen more spell it a dozen other ways. A name is a thing an author chooses;
+# a `const NAME: ... (&str, &str)` is a thing the type system fixes, and that
+# is what a list of keys and their descriptions looks like whatever it is
+# called.
+#
+# The first version of this tool was the very defect the tool exists to find:
+# a search for the spelling somebody happened to use. Lane A hit the same
+# shape the same day in `scripts/check-variant-lists.py`, whose population is
+# every list *named* ALL -- so a list that should be total and is called
+# PRIMARY_COMMANDS is invisible to it, and nothing says so.
+LIST_RE = re.compile(
+    r"(?:const|static)\s+[A-Z_][A-Z_0-9]*\s*:[^=;]*"
+    r"\(\s*&(?:'static\s+)?str\s*,\s*&(?:'static\s+)?str\s*\)"
+)
+
 
 def crate_sources(crate: Path) -> list[Path]:
     return sorted(p for p in (crate / "src").rglob("*.rs"))
@@ -137,7 +157,7 @@ def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
         except (OSError, UnicodeDecodeError):
             continue
         live, _test = rustlex.live_code(src)
-        if "SHORTCUTS" in live or "ALL_KEY_ACTIONS" in live:
+        if LIST_RE.search(live):
             has_list = True
         # Comments and literals blanked before the key scan: a key named in
         # a comment is the fourth way a search says nothing, and my own

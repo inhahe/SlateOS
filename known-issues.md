@@ -160599,11 +160599,29 @@ is now about fifteen minutes and entirely mechanical, so this is a programme of
 work rather than a defect -- filed with the tool that finds the candidates and
 one worked example verified by hand.
 
-**The one number here that needs no inference is ten.** A crate either contains
-a key list or it does not, and `scripts/key-survey.py` reads every `.rs` file in
-each crate to decide -- not just `main.rs`, because 12 of 141 apps have more
-than one source file. Everything else the survey prints is a *candidate list*,
-and it is wrong in both directions:
+**The number of apps that print a key list is 29**, and the first version of
+this entry said ten. That correction is the most useful thing in the file, so
+it goes first.
+
+I wrote "the one number here that needs no inference is ten -- a crate either
+contains a key list or it does not". The premise is true and the number was
+wrong, because **the inference was hidden inside the tool**: it searched for
+the identifiers `SHORTCUTS` and `ALL_KEY_ACTIONS`, and `apps/magnifier` calls
+its list `HELP_ROWS`. A dozen more spell it a dozen other ways. I had written a
+search for the spelling somebody happened to use, which is the exact defect the
+survey exists to find, and then quoted its output as the one figure not subject
+to it.
+
+It now matches the *shape* -- `const NAME: ... (&str, &str)` -- which is what a
+list of keys and their descriptions is whatever its author called it. A name is
+chosen; a type is fixed. **Lane A hit the identical shape the same day**: their
+`scripts/check-variant-lists.py` checks every list *named* `ALL`, so a list
+that should be total and is called `PRIMARY_COMMANDS` is invisible to it and
+nothing says so. Two tools, two authors, same afternoon, both defining their
+population by a name.
+
+Everything else the survey prints is a *candidate list*, and it is wrong in
+both directions:
 
 | | |
 |---|---|
@@ -160621,11 +160639,12 @@ of the *operation*, not of the key that adds it. So the program's entire
 purpose is reachable only by someone who has read the handler, which is the
 same defect as `apps/slides` being unable to put a shape on a slide, one step
 further out: the operation is reachable, and the way in is not. It now prints
-the list on `F1` or `?`. `apps/hexeditor` followed -- thirteen chords and a
+the list on `F1` or `?`. `apps/hexeditor` and `apps/filediff` followed -- thirteen chords and a
 page of navigation, `Ctrl+B`/`Ctrl+N`/`Ctrl+P` worst of all, because bookmarks
 are invisible until one is set and so the feature could not be found by looking
 at the window in any state. That leaves the survey's count at 126 apps binding
-an unguessable key and twelve printing one.
+an unguessable key and 29 printing one -- a gap of roughly a hundred, not the
+hundred and fourteen the first count implied.
 
 **A gate for this was considered and declined, which is worth saying so nobody
 builds it twice.** The obvious move is a ratchet: baseline today's list, fail

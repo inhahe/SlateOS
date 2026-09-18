@@ -160675,12 +160675,20 @@ for prompting two fixes that were already written weeks earlier, which is a
 false attribution of exactly the kind we had both spent the day chasing in
 code: an artefact that reads as true and points at the wrong source.
 
-**Where the report actually came from is unknown.** It arrived inside the
-captured output of one of my own background `git push` tasks, between the
-status line and the push's ref updates -- a channel I cannot account for and
-will not guess at. The honest statement is that an unattributed report of a red
-gate was wrong about the gate, and that I compounded it by supplying a source
-and a cause from context rather than from evidence.
+**Where the report actually came from is unknown, and the evidence says it is
+a mechanism rather than a correspondent.** It arrived inside the captured
+output of one of my own background `git push` tasks, between the status line
+and the push's ref updates -- and then arrived **again, byte-identical, in the
+same position, in the next push task**. A correspondent does not resend the
+same paragraph to the same byte; a channel does. Searched for and not found in
+the tracked tree (`git grep`), in `scripts/`, or in the pre-push hook chain, so
+it is not something the push itself prints.
+
+That is as far as the evidence goes, and the entry stops there. The honest
+statement is that an unattributed report of a red gate was wrong about the
+gate, and that I compounded it by supplying a source and a cause from context
+rather than from evidence. Naming the one remaining peer would be the identical
+move with a different name in the slot.
 
 **The fix is provenance, and it is one line.** `audit-cli-fabrication` now ends
 its verdict with the commit it measured, with `+dirty` when the checkout is not

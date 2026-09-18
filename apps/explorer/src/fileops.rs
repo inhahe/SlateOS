@@ -2469,7 +2469,7 @@ mod tests {
     /// and not to `_`, which would drop it (and delete the directory) before
     /// the test's first line.
     fn temp_dir(label: &str) -> ScratchDir {
-        ScratchDir::new(&format!("fileops_test_{label}"))
+        crate::guarded_scratch(&format!("fileops_test_{label}"))
     }
 
     /// Write a file with the given content.

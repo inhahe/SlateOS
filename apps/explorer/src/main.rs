@@ -5570,6 +5570,31 @@ impl ExplorerState {
 // Main
 // ============================================================================
 
+/// A scratch directory, resolved while holding the environment lock.
+///
+/// `ScratchDir::new` calls `std::env::temp_dir()`, which **reads** the
+/// environment, and tests in this same binary **write** it --
+/// `settingsfile::testing::with_scratch_config` removes `HOME` and sets
+/// `XDG_CONFIG_HOME` under `ENV_LOCK`. The environment is process-global and
+/// the tests are threads, so a scratch directory could be resolved while
+/// another thread was rewriting the block. Concurrent read-and-write of the
+/// environment is undefined, which is why `std::env::set_var` is `unsafe` in
+/// Rust 2024.
+///
+/// `ENV_LOCK` only serialises the tests that take it, and **a reader is the
+/// side that forgets**. Every scratch directory in this crate is now resolved
+/// here, so the lock is taken once and cannot be omitted by a new test that
+/// copies an old one.
+///
+/// See known-issues `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE`,
+/// whose original unidentified instance was this crate's suite failing by
+/// exactly one test.
+#[cfg(test)]
+pub(crate) fn guarded_scratch(label: &str) -> scratchdir::ScratchDir {
+    let _turn = settingsfile::testing::config_turn();
+    scratchdir::ScratchDir::new(label)
+}
+
 fn main() -> std::process::ExitCode {
     // The folder to open, then the home directory, then the root. A path given
     // on the command line is what makes "open containing folder" possible from
@@ -5873,7 +5898,7 @@ mod tests {
         // The guard only has to span the resolution: once the directory is
         // named, nothing later re-reads the environment.
         let _turn = settingsfile::testing::config_turn();
-        ScratchDir::new(&format!("explorer_test_{label}"))
+        crate::guarded_scratch(&format!("explorer_test_{label}"))
     }
 
     fn write(path: &Path, content: &str) {
@@ -5975,7 +6000,7 @@ mod tests {
         // The defect: the renderer drew as many rows as fit and stopped, so
         // every file past the bottom edge was unreachable -- not merely
         // awkward to reach, but not drawn and not clickable at any point.
-        let dir = ScratchDir::new("explorer-scroll");
+        let dir = crate::guarded_scratch("explorer-scroll");
         dir_with_files(&dir.path(""), 60);
         let mut state = state_at(&dir.path(""));
         let window_h = HEADER_H + 10.0 * ROW_H;
@@ -5994,7 +6019,7 @@ mod tests {
 
     #[test]
     fn the_wheel_scrolls_and_a_trackpads_fractions_are_not_lost() {
-        let dir = ScratchDir::new("explorer-wheel");
+        let dir = crate::guarded_scratch("explorer-wheel");
         dir_with_files(&dir.path(""), 60);
         let mut state = state_at(&dir.path(""));
 
@@ -6022,7 +6047,7 @@ mod tests {
 
     #[test]
     fn the_wheel_does_not_scroll_past_either_end() {
-        let dir = ScratchDir::new("explorer-wheel-ends");
+        let dir = crate::guarded_scratch("explorer-wheel-ends");
         dir_with_files(&dir.path(""), 12);
         let mut state = state_at(&dir.path(""));
         state.viewport.set_height(10, state.entries.len());
@@ -6043,7 +6068,7 @@ mod tests {
         // The symptom that made this read as a *lost* selection: the arrow
         // keys moved an index into the full listing, the renderer drew only
         // the first screenful, and the highlighted row was off screen.
-        let dir = ScratchDir::new("explorer-follow");
+        let dir = crate::guarded_scratch("explorer-follow");
         dir_with_files(&dir.path(""), 60);
         let mut state = state_at(&dir.path(""));
         state.viewport.set_height(10, state.entries.len());
@@ -6065,7 +6090,7 @@ mod tests {
 
     #[test]
     fn the_icon_grid_scrolls_and_reaches_the_last_file() {
-        let dir = ScratchDir::new("explorer-icons-scroll");
+        let dir = crate::guarded_scratch("explorer-icons-scroll");
         dir_with_files(&dir.path(""), 60);
         let mut state = state_at(&dir.path(""));
         state.view_mode = ViewMode::Icons;
@@ -6085,7 +6110,7 @@ mod tests {
         // the step were counted in entries, a notch would move three files --
         // less than one visible row on any pane wider than three cells -- and
         // the grid would look unresponsive.
-        let dir = ScratchDir::new("explorer-icons-wheel");
+        let dir = crate::guarded_scratch("explorer-icons-wheel");
         dir_with_files(&dir.path(""), 200);
         let mut state = state_at(&dir.path(""));
         state.view_mode = ViewMode::Icons;
@@ -6111,7 +6136,7 @@ mod tests {
         // the listing, and using one number for both means the first cell
         // after a scroll claims to be the first file in the folder. A click
         // would then open the wrong file, silently.
-        let dir = ScratchDir::new("explorer-icons-zones");
+        let dir = crate::guarded_scratch("explorer-icons-zones");
         dir_with_files(&dir.path(""), 60);
         let mut state = state_at(&dir.path(""));
         state.view_mode = ViewMode::Icons;
@@ -6148,7 +6173,7 @@ mod tests {
     #[test]
     fn a_short_listing_has_no_scrollbar() {
         // A permanent grey stripe beside a three-item folder reads as broken.
-        let dir = ScratchDir::new("explorer-sb-short");
+        let dir = crate::guarded_scratch("explorer-sb-short");
         dir_with_files(&dir.path(""), 3);
         let state = state_at(&dir.path(""));
         assert!(state.scrollbar_track().is_none());
@@ -6156,7 +6181,7 @@ mod tests {
 
     #[test]
     fn a_long_listing_has_one_and_the_thumb_tracks_the_view() {
-        let dir = ScratchDir::new("explorer-sb-long");
+        let dir = crate::guarded_scratch("explorer-sb-long");
         dir_with_files(&dir.path(""), 200);
         let mut state = state_at(&dir.path(""));
         let track = state.scrollbar_track().expect("a long listing needs a bar");
@@ -6174,7 +6199,7 @@ mod tests {
 
     #[test]
     fn dragging_the_thumb_scrolls_the_listing() {
-        let dir = ScratchDir::new("explorer-sb-drag");
+        let dir = crate::guarded_scratch("explorer-sb-drag");
         dir_with_files(&dir.path(""), 200);
         let mut state = state_at(&dir.path(""));
         let track = state.scrollbar_track().expect("a bar");
@@ -6199,7 +6224,7 @@ mod tests {
         // The bar is drawn *over* the rows, so without the check the click
         // falls through and selects whatever file the thumb happens to cover --
         // the kind of wrong that looks like a misclick and is not.
-        let dir = ScratchDir::new("explorer-sb-steal");
+        let dir = crate::guarded_scratch("explorer-sb-steal");
         dir_with_files(&dir.path(""), 200);
         let mut state = state_at(&dir.path(""));
         state.selected_indices.clear();
@@ -6226,7 +6251,7 @@ mod tests {
         // one. Passing zero compiles, drags smoothly, and jumps the view the
         // instant you take hold anywhere but the thumb's very top -- a defect
         // that looks like a twitchy scrollbar rather than a bug.
-        let dir = ScratchDir::new("explorer-sb-grab");
+        let dir = crate::guarded_scratch("explorer-sb-grab");
         dir_with_files(&dir.path(""), 200);
         let mut state = state_at(&dir.path(""));
         state.viewport.scroll_by(80, state.entries.len());
@@ -6253,7 +6278,7 @@ mod tests {
 
     #[test]
     fn a_release_lets_go_of_the_thumb() {
-        let dir = ScratchDir::new("explorer-sb-release");
+        let dir = crate::guarded_scratch("explorer-sb-release");
         dir_with_files(&dir.path(""), 200);
         let mut state = state_at(&dir.path(""));
         let track = state.scrollbar_track().expect("a bar");
@@ -6274,7 +6299,7 @@ mod tests {
 
     #[test]
     fn clicking_the_track_below_the_thumb_pages_down() {
-        let dir = ScratchDir::new("explorer-sb-page");
+        let dir = crate::guarded_scratch("explorer-sb-page");
         dir_with_files(&dir.path(""), 200);
         let mut state = state_at(&dir.path(""));
         let track = state.scrollbar_track().expect("a bar");

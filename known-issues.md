@@ -159634,9 +159634,21 @@ query is: which test binaries both WRITE the environment (any call to
 | `apps/settings` | 16 | 2 | 9 | already guarded |
 | `gui/window` | 2 | 0 | 1 | no readers |
 | `apps/fileassoc` | 1 | 3 | 0 | **fixed tonight** -- three `ScratchDir::new` calls with no guard at all |
-| `apps/explorer` | 34 | 41 | 1 | **partly fixed** -- see below |
+| `apps/explorer` | 34 | 41 | 1 | **fully fixed 2026-09-18** -- see below |
 
-**`apps/explorer` is left partly done, deliberately.** The failure that was
+**`apps/explorer` is now done (2026-09-18).** All 38 scratch-directory
+creations across `main.rs`, `columns.rs`, `drives.rs`, `dropzone.rs`,
+`fileops.rs` and `search.rs` are routed through one `#[cfg(test)]
+pub(crate) guarded_scratch` in the crate root, which takes `config_turn()`
+before calling `ScratchDir::new`. **One place, so the lock cannot be omitted by
+a new test that copies an old one** -- which is how 35 of the 38 came to lack it
+in the first place. Three now-unused `ScratchDir` imports were removed. 427
+tests.
+
+The paragraph below is what it said while the work was outstanding, kept
+because the reasoning for stopping was sound and the note did its job:
+
+**`apps/explorer` was left partly done, deliberately.** The failure that was
 actually observed goes through `dir_of` -> `temp_dir`, which now holds the
 lock, so the reproduced case is covered. **35 further `ScratchDir::new` calls
 in `columns.rs`, `drives.rs`, `dropzone.rs`, `fileops.rs` and `search.rs`

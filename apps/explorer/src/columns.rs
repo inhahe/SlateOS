@@ -2356,7 +2356,7 @@ mod tests {
     /// is not a provider.
     #[test]
     fn the_standard_provider_reports_a_real_size_and_date() {
-        let scratch = scratchdir::ScratchDir::new("explorer_standard_columns");
+        let scratch = crate::guarded_scratch("explorer_standard_columns");
         let file = scratch.dir().join("payload.bin");
         std::fs::write(&file, [0u8; 1234]).expect("write fixture");
         let path = file.to_str().expect("scratch paths are ASCII");
@@ -2380,7 +2380,7 @@ mod tests {
     /// contents.
     #[test]
     fn the_standard_provider_leaves_a_directory_size_blank() {
-        let scratch = scratchdir::ScratchDir::new("explorer_standard_dir_size");
+        let scratch = crate::guarded_scratch("explorer_standard_dir_size");
         let path = scratch.dir().to_str().expect("scratch paths are ASCII");
         assert_eq!(
             StandardColumns.value(path, ColumnId::SIZE),

@@ -106,6 +106,12 @@ pub enum Command {
     SelectAll,
     /// Select the word under the caret.
     SelectWord,
+    /// Switch the active document between tab and space indentation.
+    ///
+    /// Detection at load handles an existing file; this is for a *new* one,
+    /// which has no indented line to be read from and would otherwise always
+    /// be spaces.
+    ToggleIndentStyle,
     /// Open the find bar.
     Find,
     /// Open the find bar with the caret in the replacement field.
@@ -119,7 +125,7 @@ impl Command {
     /// undispatchable -- consistently missing rather than silently running
     /// something else, which is why [`Command::id`] is the discriminant rather
     /// than a position in this list.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::New,
         Self::Open,
         Self::Save,
@@ -132,6 +138,7 @@ impl Command {
         Self::Paste,
         Self::SelectAll,
         Self::SelectWord,
+        Self::ToggleIndentStyle,
         Self::Find,
         Self::Replace,
     ];
@@ -164,6 +171,7 @@ impl Command {
             Self::Paste => "Paste",
             Self::SelectAll => "Select All",
             Self::SelectWord => "Select Word",
+            Self::ToggleIndentStyle => "Tabs or Spaces",
             Self::Find => "Find...",
             Self::Replace => "Replace...",
         }
@@ -192,6 +200,7 @@ impl Command {
             Self::Paste => "Ctrl+V",
             Self::SelectAll => "Ctrl+A",
             Self::SelectWord => "Ctrl+D",
+            Self::ToggleIndentStyle => "Ctrl+T",
             Self::Find => "Ctrl+F",
             Self::Replace => "Ctrl+H",
         }
@@ -499,7 +508,8 @@ impl EditorState {
             Command::Redo => !doc.redo_stack.is_empty(),
             Command::Cut | Command::Copy => doc.has_selection(),
             Command::Paste => !self.clipboard.is_empty(),
-            Command::New
+            Command::ToggleIndentStyle
+            | Command::New
             | Command::Open
             | Command::Save
             | Command::SaveAs
@@ -581,6 +591,11 @@ impl EditorState {
             Command::SelectWord => {
                 self.active_document_mut().select_word_at_cursor();
                 self.after_cursor_move();
+                Response::Redraw
+            }
+            Command::ToggleIndentStyle => {
+                let doc = self.active_document_mut();
+                doc.use_spaces = !doc.use_spaces;
                 Response::Redraw
             }
             Command::Find => {
@@ -854,6 +869,11 @@ impl EditorState {
             }),
             Key::Z => self.run(if shift { Command::Redo } else { Command::Undo }),
             Key::Y => self.run(Command::Redo),
+            // Tabs or spaces. The status bar already draws which is in use;
+            // until now nothing could change it, so a new file was always
+            // spaces and a Makefile written from scratch was wrong from its
+            // first line.
+            Key::T => self.run(Command::ToggleIndentStyle),
             Key::F => self.run(Command::Find),
             Key::H => self.run(Command::Replace),
             Key::A => self.run(Command::SelectAll),
@@ -1310,6 +1330,7 @@ mod tests {
             "N" => Key::N,
             "O" => Key::O,
             "S" => Key::S,
+            "T" => Key::T,
             "V" => Key::V,
             "W" => Key::W,
             "X" => Key::X,
@@ -1337,6 +1358,21 @@ mod tests {
         for command in Command::ALL {
             let event = keystroke(command.shortcut());
             match command {
+                // Adding the variant forces this arm to be *written*, but
+                // `Command::ALL` above decides whether it is ever *run* -- a
+                // variant left out of that array would compile with an arm
+                // that never executes, which is the "passes by accident"
+                // failure in its purest form. Both were changed together.
+                Command::ToggleIndentStyle => {
+                    let mut editor = editor_with("ab");
+                    let before = editor.active_document().use_spaces;
+                    editor.handle_event(&event);
+                    assert_ne!(
+                        editor.active_document().use_spaces,
+                        before,
+                        "Ctrl+T did not change the indent style"
+                    );
+                }
                 Command::New => {
                     let mut editor = editor_with("ab");
                     let before = editor.tabs.count();

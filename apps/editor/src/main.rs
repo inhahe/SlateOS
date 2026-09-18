@@ -2465,10 +2465,13 @@ impl EditorState {
         // `use_spaces` and `tab_width` are set when a file is read -- and
         // `roadmap-detailed.md` §4.4 asks for it in this bar; it was simply
         // never drawn.
+        // The key is named here because this is the only place the value is
+        // shown, and a setting nobody can find is barely reachable -- the
+        // same argument as the key hints in `passwordgen` and `metronome`.
         let indent = if doc.use_spaces {
-            format!("Spaces: {}", doc.tab_width)
+            format!("Spaces: {} (Ctrl+T)", doc.tab_width)
         } else {
-            format!("Tab width: {}", doc.tab_width)
+            format!("Tab width: {} (Ctrl+T)", doc.tab_width)
         };
         tree.text(450.0, bar_y + 5.0, &indent, self.palette.subtext0, 11.0);
 

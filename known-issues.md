@@ -160781,7 +160781,27 @@ spaces. A file that mixes them is already inconsistent and no answer serves it;
 following the first is what an editor can defend. Opening a Makefile and typing
 no longer corrupts it. 210 tests, up from 207.
 
-**Still missing: the toggle**, so a *new* file cannot be told to use tabs --
+**The toggle landed too (2026-09-18), so this is now fully fixed.** `Ctrl+T`
+switches the active document, the status bar names the key beside the value it
+already drew, and the menu row reads "Tabs or Spaces".
+
+**Adding one command touched nine places**, and the crate caught five of them
+for me: the compiler demanded a menu label, a shortcut string, an enabled
+predicate, a dispatch arm and an arm in the guard test
+`every_shortcut_a_menu_advertises_is_really_bound`, whose inner match is
+exhaustive *on purpose* -- its comment says a new command should stop the file
+compiling "until someone says what pressing its advertised key should do". Two
+more were manual lists that do not fail loudly: `Command::ALL`, which decides
+whether the guard test arm ever runs, and a `letter_key` name-to-key mapping
+that panicked with "no key is named T".
+
+**`Command::ALL` is the interesting one.** The exhaustive match forces the arm
+to be *written*; `ALL` decides whether it is *run*. A variant left out of that
+array compiles, with a test arm that never executes -- passing by accident, in
+its purest form. The two have to be changed together and nothing makes that
+true except noticing.
+
+~~**Still missing: the toggle**~~, so a *new* file cannot be told to use tabs --
 only an existing tab-indented one is honoured. The status bar already draws the
 value, so it needs a key and a name beside it, not new machinery.
 

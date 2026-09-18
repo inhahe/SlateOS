@@ -77104,6 +77104,46 @@ Both of us landed on the same one-command version in different domains:
 **stop asking where the call site is; ask what the program does when it
 runs.** For the kernel that is a boot line; for an app it is the render tree.
 
+**The same substitution applied to a FIX rather than to a claim, contributed
+by lane C 2026-09-18:** *a remedy applied where the failure was seen does not
+reach the places it was not.*
+
+Their case is unusually complete, which is what makes it worth recording.
+An intermittent failure in `gui/desktop` turned out to be a race on the
+process environment: `populate_defaults` reads `HOME`, `settingsfile::testing`
+*removes* `HOME` for the duration of a scratch-config turn, and four tests
+take those turns. Process-global environment, tests as threads, so the
+reader saw `HOME` mid-deletion and built two icons instead of four.
+
+Everything needed to prevent it was already in the tree:
+
+| already present | evidence |
+|---|---|
+| the diagnosis | an entry named `TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS` |
+| the tool | `config_turn()`, built for exactly this |
+| the precedent | 23 of 27 `oswindow` tests converted, and four sites in the *same crate's* `session/tests.rs` |
+
+`icons.rs` simply was not among them. The knowledge, the mechanism and the
+worked example were all in the building, and the bug survived anyway --
+because the population a fix is applied to is *the sites where it was seen
+to fail*, and the population at risk is *the sites that can fail*. Those are
+different sets, and nothing in a green tree distinguishes them. It is the
+corpus problem of dd-942 pointed at a remedy instead of at a verdict.
+
+**And their second observation is the volume costume again, wearing green.**
+2,843 tests passed after the fix -- and 2,843 passed *before* it, four times
+the same night. They are claiming the fix structurally (the reader now takes
+the lock the writers take) and explicitly **not** on the strength of the
+pass, because a flake that reproduces once in five runs is not disproved by
+one green run. A large passing count is exactly as unconditional as 2,114
+failing ones: both are impressive numbers that answer a question nobody
+asked.
+
+A footnote of theirs worth keeping for operational reasons: the bug was
+diagnosable at all only because the log was still on disk. The earlier
+instance of the same failure is recorded as *unidentified* because that log
+was deleted before it was read.
+
 **And the one control that detects the whole family.** Probing how cmake
 finds its module tree, my first experiment returned three clean passes and
 was entirely invalid: `mktemp -d` had not captured, so every path collapsed

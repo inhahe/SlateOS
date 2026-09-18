@@ -7124,9 +7124,15 @@ check_python_suites() {
         # would cost is this loop's readable shape: it echoes everything a
         # checker prints, and forty-odd suites' full output in place of the
         # one-line-per-suite table below is a worse log, not a better one.
+        # Per-suite wall clock. Two boots died inside this phase at their
+        # timeout with nothing here reporting a duration, so the only
+        # evidence available afterwards was how far the alphabet got. One
+        # number per suite turns that into an attribution.
+        suite_start=$(date +%s)
         out="$(PYTHONIOENCODING=:replace "$py" -u "$f" 2>&1)" && rc=0 || rc=$?
+        suite_secs=$(( $(date +%s) - suite_start ))
         if [ "$rc" -eq 0 ]; then
-            printf '    %-32s %s\n' "$(basename "$f")" "$(printf '%s\n' "$out" | tail -1)"
+            printf '    %-32s %5ss  %s\n' "$(basename "$f")" "$suite_secs" "$(printf '%s\n' "$out" | tail -1)"
             # A passing suite is reported by its LAST LINE ONLY, so a suite that
             # drops a group and still ends with "all N passed" reports a skip
             # that nothing above this line can see.  That is not hypothetical:

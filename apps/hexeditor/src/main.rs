@@ -1945,6 +1945,19 @@ impl HexEditor {
 
         // Text input for search/goto dialogs.
         if self.focused_panel == FocusedPanel::SearchBar {
+            // Case sensitivity. Before the text branch, which would otherwise
+            // take this and type an `i` into the query.
+            //
+            // `SearchQuery::case_sensitive` is honoured by `match_at` and had
+            // no writer anywhere in production, so every search this program
+            // ran was case-sensitive and there was no way to ask for anything
+            // else -- in a tool whose whole job is finding a byte sequence
+            // somebody half remembers.
+            if key.key == Key::I && key.modifiers.ctrl {
+                self.search.query.case_sensitive = !self.search.query.case_sensitive;
+                self.perform_search();
+                return EventResult::Consumed;
+            }
             if key.types_text() {
                 self.search.input_text.extend(key.typed());
                 return EventResult::Consumed;
@@ -3186,6 +3199,24 @@ impl HexEditor {
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bar_width - 120.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        // Whether case matters, and the key that changes it. A search box
+        // that silently ignores case -- or silently insists on it -- turns a
+        // miss into "it is not in the file", which is a claim about the file.
+        tree.push(RenderCommand::Text {
+            x: x + bar_width - 190.0,
+            y: y + 12.0,
+            text: if self.search.query.case_sensitive {
+                String::from("Case: on  Ctrl+I")
+            } else {
+                String::from("Case: off  Ctrl+I")
+            },
+            color: self.palette.subtext0,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(115.0),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -5598,6 +5629,107 @@ mod tests {
         assert!(!editor.active_doc().cursor_in_hex);
         editor.handle_key(&key_press(Key::Tab, Modifiers::NONE));
         assert!(editor.active_doc().cursor_in_hex);
+    }
+
+    // ====================================================================
+    // HexEditor — search case sensitivity
+    // ====================================================================
+
+    /// An editor holding "Hello" with the search bar focused.
+    fn editor_searching(text: &str) -> HexEditor {
+        let mut editor = make_test_editor(text.as_bytes().to_vec());
+        editor.focused_panel = FocusedPanel::SearchBar;
+        // The bar is drawn on `search.visible`, not on focus; without this the
+        // render assertions test a bar that is not on screen.
+        editor.search.visible = true;
+        editor
+    }
+
+    /// Ctrl+I turns case matching off and on.
+    ///
+    /// `SearchQuery::case_sensitive` is honoured by `match_at` and had no
+    /// writer anywhere in production, so every search this program ran was
+    /// case-sensitive and nothing could ask for anything else.
+    #[test]
+    fn ctrl_i_toggles_case_sensitivity() {
+        let mut editor = editor_searching("Hello");
+        let before = editor.search.query.case_sensitive;
+
+        editor.handle_key(&key_press(Key::I, Modifiers::ctrl()));
+
+        assert_eq!(
+            editor.search.query.case_sensitive, !before,
+            "Ctrl+I did not change the setting"
+        );
+    }
+
+    /// Ctrl+I is not typed into the query.
+    ///
+    /// The text branch sits directly below and would otherwise take it.
+    #[test]
+    fn ctrl_i_does_not_type_into_the_query() {
+        let mut editor = editor_searching("Hello");
+
+        editor.handle_key(&key_press(Key::I, Modifiers::ctrl()));
+
+        assert!(
+            editor.search.input_text.is_empty(),
+            "Ctrl+I typed into the box: {:?}",
+            editor.search.input_text
+        );
+    }
+
+    /// With case matching off, a search finds text that differs only in case.
+    ///
+    /// The behaviour, not the flag: a flag that flips and changes no result
+    /// is the defect this replaces, one step along.
+    #[test]
+    fn a_case_insensitive_search_finds_what_a_sensitive_one_misses() {
+        let mut editor = editor_searching("Hello");
+        for c in "hello".chars() {
+            editor.search.input_text.push(c);
+        }
+
+        editor.perform_search();
+        assert_eq!(
+            editor.search.match_count, 0,
+            "control: 'hello' should not match 'Hello' while case matters"
+        );
+
+        editor.handle_key(&key_press(Key::I, Modifiers::ctrl()));
+
+        assert!(
+            editor.search.match_count > 0,
+            "turning case matching off did not find 'Hello'"
+        );
+    }
+
+    /// The search bar says which way it is set, and which key changes it.
+    #[test]
+    fn the_search_bar_says_whether_case_matters() {
+        let mut editor = editor_searching("Hello");
+        let drawn = |e: &mut HexEditor| -> Vec<String> {
+            e.render(1200.0, 800.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        assert!(
+            drawn(&mut editor).iter().any(|t| t.contains("Case: on")),
+            "the bar does not say case matters"
+        );
+
+        editor.handle_key(&key_press(Key::I, Modifiers::ctrl()));
+
+        assert!(
+            drawn(&mut editor).iter().any(|t| t.contains("Case: off")),
+            "the bar still says case matters after it stopped"
+        );
     }
 
     // ====================================================================

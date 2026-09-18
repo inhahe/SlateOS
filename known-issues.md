@@ -159828,7 +159828,7 @@ and has no writer anywhere in production:
 |---|---|---|---|
 | `pdfviewer` | `dark_mode` | **`true`** | `page_color()` returns `rgb(40,42,54)` for every page, and `text_color` inverts with it. **Every document renders in inverted colours and no key restores the white page** -- though the comment beside it calls this "the viewer's own `dark_mode` for reading", which is a thing you would switch |
 | `calendar` | `week_starts_monday` | `true` | every month grid begins on Monday, for everyone, forever |
-| `hexeditor` | `case_sensitive` | `true` | search is always case-sensitive; there is no case-insensitive search in the program |
+| `hexeditor` | `case_sensitive` | `true` | search was always case-sensitive; there was no case-insensitive search in the program. **Fixed 2026-09-18:** `Ctrl+I` in the search bar toggles it and the bar says which way it is set, because a search that silently ignores case -- or silently insists on it -- turns a miss into "it is not in the file", which is a claim about the file. 198 tests |
 | `imageviewer` | `show_toolbar` | `true` | the toolbar cannot be hidden, including when looking at an image |
 
 `pdfviewer` is the one that matters most: a document reader that cannot show a

@@ -1840,6 +1840,21 @@ pub enum TextEntry {
     NewFolder,
 }
 
+/// A question at the foot of the window waiting on one keypress.
+///
+/// Separate from `TextEntry` because these collect a choice rather than a
+/// string, and because the destructive two must not be answerable by the
+/// same `Enter` that accepts a typed name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Prompt {
+    /// Delete this feed and the articles belonging to it?
+    RemoveFeed(FeedId),
+    /// Delete this folder, keeping the feeds that were in it?
+    RemoveFolder(FolderId),
+    /// Which folder should this feed be filed under?
+    MoveFeed(FeedId),
+}
+
 /// What is selected in the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarSelection {
@@ -2124,6 +2139,8 @@ pub struct RssReaderApp {
     pub filter_mode: FilterMode,
     pub search_query: String,
     pub search_active: bool,
+    /// A question waiting on a single keypress, if one is up.
+    pub prompt: Option<Prompt>,
     /// The prompt at the foot of the window, if one is up.
     pub text_entry: Option<TextEntry>,
     /// What has been typed into that prompt.
@@ -2178,6 +2195,7 @@ impl RssReaderApp {
             filter_mode: FilterMode::All,
             search_query: String::new(),
             search_active: false,
+            prompt: None,
             text_entry: None,
             text_buffer: String::new(),
             search_results: Vec::new(),
@@ -2808,6 +2826,12 @@ impl RssReaderApp {
             return self.handle_text_entry_key(key);
         }
 
+        // A question waiting on one key takes that key, including the digits
+        // that are filter shortcuts outside it.
+        if self.prompt.is_some() {
+            return self.handle_prompt_key(key);
+        }
+
         if key.modifiers.ctrl {
             return match key.key {
                 Key::F => {
@@ -2894,6 +2918,34 @@ impl RssReaderApp {
             }
             Key::R => {
                 self.toggle_read();
+                EventResult::Consumed
+            }
+            // `D` is the overlay's "Remove feed", widened to the folder when
+            // that is what is selected: `remove_folder` had no caller either,
+            // and `remove_feed`'s only one was inside `remove_folder`.
+            Key::D => {
+                self.prompt = match self.sidebar_selection {
+                    SidebarSelection::Feed(id) => Some(Prompt::RemoveFeed(id)),
+                    SidebarSelection::Folder(id) => Some(Prompt::RemoveFolder(id)),
+                    SidebarSelection::AllFeeds | SidebarSelection::Starred => {
+                        self.status_message =
+                            "Select a feed or folder in the sidebar first".to_string();
+                        None
+                    }
+                };
+                EventResult::Consumed
+            }
+            // Filing a feed into a folder. `move_feed_to_folder` had no
+            // caller, and nothing else wrote `folder_id`, so an imported
+            // arrangement could never be changed.
+            Key::V => {
+                match self.sidebar_selection {
+                    SidebarSelection::Feed(id) => self.prompt = Some(Prompt::MoveFeed(id)),
+                    _ => {
+                        self.status_message =
+                            "Select a feed in the sidebar to move it".to_string();
+                    }
+                }
                 EventResult::Consumed
             }
             // The overlay says Space opens and closes a folder.
@@ -3011,6 +3063,95 @@ impl RssReaderApp {
                 self.perform_search();
                 EventResult::Consumed
             }
+        }
+    }
+
+    /// The folders a feed can be filed into, in sidebar order.
+    ///
+    /// Capped at nine because the prompt answers to a single digit, and a
+    /// tenth folder that silently cannot be chosen is worse than one the
+    /// prompt admits it is not showing.
+    pub fn move_targets(&self) -> Vec<(FolderId, String)> {
+        self.folders
+            .iter()
+            .take(9)
+            .map(|f| (f.id, f.name.clone()))
+            .collect()
+    }
+
+    /// Keys while a one-keypress question is up.
+    fn handle_prompt_key(&mut self, key: &KeyEvent) -> EventResult {
+        let Some(prompt) = self.prompt.clone() else {
+            return EventResult::Ignored;
+        };
+        // Whatever happens, the question comes down: a prompt that survives a
+        // keypress it did not understand is one you cannot get out of.
+        self.prompt = None;
+        match prompt {
+            Prompt::RemoveFeed(id) => {
+                // Only `Y`. A destructive answer should not be reachable by
+                // the `Enter` someone is already pressing to read articles.
+                if key.key == Key::Y {
+                    self.remove_feed(id);
+                    self.forget_selection_of_removed();
+                    self.status_message = "Feed removed".to_string();
+                }
+                EventResult::Consumed
+            }
+            Prompt::RemoveFolder(id) => {
+                if key.key == Key::Y {
+                    // `false`: the feeds inside outlive the folder and become
+                    // ungrouped. Deleting a folder is a filing decision, and
+                    // taking the subscriptions with it is not what the word
+                    // means anywhere else.
+                    self.remove_folder(id, false);
+                    self.forget_selection_of_removed();
+                    self.status_message = "Folder removed; its feeds kept".to_string();
+                }
+                EventResult::Consumed
+            }
+            Prompt::MoveFeed(id) => {
+                let targets = self.move_targets();
+                let choice = match key.key {
+                    Key::Num0 => Some(None),
+                    Key::Num1 => targets.first().map(|(f, _)| Some(*f)),
+                    Key::Num2 => targets.get(1).map(|(f, _)| Some(*f)),
+                    Key::Num3 => targets.get(2).map(|(f, _)| Some(*f)),
+                    Key::Num4 => targets.get(3).map(|(f, _)| Some(*f)),
+                    Key::Num5 => targets.get(4).map(|(f, _)| Some(*f)),
+                    Key::Num6 => targets.get(5).map(|(f, _)| Some(*f)),
+                    Key::Num7 => targets.get(6).map(|(f, _)| Some(*f)),
+                    Key::Num8 => targets.get(7).map(|(f, _)| Some(*f)),
+                    Key::Num9 => targets.get(8).map(|(f, _)| Some(*f)),
+                    _ => None,
+                };
+                if let Some(folder) = choice {
+                    self.move_feed_to_folder(id, folder);
+                    self.status_message = match folder {
+                        Some(_) => "Feed moved".to_string(),
+                        None => "Feed moved out of its folder".to_string(),
+                    };
+                }
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Point the sidebar somewhere that still exists.
+    ///
+    /// The selection holds an id, not a row, so removing what it names leaves
+    /// it naming nothing: the highlight is drawn nowhere and the article list
+    /// filters to a feed that is gone, which looks exactly like an app that
+    /// has lost the user's articles.
+    fn forget_selection_of_removed(&mut self) {
+        let alive = match self.sidebar_selection {
+            SidebarSelection::Feed(id) => self.feeds.iter().any(|f| f.id == id),
+            SidebarSelection::Folder(id) => self.folders.iter().any(|f| f.id == id),
+            SidebarSelection::AllFeeds | SidebarSelection::Starred => true,
+        };
+        if !alive {
+            self.sidebar_selection = SidebarSelection::AllFeeds;
+            self.selected_article_index = 0;
         }
     }
 
@@ -4636,9 +4777,42 @@ impl RssReaderApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // The prompt outranks the status message: it is a question waiting
-        // for an answer, and they share the one line.
-        if let Some(entry) = &self.text_entry {
+        // A question waiting on one keypress outranks everything on this line.
+        if let Some(prompt) = &self.prompt {
+            let text = match prompt {
+                Prompt::RemoveFeed(id) => {
+                    let name = self.feed_name(*id);
+                    format!("Remove {name} and its articles?  Y to confirm, any other key cancels")
+                }
+                Prompt::RemoveFolder(id) => {
+                    let name = self
+                        .folders
+                        .iter()
+                        .find(|f| f.id == *id)
+                        .map_or("this folder", |f| f.name.as_str());
+                    format!(
+                        "Remove {name}?  Its feeds are kept.  Y to confirm, any other key cancels"
+                    )
+                }
+                Prompt::MoveFeed(_) => {
+                    let mut parts = vec!["Move to:".to_string(), "0) no folder".to_string()];
+                    for (i, (_, name)) in self.move_targets().iter().enumerate() {
+                        parts.push(format!("{}) {name}", i.saturating_add(1)));
+                    }
+                    parts.join("   ")
+                }
+            };
+            cmds.push(RenderCommand::Text {
+                x: 12.0,
+                y: y + 7.0,
+                text,
+                font_size: 11.0,
+                color: self.palette.ink(self.palette.yellow),
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(self.width - 24.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        } else if let Some(entry) = &self.text_entry {
             let label = match entry {
                 TextEntry::RenameFeed(_) => "Rename feed",
                 TextEntry::NewFolder => "New folder",
@@ -5564,6 +5738,175 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// `D` then `Y` removes the selected feed and its articles.
+    ///
+    /// `remove_feed`'s only production caller was inside `remove_folder`, so
+    /// a feed could only be removed by removing the folder around it.
+    #[test]
+    fn d_then_y_removes_the_selected_feed() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        assert!(
+            a.articles.iter().any(|x| x.feed_id == id),
+            "control: the feed needs articles to lose"
+        );
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&press(Key::D));
+        assert!(a.prompt.is_some(), "D did not ask");
+        a.handle_event(&press(Key::Y));
+
+        assert!(!a.feeds.iter().any(|f| f.id == id), "the feed is still there");
+        assert!(
+            !a.articles.iter().any(|x| x.feed_id == id),
+            "its articles outlived it"
+        );
+    }
+
+    /// Any other key cancels, and nothing is removed.
+    #[test]
+    fn a_key_that_is_not_y_cancels_a_removal() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&press(Key::D));
+        a.handle_event(&press(Key::Enter));
+
+        assert!(a.prompt.is_none(), "the question is still up");
+        assert!(
+            a.feeds.iter().any(|f| f.id == id),
+            "Enter removed the feed; only Y should"
+        );
+    }
+
+    /// Removing a folder keeps the feeds that were in it.
+    #[test]
+    fn removing_a_folder_keeps_its_feeds() {
+        let mut a = app();
+        let id = a.folders.first().expect("a folder").id;
+        let inside: Vec<FeedId> = a
+            .feeds
+            .iter()
+            .filter(|f| f.folder_id == Some(id))
+            .map(|f| f.id)
+            .collect();
+        assert!(!inside.is_empty(), "control: the folder needs a feed in it");
+        a.sidebar_selection = SidebarSelection::Folder(id);
+
+        a.handle_event(&press(Key::D));
+        a.handle_event(&press(Key::Y));
+
+        assert!(!a.folders.iter().any(|f| f.id == id), "the folder survived");
+        for fid in inside {
+            let feed = a.feeds.iter().find(|f| f.id == fid).expect("the feed was deleted too");
+            assert_eq!(feed.folder_id, None, "the feed still points at a dead folder");
+        }
+    }
+
+    /// After a removal the selection names something that exists.
+    ///
+    /// The selection holds an id, not a row: left pointing at a removed feed
+    /// it filters the article list to nothing, which looks like an app that
+    /// has lost the user's articles.
+    #[test]
+    fn the_selection_survives_removing_what_it_named() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&press(Key::D));
+        a.handle_event(&press(Key::Y));
+
+        assert_eq!(
+            a.sidebar_selection,
+            SidebarSelection::AllFeeds,
+            "the sidebar still points at the removed feed"
+        );
+        assert!(
+            !a.filtered_article_indices().is_empty(),
+            "the article list is empty though other feeds have articles"
+        );
+    }
+
+    /// `V` then a digit files the feed into that folder.
+    ///
+    /// `move_feed_to_folder` had no caller and nothing else wrote
+    /// `folder_id`, so an imported arrangement could never be changed.
+    #[test]
+    fn v_then_a_digit_files_the_feed() {
+        let mut a = app();
+        let folder = a.folders.first().expect("a folder").id;
+        let id = a
+            .feeds
+            .iter()
+            .find(|f| f.folder_id != Some(folder))
+            .expect("a feed outside that folder")
+            .id;
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&press(Key::V));
+        assert!(a.prompt.is_some(), "V did not offer the folders");
+        a.handle_event(&press(Key::Num1));
+
+        assert_eq!(
+            a.feeds.iter().find(|f| f.id == id).unwrap().folder_id,
+            Some(folder),
+            "the feed was not filed"
+        );
+    }
+
+    /// `0` takes the feed out of every folder.
+    #[test]
+    fn v_then_zero_moves_the_feed_out_of_its_folder() {
+        let mut a = app();
+        let id = a
+            .feeds
+            .iter()
+            .find(|f| f.folder_id.is_some())
+            .expect("a feed in a folder")
+            .id;
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&press(Key::V));
+        a.handle_event(&press(Key::Num0));
+
+        assert_eq!(
+            a.feeds.iter().find(|f| f.id == id).unwrap().folder_id,
+            None,
+            "the feed is still in a folder"
+        );
+    }
+
+    /// A digit answering a prompt does not also change the filter behind it.
+    #[test]
+    fn a_digit_answering_a_prompt_does_not_change_the_filter() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        a.sidebar_selection = SidebarSelection::Feed(id);
+        let before = a.filter_mode;
+
+        a.handle_event(&press(Key::V));
+        a.handle_event(&press(Key::Num1));
+
+        assert_eq!(a.filter_mode, before, "answering the prompt changed the filter");
+    }
+
+    /// The question is on screen while it waits.
+    #[test]
+    fn the_removal_question_is_drawn() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&press(Key::D));
+
+        assert!(
+            drawn_text(&a).iter().any(|t| t.contains("Y to confirm")),
+            "the question is nowhere on screen"
+        );
     }
 
     /// Ctrl+R renames the selected feed. It was advertised and bound to

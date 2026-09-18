@@ -726,6 +726,8 @@ struct App {
     /// floor to Warn instead — the app had no input at all, so nothing had ever
     /// needed to make the distinction.
     search_focused: bool,
+    /// Whether the shortcut list is up.
+    show_help: bool,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -743,6 +745,33 @@ struct App {
 const NO_LOGS_LINES: [&str; 2] = [
     "No log is being read.",
     "This program cannot open a log file, so the view stays empty -- that is not a quiet system.",
+];
+
+/// Every key this program answers, and what it does.
+///
+/// Twenty-three bindings and nothing on screen naming one. `F1` rather than
+/// `?`, because this match reads `key.key` and ignores modifiers, so a shifted
+/// slash is a slash and would open the search box.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("1 / 2 / 3", "List / statistics / detail"),
+    ("T / D / I", "Show trace / debug / info and above"),
+    ("W / E / F", "Show warnings / errors / fatal and above"),
+    ("Up / Down", "Move through the entries"),
+    ("Home / End", "First / last entry"),
+    ("Space", "Bookmark this entry"),
+    ("B", "Show only the bookmarked entries"),
+    ("/", "Search"),
+    ("N / P", "Next / previous match"),
+    ("L", "Wrap long lines"),
+    ("A", "Follow the tail of the log"),
+    ("Ctrl+L", "Show or hide the line numbers"),
+    ("Ctrl+T", "Show or hide the timestamps"),
+    ("Ctrl+S", "Show or hide the source column"),
+    ("Escape", "Clear every filter"),
+    ("F1", "This list"),
 ];
 
 impl App {
@@ -775,6 +804,7 @@ impl App {
         file.parse_content(sample);
 
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             files: vec![file],
             active_file: 0,
@@ -890,6 +920,40 @@ impl App {
             return self.handle_key_search(key);
         }
         match key.key {
+            // The shortcut list, and the three columns the window drew and
+            // could not hide.
+            //
+            // All four are guarded on their modifier and sit above every bare
+            // letter below, because this match reads `key.key` and nothing
+            // else: an unguarded `Key::T` takes `Ctrl+T` as readily as `T`, so
+            // a chord placed after one never runs. `F1` needs no guard and is
+            // here for company.
+            //
+            // `show_line_numbers`, `show_timestamps` and `show_source` were
+            // `true` at construction with no writer anywhere -- three members
+            // missing from the group the author had already labelled
+            // "Display toggles" below. Found by
+            // `scripts/frozen-flag-survey.py`.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Key::Escape if self.show_help => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
+            Key::L if key.modifiers.ctrl => {
+                self.show_line_numbers = !self.show_line_numbers;
+                EventResult::Consumed
+            }
+            Key::T if key.modifiers.ctrl => {
+                self.show_timestamps = !self.show_timestamps;
+                EventResult::Consumed
+            }
+            Key::S if key.modifiers.ctrl => {
+                self.show_source = !self.show_source;
+                EventResult::Consumed
+            }
             // Views.
             Key::Num1 => self.set_view(ViewMode::List),
             Key::Num2 => self.set_view(ViewMode::Stats),
@@ -1138,6 +1202,18 @@ impl App {
         }
 
         self.render_status_bar(&mut cmds);
+
+        // Over everything, because it is the one thing a reader asked for.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (WINDOW_WIDTH, WINDOW_HEIGHT),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         cmds
     }
@@ -2181,6 +2257,127 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    /// A key with Ctrl held.
+    fn ctrl(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.ctrl = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table beside it here, which would be a third copy of the same fact.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states().iter_mut().any(|app| {
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Viewers chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<App> {
+        let plain = App::new();
+
+        // A filter set, so `Escape` has something to clear; and the selection
+        // moved, so the keys that go back have somewhere to go.
+        let mut filtered = App::new();
+        filtered.handle_event(&press(Key::W));
+        filtered.handle_event(&press(Key::Down));
+
+        // A search with matches, the one state `N` and `P` can step through.
+        let mut searching = App::new();
+        searching.handle_event(&press(Key::Slash));
+        for c in "e".chars() {
+            searching.handle_event(&typed(c));
+        }
+        searching.handle_event(&press(Key::Escape));
+
+        // In another view, so `1` has one to return from: setting the view
+        // already in force changes nothing, and nothing changing is how this
+        // app reports `Ignored`.
+        let mut elsewhere = App::new();
+        elsewhere.handle_event(&press(Key::Num2));
+
+        vec![plain, filtered, searching, elsewhere]
+    }
+
+    /// **The three display toggles change the display.**
+    ///
+    /// They were `true` at construction with no writer anywhere -- three
+    /// members missing from the group the source already called "Display
+    /// toggles". The chords are guarded and sit above every bare letter,
+    /// because this match reads `key.key` alone: an unguarded `Key::T` takes
+    /// `Ctrl+T` as readily as `T`. So this asserts the *effect*, which is the
+    /// only thing that can tell the two apart -- both are `Consumed`.
+    #[test]
+    fn the_display_toggles_move_and_do_not_change_the_level() {
+        let mut app = App::new();
+        let level = app.filter.min_level;
+        let before = (app.show_line_numbers, app.show_timestamps, app.show_source);
+
+        app.handle_event(&ctrl(Key::L));
+        app.handle_event(&ctrl(Key::T));
+        app.handle_event(&ctrl(Key::S));
+
+        assert_ne!(app.show_line_numbers, before.0, "Ctrl+L did nothing");
+        assert_ne!(app.show_timestamps, before.1, "Ctrl+T did nothing");
+        assert_ne!(app.show_source, before.2, "Ctrl+S did nothing");
+        assert_eq!(
+            app.filter.min_level, level,
+            "a display chord fell through to the level filter"
+        );
+    }
+
+    /// **The shortcut list reaches the window.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = App::new();
+        assert!(
+            !drawn_help_text(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = drawn_help_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(*keys), "{keys:?} never reached the window");
+            assert!(shown.contains(*what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !drawn_help_text(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn drawn_help_text(app: &App) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     fn typed(c: char) -> Event {

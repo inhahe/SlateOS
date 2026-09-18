@@ -160776,7 +160776,7 @@ naming), and **detection on read** -- if any line begins with a tab, the file
 uses tabs. Without the second, opening a Makefile and typing still corrupts
 it, which is the case the whole finding is about.
 
-## `TD-C-THE-TERMINAL-ECHOES-AND-RUNS-NOTHING` (lane C, 2026-09-18)
+## `TD-C-THE-TERMINAL-ECHOES-AND-RUNS-NOTHING` -- **PARTLY FIXED 2026-09-18** (lane C)
 
 **In short:** `apps/terminal` has no shell and starts no process. Typing works
 and the characters appear -- the PTY's cooked-mode line discipline echoes them
@@ -160813,6 +160813,19 @@ wiring up the half that does. There it was "set when a file is read" over a
 crate with no indent detection; here it is "keystrokes go to a child" over a
 crate that starts no child. **Both were written truthfully about the
 *intention* and read as claims about the *program*.**
+
+**Worse than filed: it drew a shell prompt.** `main` fed
+`"Welcome to Slate OS Terminal
+$ "`, so the window opened with a `$ `
+waiting. **A prompt is not decoration; it is a claim that a shell is waiting
+for a command** -- the single most direct way this app could assert the thing
+it cannot do. Found only by opening `main` to place the fix.
+
+**Fixed (2026-09-18):** the prompt is gone and the greeting says why -- "There
+is no shell here. Nothing in this program starts a process, so what you type is
+echoed and then goes nowhere. Silence after Enter is not a command that
+produced no output." The module doc's "keystrokes go to a child" claim and the
+absence of a real process remain; those are the larger half.
 
 **What the repair wants, in order.** The window should say it has no shell --
 one line, on the §862 pattern, since a terminal that silently swallows commands

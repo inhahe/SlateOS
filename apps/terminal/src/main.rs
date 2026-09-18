@@ -3155,7 +3155,18 @@ impl Probe for TerminalState {
 
 fn main() -> ExitCode {
     let mut terminal = TerminalState::new(TerminalConfig::default());
-    terminal.feed(b"\x1b[1;32mWelcome to Slate OS Terminal\x1b[0m\r\n$ ");
+    // The greeting used to end in a `$ ` prompt. **A prompt is a claim
+    // that a shell is waiting for a command**, and nothing in this crate
+    // starts a process -- `Command::new`, `spawn(` and `exec(` appear
+    // zero times. The cooked-mode line discipline echoes what is typed,
+    // so the window answers the keyboard and looks alive, and a command
+    // pressed into it is echoed and then goes nowhere. The silence
+    // afterwards is indistinguishable from a command that produced no
+    // output: `ls` in an empty directory looks exactly the same.
+    //
+    // design-decisions 862: an app that *cannot* do the thing says so,
+    // rather than leaving an absence to be read as a result.
+    terminal.feed(b"\x1b[1;32mSlate OS Terminal\x1b[0m\r\n\x1b[33mThere is no shell here.\x1b[0m Nothing in this program starts a process,\r\nso what you type is echoed and then goes nowhere. Silence after Enter is\r\nnot a command that produced no output.\r\n");
     app::launch("terminal", &mut terminal)
 }
 

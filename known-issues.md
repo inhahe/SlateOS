@@ -160570,6 +160570,35 @@ an `F1` list to advertise the new key on:
 | `apps/calendar` `use_24h` | `false` at construction, read twice, no writer. **The calendar can only ever show 12-hour time.** It already has `W` for the week-start question, which is the same kind of preference, so a key is consistent. |
 | `apps/hexeditor` `show_inspector` | `true` at construction, read twice, no writer. The inspector panel is permanent. |
 
+**The survey covered only `bool` at first, and that hid the more expensive
+half of one defect.** `apps/torrent`'s `sort_ascending` was on the list;
+`sort_column` beside it was not, because it is an enum. It has no writer
+anywhere -- declared, constructed as `Added`, read once in the comparator -- so
+the torrent list sorts by date-added descending for ever and **ten of its
+eleven comparator arms are unreachable**. Reporting the boolean and not the
+enum is reporting the smaller half.
+
+Fieldless enums are now included, on the same reasoning that justified
+restricting to `bool`: nothing can change one in place, so "never assigned"
+means "never changed". The count went to 95 in 33 apps, and the first pass of
+the new rows found something larger than anything the bool-only version did:
+
+**`apps/regextester` draws three tabs and only one can ever be shown.**
+`active_tab` is `ActiveTab::Tester` at construction, matched to choose the
+view, drawn to highlight the tab strip -- and written only by tests. The
+Library and Reference tabs are rendered code that no user can reach. That is in
+the same app whose `i`/`g`/`m` flag buttons were fixed two hours ago, which
+says something about how much a single reading of one app finds: the flags were
+visible because they were *drawn as controls*, and the tabs looked like they
+worked because a tab strip with one tab highlighted looks exactly like a tab
+strip.
+
+`apps/editor`'s `line_ending` is on the list and is **correct**: it is detected
+from the file's own content (`if content.contains("backslash-r" + "backslash-n")`)
+and set at construction, which is an editor preserving what it opened. Same
+false-positive mode as `apps/installer`, and the same tell -- look at where the
+struct comes from.
+
 **A second kind of noise, found by checking the two rows with the highest
 stakes.** `apps/installer`'s `wipe` and `auto_reboot` look frozen and are not:
 they are built from an answer file through `disk.get("wipe")` and

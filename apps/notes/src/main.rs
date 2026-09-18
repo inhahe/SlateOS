@@ -25,8 +25,8 @@
 //! The version panel and the note list answer a click: clicking a version
 //! restores it, clicking a note selects it, and right-clicking one offers to
 //! tag it, delete it, or move it to another notebook. The sidebar answers one
-//! too: a notebook selects, and a tag filters by itself -- clicked again, it
-//! clears.
+//! too: a notebook selects, a tag filters by itself -- clicked again, it
+//! clears -- and right-clicking a notebook offers to rename or delete it.
 //!
 //! **All four panels take a pointer now.** What is left is not a panel but
 //! particular controls, listed in `TD-C-NOTES-CANNOT-TAG-OR-DELETE-A-NOTE`.
@@ -106,7 +106,29 @@ pub enum TextEntry {
     Search,
     /// A tag for the note the menu was raised on, applied when committed.
     Tag(String),
+    /// A new name for the notebook the menu was raised on.
+    NotebookName(String),
 }
+
+/// What an open menu is about.
+///
+/// One field rather than an `Option` per menu. Two of them could both be set,
+/// which is a state with no meaning, and the second one is where that starts
+/// -- the same accumulation that cost this file a refactor of `searching` an
+/// hour ago.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuTarget {
+    /// A note in the list.
+    Note(NoteId),
+    /// A notebook in the sidebar.
+    Notebook(NotebookId),
+}
+
+/// The notebook menu's id for "Rename notebook...".
+const MENU_RENAME_NOTEBOOK: u64 = u64::MAX - 2;
+
+/// The notebook menu's id for "Delete notebook".
+const MENU_DELETE_NOTEBOOK: u64 = u64::MAX - 3;
 
 /// The note menu's id for "Add tag...", which is not a notebook either.
 const MENU_ADD_TAG: u64 = u64::MAX - 1;
@@ -1399,7 +1421,7 @@ pub struct NotesApp {
     note_menu: Option<ContextMenu>,
     /// The note the open menu is about, so nothing can move the answer while
     /// it is up.
-    menu_note: Option<NoteId>,
+    menu_target: Option<MenuTarget>,
     pub window_width: f32,
     pub window_height: f32,
     note_id_gen: IdGen,
@@ -1437,7 +1459,7 @@ impl NotesApp {
             picker: FilePicker::new(),
             last_save: None,
             note_menu: None,
-            menu_note: None,
+            menu_target: None,
             window_width: 1280.0,
             window_height: 800.0,
             note_id_gen: IdGen::new(1),
@@ -1727,12 +1749,77 @@ impl NotesApp {
         let mut menu = ContextMenu::new(items);
         menu.show(x, y, (self.window_width, self.window_height));
         self.note_menu = Some(menu);
-        self.menu_note = Some(id);
+        self.menu_target = Some(MenuTarget::Note(id));
     }
 
-    /// Act on whatever row of the note menu was chosen.
+    /// Raise the notebook menu over a notebook.
+    fn open_notebook_menu(&mut self, id: NotebookId, x: f32, y: f32) {
+        let items = vec![
+            MenuItem::Action {
+                id: MENU_RENAME_NOTEBOOK,
+                label: "Rename notebook...".to_owned(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            },
+            MenuItem::Action {
+                id: MENU_DELETE_NOTEBOOK,
+                label: "Delete notebook".to_owned(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            },
+        ];
+        let mut menu = ContextMenu::new(items);
+        menu.show(x, y, (self.window_width, self.window_height));
+        self.note_menu = Some(menu);
+        self.menu_target = Some(MenuTarget::Notebook(id));
+    }
+
+    /// Act on a row of the notebook menu.
+    fn choose_for_notebook(&mut self, chosen: u64, id: NotebookId) -> bool {
+        if chosen == MENU_RENAME_NOTEBOOK {
+            // Seeded with the current name, because a rename is usually an
+            // edit of what is there rather than a fresh answer.
+            let current = self
+                .find_notebook(id)
+                .map_or_else(String::new, |nb| nb.name.clone());
+            self.text_entry = Some(TextEntry::NotebookName(current));
+            return true;
+        }
+        if chosen == MENU_DELETE_NOTEBOOK {
+            return self.delete_notebook(id);
+        }
+        false
+    }
+
+    /// Give the notebook the menu was raised on its new name.
+    ///
+    /// An empty name cancels: a notebook called nothing is not what somebody
+    /// clearing the field meant to ask for.
+    fn commit_notebook_name(&mut self, typed: &str) {
+        let name = typed.trim().to_owned();
+        if name.is_empty() {
+            return;
+        }
+        if let Some(MenuTarget::Notebook(id)) = self.menu_target {
+            self.rename_notebook(id, &name);
+        }
+    }
+
+    /// Act on whatever row of an open menu was chosen.
+    ///
+    /// One entry point for both menus: the id says which row, and the target
+    /// says which menu it came from, so a caller never has to know before
+    /// asking.
     pub fn choose_from_note_menu(&mut self, chosen: u64) -> bool {
-        let Some(id) = self.menu_note else {
+        match self.menu_target {
+            Some(MenuTarget::Notebook(id)) => return self.choose_for_notebook(chosen, id),
+            Some(MenuTarget::Note(_)) | None => {}
+        }
+        let Some(MenuTarget::Note(id)) = self.menu_target else {
             return false;
         };
         if chosen == MENU_ADD_TAG {
@@ -2305,12 +2392,17 @@ impl NotesApp {
                 return EventResult::Consumed;
             }
         }
-        if matches!(event.kind, MouseEventKind::Press(MouseButton::Right))
-            && let Some(id) = self.note_at(event.x, event.y)
-        {
-            self.selected_note = Some(id);
-            self.open_note_menu(id, event.x, event.y);
-            return EventResult::Consumed;
+        if matches!(event.kind, MouseEventKind::Press(MouseButton::Right)) {
+            if let Some(id) = self.note_at(event.x, event.y) {
+                self.selected_note = Some(id);
+                self.open_note_menu(id, event.x, event.y);
+                return EventResult::Consumed;
+            }
+            if let Some(id) = self.notebook_at(event.x, event.y) {
+                self.selected_notebook = Some(id);
+                self.open_notebook_menu(id, event.x, event.y);
+                return EventResult::Consumed;
+            }
         }
         if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
             return EventResult::Ignored;
@@ -2422,10 +2514,12 @@ impl NotesApp {
         match key.key {
             Key::Escape | Key::Enter => {
                 self.text_entry = None;
-                if let TextEntry::Tag(tag) = entry
-                    && key.key == Key::Enter
-                {
-                    self.commit_tag(&tag);
+                if key.key == Key::Enter {
+                    match entry {
+                        TextEntry::Tag(tag) => self.commit_tag(&tag),
+                        TextEntry::NotebookName(name) => self.commit_notebook_name(&name),
+                        TextEntry::Search => {}
+                    }
                 }
                 EventResult::Consumed
             }
@@ -2440,6 +2534,10 @@ impl NotesApp {
                     TextEntry::Tag(mut tag) => {
                         tag.pop();
                         self.text_entry = Some(TextEntry::Tag(tag));
+                    }
+                    TextEntry::NotebookName(mut name) => {
+                        name.pop();
+                        self.text_entry = Some(TextEntry::NotebookName(name));
                     }
                 }
                 EventResult::Consumed
@@ -2457,6 +2555,10 @@ impl NotesApp {
                         tag.push_str(&key.text);
                         self.text_entry = Some(TextEntry::Tag(tag));
                     }
+                    TextEntry::NotebookName(mut name) => {
+                        name.push_str(&key.text);
+                        self.text_entry = Some(TextEntry::NotebookName(name));
+                    }
                 }
                 EventResult::Consumed
             }
@@ -2471,7 +2573,7 @@ impl NotesApp {
         if tag.is_empty() {
             return;
         }
-        if let Some(id) = self.menu_note {
+        if let Some(MenuTarget::Note(id)) = self.menu_target {
             self.add_tag_to_note(id, &tag);
         }
     }
@@ -2610,11 +2712,17 @@ impl NotesApp {
         // A tag being typed, where the save line goes and outranking it: this
         // entry has no box of its own, so without somewhere to show the
         // characters the user is typing into nothing they can see.
-        if let Some(TextEntry::Tag(typed)) = &self.text_entry {
+        let prompt = match &self.text_entry {
+            Some(TextEntry::Tag(typed)) => Some(format!("Tag: {typed}|")),
+            Some(TextEntry::NotebookName(typed)) => Some(format!("Notebook name: {typed}|")),
+            // The search box has a box of its own to show its text in.
+            Some(TextEntry::Search) | None => None,
+        };
+        if let Some(prompt) = prompt {
             cmds.push(RenderCommand::Text {
                 x: 8.0,
                 y: 24.0,
-                text: format!("Tag: {typed}|"),
+                text: prompt,
                 color: self.palette.ink(self.palette.blue),
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
@@ -4675,7 +4783,7 @@ mod tests {
     #[test]
     fn clicking_a_tag_filters_and_clicking_it_again_clears() {
         let (mut app, nid, _, _) = app_with_two_notebooks();
-        app.menu_note = Some(nid);
+        app.menu_target = Some(MenuTarget::Note(nid));
         app.add_tag_to_note(nid, "pier");
         let chips = app.tag_chips();
         let (tag, cx, cy, _) = chips.first().cloned().expect("a tag chip");
@@ -4760,6 +4868,119 @@ mod tests {
         );
     }
 
+    /// The notebook name being typed, if that is what has the keyboard.
+    fn naming_notebook(app: &NotesApp) -> Option<&str> {
+        match &app.text_entry {
+            Some(TextEntry::NotebookName(text)) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Right-clicking a notebook raises a menu about that notebook.
+    #[test]
+    fn right_clicking_a_notebook_raises_a_menu_about_it() {
+        let (mut app, _, _, work) = app_with_two_notebooks();
+        let (_, row_y, _) = *app
+            .notebook_rows()
+            .iter()
+            .find(|(id, _, _)| *id == work)
+            .expect("a row");
+
+        let consumed = app.handle_event(&right_click_at(20.0, row_y + 2.0));
+
+        assert_eq!(consumed, EventResult::Consumed);
+        assert_eq!(app.menu_target, Some(MenuTarget::Notebook(work)));
+    }
+
+    /// Renaming seeds the field with the current name and applies the edit.
+    ///
+    /// `rename_notebook` is written and tested and had no caller.
+    #[test]
+    fn a_notebook_can_be_renamed() {
+        let (mut app, _, _, work) = app_with_two_notebooks();
+        let (_, row_y, _) = *app
+            .notebook_rows()
+            .iter()
+            .find(|(id, _, _)| *id == work)
+            .expect("a row");
+        app.handle_event(&right_click_at(20.0, row_y + 2.0));
+
+        assert!(
+            app.choose_from_note_menu(MENU_RENAME_NOTEBOOK),
+            "rename refused"
+        );
+        assert_eq!(
+            naming_notebook(&app),
+            Some("Work"),
+            "the field was not seeded with the current name"
+        );
+
+        // "Work" -> backspace -> "Wor" -> "s" -> "Wors". Both halves matter:
+        // the seed is editable, not just replaceable.
+        app.handle_event(&plain_key(Key::Backspace));
+        app.handle_event(&typed_key("s"));
+        app.handle_event(&plain_key(Key::Enter));
+
+        assert_eq!(
+            app.find_notebook(work).expect("the notebook").name,
+            "Wors",
+            "the rename did not apply"
+        );
+    }
+
+    /// Deleting a notebook deletes it.
+    #[test]
+    fn a_notebook_can_be_deleted() {
+        let (mut app, _, _, work) = app_with_two_notebooks();
+        let (_, row_y, _) = *app
+            .notebook_rows()
+            .iter()
+            .find(|(id, _, _)| *id == work)
+            .expect("a row");
+        app.handle_event(&right_click_at(20.0, row_y + 2.0));
+
+        assert!(
+            app.choose_from_note_menu(MENU_DELETE_NOTEBOOK),
+            "delete refused"
+        );
+
+        assert!(
+            app.find_notebook(work).is_none(),
+            "the notebook is still there"
+        );
+    }
+
+    /// An empty name leaves the notebook as it was.
+    #[test]
+    fn an_empty_notebook_name_is_refused() {
+        let (mut app, _, _, work) = app_with_two_notebooks();
+        app.menu_target = Some(MenuTarget::Notebook(work));
+        app.text_entry = Some(TextEntry::NotebookName(String::new()));
+
+        app.handle_event(&plain_key(Key::Enter));
+
+        assert_eq!(
+            app.find_notebook(work).expect("the notebook").name,
+            "Work",
+            "an empty name was applied"
+        );
+    }
+
+    /// The name being typed is on screen.
+    #[test]
+    fn the_notebook_name_being_typed_is_shown() {
+        let (mut app, _, _, work) = app_with_two_notebooks();
+        app.menu_target = Some(MenuTarget::Notebook(work));
+        app.text_entry = Some(TextEntry::NotebookName("Wor".to_owned()));
+
+        let tree = app.render(app.window_width, app.window_height);
+
+        let shown = tree.commands.iter().any(|c| {
+            matches!(c, RenderCommand::Text { text, .. } if text.contains("Notebook name: Wor"))
+        });
+        assert!(shown, "the name being typed is nowhere on screen");
+    }
+
     /// The tag being typed, if that is what has the keyboard.
     fn tagging(app: &NotesApp) -> Option<&str> {
         match &app.text_entry {
@@ -4813,7 +5034,7 @@ mod tests {
     #[test]
     fn escape_abandons_the_tag() {
         let (mut app, nid, _, _) = app_with_two_notebooks();
-        app.menu_note = Some(nid);
+        app.menu_target = Some(MenuTarget::Note(nid));
         app.text_entry = Some(TextEntry::Tag("half".to_owned()));
 
         app.handle_event(&plain_key(Key::Escape));
@@ -4829,7 +5050,7 @@ mod tests {
     #[test]
     fn enter_on_an_empty_tag_adds_nothing() {
         let (mut app, nid, _, _) = app_with_two_notebooks();
-        app.menu_note = Some(nid);
+        app.menu_target = Some(MenuTarget::Note(nid));
         app.text_entry = Some(TextEntry::Tag(String::new()));
 
         app.handle_event(&plain_key(Key::Enter));
@@ -4904,7 +5125,11 @@ mod tests {
 
         assert_eq!(consumed, EventResult::Consumed);
         assert!(app.note_menu.is_some(), "no menu appeared");
-        assert_eq!(app.menu_note, Some(nid), "the menu is about the wrong note");
+        assert_eq!(
+            app.menu_target,
+            Some(MenuTarget::Note(nid)),
+            "the menu is about the wrong note"
+        );
     }
 
     /// Choosing Delete deletes the note.

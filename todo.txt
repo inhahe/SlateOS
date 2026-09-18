@@ -54806,6 +54806,17 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   a file; assert the artifact's exact bytes. Fixture 03 additionally
 ##   needs stderr captured, to contain 'slateos-deliberate-failure'.
 ##
+##   MEASURED FACT 5 -- a SlateOS-linked binary CANNOT be smoke-tested on the
+##   host, so there is no way to validate the fixtures before a boot. Running
+##   cmake-slateos.elf under WSL gives rc=139 (SIGSEGV) with zero bytes of
+##   output. That looks alarming and means nothing: the CONTROL is that
+##   bash-slateos.elf, pkgconf-slateos.elf and make-slateos.elf -- all three
+##   green under SlateOS on every boot -- segfault identically, rc=139,
+##   0 bytes. It is ABI mismatch, since these link our libc and call our
+##   kernel. Do not spend time on this again; the ring-3 rung IS the only
+##   smoke test. (First attempt also misread `cmd | head -3` then `rc=$?` as
+##   cmake's status; that is head's status, and it said 0 over a segfault.)
+##
 ##   MEASURED FACT 4 -- the binary is linked against our libc.a, so it is
 ##   static: no ld.so/libc.so to stage. Template is
 ##   self_test_pkgconf_on_slateos_libc (static, our libc), not the make rung

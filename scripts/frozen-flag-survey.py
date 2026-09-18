@@ -49,6 +49,20 @@ KNOWN LIMITS, in the tool's own voice rather than a reader's:
     one name; a write to either exonerates both.
   * Test-only writers are deliberately ignored, because a flag only a test can
     move is frozen for every real user. That is a decision, not an oversight.
+  * **A field built from parsed configuration reads as frozen and is not.**
+    `apps/installer`'s `wipe` and `auto_reboot` come from an answer file --
+    `disk.get("wipe")`, `root.get("auto_reboot")` -- and are set by
+    constructing the struct, which this deliberately does not count as a
+    write. They are settable by editing a document; nothing assigns them
+    afterwards. The tell is a `get(` or a deserialize near the construction
+    site, and it is worth looking for before believing any row in an app that
+    reads a config file.
+
+    This is the same evidence as `apps/lockscreen`, with the opposite answer:
+    there `main` passes `LockScreenConfig::default()` and nothing parses
+    anything, so the flags really are fixed at compile time. Construction from
+    a *parser* and construction from a *literal* look identical to this tool
+    and mean opposite things.
 
 Run from anywhere: `python scripts/frozen-flag-survey.py [--all]`.
 """

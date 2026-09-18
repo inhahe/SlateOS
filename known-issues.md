@@ -160570,6 +160570,25 @@ an `F1` list to advertise the new key on:
 | `apps/calendar` `use_24h` | `false` at construction, read twice, no writer. **The calendar can only ever show 12-hour time.** It already has `W` for the week-start question, which is the same kind of preference, so a key is consistent. |
 | `apps/hexeditor` `show_inspector` | `true` at construction, read twice, no writer. The inspector panel is permanent. |
 
+**A second kind of noise, found by checking the two rows with the highest
+stakes.** `apps/installer`'s `wipe` and `auto_reboot` look frozen and are not:
+they are built from an answer file through `disk.get("wipe")` and
+`root.get("auto_reboot")`, so they are set by *constructing* the struct, which
+the survey deliberately does not count as a write. `apps/backup`'s
+`follow_symlinks` is threaded through `scan_dir_recursive` as a parameter.
+
+That matters more than the count, because it is **the same evidence as
+`apps/lockscreen` with the opposite answer**: there, `main` passes
+`LockScreenConfig::default()` and nothing parses anything, so the flags really
+are fixed at compile time. Construction from a parser and construction from a
+literal are indistinguishable to the tool and mean opposite things -- so the
+question to ask of any row in an app that reads a config file is *where does
+this struct come from*, before anything else.
+
+I checked those two first because an installer that cannot be told whether to
+wipe a disk would have been the worst finding of the night. It would also have
+been wrong.
+
 And the list's own noise is now legible enough to describe: entries like
 `ctrl`, `shift`, `bold`, `expandable` and `is_directory` are **data** -- a
 recorded keystroke's modifiers, a tree node's shape, a listing entry's kind --

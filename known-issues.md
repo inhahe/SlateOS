@@ -160304,7 +160304,7 @@ the handler from drifting apart -- the failure that entry documents.
 image for hours before anyone found `S`, and the app it most resembles --
 before this change -- was one that could only make decks of textboxes.
 
-## `TD-C-A-PRESENTATION-EDITOR-THAT-CANNOT-TYPE` (lane C, 2026-09-18)
+## `TD-C-A-PRESENTATION-EDITOR-THAT-CANNOT-TYPE` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** `apps/slides` cannot put a single word on a slide. Every text box
 it creates says "New Text", every title slide says "Presentation Title", the
@@ -160354,6 +160354,29 @@ into it via `element_by_id_mut`, `Backspace`, and `Escape`/`Enter` to finish.
 than permanent contents. The deck title wants the same treatment, and it is
 what `export_as` names the file with.
 
+
+**Fixed the same day.** `Enter` or `F2` types into the selected text box,
+`Shift+Enter` gives a second line, and leaving on either `Escape` or `Enter`
+keeps the words. The canvas draws the buffer while it is being typed, because
+the commit happens on the way out and drawing the element would leave the user
+typing at a slide that never changes.
+
+**The test found a defect the design had.** `begin_editing` seeded the buffer
+with the box's current text -- right for editing, wrong for a box that still
+holds its prompt, because the first thing anyone types produces "New TextHi"
+and they have to delete the prompt first. `PLACEHOLDER_TEXT` now lists the
+seven strings a box is born holding and a box still holding one starts empty.
+**A placeholder is a prompt, not content**, and the friction of deleting it
+first is exactly what stops someone writing at all. The cost is that a user
+who genuinely wants a box reading "New Text" types it twice.
+
+`typing_does_not_fire_the_shape_keys` is the one that would have bitten
+otherwise: `S`, `O`, `L`, `A` and `I` add shapes outside this mode, so a title
+containing any of them would have littered the slide while being written. 93
+tests, up from 90.
+
+**Still open here:** the deck title is `"Untitled Presentation"` with no
+writer, and `export_as` names the file with it.
 ## `TD-C-NOTES-CANNOT-MAKE-A-NOTE` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** `apps/notes` starts empty and cannot create a note, title one, or
@@ -160440,7 +160463,7 @@ versions, export -- and is missing the one act it exists for.
 
 | App | What it can do | What it cannot |
 |---|---|---|
-| `slides` | add slides, four shapes, images; themes, transitions, sorter view, undo, export | **type anything.** Zero assignments to `.text` in the crate, tests included; every element born "New Text" / "Presentation Title"; deck permanently "Untitled Presentation" |
+| `slides` | add slides, four shapes, images; themes, transitions, sorter view, undo, export -- **and, since 2026-09-18, type** | ~~**type anything.**~~ *(fixed)* Zero assignments to `.text` in the crate, tests included; every element born "New Text" / "Presentation Title"; deck permanently "Untitled Presentation" |
 | `notes` | notebooks, tags, versions, search, export to text/Markdown/HTML -- **and, since 2026-09-18, make and write a note** | ~~**make a note.**~~ *(fixed)* `create_note`, `update_note_title`, `update_note_content` all callerless; both `notes.push` sites are inside the unreachable creators; there is no import. It exports notes it cannot create |
 | `diagram` | insert canned flowcharts and org charts, move and connect nodes, export SVG/JSON | **label anything.** `set_node_label` and `set_edge_label` callerless, **zero** typing sites in the crate. The only writer of `.label` besides them is `add_template_node`, so every box says what the template said |
 

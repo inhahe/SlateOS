@@ -159734,6 +159734,7 @@ sites over nothing.
 | the only writer of `current` | line 967, inside `with_sample_weather`, which is `#[cfg(test)]` |
 | `add_location` | no production caller; the only `locations.push` is inside it |
 | `remove_location`, `reorder_location`, `set_default_location`, `set_update_interval` | the same |
+| every generator of weather | `sample_current_weather`, `sample_hourly_forecast`, `sample_daily_forecast`, `sample_alerts` and `default_locations` are **all `#[cfg(test)]`** |
 
 **This is the fabrication cleanup, half-finished.** A comment in `new` records
 what happened: *"`locations` went with the rest: it defaulted to 'New York,
@@ -159756,8 +159757,30 @@ shape.** `notes` was wholesale, `reminders` specific, `rssreader` one-way.
 This one is *empty by construction*: seventeen keys are bound and every one of
 them navigates or toggles a view over data that cannot arrive.
 
-**What the repair wants.** A way to name a location -- this app is
-keyboard-driven, so a text-entry mode in the shape `apps/reminders`'s snooze
-prompt or `apps/notes`'s tag entry now uses -- and then `add_location` has a
-caller and the rest follow. The simulated forecast is honest and documented
-("All weather data is simulated locally"), so nothing needs a network first.
+**CORRECTION (same day, before this was acted on).** The paragraph that stood
+here said the repair was a text-entry mode, because "the simulated forecast is
+honest and documented, so nothing needs a network first". **That was wrong, and
+wrong in the direction that would have wasted the work.** Every generator is
+`#[cfg(test)]`, not just the location list -- so a text-entry mode would let a
+user name a city and then show them an empty dashboard, which is the current
+behaviour with more steps. `new`'s own comment says it plainly: *"Nothing here
+can reach a weather service."*
+
+I filed the first version after checking `add_location` and `current` and not
+checking the other four generators. **The lesson is the one this project keeps
+relearning: a route to a feature is not a feature.** I confirmed the door was
+locked and inferred there was a room behind it.
+
+**So the module doc's "All weather data is simulated locally (no network
+required)" is also false in production** -- there is no simulation there
+either. That line should go whichever way the question below is answered.
+
+**What the repair actually wants is a decision, not a keybinding.** A weather
+app needs weather, the invented weather was deliberately deleted, and
+re-inventing it is the one thing nobody should do. That is an operator
+question (data source, provider, privacy) and is filed in `open-questions.md`
+as **C-Q26**. Until it is answered the honest interim is for the app to *say*
+it has no weather source rather than draw an empty dashboard over the
+absence -- which is a change worth making on its own, since an empty dashboard
+reads as a broken app and a stated "no weather source configured" reads as an
+unfinished one, and only the second is true.

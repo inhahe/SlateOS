@@ -1,7 +1,26 @@
 //! Slate OS Weather Application
 //!
-//! A weather dashboard application providing:
-//! - Current weather conditions with detailed metrics
+//! # This app has no weather in it
+//!
+//! Read this before the feature list, because the list describes *layouts*
+//! and not things a user can see. `WeatherApp::new` -- which is what `main`
+//! builds -- holds no conditions, no forecast, no alerts and no locations,
+//! and nothing in production writes any of them. Every generator here
+//! (`sample_current_weather`, `sample_hourly_forecast`, `sample_daily_forecast`,
+//! `sample_alerts`, `default_locations`) is `#[cfg(test)]`, and so is every
+//! way to add a place to look at. In a real window this program draws its
+//! chrome over an empty model.
+//!
+//! It is this way on purpose and the purpose was right: it used to open on
+//! invented weather for New York, London and Tokyo, which is a confident lie
+//! about something people make decisions with. Deleting that was correct.
+//! What has not happened is replacing it -- our HTTP library parses and
+//! serialises and has no transport, so there is nowhere to get real weather
+//! from yet. See `open-questions.md` C-Q26 for the decision that unblocks
+//! this, and `known-issues.md` for the evidence.
+//!
+//! The layouts below are real, tested, and waiting for a model to draw:
+//! - Current conditions with detailed metrics
 //! - Hourly forecast (24 hours) with horizontal strip layout
 //! - 7-day daily forecast in a table layout
 //! - Weather alerts with severity-based banner display
@@ -10,7 +29,6 @@
 //! - Settings for units (temperature, wind, pressure, time)
 //! - Air quality index with color-coded display
 //!
-//! All weather data is simulated locally (no network required).
 //! Uses the guitk library for rendering.
 
 use appearance::Palette;

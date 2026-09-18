@@ -159834,6 +159834,48 @@ and has no writer anywhere in production:
 `pdfviewer` is the one that matters most: a document reader that cannot show a
 document in the colours it was written in.
 
+**`metronome`, and the strongest form of the signal.** Its practice panel
+draws three lines:
+
+```
+Practice Target: 140 BPM (up/down to adjust)
+Practice Increment: +10 BPM
+Practice Measures: 4
+```
+
+The first is adjustable and says so. `practice_increment` and
+`practice_measures` **have no writers**, so practice mode always speeds up by
+ten every four measures. The line above them advertising its own keys is what
+makes the other two read as settings rather than as a description -- they are
+laid out as a group, and one third of the group works.
+
+**`slides` has the same shape and is filed separately**
+(`TD-C-SLIDES-CAN-ADD-A-TEXTBOX-AND-NOTHING-ELSE`): "Theme:" once and
+"Transition:" twice, none of them changeable.
+
+**A third probe, and the limit of all three.** Looking for a *displayed* value
+with no writer -- a field read inside a `format!` or a `text:` and assigned
+nowhere -- gives 173 hits across 65 apps, and it is the best signal of the
+three because a value on screen is a claim to the user. **It is still only a
+lead generator**, for a reason worth writing down: it reads `self.field` and
+cannot see which `self` it is in, so every field of every helper struct in the
+file is folded in with the app's own. That is why `calendar` appears to have a
+frozen `day` and `month` (they belong to a date), and it is the same blindness
+that made the *first* probe miss `passwordgen`: a field written as
+`self.password_opts.use_symbols` is not matched by a search for
+`.use_symbols =` in one direction, and a field replaced wholesale as
+`self.time_signature = sig` looks frozen from the other.
+
+**`metronome` is the worked example of the second failure.** Its
+`beats_per_measure` and `beat_value` have no writers, which reads as a
+metronome with a fixed time signature -- the one thing a metronome must be able
+to change. They are fields of a `TimeSignature` struct that `set_time_signature`
+replaces whole, on the `T` key, from nine predefined signatures. **The feature
+works; only the field is still.** Third time today that a sub-field or a
+spelling nearly turned a working program into a filed defect, which is the
+argument for the rule these entries keep restating: **a probe finds candidates,
+and only reading the code finds defects.**
+
 **The last five read, and all five are safe.** Each is a preference with no
 writer, and each is frozen at the value you would have chosen anyway:
 

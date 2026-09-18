@@ -159490,6 +159490,29 @@ being keyboard-driven by design. The case has to be *in the file*, though --
 and had three keyboard shortcuts in the whole of its production code, which is
 not a keyboard-driven application either.
 
+**UPDATE 2026-09-18: a second one examined, and it is a different case.**
+`apps/reminders` is on this list and is *not* `notes`. It binds fifteen keys,
+its number keys are view filters, `Space`/`Enter` completes the selected
+reminder and `Escape` dismisses notifications -- so it is a genuinely
+keyboard-driven program that happens also to take no pointer. Its defects were
+specific rather than wholesale: snoozing could not be reached at all (the one
+thing a reminder app is for besides listing), and `last_file_action` recorded
+what every save did and was drawn nowhere. Both are fixed; neither needed a
+pointer layer.
+
+**So the number in this entry is "applications that draw and take no
+pointer", and it is not a defect count.** Two examined so far:
+
+| | finding |
+|---|---|
+| `notes` | wholesale -- a mouse-shaped UI with three shortcuts, nine operations unreachable. A pointer layer was the repair. |
+| `reminders` | specific -- keyboard-driven by construction, two unreachable things, no pointer layer needed. |
+
+Nineteen unexamined. The question to ask of each is not "does it handle a
+click" but **"can everything it offers be reached by something"** -- which is
+a different question, and the reason the first is only a way of finding
+candidates for the second.
+
 **Why this is worth a single entry rather than twenty-one.** The repair is the
 same shape every time and it is not "add a click handler": it is hit-tests
 derived from the same functions the renderer already reads, so the law a click
@@ -159708,6 +159731,397 @@ code sites across 1256 acquisitions per boot. Still not a deadlock report --
 nothing here has been shown to form a cycle -- but the reason those locks are
 safe remains "no pair happens to be taken in both orders", and now that is
 unchecked in 89 places.
+
+## `TD-C-RSSREADER-FOLDERS-ARRIVE-BY-IMPORT-AND-CANNOT-BE-REORGANISED` -- **FIXED 2026-09-18** (lane C)
+
+**In short:** `apps/rssreader` could not move a feed between folders, remove a
+folder, or rename a feed. All three are now bound to keys. Chasing why they had
+no callers found the actual cause, which was larger than the three operations:
+**nothing in the app could select a feed**, and the help overlay was
+advertising twenty-one shortcuts of which about four worked.
+
+**The root cause.** `sidebar_selection` -- the field naming which feed or
+folder is chosen -- had **no production writer**. It was `AllFeeds` from
+construction to exit. So:
+
+- the `Feed`, `Folder` and `Starred` arms of the article filter were
+  unreachable: you could never narrow the list to one feed, which is what a
+  sidebar is *for*;
+- four highlight branches in the draw were dead;
+- tabbing to the sidebar changed only which pane was outlined;
+- and the three filed operations had no subject to act on, which is why nobody
+  had called them.
+
+`Folder::is_expanded`, `sidebar_visible` and `sort_order` had no writers
+either -- so folders could never be collapsed, the sidebar could never be
+hidden, and the window displayed "Sort: Date (newest first)", a label that
+could not say anything else, above a `sort_by` that genuinely worked.
+
+**The overlay was the thing that made this a lie rather than a gap.** Pressing
+`?` listed twenty-one shortcuts. `R`, `Shift+R`, `Shift+J`, `Shift+K`, `B`,
+`O`, `F`, `D`, `V`, `Space`, `/`, `A`, `Ctrl+R` and `Ctrl+N` were named and
+bound to nothing, and three more named operations that existed **nowhere in
+the crate**: refresh (impossible -- this reader has no transport), open in
+browser (there is no browser), and quit (the framework gives an app no way to
+close its own window).
+
+**What was done.** All of the above are bound, over machinery that already
+existed and was already obeyed. The four impossible rows were removed from the
+overlay and four real ones it had never mentioned were added. Removals ask
+first and only `Y` confirms; removing a folder keeps its feeds. `A` adds a
+feed by address, so the app now has a whole subscription workflow -- add,
+rename, file into a folder, export OPML -- none of which needs the fetching it
+cannot do. 216 tests, up from 184.
+
+**The guard that keeps it fixed** is `every_advertised_shortcut_does_something`:
+it walks `ALL_KEY_ACTIONS` and asserts each row's key is answered. A new row
+must be given a binding, and a binding that disappears fails the test. **It
+caught one defect on its first run** -- `Space` was a silent no-op unless a
+folder was selected -- which is the argument for the pattern: the overlay and
+the handler are two lists that must agree, and nothing but a test makes them.
+
+**Worth copying.** Any app with a shortcut table should have this test. The
+failure mode is invisible by construction: a key that does nothing looks
+exactly like a key you pressed wrong, so users blame themselves and the bug is
+never reported.
+
+## `TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY` -- **WITHDRAWN, was never a defect** (lane C, 2026-09-18)
+
+**In short:** I filed this saying `apps/weather` draws a full dashboard over
+an empty model. It does not. When it has no weather it draws four lines
+saying it cannot fetch any, and returns before the dashboard. The app was
+already doing the right thing, and had been since the invented cities were
+deleted. Nothing here needed fixing; the entry is kept because the *way* I got
+it wrong is worth more than the finding would have been.
+
+**What is actually true**, and all of it is fine:
+
+| | |
+|---|---|
+| the model is empty in production | yes -- `new` holds nothing and every generator is `#[cfg(test)]` |
+| the five location operations are unreachable | yes -- and irrelevant, since there is no weather to attach to a location |
+| it draws the dashboard over that emptiness | **no.** `render_commands` does `let Some(current) = self.current.clone() else { self.render_cannot_fetch(...); return cmds; }` |
+| it says so on screen | yes, in `CANNOT_FETCH_LINES`, and better than I would have written it |
+
+The fourth of those lines is the one to keep: **"It cannot deliver
+severe-weather alerts either. Silence here is not an all-clear."** An empty
+alerts banner is not a neutral absence -- it is read as "no warnings in
+force", which is a claim about the world. `apps/partmanager` makes the same
+move for disks ("This is not a finding that you have none"), so this is a
+settled pattern in the lane, not one app being careful.
+
+**How I got it wrong, twice, on one entry.**
+
+1. I checked `main`'s constructor, checked `current`'s only writer, checked
+   `add_location`'s callers -- and filed. Every one of those checks was
+   correct. I never read the render path, which is the only place that could
+   answer the question I was actually asking.
+2. Told the first version was wrong about the *generators*, I corrected that
+   and still did not read the render path -- so the correction repeated the
+   same false premise in stronger words, and I put it in the source file too
+   ("draws its chrome over an empty model", since removed).
+
+**The lesson is not "check more things".** It is that *"can this app show
+anything"* is a question about the **render path**, and I answered it from the
+**model**. A model check tells you what the app has; only the draw tells you
+what the app claims. Those differ exactly when the app is handling emptiness
+well -- so my method was blindest precisely where the code was best, and would
+have gone on reporting careful apps as broken ones.
+
+**Concretely, for the remaining no-pointer sweep:** before filing "app X shows
+nothing", grep its render entry point for an early return on the empty case.
+`weather` and `partmanager` both have one. A test-only data generator is not
+evidence of a defect -- it is the normal state of an app whose real source is
+not built yet, and the presence of an honest-empty path is what tells the two
+apart.
+
+## `TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE` (lane C, 2026-09-18)
+
+**In short:** A number of our apps have a setting that the code genuinely
+honours -- it gates a draw, or picks a sort, or decides what characters a
+password may contain -- and that nothing anywhere can change. The value it was
+given at construction is the only value it will ever have. From inside the code
+it looks like a finished feature, because every part of it *is* finished except
+the one that lets a person use it.
+
+**This is the exact mirror of pre-push gate 50 (`write-only-fields`)**, and the
+worse half of the pair. A write-only field is state nobody reads: dead weight,
+no user ever affected. A **frozen** field is read and obeyed, so the feature is
+live, visible and stuck -- and usually *displayed*, which turns it from a
+missing feature into a false offer.
+
+**Verified and fixed.**
+
+| App | Frozen | What it meant |
+|---|---|---|
+| `rssreader` | `sidebar_selection` | no feed or folder could ever be selected; the article filter's `Feed`, `Folder` and `Starred` arms were unreachable |
+| `rssreader` | `is_expanded` | no folder could be collapsed; the "closed" indicator could not be drawn |
+| `rssreader` | `sidebar_visible` | the sidebar could not be hidden |
+| `rssreader` | `sort_order` | the window displayed "Sort: Date (newest first)" -- a label that could not say anything else -- over a `sort_by` that worked perfectly |
+| `passwordgen` | `use_lowercase`, `use_uppercase`, `use_digits`, `use_symbols`, `exclude_ambiguous` | **`length` was the only field of `password_opts` with a writer.** The options panel drew all five as "Yes"/"No" and no key could change one |
+
+**`passwordgen` is the one to look at**, because the consequence is not
+cosmetic. Every password it produced contained symbols. Sites that forbid
+symbols are common, so for those the generator was simply unusable, and the
+user could see an option called "Symbols: Yes" that they could not act on.
+Ambiguous characters (`l` and `1`, `O` and `0`) could never be excluded either.
+Both are now keys, and turning off the last remaining class is refused --
+`generate_password` answers an empty pool with an empty string, so a generator
+with nothing selected would have produced nothing at all, silently.
+
+**Four more read and confirmed, not yet fixed.** Each is obeyed by real logic
+and has no writer anywhere in production:
+
+| App | Frozen | Stuck at | What it means |
+|---|---|---|---|
+| `pdfviewer` | `dark_mode` | **`true`** | `page_color()` returns `rgb(40,42,54)` for every page, and `text_color` inverts with it. **Every document renders in inverted colours and no key restores the white page** -- though the comment beside it calls this "the viewer's own `dark_mode` for reading", which is a thing you would switch |
+| `calendar` | `week_starts_monday` | `true` | every month grid begins on Monday, for everyone, forever |
+| `hexeditor` | `case_sensitive` | `true` | search is always case-sensitive; there is no case-insensitive search in the program |
+| `imageviewer` | `show_toolbar` | `true` | the toolbar cannot be hidden, including when looking at an image |
+
+`pdfviewer` is the one that matters most: a document reader that cannot show a
+document in the colours it was written in.
+
+**`metronome`, and the strongest form of the signal.** Its practice panel
+draws three lines:
+
+```
+Practice Target: 140 BPM (up/down to adjust)
+Practice Increment: +10 BPM
+Practice Measures: 4
+```
+
+The first is adjustable and says so. `practice_increment` and
+`practice_measures` **have no writers**, so practice mode always speeds up by
+ten every four measures. The line above them advertising its own keys is what
+makes the other two read as settings rather than as a description -- they are
+laid out as a group, and one third of the group works.
+
+**`slides` has the same shape and is filed separately**
+(`TD-C-SLIDES-CAN-ADD-A-TEXTBOX-AND-NOTHING-ELSE`): "Theme:" once and
+"Transition:" twice, none of them changeable.
+
+**A third probe, and the limit of all three.** Looking for a *displayed* value
+with no writer -- a field read inside a `format!` or a `text:` and assigned
+nowhere -- gives 173 hits across 65 apps, and it is the best signal of the
+three because a value on screen is a claim to the user. **It is still only a
+lead generator**, for a reason worth writing down: it reads `self.field` and
+cannot see which `self` it is in, so every field of every helper struct in the
+file is folded in with the app's own. That is why `calendar` appears to have a
+frozen `day` and `month` (they belong to a date), and it is the same blindness
+that made the *first* probe miss `passwordgen`: a field written as
+`self.password_opts.use_symbols` is not matched by a search for
+`.use_symbols =` in one direction, and a field replaced wholesale as
+`self.time_signature = sig` looks frozen from the other.
+
+**Refined, and then measured.** Restricting the probe to the fields of the
+*application* struct -- rather than every `self` in the file -- cuts 173 hits
+across 65 apps to **40 across 22**, and it independently reproduced
+`metronome`'s two, which had been found by hand. That is the good news. The
+bad news is what reading the 40 showed:
+
+| App | Field | Verdict |
+|---|---|---|
+| `videoplayer` | `volume` | **false positive.** `self.volume.increase(5)`, `.decrease(5)`, `.toggle_mute()` -- mutated through its own methods, which the probe does not count as writes |
+| `editor` | `font_size` | **false positive as a *label*.** It is genuinely frozen at 14.0, but it is never *shown*: the probe matched `tree.text(x, y, s, c, self.font_size)`, a call that draws text *at* that size rather than a label that displays the number |
+
+**So the probe has three blind spots and only one of them is fixed.** It now
+knows which struct a field belongs to. It still cannot see a field mutated
+through its own methods, and its test for "displayed" is the substring `text:`,
+which matches any drawing call that happens to take the field as an argument.
+**Both remaining blind spots produce false positives, which is the dangerous
+direction** -- a probe that under-reports wastes an afternoon, while one that
+over-reports gets working programs filed as broken. Of the 40, the two read so
+far were both wrong.
+
+**The conclusion for anyone picking this up:** the probes in this entry are
+worth running once, as a way of choosing what to read. **They are not worth
+believing.** Every defect recorded here was confirmed by reading the code, and
+in four separate cases today a probe's hit dissolved on contact with it --
+`passwordgen` (real, but found only after a probe missed it), `metronome`'s
+time signature (replaced wholesale), `slides`' `next_slide` (a redundant
+duplicate of working code), and `videoplayer`'s volume (mutated by method).
+
+**`metronome` is the worked example of the second failure.** Its
+`beats_per_measure` and `beat_value` have no writers, which reads as a
+metronome with a fixed time signature -- the one thing a metronome must be able
+to change. They are fields of a `TimeSignature` struct that `set_time_signature`
+replaces whole, on the `T` key, from nine predefined signatures. **The feature
+works; only the field is still.** Third time today that a sub-field or a
+spelling nearly turned a working program into a filed defect, which is the
+argument for the rule these entries keep restating: **a probe finds candidates,
+and only reading the code finds defects.**
+
+**The last five read, and all five are safe.** Each is a preference with no
+writer, and each is frozen at the value you would have chosen anyway:
+
+| App | Frozen at | Consequence |
+|---|---|---|
+| `markdowneditor` `autosave_enabled` | `true` | autosave is always on; it cannot be turned off, but nothing is lost by that |
+| `diskimager` `verify_after_write` | `true` | images are always verified; the window draws it as a checkbox that cannot be unchecked |
+| `imageviewer` `show_status_bar` | `true` | the status bar cannot be hidden |
+| `spreadsheet` `show_toolbar` | `true` | the toolbar cannot be hidden |
+| `mindmap` `show_sidebar` | `true` | the sidebar cannot be hidden |
+
+**So these are false offers, not hazards**, and that distinction is worth
+keeping: had `verify_after_write` been frozen at `false`, a tool that writes
+disk images would silently never verify one while showing a box implying it
+had. The defaults being right is luck as much as design -- nothing in the code
+records that the frozen value is the safe one, because nothing in the code
+knows it is frozen.
+
+**Remaining candidates, unread.** The probe over `apps/*/src/main.rs` for `pub`
+`bool` fields with no assignment, no `&mut` and at least one read found 157
+across 47 apps. **Most are not defects** -- `is_dir` on a directory entry is
+supposed to be fixed at construction, and the probe cannot tell a property from
+a preference. Still worth reading: `imageviewer` `show_status_bar` ·
+`spreadsheet` `show_toolbar` · `mindmap` `show_sidebar` · `markdowneditor`
+`autosave_enabled` · `diskimager` `verify_after_write` · `systemrestore`
+`enabled` (it sits in `ScheduleConfig` and means "whether scheduling is on",
+so it is a preference and not a property).
+
+**`fontmanager` `system` is the worked example of a false positive**, and worth
+keeping here so the next person does not re-file it: it is documented as
+"whether this is a system font (cannot be uninstalled)". It is a fact about a
+font, it is supposed to be fixed at construction, and a writer for it would be
+the bug. The probe cannot see that; only the doc comment and the name can.
+
+**The discriminator to apply to each** is not "does it have a writer" but two
+questions in order: *is this a preference or a property of the thing it sits
+on?*, and if a preference, *is it displayed?* A displayed preference that
+cannot be changed is the false-offer case and should be fixed or removed. An
+undisplayed one is a smaller matter. `apps/paint`'s `should_quit` is neither:
+it has no writer **and** no reader, so it is an ordinary write-only field --
+and it cannot be fixed, because the framework gives an app no way to close its
+own window.
+
+**Why a gate is not proposed here.** Gate 50 can be mechanical because
+"written and never read" is decidable from the text. "Frozen" is not: the probe
+cannot distinguish `is_dir` from `dark_mode`, and a gate with a 157-entry
+baseline of mostly-correct code teaches people to add to the baseline. The
+check that works is the per-app one `rssreader` now carries --
+`every_advertised_shortcut_does_something` -- which asserts that what the UI
+offers, the program answers. That is worth copying to any app with a settings
+panel: **draw the option, then assert something can change it.**
+
+## `TD-C-A-FIND-AND-REPLACE-PANEL-THAT-OPENS-AND-DOES-NOTHING` -- **FIXED 2026-09-18** (lane C)
+
+**In short:** In `apps/markdowneditor`, Ctrl+H opens a Find & Replace panel.
+The panel has a "Find:" box, a "Replace:" box and three buttons. **Nothing you
+can do affects any of them.** No keystroke reaches either box, the buttons
+cannot be clicked because this app has no pointer handling at all, and the four
+operations behind them have no callers. Escape closes it again. That is the
+whole of the feature.
+
+**Verified, and the panel really is reachable** -- this is not a dead dialog:
+
+| | |
+|---|---|
+| opening it | `Key::Char('h')` with ctrl toggles `find_state.visible`; `Ctrl+F` sets it true |
+| drawing it | `render_find_replace` runs whenever `find_state.visible`, drawing `Find:`, `Replace:` and `["Replace", "Replace All", "Close"]` |
+| typing into it | **nothing in production writes `find_state.query` or `find_state.replacement`** -- both are permanently `String::new()` |
+| the buttons | `markdowneditor` handles no pointer events, so no click can reach them |
+| the operations | `replace_current`, `replace_all`, `next_match`, `prev_match` each appear exactly once in the production half: their own definition |
+| `find_state.case_sensitive` | frozen as well -- see `TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE` |
+
+`go_to_line` is unreachable by the same measure, and the toolbar's "Find"
+button carries the tooltip "Find & Replace (Ctrl+H)" -- which is the one part
+of this that is true.
+
+**Why this is worse than an absent feature.** An editor with no find is an
+editor you search by eye. An editor that *opens a find panel* has told you the
+feature exists, so a user who cannot make it work concludes they are using it
+wrong -- and a keyboard-only app gives them every reason to think so, since the
+obvious move is to click a field that cannot be clicked. **The failure is
+silent, and it is attributed to the user.** That is why nobody has reported it.
+
+**Three defect classes meeting in one panel**, each already filed separately:
+operations with no caller, fields the program obeys that nothing can set, and a
+UI drawn for a pointer in an app that handles none. Any one of them alone would
+leave a usable program.
+
+**What the repair wants.** The panel needs the treatment `apps/rssreader` just
+had: a text-entry mode routing keystrokes into `query` and `replacement`, a key
+to move between the two boxes, Enter for next match, and keys for Replace and
+Replace All -- then `replace_current`, `replace_all`, `next_match` and
+`prev_match` have callers and the buttons become labels for keys rather than
+targets for a pointer that does not exist. `go_to_line` wants the same kind of
+small prompt. **Do not start by adding pointer handling:** the panel is one
+feature of a program that is keyboard-driven throughout, and giving this one
+dialog a mouse would make it the only part of the app that needs one.
+
+**Method note.** I twice nearly got this wrong, in opposite directions. First I
+concluded Ctrl+H was unbound, having grepped `Key::H` when the app spells it
+`Key::Char('h')`. Then I nearly filed the panel as dead code, having grepped
+`find_state.query` when the render function takes the struct by reference and
+spells it `state.query`. **Both were the same mistake: searching for one
+spelling of a thing and reading the silence as absence.** The check that
+settled it was for *writers* of the field under any receiver, which is the
+question that was actually being asked.
+
+
+
+**Fixed the same day.** `handle_find_key` routes the keyboard into the panel
+while it is open: letters reach the focused box, `Tab` moves between Find and
+Replace, `Enter` and `Shift+Enter` walk the matches, `Ctrl+Enter` replaces and
+`Ctrl+Shift+Enter` replaces every match, `Escape` closes. The panel takes every
+key while it is up, for the reason every text mode in this tree does -- a query
+containing `s` must not save the document behind it, which there is now a test
+for.
+
+`Enter` also puts the *cursor* on the match rather than only counting it, which
+is the half of "find" that is not searching -- and is the only caller
+`go_to_line` has ever had. The three buttons now read "Replace  Ctrl+Enter",
+"Replace All  Ctrl+Shift+Enter" and "Close  Esc": in an app that handles no
+pointer events a button can only ever tell you what to press, so it should say
+so. `find_state.case_sensitive` remains frozen and stays filed under
+`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`; the panel draws no
+control for it, so it is a smaller matter than the rest. 225 tests, up from
+217.
+
+## `TD-C-SLIDES-CAN-ADD-A-TEXTBOX-AND-NOTHING-ELSE` (lane C, 2026-09-18)
+
+**In short:** `apps/slides` edits a deck well enough -- new slide, duplicate,
+delete, copy, paste, add a textbox -- and then stops. You cannot add a shape or
+an image, you cannot delete an element you just added (only the whole slide
+around it), and the theme and the slide transition are both **printed on screen
+and impossible to change**.
+
+**Verified.**
+
+| Operation | State |
+|---|---|
+| `add_shape` | no production caller; `T` adds a textbox and nothing adds anything else |
+| `add_image_placeholder` | the same |
+| `delete_selected_element` | no production caller. `Delete` is bound to `delete_slide`, so the only way to remove an element is to remove the slide holding it |
+| `set_theme` | no production caller, while the window draws `format!("Theme: {}", self.theme.name)` |
+| `set_current_transition` | no production caller, while the window draws `"Transition: {}"` **twice** -- once on the slide and once in the property panel |
+
+`selected_element` is genuinely written (`Some(eid)` in three places, when an
+element is added), so `delete_selected_element` has a subject waiting for it.
+That distinguishes this from `rssreader`, where the equivalent field had no
+writer at all and the operations had nothing to act on.
+
+**The theme and transition are the same defect as
+`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`**, and among the worst
+instances of it, because they are displayed *three* times between them. A label
+reading "Transition: Fade" in a property panel is not a status line; it is an
+offer.
+
+**The false positive worth recording.** `next_slide` and `prev_slide` also have
+no callers, and they are **not** a defect: `Left`/`Right`/`PageUp`/`PageDown`
+all move through the deck via `advance`, and `Home`/`End` via `jump_to`. They
+are redundant duplicates of working code, so the feature is reachable and the
+functions are merely dead. **"No caller" means the *function* is unreachable;
+it does not mean the *feature* is** -- the implication runs one way only, and a
+sweep that forgets this reports working programs as broken ones.
+
+**What the repair wants.** Keys, on the pattern this lane has now used four
+times: a key for shape and image, a key for deleting the selected element that
+is not the one that deletes the slide, and a key each to cycle theme and
+transition -- both of which already have `next()`-style cycling elsewhere in
+this tree and are already displayed, so the display becomes true the moment a
+key exists.
 
 ### [A] `faceunlock::verify()` returns Matched unconditionally, and my first attempt to document that understated it -- 2026-09-17
 

@@ -2935,6 +2935,14 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
     }
 
     match key.key {
+        // Which day a week begins on. `week_starts_monday` was `true` at
+        // construction and had no writer, so every month grid began on Monday
+        // for everyone -- a question with no universally right answer, being
+        // answered once at compile time.
+        Key::W => {
+            state.week_starts_monday = !state.week_starts_monday;
+            EventResult::Consumed
+        }
         Key::Left | Key::PageUp => {
             state.navigate_backward();
             state.content_scroll = 0.0;
@@ -5221,6 +5229,22 @@ mod tests {
         assert_eq!(app.view, CalendarView::Month);
         assert_eq!(app.view_date.month, 11);
         assert_eq!(app.selected_date, target);
+    }
+
+    /// `W` changes which day a week begins on.
+    ///
+    /// `week_starts_monday` was `true` at construction and had no writer, so
+    /// every month grid began on Monday for everyone -- a question with no
+    /// universally right answer, answered once at compile time.
+    #[test]
+    fn w_changes_the_day_a_week_starts_on() {
+        let mut app = sample_app(june_2024());
+        app.view = CalendarView::Month;
+        assert!(app.week_starts_monday, "control: it starts on Monday");
+
+        probe::key(&mut app, &probe::press(Key::W));
+
+        assert!(!app.week_starts_monday, "W did not change the week start");
     }
 
     #[test]

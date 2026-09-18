@@ -4098,6 +4098,15 @@ impl PdfViewerApp {
                 self.step_page(false);
                 true
             }
+            // Reading mode. `dark_mode` was `true` at construction and had
+            // no writer anywhere, so `page_color` returned rgb(40,42,54) for
+            // every page of every document and `text_color` inverted with it.
+            // A viewer that cannot show a page in the colours it was written
+            // in is not offering a reading mode; it only has the one mode.
+            Key::D => {
+                self.dark_mode = !self.dark_mode;
+                true
+            }
             Key::Home => {
                 self.go_to_page(0);
                 true
@@ -5502,6 +5511,32 @@ mod tests {
     /// The dialog is modal. A Right arrow while it is up is a keystroke aimed
     /// at the dialog, and letting it walk the document behind would move the
     /// page the "Current page" choice refers to while the user is choosing it.
+    /// `D` turns the reading mode off, and the page goes white.
+    ///
+    /// `dark_mode` was `true` at construction and had no writer, so every page
+    /// of every document was drawn at rgb(40,42,54) and nothing could ask for
+    /// the white page the document actually is.
+    #[test]
+    fn d_leaves_the_dark_reading_mode() {
+        let mut app = viewer_with_recorder(|_, _| true, 10);
+        assert!(app.dark_mode, "control: it starts in the dark mode");
+        let dark = app.page_color();
+
+        app.handle_key(&probe::press(Key::D));
+
+        assert!(!app.dark_mode, "D did not leave the reading mode");
+        assert_ne!(
+            app.page_color(),
+            dark,
+            "the page is drawn the same either way"
+        );
+        assert_eq!(
+            app.page_color(),
+            Color::rgb(255, 255, 255),
+            "a page that is not in reading mode should be the document's white"
+        );
+    }
+
     #[test]
     fn the_dialog_swallows_the_page_keys() {
         let mut app = viewer_with_recorder(|_, _| true, 10);

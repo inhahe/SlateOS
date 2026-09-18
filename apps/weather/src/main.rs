@@ -1,7 +1,26 @@
 //! Slate OS Weather Application
 //!
-//! A weather dashboard application providing:
-//! - Current weather conditions with detailed metrics
+//! **This program cannot fetch weather, and says so in the window.** It has
+//! no network access and no data source: `WeatherApp::new` -- what `main`
+//! builds -- holds no conditions, forecast, alerts or locations, every
+//! generator here is `#[cfg(test)]`, and so is every way to add a place.
+//! `render_commands` therefore stops at `render_cannot_fetch` and draws
+//! `CANNOT_FETCH_LINES` instead of the dashboard, so no panel ever shows a
+//! default that would be read as a reading. The fourth of those lines is the
+//! one that matters most: *silence here is not an all-clear* -- an empty
+//! alerts banner must not be mistaken for "no warnings in force".
+//!
+//! It used to open on invented weather for New York, London and Tokyo, which
+//! is a confident lie about something people make decisions with. Deleting
+//! that was right, and the honest-empty state was put in at the same time.
+//! What is still missing is a real source: our HTTP library parses and
+//! serialises and has no transport, so there is nowhere to fetch from yet.
+//! That is tracked in `deferred-questions.md`, not as a live question, since
+//! nothing can act on it until the transport exists.
+//!
+//! The layouts below are real and tested, and draw when a model is supplied
+//! (which today only tests do):
+//! - Current conditions with detailed metrics
 //! - Hourly forecast (24 hours) with horizontal strip layout
 //! - 7-day daily forecast in a table layout
 //! - Weather alerts with severity-based banner display
@@ -10,7 +29,6 @@
 //! - Settings for units (temperature, wind, pressure, time)
 //! - Air quality index with color-coded display
 //!
-//! All weather data is simulated locally (no network required).
 //! Uses the guitk library for rendering.
 
 use appearance::Palette;

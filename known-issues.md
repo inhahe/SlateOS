@@ -160482,6 +160482,53 @@ programs as broken. The entry they live in
 (`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
 says why the failure is systematic rather than a matter of care.
 
+## `TD-C-A-HUNDRED-APPS-BIND-KEYS-NOBODY-CAN-FIND` (lane C, 2026-09-18)
+
+**In short:** Seven apps got a shortcut list today. A survey of the other 134
+says the same problem is everywhere: **126 apps bind at least one letter, digit
+or function key, and ten of them print a list of their keys.** The fix per app
+is now about fifteen minutes and entirely mechanical, so this is a programme of
+work rather than a defect -- filed with the tool that finds the candidates and
+one worked example verified by hand.
+
+**The one number here that needs no inference is ten.** A crate either contains
+a key list or it does not, and `scripts/key-survey.py` reads every `.rs` file in
+each crate to decide -- not just `main.rs`, because 12 of 141 apps have more
+than one source file. Everything else the survey prints is a *candidate list*,
+and it is wrong in both directions:
+
+| | |
+|---|---|
+| **Overstates** | a `Key::` match is not a shortcut. `apps/crossword` pairs `(Key::Q, 'Q')` through the whole alphabet -- that is how letters get into squares, not twenty-six hidden commands. |
+| **Understates, badly** | a one-character key name matches almost any prose. `apps/renamer` binds `L`, `U`, `T`, `S`, `K`, `W`, `E` and `X`; the survey flagged four, because "Lower" contains an `L` and "Snake" an `S`. |
+
+So the survey ranks apps to read by hand. It does not decide anything, and the
+report says so at the top of the file.
+
+**The worked example, verified by reading it.** `apps/renamer` answers eight
+letter keys, each adding a rename operation to the pipeline -- lower, upper,
+title, snake, kebab, trim, extension-lower, extension-remove. The only string
+in the crate that comes near naming one is `"kebab-case"`, which is the label
+of the *operation*, not of the key that adds it. So the program's entire
+purpose is reachable only by someone who has read the handler, which is the
+same defect as `apps/slides` being unable to put a shape on a slide, one step
+further out: the operation is reachable, and the way in is not.
+
+**Why this is filed rather than done.** There are of the order of a hundred
+apps in it, at roughly fifteen minutes each. That is not a task, and doing a
+handful more would leave the entry saying the same thing with a smaller number
+in it. What makes it worth filing rather than merely noting is that everything
+expensive is already built: `guitk::shortcut::keystrokes` reads the labels,
+the overlay is forty lines that cannot disturb a layout it does not understand,
+and the two tests each app needs are written once and copied --
+`every_advertised_key_does_something` against the handler and
+`the_shortcut_list_reaches_the_window` against the screen.
+
+**Order to work in**, when somebody picks this up: the survey's letter and
+function-key columns first and its digit column last. Digits are nearly always
+a size, a level or a view, and an app that draws "Levels 1-8" has named all
+eight to a reader while naming two to a substring search.
+
 ## `TD-C-A-PRINTED-KEY-LIST-IS-A-SECOND-COPY` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** Five apps print a list of their keys on screen. That list is a

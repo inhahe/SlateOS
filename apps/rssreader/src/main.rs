@@ -5513,6 +5513,7 @@ mod tests {
     )]
 
     use super::*;
+    use guitk::shortcut::keystrokes;
 
     /// A downloaded feed file becomes articles you can actually read.
     ///
@@ -5841,49 +5842,30 @@ mod tests {
     /// a key here, and a key that stops being bound fails it.
     #[test]
     fn every_advertised_shortcut_does_something() {
-        // One representative event per row. Where a row names two keys
-        // ("R / Enter"), the first is the one checked.
-        let probe = |action: KeyAction| -> Event {
-            match action {
-                KeyAction::NextArticle => press(Key::J),
-                KeyAction::PrevArticle => press(Key::K),
-                KeyAction::NextFeed => key_ev(Key::J, false, true),
-                KeyAction::PrevFeed => key_ev(Key::K, false, true),
-                KeyAction::CyclePane => press(Key::Tab),
-                KeyAction::ToggleRead => press(Key::R),
-                KeyAction::ToggleStar => press(Key::S),
-                KeyAction::Search => press(Key::Slash),
-                KeyAction::CycleSortOrder => press(Key::O),
-                KeyAction::CycleFilter => press(Key::F),
-                KeyAction::ToggleSidebar => press(Key::B),
-                KeyAction::MarkAllRead => key_ev(Key::R, false, true),
-                KeyAction::AddFeed => press(Key::A),
-                KeyAction::RemoveFeed => press(Key::D),
-                KeyAction::RenameFeed => key_ev(Key::R, true, false),
-                KeyAction::NewFolder => key_ev(Key::N, true, false),
-                KeyAction::MoveToFolder => press(Key::V),
-                KeyAction::ToggleFolderExpand => press(Key::Space),
-                KeyAction::ImportOpml => key_ev(Key::O, true, false),
-                KeyAction::ExportOpml => key_ev(Key::S, true, false),
-                KeyAction::ShowHelp => key_ev(Key::Slash, false, true),
-            }
-        };
-
+        // The events come from each row's own printed hint, read by
+        // `guitk::shortcut`. What stood here was a `match` with one arm per
+        // row mapping the action to an event -- a third copy of the same fact,
+        // after the hint and the key handler, and one that could drift from
+        // *both* while still passing. It also checked only the first key of a
+        // row, so the `Down` in "J / Down" and the `Enter` in "R / Enter" were
+        // advertised and never tested. Every key of every row is pressed now.
         for action in ALL_KEY_ACTIONS {
-            // A fresh app per row: several of these open a prompt or a dialog
-            // that would swallow the next row's key.
-            let mut a = app();
-            // Both of these act on a sidebar row, and say so rather than
-            // acting when nothing is selected -- which is still answering.
-            a.sidebar_selection = SidebarSelection::Feed(a.feeds.first().expect("a feed").id);
+            let hint = action.key_hint();
+            for stroke in keystrokes(hint).unwrap_or_else(|e| panic!("{e}")) {
+                // A fresh app per key: several of these open a prompt or a
+                // dialog that would swallow the next one.
+                let mut a = app();
+                // Both of these act on a sidebar row, and say so rather than
+                // acting when nothing is selected -- which is still answering.
+                a.sidebar_selection = SidebarSelection::Feed(a.feeds.first().expect("a feed").id);
 
-            assert_eq!(
-                a.handle_event(&probe(*action)),
-                EventResult::Consumed,
-                "the overlay advertises {:?} ({}) and nothing answers it",
-                action,
-                action.key_hint()
-            );
+                assert_eq!(
+                    a.handle_event(&Event::Key(stroke.clone())),
+                    EventResult::Consumed,
+                    "the overlay advertises {hint:?} for {action:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
         }
     }
 

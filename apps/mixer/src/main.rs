@@ -2816,18 +2816,18 @@ mod tests {
         // either. The old bar named four shortcuts for a program that answered
         // seven keys, and described `Tab` and `Left/Right` as different things
         // when they ran the same three lines.
+        // Read by `guitk::shortcut`, which is where this parser went after the
+        // fourth app wrote its own. What stood here was a local match arm per
+        // label -- a *third* copy of the same fact, after the bar and the key
+        // handler, and one that has to be edited for every label an author
+        // spells a new way. `Esc` versus `Escape` is not a fact about this
+        // program.
         fn keys_named(label: &str) -> Vec<Key> {
-            match label {
-                "Left/Right" => vec![Key::Left, Key::Right],
-                "Up/Down" => vec![Key::Up, Key::Down],
-                "Tab" => vec![Key::Tab],
-                "M" => vec![Key::M],
-                "O" => vec![Key::O],
-                "I" => vec![Key::I],
-                "Enter" => vec![Key::Enter],
-                "Esc" => vec![Key::Escape],
-                other => panic!("the shortcut bar names {other:?}, which is not a key"),
-            }
+            guitk::shortcut::keystrokes(label)
+                .unwrap_or_else(|e| panic!("{e}"))
+                .into_iter()
+                .map(|stroke| stroke.key)
+                .collect()
         }
 
         for (open, rows) in [

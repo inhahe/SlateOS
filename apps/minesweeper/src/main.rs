@@ -1568,6 +1568,7 @@ mod tests {
     use super::*;
     use guitk::event::Modifiers;
     use guitk::probe::{self, ctrl, press, press_with};
+    use guitk::shortcut::keystrokes;
     use std::collections::HashSet;
 
     // ── Helpers ────────────────────────────────────────────────────────────
@@ -3716,6 +3717,62 @@ mod tests {
                 "no '{k} {what}' in {all}"
             );
         }
+    }
+
+    /// **Every key the footer names is one the board answers.**
+    ///
+    /// `the_footer_names_the_keys_that_do_something` reads the drawn strings
+    /// and finds all six, which says the footer is *complete* and nothing at
+    /// all about whether it is *true*: a row naming a key nothing handles
+    /// passes it exactly as loudly. `apps/rssreader` shipped an overlay of
+    /// twenty-one shortcuts of which about four worked, and three of its rows
+    /// named operations that existed nowhere in the crate. Both halves are
+    /// needed, and this is the other one.
+    ///
+    /// The property is "some reachable state answers this key", not "this key
+    /// is taken right now". Several of these decline on purpose -- `C` on a
+    /// number whose flags are missing, an arrow at the edge -- and declining
+    /// from its own arm is answering. The defect to catch is a key that falls
+    /// through to the catch-all on every board.
+    #[test]
+    fn every_key_the_footer_names_does_something() {
+        for &(label, what) in SHORTCUTS {
+            for stroke in keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = states().into_iter().any(|mut a| {
+                    handle_event(&mut a, &Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the footer names {label:?} for {what:?}, and no board answers it"
+                );
+            }
+        }
+    }
+
+    /// Boards chosen so that between them every key in the footer has work.
+    ///
+    /// A key none of the three takes is a key nothing acts on.
+    fn states() -> Vec<MinesweeperApp> {
+        // Dealt but untouched, cursor off the edges so all four arrows move
+        // and every cell is still coverable.
+        let mut fresh = game(7);
+        walk_cursor_to(&mut fresh, 2, 2);
+
+        // Opened, so the flood has run and there is something revealed.
+        let opened = started(7);
+
+        // A satisfied number under the cursor, which is the one state a chord
+        // will act in.
+        let chordable = (0..80u64)
+            .find_map(|seed| {
+                let mut a = started(seed);
+                let (r, c) = a_satisfied_number(&mut a)?;
+                walk_cursor_to(&mut a, r, c);
+                Some(a)
+            })
+            .expect("a board with a satisfied number to chord");
+
+        vec![fresh, opened, chordable]
     }
 
     #[test]

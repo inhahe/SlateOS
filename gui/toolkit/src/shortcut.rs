@@ -81,6 +81,7 @@ impl Error for UnknownKey {}
 /// | `Esc`, `PgUp`, `Return`, `Del` | the spellings apps actually use |
 /// | `?` | `Shift` and the slash key, which is what produces it |
 /// | `Ctrl+/` | one stroke — a `/` straight after `+` is a key, not a separator |
+/// | `Ctrl+F / /` | two strokes — the second `/` is the key, not an empty part |
 ///
 /// Modifier names are matched without case, as are key names of more than one
 /// character; a single-character name is a key cap (`A` and `a` are the same
@@ -126,13 +127,22 @@ pub fn keystrokes(label: &str) -> Result<Vec<KeyEvent>, UnknownKey> {
 
 /// Split a label on the `/` that separates alternatives.
 ///
-/// A `/` directly after a `+` is the key itself (`Ctrl+/`), not a separator.
+/// Two `/` are *not* separators, because the slash is also a key and apps
+/// print it as one:
+///
+/// * one directly after a `+` is the key (`Ctrl+/`);
+/// * one with nothing but blanks before it since the last split is the key --
+///   which is what makes `apps/rssreader`'s `"Ctrl+F / /"` read as `Ctrl+F`
+///   *or* `/`, two keys, rather than as `Ctrl+F` and a part that is gone.
+///   Dropping it silently was this function's first bug, and it would have
+///   cost a guard test one of the two keys it meant to check, while passing.
 fn split_alternatives(label: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut previous = '\0';
     for (at, ch) in label.char_indices() {
-        if ch == '/' && previous != '+' {
+        let blank_so_far = label.get(start..at).is_none_or(|s| s.trim().is_empty());
+        if ch == '/' && previous != '+' && !blank_so_far {
             if let Some(piece) = label.get(start..at) {
                 parts.push(piece);
             }
@@ -534,13 +544,30 @@ mod tests {
     #[test]
     fn an_empty_label_is_an_error_rather_than_an_empty_list() {
         // The whole point of the type: nothing to press is never a pass.
-        for empty in ["", "   ", "/", " / "] {
+        for empty in ["", "   ", "  "] {
             let Err(e) = keystrokes(empty) else {
                 panic!("{empty:?} was accepted");
             };
             assert!(e.part.is_empty());
             assert_eq!(e.to_string(), "a shortcut label names no key at all");
         }
+    }
+
+    #[test]
+    fn a_slash_with_nothing_before_it_is_the_slash_key() {
+        // `apps/rssreader` prints "Ctrl+F / /" for search, and the last part of
+        // that is a key. Read as a separator it vanishes, and a guard test then
+        // checks one key where it meant to check two -- passing, while covering
+        // half of what it was asked to.
+        assert_eq!(keys("Ctrl+F / /"), vec![Key::F, Key::Slash]);
+        assert_eq!(keys("/"), vec![Key::Slash]);
+        assert_eq!(keys(" / "), vec![Key::Slash]);
+        let strokes = keystrokes("Ctrl+F / /").unwrap_or_else(|e| panic!("{e}"));
+        assert!(strokes.first().is_some_and(|s| s.modifiers.ctrl));
+        assert!(
+            strokes.last().is_some_and(|s| !s.modifiers.ctrl),
+            "the modifier leaked onto the alternative"
+        );
     }
 
     #[test]
@@ -591,6 +618,23 @@ mod tests {
             // wordsearch
             "H",
             "F2",
+            // rssreader, whose twenty-one hints are why this corpus is read off
+            // every app rather than the ones that came to mind: it is the only
+            // app printing "Ctrl+F / /", and that label is what caught the
+            // splitter dropping a key.
+            "J / Down",
+            "K / Up",
+            "Shift+J",
+            "Shift+K",
+            "Tab / Shift+Tab",
+            "R / Enter",
+            "Ctrl+F / /",
+            "Shift+R",
+            "Ctrl+R",
+            "V",
+            "Space",
+            "Ctrl+O",
+            "Ctrl+S",
             // slides
             "Left / Right",
             "Home / End",

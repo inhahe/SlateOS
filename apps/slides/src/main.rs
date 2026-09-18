@@ -3263,6 +3263,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     use guitk::event::Modifiers;
+    use guitk::shortcut::keystrokes;
 
     fn seeded() -> SlidesApp {
         let mut app = SlidesApp::new(1280.0, 720.0);
@@ -3376,10 +3377,12 @@ mod tests {
     ///
     /// Two things this test deliberately does *not* do.
     ///
-    /// The event is built from the row's own key text rather than looked up in
-    /// a parallel table of events. A second table would be a second list to
-    /// keep in step -- the defect this test exists to prevent, rebuilt inside
-    /// the test.
+    /// The event is built from the row's own key text by `guitk::shortcut`,
+    /// rather than looked up in a parallel table of events. A second table
+    /// would be a second list to keep in step -- the defect this test exists
+    /// to prevent, rebuilt inside the test. It started as exactly that table,
+    /// forty lines of `"Left" => Key::Left`, and `apps/mixer` turned out to
+    /// have written the same forty lines already.
     ///
     /// And the claim checked is "some reachable state answers this key", not
     /// "this key is taken right now". Several of these decline on purpose:
@@ -3390,14 +3393,15 @@ mod tests {
     #[test]
     fn every_advertised_key_does_something() {
         for (row, what) in SHORTCUTS {
-            for spec in row.split(" / ") {
-                let event = event_for(spec);
+            for stroke in keystrokes(row).unwrap_or_else(|e| panic!("{e}")) {
+                let event = Event::Key(stroke.clone());
                 let taken = states()
                     .iter_mut()
                     .any(|app| app.handle_event(&event) == EventResult::Consumed);
                 assert!(
                     taken,
-                    "the list advertises {spec:?} for {what:?} and no state answers it"
+                    "the list advertises {row:?} for {what:?}, and no state answers {:?}",
+                    stroke.key
                 );
             }
         }
@@ -3423,50 +3427,6 @@ mod tests {
         working.handle_event(&press(Key::T));
 
         vec![plain, sorter, working]
-    }
-
-    /// The event a shortcut row describes.
-    fn event_for(spec: &str) -> Event {
-        let name = spec.rsplit('+').next().unwrap_or(spec);
-        let key = match name {
-            "Left" => Key::Left,
-            "Right" => Key::Right,
-            "Home" => Key::Home,
-            "End" => Key::End,
-            "Tab" => Key::Tab,
-            "PageUp" => Key::PageUp,
-            "PageDown" => Key::PageDown,
-            "Delete" => Key::Delete,
-            "Enter" => Key::Enter,
-            "F2" => Key::F2,
-            "?" => Key::Slash,
-            "1" => Key::Num1,
-            "2" => Key::Num2,
-            "A" => Key::A,
-            "B" => Key::B,
-            "C" => Key::C,
-            "D" => Key::D,
-            "E" => Key::E,
-            "I" => Key::I,
-            "L" => Key::L,
-            "N" => Key::N,
-            "O" => Key::O,
-            "R" => Key::R,
-            "S" => Key::S,
-            "T" => Key::T,
-            "V" => Key::V,
-            other => panic!("the list names {other:?}, which this test cannot press"),
-        };
-        let mut modifiers = Modifiers::NONE;
-        modifiers.ctrl = spec.contains("Ctrl+");
-        // `?` is the shifted slash key; nothing else here is shifted implicitly.
-        modifiers.shift = spec.contains("Shift+") || spec == "?";
-        Event::Key(KeyEvent {
-            key,
-            pressed: true,
-            modifiers,
-            text: String::new(),
-        })
     }
 
     fn types(text: &str) -> Event {

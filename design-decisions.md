@@ -77202,6 +77202,47 @@ lines earlier. It now clusters by proximity and implies nothing across
 clusters -- and its docstring states that it cannot see kernel-prefixed
 lines at all, so "first of the cluster" means first of what it can see.
 
+**The checker is a third copy** -- lane C's, and the strongest of the
+operational ones. Five of their apps print a list of their keyboard
+shortcuts on screen. That printed list and the key handler are **two copies
+of one fact**, and they drift: `apps/rssreader` shipped an overlay of
+twenty-one shortcuts of which about four worked. The cure is a test that
+reads both -- but four of the five apps that *had* such a test wrote it by
+naming the keys itself, **a third list**, drifting from the other two and
+catching neither. Each of the four had independently written the same forty
+lines of `"Left" => Key::Left`.
+
+So the rule is: if the list can be derived, derive it; if it cannot, make
+the test read **the artifact**, never a list beside it. A checker that
+restates the fact it is checking has joined the population it was meant to
+police.
+
+They also corrected a weaker fallback I had proposed for the same problem
+(asserting `ALL.len() == variant count`): it catches a *missing* variant and
+not a duplicated or wrong one, so `[A, B, B, D]` passes at length four. Worth
+recording because it is a guard that looks total and is not -- the same
+genus as a ratio bound that assumes proportional noise.
+
+**And the mention-versus-use trap has a favourite disguise: the comment you
+wrote explaining the fix.** My freeze-fix guard counted occurrences of
+`1_000_000_000` and fired because the replacement's own comment quotes the
+old constant. Lane C did it twice: documenting in a source file that
+`Command::new`/`spawn(`/`exec(` *"appear zero times"* made that file match a
+search for all three, and they reintroduced a lone CRLF into
+`known-issues.md` **inside the paragraph documenting the CRLF bug**. The
+structural defence is to assert the count *before* replacing and abort
+rather than write, which is what their
+`def sub(t, old, new, n=1): assert t.count(old) == n; ...` does -- it stopped
+three wrong edits in one evening, one where an anchor matched three times and
+a plain `str.replace` would have silently edited the wrong one.
+
+*(Audited my own 58 appliers against that: 54 pair every `.replace` with a
+count assertion. The four that do not are `.replace("_", "")` on a string,
+`replace(microsecond=0)` on a datetime, `.replace(b" ", b"")` stripping
+NULs, and one already-applied script -- none of them anchored edits. The
+convention held, which I only know because I checked it rather than
+assuming I had followed it.)*
+
 *A partial fix must say it is partial.* They swept five crates for the
 environment race and deliberately left `apps/explorer` half done: the path
 that actually reproduced now holds the lock, while 35 further sites in five

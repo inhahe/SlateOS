@@ -159135,6 +159135,36 @@ version history *with snapshot restore*, and notebook organisation to the
 extent that a notebook cannot be renamed and a note cannot be moved between
 notebooks. "Full-text search" is real. The rest were not examined.
 
-**Nine operations, one missing wire each.** That is the same repair
-`apps/photomanager` needed, and the same size: the model, the tests and the
-drawing all exist in every case.
+**They are not nine oversights. The application has no mouse.**
+
+`apps/notes` handles `Event::Key`, `Event::Resize` and `Event::CloseRequested`,
+and nothing else. It imports no `MouseEvent`, no `MouseButton`, no
+`MouseEventKind`; `grep -c "Event::Mouse\|MouseEvent"` is 0, and there is not
+one hit-test function in the file. It draws a notebook sidebar, a note list
+and an editor -- three panels, none of which can be clicked anywhere.
+
+So every operation must be a keyboard shortcut, and the keyboard covers about
+eight of them: Tab, Up/Down, `/` and Ctrl+F for search, Ctrl+S and S to save,
+P to pin, V to favourite, B for bold, Escape/Enter, Backspace. The nine in the
+table above have neither a key nor a click. That is the whole of the defect,
+and it explains why the list reads like a cross-section of the application
+rather than a set of related gaps.
+
+**It is not a documented keyboard-only design.** There is no comment saying
+so, the module doc advertises a "Multi-panel UI", and three mentions of a
+shortcut in the whole of the production code is not a keyboard-driven
+application either. It is an application with a mouse-shaped interface and no
+mouse.
+
+**So the repair is not nine wires.** It is a pointer layer -- hit-tests for
+the three panels, mirroring the way `apps/photomanager` derives every
+clickable rectangle from one function the renderer also reads -- and then the
+nine operations have somewhere to hang. Adding nine more keyboard shortcuts
+would reach them too, and would leave a program whose sidebar still does
+nothing when clicked.
+
+**A smaller bug found while reading the version panel for a hit-test.** It
+computes how many rows fit with `(height - 30.0) / 24.0` and then advances
+`vy` by `28.0` per row. At a 740-pixel panel that is 29 rows drawn 28 apart in
+812 pixels, so the last few are drawn past the bottom of the panel they are
+in. One of the two numbers is wrong and they should be one constant.

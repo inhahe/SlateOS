@@ -160095,3 +160095,50 @@ have let Ctrl+T add a textbox and leave the theme alone -- which looks exactly
 like a theme key that does nothing, the very defect being fixed. I wrote it
 that way first and caught it before running it;
 `ctrl_t_does_not_add_a_textbox` is what keeps it caught. 90 tests, up from 83.
+
+## `TD-C-A-SCAN-REPORT-OUTLIVED-THE-SCAN-IT-DESCRIBED` -- **FIXED 2026-09-18** (lane C)
+
+**In short:** `apps/netscan` had its invented hosts removed on 2026-09-15. The
+*report wrapped around* those hosts stayed, and it was still a claim: pressing
+Scan printed "Scanned 254 IPs | 0 hosts up | 0 open ports | 12.3s", put "0
+hosts up on 192.168.1.0/24" in the window title, and filed a history entry
+timestamped "2026-05-18 12:07:13". Nothing was contacted. **"0 hosts up" is a
+finding about the user's network**, and it reached the taskbar.
+
+**Verified before it was changed.**
+
+| | |
+|---|---|
+| can it reach anything | no -- `Cargo.toml` lists `appearance`, `guitk`, `oswindow`, and nothing else |
+| the hosts | `let hosts: Vec<HostResult> = Vec::new();`, correctly, since 2026-09-15 |
+| the summary | `render_summary_bar` prints `total_ips_scanned` and `duration_secs`, an address count and an *estimate* |
+| the title | `title()` returned `"{} hosts up on {} - Network Scanner"` |
+| the history | `self.history.push_front(result)` with `timestamp` a constant derived from the scan id |
+
+**The tell was internal inconsistency.** The same author, in the same file, had
+already made `run_traceroute`, `run_whois` and `send_wol` refuse outright and
+say why -- *"Cannot trace a route: this program has no network access, so no
+packet was sent"*. The scan is the one of the four that was missed, and it is
+the one with a durable history behind it.
+
+**Fixed.** `start_scan` parses the target first, so a typo is still named as a
+typo rather than being swallowed by the refusal -- the order `run_traceroute`
+uses -- and then sets `scan_note` and stops. No result, no history entry, and
+the title stays "Network Scanner". The note is drawn where the summary was.
+
+**A removal is finished when the claim is gone, not when the data is.** The
+2026-09-15 change deleted the fabricated *hosts* and left every sentence built
+around them. That is the same shape as `TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY`
+predicted and got wrong -- there the removal really had been finished -- so the
+shape is real even though that instance was not.
+
+**Four tests changed rather than deleted**, and the changes are the record:
+`test_app_start_scan` asserted `results.is_some()` and `!history.is_empty()`,
+both true and both the defect;
+`a_scan_reports_no_hosts_because_it_cannot_reach_the_network` checked the hosts
+list and not the sentence around it; `the_title_reports_what_the_scan_found`
+asserted the title *did* report a finding. A fifth,
+`the_scan_refusal_reaches_the_window`, asserts through the render, because
+`wol_note` in this same file was written and drawn by nothing for three
+commits and only the write-only-field gate noticed. 135 tests.
+

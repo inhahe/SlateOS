@@ -5258,6 +5258,23 @@ impl ExplorerState {
                 self.load_directory();
                 true
             }
+            // The three view modes. `set_view_mode` was the only writer of
+            // `view_mode` and had no caller, so this window was permanently
+            // in Details: `List` and `Icons` both render correctly, are
+            // obeyed by the layout, the navigation step and the header, and
+            // could never be seen.
+            Key::Num1 => {
+                self.set_view_mode(ViewMode::Details);
+                true
+            }
+            Key::Num2 => {
+                self.set_view_mode(ViewMode::List);
+                true
+            }
+            Key::Num3 => {
+                self.set_view_mode(ViewMode::Icons);
+                true
+            }
             // Shift+Delete is the permanent one, by long convention. It is
             // matched first because `Key::Delete` below would otherwise take
             // it and quietly recycle instead.
@@ -5881,6 +5898,59 @@ mod tests {
         (rows.start..rows.end())
             .filter_map(|i| state.entries.get(i).map(|e| e.name.clone()))
             .collect()
+    }
+
+    /// The three view modes can all be reached.
+    ///
+    /// `set_view_mode` was the only writer of `view_mode` and had no caller,
+    /// so this window was permanently in Details. `List` and `Icons` both
+    /// render, are obeyed by the layout and the navigation step, and could
+    /// never be seen.
+    #[test]
+    fn the_view_modes_can_be_reached() {
+        let dir = temp_dir("view_modes");
+        let root = dir.dir();
+        write(&root.join("a.txt"), "a");
+        let mut state = state_at(root);
+        assert_eq!(
+            state.view_mode,
+            ViewMode::Details,
+            "control: starts in Details"
+        );
+
+        send(&mut state, &key(Key::Num2));
+        assert_eq!(state.view_mode, ViewMode::List, "2 did not select List");
+
+        send(&mut state, &key(Key::Num3));
+        assert_eq!(state.view_mode, ViewMode::Icons, "3 did not select Icons");
+
+        send(&mut state, &key(Key::Num1));
+        assert_eq!(
+            state.view_mode,
+            ViewMode::Details,
+            "1 did not return to Details"
+        );
+    }
+
+    /// And the window actually looks different in them.
+    ///
+    /// The field changing proves only that the field changed; Details draws a
+    /// column header that the other two do not.
+    #[test]
+    fn a_view_mode_changes_what_is_drawn() {
+        let dir = temp_dir("view_render");
+        let root = dir.dir();
+        write(&root.join("a.txt"), "a");
+        let mut state = state_at(root);
+
+        let details = state.render().commands.len();
+        send(&mut state, &key(Key::Num3));
+        let icons = state.render().commands.len();
+
+        assert_ne!(
+            details, icons,
+            "Details and Icons drew the same number of commands"
+        );
     }
 
     #[test]

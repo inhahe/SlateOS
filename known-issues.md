@@ -159834,6 +159834,17 @@ and has no writer anywhere in production:
 `pdfviewer` is the one that matters most: a document reader that cannot show a
 document in the colours it was written in.
 
+**`explorer`, found only by the whole-crate re-read (2026-09-18, fixed).** The
+file manager has three view modes -- `Details`, `List`, `Icons` -- and
+`set_view_mode` was the only writer of `view_mode` and had no caller, so the
+window was permanently in `Details`. The other two are not stubs: they are
+obeyed by the layout, the navigation step size, the header and the item
+renderer, and could never be seen. `1`/`2`/`3` select them now, with a test
+that the *drawing* differs and not merely the field.
+
+This one is the argument for re-reading whole crates: `explorer` has **eight**
+source files, and every sweep before this read `main.rs` alone.
+
 **`metronome`, and the strongest form of the signal.** Its practice panel
 draws three lines:
 

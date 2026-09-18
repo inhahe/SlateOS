@@ -2099,6 +2099,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+N / Ctrl+W", "New tab / close this tab"),
     ("Ctrl+Tab", "Next tab"),
     ("Ctrl+F", "Find"),
+    ("Ctrl+I", "Match case while searching"),
     ("Ctrl+G", "Find the next match"),
     ("Ctrl+E", "Editing on or off"),
     ("F1 / ?", "This list"),
@@ -2122,6 +2123,8 @@ struct Fingerprint {
     search_query: String,
     search_index: usize,
     search_visible: bool,
+    /// Whether the search is case-sensitive, which the "Aa" button draws.
+    search_case_sensitive: bool,
     edit_mode: bool,
     input_focused: bool,
     edit_buffer: String,
@@ -2315,6 +2318,18 @@ impl App {
                 }
                 Key::F => {
                     self.search_visible = !self.search_visible;
+                    return;
+                }
+                // The "Aa" button the search bar draws, whose colour has
+                // tracked this flag since it was written and whose flag had
+                // no writer: `search_case_sensitive` was `false` at
+                // construction, passed to `search_json`, drawn twice, and
+                // changeable only from a test. `Ctrl+I` is what
+                // `apps/hexeditor` uses for the same question.
+                // Found by `scripts/frozen-flag-survey.py`.
+                Key::I => {
+                    self.search_case_sensitive = !self.search_case_sensitive;
+                    self.perform_search();
                     return;
                 }
                 Key::G => {
@@ -2958,6 +2973,7 @@ impl App {
             search_query: self.search_query.clone(),
             search_index: self.search_index,
             search_visible: self.search_visible,
+            search_case_sensitive: self.search_case_sensitive,
             edit_mode: self.edit_mode,
             input_focused: self.input_focused,
             edit_buffer: self.edit_buffer.clone(),
@@ -4838,6 +4854,48 @@ mod tests {
         elsewhere.handle_event(&press(Key::Num4));
 
         vec![plain, moved, raw, editing, searching, elsewhere]
+    }
+
+    /// **The "Aa" button can be turned on, and the search follows it.**
+    ///
+    /// `search_case_sensitive` was `false` at construction, passed to
+    /// `search_json`, drawn twice as the colour of a button, and written only
+    /// by a test. The toolbar showed a case-sensitivity control that could not
+    /// be operated.
+    ///
+    /// Asserts the search result, not the flag: a toggle that flips a boolean
+    /// the matcher ignores is the defect `apps/regextester`'s `multiline` had,
+    /// and only a changed answer tells the two apart.
+    #[test]
+    fn matching_case_can_be_turned_on_and_changes_the_answer() {
+        let mut app = App::new();
+        app.documents.clear();
+        let text = r#"{"Name":"x","name":"y"}"#;
+        let mut doc = Document::new(0, "case".to_owned());
+        doc.input = text.to_owned();
+        doc.parsed = parse_json(text).ok();
+        app.documents.push(doc);
+        app.active_tab = 0;
+
+        app.handle_event(&press_ctrl(Key::F));
+        for c in "Name".chars() {
+            app.handle_event(&typed(c));
+        }
+        let insensitive = app.search_results.len();
+        assert!(insensitive >= 2, "the fixture should match both spellings");
+
+        assert_eq!(
+            app.handle_event(&press_ctrl(Key::I)),
+            EventResult::Consumed,
+            "Ctrl+I did not read as a redraw, so the button would not repaint"
+        );
+        assert!(app.search_case_sensitive, "the flag did not move");
+        assert!(
+            app.search_results.len() < insensitive,
+            "the search returned the same answer with matching on: {} then {}",
+            insensitive,
+            app.search_results.len()
+        );
     }
 
     /// **The shortcut list reaches the window.**

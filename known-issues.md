@@ -160578,6 +160578,22 @@ app struct holds a copy of the thing, not because anyone meant them to be
 settings. A reader working the list should expect roughly a third of it to be
 that.
 
+**And one of them is not a flag at all -- it is two whole features.**
+`apps/rssreader`'s `show_add_feed_dialog` and `show_feed_health` are `false` at
+construction, written only by tests, and each gates a *render function of its
+own*: `render_add_feed_dialog` and `render_feed_health_overlay`. So two
+complete overlays are written, drawn conditionally, and reachable by nobody.
+
+That one is filed rather than fixed, because the remedy depends on something
+the code cannot say. `show_add_feed_dialog` looks **superseded**: adding a feed
+already works through the inline `A` prompt wired on 2026-09-18, so the dialog
+is a second way to do a thing that has a first way, and design-decision 1006's
+rule -- a command that does not work is deleted, not kept -- argues for
+removing it. `show_feed_health` looks **unfinished**: nothing else in the app
+shows feed health, so wiring a key would add the feature rather than restore
+it. Deleting a finished feature and shipping an unfinished one are opposite
+mistakes, and the flags look identical from here.
+
 So the survey's output is a list of *questions about intent*, not a list of
 patches. A flag frozen because nobody wired the toggle and a flag frozen
 because its home is a configuration file that does not exist yet look identical

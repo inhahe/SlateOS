@@ -159110,9 +159110,31 @@ first `#[cfg(test)]`: an item-level attribute appears hundreds of lines
 earlier in several of these files, and cutting there hides most of the
 application -- see the entry above about three checkers doing exactly that.
 
-**Not verified, and still candidates:** `restore_version`, `resolve_links`,
-`build_backlinks`, `rename_notebook`, `move_note`, `update_note_title`,
-`remove_checklist_item`. Each is listed by the probe as test-only and each
-needs the same chase before it can be called a defect. The feature list claims
-version history with restore, and wiki-style `[[Note Title]]` linking, so two
-of those are worth starting with.
+**The other seven, chased the same way.** All unreachable, each checked for an
+alternative route rather than counted:
+
+| Operation | The only writer, and where it is reached from |
+|---|---|
+| rename a notebook | `nb.name = ...` inside `rename_notebook`. No caller. |
+| move a note | `note.notebook_id = ...` inside `move_note`. No caller. |
+| retitle a note | `note.title = ...` inside `update_note_title`; the only other assignment is in `seed_sample_content`, which is test-only. |
+| remove a checklist item | `checklist.remove` inside `Note::remove_checklist_item`, reached only from the app method of the same name. No caller. |
+| resolve a wiki link | `resolve_links` and `build_backlinks`. No callers, and nothing else in the file mentions backlinks -- so `[[Note Title]]` is text that never becomes a link. |
+| restore a version | see below. |
+
+**Version history is the sharpest one, because it nearly works.** Versions are
+genuinely recorded: `Note::set_content` snapshots the old text and it has a
+production caller, so editing a note really does accumulate history. The
+sidebar that lists them is drawn -- `render_version_sidebar`. And
+`restore_version` has no caller, so the application shows you a history you
+cannot restore from. Everything except the last click is built.
+
+**Tally for the claims in the module doc.** Of fourteen listed features, four
+are contradicted: tagging with tag-based filtering, wiki-style linking,
+version history *with snapshot restore*, and notebook organisation to the
+extent that a notebook cannot be renamed and a note cannot be moved between
+notebooks. "Full-text search" is real. The rest were not examined.
+
+**Nine operations, one missing wire each.** That is the same repair
+`apps/photomanager` needed, and the same size: the model, the tests and the
+drawing all exist in every case.

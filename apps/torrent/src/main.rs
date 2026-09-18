@@ -2342,6 +2342,53 @@ pub struct TorrentApp {
     palette: Palette,
 }
 
+/// Stepping and naming for [`SortColumn`].
+impl SortColumn {
+    /// Every column, in the order `C` steps through them.
+    ///
+    /// Written in the same order as the comparator so the two cannot drift:
+    /// a variant added to the enum and forgotten here would be unreachable
+    /// again, which is the defect this list exists to end.
+    pub const ALL: [Self; 11] = [
+        Self::Name,
+        Self::Size,
+        Self::Progress,
+        Self::Status,
+        Self::DownSpeed,
+        Self::UpSpeed,
+        Self::Ratio,
+        Self::Eta,
+        Self::Seeds,
+        Self::Peers,
+        Self::Added,
+    ];
+
+    /// What the status bar calls this column.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Size => "size",
+            Self::Progress => "progress",
+            Self::Status => "status",
+            Self::DownSpeed => "download speed",
+            Self::UpSpeed => "upload speed",
+            Self::Ratio => "ratio",
+            Self::Eta => "time left",
+            Self::Seeds => "seeds",
+            Self::Peers => "peers",
+            Self::Added => "date added",
+        }
+    }
+
+    /// The next column round the ring.
+    #[must_use]
+    pub fn next(self) -> Self {
+        let at = Self::ALL.iter().position(|c| *c == self).unwrap_or(0);
+        let wrapped = at.saturating_add(1) % Self::ALL.len();
+        Self::ALL.get(wrapped).copied().unwrap_or(Self::Added)
+    }
+}
+
 /// Column for sorting
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SortColumn {
@@ -2704,6 +2751,19 @@ impl TorrentApp {
     }
 
     /// Handle a key press.
+    /// Choose a filter, reporting whether the list actually changed.
+    ///
+    /// `Ignored` when the filter is already the one asked for: pressing `1`
+    /// twice does nothing the second time, and saying so is how every other
+    /// key in this app behaves.
+    fn set_filter(&mut self, filter: TorrentFilter) -> EventResult {
+        if self.filter == filter {
+            return EventResult::Ignored;
+        }
+        self.filter = filter;
+        EventResult::Consumed
+    }
+
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
         if key.modifiers.ctrl {
             return match key.key {
@@ -2778,6 +2838,27 @@ impl TorrentApp {
                 {
                     t.toggle_sequential();
                 }
+                EventResult::Consumed
+            }
+            // The filter sidebar, the sort column and its direction: three
+            // controls this window draws and nothing could operate. The
+            // sidebar highlighted whichever filter was selected and none could
+            // be chosen; the comparator had eleven arms and ten were
+            // unreachable. Found by `scripts/frozen-flag-survey.py` after it
+            // learned to look at enums as well as booleans.
+            Key::Num1 => self.set_filter(TorrentFilter::All),
+            Key::Num2 => self.set_filter(TorrentFilter::Downloading),
+            Key::Num3 => self.set_filter(TorrentFilter::Seeding),
+            Key::Num4 => self.set_filter(TorrentFilter::Completed),
+            Key::Num5 => self.set_filter(TorrentFilter::Paused),
+            Key::Num6 => self.set_filter(TorrentFilter::Active),
+            Key::Num7 => self.set_filter(TorrentFilter::Error),
+            Key::C => {
+                self.sort_column = self.sort_column.next();
+                EventResult::Consumed
+            }
+            Key::R => {
+                self.sort_ascending = !self.sort_ascending;
                 EventResult::Consumed
             }
             Key::Tab => {
@@ -3225,12 +3306,18 @@ impl TorrentApp {
             x: 12.0,
             y: sy + 8.0,
             text: format!(
-                "↓ {}  ↑ {}  |  {} downloading, {} seeding, {} total  |  {}",
+                "↓ {}  ↑ {}  |  {} downloading, {} seeding, {} total  |  sorted by {} {} (C, R)  |  {}",
                 format_speed(dl_speed),
                 format_speed(ul_speed),
                 downloading,
                 seeding,
                 total,
+                self.sort_column.label(),
+                if self.sort_ascending {
+                    "ascending"
+                } else {
+                    "descending"
+                },
                 self.status_message
             ),
             font_size: 11.0,
@@ -4367,6 +4454,111 @@ mod tests {
     // outside the tests -- the transfer controls and the piece picker, which
     // is the whole of a BitTorrent client's download loop.
     // ------------------------------------------------------------------
+
+    /// **The sort column and its direction can be changed.**
+    ///
+    /// `sort_column` had no writer anywhere: declared, constructed as `Added`,
+    /// read once in a comparator with eleven arms, ten of them unreachable.
+    /// `sort_ascending` was fixed at descending beside it.
+    ///
+    /// Asserts the *order of the list*, not the value of the field: a key that
+    /// sets an enum the comparator ignores would pass the weaker test, which
+    /// is the defect `apps/regextester`'s `multiline` had.
+    #[test]
+    fn the_sort_column_and_direction_can_be_changed() {
+        let mut app = TorrentApp::new();
+        for (name, size) in [("beta", 3000u64), ("alpha", 1000), ("gamma", 2000)] {
+            let meta = create_sample_torrent(name, size, 256, "http://t.co/a");
+            app.add_torrent(meta, None);
+        }
+
+        let names = |app: &TorrentApp| -> Vec<String> {
+            app.filtered_torrents()
+                .iter()
+                .map(|t| t.name.clone())
+                .collect()
+        };
+        let start = names(&app);
+
+        // Step to the name column and the list has to re-order.
+        let mut guard = 0;
+        while app.sort_column != SortColumn::Name && guard < SortColumn::ALL.len() {
+            assert_eq!(app.handle_event(&press(Key::C)), EventResult::Consumed);
+            guard += 1;
+        }
+        assert_eq!(
+            app.sort_column,
+            SortColumn::Name,
+            "C did not reach the name column"
+        );
+        let by_name = names(&app);
+        assert_ne!(by_name, start, "sorting by name changed nothing");
+
+        assert_eq!(app.handle_event(&press(Key::R)), EventResult::Consumed);
+        let reversed = names(&app);
+        assert_ne!(reversed, by_name, "R did not reverse the order");
+        assert_eq!(
+            reversed.iter().rev().cloned().collect::<Vec<_>>(),
+            by_name,
+            "R gave an order that is not the reverse of the one before it"
+        );
+    }
+
+    /// **Every filter in the sidebar can be selected.**
+    ///
+    /// The sidebar drew seven entries and highlighted whichever was current;
+    /// `filter` had no writer, so the highlight never moved and six of the
+    /// seven rows were decoration.
+    #[test]
+    fn every_filter_in_the_sidebar_can_be_selected() {
+        let mut app = TorrentApp::new();
+        let wanted = [
+            (Key::Num1, TorrentFilter::All),
+            (Key::Num2, TorrentFilter::Downloading),
+            (Key::Num3, TorrentFilter::Seeding),
+            (Key::Num4, TorrentFilter::Completed),
+            (Key::Num5, TorrentFilter::Paused),
+            (Key::Num6, TorrentFilter::Active),
+            (Key::Num7, TorrentFilter::Error),
+        ];
+        for (key, filter) in wanted {
+            app.handle_event(&press(key));
+            assert_eq!(app.filter, filter, "{key:?} did not select {filter:?}");
+        }
+    }
+
+    /// **The status bar says what the list is sorted by, and how to change it.**
+    ///
+    /// Without this the two keys are as unreachable as the fields were: the
+    /// sidebar shows its own selection, but nothing else on screen mentions
+    /// the sort at all.
+    #[test]
+    fn the_status_bar_names_the_sort_and_its_keys() {
+        let mut app = TorrentApp::new();
+        let drawn = |app: &mut TorrentApp| -> String {
+            app.render(1200.0, 800.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+
+        let before = drawn(&mut app);
+        assert!(
+            before.contains("sorted by date added descending (C, R)"),
+            "the status bar does not say what the list is sorted by: {before}"
+        );
+
+        app.handle_event(&press(Key::R));
+        assert!(
+            drawn(&mut app).contains("sorted by date added ascending (C, R)"),
+            "the status bar did not follow the direction"
+        );
+    }
 
     fn key_ev(key: Key, ctrl: bool) -> Event {
         let mut modifiers = guitk::event::Modifiers::NONE;

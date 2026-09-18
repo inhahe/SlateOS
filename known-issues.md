@@ -160516,8 +160516,24 @@ of the *operation*, not of the key that adds it. So the program's entire
 purpose is reachable only by someone who has read the handler, which is the
 same defect as `apps/slides` being unable to put a shape on a slide, one step
 further out: the operation is reachable, and the way in is not. It now prints
-the list on `F1` or `?`, which leaves the survey's count at 126 apps binding an
-unguessable key and eleven printing one.
+the list on `F1` or `?`. `apps/hexeditor` followed -- thirteen chords and a
+page of navigation, `Ctrl+B`/`Ctrl+N`/`Ctrl+P` worst of all, because bookmarks
+are invisible until one is set and so the feature could not be found by looking
+at the window in any state. That leaves the survey's count at 126 apps binding
+an unguessable key and twelve printing one.
+
+**A gate for this was considered and declined, which is worth saying so nobody
+builds it twice.** The obvious move is a ratchet: baseline today's list, fail
+when an app joins it, the way `lossy-decode` reports "26 file(s) baselined,
+none worse". Two things argue against it. The battery those gates live in runs
+on **push**, not commit, and a push in this tree already takes thirty to forty
+minutes -- it is the throughput bottleneck, and adding to it costs all three
+lanes on every push to catch a defect in one lane's tree. And the thing it
+would prevent is a *new* app being written without a key list, in a tree that
+already has 141 of them and is not gaining many. The tool is `scripts/key-survey.py`,
+it runs in about a second, and running it is one line. If apps start being
+added in numbers again, the ratchet becomes worth its cost and this paragraph
+is the argument for building it then.
 
 **Four things the program had never written down** turned up while building the
 states its guard test needs, each found by a red test rather than by reading

@@ -160529,6 +160529,58 @@ So the checker's uniqueness and uppercase-marker rules -- both written after a
 firing, both correct -- run over 356 of 518 entries, and the 62 written in the
 style `roadmap.md`:379 prescribes (`### [C] ...`) are outside every count.
 
+#### Corrected the same day: 740 entries, not 518, and the entry you are reading undercounted by 222
+
+The census above lists three populations and calls them "none of them the
+file's contents". **The list of three was itself not the file's contents.**
+I enumerated the shapes I thought of and reported the total as though it
+were the file. Full count:
+
+| shape | count | documented triage grep `^## TD-` | checker regex |
+|---|---|---|---|
+| `## TD-<letter>-` | 356 | sees | sees |
+| `## TD-<SUBSYSTEM>-` (`TD-FONT-`, `TD-KASAN-`) | 73 | sees | **misses** |
+| `` ## `TD- `` (backticked) | 43 | **misses** | **misses** |
+| **`### TD-`** | **201** | **misses** | **misses** |
+| `### [A]` / `### [B]` / `### [C]` | 67 | **misses** | **misses** |
+| **total** | **740** | **429 (58%)** | **356 (48%)** |
+
+So the triage grep every number in this project comes from sees **58%** of
+the file, and the checker that enforces unique slugs and uppercase markers
+covers **48%**. The 201-entry `### TD-` population is the largest single
+blind spot and I had not looked for it at all.
+
+**How it surfaced, which is the part worth keeping.** Not by re-counting. A
+scanner I wrote to find real errors inside passing boots flagged
+`selftest: not valid UTF-8, and this stage cannot handle arbitrary bytes yet`
+as unexplained. I grepped `known-issues.md` for that message text, got
+nothing, and concluded the limitation was untracked -- and was about to file
+it. The helper's own doc comment says *"Tracked in `known-issues.md` ->
+`TD-KSHELL-LINE-EDITOR-IS-UTF8`"*, and that entry has been at line 18907
+since 2026-08-13. It is a `### TD-<SUBSYSTEM>-` heading, so it fails both
+counters on both counts.
+
+That is dd-953's *silence vs absence* row -- contributed by lane C and
+written by me the same hour -- catching me inside the hour: I searched for
+the message rather than the subject, got silence, and read it as absence.
+And it is the duplicate direction of the immutability near-miss: not "a
+working thing reported broken" but "a tracked thing reported untracked",
+which would have put a second entry in a file whose whole problem is that
+nobody can count it.
+
+**What this changes about the fix.** The earlier plan -- teach the checker
+the `### [lane]` convention once lanes B and C have stamped their 8 -- is
+now the smaller half. `### TD-` is 3x larger than `### [lane]` and is not a
+lane convention at all; it is the single-agent era's heading style, which
+means it belongs to no one and nobody will volunteer for it. Any real fix
+has to either normalise the five shapes or make the counter accept all of
+them; the second is a one-line regex and the first is 740 edits, so the
+counter should move.
+
+Deliberately not doing that in this pass: a counter that suddenly reports
+740 where every previous number said ~430 needs the other two lanes to know
+why before it lands, which is the same sequencing argument as the gate above.
+
 **And the status line those 62 were supposed to carry was mostly absent.**
 `known-issues.md`'s own preamble: *"Put a `**Status:** ...` line immediately
 under the heading -- `OPEN` / `FIXED <date>` / `RESOLVED <date>`"*. On finding

@@ -34552,3 +34552,366 @@ fn test_spawn_ex_args_layout() -> KernelResult<()> {
     );
     Ok(())
 }
+
+/// Invoke `/mnt/bin/cmake -P <script>` once, capturing stdout AND stderr.
+///
+/// Both streams are captured to files because `message()` in `-P` script mode
+/// writes to stderr: a rung that watched only stdout would see nothing at all,
+/// pass or fail. Case 03 asserts on the stderr text specifically.
+fn cmake_invoke(
+    exe_elf: &[u8],
+    script_path: &str,
+    out_path: &str,
+    err_path: &str,
+    work_dir: &str,
+) -> KernelResult<(Option<i32>, alloc::vec::Vec<u8>, alloc::vec::Vec<u8>)> {
+    use crate::fs::handle;
+
+    // cmake reads hundreds of module files during startup before it evaluates a
+    // single line of the script, so its budget is far larger than the shell
+    // rungs'. Named rather than inlined so a hang says which limit was reached.
+    const MAX_YIELDS: usize = 4_194_304;
+
+    // Fresh capture files per invocation: a read-back can then only succeed on
+    // bytes THIS run wrote, and cannot be satisfied by a previous case's output
+    // still sitting there.
+    let _ = crate::fs::Vfs::remove(out_path);
+    let _ = crate::fs::Vfs::remove(err_path);
+    let flags = handle::OpenFlags::WRITE
+        .union(handle::OpenFlags::CREATE)
+        .union(handle::OpenFlags::TRUNCATE);
+    let out_handle = handle::open(out_path, flags)?;
+    let err_handle = handle::open(err_path, flags)?;
+
+    // argv[0] is the path cmake derives its module-tree prefix from, so it must
+    // be the /mnt path and not a bare "cmake". See the rung's doc comment.
+    let argv: &[&[u8]] = &[b"/mnt/bin/cmake", b"-P", script_path.as_bytes()];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+
+    // Console handles are virtual and identified by the fd number itself, which
+    // is why 0 appears as its own handle value. fd 2 is a FILE here and not a
+    // CONSOLE as in `pkgconf_invoke`, because this rung has to READ stderr.
+    let fd_map = [
+        (0_i32, fd_handle_type::CONSOLE, 0_u64),
+        (1_i32, fd_handle_type::FILE, out_handle),
+        (2_i32, fd_handle_type::FILE, err_handle),
+    ];
+
+    // METADATA is not decoration. cmake stats and walks directories constantly
+    // -- `file(GLOB)` in case 05 is nothing but that -- and `SYS_FS_STAT` gates
+    // on `(File, METADATA)`, a different right from READ. Omitting it does not
+    // produce a permission error; it produces a cmake that cannot see its own
+    // module tree, which reads as a cmake bug. Same trap as pkgconf's `lstat`.
+    let caps = [(
+        ResourceType::File,
+        1u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "spawn-test-cmake",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &fd_map,
+        argv,
+        envp,
+        // Set alongside argv[0] so the prefix resolves whichever of the two
+        // cmake consults; measured to be argv[0], but this costs nothing.
+        exe_path: Some(b"/mnt/bin/cmake"),
+        cwd: Some(work_dir.as_bytes()),
+        uid_gid: None,
+    };
+
+    let result = spawn_process(exe_elf, &options)?;
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let out = crate::fs::Vfs::read_file(out_path).unwrap_or_default();
+    let err = crate::fs::Vfs::read_file(err_path).unwrap_or_default();
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: cmake did not exit within {} yields (state={:?}); startup, the \
+             module tree at /mnt/share/cmake-4.4, or script evaluation likely hung",
+            MAX_YIELDS,
+            state
+        );
+        return Err(KernelError::TimedOut);
+    }
+
+    Ok((exit_code, out, err))
+}
+
+/// Path Z Part 61: run **our own cross-compiled CMake** on target, driving the
+/// five `-P` script fixtures lane B staged in `/usr/share/cmake-selftest`.
+///
+/// Answers `requests/b-a-cmake-needs-a-ring-3-rung-like-the-other-three.md`.
+/// cmake was the last of the roadmap's four toolchain ports (`pkgconf`, `make`,
+/// `cmake`, `gcc`) whose "shipped is not run" caveat was still true, and it is
+/// the one worth proving most: pkgconf parses text files and make spawns
+/// `/bin/sh`, while cmake does both and also walks directory trees.
+///
+/// # Nothing is staged into `/`, and that is the deliberate difference
+///
+/// Every other Path-Z rung copies its fixtures out of `/mnt` into `/` first.
+/// This one runs the binary **in place** from `/mnt/bin/cmake`, because the
+/// alternative is copying a 6 MB module tree into the VFS on every boot:
+///
+/// * `CMAKE_DATA_DIR` is compiled in as `/share/cmake-4.4`, resolved against a
+///   prefix derived from the program's own path. A cmake at `/mnt/bin/cmake`
+///   therefore looks in `/mnt/share/cmake-4.4`, which the rootfs already has.
+/// * The `CMAKE_ROOT` environment variable is **not** an escape hatch.
+///   Measured against a real cmake 3.28.3: an isolated binary with no module
+///   tree fails `Could not find CMAKE_ROOT !!!`, and `CMAKE_ROOT=<real tree>`
+///   does **not** fix it.
+/// * `argv[0]` governs the derivation, not `/proc/self/exe`. Measured with the
+///   discriminator that separates the two: a binary at `B/bin/cmake` with no
+///   `B/share`, invoked as `exec -a A/bin/cmake B/bin/cmake --version`, found
+///   A's tree and printed its version. Both `argv[0]` and `exe_path` are set
+///   below regardless, since agreeing costs nothing.
+///
+/// # stdout is empty, so every assertion is on a file
+///
+/// `message()` in `-P` mode writes to **stderr**; stdout is empty for all five
+/// fixtures. A rung modelled on [`self_test_linux_slateos_make`], which
+/// asserts on stdout, would fail forever against a working cmake -- lane B
+/// measured this and led their request with it. Each fixture states its result
+/// by writing a file and the assertion is that artifact's exact bytes.
+///
+/// Case 03 is the negative one and is the reason the set is worth having: it
+/// asserts a non-zero exit, `slateos-deliberate-failure` on stderr, **and**
+/// that the file written after the `FATAL_ERROR` never appears. Without it the
+/// rung would pass against a cmake that cannot report a failure at all.
+pub fn self_test_linux_slateos_cmake() -> KernelResult<()> {
+    /// One fixture: what to run, and what must be true afterwards.
+    struct Case {
+        label: &'static str,
+        script: &'static str,
+        artifact: &'static str,
+        expect: &'static [u8],
+        expect_exit: i32,
+        stderr_needle: Option<&'static [u8]>,
+        /// When true the artifact must be ABSENT, and `expect` is unused.
+        artifact_absent: bool,
+    }
+
+    const CMAKE: &str = "/mnt/bin/cmake";
+    /// A real file inside the module tree rather than the directory itself: the
+    /// tree being present is the prerequisite, and `Modules/` existing while
+    /// empty would satisfy a directory check and fail every case.
+    const MODULE_PROBE: &str = "/mnt/share/cmake-4.4/Modules/CMakeDetermineCCompiler.cmake";
+    const FIX_DIR: &str = "/mnt/usr/share/cmake-selftest";
+    const WORK: &str = "/cmake-test";
+    const OUT: &str = "/cmake-test/.stdout";
+    const ERR: &str = "/cmake-test/.stderr";
+    const RUNG: &str = "CMake 4.4.3 linked against OUR libc.a (ring 3)";
+
+    const CASES: &[Case] = &[
+        Case {
+            label: "01 a script runs and writes a file",
+            script: "01-script.cmake",
+            artifact: "script-ran.txt",
+            expect: b"slateos-cmake-ok\n",
+            expect_exit: 0,
+            stderr_needle: None,
+            artifact_absent: false,
+        },
+        Case {
+            label: "02 the language is evaluated, not merely parsed",
+            script: "02-vars.cmake",
+            artifact: "vars.txt",
+            expect: b"SLATEOS/7/len-ok\n",
+            expect_exit: 0,
+            stderr_needle: None,
+            artifact_absent: false,
+        },
+        Case {
+            label: "03 FATAL_ERROR exits non-zero and stops the script",
+            script: "03-fatal.cmake",
+            artifact: "must-not-exist.txt",
+            expect: b"",
+            expect_exit: 1,
+            stderr_needle: Some(b"slateos-deliberate-failure"),
+            artifact_absent: true,
+        },
+        Case {
+            label: "04 file(READ) reads a staged file through our VFS",
+            script: "04-read.cmake",
+            artifact: "read.txt",
+            expect: b"SLATEOS-INPUT-PAYLOAD\n",
+            expect_exit: 0,
+            stderr_needle: None,
+            artifact_absent: false,
+        },
+        Case {
+            label: "05 file(GLOB) enumerates a directory, sorted",
+            script: "05-glob.cmake",
+            artifact: "glob.txt",
+            expect: b"3:a.txt,b.txt,c.txt,\n",
+            expect_exit: 0,
+            stderr_needle: None,
+            artifact_absent: false,
+        },
+    ];
+
+    // The fixtures are as much a prerequisite as the binary: with cmake present
+    // and the scripts absent, every case below would fail and the rung would
+    // report a cmake bug that is really a missing rootfs.
+    let mut required: alloc::vec::Vec<&str> = alloc::vec::Vec::with_capacity(8);
+    required.push(CMAKE);
+    required.push(MODULE_PROBE);
+    required.push(FIX_DIR);
+    if pathz_missing(RUNG, &required) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running {} test...", RUNG);
+
+    if let Err(e) = crate::fs::Vfs::mkdir_all(WORK) {
+        serial_println!("[spawn]   FAIL: cmake: mkdir {} failed: {:?}", WORK, e);
+        return Err(KernelError::InternalError);
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(CMAKE) {
+        Ok(b) => {
+            serial_println!("[spawn]   cmake: {} is {} bytes", CMAKE, b.len());
+            b
+        }
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: cmake: reading {} failed: {:?}", CMAKE, e);
+            return Err(KernelError::InternalError);
+        }
+    };
+
+    for case in CASES {
+        // Build the absolute paths this case needs. `alloc::format!` rather
+        // than a fixed buffer because the fixture directory is a constant and
+        // the names are short.
+        let script = alloc::format!("{}/{}", FIX_DIR, case.script);
+        let artifact = alloc::format!("{}/{}", WORK, case.artifact);
+
+        // Remove the artifact first, so "present with the right bytes" cannot
+        // be satisfied by an earlier case or an earlier boot. This matters most
+        // for case 03, whose whole assertion is that the file is NOT created.
+        let _ = crate::fs::Vfs::remove(&artifact);
+
+        let (exit_code, out, err) = cmake_invoke(&exe_elf, &script, OUT, ERR, WORK)?;
+
+        if exit_code != Some(case.expect_exit) {
+            serial_println!(
+                "[spawn]   FAIL: cmake {} -- exit={:?}, expected {}; stderr={:?}",
+                case.label,
+                exit_code,
+                case.expect_exit,
+                err.as_slice()
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        if let Some(needle) = case.stderr_needle {
+            if !err.windows(needle.len()).any(|w| w == needle) {
+                serial_println!(
+                    "[spawn]   FAIL: cmake {} -- stderr lacks {:?}; got {} bytes {:?}",
+                    case.label,
+                    needle,
+                    err.len(),
+                    err.as_slice()
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        if case.artifact_absent {
+            match crate::fs::Vfs::exists_or_err(&artifact) {
+                Ok(false) => {}
+                Ok(true) => {
+                    serial_println!(
+                        "[spawn]   FAIL: cmake {} -- {} EXISTS; execution continued past a \
+                         FATAL_ERROR",
+                        case.label,
+                        artifact
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                Err(e) => {
+                    serial_println!(
+                        "[spawn]   FAIL: cmake {} -- probing {} failed: {:?}",
+                        case.label,
+                        artifact,
+                        e
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            serial_println!(
+                "[spawn]   cmake {}: OK (exit {}, stderr names the failure, {} absent)",
+                case.label,
+                case.expect_exit,
+                case.artifact
+            );
+            continue;
+        }
+
+        match crate::fs::Vfs::read_file(&artifact) {
+            Ok(bytes) if bytes.as_slice() == case.expect => {
+                serial_println!(
+                    "[spawn]   cmake {}: OK ({} = {} bytes as expected)",
+                    case.label,
+                    case.artifact,
+                    bytes.len()
+                );
+            }
+            Ok(bytes) => {
+                serial_println!(
+                    "[spawn]   FAIL: cmake {} -- {} holds {} bytes {:?}, expected {} bytes {:?}",
+                    case.label,
+                    artifact,
+                    bytes.len(),
+                    bytes.as_slice(),
+                    case.expect.len(),
+                    case.expect
+                );
+                return Err(KernelError::InternalError);
+            }
+            Err(e) => {
+                // stdout is reported here even though it should be empty: if it
+                // is NOT empty, that is itself the finding, because it means
+                // this cmake writes where lane B measured that it does not.
+                serial_println!(
+                    "[spawn]   FAIL: cmake {} -- reading {} back failed: {:?}; stdout={} bytes, \
+                     stderr={:?}",
+                    case.label,
+                    artifact,
+                    e,
+                    out.len(),
+                    err.as_slice()
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    let _ = crate::fs::Vfs::remove(OUT);
+    let _ = crate::fs::Vfs::remove(ERR);
+
+    serial_println!(
+        "[spawn]   {} (ring 3: all {} `-P` fixtures passed -- script ran, language evaluated, \
+         FATAL_ERROR refused with the file after it unwritten, file(READ) through our VFS, \
+         file(GLOB) enumerated a directory sorted): OK",
+        RUNG,
+        CASES.len()
+    );
+    Ok(())
+}

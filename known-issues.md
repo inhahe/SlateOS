@@ -160489,6 +160489,59 @@ programs as broken. The entry they live in
 (`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
 says why the failure is systematic rather than a matter of care.
 
+## `TD-C-THE-REDRAW-SIGNAL-WAS-A-THIRD-LIST` -- **FIXED 2026-09-18** (lane C)
+
+**In short:** `apps/jsonviewer` decides whether to draw a frame by comparing a
+snapshot of its state before and after each event. Three kinds of change were
+missing from that snapshot, so the program made them and then did not repaint:
+**expanding a node**, **scrolling the raw or diff view**, and **editing the
+document** -- deleting a node or committing a new value. The work happened and
+the screen kept the old picture.
+
+**The shape.** `handle_key` returns nothing, so the snapshot *is* the answer to
+"did anything happen"; `handle_event` returns `Consumed` exactly when the
+snapshot moved. That makes the snapshot a third list beside the state and the
+renderer, and it drifts from both the same way a printed key list drifts from
+its handler. A field nobody added is a change nobody can see.
+
+**The comment was already right, again.** The snapshot's own comment read
+"Scrolling and expanding are document state, and a wheel event that moved the
+view has to read as a redraw" -- above a tuple containing neither a scroll
+offset nor anything about expansion. That is the second time today a comment in
+this tree stated an invariant the code beneath it did not keep; the first was
+`apps/explorer`'s `icon_columns`, whose doc said it must not disagree with the
+renderer while it did. **A doc comment stating an invariant is not an
+invariant.**
+
+**How it was found: by a test for something else.** The guard test for the new
+shortcut overlay presses every key the list advertises and asserts the program
+answers. `Enter` -- "expand or collapse" -- answered nothing, because expansion
+was invisible to the snapshot. Then `Delete` for the same reason once edit mode
+was on. Neither key was suspected of anything; the overlay work simply pressed
+every key in the app with an honest definition of "answered", and three
+redraw bugs fell out. **A guard test written for discoverability turned out to
+be a redraw audit**, because both questions reduce to "does this key do
+anything a user can perceive".
+
+**The fixes, each at the level the fact lives at:**
+
+| Change | Signal |
+|---|---|
+| expanding a node | the *count* of expanded paths -- one event toggles at most one, so the count always moves, and cloning a `Vec<Vec<PathSegment>>` per keystroke buys nothing |
+| scrolling | the three scroll offsets, which are `f32` and compare fine |
+| editing | a `revision` counter bumped in `invalidate_caches`, the one choke point every content change already passes through |
+
+The revision counter is the one worth explaining: `input.len()` would have been
+cheaper and wrong, because editing a `1` to a `2` changes no length. An exact
+O(1) counter at a choke point beats a cheap proxy that is right about most
+edits.
+
+**The snapshot is a struct now, not a sixteen-tuple.** It had to become one --
+Rust implements `PartialEq` for tuples up to twelve -- but it was past readable
+well before it was past legal: `(usize, String, usize, bool, bool, bool,
+String, usize, ...)` gives somebody adding a field no way to check they put it
+in the right place, which is precisely how three fields came to be missing.
+
 ## `TD-C-TWENTY-ONE-LISTS-ARE-EXHAUSTIVE-BY-ACCIDENT` (lane C, 2026-09-18)
 
 **In short:** 21 arrays in `apps/` name every variant of their enum today, and

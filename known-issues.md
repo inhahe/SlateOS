@@ -160834,7 +160834,7 @@ naming), and **detection on read** -- if any line begins with a tab, the file
 uses tabs. Without the second, opening a Makefile and typing still corrupts
 it, which is the case the whole finding is about.
 
-## `TD-C-THE-TERMINAL-ECHOES-AND-RUNS-NOTHING` -- **PARTLY FIXED 2026-09-18** (lane C)
+## `TD-C-THE-TERMINAL-ECHOES-AND-RUNS-NOTHING` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** `apps/terminal` has no shell and starts no process. Typing works
 and the characters appear -- the PTY's cooked-mode line discipline echoes them
@@ -160884,7 +160884,35 @@ echoed and then goes nowhere. Silence after Enter is not a command that
 produced no output." The module doc's "keystrokes go to a child" claim and the
 absence of a real process remain; those are the larger half.
 
-**The remaining half is feasible, and that was checked rather than assumed.**
+**The remaining half landed (2026-09-18).** `main` now starts the shell from
+`$SHELL` (or `/bin/sh`) and bridges its pipes to the slave end of the PTY the
+emulator already drains. Two threads copy bytes in each direction, because
+`std` has no portable non-blocking read of a child's stdout -- a read must
+block somewhere, and a thread is the only place it can block without stopping
+the frame.
+
+**The tested seam did not change**, which is why this adds no flake risk on a
+night spent removing them: `drain_child` still reads the master and the
+existing tests still write to the slave directly. The threads are a thin I/O
+bridge with no new assertions hanging off them.
+
+**Three outcomes, three things said**, because they are three different
+situations for whoever is looking at the window:
+
+| | |
+|---|---|
+| the shell started | nothing -- it will greet them itself |
+| the shell failed | "No shell." plus the program and the error, then the echo warning |
+| there is no pty | "No terminal device." -- nothing can be connected at all |
+
+**What is verified and what is not, plainly.** The seam, the greeting logic and
+both targets' clippy are checked; 126 tests pass. **That a real shell actually
+appears in the window is not covered by a test** -- it needs a process, a
+window and a shell on the machine running it, which is an integration test this
+lane does not have. The failure path is the one that matters for honesty and it
+is the one exercised on a host with no `/bin/sh`: the window says why.
+
+**The feasibility check that preceded it, kept because it was the useful part.**
 This entry first said spawning a process is "a much larger piece of work"
 without establishing whether it was possible at all. It is:
 

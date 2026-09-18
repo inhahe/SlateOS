@@ -678,6 +678,19 @@ pub struct PtySlave {
 }
 
 impl PtySlave {
+    /// Another handle to the same slave end.
+    ///
+    /// The two bridge threads need one each -- one copying the child's output
+    /// in, one carrying keystrokes out -- and both must refer to the *same*
+    /// channel pair as the emulator's master. Cloning the `Arc` is what makes
+    /// that true; constructing a second `PtySlave` would not.
+    #[must_use]
+    pub fn clone_handle(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
     /// Write output data (child stdout/stderr) to the terminal.
     ///
     /// Returns the number of bytes written.

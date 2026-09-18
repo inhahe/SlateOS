@@ -236,6 +236,22 @@ pub struct PasswordOptions {
     pub must_include_each_class: bool,
 }
 
+/// A kind of character the generator may draw from.
+///
+/// An enum rather than four methods because the guard against turning the
+/// last one off has to see them as one set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CharClass {
+    /// a-z
+    Lower,
+    /// A-Z
+    Upper,
+    /// 0-9
+    Digits,
+    /// Punctuation.
+    Symbols,
+}
+
 impl Default for PasswordOptions {
     fn default() -> Self {
         Self {
@@ -1526,6 +1542,18 @@ impl PasswordApp {
             // Length, applied to whichever kind is showing.
             Key::Left => self.adjust_length(-1),
             Key::Right => self.adjust_length(1),
+            // The character classes. Every one of these was drawn in the
+            // options panel as "Yes" or "No" and none could be changed:
+            // `length` was the only field of `password_opts` with a writer.
+            // So every password this program produced contained symbols, and
+            // sites that forbid symbols are common enough to make a generator
+            // that cannot drop them useless for them. Nor could the
+            // easy-to-misread characters be left out.
+            Key::L => self.toggle_class(CharClass::Lower),
+            Key::U => self.toggle_class(CharClass::Upper),
+            Key::D => self.toggle_class(CharClass::Digits),
+            Key::S => self.toggle_class(CharClass::Symbols),
+            Key::A => self.toggle_ambiguous(),
             Key::C => {
                 if self.history.is_empty() {
                     return EventResult::Ignored;
@@ -1535,6 +1563,46 @@ impl PasswordApp {
             }
             _ => EventResult::Ignored,
         }
+    }
+
+    /// Turn a character class on or off, and produce one with the new set.
+    ///
+    /// Produces immediately for the reason the kind keys do: leaving the
+    /// previous password on screen after changing what a password may contain
+    /// invites reading the old one as the new setting's output.
+    ///
+    /// Refuses to turn off the last class. `generate_password` answers an
+    /// empty pool with an empty string, so a generator with nothing selected
+    /// would produce nothing at all and say nothing about why.
+    fn toggle_class(&mut self, class: CharClass) -> EventResult {
+        let on = match class {
+            CharClass::Lower => self.password_opts.use_lowercase,
+            CharClass::Upper => self.password_opts.use_uppercase,
+            CharClass::Digits => self.password_opts.use_digits,
+            CharClass::Symbols => self.password_opts.use_symbols,
+        };
+        if on && self.password_opts.active_classes() <= 1 {
+            self.status = Some("A password needs at least one kind of character".to_owned());
+            return EventResult::Consumed;
+        }
+        match class {
+            CharClass::Lower => self.password_opts.use_lowercase = !on,
+            CharClass::Upper => self.password_opts.use_uppercase = !on,
+            CharClass::Digits => self.password_opts.use_digits = !on,
+            CharClass::Symbols => self.password_opts.use_symbols = !on,
+        }
+        let kind = self.gen_kind;
+        self.generate(kind)
+    }
+
+    /// Include or leave out the characters that are easy to misread.
+    ///
+    /// `l` and `1`, `O` and `0`: the difference between a password you can
+    /// read off a screen and one you cannot.
+    fn toggle_ambiguous(&mut self) -> EventResult {
+        self.password_opts.exclude_ambiguous = !self.password_opts.exclude_ambiguous;
+        let kind = self.gen_kind;
+        self.generate(kind)
     }
 
     /// Switch tabs, reporting whether anything changed.
@@ -1850,10 +1918,10 @@ impl PasswordApp {
         cy += 18.0;
 
         let options = [
-            (format!("Length: {}", self.password_opts.length), true),
+            (format!("Length (Left/Right): {}", self.password_opts.length), true),
             (
                 format!(
-                    "Lowercase: {}",
+                    "Lowercase (L): {}",
                     if self.password_opts.use_lowercase {
                         "Yes"
                     } else {
@@ -1864,7 +1932,7 @@ impl PasswordApp {
             ),
             (
                 format!(
-                    "Uppercase: {}",
+                    "Uppercase (U): {}",
                     if self.password_opts.use_uppercase {
                         "Yes"
                     } else {
@@ -1875,7 +1943,7 @@ impl PasswordApp {
             ),
             (
                 format!(
-                    "Digits: {}",
+                    "Digits (D): {}",
                     if self.password_opts.use_digits {
                         "Yes"
                     } else {
@@ -1886,7 +1954,7 @@ impl PasswordApp {
             ),
             (
                 format!(
-                    "Symbols: {}",
+                    "Symbols (S): {}",
                     if self.password_opts.use_symbols {
                         "Yes"
                     } else {
@@ -1897,7 +1965,7 @@ impl PasswordApp {
             ),
             (
                 format!(
-                    "Exclude Ambiguous: {}",
+                    "Exclude Ambiguous (A): {}",
                     if self.password_opts.exclude_ambiguous {
                         "Yes"
                     } else {
@@ -2351,6 +2419,122 @@ mod tests {
     /// This drives the whole path -- shortcut, picker, write -- and reads the
     /// file back off the disk rather than asking the app what it thinks it
     /// did.
+    /// `S` drops symbols, and the next password has none.
+    ///
+    /// `length` was the only field of `password_opts` with a writer, so every
+    /// password this program made contained symbols -- and a site that
+    /// forbids them made the generator useless.
+    #[test]
+    fn s_turns_symbols_off() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::P));
+        assert!(
+            app.password_opts.use_symbols,
+            "control: symbols are on by default"
+        );
+
+        app.handle_event(&press(Key::S));
+
+        assert!(!app.password_opts.use_symbols, "S did not turn symbols off");
+        assert!(
+            !app.current_password.is_empty(),
+            "the password went missing entirely"
+        );
+        assert!(
+            app.current_password.chars().all(|c| c.is_alphanumeric()),
+            "a symbol survived in {}",
+            app.current_password
+        );
+    }
+
+    /// Toggling produces a new password rather than leaving the old one up.
+    ///
+    /// The old password was made under the old settings, so leaving it on
+    /// screen invites reading it as the new setting's output.
+    #[test]
+    fn toggling_a_class_produces_a_new_password() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::P));
+        let before = app.current_password.clone();
+
+        app.handle_event(&press(Key::S));
+
+        assert_ne!(app.current_password, before, "the old password is still up");
+    }
+
+    /// The last class cannot be turned off.
+    ///
+    /// `generate_password` answers an empty pool with an empty string, so a
+    /// generator with nothing selected would produce nothing and say nothing.
+    #[test]
+    fn the_last_character_class_cannot_be_turned_off() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::P));
+        app.handle_event(&press(Key::U));
+        app.handle_event(&press(Key::D));
+        app.handle_event(&press(Key::S));
+        assert_eq!(
+            app.password_opts.active_classes(),
+            1,
+            "control: one class should be left"
+        );
+
+        app.handle_event(&press(Key::L));
+
+        assert!(app.password_opts.use_lowercase, "the last class was turned off");
+        assert!(
+            app.status.as_deref().is_some_and(|s| s.contains("at least one")),
+            "it refused without saying why: {:?}",
+            app.status
+        );
+        assert!(
+            !app.current_password.is_empty(),
+            "the generator produced an empty password"
+        );
+    }
+
+    /// `A` leaves out the characters that are easy to misread.
+    #[test]
+    fn a_excludes_ambiguous_characters() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::P));
+        assert!(
+            !app.password_opts.exclude_ambiguous,
+            "control: they are included by default"
+        );
+
+        app.handle_event(&press(Key::A));
+
+        assert!(
+            app.password_opts.exclude_ambiguous,
+            "A did not exclude the ambiguous characters"
+        );
+    }
+
+    /// The options panel says which key changes each option.
+    ///
+    /// It listed them as "Lowercase: Yes" for a program in which no key could
+    /// make it say "No".
+    #[test]
+    fn the_options_panel_names_its_keys() {
+        let app = seeded_app();
+        let text: Vec<String> = app
+            .render_commands(1100.0, 700.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        for hint in ["Lowercase (L)", "Symbols (S)", "Exclude Ambiguous (A)"] {
+            assert!(
+                text.iter().any(|t| t.contains(hint)),
+                "the panel never says {hint}"
+            );
+        }
+    }
+
     #[test]
     fn ctrl_e_exports_the_history_to_the_chosen_file() {
         let dir = scratchdir::ScratchDir::new("passwordgen_export");

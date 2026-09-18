@@ -160536,6 +160536,27 @@ cheaper and wrong, because editing a `1` to a `2` changes no length. An exact
 O(1) counter at a choke point beats a cheap proxy that is right about most
 edits.
 
+**`apps/flashcards` had it too, and worse.** Checked immediately on the
+strength of the pattern, and its snapshot held `study_session.is_some()` --
+whether a session *exists*, which is true from the first card to the last. So
+`Space` set `flipped`, every field compared equal, and **the answer stayed
+hidden**: in a flashcards program, the one interaction it is for. Cycling the
+tag filter and shuffling the deck were invisible for the same reason. Found by
+reading the snapshot rather than by using the app, which is the whole argument
+for treating this as a class rather than three bugs.
+
+Its snapshot is a struct now as well -- clippy refused the eleven-element tuple
+outright, which is the tooling reaching the same conclusion by a different
+road.
+
+**`apps/finance` and `apps/photomanager` decide redraws the same way** and have
+not been checked. The cheap way to check them is the
+programme already running: give each one the shortcut overlay and its guard
+test, and any field missing from its snapshot shows up as a key that the list
+advertises and the program says it did not answer. **The discoverability sweep
+doubles as a redraw audit on exactly the apps that need one**, which is a
+better reason to prioritise those three than their key counts.
+
 **The snapshot is a struct now, not a sixteen-tuple.** It had to become one --
 Rust implements `PartialEq` for tuples up to twelve -- but it was past readable
 well before it was past legal: `(usize, String, usize, bool, bool, bool,

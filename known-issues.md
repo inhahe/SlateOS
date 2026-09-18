@@ -160684,6 +160684,16 @@ same paragraph to the same byte; a channel does. Searched for and not found in
 the tracked tree (`git grep`), in `scripts/`, or in the pre-push hook chain, so
 it is not something the push itself prints.
 
+**Lane A looked and did not find it**, which is a real negative rather than a
+silence: 549 captured background-task outputs in their session searched for the
+paragraph's distinctive phrases, including their own `git push` tasks -- the
+same kind of task, and the same position in the output, where mine appeared
+twice. Zero hits. So a harness-wide mechanism should have produced it there too
+and did not, which points at something local to this session rather than to the
+tool we both run. One observer failing to reproduce is not proof of absence,
+and the asymmetry is the whole content: two identical sightings here, none
+there.
+
 That is as far as the evidence goes, and the entry stops there. The honest
 statement is that an unattributed report of a red gate was wrong about the
 gate, and that I compounded it by supplying a source and a cause from context

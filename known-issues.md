@@ -160454,7 +160454,7 @@ eggs"`.
 Deliberately end-to-end rather than "the key sets the field" -- every piece of
 this existed already and the program still could not be used. 120 tests, up
 from 116.
-## `TD-C-AUTHORING-APPS-THAT-CANNOT-AUTHOR` (lane C, 2026-09-18)
+## `TD-C-AUTHORING-APPS-THAT-CANNOT-AUTHOR` -- **ALL THREE FIXED 2026-09-18** (lane C)
 
 **In short:** Three of our content-creation programs cannot create content.
 You can add slides, notes and diagram nodes; you cannot put a word in any of
@@ -160465,7 +160465,7 @@ versions, export -- and is missing the one act it exists for.
 |---|---|---|
 | `slides` | add slides, four shapes, images; themes, transitions, sorter view, undo, export -- **and, since 2026-09-18, type** | ~~**type anything.**~~ *(fixed)* Zero assignments to `.text` in the crate, tests included; every element born "New Text" / "Presentation Title"; deck permanently "Untitled Presentation" |
 | `notes` | notebooks, tags, versions, search, export to text/Markdown/HTML -- **and, since 2026-09-18, make and write a note** | ~~**make a note.**~~ *(fixed)* `create_note`, `update_note_title`, `update_note_content` all callerless; both `notes.push` sites are inside the unreachable creators; there is no import. It exports notes it cannot create |
-| `diagram` | insert canned flowcharts and org charts, move and connect nodes, export SVG/JSON | **label anything.** `set_node_label` and `set_edge_label` callerless, **zero** typing sites in the crate. The only writer of `.label` besides them is `add_template_node`, so every box says what the template said |
+| `diagram` | insert canned flowcharts and org charts, move and connect nodes, export SVG/JSON -- **and, since 2026-09-18, label a node or an edge** | ~~**label anything.**~~ *(fixed)* `set_node_label` and `set_edge_label` callerless, **zero** typing sites in the crate. The only writer of `.label` besides them is `add_template_node`, so every box says what the template said |
 
 **`diagram` is the one that shows what the class costs.** Its 32 reachable
 `add_template_node` calls build a flowchart reading Start → Process →
@@ -160497,6 +160497,29 @@ this happened: every one of these apps looks finished from the inside because
 everything *around* the hole is built. The test worth writing is not "the key
 sets the field" but **"a user can produce the artifact the program is named
 after"** -- type into a new note, save it, and read it back.
+
+**All three fixed the same day**, each with an end-to-end test that asks for
+the artifact rather than for the field: `a_user_can_make_a_note_and_write_in_it`,
+`a_user_can_put_words_on_a_slide`, `a_user_can_label_a_node`.
+
+**Every one of the three end-to-end tests failed first, on something a unit
+test of the key handler would have passed.** `notes` needed a notebook
+invented for the first note, because the app starts with none and
+`create_note` takes an id. `slides` produced "New TextHi", because seeding the
+buffer from the box is right for an edit and wrong for a box still holding its
+prompt. `diagram` drew "New" on the canvas and "Old" in the properties panel
+at the same moment -- one value disagreeing with itself on one screen. **The
+assertion that catches all three is the same one: ask for the artifact and
+read what comes out.**
+
+**The near-miss in `diagram` is the one to remember.** `Backspace` is bound
+there to *delete the selection*, so a typo while naming a box would have
+deleted the box, with the undo stack the only record. The mode taking the
+keyboard first is what prevents it, and
+`backspace_while_labelling_does_not_delete_the_node` is what keeps it
+prevented -- the same shape as `rssreader`'s digits and `spreadsheet`'s bare
+`T`. **A text mode is not finished when it accepts text; it is finished when
+it stops the keys underneath it.**
 
 **Related.** `TD-C-A-PRESENTATION-EDITOR-THAT-CANNOT-TYPE`,
 `TD-C-NOTES-CANNOT-MAKE-A-NOTE`, and the method note

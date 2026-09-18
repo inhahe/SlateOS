@@ -1918,7 +1918,10 @@ impl PasswordApp {
         cy += 18.0;
 
         let options = [
-            (format!("Length (Left/Right): {}", self.password_opts.length), true),
+            (
+                format!("Length (Left/Right): {}", self.password_opts.length),
+                true,
+            ),
             (
                 format!(
                     "Lowercase (L): {}",
@@ -2481,9 +2484,14 @@ mod tests {
 
         app.handle_event(&press(Key::L));
 
-        assert!(app.password_opts.use_lowercase, "the last class was turned off");
         assert!(
-            app.status.as_deref().is_some_and(|s| s.contains("at least one")),
+            app.password_opts.use_lowercase,
+            "the last class was turned off"
+        );
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|s| s.contains("at least one")),
             "it refused without saying why: {:?}",
             app.status
         );

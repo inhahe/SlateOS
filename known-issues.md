@@ -159834,6 +159834,24 @@ and has no writer anywhere in production:
 `pdfviewer` is the one that matters most: a document reader that cannot show a
 document in the colours it was written in.
 
+**The last five read, and all five are safe.** Each is a preference with no
+writer, and each is frozen at the value you would have chosen anyway:
+
+| App | Frozen at | Consequence |
+|---|---|---|
+| `markdowneditor` `autosave_enabled` | `true` | autosave is always on; it cannot be turned off, but nothing is lost by that |
+| `diskimager` `verify_after_write` | `true` | images are always verified; the window draws it as a checkbox that cannot be unchecked |
+| `imageviewer` `show_status_bar` | `true` | the status bar cannot be hidden |
+| `spreadsheet` `show_toolbar` | `true` | the toolbar cannot be hidden |
+| `mindmap` `show_sidebar` | `true` | the sidebar cannot be hidden |
+
+**So these are false offers, not hazards**, and that distinction is worth
+keeping: had `verify_after_write` been frozen at `false`, a tool that writes
+disk images would silently never verify one while showing a box implying it
+had. The defaults being right is luck as much as design -- nothing in the code
+records that the frozen value is the safe one, because nothing in the code
+knows it is frozen.
+
 **Remaining candidates, unread.** The probe over `apps/*/src/main.rs` for `pub`
 `bool` fields with no assignment, no `&mut` and at least one read found 157
 across 47 apps. **Most are not defects** -- `is_dir` on a directory entry is

@@ -2969,8 +2969,7 @@ impl RssReaderApp {
                 match self.sidebar_selection {
                     SidebarSelection::Feed(id) => self.prompt = Some(Prompt::MoveFeed(id)),
                     _ => {
-                        self.status_message =
-                            "Select a feed in the sidebar to move it".to_string();
+                        self.status_message = "Select a feed in the sidebar to move it".to_string();
                     }
                 }
                 EventResult::Consumed
@@ -3253,9 +3252,11 @@ impl RssReaderApp {
                 // neither.
                 let folder = match self.sidebar_selection {
                     SidebarSelection::Folder(id) => Some(id),
-                    SidebarSelection::Feed(id) => {
-                        self.feeds.iter().find(|f| f.id == id).and_then(|f| f.folder_id)
-                    }
+                    SidebarSelection::Feed(id) => self
+                        .feeds
+                        .iter()
+                        .find(|f| f.id == id)
+                        .and_then(|f| f.folder_id),
                     SidebarSelection::AllFeeds | SidebarSelection::Starred => None,
                 };
                 let id = self.add_feed(&text, &text, folder);
@@ -4878,7 +4879,10 @@ impl RssReaderApp {
             cmds.push(RenderCommand::Text {
                 x: self.width / 2.0,
                 y: y + 7.0,
-                text: format!("{label}: {}_  (Enter to accept, Esc to cancel)", self.text_buffer),
+                text: format!(
+                    "{label}: {}_  (Enter to accept, Esc to cancel)",
+                    self.text_buffer
+                ),
                 font_size: 11.0,
                 color: self.palette.ink(self.palette.blue),
                 font_weight: FontWeightHint::Regular,
@@ -5901,7 +5905,10 @@ mod tests {
         assert!(a.prompt.is_some(), "D did not ask");
         a.handle_event(&press(Key::Y));
 
-        assert!(!a.feeds.iter().any(|f| f.id == id), "the feed is still there");
+        assert!(
+            !a.feeds.iter().any(|f| f.id == id),
+            "the feed is still there"
+        );
         assert!(
             !a.articles.iter().any(|x| x.feed_id == id),
             "its articles outlived it"
@@ -5944,8 +5951,15 @@ mod tests {
 
         assert!(!a.folders.iter().any(|f| f.id == id), "the folder survived");
         for fid in inside {
-            let feed = a.feeds.iter().find(|f| f.id == fid).expect("the feed was deleted too");
-            assert_eq!(feed.folder_id, None, "the feed still points at a dead folder");
+            let feed = a
+                .feeds
+                .iter()
+                .find(|f| f.id == fid)
+                .expect("the feed was deleted too");
+            assert_eq!(
+                feed.folder_id, None,
+                "the feed still points at a dead folder"
+            );
         }
     }
 
@@ -6034,7 +6048,10 @@ mod tests {
         a.handle_event(&press(Key::V));
         a.handle_event(&press(Key::Num1));
 
-        assert_eq!(a.filter_mode, before, "answering the prompt changed the filter");
+        assert_eq!(
+            a.filter_mode, before,
+            "answering the prompt changed the filter"
+        );
     }
 
     /// The question is on screen while it waits.
@@ -6158,7 +6175,11 @@ mod tests {
         a.handle_event(&press(Key::Enter));
 
         assert_eq!(a.folders.len(), before + 1, "no folder was created");
-        let made = a.folders.iter().find(|f| f.name == "Reading").expect("the folder");
+        let made = a
+            .folders
+            .iter()
+            .find(|f| f.name == "Reading")
+            .expect("the folder");
         assert_eq!(
             a.sidebar_selection,
             SidebarSelection::Folder(made.id),
@@ -6176,7 +6197,9 @@ mod tests {
         }
 
         assert!(
-            drawn_text(&a).iter().any(|t| t.contains("New folder: Reading")),
+            drawn_text(&a)
+                .iter()
+                .any(|t| t.contains("New folder: Reading")),
             "the prompt is nowhere on screen"
         );
     }
@@ -6356,7 +6379,11 @@ mod tests {
         );
 
         a.handle_event(&key_ev(Key::Tab, false, true));
-        assert_eq!(a.active_pane, ActivePane::Sidebar, "Shift-Tab missed the sidebar");
+        assert_eq!(
+            a.active_pane,
+            ActivePane::Sidebar,
+            "Shift-Tab missed the sidebar"
+        );
         a.handle_event(&press(Key::Down));
 
         assert_eq!(
@@ -6371,7 +6398,10 @@ mod tests {
     fn down_outside_the_sidebar_still_moves_through_articles() {
         let mut a = app();
         a.active_pane = ActivePane::ArticleList;
-        assert!(a.filtered_article_indices().len() > 1, "control: need two articles");
+        assert!(
+            a.filtered_article_indices().len() > 1,
+            "control: need two articles"
+        );
         a.selected_article_index = 0;
 
         a.handle_event(&press(Key::Down));
@@ -6462,7 +6492,10 @@ mod tests {
 
         a.handle_event(&press(Key::Enter));
 
-        assert_ne!(a.articles[idx].is_read, before, "Enter no longer marks read");
+        assert_ne!(
+            a.articles[idx].is_read, before,
+            "Enter no longer marks read"
+        );
     }
 
     /// The selection stops at the ends instead of wrapping or panicking.

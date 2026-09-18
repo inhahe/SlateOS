@@ -5525,7 +5525,11 @@ mod tests {
         app.handle_key(&probe::press(Key::D));
 
         assert!(!app.dark_mode, "D did not leave the reading mode");
-        assert_ne!(app.page_color(), dark, "the page is drawn the same either way");
+        assert_ne!(
+            app.page_color(),
+            dark,
+            "the page is drawn the same either way"
+        );
         assert_eq!(
             app.page_color(),
             Color::rgb(255, 255, 255),

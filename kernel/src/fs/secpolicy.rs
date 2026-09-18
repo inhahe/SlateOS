@@ -1,8 +1,29 @@
-//! Security Policy — mandatory access control policy engine.
+//! Security Policy — **stores** labels and rules; nothing consults them.
 //!
-//! Manages security labels, access rules, and enforcement modes.
-//! Supports label assignment to processes and files, with rule-based
-//! access decisions (allow/deny/audit).
+//! **NOT AN ENFORCEMENT ENGINE YET.** `check_access` has exactly one
+//! caller outside this module: `kshell.rs:101079`, an interactive shell
+//! command a human types. No VFS path, syscall, or capability check asks
+//! this module anything, so `set_mode(Enforcing)` changes what `/proc`
+//! reports and nothing else -- a label can be assigned, a rule can deny,
+//! and the operation it describes proceeds regardless.
+//!
+//! Two consequences worth stating where they will be read:
+//!
+//! - The mode is the dangerous part. "Enforcing" is a word a reader trusts,
+//!   and here it is a stored enum. An unenforced *mandatory* access control
+//!   is worse than none, because "mandatory" is precisely the claim that
+//!   stops someone adding their own check.
+//! - `stats()`'s denial count can only ever be 0, since nothing asks this
+//!   module for a decision it could refuse. In `/proc` that reads as
+//!   *nothing was denied*, not as *nothing was asked* (dd-942).
+//!
+//! The architecture block below also advertises `secpolicy::check(...)`,
+//! which does not exist; the function is `check_access`.
+//!
+//! Intended: a mandatory access control policy engine managing security
+//! labels, access rules, and enforcement modes, supporting label
+//! assignment to processes and files, with rule-based access decisions
+//! (allow/deny/audit).
 //!
 //! ## Architecture
 //!

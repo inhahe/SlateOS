@@ -159691,6 +159691,45 @@ targeted correction rather than a sweep, because changing `provides` to
 rewrite dd-951 warns about. Recorded first so the finding exists
 independently of whether the wording gets fixed.
 
+#### Triage complete 2026-09-18: 5 docs corrected, 3 were already honest
+
+All nine modules in the table above have now been read rather than
+inferred from their names -- which matters, because inferring purpose from
+a name and a signature list is exactly how I called `binfmt` a registry
+when its line 1 says *statistics*.
+
+| module | line 1 says | verdict | action |
+|---|---|---|---|
+| `sealing` | "place **irrevocable restrictions**" | false | doc states the gap |
+| `authbroker` | "**Implements** a Plan 9 Factotum-inspired ... broker" | false | doc states the gap |
+| `filevault` | "**Provides** per-folder encryption" | false | doc states the gap |
+| `faceunlock` | "**Provides** facial recognition ... verification" | false, and `verify()` always succeeds | doc leads with ALWAYS SUCCEEDS |
+| `secpolicy` | "mandatory access control policy **engine**" | false | doc states the gap (this update) |
+| `immutable` | "**Provides** `chattr`-style file flags" | duplicate of a working mechanism | separate entry; not a missing feature |
+| `secmod` | "Security Module **Statistics** ... **monitoring** ... **Tracks**" | **honest** | none |
+| `diskencrypt` | "encryption **management** ... encryption **status** ... **settings panel interface**" | **honest** | none |
+| `integrity` | (the control) | **honest**, and really enforces | none |
+
+**`secpolicy` was the one addition.** Its `check_access` has exactly one
+caller outside the module -- `kshell.rs:101079`, a command a human types --
+so `set_mode(Enforcing)` changes what `/proc` reports and nothing else. The
+word *mandatory* is the dangerous part: it is the claim that stops the next
+person adding their own check. Its architecture block also advertises
+`secpolicy::check(...)`, which does not exist under that name.
+
+**Three were left alone because they are accurate**, and that is the half of
+this triage worth keeping. `secmod` and `diskencrypt` use *statistics*,
+*monitoring*, *tracks*, *management*, *status*, *settings panel interface* --
+all true of stores that store. Editing them would have replaced correct text
+with a warning about a problem they do not have, and a sweep that cannot
+tell those two from the other five would have done exactly that. The
+distinction is not detectable from the directory, the naming, or the caller
+count: `secmod` and `authbroker` have identical caller profiles (0 outside
+`/proc`, `kshell` and self-test) and opposite verdicts. **Only line 1
+separates them**, which is the rule that came out of the `binfmt` error and
+is the reason this pass read nine module docs instead of grepping for nine
+caller counts.
+
 ### [A] The leaf-claim cap was reporting 27% of the truth: 89 distinct site pairs, not 24 -- 2026-09-17
 
 **Status:** OPEN

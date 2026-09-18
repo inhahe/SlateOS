@@ -159915,7 +159915,7 @@ and has no writer anywhere in production:
 |---|---|---|---|
 | `pdfviewer` | `dark_mode` | **`true`** | `page_color()` returns `rgb(40,42,54)` for every page, and `text_color` inverts with it. **Every document renders in inverted colours and no key restores the white page** -- though the comment beside it calls this "the viewer's own `dark_mode` for reading", which is a thing you would switch |
 | `calendar` | `week_starts_monday` | `true` | every month grid begins on Monday, for everyone, forever |
-| `hexeditor` | `case_sensitive` | `true` | search is always case-sensitive; there is no case-insensitive search in the program |
+| `hexeditor` | `case_sensitive` | `true` | search was always case-sensitive; there was no case-insensitive search in the program. **Fixed 2026-09-18:** `Ctrl+I` in the search bar toggles it and the bar says which way it is set, because a search that silently ignores case -- or silently insists on it -- turns a miss into "it is not in the file", which is a claim about the file. 198 tests |
 | `imageviewer` | `show_toolbar` | `true` | the toolbar cannot be hidden, including when looking at an image |
 
 `pdfviewer` is the one that matters most: a document reader that cannot show a
@@ -159931,8 +159931,12 @@ Practice Measures: 4
 ```
 
 The first is adjustable and says so. `practice_increment` and
-`practice_measures` **have no writers**, so practice mode always speeds up by
-ten every four measures. The line above them advertising its own keys is what
+`practice_measures` **had no writers**, so practice mode always sped up by ten
+every four measures. **Fixed 2026-09-18:** in the settings panel, `Left` and
+`Right` move the increment and a digit names the measure count outright --
+stepping to nine with an arrow is eight keypresses for a number the user
+already knows. Both labels now name their keys, as the target line already
+did. 74 tests, up from 69. The line above them advertising its own keys is what
 makes the other two read as settings rather than as a description -- they are
 laid out as a group, and one third of the group works.
 
@@ -160118,7 +160122,7 @@ so. `find_state.case_sensitive` remains frozen and stays filed under
 control for it, so it is a smaller matter than the rest. 225 tests, up from
 217.
 
-## `TD-C-SLIDES-CAN-ADD-A-TEXTBOX-AND-NOTHING-ELSE` (lane C, 2026-09-18)
+## `TD-C-SLIDES-CAN-ADD-A-TEXTBOX-AND-NOTHING-ELSE` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** `apps/slides` edits a deck well enough -- new slide, duplicate,
 delete, copy, paste, add a textbox -- and then stops. You cannot add a shape or
@@ -160161,6 +160165,158 @@ is not the one that deletes the slide, and a key each to cycle theme and
 transition -- both of which already have `next()`-style cycling elsewhere in
 this tree and are already displayed, so the display becomes true the moment a
 key exists.
+
+
+
+**Fixed the same day.** `S`, `O`, `L` and `A` add the four shapes, `I` adds an
+image placeholder, `Ctrl+T` moves through the three themes and `Ctrl+R` through
+the six transitions -- both of which the window was already printing. `Delete`
+now removes the *selected element* when there is one and the slide otherwise,
+with `Shift+Delete` always meaning the slide: erring towards the element is the
+safe half of the ambiguity, since re-adding an element is cheap and re-making a
+slide is not.
+
+**One test earns its place more than the others.** `Key::T` is unguarded and
+lives in the same match, so putting the new `Key::T if ctrl` arm after it would
+have let Ctrl+T add a textbox and leave the theme alone -- which looks exactly
+like a theme key that does nothing, the very defect being fixed. I wrote it
+that way first and caught it before running it;
+`ctrl_t_does_not_add_a_textbox` is what keeps it caught. 90 tests, up from 83.
+
+## `TD-C-A-SCAN-REPORT-OUTLIVED-THE-SCAN-IT-DESCRIBED` -- **FIXED 2026-09-18** (lane C)
+
+**In short:** `apps/netscan` had its invented hosts removed on 2026-09-15. The
+*report wrapped around* those hosts stayed, and it was still a claim: pressing
+Scan printed "Scanned 254 IPs | 0 hosts up | 0 open ports | 12.3s", put "0
+hosts up on 192.168.1.0/24" in the window title, and filed a history entry
+timestamped "2026-05-18 12:07:13". Nothing was contacted. **"0 hosts up" is a
+finding about the user's network**, and it reached the taskbar.
+
+**Verified before it was changed.**
+
+| | |
+|---|---|
+| can it reach anything | no -- `Cargo.toml` lists `appearance`, `guitk`, `oswindow`, and nothing else |
+| the hosts | `let hosts: Vec<HostResult> = Vec::new();`, correctly, since 2026-09-15 |
+| the summary | `render_summary_bar` prints `total_ips_scanned` and `duration_secs`, an address count and an *estimate* |
+| the title | `title()` returned `"{} hosts up on {} - Network Scanner"` |
+| the history | `self.history.push_front(result)` with `timestamp` a constant derived from the scan id |
+
+**The tell was internal inconsistency.** The same author, in the same file, had
+already made `run_traceroute`, `run_whois` and `send_wol` refuse outright and
+say why -- *"Cannot trace a route: this program has no network access, so no
+packet was sent"*. The scan is the one of the four that was missed, and it is
+the one with a durable history behind it.
+
+**Fixed.** `start_scan` parses the target first, so a typo is still named as a
+typo rather than being swallowed by the refusal -- the order `run_traceroute`
+uses -- and then sets `scan_note` and stops. No result, no history entry, and
+the title stays "Network Scanner". The note is drawn where the summary was.
+
+**A removal is finished when the claim is gone, not when the data is.** The
+2026-09-15 change deleted the fabricated *hosts* and left every sentence built
+around them. That is the same shape as `TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY`
+predicted and got wrong -- there the removal really had been finished -- so the
+shape is real even though that instance was not.
+
+**The sweep this prompted, and its one other hit.** Searching production code
+for hardcoded date literals -- the sharpest signal netscan gave -- found 18
+across 11 apps once test code was excluded properly with `rustlex.live_code`.
+**A naive cut at the last `#[cfg(test)]` reported 50 across 12**, nearly three
+times as many, and put 23 of them in `devicemanager` alone, which actually has
+one. That is the `production_part` bug in miniature, and a reminder to use the
+lexer rather than a split.
+
+Of the 18, thirteen are honest: doc comments in `sysinfo`, `pomodoro`,
+`settings` and `devicemanager` recording what a fabricated date *used* to be,
+and explanatory strings in `calendar`, `finance`, `habits` and `reminders`
+telling the user what the app opened with before the fabrication was removed.
+`rssreader`'s five are inside `SAMPLE_RSS`, a fixture deliberately fed through
+the real parser.
+
+**One was live: `apps/podcast`.** `listened_at` was the literal
+`"2026-05-18 10:00"` at *both* of its assignment sites --
+`complete_current_episode` and `record_current_to_history`, each reachable --
+and the history panel drew it, so a listening history filled with rows that all
+happened at the same minute of the same day. Fixed by reading the clock:
+`system_timestamp()` on the pattern `apps/reminders` uses at `system_now`,
+returning `None` rather than a fallback date, because a row saying "time
+unknown" is awkward and true and one saying 1 January 1970 is neither. 201
+tests.
+
+**A fourth scanner was attempted for this class and abandoned, which is worth
+one paragraph.** The four existing finders miss it by construction:
+`find-silent-incapacity.py` asks whether a program admits it cannot reach
+anything, and netscan *does* -- for three of its four operations. The gap is
+**internal inconsistency**, so the query was "apps that admit an incapacity and
+still claim a result". It found 38, then 34 after blanking comments with
+`rustlex.strip_noise(keep_literals=True)` -- whose own doc says an earlier
+query had counted doc comments quoting the lines they replaced, which is
+exactly the mistake I made before reading it. What is left is almost entirely
+**enum labels**: `PeerStatus::Connected`, `EpisodeStatus::Downloaded`,
+`"Completed"`. A label naming a state is not a claim that the state was
+reached, and telling the two apart needs the code. **netscan was found by
+reading it, not by a query**, and no scanner is proposed here.
+
+**Four tests changed rather than deleted**, and the changes are the record:
+`test_app_start_scan` asserted `results.is_some()` and `!history.is_empty()`,
+both true and both the defect;
+`a_scan_reports_no_hosts_because_it_cannot_reach_the_network` checked the hosts
+list and not the sentence around it; `the_title_reports_what_the_scan_found`
+asserted the title *did* report a finding. A fifth,
+`the_scan_refusal_reaches_the_window`, asserts through the render, because
+`wol_note` in this same file was written and drawn by nothing for three
+commits and only the write-only-field gate noticed. 135 tests.
+
+## `TD-C-SEVEN-WAYS-A-SEARCH-SAYS-NOTHING-AND-MEANS-NOTHING` (lane C, 2026-09-18)
+
+**In short:** When you grep a codebase and find nothing, you have learned that
+*that text* is not there. You have not learned that the *code does not do the
+thing*. Those two are different, and on 2026-09-18 I confused them seven times
+in one day, in seven different ways. Each one nearly became a filed defect
+about a program that was working correctly, or nearly hid a real one. This
+entry lists the seven with the instance that caught each, because the fix is
+not "be careful" -- it is knowing the specific shapes.
+
+| # | The divergence | What it cost |
+|---|---|---|
+| 1 | **Spelling.** The same key is `Key::H` in one app and `Key::Char('h')` in another. | Concluded `markdowneditor`'s Ctrl+H was unbound. It is bound. |
+| 2 | **Receiver.** A field is `self.find_state.query` in the app and `state.query` inside a function taking the struct by reference. | Nearly filed a live find-panel as dead code. |
+| 3 | **Case.** `grep 'cannot'` does not match `"Cannot trace a route"`. | Claimed `netscan` had "zero honest admissions". It has five. |
+| 4 | **Prose.** `grep guitk Cargo.toml` matches a *comment* reading "must not link a widget library... rather than through `guitk`". | Nearly recorded `backup` as a GUI app when its manifest says the opposite. |
+| 5 | **Structure.** Cutting production code at `#[cfg(test)]` includes every test-only item that precedes the last one. | A date sweep reported **50 hits across 12 apps**; the real answer via `rustlex.live_code` is **18 across 11**, and `devicemanager` went from 23 to 1. |
+| 6 | **Method mutation.** A field with no `=` anywhere may still be written by its own methods: `self.volume.increase(5)`. | Nearly filed `videoplayer`'s volume as frozen. |
+| 7 | **Sub-field assignment.** `self.password_opts.use_symbols = x` is invisible to a search for `.use_symbols` on the app struct, and `self.time_signature = sig` makes `beats_per_measure` *look* frozen when it is not. | Missed `passwordgen` on the first pass; nearly filed `metronome`'s time signature, which works. |
+
+**The shape they share** is that a search reports on *text* and the question
+was about *behaviour*. Every one of these is a case where the text and the
+behaviour come apart -- and they come apart most often in exactly the code
+worth examining, because a program doing something interesting is a program
+spelling it in some particular way.
+
+**What actually works**, in order of how much it costs:
+
+1. **Ask for the writers, not the name.** "Does anything assign this?" survives
+   1, 3 and 4, because assignment has a syntax and prose does not.
+2. **Use the lexer.** `rustlex.live_code` for "is this production code" and
+   `rustlex.strip_noise(keep_literals=True)` for "is this a comment". Both
+   exist because somebody already lost a day to 5 and to 4; the second one's
+   own doc says so.
+3. **Check the render path, not the model.** The question "can this app show
+   anything" is answered by the draw and not by the fields -- see
+   `TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY`, withdrawn for exactly this.
+4. **Then read the code.** Every genuine defect filed today --
+   `rssreader`'s sidebar, `passwordgen`'s classes, `netscan`'s scan report,
+   `podcast`'s timestamp, `markdowneditor`'s find panel -- was confirmed by
+   reading it. **No probe found one that reading did not.** The probes were
+   worth running only as a way of choosing what to read.
+
+**Why this is filed rather than merely learned.** The three probes written
+today (frozen fields, displayed-but-unchangeable labels, admit-yet-claim) all
+over-report, and a future session that trusts their output will file working
+programs as broken. The entry they live in
+(`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
+says why the failure is systematic rather than a matter of care.
 
 ### [A] `faceunlock::verify()` returns Matched unconditionally, and my first attempt to document that understated it -- 2026-09-17
 

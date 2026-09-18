@@ -8,6 +8,15 @@
 //!
 //! Track income and expenses across categories, set budgets, view spending
 //! trends, manage accounts, and get financial summaries.
+//!
+//! **This program cannot record your finances, and the window says so.** It
+//! has no filesystem access; `add_account`, `add_transaction` and `set_budget`
+//! exist and have no production caller, so nothing above can actually be done.
+//! It opened on an invented Main Checking of 3,500 and Savings of 12,000 until
+//! 2026-09-15, and nothing replaced them.
+//!
+//! The list above is what the layouts draw when something supplies a model,
+//! which today only tests do.
 
 use appearance::Palette;
 use appearance::Surface;

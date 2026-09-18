@@ -1082,6 +1082,45 @@ impl SlidesApp {
     // ---- Theme -------------------------------------------------------------
 
     /// Set the presentation theme and re-apply it to all slides.
+    /// Move to the next theme in the set.
+    ///
+    /// `set_theme` had no caller, so the deck was permanently on Mocha and the
+    /// window's "Theme: Mocha" was a label that could not say anything else.
+    /// `SlideTheme::light` and `SlideTheme::vibrant` existed and nothing could
+    /// ask for them.
+    pub fn cycle_theme(&mut self) {
+        let next = match self.theme.name.as_str() {
+            "Mocha" => SlideTheme::light(),
+            "Light" => SlideTheme::vibrant(),
+            _ => SlideTheme::mocha(&self.palette),
+        };
+        self.set_theme(next);
+    }
+
+    /// Move the current slide to the next transition.
+    ///
+    /// `set_current_transition` had no caller either, while the window drew
+    /// "Transition: ..." twice -- once on the slide and once in the property
+    /// panel. A value printed in a property panel is an offer, not a status.
+    pub fn cycle_transition(&mut self) {
+        let next = match self.current_transition() {
+            Transition::None => Transition::Fade,
+            Transition::Fade => Transition::SlideLeft,
+            Transition::SlideLeft => Transition::SlideRight,
+            Transition::SlideRight => Transition::Wipe,
+            Transition::Wipe => Transition::Dissolve,
+            Transition::Dissolve => Transition::None,
+        };
+        self.set_current_transition(next);
+    }
+
+    /// The transition the current slide uses.
+    fn current_transition(&self) -> Transition {
+        self.slides
+            .get(self.current_index)
+            .map_or(Transition::None, |s| s.transition)
+    }
+
     pub fn set_theme(&mut self, theme: SlideTheme) {
         self.undo_mgr.save(&self.slides, self.current_index);
         self.theme = theme;
@@ -1452,6 +1491,16 @@ impl SlidesApp {
                 self.duplicate_current_slide();
                 EventResult::Consumed
             }
+            // `Delete` removes the selected element if there is one, and the
+            // slide otherwise. `delete_selected_element` had no caller, so the
+            // only way to remove a shape or a textbox was to delete the slide
+            // around it -- and erring towards the element is the safe half of
+            // the ambiguity, since re-adding an element is cheap and re-making
+            // a slide is not. `Shift+Delete` always means the slide.
+            Key::Delete if self.selected_element.is_some() && !key.modifiers.shift => {
+                self.delete_selected_element();
+                EventResult::Consumed
+            }
             Key::Delete => {
                 if self.slides.len() < 2 {
                     // Refusing to delete the last slide rather than leaving an
@@ -1475,8 +1524,47 @@ impl SlidesApp {
                     EventResult::Consumed
                 }
             }
+            // Before the unguarded `Key::T` below, which would otherwise
+            // take Ctrl+T and add a textbox. The deck's look and the slide's
+            // transition are both already printed in the window.
+            Key::T if ctrl => {
+                self.cycle_theme();
+                EventResult::Consumed
+            }
+            Key::R if ctrl => {
+                self.cycle_transition();
+                EventResult::Consumed
+            }
             Key::T => {
                 self.add_textbox();
+                EventResult::Consumed
+            }
+            // The rest of what a slide can hold. `add_shape` and
+            // `add_image_placeholder` had no callers, so `T` was the only
+            // thing that could put anything on a slide: this program made
+            // decks of textboxes.
+            //
+            // A key per shape rather than a mode with an armed kind: there are
+            // four, they are all mnemonic, and a mode would need its own label
+            // on screen to say which kind the next `S` would produce.
+            Key::S => {
+                self.add_shape(ShapeKind::Rectangle);
+                EventResult::Consumed
+            }
+            Key::O => {
+                self.add_shape(ShapeKind::Ellipse);
+                EventResult::Consumed
+            }
+            Key::L => {
+                self.add_shape(ShapeKind::Line);
+                EventResult::Consumed
+            }
+            Key::A => {
+                self.add_shape(ShapeKind::Arrow);
+                EventResult::Consumed
+            }
+            Key::I => {
+                self.add_image_placeholder();
                 EventResult::Consumed
             }
             Key::B => {
@@ -2910,6 +2998,162 @@ mod tests {
             modifiers: Modifiers::ctrl(),
             text: String::new(),
         })
+    }
+
+    /// The element count of the slide now showing.
+    fn element_count(app: &SlidesApp) -> usize {
+        app.slides
+            .get(app.current_index)
+            .map_or(0, |s| s.elements.len())
+    }
+
+    /// `S`, `O`, `L` and `A` put the four shapes on a slide.
+    ///
+    /// `add_shape` had no caller, so `T` was the only thing that could put
+    /// anything on a slide: this program made decks of textboxes.
+    #[test]
+    fn the_four_shape_keys_each_add_their_shape() {
+        for (key, kind) in [
+            (Key::S, ShapeKind::Rectangle),
+            (Key::O, ShapeKind::Ellipse),
+            (Key::L, ShapeKind::Line),
+            (Key::A, ShapeKind::Arrow),
+        ] {
+            let mut app = seeded();
+            let before = element_count(&app);
+
+            assert_eq!(app.handle_event(&press(key)), EventResult::Consumed);
+
+            assert_eq!(
+                element_count(&app),
+                before + 1,
+                "{key:?} added nothing to the slide"
+            );
+            let added = app
+                .slides
+                .get(app.current_index)
+                .and_then(|s| s.elements.last())
+                .expect("the element just added");
+            assert!(
+                format!("{added:?}").contains(&format!("{kind:?}")),
+                "{key:?} added something that is not a {kind:?}: {added:?}"
+            );
+        }
+    }
+
+    /// `I` adds an image placeholder.
+    #[test]
+    fn i_adds_an_image_placeholder() {
+        let mut app = seeded();
+        let before = element_count(&app);
+
+        assert_eq!(app.handle_event(&press(Key::I)), EventResult::Consumed);
+
+        assert_eq!(element_count(&app), before + 1, "I added nothing");
+    }
+
+    /// Delete removes the selected element rather than the slide around it.
+    ///
+    /// `delete_selected_element` had no caller, so removing a shape meant
+    /// deleting the whole slide it was on.
+    #[test]
+    fn delete_removes_the_selected_element_not_the_slide() {
+        let mut app = seeded();
+        let slides_before = app.slides.len();
+        app.handle_event(&press(Key::S));
+        let elements_before = element_count(&app);
+        assert!(
+            app.selected_element.is_some(),
+            "control: adding a shape selects it"
+        );
+
+        app.handle_event(&press(Key::Delete));
+
+        assert_eq!(app.slides.len(), slides_before, "it deleted the slide");
+        assert_eq!(
+            element_count(&app),
+            elements_before - 1,
+            "the element is still there"
+        );
+    }
+
+    /// Shift+Delete still means the slide, even with an element selected.
+    #[test]
+    fn shift_delete_still_removes_the_slide() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::S));
+        let slides_before = app.slides.len();
+        assert!(slides_before > 1, "control: needs two slides to delete one");
+
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Delete,
+            pressed: true,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        }));
+
+        assert_eq!(
+            app.slides.len(),
+            slides_before - 1,
+            "Shift+Delete did not remove the slide"
+        );
+    }
+
+    /// Ctrl+T moves through the themes, which the window prints.
+    ///
+    /// `set_theme` had no caller, so "Theme: Mocha" could not say anything
+    /// else though `light()` and `vibrant()` both existed.
+    #[test]
+    fn ctrl_t_cycles_the_theme() {
+        let mut app = seeded();
+        let first = app.theme.name.clone();
+
+        app.handle_event(&press_ctrl(Key::T));
+        let second = app.theme.name.clone();
+        assert_ne!(second, first, "Ctrl+T did not change the theme");
+
+        app.handle_event(&press_ctrl(Key::T));
+        app.handle_event(&press_ctrl(Key::T));
+        assert_eq!(app.theme.name, first, "the themes do not come back round");
+    }
+
+    /// Ctrl+T does not also add a textbox.
+    ///
+    /// `Key::T` is unguarded and appears in the same match, so an arm order
+    /// that put it first would have taken Ctrl+T and added a textbox while
+    /// leaving the theme alone -- which looks exactly like a theme key that
+    /// does nothing.
+    #[test]
+    fn ctrl_t_does_not_add_a_textbox() {
+        let mut app = seeded();
+        let before = element_count(&app);
+
+        app.handle_event(&press_ctrl(Key::T));
+
+        assert_eq!(element_count(&app), before, "Ctrl+T added a textbox");
+    }
+
+    /// Ctrl+R moves the current slide through the transitions.
+    #[test]
+    fn ctrl_r_cycles_the_transition() {
+        let mut app = seeded();
+        let before = app
+            .slides
+            .get(app.current_index)
+            .map(|s| s.transition)
+            .expect("a slide");
+
+        app.handle_event(&press_ctrl(Key::R));
+
+        let after = app
+            .slides
+            .get(app.current_index)
+            .map(|s| s.transition)
+            .expect("a slide");
+        assert_ne!(after, before, "Ctrl+R did not change the transition");
     }
 
     #[test]

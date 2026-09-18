@@ -4,6 +4,12 @@
 //! visualization, VU metering, markers, trim tool, playback, and a file
 //! browser for saved recordings. Uses the guitk library for UI rendering
 //! with Catppuccin Mocha theme.
+//!
+//! **This program has no audio input, and the window says so.** Nothing here
+//! can enumerate or open a capture device. The distinction it draws is the one
+//! that matters: *"This is not a missing microphone -- this program has no way
+//! to open a capture device at all."* Told only that there is no input, a user
+//! goes looking for a hardware fault they do not have.
 
 #![allow(dead_code, clippy::too_many_arguments, clippy::vec_init_then_push)]
 

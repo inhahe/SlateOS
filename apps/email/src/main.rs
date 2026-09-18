@@ -15,6 +15,15 @@
 //! - Signature management
 //! - Rules/filters for automatic sorting
 //! - Multi-panel UI: folder sidebar, message list, reading pane
+//!
+//! **This client cannot send or receive mail, and the window says so.** It has
+//! no network access, so no account is connected and no server has been
+//! contacted. The line that matters most is the one about silence:
+//! *"An empty mailbox here does not mean no new mail -- nothing was ever
+//! fetched."* An empty inbox is otherwise read as a report about the mail that
+//! exists, which is a claim about the world.
+//!
+//! The list above is what the layouts draw when something supplies a model.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow

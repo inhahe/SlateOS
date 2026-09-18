@@ -77202,6 +77202,35 @@ lines earlier. It now clusters by proximity and implies nothing across
 clusters -- and its docstring states that it cannot see kernel-prefixed
 lines at all, so "first of the cluster" means first of what it can see.
 
+**Check whether the remedy already exists, before proposing one.** Three
+times on 2026-09-18 the thing I was about to build or file was already
+there:
+
+| I was about to | it already existed as |
+|---|---|
+| file a kshell UTF-8 limitation as untracked | `TD-KSHELL-LINE-EDITOR-IS-UTF8`, logged 2026-08-13 |
+| add a bounded retry to `submit_and_reap` as a new idea | the same loop, stated with its rationale eight times elsewhere in that file |
+| suggest lane C assert `ALL.len() == variant_count` | `scripts/check-variant-lists.py`, **which lane C wrote**, already checking 81 lists across `apps`/`gui`/`net*`/`pkg` |
+
+The third is the instructive one, and it is a new wrinkle rather than more
+of the same: **the person who described the problem as unenforced was the
+person who had enforced it.** Lane C asked how to stop `Command::ALL`
+drifting from its enum; their own script had already checked it that morning
+and reported it in step, including the variant they had just added. So
+"does a gate exist" is not answered by asking the author.
+
+It also killed my proposed fallback on evidence I would not have found
+otherwise. `assert!(Foo::ALL.len() == core::mem::variant_count::<Foo>())`
+is `error[E0658]: use of unstable library feature 'variant_count'` on this
+toolchain -- measured and dated in that script's docstring, which exists
+*because* the in-language assertion could not be written. A suggestion
+refuted by the very artefact that replaced it.
+
+And the script carries the third-copy problem in its own scope: it checks
+only lists **named** `ALL`, `ALL_*` or `EVERY_*`, so a list that should be
+total and is called `PRIMARY_COMMANDS` is invisible to it and nothing says
+so. The gate's population is defined by what the author called the thing.
+
 **The filter kept the wrong end.** Lane C gated a merge on
 `cargo test --workspace ... | grep -E "FAILED|^error|test result: ok" | tail -40`.
 It printed forty `test result: ok` lines and no failures, and it **could not

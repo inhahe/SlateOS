@@ -160355,8 +160355,16 @@ commits and only the write-only-field gate noticed. 135 tests.
 thing*. Those two are different, and on 2026-09-18 I confused them seven times
 in one day, in seven different ways. Each one nearly became a filed defect
 about a program that was working correctly, or nearly hid a real one. This
-entry lists the seven with the instance that caught each, because the fix is
-not "be careful" -- it is knowing the specific shapes.
+entry lists them with the instance that caught each, because the fix is not
+"be careful" -- it is knowing the specific shapes.
+
+**It started at seven and is at thirteen**, all in the same day, and the slug
+keeps the original number because renaming it would break every reference to
+it. The later six are not more of the same: 8 and 12 are about *coverage* --
+which files a sweep read, which configuration a build compiled -- and 11 and 13
+are about *lists*, which is where this has cost the most. The count going up
+is the useful signal here; it says the supply is not exhausted, so a search
+that returns nothing still means nothing.
 
 | # | The divergence | What it cost |
 |---|---|---|
@@ -160370,6 +160378,7 @@ not "be careful" -- it is knowing the specific shapes.
 
 | 8 | **One file vs the crate.** Every sweep run on 2026-09-18 globbed `apps/*/src/main.rs`. **12 of 141 apps have more than one source file** -- `explorer` has 8, `settings` 5, `editor` 4. | Concluded `apps/editor` "has zero typing sites" and could not be typed in. Its typing lives in `input.rs`. A text editor was one sentence away from being filed as unable to accept text. |
 
+| 13 | **The checker is a third copy.** A list printed on screen and the handler behind it are two copies of one fact, and the cure is a test that reads both -- but a test that reads the list and then *names the keys itself* has added a third, which drifts from the other two and catches neither. | Four of the five apps that print their keys checked them this way, each having written the same forty-line `"Left/Right" => vec![Key::Left, Key::Right]` table independently: `mixer`, `rssreader`, `wordsearch` and `slides`. `rssreader`'s checked only the *first* key of each row, so three advertised keys had never been pressed by anything. Now one parser, `guitk::shortcut`, reads the printed label -- see `TD-C-A-PRINTED-KEY-LIST-IS-A-SECOND-COPY`. |
 | 12 | **The test build never compiled it.** Code behind `#[cfg(not(test))]` is absent from `cargo test`, so the suite passes over it without type-checking a line. The mirror image of lane A's `#[cfg(unix)]` lint, which no clippy on a Windows host ever compiles. | Added `apps/terminal`'s shell bridge behind `#[cfg(not(test))]`; **126 tests passed over code that had never been compiled.** It was caught only because `main` then referenced functions absent from a test build, which failed loudly -- had it not, an unchecked feature would have shipped behind a green suite. |
 | 11 | **One list is checked and its twin is not.** `apps/editor` has an exhaustive `match` that forces a new `Command` to be handled -- and a hand-written `Command::ALL: [Self; 14]` that decides whether the guard test ever *reaches* it. The compiler enforces the first and nothing enforces the second. | A variant added to the enum and omitted from `ALL` compiles, with a guard-test arm that is written, never executed, and reported as passing. **No symptom at all** -- worse than passing for the wrong reason, because there is no run to inspect. |
 | 10 | **A heredoc eats the backslashes.** A `python - <<'PYEOF'` block is supposed to pass its body through literally; in this shell it did not, three times. `\x1b` arrived as a real ESC byte and `\r\n` as a real CRLF. | Wrote literal control characters into a Rust byte literal (invalid source), and a lone CRLF into `known-issues.md` -- in a paragraph *about* an escape sequence, which is how it got past reading. The habit that fixes it: **any script containing backslash escapes goes in a file, not a heredoc.** |
@@ -160472,6 +160481,79 @@ over-report, and a future session that trusts their output will file working
 programs as broken. The entry they live in
 (`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
 says why the failure is systematic rather than a matter of care.
+
+## `TD-C-A-PRINTED-KEY-LIST-IS-A-SECOND-COPY` -- **FIXED 2026-09-18** (lane C)
+
+**In short:** Five apps print a list of their keys on screen. That list is a
+second copy of something the key handler already knows, and two copies of a
+fact drift apart -- `apps/rssreader` once shipped an overlay of twenty-one
+shortcuts of which about four worked. Only two of the five checked the list
+against the handler, and **both did it through a third copy**. All five now
+read the printed label itself, so there are two copies and a test that reads
+both.
+
+**Where each app stood before this.**
+
+| App | Prints | Checked? |
+|---|---|---|
+| `minesweeper` | six keys, in a footer | that the footer was **complete** -- nothing about whether it was **true** |
+| `wordsearch` | two tables, footer | six keys named **by hand** in the test; a seventh row would not have been checked |
+| `mixer` | two tables, footer | both directions, but through a local `fn keys_named(label)` -- a match arm per label |
+| `rssreader` | twenty-one rows, `?` overlay | a 21-arm `probe(action) -> Event`, first key of each row only |
+| `slides` | twenty rows, `?` overlay | a 40-line `event_for(spec)` table, written the same day |
+
+**The third copy is the part worth naming.** A printed list and a handler are
+two copies, and the cure is a test that reads both. But a test that reads the
+list and then *names the keys itself* has added a third, which drifts from the
+other two and fails to catch either. Four of the five had exactly that, and
+each wrote it independently -- `"Left/Right" => vec![Key::Left, Key::Right]`
+appears in `mixer` and, in different words, in `rssreader`, `wordsearch` and
+`slides`. Nobody was being careless: the check is obvious and the parser is
+forty dull lines, so each author wrote the forty lines again.
+
+**The fix is `guitk::shortcut::keystrokes(label)`**, which turns a printed
+label back into the keystrokes it names -- `"Ctrl+PageUp / Ctrl+PageDown"` into
+two strokes -- and refuses by name what it cannot read. It lives in the toolkit
+because the *labels* are not app-specific: `Esc` versus `Escape` is not a fact
+about a mixer. Each app keeps only what is genuinely its own, which is the set
+of states to try the key in.
+
+**Two things this turned up that were not visible from any one app.**
+
+`rssreader`'s probe checked only the first key of each row, so the `Down` in
+`"J / Down"`, the `Enter` in `"R / Enter"` and the `Shift+Tab` in
+`"Tab / Shift+Tab"` were advertised to users and never once pressed by a test.
+They all work. **Nothing knew that**, which is a different state from working.
+
+And the new splitter dropped the second `/` of `rssreader`'s `"Ctrl+F / /"`,
+where the slash is both the separator and a key. That is the failure this
+whole entry is about, reproduced inside the fix for it: the guard test would
+have checked one key where it meant to check two, **and passed**. A `/` with
+nothing but blanks before it is now the key. The corpus test that should have
+caught it was reading four apps' labels and not the fifth -- the eighth way a
+search says nothing, "one file was read and the crate was not", in its
+list-of-apps form.
+
+**The property to assert is "some reachable state answers this key",** not
+"this key is taken right now". The `slides` guard failed on its first run, on
+its first row, and the app was right: `Left` at the first slide returns
+`Ignored` on purpose, as do `1` for a view already open, `Ctrl+V` with nothing
+copied, `C` on a number whose flags are missing, and `Esc` with no mark open.
+**Declining from its own arm is answering.** The defect to catch is a row that
+falls through to the catch-all in *every* state, so each guard offers its keys
+to a small set of prepared states -- three decks, three boards, two grids --
+and requires one of them to take it.
+
+**Both new guards were mutation-checked**, since a guard test that has only
+ever been green is a decoration: one row retyped to a key the program does not
+answer (`B` to plain `C` in slides, `F` to `Q` in minesweeper), and each failed
+naming the row. The first `slides` failure had been about *state* rather than a
+missing handler, which is exactly why the deliberate one was worth running.
+
+**What is still open is the other half**, tracked in
+`TD-C-KEYS-THAT-WORK-AND-NOTHING-MENTIONS`: five apps print no list at all, so
+there is nothing to check. A list that is absent cannot be false, and is still
+a user who cannot find the key.
 
 ## `TD-C-KEYS-THAT-WORK-AND-NOTHING-MENTIONS` (lane C, 2026-09-18)
 

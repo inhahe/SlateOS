@@ -160207,6 +160207,31 @@ behaviour come apart -- and they come apart most often in exactly the code
 worth examining, because a program doing something interesting is a program
 spelling it in some particular way.
 
+**The corollary, which outranks all seven** (from lane A, 2026-09-18, after
+it nearly cost them a false report that the kernel's file-immutability
+protection did not work): **"has no caller" and "nothing does this" are
+different sentences, and only the second survives a second implementation
+path.** Their call graph was clean and every step of it was true --
+`FileAttr::IMMUTABLE` is checked in `Vfs::is_writable`, whose only caller is
+inside `self_test()`. The conclusion was still false: enforcement does not go
+through that predicate at all, because `write_file`, `truncate` and `unlink`
+each refuse on their own paths. What settled it in one command was asking
+whether the **test passes** rather than where the call site is.
+
+Run against tonight's two findings, both survive, and the reason is that
+neither rests on a call graph: `slides` has **zero assignments to `.text`
+anywhere in the crate**, tests included, and `notes` has both its
+`notes.push` sites *inside* the two unreachable creators with no import. The
+mutation was checked, not the entry point. **A finding phrased as "no caller"
+should be re-phrased as "nothing writes it" before it is filed, and if it
+cannot be, it is not ready.**
+
+**Being wrong in this direction is the expensive one.** Recording a capability
+as missing when it exists tells a reader not to rely on something they can
+rely on -- which is what the withdrawn
+`TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY` did, and why it was withdrawn in place
+rather than deleted.
+
 **What actually works**, in order of how much it costs:
 
 1. **Ask for the writers, not the name.** "Does anything assign this?" survives
@@ -160215,9 +160240,13 @@ spelling it in some particular way.
    `rustlex.strip_noise(keep_literals=True)` for "is this a comment". Both
    exist because somebody already lost a day to 5 and to 4; the second one's
    own doc says so.
-3. **Check the render path, not the model.** The question "can this app show
-   anything" is answered by the draw and not by the fields -- see
-   `TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY`, withdrawn for exactly this.
+3. **Ask what the program does when run, not where the call site is.** This
+   belongs above the lexer and was written below it at first, which is
+   backwards: the lexer makes a *search* honest, running the thing makes a
+   *claim* true. For a GUI app that means the render tree -- "can this app
+   show anything" is answered by the draw and not by the fields, see
+   `TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY`, withdrawn for exactly this. For a
+   kernel subsystem it means the boot line. Same question, different output.
 4. **Then read the code.** Every genuine defect filed today --
    `rssreader`'s sidebar, `passwordgen`'s classes, `netscan`'s scan report,
    `podcast`'s timestamp, `markdowneditor`'s find panel -- was confirmed by

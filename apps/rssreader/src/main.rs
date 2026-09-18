@@ -2472,6 +2472,39 @@ impl RssReaderApp {
         self.content_scroll_offset = 0.0;
     }
 
+    /// Move the sidebar selection to the next or previous feed, passing over
+    /// the folders and the two standing entries.
+    ///
+    /// Distinct from `step_sidebar`, which visits every row: the overlay
+    /// offers both because moving feed-to-feed in a sidebar of many folders
+    /// is otherwise a lot of keypresses through headings you do not want to
+    /// stop on.
+    pub fn step_feed(&mut self, forward: bool) {
+        let rows = self.sidebar_rows();
+        let feeds: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r, SidebarSelection::Feed(_)))
+            .map(|(i, _)| i)
+            .collect();
+        let target = match rows.iter().position(|r| *r == self.sidebar_selection) {
+            Some(here) if forward => feeds.iter().find(|i| **i > here).copied(),
+            Some(here) => feeds.iter().rev().find(|i| **i < here).copied(),
+            None => feeds.first().copied(),
+        };
+        // Past the last feed there is no next one; staying put is the same
+        // choice `step_sidebar` makes at either end of the list.
+        let Some(index) = target else {
+            return;
+        };
+        let Some(selection) = rows.get(index).copied() else {
+            return;
+        };
+        self.sidebar_selection = selection;
+        self.selected_article_index = 0;
+        self.content_scroll_offset = 0.0;
+    }
+
     /// Open or close the selected folder. Reports whether it did.
     ///
     /// `Folder::is_expanded` had no writer in production, so every folder was
@@ -2783,6 +2816,16 @@ impl RssReaderApp {
                 };
                 EventResult::Consumed
             }
+            // Feed to feed, as the overlay names them. These must precede the
+            // plain J/K arms below, which would otherwise take them.
+            Key::J if key.modifiers.shift => {
+                self.step_feed(true);
+                EventResult::Consumed
+            }
+            Key::K if key.modifiers.shift => {
+                self.step_feed(false);
+                EventResult::Consumed
+            }
             // Through the articles -- or through the sidebar, when that is
             // the active pane. `sidebar_selection` previously had no writer at
             // all: the sidebar highlighted "All Feeds" forever, its Feed,
@@ -2802,6 +2845,24 @@ impl RssReaderApp {
                 } else {
                     self.prev_article();
                 }
+                EventResult::Consumed
+            }
+            // `R` and `Shift+R` are what the help overlay has named all
+            // along. `R` was bound to nothing while read/unread sat on `M`,
+            // and mark-all-read was on `Ctrl+A`, which the overlay never
+            // mentioned. Both old keys stay: they are what anyone who learned
+            // this app by trying keys already uses.
+            Key::R if key.modifiers.shift => {
+                self.mark_all_read();
+                EventResult::Consumed
+            }
+            Key::R => {
+                self.toggle_read();
+                EventResult::Consumed
+            }
+            // The overlay says Space opens and closes a folder.
+            Key::Space if matches!(self.sidebar_selection, SidebarSelection::Folder(_)) => {
+                self.toggle_selected_folder();
                 EventResult::Consumed
             }
             // On a folder, `Enter` opens or closes it. This arm must precede
@@ -2854,6 +2915,29 @@ impl RssReaderApp {
             }
             Key::Slash if key.modifiers.shift => {
                 self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            // The other half of the overlay's "Ctrl+F / /".
+            Key::Slash => {
+                self.search_active = true;
+                EventResult::Consumed
+            }
+            // Three pieces of state the app already obeys and nothing could
+            // change: `sidebar_visible` gates the sidebar's draw, `sort_order`
+            // drives the real `sort_by` over the article list, and the window
+            // prints "Sort: Date (newest first)" -- a label that until now
+            // could never say anything else.
+            Key::B => {
+                self.sidebar_visible = !self.sidebar_visible;
+                EventResult::Consumed
+            }
+            Key::O => {
+                self.sort_order = self.sort_order.next();
+                EventResult::Consumed
+            }
+            Key::F => {
+                self.filter_mode = self.filter_mode.next();
+                self.clamp_selection();
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -5339,6 +5423,157 @@ mod tests {
 
     fn app() -> RssReaderApp {
         RssReaderApp::with_sample_data(1200.0, 800.0)
+    }
+
+    /// Text drawn anywhere in the window.
+    fn drawn_text(a: &RssReaderApp) -> Vec<String> {
+        a.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `R` marks read, which the overlay has always said and nothing did.
+    #[test]
+    fn r_toggles_read() {
+        let mut a = app();
+        let idx = *a.filtered_article_indices().first().expect("an article");
+        a.selected_article_index = 0;
+        let before = a.articles[idx].is_read;
+
+        a.handle_event(&press(Key::R));
+
+        assert_ne!(a.articles[idx].is_read, before, "R did nothing");
+    }
+
+    /// `Shift+R` marks everything read. It was on `Ctrl+A`, unadvertised.
+    #[test]
+    fn shift_r_marks_all_read() {
+        let mut a = app();
+        assert!(
+            a.articles.iter().any(|x| !x.is_read),
+            "control: something must be unread"
+        );
+
+        a.handle_event(&key_ev(Key::R, false, true));
+
+        assert!(
+            a.articles.iter().all(|x| x.is_read),
+            "Shift+R left something unread"
+        );
+    }
+
+    /// `Space` opens and closes a folder, as the overlay says.
+    #[test]
+    fn space_toggles_a_folder() {
+        let mut a = app();
+        let id = a.folders.first().expect("a folder").id;
+        a.sidebar_selection = SidebarSelection::Folder(id);
+
+        a.handle_event(&press(Key::Space));
+
+        assert!(
+            !a.folders.iter().any(|f| f.id == id && f.is_expanded),
+            "Space did not close the folder"
+        );
+    }
+
+    /// `Shift+J` moves feed to feed, passing over folder headings.
+    #[test]
+    fn shift_j_moves_to_the_next_feed() {
+        let mut a = app();
+        a.sidebar_selection = SidebarSelection::AllFeeds;
+
+        a.handle_event(&key_ev(Key::J, false, true));
+
+        assert!(
+            matches!(a.sidebar_selection, SidebarSelection::Feed(_)),
+            "Shift+J landed on {:?}, not a feed",
+            a.sidebar_selection
+        );
+    }
+
+    /// `B` hides the sidebar, and the sidebar actually leaves the window.
+    ///
+    /// `sidebar_visible` gates the sidebar's draw and had no writer, so the
+    /// panel could never be hidden. Asserted through the render because the
+    /// field changing proves only that the field changed.
+    #[test]
+    fn b_hides_the_sidebar_from_the_window() {
+        let mut a = app();
+        assert!(
+            drawn_text(&a).iter().any(|t| t == "All Feeds"),
+            "control: the sidebar is on screen to begin with"
+        );
+
+        a.handle_event(&press(Key::B));
+
+        assert!(!a.sidebar_visible, "B did not clear the flag");
+        assert!(
+            !drawn_text(&a).iter().any(|t| t == "All Feeds"),
+            "the flag cleared and the sidebar was drawn anyway"
+        );
+    }
+
+    /// `O` cycles the sort order, and the window says so.
+    ///
+    /// The sort indicator read "Sort: Date (newest first)" and could not say
+    /// anything else, though `sort_order` drives a real sort of the list.
+    #[test]
+    fn o_cycles_the_sort_order() {
+        let mut a = app();
+        let before = a.sort_order;
+        let label_before = format!("Sort: {}", before.label());
+        assert!(
+            drawn_text(&a).iter().any(|t| *t == label_before),
+            "control: the sort indicator is on screen"
+        );
+
+        a.handle_event(&press(Key::O));
+
+        assert_ne!(a.sort_order, before, "O did not change the sort order");
+        let label_after = format!("Sort: {}", a.sort_order.label());
+        assert!(
+            drawn_text(&a).iter().any(|t| *t == label_after),
+            "the indicator still shows the old order"
+        );
+    }
+
+    /// `F` cycles the filter mode.
+    #[test]
+    fn f_cycles_the_filter_mode() {
+        let mut a = app();
+        let before = a.filter_mode;
+
+        a.handle_event(&press(Key::F));
+
+        assert_ne!(a.filter_mode, before, "F did not change the filter");
+    }
+
+    /// `/` opens the search box -- the half of "Ctrl+F / /" that was missing.
+    #[test]
+    fn slash_opens_search() {
+        let mut a = app();
+        assert!(!a.search_active, "control: search starts closed");
+
+        a.handle_event(&press(Key::Slash));
+
+        assert!(a.search_active, "/ did not open the search box");
+        assert!(!a.show_help, "/ opened the help overlay instead");
+    }
+
+    /// `?` still opens help, rather than being taken by the new `/`.
+    #[test]
+    fn shift_slash_still_opens_help() {
+        let mut a = app();
+
+        a.handle_event(&key_ev(Key::Slash, false, true));
+
+        assert!(a.show_help, "? no longer opens the help overlay");
+        assert!(!a.search_active, "? opened the search box instead");
     }
 
     /// Shift-Tab reaches the sidebar and Down moves its selection.

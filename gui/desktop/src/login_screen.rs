@@ -5,6 +5,28 @@
 //! match desktop wallpaper), keyboard layout indicator, accessibility options,
 //! power options (shutdown/reboot/sleep), and on-screen keyboard toggle.
 //!
+//! # Face unlock authenticates anybody, and is not wired here
+//!
+//! `kernel/src/fs/faceunlock.rs` exists, and its `verify()` returns `Matched`
+//! unconditionally for any enrolled user: no camera, no template comparison,
+//! no cryptography in the file. The only refusals it can produce are "not
+//! enabled", "not enrolled", and a liveness flag **the caller passes in** --
+//! so a caller handing it `is_live: true` for an enrolled id is authenticated,
+//! and the decision was the caller's all along.
+//!
+//! Nothing in this lane references it. Checked 2026-09-18: no match for
+//! `faceunlock` anywhere in `gui/`, `apps/`, `net*/` or `pkg/`, which is why
+//! this is a note and not a defect.
+//!
+//! It is written *here* because this file is where such a branch would be
+//! added, beside [`LoginAction::Authenticate`], and a warning in the kernel
+//! module is one directory nobody passes through on the way. Real recognition
+//! needs a camera stack; until that exists, a face-unlock path in this file
+//! would be a login screen that lets anyone enrolled in.
+//!
+//! Found and reported by lane A, who rewrote that module's doc to lead with
+//! the fact rather than describing the comparison it does not do.
+//!
 //! # Autologin is modelled here but does *not* happen
 //!
 //! This list said "autologin" until 2026-09-16, and it was not true. The field

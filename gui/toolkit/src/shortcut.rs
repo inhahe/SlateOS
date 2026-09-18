@@ -392,12 +392,6 @@ pub fn render_card<S: CommandSink + ?Sized>(
     closing: &str,
 ) {
     let (window_w, window_h) = window;
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a shortcut list is tens of rows, far below f32's integer-exact range"
-    )]
-    let rows_h = rows.len() as f32 * ROW_HEIGHT;
-
     // The key column is as wide as the widest key label, not as wide as
     // somebody guessed. A `max_width` that is too small elides the key itself,
     // which is the one string on the card that must be readable exactly.
@@ -409,7 +403,39 @@ pub fn render_card<S: CommandSink + ?Sized>(
     let w = (keys_w + COLUMN_GAP + 220.0 + PAD * 2.0)
         .max(320.0)
         .min(window_w * 0.86);
-    let h = rows_h + HEAD_HEIGHT + FOOT_HEIGHT;
+
+    // How many rows there is room for, and what to do about the rest.
+    //
+    // **A row that does not fit is named, never dropped.** `apps/rssreader`
+    // drew twenty of its twenty-one shortcuts for weeks because its overlay
+    // was a fixed height with a `break` when the rows ran past the bottom, and
+    // the row it lost was the one naming the key that closes it. Nothing could
+    // see it: the list and the key handler agreed, and the box was a third
+    // quantity agreeing with neither. So this counts what fits, and if any are
+    // left over it spends one of those lines saying how many -- which is worth
+    // more than the row it displaces, because a reader who can see that
+    // something is missing goes looking.
+    let room = (window_h - keep_clear - HEAD_HEIGHT - FOOT_HEIGHT).max(0.0);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "room/ROW_HEIGHT is a small non-negative count of rows"
+    )]
+    let fits = (room / ROW_HEIGHT).floor().max(0.0) as usize;
+    let (shown, hidden) = if fits >= rows.len() {
+        (rows, 0)
+    } else {
+        // One line goes to the count, so `shown` is one shorter than `fits`.
+        let keep = fits.saturating_sub(1);
+        (rows.get(..keep).unwrap_or(&[]), rows.len() - keep)
+    };
+
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a shortcut list is tens of rows, far below f32's integer-exact range"
+    )]
+    let drawn_rows = (shown.len() + usize::from(hidden > 0)) as f32;
+    let h = drawn_rows.mul_add(ROW_HEIGHT, HEAD_HEIGHT + FOOT_HEIGHT);
     let x = ((window_w - w) / 2.0).max(0.0);
     let y = ((window_h - h) / 2.0).max(keep_clear);
 
@@ -427,7 +453,7 @@ pub fn render_card<S: CommandSink + ?Sized>(
 
     let what_x = x + PAD + keys_w + COLUMN_GAP;
     let mut row_y = y + HEAD_HEIGHT;
-    for (keys, what) in rows {
+    for (keys, what) in shown {
         out.emit(RenderCommand::Text {
             x: x + PAD,
             y: row_y,
@@ -449,6 +475,19 @@ pub fn render_card<S: CommandSink + ?Sized>(
             overflow: TextOverflow::Ellipsis,
         });
         row_y += ROW_HEIGHT;
+    }
+
+    if hidden > 0 {
+        out.emit(RenderCommand::Text {
+            x: x + PAD,
+            y: row_y,
+            text: format!("... and {hidden} more, in a taller window"),
+            color: palette.ink(palette.yellow),
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(w - PAD * 2.0),
+            overflow: TextOverflow::Ellipsis,
+        });
     }
 }
 
@@ -566,6 +605,65 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_card_too_short_for_its_rows_says_how_many_it_left_out() {
+        // The `apps/rssreader` defect, made structurally impossible. Its
+        // overlay drew twenty of twenty-one rows and said nothing, and the row
+        // it lost was the one naming the key that closes it. A reader who can
+        // see that something is missing goes looking; one who cannot, cannot.
+        let many: Vec<(&str, &str)> = (0..40).map(|_| ("Ctrl+Q", "Quit")).collect::<Vec<_>>();
+        let mut cmds = Vec::new();
+        render_card(
+            &mut cmds,
+            &Palette::for_mode(false),
+            (900.0, 300.0),
+            0.0,
+            &many,
+            "x",
+        );
+        let placed = texts(&cmds);
+        let all = placed
+            .iter()
+            .map(|(_, _, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            all.contains("more, in a taller window"),
+            "forty rows in a 300px window and the card said nothing: {all}"
+        );
+
+        // And what it *did* draw stayed inside the window, rather than running
+        // off the bottom where the truth is equally unreadable.
+        for (_, y, t) in &placed {
+            assert!(*y <= 300.0, "{t:?} was drawn at {y}, past the window");
+        }
+    }
+
+    #[test]
+    fn a_card_with_room_leaves_nothing_out_and_says_nothing_about_it() {
+        let mut cmds = Vec::new();
+        render_card(
+            &mut cmds,
+            &Palette::for_mode(false),
+            (900.0, 800.0),
+            0.0,
+            ROWS,
+            "x",
+        );
+        let all = texts(&cmds)
+            .iter()
+            .map(|(_, _, t)| t.clone())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            !all.contains("more, in a taller window"),
+            "three rows in an 800px window and it claimed to have dropped some"
+        );
+        for (keys, _) in ROWS {
+            assert!(all.contains(keys), "{keys:?} is not on the card");
+        }
     }
 
     #[test]

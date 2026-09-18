@@ -160485,6 +160485,60 @@ programs as broken. The entry they live in
 (`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
 says why the failure is systematic rather than a matter of care.
 
+## `TD-C-A-RED-RUN-THAT-WAS-NOT-ABOUT-THE-CODE` (lane C, 2026-09-18)
+
+**In short:** A full `cargo test --workspace` came back red with what looked
+like three missing dependencies in `gui/window`. Nothing was wrong with
+`gui/window`. I had run `cargo clippy` against the same `target/` directory
+while the test run was going, and clippy leaves behind artifacts that the
+documentation tests cannot use. The same run passes alone.
+
+**What it looked like:**
+
+```
+   Doc-tests oswindow
+error[E0463]: can't find crate for `appearance`
+  --> gui\window\srcpp.rs:95:5
+error[E0463]: can't find crate for `guiremote`
+error[E0432]: unresolved imports `crate::DISPLAY_VAR`, `crate::PixelFormat`
+error: doctest failed, to rerun pass `-p oswindow --doc`
+```
+
+**Why it is worth a file of its own: the symptom names the wrong fix.**
+"Can't find crate for `appearance`" reads exactly like a missing entry in
+`Cargo.toml`, and the obvious next move is to go and add one -- to a manifest
+that is correct, in a crate that is fine, which would then have to be undone.
+The tell is in the `rustdoc` command line the error prints underneath it:
+
+```
+--extern 'appearance=...	arget\...\libappearance-c585cc90e74addac.rlib'
+```
+
+**The crate is named right there.** rustdoc was told exactly where it was and
+still could not use it, which is not what a missing dependency looks like --
+a missing dependency has no `--extern` at all. That one line separates "the
+manifest is wrong" from "the file on disk is not what it should be", and it is
+the only thing in the output that does.
+
+**The mechanism.** `cargo clippy` and `cargo test` share `target/`, and clippy
+compiles metadata-only: it type-checks and emits an `.rlib` with no generated
+code in it, because it never needed any. A later `rustdoc` asked to *link*
+against that file finds nothing to link. So the two commands are not
+independent, and running them at the same time against one directory makes the
+second one's result a fact about the first.
+
+**What to do instead.** Do not interleave them. Run the lint pass and the test
+pass one after another, or give the lint pass its own `--target-dir` and
+**delete it when the run finishes** -- a scratch target dir is 10-40 GB and
+`CLAUDE.md` is explicit that leaving one behind is a leak.
+
+**The general form, which is the reason this is filed rather than muttered:**
+a build system with shared state means **a red run is not automatically about
+the code**, exactly as a green one is not automatically about the tests. Both
+directions need the same question asked -- *what else was touching this
+tree?* -- and the answer here cost one re-run rather than an afternoon only
+because the `--extern` line was read before the manifest was opened.
+
 ## `TD-C-A-HUNDRED-APPS-BIND-KEYS-NOBODY-CAN-FIND` (lane C, 2026-09-18)
 
 **In short:** Seven apps got a shortcut list today. A survey of the other 134

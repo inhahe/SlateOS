@@ -38,7 +38,7 @@ use guitk::text;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -623,6 +623,36 @@ impl Podcast {
 // ============================================================================
 // Playback History Entry
 // ============================================================================
+
+/// The wall clock as "YYYY-MM-DD HH:MM", or `None` if it cannot be read.
+///
+/// Every `HistoryEntry` carried the string literal `"2026-05-18 10:00"` until
+/// 2026-09-18, and the history panel drew it, so a listening history filled up
+/// with rows that all happened at the same minute of the same day -- a day in
+/// the past, for anyone running this after that date.
+///
+/// `None` rather than a fallback date: a history row saying "time unknown" is
+/// awkward and true, and one saying 1 January 1970 is neither. This is the
+/// same choice `apps/reminders` makes at `system_now`, and for the same
+/// reason.
+fn system_timestamp() -> Option<String> {
+    let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    let secs = i64::try_from(since_epoch.as_secs()).ok()?;
+    // The civil date comes from `guitk::date`, the toolkit's one calendar,
+    // rather than a day-number formula written again here.
+    let (year, month, day) = guitk::date::Date::from_unix_utc(secs).ymd();
+    // `rem_euclid`, not `%`: a pre-1970 instant with `%` gives a negative
+    // remainder, which is not a time of day at all.
+    let secs_into_day = secs.rem_euclid(86_400);
+    let hour = secs_into_day / 3600;
+    let minute = (secs_into_day / 60) % 60;
+    Some(format!(
+        "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}"
+    ))
+}
+
+/// What to show when the clock could not be read.
+const TIME_UNKNOWN: &str = "time unknown";
 
 /// A record of a listening session.
 #[derive(Clone, Debug)]
@@ -1493,7 +1523,7 @@ impl PodcastApp {
                 podcast_id,
                 episode_title: ep_title,
                 podcast_title: podcast_title.clone(),
-                listened_at: "2026-05-18 10:00".to_string(),
+                listened_at: system_timestamp().unwrap_or_else(|| TIME_UNKNOWN.to_owned()),
                 duration_listened_secs: pos,
                 completed: true,
             });
@@ -1546,7 +1576,7 @@ impl PodcastApp {
                 podcast_id,
                 episode_title: ep_title,
                 podcast_title: pod_title,
-                listened_at: "2026-05-18 10:00".to_string(),
+                listened_at: system_timestamp().unwrap_or_else(|| TIME_UNKNOWN.to_owned()),
                 duration_listened_secs: pos,
                 completed: false,
             });
@@ -6007,6 +6037,43 @@ mod tests {
     // -----------------------------------------------------------------------
     // History tests
     // -----------------------------------------------------------------------
+
+    /// A history entry carries the real time, not a constant.
+    ///
+    /// `listened_at` was the string literal "2026-05-18 10:00" at both of its
+    /// assignment sites, and the history panel drew it -- so a listening
+    /// history filled up with rows that all happened at the same minute of the
+    /// same day, a day in the past for anyone running this after that date.
+    #[test]
+    fn a_history_entry_is_stamped_with_the_real_time() {
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
+        let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
+        app.play_episode(pid, eid);
+        app.seek_forward(100);
+        app.stop_playback();
+
+        let entry = app.history.last().expect("an entry was recorded");
+        assert_ne!(
+            entry.listened_at, "2026-05-18 10:00",
+            "the entry still carries the invented timestamp"
+        );
+        // Either the clock was read, in which case it agrees with a reading
+        // taken now, or it could not be, in which case the row says so rather
+        // than naming a day.
+        match system_timestamp() {
+            Some(now) => assert_eq!(
+                entry.listened_at, now,
+                "the entry disagrees with the clock it was supposed to read"
+            ),
+            None => assert_eq!(
+                entry.listened_at, TIME_UNKNOWN,
+                "the clock could not be read and the row named a time anyway"
+            ),
+        }
+    }
 
     #[test]
     fn test_playback_records_history() {

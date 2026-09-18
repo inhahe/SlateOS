@@ -160132,6 +160132,31 @@ around them. That is the same shape as `TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY`
 predicted and got wrong -- there the removal really had been finished -- so the
 shape is real even though that instance was not.
 
+**The sweep this prompted, and its one other hit.** Searching production code
+for hardcoded date literals -- the sharpest signal netscan gave -- found 18
+across 11 apps once test code was excluded properly with `rustlex.live_code`.
+**A naive cut at the last `#[cfg(test)]` reported 50 across 12**, nearly three
+times as many, and put 23 of them in `devicemanager` alone, which actually has
+one. That is the `production_part` bug in miniature, and a reminder to use the
+lexer rather than a split.
+
+Of the 18, thirteen are honest: doc comments in `sysinfo`, `pomodoro`,
+`settings` and `devicemanager` recording what a fabricated date *used* to be,
+and explanatory strings in `calendar`, `finance`, `habits` and `reminders`
+telling the user what the app opened with before the fabrication was removed.
+`rssreader`'s five are inside `SAMPLE_RSS`, a fixture deliberately fed through
+the real parser.
+
+**One was live: `apps/podcast`.** `listened_at` was the literal
+`"2026-05-18 10:00"` at *both* of its assignment sites --
+`complete_current_episode` and `record_current_to_history`, each reachable --
+and the history panel drew it, so a listening history filled with rows that all
+happened at the same minute of the same day. Fixed by reading the clock:
+`system_timestamp()` on the pattern `apps/reminders` uses at `system_now`,
+returning `None` rather than a fallback date, because a row saying "time
+unknown" is awkward and true and one saying 1 January 1970 is neither. 201
+tests.
+
 **Four tests changed rather than deleted**, and the changes are the record:
 `test_app_start_scan` asserted `results.is_some()` and `!history.is_empty()`,
 both true and both the defect;

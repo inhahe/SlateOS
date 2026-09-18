@@ -6,6 +6,9 @@
 //! - Recurring reminders: daily, weekly, monthly, yearly, custom interval
 //! - Categories: work, personal, health, finance, shopping, custom with colors
 //! - Multiple views: today, upcoming (7 days), all, by category, overdue, completed
+//! - Subtasks exist on the model and cannot be reached: `add_subtask`,
+//!   `remove_subtask` and `toggle_subtask` are written, tested, and have
+//!   no production caller, so every task has none
 //! - Snooze support: Z offers 5min, 15min, 30min and 1hr. `SnoozeDuration`
 //!   also has a `Custom { minutes }`, which nothing can reach: there is
 //!   nowhere to type a number, and the four fixed durations are the four

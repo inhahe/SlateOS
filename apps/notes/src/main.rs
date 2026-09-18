@@ -5,7 +5,9 @@
 //! - Notebook organization with nesting
 //! - Tagging system with tag-based filtering
 //! - Full-text search across all notes
-//! - Wiki-style `[[Note Title]]` linking between notes
+//! - Wiki-style `[[Note Title]]` syntax -- stored and displayed as text.
+//!   `resolve_links` and `build_backlinks` are written and tested and have
+//!   no caller, so a link never becomes a link
 //! - Version history with snapshot restore
 //! - Predefined templates (Meeting Notes, To-Do List, Journal, Code Snippet, etc.)
 //! - Export to plain text, Markdown, or HTML

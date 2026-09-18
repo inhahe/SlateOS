@@ -159866,6 +159866,34 @@ that made the *first* probe miss `passwordgen`: a field written as
 `.use_symbols =` in one direction, and a field replaced wholesale as
 `self.time_signature = sig` looks frozen from the other.
 
+**Refined, and then measured.** Restricting the probe to the fields of the
+*application* struct -- rather than every `self` in the file -- cuts 173 hits
+across 65 apps to **40 across 22**, and it independently reproduced
+`metronome`'s two, which had been found by hand. That is the good news. The
+bad news is what reading the 40 showed:
+
+| App | Field | Verdict |
+|---|---|---|
+| `videoplayer` | `volume` | **false positive.** `self.volume.increase(5)`, `.decrease(5)`, `.toggle_mute()` -- mutated through its own methods, which the probe does not count as writes |
+| `editor` | `font_size` | **false positive as a *label*.** It is genuinely frozen at 14.0, but it is never *shown*: the probe matched `tree.text(x, y, s, c, self.font_size)`, a call that draws text *at* that size rather than a label that displays the number |
+
+**So the probe has three blind spots and only one of them is fixed.** It now
+knows which struct a field belongs to. It still cannot see a field mutated
+through its own methods, and its test for "displayed" is the substring `text:`,
+which matches any drawing call that happens to take the field as an argument.
+**Both remaining blind spots produce false positives, which is the dangerous
+direction** -- a probe that under-reports wastes an afternoon, while one that
+over-reports gets working programs filed as broken. Of the 40, the two read so
+far were both wrong.
+
+**The conclusion for anyone picking this up:** the probes in this entry are
+worth running once, as a way of choosing what to read. **They are not worth
+believing.** Every defect recorded here was confirmed by reading the code, and
+in four separate cases today a probe's hit dissolved on contact with it --
+`passwordgen` (real, but found only after a probe missed it), `metronome`'s
+time signature (replaced wholesale), `slides`' `next_slide` (a redundant
+duplicate of working code), and `videoplayer`'s volume (mutated by method).
+
 **`metronome` is the worked example of the second failure.** Its
 `beats_per_measure` and `beat_value` have no writers, which reads as a
 metronome with a fixed time signature -- the one thing a metronome must be able

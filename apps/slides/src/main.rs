@@ -1955,11 +1955,23 @@ impl SlidesApp {
         });
 
         // Slide position and transition info.
-        let slide_pos = format!(
-            "Slide {} of {}",
-            self.current_index.saturating_add(1),
-            self.slides.len(),
-        );
+        // While typing, this line says so instead of counting slides. The
+        // count is still in the window bar; the mode is nowhere else, and the
+        // shape keys are captured in here -- so somebody pressing `S` for a
+        // rectangle gets an "S" in their text with nothing to explain it.
+        let slide_pos = match &self.editing {
+            Some((EditTarget::DeckTitle, _)) => {
+                String::from("Naming the deck -- Enter or Esc to finish")
+            }
+            Some((EditTarget::Element(_), _)) => {
+                String::from("Typing -- Shift+Enter for a new line, Esc to finish")
+            }
+            None => format!(
+                "Slide {} of {}",
+                self.current_index.saturating_add(1),
+                self.slides.len(),
+            ),
+        };
         cmds.push(RenderCommand::Text {
             x: 12.0,
             y: y + 5.0,
@@ -3173,6 +3185,31 @@ mod tests {
             modifiers,
             text: String::new(),
         })
+    }
+
+    /// The status bar says the app is typing, and how to stop.
+    ///
+    /// The shape keys are captured while typing, so somebody pressing `S` for
+    /// a rectangle gets an "S" in their text. A mode with no indicator is one
+    /// the user cannot tell they are in.
+    #[test]
+    fn the_status_bar_says_it_is_typing() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::T));
+        app.handle_event(&press(Key::Enter));
+
+        let shown: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            shown.iter().any(|t| t.contains("Esc to finish")),
+            "nothing on screen says the app is typing or how to stop"
+        );
     }
 
     /// The deck can be named, and the window bar says so.

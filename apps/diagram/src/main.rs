@@ -3575,7 +3575,15 @@ impl DiagramApp {
         cmds.push(RenderCommand::Text {
             x: self.window_w - 200.0,
             y: sy + 6.0,
-            text: String::from(mode_str),
+            // Labelling is a mode and this is where the program says which
+            // mode it is in. Without it, typing a label looks exactly like
+            // the app ignoring the keyboard -- and `Backspace` meaning
+            // something else in here is worth being told, not discovered.
+            text: String::from(if self.editing.is_some() {
+                "Mode: Labelling -- Enter or Esc to finish"
+            } else {
+                mode_str
+            }),
             color: self.palette.ink(self.palette.lavender),
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
@@ -3938,6 +3946,31 @@ mod tests {
 
         let node = app.nodes.iter().find(|n| n.id == id).expect("the node");
         assert!(node.label.ends_with("Pay"), "the label is {:?}", node.label);
+    }
+
+    /// The status bar says the app is labelling, and how to stop.
+    ///
+    /// `Backspace` means something else in this mode -- a character rather
+    /// than the selected node -- which is worth being told, not discovered.
+    #[test]
+    fn the_status_bar_says_it_is_labelling() {
+        let mut app = DiagramApp::new(800.0, 600.0);
+        let id = app.add_node(NodeShape::Rectangle, 100.0, 100.0);
+        app.selection.nodes = vec![id];
+        app.handle_event(&press(Key::F2));
+
+        let shown: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            shown.iter().any(|t| t.contains("Labelling")),
+            "nothing on screen says the app is labelling"
+        );
     }
 
     /// An edge can be labelled too, and its panel follows the typing.

@@ -1386,6 +1386,15 @@ mod tests {
 
     /// A layer with the default icons on a 1920x1080 screen.
     fn populated() -> DesktopIconLayer {
+        // `populate_defaults` reads `HOME`, and `settingsfile::testing`
+        // removes it for the duration of a scratch-config turn -- which four
+        // tests in `idle_lock.rs` take. The environment is process-global and
+        // these tests are threads, so without holding the same lock this
+        // reads `HOME` while another thread is deleting it and sees two icons
+        // instead of four. `ENV_LOCK` only serialises the tests that take it,
+        // and a reader is the side that forgets: see known-issues
+        // `TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS`.
+        let _turn = settingsfile::testing::config_turn();
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
         layer.populate_defaults();
         layer
@@ -1509,6 +1518,15 @@ mod tests {
     /// able to click it.
     #[test]
     fn a_position_off_this_screen_is_clamped_onto_it() {
+        // `populate_defaults` reads `HOME`, and `settingsfile::testing`
+        // removes it for the duration of a scratch-config turn -- which four
+        // tests in `idle_lock.rs` take. The environment is process-global and
+        // these tests are threads, so without holding the same lock this
+        // reads `HOME` while another thread is deleting it and sees two icons
+        // instead of four. `ENV_LOCK` only serialises the tests that take it,
+        // and a reader is the side that forgets: see known-issues
+        // `TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS`.
+        let _turn = settingsfile::testing::config_turn();
         let mut wide = DesktopIconLayer::new(3840, 2160, 40);
         wide.populate_defaults();
         wide.icons[0].x = 3600;
@@ -1864,6 +1882,15 @@ mod tests {
 
     #[test]
     fn the_default_icons_are_stacked_at_the_layers_own_pitch() {
+        // `populate_defaults` reads `HOME`, and `settingsfile::testing`
+        // removes it for the duration of a scratch-config turn -- which four
+        // tests in `idle_lock.rs` take. The environment is process-global and
+        // these tests are threads, so without holding the same lock this
+        // reads `HOME` while another thread is deleting it and sees two icons
+        // instead of four. `ENV_LOCK` only serialises the tests that take it,
+        // and a reader is the side that forgets: see known-issues
+        // `TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS`.
+        let _turn = settingsfile::testing::config_turn();
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
         layer.grid = GridConfig::new(120, 140);
         layer.populate_defaults();
@@ -2185,6 +2212,15 @@ mod tests {
 
     #[test]
     fn populate_defaults_creates_four_icons() {
+        // `populate_defaults` reads `HOME`, and `settingsfile::testing`
+        // removes it for the duration of a scratch-config turn -- which four
+        // tests in `idle_lock.rs` take. The environment is process-global and
+        // these tests are threads, so without holding the same lock this
+        // reads `HOME` while another thread is deleting it and sees two icons
+        // instead of four. `ENV_LOCK` only serialises the tests that take it,
+        // and a reader is the side that forgets: see known-issues
+        // `TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS`.
+        let _turn = settingsfile::testing::config_turn();
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
         layer.populate_defaults();
         assert_eq!(layer.icons.len(), 4);

@@ -1184,6 +1184,8 @@ fn spawn_process_inner(
     // argument rather than a `SpawnOptions` field: see [`CapInherit`].
     cap_inherit: CapInherit<'_>,
 ) -> KernelResult<SpawnResult> {
+    // Start of the span recorded into binfmt on success below.
+    let elf_load_start_ns = crate::hrtimer::now_ns();
     // This function OWNS the `linux_fd_redirects` handles (see
     // `spawn_process_with_redirects`): on success each is *moved* into the
     // child's fd table (released by the child's exit teardown); on any error it
@@ -1244,6 +1246,15 @@ fn spawn_process_inner(
             return Err(KernelError::InvalidExecutable);
         }
     };
+    // dd-946: binfmt is a statistics module and nothing reported to it,
+    // so /proc/binfmt read zero for the life of the machine. Recorded at
+    // BOTH ELF success sites -- spawn and exec -- because recording one
+    // would under-count by the path a running system uses most (dd-947,
+    // subset coverage).
+    let _ = crate::fs::binfmt::record_load(
+        crate::fs::binfmt::BinFormat::Elf64,
+        crate::hrtimer::now_ns().saturating_sub(elf_load_start_ns),
+    );
     serial_println!(
         "[spawn] ELF validated: {} segment(s), entry={:#x} (raw {:#x}, bias {:#x}), pie={}",
         segment_count,
@@ -2006,6 +2017,8 @@ pub fn exec_process(
     envp: &[&[u8]],
     exe_path: Option<&[u8]>,
 ) -> KernelResult<ExecResult> {
+    // Start of the span recorded into binfmt on success below.
+    let elf_load_start_ns = crate::hrtimer::now_ns();
     // Step 1: Parse and validate the ELF binary BEFORE tearing down
     // the old address space.  If the ELF is bad, the process keeps
     // running its old code.
@@ -2028,6 +2041,15 @@ pub fn exec_process(
         serial_println!("[exec] executable entry point overflowed load bias");
         KernelError::InvalidExecutable
     })?;
+    // dd-946: binfmt is a statistics module and nothing reported to it,
+    // so /proc/binfmt read zero for the life of the machine. Recorded at
+    // BOTH ELF success sites -- spawn and exec -- because recording one
+    // would under-count by the path a running system uses most (dd-947,
+    // subset coverage).
+    let _ = crate::fs::binfmt::record_load(
+        crate::fs::binfmt::BinFormat::Elf64,
+        crate::hrtimer::now_ns().saturating_sub(elf_load_start_ns),
+    );
     serial_println!(
         "[exec] ELF validated for exec: {} segment(s), entry={:#x} (raw {:#x}, bias {:#x}), pie={}",
         segment_count,

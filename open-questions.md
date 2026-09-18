@@ -2828,11 +2828,36 @@ confirms the order holds.
 | (c) Convert only the cross-module pairs | the five cross-module orderings get watched; the same-module init-guard idiom (the bulk) stays as it is. |
 
 **My recommendation: (a), scoped by measurement rather than all at once.**
-The cost objection has never actually been measured for this type -- there
-was no `PreemptSpinMutex` benchmark arm in `bench_lock_primitives` until
-today, so "the per-acquire tracking cost would matter" is itself an
-unmeasured claim. Convert, measure the arm, and revert any conversion that
-costs more than it is worth.
+
+**Measured after this question was filed, so the cost is no longer a
+guess.** There was no `PreemptSpinMutex` arm in `bench_lock_primitives`
+until 2026-09-17; there is now, and five boots agree:
+
+| | bare `spin::Mutex` | `PreemptSpinMutex` | `crate::sync::Mutex` |
+|---|---|---|---|
+| typical | 26ns | **160ns** | **395ns** |
+
+So converting one of these locks costs roughly **235ns per acquire**, and
+that 235ns is identifiable work -- lockdep, contention statistics, and two
+`rdtsc` reads -- rather than a general penalty for touching the acquire
+path. Which means the decision is per-lock and answerable: a lock taken
+once per boot costs nothing worth discussing, and one on a syscall path
+might.
+
+Two caveats on those numbers. They are QEMU TCG figures, so the *ratios*
+transfer and the nanoseconds do not. And one of the five boots reads
+28/268/719 -- uniformly higher across all three arms, so it is a slow boot
+rather than a slow lock, and is excluded rather than averaged in.
+
+A related measurement, because it bears on whether instrumenting these
+locks is inherently costly: the §949 leaf check adds three atomic
+operations to that same acquire path, and its cost is **below the noise
+floor** -- 166ns without it against 159/162/159 with it, the instrumented
+runs being the faster ones. So the 235ns is not "what it costs to touch
+this path"; it is what lockdep and statistics specifically cost.
+
+So: convert, read the arm, and revert any conversion that costs more than
+it is worth. The arm now exists to read.
 
 **If never answered:** the current behaviour is safe as far as anyone can
 tell and has been for months, so nothing breaks tomorrow. What degrades is
@@ -2840,6 +2865,55 @@ that every new nesting added inside one of these 489 locks is equally
 unwatched, and the check now reports 24 of them at its cap on every boot --
 so the noise grows and the signal for a genuinely new one gets harder to
 see.
+
+
+## A-Q17 — [A] Moving or scaling a video/cursor layer silently does nothing. Should the kernel refuse the request, or start honouring it? — Status: OPEN
+
+**In short:** the display hardware can draw a picture as a layer and place
+or stretch it anywhere on screen -- that is how a video overlay or a mouse
+cursor gets positioned without redrawing everything. A program asks for a
+rectangle, the kernel stores the numbers, replies success, and never uses
+them. So moving or resizing that layer does nothing at all, and the program
+is told it worked.
+
+**Glossary.** A *plane* is one such hardware layer. *Atomic modeset* is the
+interface a display program uses to change several display settings at once,
+so they either all take effect together or none do -- it is the modern way
+Linux programs talk to a graphics driver. *Scanout* is the hardware
+continuously reading a framebuffer to send pixels to the monitor.
+
+**The measurement.** `drm/plane.rs` declares `src_x/y/w/h` (the region of
+the picture to take) and `dst_x/y/w/h` (where to put it on screen). Every
+occurrence of `dst_w` in the whole kernel is the declaration or one of five
+writes; there are **zero reads**. One of those writes is
+`drm/atomic.rs:423`, the atomic commit handler storing what a client asked
+for. Nothing in the scanout path consults any of it.
+
+| option | *What changes:* |
+|---|---|
+| **(a) Refuse a commit that sets a non-default rectangle** (recommended) | a program that tries to move a layer gets a clear error instead of false success. Programs that only ever use the full-screen default are unaffected. |
+| (b) Honour the rectangle in the scanout path | layers can actually be placed and scaled -- the feature works. This is real driver work, per backend, and needs hardware to verify. |
+| (c) Leave it, and document it | nothing changes; `/proc` and the API keep reporting success for a no-op. |
+
+**Why this needs you and not me.** (a) is a user-visible behaviour change to
+an API that Linux programs use by construction. Anything currently setting a
+rectangle gets success today and an error afterwards -- and "currently
+works" is doing a lot of work in that sentence, because what it means is
+"currently appears to work while doing nothing". That is a trade between two
+kinds of wrong, and which one is worse depends on what you want the OS to
+be honest about.
+
+**My recommendation is (a)**, on design-decisions 945: a simulated action
+should be disclosed where its result is read, and an API return value is
+where this one is read. There is no `/proc` header to put a note in, so the
+only honest disclosure available is the error. (b) is the right end state
+and is not blocked by (a) -- refusing now does not make honouring it later
+harder.
+
+**If never answered:** nothing breaks today, because nothing in the tree
+sets a plane rectangle. It gets worse with time in a specific way: the first
+real compositor to try it will spend a while looking for a bug in its own
+code, since every call it makes returns success.
 
 
 

@@ -157561,12 +157561,37 @@ unexplained 203ns`, two orders larger. These are QEMU TCG measurements, so
 the absolute nanoseconds are not hardware nanoseconds -- the 21x *ratio*
 between raw and tracked is the part that transfers, not the ns.
 
-**And the leaf check's own cost is still unmeasured.** It adds three atomic
-operations to `PreemptSpinMutex`'s acquire path. The bench runs in the
-deferred bench task, and every boot this session was torn down on lane B's
-three ring-3 failures before that task reached the lock arm -- the same
-teardown that hid the lock-context line. So the arm exists and the number
-does not yet. Stated rather than assumed cheap.
+**Measured 2026-09-17, and dd-70's premise holds.** The arm did print --
+the teardown-before-bench worry was wrong, four consecutive boots reached
+it:
+
+| boot | raw | preempt-spin | tracked |
+|---|---|---|---|
+| `134333Z` | 25ns | 166ns | 408ns |
+| `144018Z` | 26ns | 159ns | 392ns |
+| `170456Z` | 26ns | 162ns | 394ns |
+| `202155Z` | 26ns | 159ns | 400ns |
+| `182832Z` | 28ns | 268ns | 719ns |
+
+`182832Z` is uniformly higher across all three arms, so it is a slow boot
+rather than a slow lock; the ratio is what transfers under TCG, not the ns.
+**`PreemptSpinMutex` is ~2.5x cheaper than `crate::sync::Mutex`** (159 vs
+394) and ~6x dearer than a bare `spin::Mutex` (26). So dd-70 split the types
+on a real cost difference, which nobody had measured until the arm existed.
+
+**And the leaf check's own cost is below the noise floor.** `134333Z`
+predates the leaf check (`leaf-claim check:` absent) and already has the
+arm, so a genuine before/after exists: 166ns uninstrumented against 159,
+162, 159 instrumented. The instrumented runs are *faster*, which means the
+three added atomics are not resolvable at 2000 iterations on TCG -- variance
+between runs exceeds any effect. Not "cheap because it looks cheap": a
+measured non-result.
+
+That also narrows A-Q16's cost objection. The 159 -> 394 gap is lockdep plus
+contention stats plus two `rdtsc` reads, not a general penalty for touching
+the acquire path -- so "converting these locks costs per-acquire tracking"
+is about 235ns of specific work, and a conversion's real cost depends on how
+often the lock in question is taken.
 
 ## TD-FONT-LEGACY-KERNING-DISAGREES-ACROSS-AN-INVISIBLE-CHARACTER -- 2026-09-17
 
@@ -158847,7 +158872,7 @@ number that large deserves a check that does not come from the same script:
 
 | module | every external reference |
 |---|---|
-| `binfmt` | 3 in `procfs.rs`, 3 in `kshell.rs`. **Nothing in the exec path consults it**, so the binary-format registry is decorative. |
+| `binfmt` | 3 in `procfs.rs`, 3 in `kshell.rs`. See the correction below -- my first reading of this one was wrong. |
 | `brightness` | `procfs.rs` stats, and `kshell.rs:80881 brightness::init_defaults()`. No backlight is ever set. |
 | `faceunlock` | 2 in `procfs.rs`. Nothing else. |
 
@@ -158913,6 +158938,35 @@ not 337 bugs, and a sweep rewriting 337 module docs on one agent's reading of
 the architecture would be exactly the kind of unilateral change dd-951 is
 about.
 
+### Correction 2026-09-17: `binfmt` is a statistics module, and I called it a registry
+
+The row above originally read *"nothing in the exec path consults it, so the
+binary-format registry is decorative"*. That was wrong, and it reached `main`
+before I read the module's first line:
+
+> `//! Binary Format -- executable format loader statistics.`
+
+`binfmt` is not something `exec` should *consult*. `register_format`,
+`record_load` and `record_error` are recorders: the module's job is to be
+**told** what the loader did. So the question is the reverse of the one I
+asked -- and the answer is still a gap, just a smaller and different one.
+**Nothing reports to it.** Outside `binfmt.rs` there is not one call to
+`record_load`, `record_error` or `register_format`; all 11 references are its
+own API and self-test. `/proc/binfmt`'s load and error counts are therefore
+permanently zero, and a reader would conclude no binary has ever been
+executed on this system.
+
+That is dd-946 from the other side: not a publisher with no subscriber, but a
+**subscriber with no publisher**. The fix is one call in the ELF loader, and
+it is a real instance of the wiring backlog this entry describes rather than
+a documentation defect.
+
+Recorded as a correction rather than a silent edit, because the wrong version
+is already on `main` and because the mistake is instructive: I inferred a
+module's purpose from its **name** and its function signatures without
+reading its first line. dd-947's rule is to grep the tree for prose about the
+thing before instrumenting it, and the prose here was line 1 of the file I
+already had open.
 ## `TD-C-THREE-CHECKERS-STOP-READING-AT-THE-FIRST-CFG-TEST-ATTRIBUTE` (lane C, 2026-09-17)
 
 **In short:** three of the tools that inspect Rust source cut the file off at
@@ -159007,6 +159061,57 @@ library format storing the bytes (the format already escapes, and
 whole crate -- import, search, the library file, the thumbnail cache key --
 and is worth doing properly rather than papering over at the call site.
 
+### [A] Twice in one day a lane-C gate went out green from lane C and red from lane A, and where the gate sits decided what it cost -- 2026-09-17
+
+**In short:** a check that only runs late catches mistakes after they have
+been shared, so the person who pays is whoever tries to build next -- never
+the person who made the mistake. It happened twice today with the same lane's
+gates, and the two incidents cost very different amounts purely because of
+*where* in the pipeline the check runs.
+
+| incident | gate | where it fired | what it cost me |
+|---|---|---|---|
+| `apps/pdfviewer` text in an accent role | `check-text-ink` | boot **pre-flight** | two dead runs, 658s and 2022s of gates before the refusal |
+| `apps/photomanager:1813` `library_note` | `check-fields-written-never-read` | my **sweep** | ~1 minute; the chain stops before the boot starts |
+
+Both were lane C's code failing lane C's own gate, and both reached `main`
+green from their side. Neither was a merge artifact of mine -- checked both
+times: the offending line is in `origin/main`'s copy of the file, and
+`lane-a` touches nothing under `apps/`.
+
+**Placement, verified rather than asserted**, because I claimed it to lane C
+before checking: `check-fields-written-never-read` appears **0** times in
+`scripts/hooks/pre-push`, 9 times in `scripts/boot-test.sh`, once in
+`build/sweep.sh`. So it cannot fire for the author at push time.
+
+**The principle, which is lane C's and better than my first version of it.**
+I had framed gate placement as "a boot-only gate's failures are paid for by
+whoever boots next", which is the author-centric reading. Lane C's
+correction: the good is **containment** -- one lane's breakage stopping
+before it reaches the other two -- and that is the only thing that justifies
+spending every lane's push time. My own chain demonstrates why the
+author-centric reading is wrong: it runs clippy, commit, merge, sweep, boot
+and pushes *separately afterwards*, so the pre-push battery has not run when
+my boot starts. A pre-push gate protects me from nobody; it protects the
+other lanes from me.
+
+**And the counterargument, with lane C's numbers**, because this is not an
+argument for wiring everything: 26 of the 33 checkers the boot runs are absent
+from pre-push, and adding that class wholesale would put **~2.5 minutes on
+every push for every lane** -- `check-live-counter-reads` alone is 92.6s,
+`check-tick-wiring` 28.6s. So it is a per-gate decision. Lane C added
+`check-overlay0-ink` (1.6s) and deliberately did *not* add
+`check-frame-needles` (0.3s) because it has no self-test and signals "I could
+not look" with a `return 2`, which at the shell is indistinguishable from a
+pass. Fast is not the same as safe to gate on.
+
+**Not acted on here.** `check-fields-written-never-read` is lane C's gate and
+`scripts/hooks/pre-push` is the file two lanes each believed they owned
+(A-Q11, still open). Wiring another lane's gate into a contested hook is the
+combination least likely to end well, so it is filed as a suggestion and
+nothing more. Recorded because two instances in one day is a pattern, and
+because the cost asymmetry -- 2022s against 60s for the same class of
+mistake -- is the argument for caring where a gate runs at all.
 ## `TD-C-A-BAD-ARGUMENT-TO-OPEN-EMPTIES-THE-FILE-BEFORE-IT-COMPLAINS` (lane C, 2026-09-17)
 
 **In short:** `io.open(path, "w", ...)` truncates the file and *then* validates
@@ -159048,6 +159153,106 @@ one session -- twice caught before running, once not. A habit that fails one
 time in three is not a habit, and the answer to a destructive default is to
 stop calling it, not to concentrate harder.
 
+### [A] `check-selftest-reinit`'s rule is right and one case short: "empty and live" is still broken for a table something registers into at boot -- 2026-09-17
+
+**In short:** a self-test that wipes its module's table must switch the table
+back on before it finishes, and a checker enforces that across 273 call
+sites. But "switched back on and empty" is only harmless if the table fills
+up through use. If something registered a row into it at boot, that row is
+gone and nothing puts it back -- so the table is live, empty, and wrong, and
+the checker is satisfied.
+
+**The existing rule, which is a good one.** `scripts/check-selftest-reinit.py`:
+
+> A `self_test` that clears a `Mutex<Option<_>>` state table must re-open it
+> before returning. Clearing is right; stopping there is not.
+
+and it names the distinction exactly -- `*STATE.lock() = None` leaves the
+module *switched off* for the rest of boot, because every writer goes through
+a `with_state` helper that returns `NotSupported` while it is `None`, whereas
+`None; init_defaults()` leaves it *empty and live*. 146 modules had the first
+shape; 18 were opened by nothing except their own self-test.
+
+**Where it stops short.** `binfmt` complies with that rule -- its `self_test`
+ends with `*STATE.lock() = None; init_defaults();`, and its own comment says
+why: "no fixtures leak into the live format table afterwards". Correct for a
+table whose contents accumulate through use.
+
+But `binfmt`'s contents do not accumulate through use. `record_load` requires
+the format to have been **registered** first, or it returns `NotFound`. So
+when I wired the boot to register `Elf64` at step ~12, the self-test later in
+the battery re-opened the table empty and the registration was gone. The
+`[binfmt]` report read `0 format(s), 0 load(s)` on a kernel that had just
+executed dozens of binaries, and `check-selftest-reinit` was green throughout
+-- correctly, by its own rule.
+
+**The refinement.** For a module with boot-time registration, "empty and
+live" is a third broken state alongside "switched off". Two ways out, and
+the first is what I did:
+
+| fix | where |
+|---|---|
+| register **after** the self-test dispatch | `main.rs`, beside the `Binfmt` dispatch -- one line moved |
+| have the self-test restore what it wiped | inside the module, but then the fixtures it was avoiding come back unless it re-registers exactly the boot set |
+
+**Not proposing a gate for it.** The class is "modules whose table needs a
+boot-time registration to be useful", and the only way I know to identify
+them is to notice that some `record_*` returns `NotFound` without a prior
+`register_*` -- which needs call-graph reasoning, not a grep, and would
+produce the same false positives as the module-doc probe (2 real of 8).
+Recorded so the next person wiring a stats module reads it before choosing a
+call site, which is the cheapest place for this to be known.
+
+### [A] The byte count I used as proof was anti-correlated with the truth -- 2026-09-17
+
+The strongest single piece of evidence this session produced for its own
+recurring lesson, and it is against me.
+
+I wired `binfmt` so something would finally report to it, and confirmed the
+fix by watching `/proc/binfmt` grow from **49 to 104 bytes** -- the only
+signal available, since the procfs self-test prints sizes and not content.
+I wrote that the disclosure was "confirmed live" on that basis.
+
+Then I added a report that prints the counts, because a byte count cannot
+distinguish "a format row exists" from "anything records into it". It said
+`0 format(s), 0 load(s)` -- the registration was being wiped by binfmt's own
+self-test, which re-opens its table empty by design. After moving the
+registration to after that dispatch:
+
+```
+[binfmt] 1 format(s), 11 load(s), 0 error(s)
+```
+
+And the three byte counts, in order:
+
+| state | `/proc/binfmt` |
+|---|---|
+| no wiring at all | 49 bytes |
+| wiring present, registration wiped -- **broken** | **104 bytes** |
+| working: 1 format, 11 loads | **51 bytes** |
+
+**So the number I cited as proof was the broken state, and the working state
+is two bytes off the unwired one.** The proxy did not merely fail to
+distinguish the cases; it moved in the *opposite direction* from the property
+it was standing in for. Had I trusted it, I would have shipped a statistics
+module that records nothing and a commit message asserting it works -- and
+the next person to read `/proc/binfmt` would have found a plausible, empty
+file.
+
+**Why it went the wrong way**, since a rule needs a mechanism and not just an
+anecdote: the broken state prints an empty-table form, and the working state
+prints one compact format row. Size tracked the *shape* of the output, which
+has no fixed relationship to whether a counter is being incremented. That is
+the whole of it -- a proxy is only evidence if you can state why it moves
+with the thing, and I never did.
+
+**What this does not say.** Byte counts were the right instrument for the
+dd-945 `/proc` disclosures earlier the same day: there the question was "is
+this string being served", growth of the exact length of the added sentence
+answers it, and an unchanged control (`devpower` at 362 both sides) made it
+specific. Same instrument, different question, opposite verdict on its
+fitness. The error was not using a proxy; it was not asking what the proxy
+was a proxy *for*.
 ## `TD-C-THE-TOOLKIT-CAN-SELECT-A-FOLDER-AND-NO-APPLICATION-ASKS-IT-TO` (lane C, 2026-09-17)
 
 **In short:** guitk's file dialog knows how to choose a *folder*. It has a

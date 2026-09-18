@@ -958,6 +958,22 @@ extern "C" fn kernel_main() -> ! {
             // reasoning, and same idempotence, as the sysuptime init below.
             fs::futexstat::init_defaults();
 
+            // Same defect, same fix, found 2026-09-17: `binfmt` had no
+            // caller of `init_defaults()` anywhere, so its STATE stayed
+            // None, every `record_*` would have returned NotSupported, and
+            // /proc/binfmt reported nothing for the life of the machine --
+            // indistinguishable from a system that has never executed a
+            // binary. Registering Elf64 here rather than in a loader
+            // because this kernel validates ELF inline in `proc::spawn`
+            // rather than installing pluggable format handlers, so there is
+            // no loader to do it at install time as binfmt's doc expects.
+            fs::binfmt::init_defaults();
+            // Elf64 is NOT registered here. `binfmt::self_test()` ends with
+            // `*STATE.lock() = None; init_defaults();` on purpose -- so its
+            // fixtures cannot leak into the live table -- and it runs later
+            // in the battery, so a registration made here is wiped before
+            // anything executes. Registered after that dispatch instead.
+
             // Step 12: Initialize futex subsystem.
             // Futexes enable fast userspace synchronization: the uncontended
             // path is pure atomic CAS (no syscall), the contended path uses
@@ -5543,6 +5559,15 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::binfmt::self_test(),
             );
+            // AFTER the self-test, which resets the table to empty by design.
+            // Registering before it left 0 formats at BOOT_OK, which the new
+            // [binfmt] report caught and a /proc byte count could not: the
+            // format row is the same size whether anything records into it.
+            if let Err(e) = fs::binfmt::register_format(fs::binfmt::BinFormat::Elf64) {
+                if e != error::KernelError::AlreadyExists {
+                    serial_println!("[boot] WARNING: binfmt Elf64 register failed: {:?}", e);
+                }
+            }
             // Recovery-partition self-test.  recoverypart previously seeded a fabricated
             // 500 MB "Healthy" recovery partition (85 MB used) with four pre-installed
             // tools — System Repair, Boot Repair, Memory Test, Command Shell — into
@@ -6676,6 +6701,16 @@ extern "C" fn kernel_main() -> ! {
                 "Sync",
                 selftest::Severity::Diagnostic,
                 crate::sync::self_test(),
+            );
+            // The leaf-claim control, beside the Mutex self-test rather
+            // than inside it: both need the scheduler alive (every
+            // acquisition here disables preemption), and this one wants
+            // its own PASS/FAIL line so a reader can tell which of the
+            // two failed.
+            selftest::dispatch_debug(
+                "Leaf-claim",
+                selftest::Severity::Diagnostic,
+                crate::sync::self_test_leaf_claim(),
             );
         }
         case();
@@ -9588,6 +9623,38 @@ extern "C" fn kernel_main() -> ! {
             // reports fire as they happen, so without this its totals
             // accumulate where nothing reads them.
             sync::report_leaf_claims();
+
+            // And binfmt's, for the reason its own accessor cannot give:
+            // `stats()` returns (0, 0, 0, 0) when STATE is None, which is
+            // byte-identical to an initialised table on a system that has
+            // executed nothing. /proc/binfmt growing 49 -> 104 bytes proved
+            // the format row was registered and said nothing about whether
+            // anything records into it -- the row exists either way. So the
+            // count is printed rather than inferred, and the uninitialised
+            // case is named (942).
+            {
+                let (fmts, loads, errors, _ops) = fs::binfmt::stats();
+                serial_println!(
+                    "[binfmt] {} format(s), {} load(s), {} error(s){}",
+                    fmts,
+                    loads,
+                    errors,
+                    if fmts == 0 {
+                        // Deliberately does NOT say "uninitialised". `stats()`
+                        // returns 0 formats for both `None` and an initialised
+                        // empty table, so naming either would assert a
+                        // distinction this accessor cannot make -- which is the
+                        // exact conflation this line was added to expose, and
+                        // which its first version reproduced.
+                        " -- no format registered; uninitialised and empty are \
+                         indistinguishable through stats()"
+                    } else if loads == 0 {
+                        " -- registered but nothing has reported a load"
+                    } else {
+                        ""
+                    }
+                );
+            }
 
             // Boot success marker — the boot test script greps for this.
             // Printed synchronously so it appears within seconds of power-on,

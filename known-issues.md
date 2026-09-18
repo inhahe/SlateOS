@@ -162803,6 +162803,50 @@ workspace runs inside it and I ran a cmake cross-build, a rootfs rebuild and
 two cargo-using pushes during an earlier one -- rather than at anything
 having become slow.
 
+#### Corrected the same day: the figures above came out of a truncated list
+
+The table above says 22 suites totalling ~875s with one at 663s. Measured
+again on the next run, reading **all** of them:
+
+| suite | seconds |
+|---|---|
+| `test-checkers-honour-head.py` | 573 |
+| `test-pre-push-fmt-gate.py` | **189** |
+| `test-pre-push-doclinks-gate.py` | **97** |
+| `test-pre-push-identity-gate.py` | **56** |
+| `test-canary-load.py` | 33 |
+| the other nineteen | 0-19 each |
+| **24 suites, total** | **1078s** |
+
+So it is 24 suites and 1078s, not 22 and ~875s, and the top four are 915s --
+**85% of the phase**. Three suites in the 56-189s band were missing from the
+first table entirely.
+
+**Why they were missing is the part worth keeping, because it is the error I
+recorded in `design-decisions.md` the same morning.** I read the timings with
+`head -20` over an output that is **alphabetically ordered**, and the three I
+missed are alphabetically late -- `test-pre-push-*`. Lane C's phrasing, from
+their `tail -40` that could not have shown a failure: *the filter kept the
+wrong end.* Mine kept the wrong end of my own instrument's output, hours
+after writing that sentence down.
+
+A truncation over a sorted list is not a sample. It is the first N of an
+ordering that has nothing to do with the quantity being measured, and it
+fails silently because twenty numbers look like a census.
+
+**The conclusion is unchanged, which is why the correction is worth making
+rather than burying:** 1078s is still 10% of the 10800s budget, so the suite
+phase was not the timeout and the 79 `=== Checking ...` gates remain the
+unattributed 80%. Being wrong by 200s does not move that, but publishing a
+figure taken off a truncated list would have made the next reader's
+arithmetic wrong for no reason.
+
+One further datum the full list gives that the truncated one could not:
+`test-checkers-honour-head.py` has now been measured at 776s standalone,
+663s in one boot and 573s in the next. It is variable by a third, which
+makes any single reading of it a poor basis for a threshold -- worth knowing
+before anyone sets one.
+
 **What is worth doing, and what is not.** Timing the 79 gates the way the
 suites are now timed is the obvious next step and is a larger edit: they are
 not a loop, they are individual functions. Not done yet, and possibly not

@@ -160370,6 +160370,7 @@ not "be careful" -- it is knowing the specific shapes.
 
 | 8 | **One file vs the crate.** Every sweep run on 2026-09-18 globbed `apps/*/src/main.rs`. **12 of 141 apps have more than one source file** -- `explorer` has 8, `settings` 5, `editor` 4. | Concluded `apps/editor` "has zero typing sites" and could not be typed in. Its typing lives in `input.rs`. A text editor was one sentence away from being filed as unable to accept text. |
 
+| 12 | **The test build never compiled it.** Code behind `#[cfg(not(test))]` is absent from `cargo test`, so the suite passes over it without type-checking a line. The mirror image of lane A's `#[cfg(unix)]` lint, which no clippy on a Windows host ever compiles. | Added `apps/terminal`'s shell bridge behind `#[cfg(not(test))]`; **126 tests passed over code that had never been compiled.** It was caught only because `main` then referenced functions absent from a test build, which failed loudly -- had it not, an unchecked feature would have shipped behind a green suite. |
 | 11 | **One list is checked and its twin is not.** `apps/editor` has an exhaustive `match` that forces a new `Command` to be handled -- and a hand-written `Command::ALL: [Self; 14]` that decides whether the guard test ever *reaches* it. The compiler enforces the first and nothing enforces the second. | A variant added to the enum and omitted from `ALL` compiles, with a guard-test arm that is written, never executed, and reported as passing. **No symptom at all** -- worse than passing for the wrong reason, because there is no run to inspect. |
 | 10 | **A heredoc eats the backslashes.** A `python - <<'PYEOF'` block is supposed to pass its body through literally; in this shell it did not, three times. `\x1b` arrived as a real ESC byte and `\r\n` as a real CRLF. | Wrote literal control characters into a Rust byte literal (invalid source), and a lone CRLF into `known-issues.md` -- in a paragraph *about* an escape sequence, which is how it got past reading. The habit that fixes it: **any script containing backslash escapes goes in a file, not a heredoc.** |
 
@@ -160382,6 +160383,16 @@ on that day (`notes`, `slides`, `diagram`, `explorer`, `rssreader`, `netscan`,
 them hold. The check is one line and belongs in any future sweep: count
 occurrences of the bare name against occurrences of `name(`, and read the
 difference.
+
+**Eight and twelve are the same question asked of different axes**, and
+together they say what a green run actually covers: shape 8 is *which files*
+were read, shape 12 is *which configuration* was built. A suite is silent about
+every line outside both. The practical form is two questions to ask of any
+passing run -- **did it read the whole crate, and did it build the
+configuration the user gets?** -- and on this project the answers differ from
+the obvious one often enough to be worth asking aloud: 12 of 141 apps have more
+than one source file, and `cargo test` builds `cfg(test)` while the shipped
+binary is `cfg(not(test))`.
 
 **The eleventh is the one to look for in any codebase with a guard test.**
 The pattern "an exhaustive `match` plus an array of every variant" is a good

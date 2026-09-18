@@ -161937,10 +161937,39 @@ a single line inside that observable. The rule gets you to the right
 function; it does not get you to the right line, and stopping there is how
 I recorded a wrong hypothesis with a right-sounding provenance.
 
-**The fix, not applied.** Replace the single `cq_pop()` with a bounded
-retry -- poll, yield, poll, up to a small budget -- and return a
+**Sharpened: this is not a missing retry, it is an unfollowed convention
+stated eight times in the same file.** `netstack_client.rs` already
+contains eight bounded poll loops -- `for _ in 0..64`, `..32`, `..32`,
+`..16`, `..64`, `..64`, `..16`, `..16` -- and their comments give the
+reason in almost identical words:
+
+> *Poll for the reply. Each non-blocking recv **drives the daemon's RX pump
+> once**, so a bounded loop is enough...*
+>
+> *Poll for the looped-back datagram. Each non-blocking recv **drives the
+> daemon's UDP pump once**, so a bounded loop suffices...*
+>
+> *...to writable (**each poll pumps once**). Loopback normally completes
+> immediately.*
+
+So the file states the governing fact -- one poll drives the daemon's pump
+exactly once, therefore one poll may not be enough -- and applies it in
+eight **data**-path functions. The one **control**-path function that every
+other call in the module routes through, `submit_and_reap`, polls once.
+
+That is lane C's rule with the populations inverted: a remedy applied
+everywhere the failure was *seen* (the data paths, where a missing datagram
+is obvious and frequent) and absent from the place it was not (the control
+path, where it costs one boot in twenty and arrives as a bare
+`InternalError`). And *"Loopback normally completes immediately"* is the
+same sentence as the ratio argument: true about the common case, and the
+reason nobody noticed the uncommon one.
+
+**The fix, not applied.** Copy the neighbours: a bounded poll loop around
+`cq_pop()` with the same shape and rationale as the eight beside it, and a
 *distinguishable* error on exhaustion rather than sharing `InternalError`
-with three unrelated conditions. Not applied here because it is in the
+with three unrelated conditions. `TimedOut` (-6) and `WouldBlock` (-4) both
+already exist, so no new variant is needed. Not applied here because it is in the
 control path every `netstack_client` call uses, not just `listen`, so it
 wants its own boot rather than a ride on one already in flight; and because
 the consistency checks below it should get their own error values in the

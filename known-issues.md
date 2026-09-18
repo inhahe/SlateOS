@@ -159368,9 +159368,9 @@ nine operations have somewhere to hang. Adding nine more keyboard shortcuts
 would reach them too, and would leave a program whose sidebar still does
 nothing when clicked.
 
-**PROGRESS 2026-09-17: four have a route, and the pointer layer is half
-built.** The version panel and the note list answer a click; the notebook
-sidebar still does not.
+**PROGRESS 2026-09-17: seven have a route, and the pointer layer is done.**
+All four panels answer a click -- the version panel, the note list, the
+notebook tree and the tag cloud.
 
 | Operation | Route |
 |---|---|
@@ -159378,20 +159378,26 @@ sidebar still does not.
 | delete a note | right-click the note |
 | move a note to another notebook | right-click, Move to |
 | tag a note | right-click, Add tag..., type, Enter |
+| filter by tag | click the tag; click it again to clear |
+| rename a notebook | right-click it, Rename |
+| delete a notebook | right-click it, Delete |
 | remove a tag | **none** |
-| filter by tag | **none** |
-| delete a notebook | **none** |
-| rename a notebook | **none** |
 | retitle a note | **none** |
 | remove a checklist item | **none** |
 | resolve a wiki link | **none** |
 
-Three of the seven that remain want the notebook sidebar to answer a click,
-which is the third panel and the obvious next piece. Retitling and removing a
-checklist item want an edit inside the editor rather than a menu, and wiki
-links want the link text itself to be clickable -- a different shape again,
-and the only one of the seven that is not "hang it off a hit test that does
-not exist yet".
+**The four that remain are not waiting on a hit test.** Every panel takes a
+pointer now, so what is missing in each case is a control rather than a layer:
+
+* *remove a tag* -- the chips are drawn in the sidebar for filtering, and a
+  note's own tags are not drawn anywhere. There is nothing to click yet.
+* *retitle a note* and *remove a checklist item* -- both are edits **inside**
+  the editor, where the text already lives. A menu is the wrong shape for
+  them; they want the editor to be editable in place.
+* *resolve a wiki link* -- `[[Note Title]]` has to become clickable text
+  within the editor's own content, which no other control here does.
+
+So the cheap half is finished and the rest is editor work.
 
 **A smaller bug found while reading the version panel for a hit-test.** It
 computes how many rows fit with `(height - 30.0) / 24.0` and then advances

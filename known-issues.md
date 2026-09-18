@@ -159787,3 +159787,84 @@ evidence of a defect -- it is the normal state of an app whose real source is
 not built yet, and the presence of an honest-empty path is what tells the two
 apart.
 
+## `TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE` (lane C, 2026-09-18)
+
+**In short:** A number of our apps have a setting that the code genuinely
+honours -- it gates a draw, or picks a sort, or decides what characters a
+password may contain -- and that nothing anywhere can change. The value it was
+given at construction is the only value it will ever have. From inside the code
+it looks like a finished feature, because every part of it *is* finished except
+the one that lets a person use it.
+
+**This is the exact mirror of pre-push gate 50 (`write-only-fields`)**, and the
+worse half of the pair. A write-only field is state nobody reads: dead weight,
+no user ever affected. A **frozen** field is read and obeyed, so the feature is
+live, visible and stuck -- and usually *displayed*, which turns it from a
+missing feature into a false offer.
+
+**Verified and fixed.**
+
+| App | Frozen | What it meant |
+|---|---|---|
+| `rssreader` | `sidebar_selection` | no feed or folder could ever be selected; the article filter's `Feed`, `Folder` and `Starred` arms were unreachable |
+| `rssreader` | `is_expanded` | no folder could be collapsed; the "closed" indicator could not be drawn |
+| `rssreader` | `sidebar_visible` | the sidebar could not be hidden |
+| `rssreader` | `sort_order` | the window displayed "Sort: Date (newest first)" -- a label that could not say anything else -- over a `sort_by` that worked perfectly |
+| `passwordgen` | `use_lowercase`, `use_uppercase`, `use_digits`, `use_symbols`, `exclude_ambiguous` | **`length` was the only field of `password_opts` with a writer.** The options panel drew all five as "Yes"/"No" and no key could change one |
+
+**`passwordgen` is the one to look at**, because the consequence is not
+cosmetic. Every password it produced contained symbols. Sites that forbid
+symbols are common, so for those the generator was simply unusable, and the
+user could see an option called "Symbols: Yes" that they could not act on.
+Ambiguous characters (`l` and `1`, `O` and `0`) could never be excluded either.
+Both are now keys, and turning off the last remaining class is refused --
+`generate_password` answers an empty pool with an empty string, so a generator
+with nothing selected would have produced nothing at all, silently.
+
+**Four more read and confirmed, not yet fixed.** Each is obeyed by real logic
+and has no writer anywhere in production:
+
+| App | Frozen | Stuck at | What it means |
+|---|---|---|---|
+| `pdfviewer` | `dark_mode` | **`true`** | `page_color()` returns `rgb(40,42,54)` for every page, and `text_color` inverts with it. **Every document renders in inverted colours and no key restores the white page** -- though the comment beside it calls this "the viewer's own `dark_mode` for reading", which is a thing you would switch |
+| `calendar` | `week_starts_monday` | `true` | every month grid begins on Monday, for everyone, forever |
+| `hexeditor` | `case_sensitive` | `true` | search is always case-sensitive; there is no case-insensitive search in the program |
+| `imageviewer` | `show_toolbar` | `true` | the toolbar cannot be hidden, including when looking at an image |
+
+`pdfviewer` is the one that matters most: a document reader that cannot show a
+document in the colours it was written in.
+
+**Remaining candidates, unread.** The probe over `apps/*/src/main.rs` for `pub`
+`bool` fields with no assignment, no `&mut` and at least one read found 157
+across 47 apps. **Most are not defects** -- `is_dir` on a directory entry is
+supposed to be fixed at construction, and the probe cannot tell a property from
+a preference. Still worth reading: `imageviewer` `show_status_bar` ·
+`spreadsheet` `show_toolbar` · `mindmap` `show_sidebar` · `markdowneditor`
+`autosave_enabled` · `diskimager` `verify_after_write` · `systemrestore`
+`enabled` (it sits in `ScheduleConfig` and means "whether scheduling is on",
+so it is a preference and not a property).
+
+**`fontmanager` `system` is the worked example of a false positive**, and worth
+keeping here so the next person does not re-file it: it is documented as
+"whether this is a system font (cannot be uninstalled)". It is a fact about a
+font, it is supposed to be fixed at construction, and a writer for it would be
+the bug. The probe cannot see that; only the doc comment and the name can.
+
+**The discriminator to apply to each** is not "does it have a writer" but two
+questions in order: *is this a preference or a property of the thing it sits
+on?*, and if a preference, *is it displayed?* A displayed preference that
+cannot be changed is the false-offer case and should be fixed or removed. An
+undisplayed one is a smaller matter. `apps/paint`'s `should_quit` is neither:
+it has no writer **and** no reader, so it is an ordinary write-only field --
+and it cannot be fixed, because the framework gives an app no way to close its
+own window.
+
+**Why a gate is not proposed here.** Gate 50 can be mechanical because
+"written and never read" is decidable from the text. "Frozen" is not: the probe
+cannot distinguish `is_dir` from `dark_mode`, and a gate with a 157-entry
+baseline of mostly-correct code teaches people to add to the baseline. The
+check that works is the per-app one `rssreader` now carries --
+`every_advertised_shortcut_does_something` -- which asserts that what the UI
+offers, the program answers. That is worth copying to any app with a settings
+panel: **draw the option, then assert something can change it.**
+

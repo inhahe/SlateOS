@@ -162650,6 +162650,38 @@ a single line inside that observable. The rule gets you to the right
 function; it does not get you to the right line, and stopping there is how
 I recorded a wrong hypothesis with a right-sounding provenance.
 
+#### Fix landed 2026-09-18, and this boot does NOT verify it
+
+The bounded poll is in (`netstack_client.rs`, 8 rounds, `TimedOut` on
+exhaustion) and the boot after it reached `BOOT_OK` with only the three
+baselined failures. That is **not** evidence the race is fixed, and the
+distinction is the whole point:
+
+| log | head-of-line result |
+|---|---|
+| after the fix | `NOT CHECKED` -- declines to A-Q15 |
+| 2026-09-18 21:24, **before** the fix | `NOT CHECKED` -- declines to A-Q15 |
+| 2026-09-18 03:49, before the fix | `NOT CHECKED` -- declines to A-Q15 |
+| 2026-09-18 02:28 | `FAIL: head-of-line setup step listen` |
+
+So declining to A-Q15 is the **normal** path and predates the change; the
+`listen` failure was the 1-in-20 anomaly. A single green boot is therefore
+consistent with "fixed" and with "did not happen to fire", and at a base
+rate of one in twenty it would take many boots to tell those apart.
+
+**The fix is claimed structurally, not empirically:** the control path now
+polls the way its eight neighbours in the same file do, for the reason their
+comments state. That is lane C's rule applied to myself -- they claimed their
+environment-race fix structurally after 2,843 tests passed both before and
+after it, and declined to read the pass as proof. A flake that reproduces one
+run in twenty is not disproved by one run.
+
+What *would* verify it: the `FAIL: head-of-line setup step listen` line not
+appearing across ~20 further boots, or an instrumented count of how many
+rounds `submit_and_reap` actually needs. The second is cheap and tells you
+something the first cannot -- if the answer is always 1, the retry is
+insurance; if it is sometimes 2, the race was real and is now absorbed.
+
 **Sharpened: this is not a missing retry, it is an unfollowed convention
 stated eight times in the same file.** `netstack_client.rs` already
 contains eight bounded poll loops -- `for _ in 0..64`, `..32`, `..32`,

@@ -160284,6 +160284,21 @@ finished.
 | `spreadsheet` | `Ctrl+T` | **no** |
 | `mindmap` | `B` | **no** |
 
+**2026-09-18, later: the authoring keys were given the same treatment as they
+landed**, so the three fixes did not widen this entry. `notes` says "No notes
+yet -- Ctrl+N makes one." where the user is already looking, and its editor
+placeholder reads "Select a note, then Enter to write in it"; `diagram`'s
+properties panel reads "Label (F2)" for both a node and an edge. **The empty
+state is the best place a primary action can be named** -- it is on screen
+exactly when somebody wants to start and has nothing else to read.
+
+Fixing that also turned up an asymmetry worth recording: `diagram` draws the
+label in *two* property rows, node and edge, and the live-buffer fix had gone
+into only the node one -- so an edge being relabelled showed the new text on
+the canvas and the old text in the panel. No test covered edges to say so.
+`a_user_can_label_an_edge` does now. **A fix applied to one of a pair is a
+fix that looks complete from the diff.**
+
 **The pattern that worked** is naming the key beside the thing it controls,
 which costs one format string wherever the app already draws the value. It
 does not apply to the six unlabelled cases: `pdfviewer` draws no reading-mode

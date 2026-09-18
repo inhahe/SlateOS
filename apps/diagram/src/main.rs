@@ -3296,7 +3296,7 @@ impl DiagramApp {
                     Some((LabelTarget::Node(id), buf)) if *id == node.id => buf.as_str(),
                     _ => node.label.as_str(),
                 };
-                self.render_property_row(cmds, px, &mut row_y, "Label", shown_label);
+                self.render_property_row(cmds, px, &mut row_y, "Label (F2)", shown_label);
                 self.render_property_row(cmds, px, &mut row_y, "X", &format!("{:.0}", node.x));
                 self.render_property_row(cmds, px, &mut row_y, "Y", &format!("{:.0}", node.y));
                 self.render_property_row(
@@ -3343,7 +3343,11 @@ impl DiagramApp {
             let eid = self.selection.edges.first().copied().unwrap_or(0);
             if let Some(edge) = self.find_edge(eid) {
                 self.render_property_row(cmds, px, &mut row_y, "Kind", edge.kind.label());
-                self.render_property_row(cmds, px, &mut row_y, "Label", &edge.label);
+                let shown_edge_label = match &self.editing {
+                    Some((LabelTarget::Edge(id), buf)) if *id == edge.id => buf.as_str(),
+                    _ => edge.label.as_str(),
+                };
+                self.render_property_row(cmds, px, &mut row_y, "Label (F2)", shown_edge_label);
                 self.render_property_row(cmds, px, &mut row_y, "Style", edge.line_style.label());
                 self.render_property_row(
                     cmds,
@@ -3934,6 +3938,46 @@ mod tests {
 
         let node = app.nodes.iter().find(|n| n.id == id).expect("the node");
         assert!(node.label.ends_with("Pay"), "the label is {:?}", node.label);
+    }
+
+    /// An edge can be labelled too, and its panel follows the typing.
+    ///
+    /// Added after the node row was fixed and the edge row was not: the
+    /// canvas showed the new label while the properties panel still showed
+    /// the old one, and no test covered edges to say so.
+    #[test]
+    fn a_user_can_label_an_edge() {
+        let mut app = DiagramApp::new(800.0, 600.0);
+        let a = app.add_node(NodeShape::Rectangle, 100.0, 100.0);
+        let b = app.add_node(NodeShape::Rectangle, 300.0, 100.0);
+        let e = app.add_edge(a, b);
+        app.set_edge_label(e, String::from("Old"));
+        app.selection.edges = vec![e];
+
+        app.handle_event(&press(Key::F2));
+        for _ in 0..3 {
+            app.handle_event(&press(Key::Backspace));
+        }
+        for c in ["Y", "e", "s"] {
+            app.handle_event(&types(c));
+        }
+
+        let shown: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !shown.iter().any(|t| t == "Old"),
+            "the old edge label is still drawn somewhere: {shown:?}"
+        );
+
+        app.handle_event(&press(Key::Escape));
+        let edge = app.edges.iter().find(|x| x.id == e).expect("the edge");
+        assert_eq!(edge.label, "Yes", "the edge label was not written");
     }
 
     /// Backspace while labelling deletes a character, not the box.

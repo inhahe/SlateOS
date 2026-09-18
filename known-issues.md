@@ -160548,6 +160548,21 @@ field of a struct type can be mutated by a method without ever being assigned
 (`self.viewport.scroll_by(..)`), so "never assigned" means nothing there; for a
 `bool` it means exactly what it says.
 
+**The fix is not the same for every one of them, and the difference matters
+more than the count.** Three were verified by hand before any code was written,
+and they want three different things:
+
+| | |
+|---|---|
+| `apps/regextester` `i`/`g`/`m` | **a key.** The buttons are already drawn and already read; they needed a chord. Fixed. |
+| `apps/spreadsheet` `show_gridlines`, `show_formula_bar`, `show_status_bar` | **a key.** View toggles in an app that already has an `F1` list to advertise them on. |
+| `apps/lockscreen` `show_clock_seconds`, `show_date` | **a settings file, not a key.** `main` passes `LockScreenConfig::default()`, so a lock screen can never show seconds and always shows the date -- but a lock screen is a security surface where every keystroke belongs to the password field, and adding shortcuts to it would be the wrong repair. This one is blocked on where its configuration should live, which is a question for the operator rather than a line of code. |
+
+So the survey's output is a list of *questions about intent*, not a list of
+patches. A flag frozen because nobody wired the toggle and a flag frozen
+because its home is a configuration file that does not exist yet look identical
+from the code and need opposite work.
+
 It is still a candidate list. Some of the 60 are data rather than settings --
 `is_directory` on a listing entry is immutable because that is what it is --
 and the survey says so rather than pretending otherwise. The first run reported

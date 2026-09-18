@@ -160358,11 +160358,13 @@ about a program that was working correctly, or nearly hid a real one. This
 entry lists them with the instance that caught each, because the fix is not
 "be careful" -- it is knowing the specific shapes.
 
-**It started at seven and is at thirteen**, all in the same day, and the slug
+**It started at seven and is at fourteen**, all in the same day, and the slug
 keeps the original number because renaming it would break every reference to
-it. The later six are not more of the same: 8 and 12 are about *coverage* --
-which files a sweep read, which configuration a build compiled -- and 11 and 13
-are about *lists*, which is where this has cost the most. The count going up
+it. The later seven are not more of the same: 8 and 12 are about *coverage* --
+which files a sweep read, which configuration a build compiled -- 11 and 13 are
+about *lists*, which is where this has cost the most, and 14 is about the
+*shape of the query itself*, which is the one that survives however carefully
+the code is read. The count going up
 is the useful signal here; it says the supply is not exhausted, so a search
 that returns nothing still means nothing.
 
@@ -160378,6 +160380,7 @@ that returns nothing still means nothing.
 
 | 8 | **One file vs the crate.** Every sweep run on 2026-09-18 globbed `apps/*/src/main.rs`. **12 of 141 apps have more than one source file** -- `explorer` has 8, `settings` 5, `editor` 4. | Concluded `apps/editor` "has zero typing sites" and could not be typed in. Its typing lives in `input.rs`. A text editor was one sentence away from being filed as unable to accept text. |
 
+| 14 | **The filter kept the wrong end.** A search that ends in `head` or `tail` answers a different question from the one asked: it reports what the *last* N matching lines were, not whether any of them was the one you were looking for. The match count is reassuring and unrelated. | Gated a lane-C merge on `cargo test --workspace ... | grep -E 'FAILED|^error|test result: ok' | tail -40`. It printed forty `ok` lines and no failures -- and *could not have printed a failure*, because a workspace of 420 crates emits hundreds of `ok` lines after any early one. The pipeline also threw away cargo's exit status, so both the evidence and the verdict were gone. The fix is not a wider filter: keep the whole log, capture the status into a variable on its own line, and search the file. |
 | 13 | **The checker is a third copy.** A list printed on screen and the handler behind it are two copies of one fact, and the cure is a test that reads both -- but a test that reads the list and then *names the keys itself* has added a third, which drifts from the other two and catches neither. | Four of the five apps that print their keys checked them this way, each having written the same forty-line `"Left/Right" => vec![Key::Left, Key::Right]` table independently: `mixer`, `rssreader`, `wordsearch` and `slides`. `rssreader`'s checked only the *first* key of each row, so three advertised keys had never been pressed by anything. Now one parser, `guitk::shortcut`, reads the printed label -- see `TD-C-A-PRINTED-KEY-LIST-IS-A-SECOND-COPY`. |
 | 12 | **The test build never compiled it.** Code behind `#[cfg(not(test))]` is absent from `cargo test`, so the suite passes over it without type-checking a line. The mirror image of lane A's `#[cfg(unix)]` lint, which no clippy on a Windows host ever compiles. | Added `apps/terminal`'s shell bridge behind `#[cfg(not(test))]`; **126 tests passed over code that had never been compiled.** It was caught only because `main` then referenced functions absent from a test build, which failed loudly -- had it not, an unchecked feature would have shipped behind a green suite. |
 | 11 | **One list is checked and its twin is not.** `apps/editor` has an exhaustive `match` that forces a new `Command` to be handled -- and a hand-written `Command::ALL: [Self; 14]` that decides whether the guard test ever *reaches* it. The compiler enforces the first and nothing enforces the second. | A variant added to the enum and omitted from `ALL` compiles, with a guard-test arm that is written, never executed, and reported as passing. **No symptom at all** -- worse than passing for the wrong reason, because there is no run to inspect. |
@@ -160505,14 +160508,29 @@ and it is wrong in both directions:
 So the survey ranks apps to read by hand. It does not decide anything, and the
 report says so at the top of the file.
 
-**The worked example, verified by reading it.** `apps/renamer` answers eight
-letter keys, each adding a rename operation to the pipeline -- lower, upper,
+**The worked example, verified by reading it and then fixed.** `apps/renamer`
+answered eight letter keys, each adding a rename operation to the pipeline -- lower, upper,
 title, snake, kebab, trim, extension-lower, extension-remove. The only string
 in the crate that comes near naming one is `"kebab-case"`, which is the label
 of the *operation*, not of the key that adds it. So the program's entire
 purpose is reachable only by someone who has read the handler, which is the
 same defect as `apps/slides` being unable to put a shape on a slide, one step
-further out: the operation is reachable, and the way in is not.
+further out: the operation is reachable, and the way in is not. It now prints
+the list on `F1` or `?`, which leaves the survey's count at 126 apps binding an
+unguessable key and eleven printing one.
+
+**Four things the program had never written down** turned up while building the
+states its guard test needs, each found by a red test rather than by reading
+the source, and they are the reason the per-app cost is fifteen minutes rather
+than five: `Up` declines at the top of the list; adding a rule selects it, and
+the newest is last, so no single state has a rule with room both above and
+below it; `execute_rename` records nothing unless a name actually moves on
+disk; and files arrive *already selected*, so a helpful `Ctrl+A` in the setup
+saw everything selected, did its opposite, and renamed nothing. The last was
+caught only by an assertion written into the state helper for exactly that
+case. Without it the suite would have been green over a `Ctrl+Z` pressed at an
+app with nothing to undo -- **a test that checks nothing passes exactly as
+loudly as one that checks everything.**
 
 **Why this is filed rather than done.** There are of the order of a hundred
 apps in it, at roughly fifteen minutes each. That is not a task, and doing a

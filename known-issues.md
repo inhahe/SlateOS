@@ -160031,7 +160031,7 @@ so. `find_state.case_sensitive` remains frozen and stays filed under
 control for it, so it is a smaller matter than the rest. 225 tests, up from
 217.
 
-## `TD-C-SLIDES-CAN-ADD-A-TEXTBOX-AND-NOTHING-ELSE` (lane C, 2026-09-18)
+## `TD-C-SLIDES-CAN-ADD-A-TEXTBOX-AND-NOTHING-ELSE` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** `apps/slides` edits a deck well enough -- new slide, duplicate,
 delete, copy, paste, add a textbox -- and then stops. You cannot add a shape or
@@ -160075,3 +160075,19 @@ transition -- both of which already have `next()`-style cycling elsewhere in
 this tree and are already displayed, so the display becomes true the moment a
 key exists.
 
+
+
+**Fixed the same day.** `S`, `O`, `L` and `A` add the four shapes, `I` adds an
+image placeholder, `Ctrl+T` moves through the three themes and `Ctrl+R` through
+the six transitions -- both of which the window was already printing. `Delete`
+now removes the *selected element* when there is one and the slide otherwise,
+with `Shift+Delete` always meaning the slide: erring towards the element is the
+safe half of the ambiguity, since re-adding an element is cheap and re-making a
+slide is not.
+
+**One test earns its place more than the others.** `Key::T` is unguarded and
+lives in the same match, so putting the new `Key::T if ctrl` arm after it would
+have let Ctrl+T add a textbox and leave the theme alone -- which looks exactly
+like a theme key that does nothing, the very defect being fixed. I wrote it
+that way first and caught it before running it;
+`ctrl_t_does_not_add_a_textbox` is what keeps it caught. 90 tests, up from 83.

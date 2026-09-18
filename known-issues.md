@@ -160861,3 +160861,63 @@ than an `open-questions.md` entry -- that file is 32 deep and
 
 Worth noting the consequence plainly: **until it is committed, SlateOS has
 no licence on `main`**, which is the only copy anyone else can see.
+
+### [A] The kernel now counts interrupt nesting twice, on two counters with different coverage, and I added the second one this session -- 2026-09-18
+**Status:** OPEN (consolidation designed and costed below; not applied -- a boot was building)
+
+**In short:** the kernel tracks how deeply nested it is inside interrupt
+handlers. It now does that in two separate places, which disagree: one
+counts every kind of interrupt, the other counts two of five kinds. I added
+the one that counts everything, today, *because* the existing one counted
+two of five -- which is the same thing I criticised a filesystem module for
+this morning, done by me, in the same session.
+
+| counter | bumped at | coverage | read by |
+|---|---|---|---|
+| `cputime::irq_depth` (`cputime.rs:92`) | `apic.rs:989` (timer), `ioapic.rs:726` (device) | **2 of 5** dispatch arms | CPU-time accounting, and the nesting cap at `apic.rs:1006` |
+| `idt::HARDIRQ_DEPTH` (`idt.rs:513`) | `dispatch_vector` | **5 of 5** | `in_hardirq()`, for the lockdep context check |
+
+They describe the same physical fact -- hardirq nesting depth on this CPU.
+
+**How it happened, which is the only part that generalises.** dd-948 said a
+rule only an interrupt can break needs a check only an interrupt can trip,
+so the lockdep marker had to see *every* vector. `cputime`'s counter saw two
+of five. I sited a new counter at the one point every vector passes through
+rather than extending the existing one to the other three arms -- the
+expedient choice, and I did not record it as a choice at the time. That is
+`fs/immutable.rs`'s shape exactly: a second store for a capability that
+already had one, added because the first did not reach far enough.
+
+**The consequence that already existed, and is now fixable in the same
+change.** Vectors 251 (TLB shootdown), 252 (reschedule IPI) and 255
+(spurious) never bump `cputime::irq_depth`, so cycles spent in them are
+charged to whatever task they interrupted rather than to IRQ time. That was
+recorded earlier as an attribution gap worth fixing and not urgent. It is
+the *same* gap: the fix for the duplicate is the fix for the attribution.
+
+**The consolidation, costed rather than asserted.** Move the
+`enter_irq`/`exit_irq` bracket into `dispatch_vector`, drop the two existing
+call sites so nothing is counted twice, and have `in_hardirq()` read
+`cputime::irq_depth()`. One counter, 5-of-5 coverage, attribution closed.
+
+`enter_irq` was read before proposing this rather than assumed cheap: it is
+an `rdtsc`, a bounds-checked per-CPU lookup and four relaxed atomic
+operations, with no lock, no allocation and no fallible path -- a missing
+`CPU_TIME` slot returns early. `exit_irq` is the same shape with a
+defensive `depth == 0` guard. So the added cost on the three uncovered
+vectors is one `rdtsc` plus a few relaxed atomics per interrupt.
+
+**The tradeoff, which is why this is a decision and not a cleanup.** Those
+three vectors are the ones whose handlers are deliberately minimal --
+atomics, `invlpg`, EOI. Adding an `rdtsc` to the reschedule IPI and to
+*spurious* interrupts is a real cost on the hottest, least useful paths, and
+spurious interrupts are exactly the ones you get a storm of when something
+is wrong. Against that: two counters for one fact is a model that will drift
+the first time someone changes one of them, and the accounting is wrong
+today in a way nobody can see from `/proc`.
+
+**Not applied yet**, and deliberately not applied in a hurry: it touches
+`dispatch_vector`, which every interrupt in the system passes through, and
+the correct order of `enter_irq` relative to EOI and `softirq::process_pending`
+is the kind of thing that is obvious in review and wrong at runtime. It
+needs its own boot, not a ride on one already in flight.

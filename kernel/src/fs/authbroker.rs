@@ -1,7 +1,12 @@
 //! Auth Broker — credential and authentication management.
 //!
-//! Implements a Plan 9 Factotum-inspired authentication broker.
-//! Programs never touch passwords or keys directly; they request
+//! **Records credentials; does not broker anything yet.** No crypto, and
+//! no caller outside `/proc`, `kshell` and this module's own self-test --
+//! so nothing authenticates through it. The design below is what it is
+//! intended to become.
+//!
+//! Intended: a Plan 9 Factotum-inspired authentication broker where
+//! programs never touch passwords or keys directly; they request
 //! capabilities through the broker, which handles credential
 //! storage, verification, and capability granting.
 //!

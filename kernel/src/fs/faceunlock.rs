@@ -1,6 +1,22 @@
 //! Face Unlock — facial recognition authentication.
 //!
-//! Provides facial recognition enrollment, verification, and
+//! **`verify()` ALWAYS SUCCEEDS for any enrolled user.** It compares
+//! nothing: the body is a counter bump and `Ok(VerifyResult::Matched)`,
+//! under a comment reading "Simulate match (always matches enrolled
+//! user)". There is no camera, no recognition, and no caller outside
+//! `/proc` and this module's own self-test -- so nothing authenticates
+//! through it today, and anything that started to would be granting
+//! access to every enrolled id unconditionally.
+//!
+//! Stated this bluntly because the weaker phrasing is the dangerous one.
+//! A first draft of this note said `verify()` "compares stored numbers,
+//! not a face", which is an understatement, and an understatement about a
+//! security function is believed rather than investigated (lane C's
+//! `TD-C-A-MODULE-DOC-IS-THE-ONE-CLAIM-NOTHING-CHECKS`: an overstatement
+//! is caught the first time somebody tries the feature; an understatement
+//! is not).
+//!
+//! Intended: facial recognition enrolment, verification, and
 //! authentication as an alternative unlock method.
 //!
 //! ## Architecture

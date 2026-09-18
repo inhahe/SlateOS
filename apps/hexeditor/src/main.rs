@@ -1530,6 +1530,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+I", "Match case, while the search bar is up"),
     ("Ctrl+G", "Go to an offset"),
     ("Ctrl+B", "Set or clear a bookmark here"),
+    ("Ctrl+D", "Show or hide the data inspector"),
     ("Ctrl+N / Ctrl+P", "Next / previous bookmark"),
     ("Ctrl+Tab", "Next tab"),
     ("F1", "This list"),
@@ -1905,6 +1906,15 @@ impl HexEditor {
                     }
                     doc.hex_nibble = 0;
                     doc.ensure_cursor_visible(vis);
+                    return EventResult::Consumed;
+                }
+                // `show_inspector` was `true` at construction with no writer
+                // anywhere, so the panel was permanent and the bytes it sat
+                // beside had that much less room. `Ctrl+D` for "data
+                // inspector", which is what every other hex editor calls it.
+                // Found by `scripts/frozen-flag-survey.py`.
+                Key::D => {
+                    self.show_inspector = !self.show_inspector;
                     return EventResult::Consumed;
                 }
                 Key::B => {
@@ -3706,6 +3716,33 @@ mod tests {
         assert!(
             !help_text(&mut editor).contains("F1 closes this"),
             "Escape did not close it"
+        );
+    }
+
+    /// **The data inspector can be put away.**
+    ///
+    /// `show_inspector` was `true` at construction and written nowhere, so the
+    /// panel was permanent and the bytes beside it had that much less room.
+    /// `Ctrl+D` and not a bare `D`, which types the hex digit 0xD -- the
+    /// chord is in the Ctrl block that runs first, and this asserts the byte
+    /// under the cursor did not change, which is the only way to tell the two
+    /// apart when both answer `Consumed`.
+    #[test]
+    fn the_data_inspector_can_be_hidden() {
+        let mut editor = loaded();
+        let before = editor.show_inspector;
+        let byte = editor.active_doc().data.first().copied();
+
+        editor.handle_key(&key_press(Key::D, Modifiers::ctrl()));
+
+        assert_ne!(
+            editor.show_inspector, before,
+            "Ctrl+D did not move the panel"
+        );
+        assert_eq!(
+            editor.active_doc().data.first().copied(),
+            byte,
+            "Ctrl+D was taken as hex-digit entry and wrote a byte"
         );
     }
 

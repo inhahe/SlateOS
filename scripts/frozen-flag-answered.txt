@@ -1,0 +1,56 @@
+# Fields this survey reports that have already been looked at and answered.
+#
+# Fields: crate<TAB>field<TAB>reason
+#
+# WHY THIS FILE EXISTS. The survey finds fields that are read and never
+# written. Some of those are not defects, and no scanner can tell which: a
+# measurement computed once and correctly never changed, a setting whose
+# feature deliberately does not exist yet and says so on screen, a decision
+# already put to the operator. Without somewhere to record that, every run
+# re-offers the same rows and the same investigation happens again -- which
+# it has, twice.
+#
+# This is NOT a suppression list for inconvenient findings. Two rules:
+#
+#   * Every line carries a reason, and the reason has to say what *makes* it
+#     not a defect -- not that it is known.
+#   * A line naming a field the survey no longer reports is an error, not a
+#     no-op. The tool says so. An answer that has rotted is worse than no
+#     answer, because it reads as a decision somebody made about the code as
+#     it is now.
+#
+# Run `python scripts/frozen-flag-survey.py --answered` to see these rows
+# with their reasons instead of hiding them.
+
+# --- measurements, correctly immutable after construction -----------------
+passwordgen	has_digits	a measurement of a password, computed at construction
+passwordgen	has_lowercase	ditto
+passwordgen	has_uppercase	ditto
+passwordgen	has_symbols	ditto
+passwordgen	is_common	ditto
+passwordgen	rating	the strength score computed from the four above
+
+# --- a feature that deliberately does not exist, and says so on screen ----
+# `SETTINGS_NOT_APPLIED` is drawn in the panel: "Not applied: nothing reads
+# these except this panel." There is no converter in this tree yet. Giving
+# these keys would be the worse defect -- a control that moves and changes
+# nothing is a claim, where a frozen one beside an honest note is a gap.
+mediaconvert	video_codec	drawn beside SETTINGS_NOT_APPLIED; no converter exists
+mediaconvert	audio_codec	ditto
+mediaconvert	codec	ditto
+mediaconvert	two_pass	ditto
+mediaconvert	strip_metadata	ditto
+mediaconvert	preserve_aspect	ditto
+videoplayer	format	screenshot config, drawn beside NO_SCREENSHOTS
+videoplayer	include_subtitles	ditto
+videoplayer	container	metadata of the loaded file, not a setting
+
+# --- with the operator ----------------------------------------------------
+passwordgen	disallow_common	C-Q26: a policy wants a settings file, not a key
+passwordgen	require_digit	C-Q26
+passwordgen	require_lowercase	C-Q26
+passwordgen	require_symbol	C-Q26
+passwordgen	require_uppercase	C-Q26
+lockscreen	show_clock_seconds	C-Q26: must persist across a restart to mean anything
+lockscreen	show_date	C-Q26
+markdowneditor	autosave_enabled	C-Q26

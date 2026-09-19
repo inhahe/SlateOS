@@ -108,7 +108,13 @@ KNOWN LIMITS, in the tool's own voice rather than a reader's:
     a *parser* and construction from a *literal* look identical to this tool
     and mean opposite things.
 
-Run from anywhere: `python scripts/frozen-flag-survey.py [--all]`.
+Rows already looked at and found not to be defects live in
+`scripts/frozen-flag-answered.txt`, one per line with the reason. They are
+subtracted from the count and listed separately; a line there naming a field
+this no longer reports is an error, because an answer about code that has
+since changed reads as a decision about the code as it is now.
+
+Run from anywhere: `python scripts/frozen-flag-survey.py [--all] [--answered]`.
 """
 
 from __future__ import annotations
@@ -390,17 +396,54 @@ def survey(crate: Path) -> tuple[list[str], int, bool]:
     return frozen, len(names), scoped
 
 
+#: Rows already looked at and found not to be defects.
+#:
+#: See `frozen-flag-answered.txt` for the rules. The important one is that a
+#: line naming a field the survey no longer reports is an *error*: an answer
+#: about code that has since changed reads as a decision somebody made about
+#: the code as it is now, and it was not.
+ANSWERED = HERE / "frozen-flag-answered.txt"
+
+
+def answered() -> dict[tuple[str, str], str]:
+    """`{(crate, field): reason}` from the answers file."""
+    out: dict[tuple[str, str], str] = {}
+    try:
+        text = io.open(ANSWERED, encoding="utf-8").read()
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        out[(parts[0], parts[1])] = parts[2]
+    return out
+
+
 def main(argv: list[str]) -> int:
     show_all = "--all" in argv
+    show_answered = "--answered" in argv
+    known = answered()
     rows: list[tuple[int, str, list[str], bool]] = []
+    answered_rows: list[tuple[str, str, str]] = []
     total_fields = 0
     for crate in sorted((ROOT / "apps").iterdir()):
         if not crate.is_dir():
             continue
         frozen, count, scoped = survey(crate)
         total_fields += count
-        if frozen:
-            rows.append((len(frozen), crate.name, frozen, scoped))
+        open_fields = []
+        for field in frozen:
+            reason = known.get((crate.name, field))
+            if reason is None:
+                open_fields.append(field)
+            else:
+                answered_rows.append((crate.name, field, reason))
+        if open_fields:
+            rows.append((len(open_fields), crate.name, open_fields, scoped))
 
     rows.sort(key=lambda r: (-r[0], r[1]))
     scoped_rows = [r for r in rows if r[3]]
@@ -436,6 +479,28 @@ def main(argv: list[str]) -> int:
         for n, name, frozen, _ in shown_loose:
             shown = ", ".join(frozen[:6]) + ("..." if len(frozen) > 6 else "")
             print(f"  {name:<18}{n:>3}  {shown}")
+
+    if answered_rows:
+        print(f"\n{len(answered_rows)} already answered (--answered for why)")
+        if show_answered:
+            for crate_name, field, reason in sorted(answered_rows):
+                print(f"  {crate_name}.{field}: {reason}")
+
+    # An answer about a field the survey no longer reports is not harmless.
+    # It reads as a decision somebody made about the code as it is now, and
+    # the code has moved -- the field may have been fixed, renamed, or
+    # deleted, and each of those wants the line gone or rewritten.
+    stale = sorted(set(known) - {(c, f) for c, f, _ in answered_rows})
+    if stale:
+        print(
+            f"\n{len(stale)} line(s) in {ANSWERED.name} name a field this "
+            f"survey no longer reports:"
+        )
+        for crate_name, field in stale:
+            print(f"  {crate_name}.{field}")
+        print("Remove or rewrite them: an answer about code that has changed "
+              "is not an answer.")
+        return 1
     return 0
 
 

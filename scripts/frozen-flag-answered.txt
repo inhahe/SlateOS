@@ -109,3 +109,9 @@ ircclient	tls	shapes the URL of a connection CANNOT_CONNECT_LINES says is not ma
 # that is assembled, checked and discarded is not a setting a user is missing.
 email	is_html	a header of a message CANNOT_FETCH_LINES says is never sent
 email	priority	ditto
+
+# `ClipboardState::mode` gates `sync_clipboard`, which is about a session
+# that cannot exist: `CANNOT_CONNECT_LINES` is drawn where the session list
+# would be -- "no host has been contacted and no session exists". The
+# per-profile `clipboard_mode` beside it is a different field and is set.
+remotedesktop	mode	gates clipboard sync for a session CANNOT_CONNECT_LINES says never starts

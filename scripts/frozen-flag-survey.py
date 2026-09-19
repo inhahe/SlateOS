@@ -320,6 +320,16 @@ def held_by_the_many(code: str) -> set[str]:
 #: `*self = ...` -- one assignment that writes every field at once.
 WHOLE_SELF_RE = re.compile(r"\*\s*self\s*=")
 
+#: `.something = TypeName { .. }` or `= TypeName::new(..)` -- the same
+#: thing from outside: a field replaced by a whole new value of its type,
+#: which writes every field inside it without naming any of them.
+#:
+#: `apps/systemrestore` does `manager.schedule = ScheduleConfig { enabled:
+#: true, frequency: Weekly, .. }`, so `enabled` and `frequency` have a
+#: writer and no `.enabled =` exists anywhere to find it by.
+def assigned_wholesale_re(ty: str) -> re.Pattern[str]:
+    return re.compile(r"\.\w+\s*=\s*(?:\w+\s*::\s*)*%s\s*(?:\{|::)" % re.escape(ty))
+
 
 def replaced_wholesale(code: str, types: set[str]) -> set[str]:
     """Field names of any of `types` whose impl replaces the whole value.
@@ -341,7 +351,11 @@ def replaced_wholesale(code: str, types: set[str]) -> set[str]:
     """
     written = set()
     for ty in types:
-        if not any(WHOLE_SELF_RE.search(b) for b in impl_bodies(code, ty)):
+        replaced_from_inside = any(
+            WHOLE_SELF_RE.search(b) for b in impl_bodies(code, ty)
+        )
+        replaced_from_outside = assigned_wholesale_re(ty).search(code) is not None
+        if not (replaced_from_inside or replaced_from_outside):
             continue
         body = struct_body(code, ty)
         if body is None:

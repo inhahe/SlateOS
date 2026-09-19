@@ -115,3 +115,9 @@ email	priority	ditto
 # would be -- "no host has been contacted and no session exists". The
 # per-profile `clipboard_mode` beside it is a different field and is set.
 remotedesktop	mode	gates clipboard sync for a session CANNOT_CONNECT_LINES says never starts
+
+# Settings for a capture that cannot happen. `CANNOT_CAPTURE` is drawn on
+# every view now -- before this it was a notification you had to provoke, and
+# it faded after six seconds.
+screenshot	default_action	what to do after a capture CANNOT_CAPTURE says never happens
+screenshot	show_notification	whether to announce a save that never occurs

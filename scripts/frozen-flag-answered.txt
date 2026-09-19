@@ -75,3 +75,8 @@ screenrecorder	capture_cursor	under the always-drawn CANNOT_RECORD note; no fram
 screenrecorder	click_highlight	ditto
 screenrecorder	active_annotation_tool	annotations are drawn during recording; there is none
 screenrecorder	annotation_toolbar_visible	ditto
+
+# Per-datum, or a symptom of something larger that is filed on its own.
+archivemanager	encrypted	a property of the archive, read from the file by the parser
+archivemanager	purpose	set when the pending choice is created; a fact about that choice
+archivemanager	format	TD-C-THE-ARCHIVE-CREATION-OPTIONS-ARE-A-STRUCT-NOBODY-CALLS

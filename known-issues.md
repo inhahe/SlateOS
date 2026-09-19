@@ -160717,6 +160717,41 @@ it was aimed at. **A safety rail abandoned under time pressure is a safety rail
 that was never there.** The rule earns its keep most exactly when the edit
 feels too small to need it.
 
+**Update 2026-09-18 — the headline number was wrong, in both directions.**
+The survey's scope regex wanted `impl App for X` and every app here writes
+`impl oswindow::app::App for X`, so it matched none of them: 19 of the 20
+apps it had reported on were silently scanned *whole*, where a directory
+entry's `is_directory` counts as a frozen setting. Two-thirds of the number
+above was furniture, and the fallback that produced it was described in the
+docstring as "visible in the count" while being printed nowhere.
+
+Correcting it made the survey both shorter and longer. Scoped to the app
+struct alone it read 16 in 12 apps -- and `apps/lockscreen`'s
+`show_clock_seconds`, a real one already filed here, had vanished, because it
+lives one field away in a `LockScreenConfig`. Following singleton-held
+structs but not collection-held ones -- a type the crate ever puts in a
+`Vec` is data, so `apps/chess`'s `Move::is_castling` stays out -- gives
+**107 in 37 apps**, which is the first figure from this tool that means what
+the entry title claims.
+
+Four apps out of it so far:
+
+| App | Was | Now |
+|---|---|---|
+| `videoplayer` | a "Player Settings" screen drawing six settings, none changeable; `repeat` read by the playlist and set by nothing | one `SettingRow` list the renderer walks and a cursor indexes; `R` and `Shift+E` for the other two |
+| `passwordgen` | every passphrase capitalised and ending in a digit, for everyone, always | `Shift+C`/`Shift+D`/`Shift+S`, plus `M`; panel and handler are one list |
+| `diskimager` | "verify after write" and "compress" drawn as checkboxes with no writer | `V` and `C` |
+| `torrent`, `email`, `regextester` | see their own entries above | fixed earlier the same day |
+
+**The lesson is the one this file keeps recording, for the third time in a
+day: a checker whose population is defined by a name it expects will one day
+be handed a different name and say nothing.** `key-survey.py` matched
+`SHORTCUTS` and missed `HELP_ROWS`; `check-variant-lists.py` checks lists
+*named* `ALL`; this one wanted a bare trait name. Each was silent, and each
+reported a confident number while doing so. The cure that worked here was
+not a better regex -- it was **printing the count of things the tool could
+not scope**, so a population that collapses says so out loud.
+
 ## `TD-C-THE-REDRAW-SIGNAL-WAS-A-THIRD-LIST` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** `apps/jsonviewer` decides whether to draw a frame by comparing a

@@ -195,6 +195,18 @@ def survey(crate: Path) -> tuple[list[str], int]:
     # Declared in the app's own struct; written (or not) anywhere in the crate.
     names = set(FIELD_RE.findall(body))
     for enum in plain_enums(code):
+        # `Option<Enum>` as well as `Enum`. That shape is how an app spells
+        # "no filter, or this one", and it is exactly what a filter strip with
+        # a selection highlight is built on -- `apps/regextester`'s
+        # `library_category_filter` is `Option<PatternCategory>`, `None` at
+        # construction, read to highlight a chip and to filter the list, and
+        # written nowhere. A survey that covers `Enum` and not `Option<Enum>`
+        # misses the filters, which are the ones a user can see.
+        wrapped = re.compile(
+            r"\b(?:pub(?:\([^)]*\))?\s+)?([a-z_][a-z0-9_]*)\s*:\s*Option<\s*%s\s*>\s*,"
+            % re.escape(enum)
+        )
+        names.update(wrapped.findall(body))
         field_of_enum = re.compile(
             r"\b(?:pub(?:\([^)]*\))?\s+)?([a-z_][a-z0-9_]*)\s*:\s*%s\s*,"
             % re.escape(enum)

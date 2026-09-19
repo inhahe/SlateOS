@@ -87,8 +87,13 @@ the `bool` beside it and not that is reporting the smaller half of one defect.
 
 KNOWN LIMITS, in the tool's own voice rather than a reader's:
 
-  * A field written only through `..Default::default()` or a destructuring
-    assignment is not seen as written, and would be reported wrongly.
+  * A field written only through `..Default::default()`, or by a
+    destructuring assignment, is not seen as written and would be
+    reported wrongly. `*self = ...` *is* seen: a struct whose impl
+    replaces itself wholesale has every one of its fields counted as
+    written, which is how `apps/credmanager`'s `NewEntryForm::set_kind`
+    -- a real setter with a real caller, writing `kind` without the
+    string `.kind =` existing anywhere -- stopped being reported.
   * A field name that repeats across two structs in one crate is treated as
     one name; a write to either exonerates both.
   * Test-only writers are deliberately ignored, because a flag only a test can
@@ -312,7 +317,45 @@ def held_by_the_many(code: str) -> set[str]:
     return found
 
 
-def owned_state(code: str) -> tuple[str, bool]:
+#: `*self = ...` -- one assignment that writes every field at once.
+WHOLE_SELF_RE = re.compile(r"\*\s*self\s*=")
+
+
+def replaced_wholesale(code: str, types: set[str]) -> set[str]:
+    """Field names of any of `types` whose impl replaces the whole value.
+
+    `apps/credmanager`'s `NewEntryForm::set_kind` is
+
+        fn set_kind(&mut self, kind: EntryType) {
+            if self.kind == kind { return; }
+            *self = Self::new(kind);
+        }
+
+    -- a real setter, with a real caller, that writes `kind` without the
+    string `.kind =` appearing anywhere. Searching for assignments to a field
+    cannot see it, so the field reads as frozen and it is not.
+
+    Rather than record that one as a known false positive, the survey now
+    asks the question the shape actually poses: does anything replace the
+    whole struct? If so, every field in it has a writer.
+    """
+    written = set()
+    for ty in types:
+        if not any(WHOLE_SELF_RE.search(b) for b in impl_bodies(code, ty)):
+            continue
+        body = struct_body(code, ty)
+        if body is None:
+            continue
+        written.update(
+            m.group(1)
+            for m in re.finditer(
+                r"\b(?:pub(?:\([^)]*\))?\s+)?([a-z_][a-z0-9_]*)\s*:", body
+            )
+        )
+    return written
+
+
+def owned_state(code: str) -> tuple[str, bool, set[str]]:
     """The app's own struct **and the singleton structs it owns**, joined.
 
     Scoping to the app struct alone was too narrow in exactly the way that
@@ -330,10 +373,10 @@ def owned_state(code: str) -> tuple[str, bool]:
     """
     owner = re.search(APP_IMPL_OWNER_RE, code)
     if owner is None:
-        return code, False
+        return code, False, set()
     root = struct_body(code, owner.group(1))
     if root is None:
-        return code, False
+        return code, False, set()
     # A type the crate stores by the many is data, not state, wherever
     # else it also appears -- so it is pre-seeded into the visited set.
     seen = held_by_the_many(code) | {owner.group(1)}
@@ -349,7 +392,10 @@ def owned_state(code: str) -> tuple[str, bool]:
             continue
         bodies.append(sub_body)
         queue.extend(singleton_field_types(sub_body))
-    return "\n".join(bodies), True
+    # The visited set starts seeded with collection-held types, which were
+    # never walked; only the ones with a body are part of this state.
+    walked = {owner.group(1)} | {ty for ty in seen if struct_body(code, ty)}
+    return "\n".join(bodies), True, walked
 
 
 
@@ -366,7 +412,7 @@ def survey(crate: Path) -> tuple[list[str], int, bool]:
     code = crate_live_code(crate)
     if not code.strip():
         return [], 0, True
-    body, scoped = owned_state(code)
+    body, scoped, walked = owned_state(code)
     # Declared in the app's own struct; written (or not) anywhere in the crate.
     names = set(FIELD_RE.findall(body))
     for enum in judgeable_enums(code):
@@ -388,10 +434,15 @@ def survey(crate: Path) -> tuple[list[str], int, bool]:
         )
         names.update(field_of_enum.findall(body))
     names = sorted(names)
+    # A field of a struct something replaces wholesale has a writer, even
+    # though no assignment to it by name exists to be found.
+    wholesale = replaced_wholesale(code, walked)
     frozen = [
         name
         for name in names
-        if read_re(name).search(code) and not written_re(name).search(code)
+        if name not in wholesale
+        and read_re(name).search(code)
+        and not written_re(name).search(code)
     ]
     return frozen, len(names), scoped
 

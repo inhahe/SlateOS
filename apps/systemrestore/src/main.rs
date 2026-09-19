@@ -186,6 +186,29 @@ impl SnapshotType {
         ]
     }
 
+    /// The next filter choice, treating "no filter" as the first.
+    ///
+    /// `None` is inside the cycle rather than on a key of its own, because
+    /// the way out of a filter has to be as reachable as the way in -- a
+    /// filter you cannot clear hides snapshots and looks like a program that
+    /// has lost them.
+    #[must_use]
+    pub fn step_filter(current: Option<Self>) -> Option<Self> {
+        let types = Self::all();
+        let at = match current {
+            None => 0,
+            Some(ty) => types
+                .iter()
+                .position(|t| *t == ty)
+                .map_or(0, |i| i.saturating_add(1)),
+        };
+        if at >= types.len() {
+            None
+        } else {
+            types.get(at).copied()
+        }
+    }
+
     /// Icon indicator color for each type.
     pub fn indicator_color(self, pal: &Palette) -> Color {
         match self {
@@ -2534,6 +2557,23 @@ impl SystemRestoreUI {
                 }
                 Key::L => {
                     self.toggle_lock();
+                    EventResult::Consumed
+                }
+                // The snapshot-type filter. `passes_filters` has consulted it
+                // since it was written and `type_filter` was `None` at
+                // construction with no writer, so the status bar's "Filter:"
+                // half could never appear and the list could not be narrowed
+                // to, say, the snapshots taken before an update.
+                Key::F => {
+                    self.type_filter = SnapshotType::step_filter(self.type_filter);
+                    // The selection is a snapshot id, and the filter may have
+                    // just hidden it. Leaving it selected would show the
+                    // details of a row that is not in the list, which reads
+                    // as the list being wrong rather than the filter working.
+                    let visible = self.visible_ids();
+                    if !self.selected_id.is_some_and(|id| visible.contains(&id)) {
+                        self.selected_id = visible.first().copied();
+                    }
                     EventResult::Consumed
                 }
                 _ => EventResult::Ignored,
@@ -5380,6 +5420,95 @@ mod tests {
             modifiers: guitk::event::Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    /// The snapshot list can be narrowed by type, and the status bar says so.
+    ///
+    /// `passes_filters` has consulted `type_filter` since it was written, and
+    /// the field was `None` at construction with no writer anywhere in the
+    /// crate -- so the status bar's "Filter: ..." half could never appear and
+    /// the list could not be narrowed to, say, the snapshots taken before an
+    /// update.
+    #[test]
+    fn ctrl_f_narrows_the_list_by_snapshot_type() {
+        let mut ui = SystemRestoreUI::new();
+        let all = ui.visible_ids().len();
+        assert!(all > 0, "control: the fixture has no snapshots");
+        assert!(
+            !status_text(&ui).contains("Filter:"),
+            "control: the status bar should say nothing about a filter yet"
+        );
+
+        let mut narrowed_somewhere = false;
+        for _ in SnapshotType::all() {
+            assert_eq!(
+                ui.handle_event(&press_ctrl(Key::F)),
+                EventResult::Consumed,
+                "Ctrl+F was ignored"
+            );
+            let Some(ty) = ui.type_filter else {
+                continue;
+            };
+            assert!(
+                status_text(&ui).contains(ty.label()),
+                "the status bar does not name the filter that is on: {:?}",
+                status_text(&ui)
+            );
+            let shown = ui.visible_ids();
+            if shown.len() < all {
+                narrowed_somewhere = true;
+            }
+            for id in &shown {
+                let snap = ui
+                    .manager
+                    .tree
+                    .get_snapshot(*id)
+                    .expect("a visible id must name a snapshot");
+                assert_eq!(
+                    snap.snapshot_type,
+                    ty,
+                    "a {} filter left a {} snapshot in the list",
+                    ty.label(),
+                    snap.snapshot_type.label()
+                );
+            }
+            // Whatever is selected has to be something the list is showing.
+            if let Some(sel) = ui.selected_id {
+                assert!(
+                    shown.contains(&sel),
+                    "the selection is a snapshot the filter has hidden"
+                );
+            }
+        }
+        assert!(
+            narrowed_somewhere,
+            "no filter value removed anything; the fixture cannot tell a \
+working filter from a broken one"
+        );
+
+        // One more step comes back out to no filter at all.
+        ui.handle_event(&press_ctrl(Key::F));
+        assert!(
+            ui.type_filter.is_none(),
+            "the filter does not cycle back to showing everything"
+        );
+        assert_eq!(
+            ui.visible_ids().len(),
+            all,
+            "clearing the filter did not bring every snapshot back"
+        );
+    }
+
+    fn status_text(ui: &SystemRestoreUI) -> String {
+        ui.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .find(|t| t.starts_with("View: "))
+            .unwrap_or_default()
     }
 
     fn press_ctrl(k: Key) -> Event {

@@ -54,3 +54,14 @@ passwordgen	require_uppercase	C-Q26
 lockscreen	show_clock_seconds	C-Q26: must persist across a restart to mean anything
 lockscreen	show_date	C-Q26
 markdowneditor	autosave_enabled	C-Q26
+
+# `CANNOT_TRANSFER_LINES` says the client cannot download or upload, and the
+# settings panel now says "Not applied: nothing reads these except this
+# panel -- there is no network stack." Keys for a network stack that does not
+# exist would be the worse defect.
+torrent	dht_enabled	drawn beside SETTINGS_NOT_APPLIED; no network stack exists
+torrent	pex_enabled	ditto
+torrent	enable_utp	ditto
+torrent	encryption_mode	ditto
+torrent	pre_allocate_storage	ditto
+torrent	proxy_type	ditto

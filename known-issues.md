@@ -160599,6 +160599,23 @@ and set at construction, which is an editor preserving what it opened. Same
 false-positive mode as `apps/installer`, and the same tell -- look at where the
 struct comes from.
 
+**One app has now yielded three separate findings in three passes, and that
+is the most useful thing the survey has taught me about how to use it.**
+`apps/regextester`:
+
+1. the `i`/`g`/`m` flag buttons, drawn as controls and unoperable;
+2. `active_tab`, so two of its three tabs were unreachable;
+3. `show_replace` and `show_groups` -- and `show_replace` is the worst of the
+   three, because `Tab` cycles focus *into* the replacement field while the
+   pane holding it is never drawn. The app's own shortcut list says Tab moves
+   between "the pattern, the text and the replacement".
+
+Each pass fixed what it found and moved on, and each time the app looked
+finished. **The lesson is to run the survey against one app until it reports
+nothing, rather than fixing its top row and going to the next app** -- a single
+frozen field is rarely the only one, because whatever habit produced it
+produced the others in the same sitting.
+
 **A second kind of noise, found by checking the two rows with the highest
 stakes.** `apps/installer`'s `wipe` and `auto_reboot` look frozen and are not:
 they are built from an answer file through `disk.get("wipe")` and

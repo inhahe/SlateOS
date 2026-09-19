@@ -345,6 +345,36 @@ const CANNOT_CONNECT_LINES: [&str; 3] = [
 sent.",
 ];
 
+/// Every command this client understands, and what it does.
+///
+/// `/help` prints this and `every_listed_command_is_understood` checks the
+/// dispatcher answers each one, so a command cannot be added without being
+/// findable and cannot be listed without working. Before this the program
+/// knew six commands and told nobody: an unrecognised line came back
+/// "Unknown or incomplete command", which is a statement about the line and
+/// not an offer of the ones that would work.
+const COMMANDS: &[(&str, &str)] = &[
+    ("/join #channel", "Join a channel, and switch to it"),
+    ("/part [#channel]", "Leave this channel, or a named one"),
+    ("/msg nick text", "Send someone a private message"),
+    ("/nick name", "Change your nickname"),
+    ("/topic text", "Set this channel's topic"),
+    ("/quit [reason]", "Disconnect"),
+    ("/timestamps", "Show or hide the time beside each message"),
+    ("/help", "This list"),
+];
+
+/// Every key, and what it does.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Enter", "Send the line, or run the command"),
+    ("Up / Down", "Walk back and forward through what you typed"),
+    ("PageUp / PageDown", "Scroll the conversation"),
+    ("Tab", "Show or hide the list of who is here"),
+    ("Backspace", "Delete a character"),
+    ("Escape", "Clear the line you are typing"),
+    ("F1", "This list"),
+];
+
 /// CTCP message types.
 #[derive(Debug, Clone)]
 pub enum CtcpMessage {
@@ -927,6 +957,8 @@ pub struct IrcClientApp {
     pub input_history: Vec<String>,
     pub input_history_idx: Option<usize>,
     pub nick_list_visible: bool,
+    /// Whether the key list is up.
+    pub show_help: bool,
     pub show_timestamps: bool,
 
     // Notifications
@@ -986,6 +1018,7 @@ impl IrcClientApp {
             input_history: Vec::new(),
             input_history_idx: None,
             nick_list_visible: true,
+            show_help: false,
             show_timestamps: true,
             highlight_words: Vec::new(),
             notification_sound: true,
@@ -1694,6 +1727,10 @@ impl IrcClientApp {
                 self.chat_scroll != before
             }
             Key::Escape => {
+                if self.show_help {
+                    self.show_help = false;
+                    return true;
+                }
                 if self.input_text.is_empty() {
                     return false;
                 }
@@ -1703,6 +1740,10 @@ impl IrcClientApp {
             }
             Key::Tab => {
                 self.nick_list_visible = !self.nick_list_visible;
+                true
+            }
+            Key::F1 => {
+                self.show_help = !self.show_help;
                 true
             }
             _ => {
@@ -1804,6 +1845,32 @@ impl IrcClientApp {
     /// which is the truthful thing to show for a client that cannot send.
     fn run_command(&mut self, line: &str) {
         let stamp = self.timestamp();
+        // Commands that are about this program rather than about the server
+        // are answered first: they have no wire form for `parse_command` to
+        // turn them into, so it would call them unknown.
+        let rest = line.get(1..).unwrap_or("");
+        let (name, _args) = rest.split_once(' ').unwrap_or((rest, ""));
+        match name.to_ascii_lowercase().as_str() {
+            "timestamps" => {
+                self.show_timestamps = !self.show_timestamps;
+                let state = if self.show_timestamps {
+                    "shown"
+                } else {
+                    "hidden"
+                };
+                self.server_messages
+                    .push(ChatMessage::system(&stamp, &format!("Timestamps {state}.")));
+                return;
+            }
+            "help" => {
+                for (cmd, what) in COMMANDS {
+                    self.server_messages
+                        .push(ChatMessage::system(&stamp, &format!("{cmd} -- {what}")));
+                }
+                return;
+            }
+            _ => {}
+        }
         let Some(wire) = self.parse_command(line) else {
             self.server_messages.push(ChatMessage::system(
                 &stamp,
@@ -1962,6 +2029,19 @@ impl IrcClientApp {
             chat_w + nick_list_w,
             input_h,
         );
+
+        // Over everything, including the cannot-connect banner: it is the one
+        // thing a reader asked for.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.width, self.height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this, /help lists the commands",
+            );
+        }
 
         cmds
     }
@@ -3288,6 +3368,186 @@ mod tests {
     // ======================================================================
 
     use guitk::event::Modifiers;
+
+    /// Every command `/help` lists is one the dispatcher answers.
+    ///
+    /// The list and the dispatcher are two places, so this is what stops them
+    /// drifting: a command printed and not understood is worse than one that
+    /// is merely undocumented, because the reader has been told it works.
+    #[test]
+    fn every_listed_command_is_understood() {
+        for (usage, what) in COMMANDS {
+            let name = usage.split_whitespace().next().unwrap_or(usage);
+            let mut app = joined();
+            let before = app.server_messages.len();
+            app.input_text = example_for(usage);
+            app.submit_input();
+            let after = &app.server_messages[before..];
+            assert!(
+                !after
+                    .iter()
+                    .any(|m| m.text.contains("Unknown or incomplete command")),
+                "the list offers {name} for {what:?}, and the dispatcher calls it unknown"
+            );
+            assert!(
+                !after.is_empty() || name == "/part",
+                "{name} produced no reply at all"
+            );
+        }
+    }
+
+    /// `/timestamps` shows and hides the time beside each message.
+    ///
+    /// `show_timestamps` was `true` at construction with no writer in the
+    /// crate, so every line of every conversation carried a stamp and there
+    /// was no way to get a narrow window's worth of text back.
+    #[test]
+    fn the_timestamps_command_shows_and_hides_them() {
+        let mut app = joined();
+        app.input_text = String::from("hello");
+        app.submit_input();
+
+        let stamped = drawn_text(&app);
+        assert!(
+            app.show_timestamps,
+            "control: timestamps start on in this program"
+        );
+
+        app.input_text = String::from("/timestamps");
+        app.submit_input();
+        assert!(!app.show_timestamps, "/timestamps did not turn them off");
+        let unstamped = drawn_text(&app);
+        assert_ne!(
+            stamped, unstamped,
+            "/timestamps changed the setting and not the window"
+        );
+
+        app.input_text = String::from("/timestamps");
+        app.submit_input();
+        assert!(app.show_timestamps, "/timestamps is a switch, not a door");
+    }
+
+    /// `/help` prints the list rather than reporting an unknown command.
+    #[test]
+    fn help_prints_every_command() {
+        let mut app = joined();
+        let before = app.server_messages.len();
+        app.input_text = String::from("/help");
+        app.submit_input();
+        let printed: String = app.server_messages[before..]
+            .iter()
+            .map(|m| m.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (usage, what) in COMMANDS {
+            assert!(printed.contains(usage), "/help never mentions {usage}");
+            assert!(printed.contains(what), "/help never explains {usage}");
+        }
+    }
+
+    /// F1 raises the key list, and every key on it does something.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = joined();
+        assert!(
+            !drawn_text(&app).contains("F1 closes this"),
+            "the list is up before anybody asked"
+        );
+        app.handle_event(&key(Key::F1));
+        let shown = drawn_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+        app.handle_event(&key(Key::Escape));
+        assert!(
+            !drawn_text(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = key_states()
+                    .iter_mut()
+                    .any(|app| app.handle_event(&Event::Key(stroke.clone())));
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// States a key might need to be able to act in.
+    fn key_states() -> Vec<IrcClientApp> {
+        let typed = || {
+            let mut app = joined();
+            app.input_text = String::from("something");
+            app
+        };
+        // With a conversation long enough to scroll...
+        let mut long = joined();
+        for i in 0..200 {
+            long.input_text = format!("line {i}");
+            long.submit_input();
+        }
+        // ...and a second one already scrolled up, so `PageDown` has
+        // somewhere down to go. It declines at the bottom, correctly, and
+        // submitting a line returns the view there -- which is why the state
+        // above is not enough on its own. Built again rather than cloned:
+        // this app is not `Clone`, and making it so to shorten a test
+        // fixture would be the test deciding the type's interface.
+        let mut scrolled_up = joined();
+        for i in 0..200 {
+            scrolled_up.input_text = format!("line {i}");
+            scrolled_up.submit_input();
+        }
+        scrolled_up.handle_event(&key(Key::PageUp));
+        // With something in the history to walk back into...
+        let mut recalled = joined();
+        recalled.input_text = String::from("earlier");
+        recalled.submit_input();
+        // ...and already walked back, so `Down` has somewhere forward to go.
+        // It declines otherwise, correctly: there is no line after the one
+        // being typed. The guard found that before this state existed.
+        let mut walked_back = joined();
+        walked_back.input_text = String::from("earlier");
+        walked_back.submit_input();
+        walked_back.handle_event(&key(Key::Up));
+        // With the list up, so Escape has it to close.
+        let mut helping = joined();
+        helping.show_help = true;
+        vec![typed(), long, scrolled_up, recalled, walked_back, helping]
+    }
+
+    fn drawn_text(app: &IrcClientApp) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A usable line for each listed command, so the dispatcher sees
+    /// arguments where it needs them.
+    fn example_for(usage: &str) -> String {
+        match usage.split_whitespace().next().unwrap_or(usage) {
+            "/join" => String::from("/join #other"),
+            "/part" => String::from("/part #test"),
+            "/msg" => String::from("/msg someone hello"),
+            "/nick" => String::from("/nick newname"),
+            "/topic" => String::from("/topic a new topic"),
+            "/quit" => String::from("/quit bye"),
+            other => other.to_owned(),
+        }
+    }
 
     fn key(k: Key) -> Event {
         Event::Key(KeyEvent {

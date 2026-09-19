@@ -87,3 +87,25 @@ archivemanager	format	TD-C-THE-ARCHIVE-CREATION-OPTIONS-ARE-A-STRUCT-NOBODY-CALL
 # `PreUpdate`, `PreInstall` and `Scheduled` describe who took the snapshot,
 # and the answer here is always "you did". Not a setting.
 systemrestore	form_type	what `Manual` means; the form has no choice to offer
+
+# `SETTINGS_NOT_CARRIED` is drawn directly under the first value in the
+# settings panel -- "the numbers above are what read as confirmation" --
+# because nothing carries these to the toolkit and the preview renders at its
+# own fixed sizes. Both ends of that loop are open and neither is in this
+# crate, so a key here would change a number and nothing else.
+fontmanager	antialiasing	drawn beside SETTINGS_NOT_CARRIED; nothing carries it to the toolkit
+fontmanager	hinting	ditto
+fontmanager	subpixel_order	ditto
+
+# `CANNOT_CONNECT_LINES` is drawn on every frame: "Not connected: this
+# program has no network access." `tls` only picks `ircs://` over `irc://` in
+# the string a command would have sent, so it describes a connection that
+# does not happen.
+ircclient	tls	shapes the URL of a connection CANNOT_CONNECT_LINES says is not made
+
+# The draft's MIME headers. `build_message` is called once, to check the
+# draft and refuse it, and `CANNOT_FETCH_LINES` says so on every frame --
+# "This client cannot send or receive mail." A Priority header on a message
+# that is assembled, checked and discarded is not a setting a user is missing.
+email	is_html	a header of a message CANNOT_FETCH_LINES says is never sent
+email	priority	ditto

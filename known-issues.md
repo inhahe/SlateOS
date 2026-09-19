@@ -160616,6 +160616,24 @@ nothing, rather than fixing its top row and going to the next app** -- a single
 frozen field is rarely the only one, because whatever habit produced it
 produced the others in the same sitting.
 
+**One row is a choice rather than a defect, and the difference is worth
+keeping.** `apps/explorer` threads a `ConflictPolicy` through `plan_copy` --
+`Skip`, `Overwrite`, `OverwriteIfNewer`, `Rename` -- and every production call
+site passes `Rename`. So three of the four are unreachable from the window and
+a copy onto an existing name always renames; the user is never asked and never
+offered a choice.
+
+That is **not** the same as the frozen flags above, and saying why matters:
+renaming never loses data, so the app is safe and merely inflexible, where a
+frozen `show_replace` or a sort nobody can change is a control drawn and not
+wired. The fix is also different in kind -- a conflict prompt is a dialog with
+three buttons and a decision about what the default should be, which is a
+feature to design rather than a key to bind.
+
+Filed here so the next reader does not have to re-derive it, and not fixed,
+because guessing at a destructive default is exactly the kind of choice that
+should not be made by whoever happens to be passing.
+
 **A second kind of noise, found by checking the two rows with the highest
 stakes.** `apps/installer`'s `wipe` and `auto_reboot` look frozen and are not:
 they are built from an answer file through `disk.get("wipe")` and

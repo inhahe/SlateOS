@@ -162781,6 +162781,48 @@ rounds `submit_and_reap` actually needs. The second is cheap and tells you
 something the first cannot -- if the answer is always 1, the retry is
 insurance; if it is sometimes 2, the race was real and is now absorbed.
 
+#### The count came back zero, which moves the hypothesis rather than closing it
+
+Instrumented and booted. `submit_and_reap` prints only when it needs more
+than one round, and on boot `ebb683642` it printed **nothing**.
+
+Verified that the zero means something before reading it as an answer, since
+a missing line is exactly what a build without the counter also produces:
+
+| check | result |
+|---|---|
+| counter commit is an ancestor of the booted commit | yes |
+| booted tree contains the code (`git show <commit>:file`) | yes, 2 matches |
+| the path was actually exercised | 20 `netsock`/`netstack-client` lines |
+
+**So one round sufficed every time it was called.** That is not the result I
+expected, and it argues against my own diagnosis. If the 1-in-20 `listen`
+failure were a completion arriving late, the margin would be thin and
+`rounds > 1` should appear *often* -- far more often than one boot in twenty,
+because a marginal timing is marginal on every call, not on one call in
+hundreds. Zero retries across a boot's worth of operations says the single
+poll is normally comfortable, which makes late visibility an unlikely
+explanation for a rare failure.
+
+**The more likely candidates are now the other three `InternalError` sites**,
+which the same change made distinguishable: an absent ring from
+`attach_ring`, a `user_data` mismatch, or an unexpected second completion.
+Before, all four arrived at the caller as one word; now exhaustion is
+`TimedOut` and the rest stay `InternalError`, so the next occurrence names
+its own category.
+
+**What this does not establish.** One boot with zero retries is also
+consistent with a real race at a low rate -- at 1-in-20 for the *failure*,
+the underlying near-miss could still be rarer than one boot's traffic. The
+count needs accumulating across boots, which it now does for free: every
+future run either prints the line or does not.
+
+**And the retry is worth keeping regardless of which cause wins.** It cost
+nothing measurable, it applies the convention the file states eight times,
+and if the race is real-but-rarer-than-observed it absorbs it silently. What
+it must not do is be recorded as the fix for a failure it may have nothing to
+do with -- which is what this section exists to prevent.
+
 **Sharpened: this is not a missing retry, it is an unfollowed convention
 stated eight times in the same file.** `netstack_client.rs` already
 contains eight bounded poll loops -- `for _ in 0..64`, `..32`, `..32`,

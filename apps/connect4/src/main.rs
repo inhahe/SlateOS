@@ -683,6 +683,8 @@ pub enum Intent {
     CursorLeft,
     CursorRight,
     NewGame,
+    /// Play the other colour, and start again.
+    SwapSides,
     Undo,
     ToggleHelp,
     CloseHelp,
@@ -1014,12 +1016,13 @@ fn button(f: &mut Frame, r: Rect, target: Target, body: &str, size: f32, face: C
 
 const HELP_TITLE: &str = "Connect Four";
 
-const HELP_ROWS: [(&str, &str); 6] = [
+const HELP_ROWS: [(&str, &str); 7] = [
     ("Left / Right", "choose a column"),
     ("Enter / Space", "drop a piece there"),
     ("1 - 7", "drop straight into that column"),
     ("U / Ctrl+Z", "take back your last move"),
     ("N", "start a new game"),
+    ("S", "play the other colour, and start again"),
     ("H", "show or hide this sheet"),
 ];
 
@@ -1300,6 +1303,21 @@ impl Connect4 {
                 self.new_game();
                 EventResult::Consumed
             }
+            // `human_player` was Red and `ai_player` Yellow at construction,
+            // with no writer in the crate. Red moves first in `new_game`, and
+            // in Connect Four the first player wins with perfect play -- so
+            // this program handed the human the winning side, every game,
+            // with no way to take the other one.
+            //
+            // A new game comes with it: the pieces already on the board
+            // belong to the colours that were playing when they were
+            // dropped, and reassigning them mid-game would hand somebody
+            // else's position to whoever swapped.
+            Intent::SwapSides => {
+                std::mem::swap(&mut self.human_player, &mut self.ai_player);
+                self.new_game();
+                EventResult::Consumed
+            }
             Intent::Undo => {
                 if self.undo() {
                     EventResult::Consumed
@@ -1367,13 +1385,17 @@ impl Connect4 {
         match self.status {
             GameStatus::Playing => {
                 if self.ai_to_play() {
-                    "Yellow is thinking...".to_string()
+                    // Named from the field rather than written out. "Yellow"
+                    // was correct only for as long as `ai_player` could not
+                    // change, and the moment `S` could swap the colours it
+                    // became a machine playing Red announced as Yellow.
+                    format!("{} is thinking...", self.ai_player.name())
                 } else {
                     format!("Your turn ({})", self.human_player.name())
                 }
             }
             GameStatus::Won(winner) if winner == self.human_player => "You win!".to_string(),
-            GameStatus::Won(_) => "Yellow wins!".to_string(),
+            GameStatus::Won(_) => format!("{} wins!", self.ai_player.name()),
             GameStatus::Draw => "A draw — the board is full".to_string(),
         }
     }
@@ -1749,6 +1771,7 @@ pub fn key_intent(ev: &KeyEvent) -> Option<Intent> {
         Key::Num6 => Some(Intent::Drop(5)),
         Key::Num7 => Some(Intent::Drop(6)),
         Key::N => Some(Intent::NewGame),
+        Key::S => Some(Intent::SwapSides),
         Key::U => Some(Intent::Undo),
         Key::H => Some(Intent::ToggleHelp),
         Key::Escape => Some(Intent::CloseHelp),
@@ -1972,6 +1995,78 @@ mod tests {
             b.drop_piece(col, player);
         }
         b
+    }
+
+    /// `S` gives the human the other colour, and so the second move.
+    ///
+    /// `human_player` was Red and `ai_player` Yellow at construction, with no
+    /// writer in the crate, and `new_game` starts Red. In Connect Four the
+    /// player who moves first wins with perfect play, so this program handed
+    /// the human the winning side every game and offered no way to take the
+    /// other one.
+    #[test]
+    fn s_swaps_the_colours_and_lets_the_machine_move_first() {
+        let mut app = game();
+        let human = app.human_player;
+        let ai = app.ai_player;
+        assert_ne!(human, ai, "control: the two sides must differ");
+        assert_eq!(
+            app.current_player, human,
+            "control: the human moves first to begin with"
+        );
+
+        assert_eq!(
+            press(&mut app, Key::S),
+            EventResult::Consumed,
+            "S was ignored"
+        );
+        assert_eq!(
+            app.human_player, ai,
+            "S did not give the human the other colour"
+        );
+        assert_eq!(
+            app.ai_player, human,
+            "S did not give the machine the first one"
+        );
+        assert_eq!(
+            app.current_player, app.ai_player,
+            "the colour that starts a game should now be the machine's"
+        );
+        assert!(
+            app.ai_to_play(),
+            "the machine should be to move once it holds the starting colour"
+        );
+
+        // And it is named for the colour it is actually playing. That string
+        // used to read "Yellow is thinking...", which was true only while
+        // `ai_player` could not change.
+        assert!(
+            app.status_line().contains(app.ai_player.name()),
+            "the status line does not name the colour the machine is playing: {:?}",
+            app.status_line()
+        );
+        assert!(
+            !app.status_line().contains(app.human_player.name()),
+            "the status line names the human's colour on the machine's turn: {:?}",
+            app.status_line()
+        );
+    }
+
+    /// Swapping starts a fresh game: the pieces on the board belong to the
+    /// colours that dropped them.
+    #[test]
+    fn swapping_sides_clears_the_board() {
+        let mut app = game();
+        press(&mut app, Key::Num1);
+        assert!(
+            (0..ROWS).any(|r| (0..COLS).any(|c| app.board.get(r, c) != Cell::Empty)),
+            "control: the fixture needs a piece on the board"
+        );
+        press(&mut app, Key::S);
+        assert!(
+            (0..ROWS).all(|r| (0..COLS).all(|c| app.board.get(r, c) == Cell::Empty)),
+            "swapping sides left the previous game's pieces in place"
+        );
     }
 
     fn press(app: &mut Connect4, key: Key) -> EventResult {

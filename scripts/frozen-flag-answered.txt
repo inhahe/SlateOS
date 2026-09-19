@@ -35,12 +35,13 @@ passwordgen	rating	the strength score computed from the four above
 # these except this panel." There is no converter in this tree yet. Giving
 # these keys would be the worse defect -- a control that moves and changes
 # nothing is a claim, where a frozen one beside an honest note is a gap.
-mediaconvert	video_codec	drawn beside SETTINGS_NOT_APPLIED; no converter exists
-mediaconvert	audio_codec	ditto
-mediaconvert	codec	ditto
-mediaconvert	two_pass	ditto
-mediaconvert	strip_metadata	ditto
-mediaconvert	preserve_aspect	ditto
+#
+# `mediaconvert`'s six codec and quality fields were listed here and are not
+# any more: `self.video_settings = VideoSettings::from_preset(preset)`
+# replaces the whole struct, so they were never frozen and this file was
+# answering a question the survey had got wrong. They are still not
+# *applied*, which is what SETTINGS_NOT_APPLIED says and is a separate
+# statement. The stale-line check is what surfaced the difference.
 videoplayer	format	screenshot config, drawn beside NO_SCREENSHOTS
 videoplayer	include_subtitles	ditto
 videoplayer	container	metadata of the loaded file, not a setting

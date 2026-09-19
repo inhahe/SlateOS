@@ -6007,7 +6007,29 @@ mod tests {
     /// from it, so the same test would pass or fail depending on what the
     /// developer had browsed.
     fn state_at(dir: &Path) -> ExplorerState {
-        let mut state = ExplorerState::new(dir);
+        // `ExplorerState::new` READS the configuration directory -- it takes
+        // `preview_open`, `preview_split`, `preview_side`, the icon labels and
+        // the thumbnail size from `settingsfile::load`. Five tests in this
+        // binary WRITE the environment that resolves it, and
+        // `the_preview_can_move_to_any_side` writes `side: bottom` into its
+        // scratch config before restoring anything. Tests are threads of one
+        // process, so a construction here could read that file.
+        //
+        // That is not hypothetical: it is the `7 -> 7` this crate's own
+        // `the_preview_panel_narrows_the_grid_for_the_wheel_too` reported in
+        // one workspace run and in no isolated one -- a preview on the bottom
+        // divides the height, so the column count is unchanged and the test
+        // that asserts it narrows looks broken.
+        //
+        // The turn is held only across the constructor because the values are
+        // copied out of the document there; nothing later reads the
+        // environment again. `settingsfile::testing`'s own doc names this
+        // exact failure: "a reader that never called it would resolve
+        // XDG_CONFIG_HOME in the middle of somebody else's scratch directory".
+        let mut state = {
+            let _turn = settingsfile::testing::config_turn();
+            ExplorerState::new(dir)
+        };
         state.recycle = RecycleBin::new(dir.join(".recycle"), Duration::from_secs(3600));
         state.thumb_gen =
             ThumbnailGenerator::with_disk_cache(thumbs::DiskCache::new(dir.join(".thumbs")));

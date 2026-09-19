@@ -24,6 +24,32 @@ WHAT THIS IS NOT. Two neighbouring gates already exist and this is neither:
     `kernel/src/fs`, and it finds the case where the *operation* exists and is
     unwired. Here there is usually no operation at all.
 
+WHAT IT LOOKS AT, which is the part that took three tries to get right. The
+population is the app's own state struct -- the one behind
+`impl <path::>App for X` -- **plus every struct it holds exactly one of**,
+followed transitively. Not the whole crate: a sweep over every struct is
+dominated by data whose booleans are immutable on purpose (a directory
+entry's `is_directory`, a style's `bold`), and the first version of this
+reported 197 fields that way, nearly all of them furniture.
+
+Three corrections, each of which changed the answer by more than the whole
+exercise was worth:
+
+  * The trait regex wanted a bare `impl App for X`. Every app in this tree
+    writes `impl oswindow::app::App for X`, so it matched none of them and 19
+    of the 20 apps reported had silently fallen back to the whole-crate scan.
+    That fallback is now *printed*, in its own section, never summed into the
+    headline -- a docstring promising it was "visible in the count" is not the
+    same thing as it being visible.
+  * Scoping to the app struct alone dropped real settings that live one field
+    away: `apps/lockscreen` keeps `show_clock_seconds` in a
+    `LockScreenConfig`. Hence the transitive walk.
+  * The walk then had to stop following data. A type the crate ever stores
+    inside a `Vec`/`HashMap`/... describes one of many, so it is excluded
+    wherever else it also appears -- `apps/chess` holds a `Move` in
+    `last_move` *and* a `Vec<Move>` in its history, and `is_castling` is a
+    fact about one move, not a setting.
+
 HOW IT DECIDES, because the number is only worth what the method is. A field
 counts as frozen when, **in live (non-test) code across every file of the
 crate**:
@@ -131,46 +157,134 @@ def crate_live_code(crate: Path) -> str:
     return "\n".join(out)
 
 
-#: `impl App for FooApp` / `impl FooApp {` containing the key handler.
-APP_IMPL_RE = re.compile(r"\bimpl\s+(?:\w+\s+for\s+)?([A-Z]\w*)\b")
+#: The one trait every windowed app implements, *however the crate spells it*.
+#:
+#: The first version of this required the bare name -- `impl App for X`.
+#: Every app in this tree writes `impl oswindow::app::App for X`, so it
+#: matched **none of them**: 19 of the 20 apps this survey reported on had
+#: silently fallen back to scanning the whole crate, where a directory
+#: entry's `is_directory` and a tree node's `has_children` count as frozen
+#: settings. The headline figure was two-thirds furniture and said so
+#: nowhere.
+#:
+#: That is the third checker in this tree to have its population defined by
+#: a *name* it expected rather than by the thing it meant, so the fallback
+#: is now reported in the output -- rather than described in a docstring as
+#: "visible in the count" while being invisible.
+APP_IMPL_OWNER_RE = re.compile(
+    r"\bimpl\s+(?:[A-Za-z_]\w*\s*::\s*)*App\s+for\s+([A-Z]\w*)"
+)
 
 
-def app_struct_body(code: str) -> str:
-    """Just the app's own state struct, brace-matched.
+#: Types that hold *many* of something. A field of one is a per-datum field.
+#:
+#: This is the line between the two populations. `entries: Vec<FileEntry>`
+#: makes `FileEntry::is_directory` a property of a directory entry -- read
+#: everywhere, written never, and correct that way. `config: LockScreenConfig`
+#: makes `LockScreenConfig::show_clock_seconds` a setting of the one running
+#: lock screen, and a setting nothing writes is a setting nobody has.
+#: Identical Rust; opposite meanings; the container is what tells them apart.
+MANY_OF = ("Vec", "VecDeque", "HashMap", "BTreeMap", "HashSet", "BTreeSet", "Slab")
 
-    Without this the survey is dominated by *data* whose booleans are
-    immutable on purpose: a directory entry's `is_directory`, a tree node's
-    `expandable`, a style's `bold`. Those are read and never written because
-    that is what they are, and reporting them buries the handful of fields
-    that really are a setting the user cannot reach. The first run of this
-    said 197 in 67 apps and most of it was furniture.
+#: Wrappers that still hold at most one, and are therefore followed through.
+ONE_OF = ("Option", "Box", "Rc", "Arc", "RefCell", "Cell", "Mutex", "RwLock")
 
-    The struct is found through `impl App for X` -- the one trait every app in
-    this tree implements to receive events -- rather than by walking impl
-    bodies looking for a key handler. The first version did the latter and
-    silently fell back to the whole crate for every app, because a brace walk
-    over blanked source finds a closing brace the source does not have. One
-    regex naming the thing outright cannot fail that way.
+#: `name: Type,` in a struct body, with the type captured whole.
+TYPED_FIELD_RE = re.compile(r"[a-z_][a-z0-9_]*\s*:\s*([A-Za-z_][A-Za-z0-9_:<>, ]*?)\s*,")
 
-    Falls back to the whole crate when the trait impl is absent, because a
-    survey that silently reports nothing is worse than one that reports too
-    much -- but that fallback is now visible in the count, not hidden.
-    """
-    owner = re.search(r"impl\s+App\s+for\s+(\w+)", code)
-    if owner is None:
-        return code
-    decl = re.search(r"struct\s+%s\b[^{]*\{" % re.escape(owner.group(1)), code)
+
+def struct_body(code: str, name: str) -> str | None:
+    """The brace-matched body of `struct <name> { ... }`, or `None`."""
+    decl = re.search(r"struct\s+%s\b[^{;]*\{" % re.escape(name), code)
     if decl is None:
-        return code
-    start = decl.end()
-    depth, i = 1, start
+        return None
+    depth, i = 1, decl.end()
     while i < len(code) and depth:
         if code[i] == "{":
             depth += 1
         elif code[i] == "}":
             depth -= 1
         i += 1
-    return code[start:i]
+    return code[decl.end() : i]
+
+
+def singleton_field_types(body: str) -> list[str]:
+    """Crate types this struct holds exactly one of, unwrapped of `Option` etc."""
+    out = []
+    for m in TYPED_FIELD_RE.finditer(body):
+        ty = m.group(1).strip()
+        if any(re.search(r"\b%s\s*<" % c, ty) for c in MANY_OF):
+            continue
+        for wrapper in ONE_OF:
+            inner = re.fullmatch(r"%s\s*<(.+)>" % wrapper, ty)
+            if inner:
+                ty = inner.group(1).strip()
+        ty = ty.split("::")[-1].strip()
+        if re.fullmatch(r"[A-Z]\w*", ty):
+            out.append(ty)
+    return out
+
+
+def held_by_the_many(code: str) -> set[str]:
+    """Every type the crate ever puts inside a collection.
+
+    A type can be *both* a singleton field and a collection element, and when
+    it is, it is data. `apps/chess` keeps a `Move` in `last_move` and a
+    `Vec<Move>` in its history; following the singleton made `is_castling`
+    look like a frozen setting, when it is a fact about one move that is
+    written at construction and true forever after. Same for `apps/weather`'s
+    forecast row and `apps/email`'s message.
+
+    So the collection wins wherever both appear: one `Vec<T>` anywhere in the
+    crate is proof that `T` describes one of many, whatever else holds it.
+    """
+    found = set()
+    for m in re.finditer(r"\b(?:%s)\s*<([^<>]*)>" % "|".join(MANY_OF), code):
+        for part in re.split(r"[,()\[\]]", m.group(1)):
+            ty = part.split("::")[-1].strip()
+            if re.fullmatch(r"[A-Z]\w*", ty):
+                found.add(ty)
+    return found
+
+
+def owned_state(code: str) -> tuple[str, bool]:
+    """The app's own struct **and the singleton structs it owns**, joined.
+
+    Scoping to the app struct alone was too narrow in exactly the way that
+    matters: `apps/lockscreen` keeps its settings in a `LockScreenConfig` held
+    by one field, so `show_clock_seconds` -- a real frozen setting, filed as
+    one -- vanished from the survey the moment the scope became accurate. A
+    settings struct is app state that happens to have a name.
+
+    What is deliberately *not* followed is anything held by the many: a field
+    of a `Vec<FileEntry>` element is a property of a file, not a setting of the
+    program. Nor does this catch a struct only ever built as an argument --
+    `explorer`'s `OperationPlan` is constructed fresh per operation, so its
+    uniformly-`Rename` `ConflictPolicy` is a defect in every *call site*
+    rather than a frozen field, and wants a different tool than this one.
+    """
+    owner = re.search(APP_IMPL_OWNER_RE, code)
+    if owner is None:
+        return code, False
+    root = struct_body(code, owner.group(1))
+    if root is None:
+        return code, False
+    # A type the crate stores by the many is data, not state, wherever
+    # else it also appears -- so it is pre-seeded into the visited set.
+    seen = held_by_the_many(code) | {owner.group(1)}
+    bodies = [root]
+    queue = list(singleton_field_types(root))
+    while queue:
+        ty = queue.pop()
+        if ty in seen:
+            continue
+        seen.add(ty)
+        sub_body = struct_body(code, ty)
+        if sub_body is None:
+            continue
+        bodies.append(sub_body)
+        queue.extend(singleton_field_types(sub_body))
+    return "\n".join(bodies), True
 
 
 def plain_enums(code: str) -> set[str]:
@@ -187,11 +301,19 @@ def plain_enums(code: str) -> set[str]:
     return found
 
 
-def survey(crate: Path) -> tuple[list[str], int]:
+def survey(crate: Path) -> tuple[list[str], int, bool]:
+    """`(frozen names, fields scanned, whether the app struct was found)`.
+
+    The third value is not a detail. With it a row means "a setting of this
+    app that nothing can change"; without it a row means "some boolean
+    somewhere in this crate", which is mostly data that is immutable by
+    design. Summing the two is how this survey came to report 197, then 87,
+    when the answer it meant to give was neither.
+    """
     code = crate_live_code(crate)
     if not code.strip():
-        return [], 0
-    body = app_struct_body(code)
+        return [], 0, True
+    body, scoped = owned_state(code)
     # Declared in the app's own struct; written (or not) anywhere in the crate.
     names = set(FIELD_RE.findall(body))
     for enum in plain_enums(code):
@@ -218,34 +340,55 @@ def survey(crate: Path) -> tuple[list[str], int]:
         for name in names
         if read_re(name).search(code) and not written_re(name).search(code)
     ]
-    return frozen, len(names)
+    return frozen, len(names), scoped
 
 
 def main(argv: list[str]) -> int:
     show_all = "--all" in argv
-    rows: list[tuple[int, str, list[str]]] = []
+    rows: list[tuple[int, str, list[str], bool]] = []
     total_fields = 0
     for crate in sorted((ROOT / "apps").iterdir()):
         if not crate.is_dir():
             continue
-        frozen, count = survey(crate)
+        frozen, count, scoped = survey(crate)
         total_fields += count
         if frozen:
-            rows.append((len(frozen), crate.name, frozen))
+            rows.append((len(frozen), crate.name, frozen, scoped))
 
     rows.sort(key=lambda r: (-r[0], r[1]))
-    stuck = sum(r[0] for r in rows)
+    scoped_rows = [r for r in rows if r[3]]
+    loose_rows = [r for r in rows if not r[3]]
+    stuck = sum(r[0] for r in scoped_rows)
     print(
-        f"{stuck} field(s) in {len(rows)} app(s) are read and never written, "
+        f"{stuck} field(s) in {len(scoped_rows)} app(s) are read and never "
+        f"written, "
         f"out of {total_fields} bool and plain-enum fields scanned"
     )
     print("(live code only; construction is not a write; see this file's docstring)\n")
-    limit = len(rows) if show_all else 25
-    for n, name, frozen in rows[:limit]:
+    limit = len(scoped_rows) if show_all else 25
+    for n, name, frozen, _ in scoped_rows[:limit]:
         shown = ", ".join(frozen[:6]) + ("..." if len(frozen) > 6 else "")
         print(f"{name:<20}{n:>3}  {shown}")
-    if not show_all and len(rows) > limit:
-        print(f"\n...and {len(rows) - limit} more apps; --all for the rest")
+    if not show_all and len(scoped_rows) > limit:
+        print(
+            f"\n...and {len(scoped_rows) - limit} more apps; --all for the rest"
+        )
+
+    if loose_rows:
+        # Counted separately and never added in, because these rows are a
+        # different claim: no `impl <path::>App for X` was found, so the scan
+        # covered every struct in the crate, and most of what that finds is
+        # data which is immutable on purpose. Worth printing -- an app with
+        # no App impl may be one that needs one -- but not worth summing.
+        print(
+            f"\nplus {sum(r[0] for r in loose_rows)} in "
+            f"{len(loose_rows)} app(s) with no `App` impl to scope the scan; "
+            f"whole-crate results, mostly data rather than settings:"
+        )
+        shown_loose = loose_rows if show_all else loose_rows[:8]
+        for n, name, frozen, _ in shown_loose:
+            shown = ", ".join(frozen[:6]) + ("..." if len(frozen) > 6 else "")
+            print(f"  {name:<18}{n:>3}  {shown}")
     return 0
 
 

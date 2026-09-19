@@ -2831,6 +2831,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Home", "Go to today"),
     ("Up / Down", "Scroll the day or week"),
     ("W", "Start the week on Monday or Sunday"),
+    ("H", "Show times as 24-hour or 12-hour"),
     ("Escape", "Clear the selected event"),
     ("Ctrl+F", "Search"),
     ("Ctrl+B", "Show or hide the sidebar"),
@@ -2985,6 +2986,16 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
         // answered once at compile time.
         Key::W => {
             state.week_starts_monday = !state.week_starts_monday;
+            EventResult::Consumed
+        }
+        // `use_24h` was `false` at construction with no writer anywhere, so
+        // every time this program drew was 12-hour for everybody -- the same
+        // shape as `week_starts_monday` above, which is why it gets the same
+        // kind of answer. A bare letter, next to `W`, because both are
+        // questions with no universally right answer that were being settled
+        // once at compile time. Found by `scripts/frozen-flag-survey.py`.
+        Key::H => {
+            state.use_24h = !state.use_24h;
             EventResult::Consumed
         }
         Key::Left | Key::PageUp => {
@@ -5276,6 +5287,26 @@ mod tests {
         assert!(
             !help_text(&app).contains("? closes this"),
             "Escape did not close it"
+        );
+    }
+
+    /// **The clock can be put into 24-hour time.**
+    ///
+    /// `use_24h` was `false` at construction and written nowhere, so every
+    /// time this program drew was 12-hour for every user in every locale. The
+    /// guard test only asks whether `H` was consumed; this asks whether the
+    /// clock moved, and that the neighbouring preference did not come with it.
+    #[test]
+    fn the_hour_format_can_be_changed() {
+        let mut app = sample_app(june_2024());
+        let before = (app.use_24h, app.week_starts_monday);
+
+        probe::key(&mut app, &probe::press(Key::H));
+
+        assert_ne!(app.use_24h, before.0, "H did not change the hour format");
+        assert_eq!(
+            app.week_starts_monday, before.1,
+            "H moved the week-start preference as well"
         );
     }
 

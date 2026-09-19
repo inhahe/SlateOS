@@ -36,10 +36,17 @@ crate**:
 Construction does not count as a write: `name: true,` in a struct literal is
 the value it is stuck at, which is the whole complaint.
 
-Restricted to `bool` on purpose. A field of a struct type can be changed by
-calling a method on it -- `self.viewport.scroll_by(..)` mutates the field's
-contents without ever assigning the field -- so "never assigned" means nothing
-there. For a `bool` it means exactly what it says.
+Restricted to `bool` and to **fieldless enums**. A field of a struct type can
+be changed by calling a method on it -- `self.viewport.scroll_by(..)` mutates
+the field's contents without ever assigning the field -- so "never assigned"
+means nothing there. For a `bool`, or an enum whose variants carry nothing, it
+means exactly what it says.
+
+Enums were added after the bool-only version missed `apps/torrent`'s
+`sort_column`: declared, constructed as `Added`, read once in the comparator
+and assigned nowhere, so the list sorts by date-added descending for ever and
+ten of its eleven comparator arms are unreachable. A survey that reports the
+`bool` beside it and not that is reporting the smaller half of one defect.
 
 KNOWN LIMITS, in the tool's own voice rather than a reader's:
 
@@ -49,6 +56,20 @@ KNOWN LIMITS, in the tool's own voice rather than a reader's:
     one name; a write to either exonerates both.
   * Test-only writers are deliberately ignored, because a flag only a test can
     move is frozen for every real user. That is a decision, not an oversight.
+  * **A field built from parsed configuration reads as frozen and is not.**
+    `apps/installer`'s `wipe` and `auto_reboot` come from an answer file --
+    `disk.get("wipe")`, `root.get("auto_reboot")` -- and are set by
+    constructing the struct, which this deliberately does not count as a
+    write. They are settable by editing a document; nothing assigns them
+    afterwards. The tell is a `get(` or a deserialize near the construction
+    site, and it is worth looking for before believing any row in an app that
+    reads a config file.
+
+    This is the same evidence as `apps/lockscreen`, with the opposite answer:
+    there `main` passes `LockScreenConfig::default()` and nothing parses
+    anything, so the flags really are fixed at compile time. Construction from
+    a *parser* and construction from a *literal* look identical to this tool
+    and mean opposite things.
 
 Run from anywhere: `python scripts/frozen-flag-survey.py [--all]`.
 """
@@ -65,6 +86,17 @@ sys.path.insert(0, str(HERE))
 import rustlex  # noqa: E402
 
 ROOT = HERE.parent
+
+#: A fieldless `enum Name { A, B, C }` -- no payloads on any variant.
+#:
+#: Those are safe to judge exactly as a `bool` is: nothing can change one in
+#: place, so "never assigned" means "never changed". An enum with payloads, or
+#: any struct type, can be mutated through a method without the field ever
+#: appearing on the left of an `=`, which is why they are left alone.
+PLAIN_ENUM_RE = re.compile(
+    r"\benum\s+([A-Z]\w*)\s*\{([^{}]*)\}",
+    re.DOTALL,
+)
 
 #: `show_sidebar: bool,` in a struct declaration.
 FIELD_RE = re.compile(r"\b(?:pub(?:\([^)]*\))?\s+)?([a-z_][a-z0-9_]*)\s*:\s*bool\s*,")
@@ -141,12 +173,34 @@ def app_struct_body(code: str) -> str:
     return code[start:i]
 
 
+def plain_enums(code: str) -> set[str]:
+    """Every enum in the crate whose variants carry nothing."""
+    found = set()
+    for m in PLAIN_ENUM_RE.finditer(code):
+        name, body = m.group(1), m.group(2)
+        variants = [v.strip() for v in body.split(",")]
+        if all(
+            v == "" or re.fullmatch(r"(?:#\[[^\]]*\]\s*)?[A-Z]\w*", v)
+            for v in variants
+        ):
+            found.add(name)
+    return found
+
+
 def survey(crate: Path) -> tuple[list[str], int]:
     code = crate_live_code(crate)
     if not code.strip():
         return [], 0
+    body = app_struct_body(code)
     # Declared in the app's own struct; written (or not) anywhere in the crate.
-    names = sorted(set(FIELD_RE.findall(app_struct_body(code))))
+    names = set(FIELD_RE.findall(body))
+    for enum in plain_enums(code):
+        field_of_enum = re.compile(
+            r"\b(?:pub(?:\([^)]*\))?\s+)?([a-z_][a-z0-9_]*)\s*:\s*%s\s*,"
+            % re.escape(enum)
+        )
+        names.update(field_of_enum.findall(body))
+    names = sorted(names)
     frozen = [
         name
         for name in names
@@ -170,8 +224,8 @@ def main(argv: list[str]) -> int:
     rows.sort(key=lambda r: (-r[0], r[1]))
     stuck = sum(r[0] for r in rows)
     print(
-        f"{stuck} boolean field(s) in {len(rows)} app(s) are read and never "
-        f"written, out of {total_fields} bool fields scanned"
+        f"{stuck} field(s) in {len(rows)} app(s) are read and never written, "
+        f"out of {total_fields} bool and plain-enum fields scanned"
     )
     print("(live code only; construction is not a write; see this file's docstring)\n")
     limit = len(rows) if show_all else 25

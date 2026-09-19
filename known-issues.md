@@ -160635,6 +160635,105 @@ field of a struct type can be mutated by a method without ever being assigned
 (`self.viewport.scroll_by(..)`), so "never assigned" means nothing there; for a
 `bool` it means exactly what it says.
 
+**The fix is not the same for every one of them, and the difference matters
+more than the count.** Three were verified by hand before any code was written,
+and they want three different things:
+
+| | |
+|---|---|
+| `apps/regextester` `i`/`g`/`m` | **a key.** The buttons are already drawn and already read; they needed a chord. Fixed. |
+| `apps/spreadsheet` `show_gridlines`, `show_formula_bar`, `show_status_bar` | **a key.** View toggles in an app that already has an `F1` list to advertise them on. |
+| `apps/lockscreen` `show_clock_seconds`, `show_date` | **a settings file, not a key.** `main` passes `LockScreenConfig::default()`, so a lock screen can never show seconds and always shows the date -- but a lock screen is a security surface where every keystroke belongs to the password field, and adding shortcuts to it would be the wrong repair. This one is blocked on where its configuration should live, which is a question for the operator rather than a line of code. |
+
+**Down to 51 in 23 apps** as of the spreadsheet and logviewer fixes, and
+`apps/passwordgen` dropped off the list entirely when its options were wired --
+which is the tool tracking reality rather than a number in a file.
+
+Two more verified by hand and worth doing next, both in apps that already carry
+an `F1` list to advertise the new key on:
+
+| | |
+|---|---|
+| `apps/calendar` `use_24h` | `false` at construction, read twice, no writer. **The calendar can only ever show 12-hour time.** It already has `W` for the week-start question, which is the same kind of preference, so a key is consistent. |
+| `apps/hexeditor` `show_inspector` | `true` at construction, read twice, no writer. The inspector panel is permanent. |
+
+**The survey covered only `bool` at first, and that hid the more expensive
+half of one defect.** `apps/torrent`'s `sort_ascending` was on the list;
+`sort_column` beside it was not, because it is an enum. It has no writer
+anywhere -- declared, constructed as `Added`, read once in the comparator -- so
+the torrent list sorts by date-added descending for ever and **ten of its
+eleven comparator arms are unreachable**. Reporting the boolean and not the
+enum is reporting the smaller half.
+
+Fieldless enums are now included, on the same reasoning that justified
+restricting to `bool`: nothing can change one in place, so "never assigned"
+means "never changed". The count went to 95 in 33 apps, and the first pass of
+the new rows found something larger than anything the bool-only version did:
+
+**`apps/regextester` draws three tabs and only one can ever be shown.**
+`active_tab` is `ActiveTab::Tester` at construction, matched to choose the
+view, drawn to highlight the tab strip -- and written only by tests. The
+Library and Reference tabs are rendered code that no user can reach. That is in
+the same app whose `i`/`g`/`m` flag buttons were fixed two hours ago, which
+says something about how much a single reading of one app finds: the flags were
+visible because they were *drawn as controls*, and the tabs looked like they
+worked because a tab strip with one tab highlighted looks exactly like a tab
+strip.
+
+`apps/editor`'s `line_ending` is on the list and is **correct**: it is detected
+from the file's own content (`if content.contains("backslash-r" + "backslash-n")`)
+and set at construction, which is an editor preserving what it opened. Same
+false-positive mode as `apps/installer`, and the same tell -- look at where the
+struct comes from.
+
+**A second kind of noise, found by checking the two rows with the highest
+stakes.** `apps/installer`'s `wipe` and `auto_reboot` look frozen and are not:
+they are built from an answer file through `disk.get("wipe")` and
+`root.get("auto_reboot")`, so they are set by *constructing* the struct, which
+the survey deliberately does not count as a write. `apps/backup`'s
+`follow_symlinks` is threaded through `scan_dir_recursive` as a parameter.
+
+That matters more than the count, because it is **the same evidence as
+`apps/lockscreen` with the opposite answer**: there, `main` passes
+`LockScreenConfig::default()` and nothing parses anything, so the flags really
+are fixed at compile time. Construction from a parser and construction from a
+literal are indistinguishable to the tool and mean opposite things -- so the
+question to ask of any row in an app that reads a config file is *where does
+this struct come from*, before anything else.
+
+I checked those two first because an installer that cannot be told whether to
+wipe a disk would have been the worst finding of the night. It would also have
+been wrong.
+
+And the list's own noise is now legible enough to describe: entries like
+`ctrl`, `shift`, `bold`, `expandable` and `is_directory` are **data** -- a
+recorded keystroke's modifiers, a tree node's shape, a listing entry's kind --
+immutable because that is what they are. They sit in the app struct because the
+app struct holds a copy of the thing, not because anyone meant them to be
+settings. A reader working the list should expect roughly a third of it to be
+that.
+
+**And one of them is not a flag at all -- it is two whole features.**
+`apps/rssreader`'s `show_add_feed_dialog` and `show_feed_health` are `false` at
+construction, written only by tests, and each gates a *render function of its
+own*: `render_add_feed_dialog` and `render_feed_health_overlay`. So two
+complete overlays are written, drawn conditionally, and reachable by nobody.
+
+That one is filed rather than fixed, because the remedy depends on something
+the code cannot say. `show_add_feed_dialog` looks **superseded**: adding a feed
+already works through the inline `A` prompt wired on 2026-09-18, so the dialog
+is a second way to do a thing that has a first way, and design-decision 1006's
+rule -- a command that does not work is deleted, not kept -- argues for
+removing it. `show_feed_health` looks **unfinished**: nothing else in the app
+shows feed health, so wiring a key would add the feature rather than restore
+it. Deleting a finished feature and shipping an unfinished one are opposite
+mistakes, and the flags look identical from here.
+
+So the survey's output is a list of *questions about intent*, not a list of
+patches. A flag frozen because nobody wired the toggle and a flag frozen
+because its home is a configuration file that does not exist yet look identical
+from the code and need opposite work.
+
 It is still a candidate list. Some of the 60 are data rather than settings --
 `is_directory` on a listing entry is immutable because that is what it is --
 and the survey says so rather than pretending otherwise. The first run reported

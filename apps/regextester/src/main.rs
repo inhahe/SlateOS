@@ -1508,6 +1508,10 @@ impl Default for RegexFlags {
 /// `every_advertised_key_does_something`.
 const SHORTCUTS: &[(&str, &str)] = &[
     (
+        "Ctrl+1 / Ctrl+2 / Ctrl+3",
+        "The tester / the library / the reference",
+    ),
+    (
         "Tab",
         "Move between the pattern, the text and the replacement",
     ),
@@ -2929,6 +2933,28 @@ impl App {
                 self.show_help = false;
                 true
             }
+            // The three tabs the window draws. `active_tab` was
+            // `ActiveTab::Tester` at construction, matched to choose the view,
+            // drawn to highlight the strip -- and written only by tests, so
+            // the Library and Reference tabs were rendered code no user could
+            // reach. A tab strip with one tab highlighted looks exactly like a
+            // tab strip, which is why nobody noticed.
+            //
+            // Chords, because every printable character is typed into
+            // whichever field has focus. Found by
+            // `scripts/frozen-flag-survey.py` once it learned about enums.
+            GKey::Num1 if key.modifiers.ctrl => {
+                self.active_tab = ActiveTab::Tester;
+                true
+            }
+            GKey::Num2 if key.modifiers.ctrl => {
+                self.active_tab = ActiveTab::Library;
+                true
+            }
+            GKey::Num3 if key.modifiers.ctrl => {
+                self.active_tab = ActiveTab::Reference;
+                true
+            }
             GKey::I if key.modifiers.ctrl => {
                 self.flags.case_insensitive = !self.flags.case_insensitive;
                 self.update_regex();
@@ -3991,6 +4017,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **All three tabs can be reached, and each draws something different.**
+    ///
+    /// `active_tab` was `ActiveTab::Tester` at construction, matched to choose
+    /// the view, drawn to highlight the strip -- and written only by tests. So
+    /// the Library and Reference tabs were rendered code no user could reach,
+    /// in a window that showed three tabs. A tab strip with one tab
+    /// highlighted looks exactly like a tab strip, which is why this survived
+    /// a careful reading of the same file two hours earlier.
+    ///
+    /// Asserts what each tab *draws*, not which variant the field holds: a
+    /// chord that sets the enum and a renderer that ignores it would pass the
+    /// weaker test, which is the defect `multiline` had in this very app.
+    #[test]
+    fn every_tab_can_be_reached_and_shows_its_own_content() {
+        let mut app = App::new();
+        let tester = drawn_help_text(&mut app);
+        assert!(
+            tester.contains("Tester"),
+            "the tab strip is not drawn at all"
+        );
+
+        assert!(ctrl(&mut app, guitk::event::Key::Num3), "Ctrl+3 unanswered");
+        let reference = drawn_help_text(&mut app);
+        assert!(
+            reference.contains("Syntax Reference"),
+            "Ctrl+3 did not bring up the reference tab"
+        );
+
+        assert!(ctrl(&mut app, guitk::event::Key::Num2), "Ctrl+2 unanswered");
+        let library = drawn_help_text(&mut app);
+        assert_ne!(
+            library, reference,
+            "the library and the reference draw the same thing"
+        );
+
+        assert!(ctrl(&mut app, guitk::event::Key::Num1), "Ctrl+1 unanswered");
+        assert_eq!(
+            drawn_help_text(&mut app),
+            tester,
+            "Ctrl+1 did not come back to the tester"
+        );
     }
 
     /// **The shortcut list reaches the window.**

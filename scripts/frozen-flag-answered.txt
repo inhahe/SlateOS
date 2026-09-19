@@ -121,3 +121,9 @@ remotedesktop	mode	gates clipboard sync for a session CANNOT_CONNECT_LINES says 
 # it faded after six seconds.
 screenshot	default_action	what to do after a capture CANNOT_CAPTURE says never happens
 screenshot	show_notification	whether to announce a save that never occurs
+
+# `ExportOptions::format`. The module doc says it outright: "Nothing is
+# exported. `ExportOptions` records a format, a quality and a size, has a
+# `Default` and a test, and is read by nothing." A format picker is built
+# when something obeys it.
+photomanager	format	export options for an export the module doc says does not exist

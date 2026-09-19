@@ -628,6 +628,23 @@ fn read_rsp() -> u64 {
 /// `frame` points to the `InterruptStackFrame` saved on the interrupted
 /// task's kernel stack; it remains valid for the duration of the handler
 /// regardless of which stack the handler executes on.
+/// Bracket one ISR body in `cputime`'s IRQ accounting.
+///
+/// Vectors 251, 252 and 255 were dispatched without `enter_irq`/`exit_irq`,
+/// so their cycles were charged to whatever task they interrupted rather
+/// than to IRQ time. A closure rather than a Drop guard because `cputime`
+/// has no guard type, and adding one would mean converting the timer and
+/// device call sites as well -- and those are the two paths where a second
+/// bracket would double-count and make `apic.rs:1006`'s `irq_depth() > 1`
+/// nesting cap fire on every ordinary timer tick.
+///
+/// Not used for vector 32: `handle_timer_irq` brackets itself.
+fn charged_to_irq<F: FnOnce()>(body: F) {
+    crate::cputime::enter_irq();
+    body();
+    crate::cputime::exit_irq();
+}
+
 extern "C" fn dispatch_vector(frame: *mut InterruptStackFrame, vector: u64) {
     // SAFETY: `frame` was produced by `lea rdi, [rsp + 128]` in the IRQ entry
     // stub and points to a valid `InterruptStackFrame` that outlives this
@@ -655,9 +672,9 @@ extern "C" fn dispatch_vector(frame: *mut InterruptStackFrame, vector: u64) {
 
     match vector {
         32 => crate::apic::handle_timer_irq(frame_ref, 0),
-        251 => crate::tlb::handle_tlb_shootdown_irq(frame_ref, 0),
-        252 => crate::apic::handle_reschedule_irq(frame_ref, 0),
-        255 => crate::apic::handle_spurious_irq(frame_ref, 0),
+        251 => charged_to_irq(|| crate::tlb::handle_tlb_shootdown_irq(frame_ref, 0)),
+        252 => charged_to_irq(|| crate::apic::handle_reschedule_irq(frame_ref, 0)),
+        255 => charged_to_irq(|| crate::apic::handle_spurious_irq(frame_ref, 0)),
         v @ 33..=56 => {
             // Vectors 33–56 map to IOAPIC inputs 0–23.
             #[allow(clippy::arithmetic_side_effects)] // v >= 33 in this arm.

@@ -81,3 +81,9 @@ screenrecorder	annotation_toolbar_visible	ditto
 archivemanager	encrypted	a property of the archive, read from the file by the parser
 archivemanager	purpose	set when the pending choice is created; a fact about that choice
 archivemanager	format	TD-C-THE-ARCHIVE-CREATION-OPTIONS-ARE-A-STRUCT-NOBODY-CALLS
+
+# A snapshot you created by hand is Manual by definition. The create form
+# draws no type selector because there is no choice to make: `Automatic`,
+# `PreUpdate`, `PreInstall` and `Scheduled` describe who took the snapshot,
+# and the answer here is always "you did". Not a setting.
+systemrestore	form_type	what `Manual` means; the form has no choice to offer

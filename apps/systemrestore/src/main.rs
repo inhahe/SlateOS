@@ -83,6 +83,23 @@ const CANNOT_RESTORE: &str =
 const CANNOT_CREATE: &str =
     "Cannot create a snapshot: this program has no filesystem access, so nothing was captured";
 
+/// What the list of snapshots is.
+///
+/// `CANNOT_RESTORE` and `CANNOT_CREATE` appear on a progress overlay, which
+/// is dismissed and gone. The *list* stays, and it is the thing a person
+/// reads: five restore points with dates, sizes and components, one of them
+/// marked as the current system. Nothing on screen said they are a model
+/// this program built at startup rather than snapshots of this machine.
+///
+/// That is the belief the two constants above exist to prevent -- somebody
+/// who thinks a restore point exists proceeds with the risky change it was
+/// taken for -- and a message that has to be provoked before it appears does
+/// not prevent it. This one is always on screen, for the same reason
+/// `apps/screenrecorder` draws its refusal unconditionally: there is no state
+/// in which these entries become real, so a condition here would be one that
+/// is always true.
+const SNAPSHOTS_ARE_NOT_REAL: &str = "Demonstration data: these are not snapshots of this machine, and none of them can restore anything";
+
 const WINDOW_WIDTH: f32 = 1050.0;
 const WINDOW_HEIGHT: f32 = 700.0;
 const HEADER_HEIGHT: f32 = 48.0;
@@ -3090,6 +3107,19 @@ impl SystemRestoreUI {
             overflow: TextOverflow::Ellipsis,
         });
 
+        // What those snapshots are. Beside the count rather than under
+        // it: the count is the claim this qualifies.
+        rt.push(RenderCommand::Text {
+            x: 360.0,
+            y: HEADER_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
+            text: SNAPSHOTS_ARE_NOT_REAL.to_owned(),
+            color: self.palette.ink(self.palette.yellow),
+            font_size: FONT_SIZE_SMALL,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some((self.window_width - 380.0).max(120.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+
         // Snapshot count badge.
         let count_text = format!("{} snapshots", self.manager.tree.count());
         self.palette.push_surface(
@@ -5509,6 +5539,44 @@ working filter from a broken one"
             })
             .find(|t| t.starts_with("View: "))
             .unwrap_or_default()
+    }
+
+    /// The window says what the list of snapshots is.
+    ///
+    /// `CANNOT_RESTORE` and `CANNOT_CREATE` are drawn on a progress overlay,
+    /// which has to be provoked and is then dismissed. The list stays: five
+    /// restore points with dates, sizes and components, one marked as the
+    /// current system, and nothing saying they are a model this program built
+    /// at startup. That is precisely the belief those two constants exist to
+    /// prevent.
+    #[test]
+    fn the_window_says_the_snapshots_are_not_real() {
+        let ui = SystemRestoreUI::new();
+        let texts: Vec<String> = ui
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            texts.iter().any(|t| t.ends_with(" snapshots")),
+            "control: the header must be claiming a number of snapshots for \
+this test to be about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        // Against the words, not the constant: `t == SNAPSHOTS_ARE_NOT_REAL`
+        // passes with the constant rewritten to "Snapshots", which is the
+        // same defect wearing this test as cover.
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Demonstration data") && t.contains("restore anything")),
+            "the window lists restore points and does not say they are not real"
+        );
     }
 
     fn press_ctrl(k: Key) -> Event {

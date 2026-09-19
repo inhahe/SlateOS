@@ -1506,6 +1506,24 @@ impl Default for RegexFlags {
 ///
 /// **Each row is a key this program actually answers**, checked by
 /// `every_advertised_key_does_something`.
+/// The chips along the top of the Library tab, in the order they are drawn
+/// and the order `Ctrl+L` steps through them.
+///
+/// One list, not two. The renderer had this array inline and the key that
+/// steps it did not exist; adding the key with its own copy of the order is
+/// how the two drift apart, which is the defect this crate has now produced
+/// four times in four readings.
+const LIBRARY_FILTERS: [Option<PatternCategory>; 8] = [
+    None,
+    Some(PatternCategory::Validation),
+    Some(PatternCategory::Extraction),
+    Some(PatternCategory::Format),
+    Some(PatternCategory::Network),
+    Some(PatternCategory::DateTime),
+    Some(PatternCategory::Programming),
+    Some(PatternCategory::Custom),
+];
+
 const SHORTCUTS: &[(&str, &str)] = &[
     (
         "Ctrl+1 / Ctrl+2 / Ctrl+3",
@@ -1520,6 +1538,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+I", "Case insensitive"),
     ("Ctrl+G", "Global"),
     ("Ctrl+R", "Show or hide the replacement box"),
+    ("Ctrl+L", "Next category, in the library"),
     ("Ctrl+Shift+G", "Show or hide the capture groups"),
     ("Ctrl+M", "Multiline"),
     ("F1", "This list"),
@@ -2529,18 +2548,8 @@ impl App {
         let content_y = TOOLBAR_HEIGHT + PADDING;
 
         // Category filter bar
-        let categories = [
-            None,
-            Some(PatternCategory::Validation),
-            Some(PatternCategory::Extraction),
-            Some(PatternCategory::Format),
-            Some(PatternCategory::Network),
-            Some(PatternCategory::DateTime),
-            Some(PatternCategory::Programming),
-            Some(PatternCategory::Custom),
-        ];
         let mut cat_x = PADDING;
-        for cat in &categories {
+        for cat in &LIBRARY_FILTERS {
             let label = cat.map_or("All", PatternCategory::label);
             let w = text::width(label, SMALL_TEXT) + 16.0;
             let selected = self.library_category_filter == *cat;
@@ -2957,6 +2966,29 @@ impl App {
             // groups could not be put away. Found by
             // `scripts/frozen-flag-survey.py` on its third pass over this
             // crate, after the flag buttons and the tabs.
+            // The chips along the top of the Library tab.
+            // `library_category_filter` was `None` at construction, read to
+            // highlight the selected chip and again to filter the entries,
+            // and written nowhere -- so eight chips were drawn and none could
+            // be chosen. Found on the fourth pass over this crate, by reading
+            // the line under a row the survey had reported as a false
+            // positive.
+            GKey::L if key.modifiers.ctrl => {
+                let at = LIBRARY_FILTERS
+                    .iter()
+                    .position(|c| *c == self.library_category_filter)
+                    .unwrap_or(0);
+                // A comparison rather than a remainder: `%` can divide by
+                // zero and this crate denies arithmetic that can.
+                let next = at.saturating_add(1);
+                let wrapped = if next >= LIBRARY_FILTERS.len() {
+                    0
+                } else {
+                    next
+                };
+                self.library_category_filter = LIBRARY_FILTERS.get(wrapped).copied().flatten();
+                true
+            }
             GKey::R if key.modifiers.ctrl => {
                 self.show_replace = !self.show_replace;
                 // Hiding the pane takes the caret with it, rather than
@@ -4087,6 +4119,52 @@ mod tests {
             drawn_help_text(&mut app),
             tester,
             "Ctrl+1 did not come back to the tester"
+        );
+    }
+
+    /// **The library's category chips can be chosen, and the list follows.**
+    ///
+    /// `library_category_filter` was `None` at construction, read to highlight
+    /// the selected chip and again to filter the entries, and written
+    /// nowhere -- eight chips drawn and none selectable. Fourth defect found
+    /// in this one crate.
+    ///
+    /// Asserts the *entries on screen*, not the field: a key that sets the
+    /// filter while the list ignores it would pass the weaker version, which
+    /// is this crate's own `multiline` defect from earlier today.
+    #[test]
+    fn the_library_categories_can_be_chosen_and_filter_the_list() {
+        let mut app = App::new();
+        assert!(ctrl(&mut app, guitk::event::Key::Num2), "Ctrl+2 unanswered");
+
+        let shown = |app: &mut App| -> usize {
+            drawn_help_text(app)
+                .split(" | ")
+                .filter(|t| !t.is_empty())
+                .count()
+        };
+        let all = shown(&mut app);
+        assert!(app.library_category_filter.is_none(), "starts unfiltered");
+
+        // Step to the first real category; fewer entries have to be drawn.
+        assert!(ctrl(&mut app, guitk::event::Key::L), "Ctrl+L unanswered");
+        assert_eq!(
+            app.library_category_filter,
+            Some(PatternCategory::Validation),
+            "Ctrl+L did not step to the first category"
+        );
+        assert!(
+            shown(&mut app) < all,
+            "filtering to one category drew as much as no filter did"
+        );
+
+        // ...and round the ring, back to no filter.
+        for _ in 0..(LIBRARY_FILTERS.len() - 1) {
+            ctrl(&mut app, guitk::event::Key::L);
+        }
+        assert!(
+            app.library_category_filter.is_none(),
+            "the cycle did not come back to All"
         );
     }
 

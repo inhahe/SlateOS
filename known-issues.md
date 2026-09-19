@@ -161984,7 +161984,7 @@ actively misleads and is the first thing to fix; the duplication itself can
 wait for someone who wants the feature.
 
 ### [A] A timing self-test panicked the kernel over a 988ms sleep, and the boot it failed differed from the green one before it only in comment text -- 2026-09-18
-**Status:** FIXED 2026-09-18 (retry + real-time deadline; awaiting a boot test)
+**Status:** FIXED 2026-09-18, boot-verified on ebb683642 -- `[sched] sleep_ns: PASSED (slept 37.892ms for 20ms request, attempt 1 of 3)`. No retry was needed, and the attempt number is reported either way, which is the dd-942 half: PASSED first time and PASSED after a retry are different facts. Note 37.892ms is a new maximum -- the prior observed range was 20.8-32.8ms -- so the measurement keeps drifting up, still far inside the 500ms ceiling
 
 **In short:** the kernel checks at startup that asking to sleep for 20
 milliseconds really does take about 20 milliseconds. On one boot it took 988,
@@ -162400,7 +162400,7 @@ Worth noting the consequence plainly: **until it is committed, SlateOS has
 no licence on `main`**, which is the only copy anyone else can see.
 
 ### [A] The kernel now counts interrupt nesting twice, on two counters with different coverage, and I added the second one this session -- 2026-09-18
-**Status:** OPEN (consolidation designed and costed below; not applied -- a boot was building)
+**Status:** RESOLVED 2026-09-18, boot-verified on ebb683642 -- NOT by consolidating. The two counters are not duplicates (see the correction below) and both remain. What landed is the attribution fix: vectors 251/252/255 are now charged to IRQ time via `charged_to_irq`, arm 32 untouched, and dispatch_vector still works
 
 **In short:** the kernel tracks how deeply nested it is inside interrupt
 handlers. It now does that in two separate places, which disagree: one
@@ -162575,7 +162575,7 @@ about hooks -- *slow enough to route around is worse than none* -- applies
 here with much longer teeth.
 
 ### [A] `freeze.rs`'s 1-second timing ceiling is below the host stall measured today, and the rule that was supposed to prevent that does not cover it -- 2026-09-18
-**Status:** OPEN (the one at-risk assertion is identified; the fix waits for a free tree)
+**Status:** FIXED 2026-09-18, boot-verified on ebb683642 (two-clock comparison replaced the 1s ceiling; the boot reached BOOT_OK with only the three baselined failures)
 
 **In short:** several start-up checks say "this took less than N". A rule
 already written in this tree says such a check is only safe if it would take
@@ -162643,7 +162643,7 @@ between two clocks that stall together, which no host pause can break.
 Not applied yet: a boot is building, and `fs/freeze.rs` is in it.
 
 ### [A] `listen()` fails with `InternalError` about one boot in twenty, reds the run, and was recorded nowhere -- 2026-09-18
-**Status:** OPEN (reproduction rate measured, cause not yet identified)
+**Status:** OPEN (bounded retry landed and boot-verified on ebb683642; the round counter reported ZERO retries, which argues against late completion and points at the other three InternalError sites -- now distinguishable. Cause still not identified)
 
 **In short:** roughly one boot in twenty fails because opening a network
 listening socket returns an error, on a socket that was created and bound
@@ -162862,7 +162862,7 @@ the consistency checks below it should get their own error values in the
 same change, which is a slightly larger edit than it first appears.
 
 ### [A] Reading a large file panics the kernel, my cmake rung found it, and I had printed the number that predicted it -- 2026-09-18
-**Status:** FIXED 2026-09-18 (both read paths return an error; the rung skips and counts it) -- awaiting a boot
+**Status:** FIXED 2026-09-18, boot-verified on ebb683642 (both read paths return OutOfMemory instead of aborting; the cmake rung took the skip path and the kernel did not panic, which is what the change was for)
 
 **In short:** asking the kernel to read a 22-megabyte file killed it, with
 2.7 gigabytes of memory free. The cause is that the allocator rounds a

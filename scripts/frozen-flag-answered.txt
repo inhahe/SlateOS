@@ -65,3 +65,13 @@ torrent	enable_utp	ditto
 torrent	encryption_mode	ditto
 torrent	pre_allocate_storage	ditto
 torrent	proxy_type	ditto
+
+# `CANNOT_RECORD_LINES` is drawn unconditionally at the top level -- "there is
+# no state in which this program can capture a frame, so a condition here
+# would be one that is always true" -- so unlike `torrent`'s case, the note
+# already reaches every panel including these. Settings for a capture that
+# cannot happen, and annotations drawn during a recording that cannot start.
+screenrecorder	capture_cursor	under the always-drawn CANNOT_RECORD note; no frame source
+screenrecorder	click_highlight	ditto
+screenrecorder	active_annotation_tool	annotations are drawn during recording; there is none
+screenrecorder	annotation_toolbar_visible	ditto

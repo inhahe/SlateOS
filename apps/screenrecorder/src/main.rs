@@ -1694,6 +1694,23 @@ impl SettingsTab {
     pub fn all() -> &'static [SettingsTab] {
         &[Self::Output, Self::Hotkeys, Self::Schedule]
     }
+
+    /// The next tab along, wrapping. Walks `all()` rather than matching, so
+    /// a tab added there is reachable without a second edit here.
+    #[must_use]
+    pub fn step(self, forward: bool) -> Self {
+        let tabs = Self::all();
+        let at = tabs.iter().position(|t| *t == self).unwrap_or(0);
+        let last = tabs.len().saturating_sub(1);
+        let next = if forward {
+            if at >= last { 0 } else { at.saturating_add(1) }
+        } else if at == 0 {
+            last
+        } else {
+            at.saturating_sub(1)
+        };
+        tabs.get(next).copied().unwrap_or(Self::Output)
+    }
 }
 
 // ============================================================================
@@ -1997,6 +2014,15 @@ impl ScreenRecorderApp {
                         trim.set_start(start);
                     }
                 }
+                EventResult::Consumed
+            }
+            // The settings tabs. Three were drawn with the active one
+            // highlighted and nothing moved the selection, so `Hotkeys` and
+            // `Schedule` -- two complete settings pages, drawn by
+            // `render_hotkey_settings` and `render_schedule_settings` -- could
+            // not be opened at all.
+            Key::Left | Key::Right if self.active_view == ActiveView::Settings => {
+                self.settings_tab = self.settings_tab.step(key.key == Key::Right);
                 EventResult::Consumed
             }
             // Capture mode.
@@ -4014,6 +4040,87 @@ mod tests {
             modifiers,
             text: String::new(),
         })
+    }
+
+    /// Every settings tab can be opened, and each draws its own page.
+    ///
+    /// Three tabs were drawn with the active one highlighted and nothing
+    /// moved the selection, so `Hotkeys` and `Schedule` -- two complete
+    /// settings pages with renderers of their own -- could not be reached.
+    #[test]
+    fn every_settings_tab_can_be_opened_and_draws_its_page() {
+        let mut app = ScreenRecorderApp::new();
+        app.active_view = ActiveView::Settings;
+
+        let mut seen = Vec::new();
+        let mut pages = Vec::new();
+        for _ in SettingsTab::all() {
+            seen.push(app.settings_tab);
+            pages.push(drawn_text(&app));
+            assert_eq!(
+                app.handle_event(&press(Key::Right)),
+                EventResult::Consumed,
+                "Right was ignored on the settings view"
+            );
+        }
+        for tab in SettingsTab::all() {
+            assert!(
+                seen.contains(tab),
+                "stepping the settings tabs never reached {}",
+                tab.label()
+            );
+        }
+        assert_eq!(
+            app.settings_tab, seen[0],
+            "stepping right round did not come back to the first tab"
+        );
+
+        // Each tab draws something the others do not, or the tab strip is a
+        // decoration over one page.
+        for (i, page) in pages.iter().enumerate() {
+            for (j, other) in pages.iter().enumerate() {
+                if i != j {
+                    assert_ne!(
+                        page,
+                        other,
+                        "the {} and {} tabs draw exactly the same page",
+                        seen[i].label(),
+                        seen[j].label()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Left steps the other way, and neither arrow disturbs another view.
+    #[test]
+    fn the_settings_arrows_belong_to_the_settings_view() {
+        let mut app = ScreenRecorderApp::new();
+        app.active_view = ActiveView::Settings;
+        let first = app.settings_tab;
+        app.handle_event(&press(Key::Right));
+        assert_ne!(app.settings_tab, first, "control: Right moved nothing");
+        app.handle_event(&press(Key::Left));
+        assert_eq!(app.settings_tab, first, "Left did not step back");
+
+        let mut other = ScreenRecorderApp::new();
+        other.active_view = ActiveView::Record;
+        let before = other.settings_tab;
+        other.handle_event(&press(Key::Right));
+        assert_eq!(
+            other.settings_tab, before,
+            "Right changed the settings tab from a view that does not show it"
+        );
+    }
+
+    fn drawn_text(app: &ScreenRecorderApp) -> Vec<String> {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn press(k: Key) -> Event {

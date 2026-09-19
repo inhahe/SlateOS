@@ -161877,7 +161877,7 @@ it wants to persist across runs, and expressing "at least 16 characters" or
 rules the person being checked can quietly relax is not a compliance
 indicator.
 
-**What the repair wants.** A settings file, per §NNN when one is decided --
+**What the repair wants.** A settings file, whose shape is **C-Q26** --
 this is the third app to want one (`apps/lockscreen`'s `show_clock_seconds`
 and `show_date`, `apps/markdowneditor`'s `autosave_enabled`), and the shape
 of that file is an operator question rather than a lane decision, since it

@@ -62,17 +62,28 @@ crate**:
 Construction does not count as a write: `name: true,` in a struct literal is
 the value it is stuck at, which is the whole complaint.
 
-Restricted to `bool` and to **fieldless enums**. A field of a struct type can
-be changed by calling a method on it -- `self.viewport.scroll_by(..)` mutates
-the field's contents without ever assigning the field -- so "never assigned"
-means nothing there. For a `bool`, or an enum whose variants carry nothing, it
+Restricted to `bool` and to **enums nothing can change in place**. A field of
+a struct type can be changed by calling a method on it --
+`self.viewport.scroll_by(..)` mutates the field's contents without ever
+assigning the field -- so "never assigned" means nothing there. For a `bool`,
+or for an enum with no `&mut self` method anywhere in its impl blocks, it
 means exactly what it says.
 
-Enums were added after the bool-only version missed `apps/torrent`'s
+That test used to be "every variant carries nothing", and it was wrong in
+both directions. It excluded `apps/filesearch`'s `SizeFilter` -- seven
+fieldless variants and one `Custom(u64, u64)` -- whose field was a frozen
+filter strip exactly like the two beside it, so the tool reported those two
+and not the third; it was found by reading, which is the work this exists to
+replace. And it included fieldless enums that a `fn advance(&mut self) { *self
+= ... }` moves without any assignment this survey can see. The shape of the
+variants was never the question. Whether a value can change without being
+assigned is, and the answer is in the type's impl blocks.
+
+Enums were added at all after the bool-only version missed `apps/torrent`'s
 `sort_column`: declared, constructed as `Added`, read once in the comparator
-and assigned nowhere, so the list sorts by date-added descending for ever and
-ten of its eleven comparator arms are unreachable. A survey that reports the
-`bool` beside it and not that is reporting the smaller half of one defect.
+and assigned nowhere, so the list sorted by date-added descending for ever
+and ten of its eleven comparator arms were unreachable. A survey that reports
+the `bool` beside it and not that is reporting the smaller half of one defect.
 
 KNOWN LIMITS, in the tool's own voice rather than a reader's:
 
@@ -113,16 +124,64 @@ import rustlex  # noqa: E402
 
 ROOT = HERE.parent
 
-#: A fieldless `enum Name { A, B, C }` -- no payloads on any variant.
+#: `enum Name { ... }`, with the variant list captured.
 #:
-#: Those are safe to judge exactly as a `bool` is: nothing can change one in
-#: place, so "never assigned" means "never changed". An enum with payloads, or
-#: any struct type, can be mutated through a method without the field ever
-#: appearing on the left of an `=`, which is why they are left alone.
+#: Nested braces would defeat `[^{}]*`, and a variant that carries a struct
+#: body (`Foo { a: u8 }`) has them -- such an enum simply is not matched, and
+#: so is not judged. That is the safe direction to fail in.
 PLAIN_ENUM_RE = re.compile(
     r"\benum\s+([A-Z]\w*)\s*\{([^{}]*)\}",
     re.DOTALL,
 )
+
+#: `fn whatever(&mut self` inside a block. The question this answers is
+#: whether a value of the type can be changed without being assigned.
+MUT_METHOD_RE = re.compile(r"fn\s+\w+\s*(?:<[^>]*>)?\s*\(\s*&\s*mut\s+self\b")
+
+
+def impl_bodies(code: str, ty: str) -> list[str]:
+    """Every `impl ... <ty> ... { ... }` body in the crate, brace-matched."""
+    out = []
+    for m in re.finditer(r"\bimpl\b[^{;]*\b%s\b[^{;]*\{" % re.escape(ty), code):
+        depth, i = 1, m.end()
+        while i < len(code) and depth:
+            if code[i] == "{":
+                depth += 1
+            elif code[i] == "}":
+                depth -= 1
+            i += 1
+        out.append(code[m.end() : i])
+    return out
+
+
+def judgeable_enums(code: str) -> set[str]:
+    """Enums whose values cannot be changed except by assigning them.
+
+    Two things were wrong with the previous rule, which was "every variant
+    carries nothing":
+
+      * It excluded `apps/filesearch`'s `SizeFilter`, seven fieldless
+        variants and one `Custom(u64, u64)`. That field was a frozen filter
+        strip exactly like the two beside it, and the tool reported those two
+        and not this one. It was found by reading, which is what this survey
+        exists to replace.
+      * It included fieldless enums that *can* change in place. `fn
+        advance(&mut self) { *self = ... }` moves a field with no assignment
+        to it anywhere, so `self.mode.advance()` is a writer this survey
+        cannot see and would call frozen.
+
+    Both are the same question -- can a value of this type change without
+    being assigned? -- and the answer is in the type's own impl blocks, not in
+    the shape of its variants. An enum with no `&mut self` method can only be
+    changed by assignment, whatever its variants carry.
+    """
+    found = set()
+    for m in PLAIN_ENUM_RE.finditer(code):
+        name = m.group(1)
+        if any(MUT_METHOD_RE.search(body) for body in impl_bodies(code, name)):
+            continue
+        found.add(name)
+    return found
 
 #: `show_sidebar: bool,` in a struct declaration.
 FIELD_RE = re.compile(r"\b(?:pub(?:\([^)]*\))?\s+)?([a-z_][a-z0-9_]*)\s*:\s*bool\s*,")
@@ -287,18 +346,6 @@ def owned_state(code: str) -> tuple[str, bool]:
     return "\n".join(bodies), True
 
 
-def plain_enums(code: str) -> set[str]:
-    """Every enum in the crate whose variants carry nothing."""
-    found = set()
-    for m in PLAIN_ENUM_RE.finditer(code):
-        name, body = m.group(1), m.group(2)
-        variants = [v.strip() for v in body.split(",")]
-        if all(
-            v == "" or re.fullmatch(r"(?:#\[[^\]]*\]\s*)?[A-Z]\w*", v)
-            for v in variants
-        ):
-            found.add(name)
-    return found
 
 
 def survey(crate: Path) -> tuple[list[str], int, bool]:
@@ -316,7 +363,7 @@ def survey(crate: Path) -> tuple[list[str], int, bool]:
     body, scoped = owned_state(code)
     # Declared in the app's own struct; written (or not) anywhere in the crate.
     names = set(FIELD_RE.findall(body))
-    for enum in plain_enums(code):
+    for enum in judgeable_enums(code):
         # `Option<Enum>` as well as `Enum`. That shape is how an app spells
         # "no filter, or this one", and it is exactly what a filter strip with
         # a selection highlight is built on -- `apps/regextester`'s

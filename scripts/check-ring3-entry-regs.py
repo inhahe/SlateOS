@@ -155,7 +155,12 @@ def self_test() -> int:
         for name, body, want in cases:
             d = pathlib.Path(td) / name
             d.mkdir()
-            (d / "f.rs").write_text(body, encoding="utf-8")
+            (d / "f.rs").write_text(body, encoding="utf-8", newline="")
+            # Without newline=EMPTY, Windows rewrites each line ending in the
+            # fixture, invisibly: git shows nothing, because a file declared
+            # `text eol=lf` that is CRLF on disk matches the index anyway.
+            # Caught by check-text-mode-writes on the first boot after this gate
+            # was added -- a gate I wrote tripping a gate someone else wrote.
             got = scan(d)
             missing = sorted(got[0][2]) if got else []
             if missing != want:

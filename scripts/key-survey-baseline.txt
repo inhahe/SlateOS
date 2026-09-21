@@ -29,11 +29,6 @@ devicemanager	F5
 devicemanager	R
 
 
-# settings
-settings	C
-settings	F
-settings	V
-settings	X
 
 # asteroids
 asteroids	A

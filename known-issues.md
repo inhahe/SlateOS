@@ -160487,9 +160487,11 @@ about a program that was working correctly, or nearly hid a real one. This
 entry lists them with the instance that caught each, because the fix is not
 "be careful" -- it is knowing the specific shapes.
 
-**It started at seven and is at seventeen**, all in the same day, and the slug
+**It started at seven and is at nineteen**, and the slug
 keeps the original number because renaming it would break every reference to
-it. The later seven are not more of the same: 8 and 12 are about *coverage* --
+it. 18 and 19 are the two that are not failure shapes at all -- 18 is the
+question that ends a run of them and 19 is about the cost of a grouping you
+were handed. The later ones are not more of the same: 8 and 12 are about *coverage* --
 which files a sweep read, which configuration a build compiled -- 11 and 13 are
 about *lists*, which is where this has cost the most, and 14 and 15 are about the
 *query itself* rather than the reading -- 14 puts the answer where the filter
@@ -160706,6 +160708,56 @@ over-report, and a future session that trusts their output will file working
 programs as broken. The entry they live in
 (`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
 says why the failure is systematic rather than a matter of care.
+
+**18. The artefact already contained its own counter-example** (lane A,
+2026-09-21, and lane C the same day). Not a failure shape but the question
+that ends them, and it is free. Lane A's `ctest-coreutils-runs` had failed six
+rounds, each round proposing a structural cause -- not staged, wrong path,
+missing capability, forked child cannot exec, native exec syscall broken -- and
+each costing a ~90 minute boot to disprove. The thing that killed all six was
+in the *first* log any of those rounds produced: one `[spawn]` line recording a
+ring-3 process forking and the child exec'ing a binary out of the same
+directory, in the same boot. A 2.7 MB log with 275 verdicts in it almost
+certainly holds one that contradicts your theory.
+
+**The rule: before any theory that costs a boot, a build or an hour, ask
+whether anything in the run you already have does the thing you believe is
+broken.** dd-954 says a passing control licenses only the axis it varies; the
+corollary is that **a passing control you did not write is still a control.**
+Looking is free and theorising is not.
+
+This lane had the same day from the other end. Six apps were opened off a "the
+app never names its keyboard shortcuts" queue and five needed nothing, and in
+every case the answer was in the app's own source: a footer the detector could
+not match, a guard under a different name, a table of structs rather than
+tuples, a `1-0` range an ascending expander reads as empty. Six apps read
+before the instrument was fixed instead. The queue was the artefact holding its
+own counter-example, and reading one app closely would have said so as loudly
+as reading six.
+
+**19. A wrong grouping costs more than a missing one** (lane A, 2026-09-21).
+Lane A was handed three red test rungs grouped as one finding. The grouping is
+reasonable -- if `/bin/true` cannot exec, the rungs below it exercise the same
+broken path from further away -- and it is wrong: the third never execs at all,
+and its exit 45 is `waitpid(WNOHANG)` exhausting its spin. So a correct fix to
+the first clears two of three, and **the natural reading of the survivor is
+"the fix is incomplete"**, sending the next round straight back into the path it
+had just correctly left.
+
+That is the asymmetry worth keeping. A *missing* grouping costs a second look.
+A *wrong* one launders an unrelated bug into evidence against a correct fix,
+and the evidence is persuasive precisely because the fix really was incomplete
+-- for the other thing. Check a grouping you were handed before you spend
+anything on it, including one a harness produced.
+
+This lane generated exactly that failure twice in one day, both in
+`known-issues.md` where a future reader would have acted on it: "18 apps have
+an unguarded key list" (it was one -- the scan keyed on a *test name*, and
+`apps/minesweeper`'s guard is called something else) and "91 apps name no keys"
+(26 apps, about 38 real). Both were groupings that would have sent the next
+reader somewhere wrong. Both were retracted in the file they were committed to
+rather than quietly corrected, because an entry that silently becomes right
+teaches nobody why it was wrong.
 
 ## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18) -- **CLOSED 2026-09-21**
 

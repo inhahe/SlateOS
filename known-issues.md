@@ -161806,6 +161806,24 @@ work** -- `sokoban` (footer), `minesweeper` (guard under another name),
 (`paint`). The queue is a list of *candidates* and behaves like one. Read
 before editing, and expect to close entries with a note rather than a change.
 
+### `apps/launcher`: named at run time, invisible to a static survey
+
+Top of the real queue with six unnamed keys, and it needs nothing.
+`Ctrl+1`..`Ctrl+8` pick the nth result and the launcher draws the hint beside
+each of the first eight rows -- as `format!("^{}", i + 1)`, so the digit is
+computed at run time and the source literal is `"^{}"`. No survey over string
+literals can see that, and this one should not pretend to.
+
+Caret-notation support was added for it and then removed: a measurement showed
+**zero** string literals in the whole `apps/` tree match caret notation, so the
+feature fired nowhere. Its only possible effect was a false negative -- a
+footnote marker in prose read as naming a key, making the survey go quiet
+wrongly. Speculative generality in a checker is worse than in ordinary code,
+because the only thing it can do is hide something.
+
+This is the first entry for the answered-file when that exists, and the reason
+is *the keys are named at run time*, not *this is inconvenient to fix*.
+
 ### The two directions, and which tool owns each
 
 Every per-app guard in this tree -- `every_advertised_key_does_something`,

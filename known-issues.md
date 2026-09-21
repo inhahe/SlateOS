@@ -97362,7 +97362,15 @@ investigation before the work could start:
   client's, chosen at creation, so an `AboveNormal` layer would let any
   program put itself above the taskbar. It needed a *tier within* a layer.
 
-## `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C, 2026-08-26) -- original entry follows — **open**, tech debt
+### The original entry, for the record
+
+**`TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C,
+2026-08-26)** -- as filed, when twelve of the seventeen actions had nowhere to
+go. Demoted from a `##` heading to bold on 2026-09-21: it is a quoted copy of
+the entry above, and as a heading every triage count saw this entry twice --
+once closed and once open. Same defect as the two recorded in
+`scripts/check-known-issues-index.py`, hidden for two weeks longer because the
+backticked spelling was outside what that checker could see.
 
 **In short:** The Settings panel has a "Window rules" page where you can say
 things like *"the editor should always open maximised on desktop 2"* or *"chat
@@ -161451,6 +161459,70 @@ and the two tests each app needs are written once and copied --
 function-key columns first and its digit column last. Digits are nearly always
 a size, a level or a view, and an app that draws "Levels 1-8" has named all
 eight to a reader while naming two to a substring search.
+
+## `TD-C-PAINT-CANNOT-SAVE-YOUR-PICTURE-AND-SAYS-IT-CAN` (lane C, 2026-09-21) -- **OPEN**
+
+**In short:** you can draw in `apps/paint` and you cannot keep what you drew.
+There is no Save, no Open, no menu item and no key that reaches one -- yet the
+program carries a list of its own shortcuts saying `Ctrl+S` saves as BMP and
+`Ctrl+O` opens one. Neither key does anything. The list is not drawn on screen
+either, so the false claim is currently invisible, which is the only reason
+nobody has hit it.
+
+**The three parts, each verified rather than inferred.**
+
+*1. The file capability exists and only tests can reach it.* `save_bmp(path)`,
+`load_bmp(path)`, `encode_bmp` and the BMP decoder are all implemented and
+tested. `grep` for callers of `save_bmp` outside its own definition returns
+exactly one hit, `apps/paint/src/main.rs:4458`, and `#[cfg(test)] mod tests`
+begins at line 4407 -- so the only caller is a test. There is no file picker,
+no `Target::Save`, no `"Open"` string anywhere in the crate.
+
+*2. Two keys are advertised for it and neither is handled.*
+`PaintApp::shortcuts_list()` returns 33 rows including `("Ctrl+S", "Save as
+BMP")` and `("Ctrl+O", "Open BMP")`. `handle_key_press`'s `ctrl` branch matches
+`z y c x v n + = - 0 f` and then `return false`. `S` and `O` are not in it; as
+*plain* keys they select the Selection and Ellipse tools, so the letters are
+live and the chords are dead.
+
+*3. The list reaches no screen.* `shortcuts_list()` has two references in the
+whole crate: its definition, and `test_shortcuts_list`. Nothing draws it. It is
+a 33-row promise kept alive by one test -- the same shape as `apps/rssreader`'s
+overlay of twenty-one shortcuts of which four worked, except that this one is
+not even visible enough to be noticed as wrong.
+
+**A fourth, found in the same read.** `handle_text_char` -- the text tool's
+typing path -- also has exactly two references: its definition and one test.
+The live key path (`handle_key` -> `handle_key_press`) never calls it, and
+`handle_key_press` maps bare letters to tools. So with the Text tool active,
+typing `Hi` does not type `Hi`: `h` flips the canvas horizontally and `i`
+switches to the eyedropper. The text tool cannot be typed into at all.
+
+**Why this is one entry and not four.** All four are the same failure with
+different endings: a capability is built, a claim about it is written, and
+nothing joins either to a user. The tests pass throughout, because each test
+calls the function directly -- which is exactly what makes a test unable to
+notice that nothing else does.
+
+**What the proper fix looks like.** `gui/toolkit/src/dialog.rs` already has a
+`FilePicker` and `apps/markdowneditor` already drives one, so Save and Open are
+a wiring job rather than a new subsystem: `Ctrl+S` and `Ctrl+O` raise the
+picker, its answer goes to `save_bmp`/`load_bmp`. The text tool needs
+`handle_key_press` to route a character to `handle_text_char` while the Text
+tool is placing text, before the tool-letter match. The list should become the
+`SHORTCUTS` const that design-decisions 863 describes, drawn by
+`guitk::shortcut::render_card` behind `F1`, with
+`every_advertised_key_does_something` guarding it -- that guard is what would
+have caught `Ctrl+S` on the day it was written.
+
+**Order matters here.** Add the guard *before* wiring the keys: it fails on
+`Ctrl+S` and `Ctrl+O` and names them, which is the difference between fixing
+two keys and believing there were only two to fix.
+
+**If this is never done,** a user who draws something loses it when the window
+closes, having been told there is a key that saves. This is the most damaging
+entry currently open in this lane's list, because unlike a missing shortcut it
+destroys work the user has already done.
 
 ## `TD-C-NINETY-ONE-APPS-BIND-KEYS-AND-NAME-THEM-NOWHERE` (lane C, 2026-09-21) -- **OPEN**
 

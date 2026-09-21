@@ -41,9 +41,25 @@ import selftestflag  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 NL = chr(10)
+BT = chr(96)
 EMDASH = chr(0x2014)
 
-HEADING = re.compile(r"^## (TD-[A-Z]-.*)$", re.MULTILINE)
+# The backtick is optional and is the third population error this checker has
+# had. 65 of the 494 `TD-` headings in this file wrap the slug in backticks --
+# `## `TD-C-FOO` -- ...` -- and until 2026-09-21 the pattern required the `T`
+# to follow the space directly, so every one of them was outside both rules.
+# The file read as 356 entries checked when it holds 421, and the 65 invisible
+# ones were the *newest*, because writing the slug as code is what a current
+# author does. Two entries filed on the morning of that date went straight into
+# the blind spot.
+#
+# That is this checker's own docstring happening to this checker: a count taken
+# over a population that is not the one the reader believes it is. It is also
+# why the backtick is stripped in `slug_of` rather than allowed to stand -- a
+# backticked heading and a bare one naming the same entry are the same entry,
+# and a uniqueness rule that let them differ would be a rule with a hole the
+# shape of a punctuation mark.
+HEADING = re.compile(r"^## (`?TD-[A-Z]-.*)$", re.MULTILINE)
 
 # The marker follows a " -- " separator. Anything before that separator is the
 # slug and is free-form, so `TD-B-FIXED-POINT-MATH-IS-WRONG` is not a marker.
@@ -108,7 +124,10 @@ def slug_of(heading: str) -> str:
     for sep in (" -- ", " (", " " + EMDASH + " "):
         if sep in heading:
             heading = heading.split(sep, 1)[0]
-    return heading.strip()
+    # A heading may write its slug as code. `TD-C-FOO` and ``TD-C-FOO`` name
+    # the same entry, so they have to collide under the uniqueness rule rather
+    # than slip past each other.
+    return heading.strip().strip("`").strip()
 
 def is_closed(heading: str) -> bool:
     """Whether this heading carries a status marker of any spelling."""
@@ -198,6 +217,17 @@ def _self_test() -> int:
             "a lowercase marker is the triage-miscount bug",
         ),
         ("## TD-C-X -- FIXED 2026-09-13" + NL, 0, "an uppercase marker is the convention"),
+        (
+            "## " + BT + "TD-C-X" + BT + " -- fixed 2026-09-13" + NL,
+            1,
+            "a backticked heading is a heading, and its marker is still checked",
+        ),
+        (
+            "## TD-C-A-THING-IS-BROKEN -- FIXED 2026-09-13" + NL
+            + "## " + BT + "TD-C-A-THING-IS-BROKEN" + BT + " -- original entry" + NL,
+            1,
+            "backticking the quoted copy does not make it a different entry",
+        ),
         (
             "**TD-C-A-THING-IS-BROKEN** " + EMDASH + " as originally filed:" + NL + ok,
             0,

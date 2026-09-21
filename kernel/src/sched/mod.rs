@@ -3832,7 +3832,7 @@ pub fn request_preempt() {
 
 /// Service a pending deferred preemption, if one was requested.
 ///
-/// Called by the IRQ entry path ([`crate::idt::irq_common_dispatch`]) at the
+/// Called by the IRQ entry path (`crate::idt::irq_common_dispatch`) at the
 /// outermost IRQ level, **after** RSP has been switched back to the
 /// interrupted task's kernel stack.  Atomically clears the per-CPU
 /// [`NEED_RESCHED`] flag and, if it was set, calls [`preempt`].

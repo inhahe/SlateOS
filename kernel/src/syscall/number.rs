@@ -5164,12 +5164,12 @@ pub const SYS_WAIT_MULTIPLE: u64 = 1066;
 ///
 /// # Errors
 ///
-/// - [`KernelError::NoSuchProcess`] — the caller is a kernel task with no
+/// - [`crate::error::KernelError::NoSuchProcess`] — the caller is a kernel task with no
 ///   owning process.
-/// - [`KernelError::PermissionDenied`] — the caller does not hold
+/// - [`crate::error::KernelError::PermissionDenied`] — the caller does not hold
 ///   `(Process, SET_CREDENTIALS)`.
-/// - [`KernelError::InvalidArgument`] — `count > NGROUPS_MAX`.
-/// - [`KernelError::PageFault`] — `list_ptr` is null or unmapped when
+/// - [`crate::error::KernelError::InvalidArgument`] — `count > NGROUPS_MAX`.
+/// - [`crate::error::KernelError::PageFault`] — `list_ptr` is null or unmapped when
 ///   `count > 0`.
 ///
 /// Chosen number 1067, next free slot after 1066.
@@ -5204,13 +5204,13 @@ pub const SYS_PROCESS_SETGROUPS: u64 = 1067;
 ///
 /// # Errors
 ///
-/// - [`KernelError::NoSuchProcess`] — the caller is a kernel task.
-/// - [`KernelError::PermissionDenied`] — the caller does not hold
+/// - [`crate::error::KernelError::NoSuchProcess`] — the caller is a kernel task.
+/// - [`crate::error::KernelError::PermissionDenied`] — the caller does not hold
 ///   `(Process, SET_CREDENTIALS)`.
-/// - [`KernelError::NotFound`] — the path does not exist.
-/// - [`KernelError::InvalidArgument`] — the path is empty, too long, or
+/// - [`crate::error::KernelError::NotFound`] — the path does not exist.
+/// - [`crate::error::KernelError::InvalidArgument`] — the path is empty, too long, or
 ///   does not name a directory.
-/// - [`KernelError::PageFault`] — null or unmapped pointer.
+/// - [`crate::error::KernelError::PageFault`] — null or unmapped pointer.
 ///
 /// Chosen number 1068, next free slot after 1067.
 pub const SYS_PROCESS_CHROOT: u64 = 1068;
@@ -5248,12 +5248,12 @@ pub const SYS_PROCESS_CHROOT: u64 = 1068;
 ///
 /// # Errors
 ///
-/// - [`KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
+/// - [`crate::error::KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
 ///   `ITIMER_VIRTUAL` (1) and `ITIMER_PROF` (2) count CPU time consumed by the
 ///   process, which this kernel does not account for per-process. Refusing is
 ///   honest; accepting would reproduce, one layer down, the exact "reports
 ///   success and arms nothing" defect this call exists to remove.
-/// - [`KernelError::NoSuchProcess`] — the caller has no owning process.
+/// - [`crate::error::KernelError::NoSuchProcess`] — the caller has no owning process.
 ///
 /// No capability is required: the timer belongs to the calling process and
 /// affects nothing else, which is also why `syscall::linux`'s `setitimer` arm
@@ -5275,8 +5275,8 @@ pub const SYS_ITIMER_SET: u64 = 1069;
 ///
 /// # Errors
 ///
-/// - [`KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
-/// - [`KernelError::NoSuchProcess`] — the caller has no owning process.
+/// - [`crate::error::KernelError::InvalidArgument`] — `which` is not `ITIMER_REAL` (0).
+/// - [`crate::error::KernelError::NoSuchProcess`] — the caller has no owning process.
 ///
 /// Chosen number 1070, next free slot after 1069.
 pub const SYS_ITIMER_GET: u64 = 1070;
@@ -5316,9 +5316,9 @@ pub const SYS_ITIMER_GET: u64 = 1070;
 ///
 /// # Errors
 ///
-/// - [`KernelError::InvalidArgument`] -- `size` is non-zero but smaller than a
+/// - [`crate::error::KernelError::InvalidArgument`] -- `size` is non-zero but smaller than a
 ///   signal frame can use, or `sp + size` overflows.
-/// - [`KernelError::NoSuchProcess`] -- the caller has no owning process.
+/// - [`crate::error::KernelError::NoSuchProcess`] -- the caller has no owning process.
 ///
 /// No capability is required: the stack belongs to the calling process.
 ///
@@ -5345,15 +5345,15 @@ pub const SYS_SIGNAL_ALTSTACK: u64 = 1071;
 ///
 /// # Errors
 ///
-/// - [`KernelError::PermissionDenied`] -- the caller does not hold
+/// - [`crate::error::KernelError::PermissionDenied`] -- the caller does not hold
 ///   `(Process, SET_HOSTNAME)`. Deliberately distinct from `NoSuchSyscall`: an
 ///   unprivileged caller should learn that it is unprivileged, which is
 ///   permanent, rather than that the call is unimplemented, which is not.
-/// - [`KernelError::InvalidArgument`] -- `len` exceeds 64, or the bytes are not
+/// - [`crate::error::KernelError::InvalidArgument`] -- `len` exceeds 64, or the bytes are not
 ///   valid UTF-8.
-/// - [`KernelError::InvalidAddress`] -- `ptr` is not readable for `len` bytes,
+/// - [`crate::error::KernelError::InvalidAddress`] -- `ptr` is not readable for `len` bytes,
 ///   or is null with a non-zero `len`.
-/// - [`KernelError::NoSuchProcess`] -- the caller has no owning process.
+/// - [`crate::error::KernelError::NoSuchProcess`] -- the caller has no owning process.
 ///
 /// **No getter is paired with this, deliberately.** `/proc/sys/kernel/hostname`
 /// already serves reads, and it is what `osh` fills `$HOSTNAME` from and what

@@ -20078,8 +20078,8 @@ pub fn self_test_fastpy_slateos_store() -> KernelResult<()> {
 ///   * `deps <name>` — print the record's dependency field (exit 0) or
 ///     "not found" (exit 1).
 ///   * `check <name>` — verify every declared dependency of `<name>` is itself
-///     installed; "ok <name>" + exit 0, else "missing <dep>" + exit 1 (or
-///     "not found <name>" + exit 1 if `<name>` is absent).
+///     installed; "ok `<name>`" + exit 0, else "missing `<dep>`" + exit 1 (or
+///     "not found `<name>`" + exit 1 if `<name>` is absent).
 ///   * `remove <name>` — drop the record (exit 0) or "not found" (exit 1).
 ///   * `list` — print every record; exit 0.
 ///
@@ -23817,7 +23817,7 @@ pub fn self_test_spawn_ex2_abi() -> KernelResult<()> {
 /// Linux binary to completion.
 ///
 /// Every prior Linux-ABI self-test runs a *synthetic* ELF this kernel emits
-/// itself ([`elf::build_linux_*`]).  Those validate one mechanism at a time
+/// itself (`elf::build_linux_*`).  Those validate one mechanism at a time
 /// (PT_INTERP parse, `AT_BASE`/`AT_ENTRY` auxv, PIE bias, SysV stack layout,
 /// `fork`/`execve`/`wait4`) against code we control.  This test instead drives
 /// the *real* glibc dynamic path: it spawns `/bin/hello` — an ordinary

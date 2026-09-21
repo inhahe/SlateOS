@@ -2264,7 +2264,7 @@ pub fn poll_keyboard() -> Option<HidKeyboardReport> {
 
 /// Poll for USB keyboard input without ever waiting for the controller lock.
 ///
-/// This is what [`crate::keyboard::usb_hid_tick`] calls, and it runs in the
+/// This is what `crate::keyboard::usb_hid_tick` calls, and it runs in the
 /// APIC timer ISR. `lock()` there would not merely stall — it would deadlock:
 /// the code the interrupt preempted may itself be inside `XHCI.lock()` **on
 /// this same CPU**, and a spinlock cannot be re-entered by the interrupt that

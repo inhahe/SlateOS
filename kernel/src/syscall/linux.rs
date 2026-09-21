@@ -1287,7 +1287,7 @@ pub mod restart_block {
 
 /// Resolve a restart sentinel at the **no-handler** return-to-user checkpoint.
 ///
-/// Called from [`crate::syscall::entry::syscall_handler_inner`] after
+/// Called from `crate::syscall::entry::syscall_handler_inner` after
 /// `deliver_pending_signal` returned `false` (no userspace handler frame was
 /// built — either nothing was deliverable, or every pending signal was ignored
 /// or had a non-fatal default).
@@ -26974,7 +26974,7 @@ fn sys_userfaultfd(args: &SyscallArgs) -> SyscallResult {
 /// Allocates a fresh `HandleKind::MemFd` slot in the caller's Linux fd
 /// table backed by an in-kernel anonymous in-memory file managed by
 /// [`crate::ipc::memfd`].  Linux gives the inode the conventional
-/// "memfd:<name>" path label and `S_IFREG | 0o777` mode bits; we follow
+/// "`memfd:<name>`" path label and `S_IFREG | 0o777` mode bits; we follow
 /// suit (see `fill_stat_for_fd`).
 ///
 /// Flags:

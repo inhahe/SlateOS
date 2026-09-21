@@ -9739,7 +9739,7 @@ fn cmd_clear() {
 ///
 /// Usage:
 ///   color                   — show current scheme and list available schemes
-///   color <name>            — apply a built-in scheme
+///   color `<name>`            — apply a built-in scheme
 ///   color fg RRGGBB         — set default foreground (hex RGB)
 ///   color bg RRGGBB         — set default background (hex RGB)
 #[allow(clippy::arithmetic_side_effects)]
@@ -25024,7 +25024,7 @@ fn cmd_blkread(args: &str) {
     }
 }
 
-/// Parse blkread args: either "<sector>" or "<device> <sector>".
+/// Parse blkread args: either "`<sector>`" or "`<device>` `<sector>`".
 ///
 /// Returns `None` having already said why, so the caller has nothing left to
 /// decide. The previous signature returned `(device, Option<u64>)` and folded
@@ -31890,10 +31890,10 @@ fn cmd_encrypt(args: &str) {
 /// `fsearch` — advanced file search with compound queries.
 ///
 /// Subcommands:
-///   fsearch name <pattern> [path]   — search by name substring
-///   fsearch glob <pattern> [path]   — search by glob pattern
-///   fsearch ext <ext> [path]        — search by file extension
-///   fsearch size <min> [max] [path] — search by size range
+///   fsearch name `<pattern>` [path]   — search by name substring
+///   fsearch glob `<pattern>` [path]   — search by glob pattern
+///   fsearch ext `<ext>` [path]        — search by file extension
+///   fsearch size `<min>` [max] [path] — search by size range
 ///   fsearch type <file|dir> [path]  — search by entry type
 ///   fsearch query [path]            — interactive compound query
 ///   fsearch stats                   — show search statistics
@@ -32134,12 +32134,12 @@ fn cmd_fsearch(args: &str) {
 /// `tag` — file tagging system for BFS-style metadata queries.
 ///
 /// Subcommands:
-///   tag add <path> <tag>           — add a tag to a file
-///   tag rm <path> <tag>            — remove a tag from a file
-///   tag get <path>                 — list tags on a file
-///   tag set <path> <tag1,tag2,...> — set all tags on a file
-///   tag clear <path>               — remove all tags from a file
-///   tag search <tag> [path]        — find files with a tag
+///   tag add `<path>` `<tag>`           — add a tag to a file
+///   tag rm `<path>` `<tag>`            — remove a tag from a file
+///   tag get `<path>`                 — list tags on a file
+///   tag set `<path>` <tag1,tag2,...> — set all tags on a file
+///   tag clear `<path>`               — remove all tags from a file
+///   tag search `<tag>` [path]        — find files with a tag
 ///   tag find <tag1,tag2> [path]    — find files with ALL tags
 ///   tag list                       — list all known tags
 ///   tag index [path]               — build/rebuild tag index
@@ -32511,11 +32511,11 @@ fn cmd_fshealth(_args: &str) {
 /// `fswatch` — create and read filesystem watches.
 ///
 /// Subcommands:
-///   fswatch <path>                 — create watch and drain events
-///   fswatch create <path> [mask]   — create a watch (returns ID)
-///   fswatch read <id> [count]      — read events from a watch
-///   fswatch close <id>             — close a watch
-///   fswatch pending <id>           — show pending event count
+///   fswatch `<path>`                 — create watch and drain events
+///   fswatch create `<path>` [mask]   — create a watch (returns ID)
+///   fswatch read `<id>` [count]      — read events from a watch
+///   fswatch close `<id>`             — close a watch
+///   fswatch pending `<id>`           — show pending event count
 fn cmd_fswatch(args: &str) {
     use crate::fs::notify;
 
@@ -117111,8 +117111,8 @@ fn cmd_ping6(args: &str) {
 /// `udp6` — send and receive UDP datagrams over IPv6.
 ///
 /// Usage:
-///   udp6 send <ipv6-addr> <port> <message>   — send a UDP datagram
-///   udp6 listen <port> [timeout_ms]           — listen for datagrams
+///   udp6 send `<ipv6-addr>` `<port>` `<message>`   — send a UDP datagram
+///   udp6 listen `<port>` [timeout_ms]           — listen for datagrams
 fn cmd_udp6(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
@@ -122542,18 +122542,18 @@ pub fn cli_resource_parser_self_test() -> crate::error::KernelResult<()> {
 /// memory can drive SlateOS containers with familiar verbs. Each Docker
 /// subcommand is rewritten to the equivalent native command and dispatched:
 ///
-///   docker run <image-dir> [flags...]   → oci run <image-dir> [flags...]
-///   docker create <image-dir> [flags..] → oci create <image-dir> [flags...]
+///   docker run `<image-dir>` [flags...]   → oci run `<image-dir>` [flags...]
+///   docker create `<image-dir>` [flags..] → oci create `<image-dir>` [flags...]
 ///   docker ps [-a]                       → container list (all states)
-///   docker start <id>                    → container start <id>
-///   docker stop <id>                     → container stop <id>
-///   docker rm <id>                       → container delete <id>
-///   docker inspect <id>                  → container info <id>
-///   docker exec <id> <command...>        → container exec <id> <command...>
+///   docker start `<id>`                    → container start `<id>`
+///   docker stop `<id>`                     → container stop `<id>`
+///   docker rm `<id>`                       → container delete `<id>`
+///   docker inspect `<id>`                  → container info `<id>`
+///   docker exec `<id>` <command...>        → container exec `<id>` <command...>
 ///   docker images                        → oci images (list the named store)
-///   docker tag <dir|ref> <ref>           → oci tag (import a dir or re-tag)
-///   docker rmi <ref>                      → oci rmi (remove a store tag)
-///   docker commit <id> <name:tag>        → author a new image from a
+///   docker tag <dir|ref> `<ref>`           → oci tag (import a dir or re-tag)
+///   docker rmi `<ref>`                      → oci rmi (remove a store tag)
+///   docker commit `<id>` <name:tag>        → author a new image from a
 ///                                          container's changes, tag it in the store
 ///
 /// `docker ps` lists every container regardless of state (SlateOS has no
@@ -124214,9 +124214,9 @@ fn oci_run(parts: &[&str]) {
 /// `oci` — OCI container image management.
 ///
 /// Subcommands:
-///   oci inspect <dir>   — parse and display OCI image metadata
-///   oci layers <dir>    — list image layers with digests
-///   oci verify <dir>    — verify all blob digests
+///   oci inspect `<dir>`   — parse and display OCI image metadata
+///   oci layers `<dir>`    — list image layers with digests
+///   oci verify `<dir>`    — verify all blob digests
 ///   oci test            — run self-tests
 fn cmd_oci(args: &str) {
     use crate::oci;
@@ -134277,7 +134277,7 @@ fn cmd_kobjects(args: &str) {
 ///   selftest         — run all tests
 ///   selftest list    — list available test suites
 ///   selftest mm      — run only memory subsystem tests
-///   selftest <name>  — run a specific named test
+///   selftest `<name>`  — run a specific named test
 fn cmd_selftest(args: &str) {
     use crate::selftest;
 
@@ -134613,10 +134613,10 @@ fn cmd_rip_sample(args: &str) {
 /// `watch` — software memory watchpoints.
 ///
 /// Usage:
-///   watch add <addr> [label]  — add watchpoint on kernel address
+///   watch add `<addr>` [label]  — add watchpoint on kernel address
 ///   watch list                — show active watchpoints
 ///   watch poll                — check for changes
-///   watch del <slot>          — remove watchpoint
+///   watch del `<slot>`          — remove watchpoint
 ///   watch events              — show recent change events
 ///   watch clear               — remove all watchpoints
 fn cmd_watchpoint(args: &str) {
@@ -135122,9 +135122,9 @@ fn cmd_syscall_prof(args: &str) {
 ///
 /// Usage:
 ///   faultinject              — show current injection status
-///   faultinject fail <N>     — arm: fail next N allocations
-///   faultinject after <N>    — arm: fail after N successful allocs
-///   faultinject prob <N>     — arm: fail every Nth allocation
+///   faultinject fail `<N>`     — arm: fail next N allocations
+///   faultinject after `<N>`    — arm: fail after N successful allocs
+///   faultinject prob `<N>`     — arm: fail every Nth allocation
 ///   faultinject off          — disarm all injection
 fn cmd_fault_inject(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
@@ -142110,7 +142110,7 @@ fn split_lines(text: &[u8]) -> Vec<&[u8]> {
 /// it, which defeats the entire point of the command doing the padding.
 ///
 /// It is a deliberate mirror of the console's own byte→cell rule
-/// ([`crate::console::putchar_normal`] plus its UTF-8 accumulator), because the
+/// (`crate::console::putchar_normal` plus its UTF-8 accumulator), because the
 /// only width that aligns a table is the width the thing is actually drawn at.
 /// The three rules, in the console's order:
 ///
@@ -144332,7 +144332,7 @@ fn bench_memcpy() {
 /// Usage:
 ///   report              — full diagnostic report (all sections)
 ///   report summary      — one-line health summary
-///   report <section>    — single section (memory, sched, ipc, obj, cap, migrate, invar)
+///   report `<section>`    — single section (memory, sched, ipc, obj, cap, migrate, invar)
 fn cmd_diag_report(args: &str) {
     use crate::kdiag;
 
@@ -144713,9 +144713,9 @@ fn cmd_fairness() {
 /// Subcommands:
 ///   new [name]        — create a new session
 ///   list              — list all sessions
-///   switch <id>       — switch to session (alias: attach)
-///   kill <id>         — destroy a session
-///   rename <id> name  — rename a session
+///   switch `<id>`       — switch to session (alias: attach)
+///   kill `<id>`         — destroy a session
+///   rename `<id>` name  — rename a session
 ///   (no args)         — show current session info
 fn cmd_tsession(args: &str) {
     use crate::termsession;

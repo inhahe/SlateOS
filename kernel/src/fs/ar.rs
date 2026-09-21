@@ -355,7 +355,7 @@ fn align2(offset: usize) -> usize {
 
 /// Create an ar archive from a list of members.
 ///
-/// Produces a byte stream with the global "!<arch>\n" magic followed by
+/// Produces a byte stream with the global "!`<arch>`\n" magic followed by
 /// member headers and data.
 pub fn mkar(entries: &[ArEntry]) -> KernelResult<Vec<u8>> {
     let mut buf = Vec::new();

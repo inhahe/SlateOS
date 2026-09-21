@@ -89,7 +89,7 @@ pub struct ExceptionLogEntry {
     pub aux: u64,
 }
 
-/// Wrapper to make UnsafeCell<ExceptionLogEntry> usable in a static.
+/// Wrapper to make `UnsafeCell<ExceptionLogEntry>` usable in a static.
 ///
 /// SAFETY: The ring buffer is accessed via atomic index only. Partial
 /// reads are acceptable (all fields are Copy types with no invalid bit

@@ -4214,7 +4214,7 @@ pub const RLIMIT_DATA_INDEX: usize = 2;
 
 /// Index of `RLIMIT_STACK` (maximum stack size) in [`Process::rlimits`].
 ///
-/// Consulted from the page-fault handler ([`crate::idt::try_grow_user_stack`])
+/// Consulted from the page-fault handler (`crate::idt::try_grow_user_stack`)
 /// via [`try_get_rlimit`] to bound on-demand stack growth.  The page
 /// fault handler runs in interrupt context where the regular process
 /// table lock cannot be acquired safely; the `try_lock`-based accessor
@@ -4252,7 +4252,7 @@ pub const RLIMIT_RTPRIO_INDEX: usize = 14;
 /// This is the **only** safe accessor for callers that run with
 /// interrupts disabled or are themselves servicing an interrupt — most
 /// notably the page fault handler's stack-growth path
-/// ([`crate::idt::try_grow_user_stack`]).  A regular [`get_rlimit`] call
+/// (`crate::idt::try_grow_user_stack`).  A regular [`get_rlimit`] call
 /// from those contexts would deadlock if the interrupted code happened
 /// to hold the process table.
 ///

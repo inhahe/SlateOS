@@ -5297,7 +5297,7 @@ fn bench_ipc_pipe() -> KernelResult<()> {
 /// the overhead of creating a channel pair and brokering the connection.
 /// # Errors
 ///
-/// Propagates a registry failure, or [`KernelError::WouldBlock`] if a
+/// Propagates a registry failure, or [`crate::error::KernelError::WouldBlock`] if a
 /// connection that was just made is not pending on the listener. The service
 /// is unregistered on every path, including those.
 fn bench_service_connect() -> KernelResult<()> {

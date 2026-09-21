@@ -2,7 +2,7 @@
 //!
 //! An IPC semaphore is a kernel-managed counting resource that tasks
 //! can signal (increment) and wait on (decrement).  Unlike the
-//! kernel-internal [`Semaphore`](crate::sched::sync::Semaphore), this
+//! kernel-internal [`Semaphore`](crate::sched::semaphore::Semaphore), this
 //! version:
 //!
 //! - Has a handle-based API suitable for userspace via syscalls.

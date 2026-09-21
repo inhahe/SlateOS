@@ -8290,7 +8290,42 @@ pub fn sys_process_kill(args: &super::dispatch::SyscallArgs) -> super::dispatch:
 /// On failure: returns a negative error code.  If the failure happens
 /// after the old address space was torn down, the process is in a
 /// broken state and should be killed.
+/// Wrapper that reports WHY a native exec failed.
+///
+/// The Linux-ABI path got this in `fec0ab339`, after three theories cost
+/// three boots, with the reason: the fixture can only report *that* exec
+/// failed, and the kernel knows the errno and had never been asked. That
+/// wrapper is on `linux_exec_common`, so it covers only Linux-ABI callers.
+///
+/// `ctest-coreutils-runs` is a NATIVE-ABI process, so its `execl` arrives
+/// here instead and failed silently for four rounds. On 2026-09-21 a fifth
+/// round confirmed the Linux probe was present and working and still saw
+/// nothing -- which reads as "the syscall was never made" and may instead
+/// mean "the wrong instrument was watching". This closes that.
+///
+/// Wrapped rather than probed per site: five `return ...code() as i64`
+/// paths inside, so a probe per site is five chances to miss the one that
+/// fires, and a wrapper cannot miss a path including one added later.
+///
+/// Silent on success, and silent on the frame-modifying success path in
+/// particular: a successful exec returns 0 and must not add a line to a
+/// log that every boot reads.
 pub fn sys_process_exec_with_frame(frame: &mut super::entry::SyscallFrame) -> i64 {
+    let elf_len = frame.arg1 as usize;
+    let rc = sys_process_exec_with_frame_inner(frame);
+    if rc < 0 {
+        serial_println!(
+            "[exec] NATIVE exec FAILED -> {} (elf_len={}) -- the ELF bytes come \
+             from the caller, so this is after posix read the file and before \
+             the image was validated",
+            rc,
+            elf_len
+        );
+    }
+    rc
+}
+
+fn sys_process_exec_with_frame_inner(frame: &mut super::entry::SyscallFrame) -> i64 {
     use crate::proc::spawn::exec_process;
     use crate::proc::thread;
 

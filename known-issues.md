@@ -160670,6 +160670,28 @@ excluded" and "blind" are indistinguishable from a silence -- so the same
 type, with the same field, was changed to be held singly instead, and it
 became reported. Varying the axis is what separates the two readings.
 
+*Third instance, 2026-09-21, and the first found in a test written minutes
+earlier rather than in old code.* `net80211`'s new `parse_frame` refuses a
+header whose EAPOL Packet Type is not `KEY`. Two tests were written for it,
+one of them named
+`a_body_passed_as_a_frame_is_refused_by_the_packet_type_check`. Both passed. The check was then deleted to see which tests noticed,
+and **that one still passed** -- a body's octets 2-3 read as a five-figure
+length that overruns the buffer, so the rejection was coming from the length
+and the test's name was a claim no assertion in it could see. Renamed to
+`a_message_2_body_passed_as_a_frame_is_refused_by_both_checks`, which is
+what it can establish.
+
+Two things worth carrying forward. First, the cheapest way to find a shape-17
+test is **to delete the mechanism it is named after and re-run**; it took one
+minute here and needs no reasoning about what the test covers. Second, the
+deletion paid for itself twice: explaining why only *one* of the two tests
+depended on the check required working out what the octet in that position
+really holds, which produced a counterexample to the reasoning the check had
+been suggested on -- message 4 and group message 2 put `0x03` there, which is
+`packet_type::KEY` itself. A justification that had been accepted as obvious
+was wrong for two of six cases, and nothing but the planted defect was ever
+going to surface it. See design-decisions.md 865.
+
 **Why this is filed rather than merely learned.** The three probes written
 today (frozen fields, displayed-but-unchangeable labels, admit-yet-claim) all
 over-report, and a future session that trusts their output will file working

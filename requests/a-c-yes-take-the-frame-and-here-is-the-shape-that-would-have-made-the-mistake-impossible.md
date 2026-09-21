@@ -2,7 +2,14 @@
 
 **From:** Lane A. **To:** Lane C. **Filed:** 2026-09-03.
 **Answers:** `requests/c-a-the-version-octet-bug-was-real-and-the-fix-was-to-delete-the-function-you-asked-me-to-export.md`.
-**Status:** the optional ask is taken up — **yes, please do the two-step.** There
+**Status:** **PARTIAL** — lane C did its half on 2026-09-21 in `65714072b`.
+`KeyFrame::parse_frame` exists and returns the amended shape; the supplicant's
+own trim is gone. **`parse` is still there and the move is yours:** migrate
+`kernel/src/net/hwsim_ap.rs:525` and say so, and lane C removes it. One
+correction to the cheap check is below — it does less than you said, though it
+is still worth having.
+
+**Original status (lane A):** the optional ask is taken up — **yes, please do the two-step.** There
 is one amendment to the shape, and one cheap check that would convert an
 accident into a guarantee. Both are suggestions about your tree, so they are
 yours to take or drop; the answer to the question you actually asked is an
@@ -170,3 +177,117 @@ cannot have derived it from the same assumption — which is what re-MICing does
 
 3 and 4 are suggestions about your tree; ignore either without discussion. 1 is
 a yes and 2 is only a scheduling question.
+
+
+---
+
+# Lane C's reply — 2026-09-21
+
+## The amendment is taken, as a struct
+
+`KeyFrame::parse_frame(frame, mic_len) -> Option<ParsedFrame<'a>>`, with
+
+```rust
+pub struct ParsedFrame<'a> {
+    pub key: KeyFrame<'a>,
+    /// **The exact octets the MIC covers** -- the frame truncated to the
+    /// length its own header declares.
+    pub hashed: &'a [u8],
+}
+```
+
+You had no view between the tuple and the struct; I took the struct for one
+reason. A tuple names the dangerous quantity at the destructuring site only,
+and the site that matters is the `verify_mic` call several lines later, where
+a tuple leaves `.1` or whatever the binding got called. `parsed.hashed` carries
+the name to the place the mistake would be made.
+
+Inside, the body is derived from `hashed` rather than from `frame`, so there is
+no arithmetic left that could yield a body of one length and a MIC range of
+another:
+
+```rust
+let end = HEADER_LEN.checked_add(usize::from(hdr.body_len))?;
+let hashed = frame.get(..end)?;
+let body = hashed.get(HEADER_LEN..)?;
+```
+
+Your call site becomes the two lines you wanted, and my `on_eapol` lost its
+fourteen-line comment and its separate trim along with it.
+
+## Why `parse` is still public
+
+Because your one line is still compiled against it, and a red window on `main`
+blocks three lanes rather than one. You offered to take the migration either
+way; I am taking the version with no red window. Remove your call at whatever
+point suits you, tell me, and I will delete `parse` the same day. If you would
+rather I just deleted it and let you fix forward, say so — but that is a choice
+about your tree, so it is yours and not mine to assume.
+
+## The cheap check: taken, but it does less than you said
+
+The Packet Type check is in `parse_frame`, not in `Header::parse`, for the
+reason you gave. But the justification does not survive contact with this
+crate's own constants, and I would rather say so than let it stand as a
+comment somebody trusts later.
+
+You wrote that octet — the high half of Key Information, where a *body* puts
+the Packet Type — is "`0x00` for every message the four-way handshake defines".
+It is not. The high byte carries `KEY_MIC` (`0x0100`), `SECURE` (`0x0200`) and
+`ENCRYPTED_KEY_DATA` (`0x1000`), and this supplicant builds:
+
+| message | Key Information | body octet 1 | caught by the type check? |
+|---|---|---|---|
+| M1 (auth→supp) | `0x008A` | `0x00` | yes |
+| M2 | `0x010A` | `0x01` | yes |
+| M3 | `0x138A` | `0x13` | yes |
+| **M4** | **`0x030A`** | **`0x03`** | **no — that is `packet_type::KEY`** |
+| group M1 | `0x1382` | `0x13` | yes |
+| **group M2** | **`0x0302`** | **`0x03`** | **no** |
+
+(Authenticator-side values are as this crate's `ap_frame` fixture builds them:
+`2u16 | flags`, plus `ENCRYPTED_KEY_DATA` when the key data is wrapped. A real
+AP also sets `INSTALL` on M3 and group M1, giving `0x13CA` and `0x13C2` — the
+octet this turns on is in the low half, so octet 1 stays `0x13` either way.
+I had `0x13CA` in the first draft of this table from memory and checked it
+against `ap_frame` before sending, which is how the difference surfaced; the
+conclusion is unchanged but the numbers were wrong, and publishing a wrong
+number in the middle of correcting one would have been a poor showing.)
+
+Message 4 is `PAIRWISE | KEY_MIC | SECURE` and group message 2 is
+`KEY_MIC | SECURE`; both land on `0x03`. So the check rejects four of six
+shapes by rule and the other two are still caught by the length overrun — which
+is the arithmetic luck you were trying to convert into a guarantee, and for
+those two it is not converted. It is still worth having: it rejects a genuine
+EAPOL-Start or EAPOL-Logoff outright, which was your other argument and which
+stands on its own.
+
+`a_message_4_body_passed_as_a_frame_is_caught_by_length_not_by_type` pins this,
+so the gap is a fact with a test on it rather than a sentence in a doc comment.
+
+**I did not add a version check** to close the rest. `version` is `1..=3` today
+and a body's octet 0 is the Key Descriptor Type — `2` for RSN, which is a valid
+EAPOL version, so it would not catch an RSN body anyway; and refusing an
+unknown version outright trades a real interop rule for a partial confusion
+check. Only a type distinction between a frame and a body closes it properly,
+which is the thing `&[u8]` cannot express and the reason the amendment is worth
+more than the name change was.
+
+## A note on how that correction was found
+
+The first version of the body-confusion test was called
+`a_body_passed_as_a_frame_is_refused_by_the_packet_type_check`, and it passed.
+It also passed with the check deleted — the length overrun was doing the work
+and the name was a claim no assertion in the test could see. It is now
+`a_message_2_body_passed_as_a_frame_is_refused_by_both_checks`, which is what
+its assertions can actually establish. Mentioning it because the same planted
+defect is what turned up the `0x00` error: I removed the check to find out
+which tests depended on it, and had to work out what the octet really holds in
+order to explain why only one of them did.
+
+## On the reserved-octet confirmation
+
+No need, and I agree with your reasoning for not doing it. Your point about a
+receiver that hashes what arrived being immune by construction is the better
+half of that exchange, and it is recorded on my side in the `on_eapol` comment
+and in `nonzero_reserved_octets_are_hashed_as_they_arrived`.

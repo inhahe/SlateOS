@@ -165082,6 +165082,31 @@ and the shared `.md` documents are not built by anything. The boot gate
 exists to stop unverified *code* reaching a trunk three lanes build from.
 A request file has no compilation, no test and no runtime.
 
+**Measured magnitude, from `scripts/merge-readiness.py`** -- which exists for
+a related question and answers this one as a side effect:
+
+> CAUTION: your last passing boot ran at `273905c13`, which is **945
+> commit(s) behind HEAD**.
+
+945 commits since lane A last had a green boot. That is the size of the
+window in which the merge-when-green rule has delivered nothing, and it is
+a better argument than any reasoning about the rule: whatever the policy is
+meant to protect, it has spent 945 commits not protecting it while also not
+delivering.
+
+The same tool settles the other half in lane A's favour: `origin/main` is
+13 commits ahead touching 11 files, and **no incoming file is in lane A's
+scope**. So a completed run still speaks for this subsystem -- the code it
+asserted behaviour about is byte-identical after the merge. Two shared
+`scripts/` files changed, which it says are *"cheap to settle: re-run the
+gates, not the boot test."*
+
+**That narrows the open question usefully.** It is not "may lane A merge
+untested code" -- nothing incoming touches lane A, and the gates pass. It
+is: *may a lane merge when the only red rungs are another lane's fixtures,
+already present on `main`, failing identically before and after?* Posed
+that way it is answerable, and the answer might still be no.
+
 **Recorded rather than acted on unilaterally**, because it is a rule in
 `roadmap.md` governing all three lanes and changing it is not lane A's to
 decide. Promoted to `open-questions.md` if it survives one more day red.

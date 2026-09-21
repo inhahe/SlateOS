@@ -1164,11 +1164,14 @@ impl ToolbarAction {
     /// Button text.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Add => "Add",
+            Self::Add => "Add (Ctrl+N)",
             Self::Remove => "Remove",
             Self::Enable => "Enable",
             Self::Disable => "Disable",
-            Self::Refresh => "Refresh",
+            // The key is on the button because a toolbar button is
+            // where a reader looks for what it does. `BUTTON_WIDTH` is
+            // fixed, so this text is not measured for the hit box.
+            Self::Refresh => "Refresh (F5)",
         }
     }
 
@@ -2337,7 +2340,7 @@ impl StartupUI {
 
         let empty = self.search_query.is_empty();
         let display = if empty {
-            "Search by name, publisher, or path..."
+            "Search by name, publisher, or path...  (Ctrl+F)"
         } else {
             &self.search_query
         };
@@ -3125,6 +3128,27 @@ mod tests {
     ///
     /// The empty list needs the same guard, which is the third banner line:
     /// "An empty list is not an all-clear -- nothing was examined."
+    /// **Every toolbar label fits its button, so no key is elided away.**
+    ///
+    /// The buttons are a fixed `BUTTON_WIDTH` and their text is drawn with
+    /// `max_width` and `TextOverflow::Ellipsis`. Naming the keys on them --
+    /// "Refresh (F5)", "Add (Ctrl+N)" -- is only worth anything if the name
+    /// survives to the screen; elided to "Refresh ..." it would hide exactly
+    /// the thing it was added to show, and look broken doing it.
+    #[test]
+    fn every_toolbar_label_fits_its_button() {
+        let room = BUTTON_WIDTH - 8.0;
+        for action in ToolbarAction::all() {
+            let w = text::measure(action.label(), FONT_SIZE, FontWeightHint::Bold);
+            assert!(
+                w <= room,
+                "{:?} draws {:?} at {w:.1}pt wide, and the button gives {room:.1}",
+                action,
+                action.label()
+            );
+        }
+    }
+
     #[test]
     fn a_fresh_manager_lists_nothing_and_says_why() {
         let ui = StartupUI::new();

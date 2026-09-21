@@ -8337,7 +8337,8 @@ pub fn sys_process_exec_with_frame(frame: &mut super::entry::SyscallFrame) -> i6
         // target exits). So it reported OK without establishing its own
         // premise. Same hole as the positive test had before 2026-09-21.
         NATIVE_EXEC_FAIL_LOGS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        serial_println!(            "[exec] NATIVE exec FAILED -> {} (elf_ptr={:#x} elf_len={}) -- the bytes come \
+        serial_println!(
+            "[exec] NATIVE exec FAILED -> {} (elf_ptr={:#x} elf_len={}) -- the bytes come \
              from the caller, so this is after posix read the file and before \
              the image was validated",
             rc,

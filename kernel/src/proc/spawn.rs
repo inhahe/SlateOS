@@ -33446,7 +33446,9 @@ fn test_spawn_faulting_process() -> KernelResult<()> {
             "[spawn]   FAIL: fault test reached Zombie but exit code was {:?}, expected anything but Some(0)",
             code_fault
         );
-        serial_println!("[spawn]          the null write did not fault; the process ran to SYS_EXIT instead");
+        serial_println!(
+            "[spawn]          the null write did not fault; the process ran to SYS_EXIT instead"
+        );
         thread::on_thread_exit(result.task_id);
         pcb::destroy(result.pid);
         return Err(KernelError::InternalError);
@@ -33558,12 +33560,8 @@ fn test_exec_process_failure_is_reported() -> KernelResult<()> {
             "[spawn]   FAIL: exec-failure control saw {} probe log(s), expected exactly 1",
             logs_after.wrapping_sub(logs_before)
         );
-        serial_println!(
-            "[spawn]          the process died, but the probe did not report it,"
-        );
-        serial_println!(
-            "[spawn]          so an absent [exec] NATIVE line proves nothing"
-        );
+        serial_println!("[spawn]          the process died, but the probe did not report it,");
+        serial_println!("[spawn]          so an absent [exec] NATIVE line proves nothing");
         return Err(KernelError::InternalError);
     }
     serial_println!(
@@ -33781,9 +33779,7 @@ fn test_seh_handler_exit() -> KernelResult<()> {
             "[spawn]   FAIL: SEH exit reached Zombie but exit code was {:?}, expected Some(0)",
             seh_code
         );
-        serial_println!(
-            "[spawn]          the handler never ran and the #PF killed it"
-        );
+        serial_println!("[spawn]          the handler never ran and the #PF killed it");
         thread::on_thread_exit(result.task_id);
         pcb::destroy(result.pid);
         return Err(KernelError::InternalError);
@@ -33844,9 +33840,7 @@ fn test_seh_handler_resume() -> KernelResult<()> {
             "[spawn]   FAIL: SEH resume reached Zombie but exit code was {:?}, expected Some(0)",
             seh_code
         );
-        serial_println!(
-            "[spawn]          the ud2 killed it instead of resuming past it"
-        );
+        serial_println!("[spawn]          the ud2 killed it instead of resuming past it");
         thread::on_thread_exit(result.task_id);
         pcb::destroy(result.pid);
         return Err(KernelError::InternalError);

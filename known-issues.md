@@ -164727,6 +164727,66 @@ missing one.
 boost and the quantum are kernel, not fixture. The `execl` half is lane
 B's. They are unrelated and should be worked separately.
 
+#### ROUND 7: lane A diagnosed this on 2026-09-16, and that diagnosis is ALSO misattributed
+
+Lane C found `requests/a-b-libc-execl-passes-a-null-path-to-execve.md` --
+filed by **lane A**, on `origin/main`, in my own tree since 2026-09-16. It
+contains the discriminator I rebuilt today, the named mechanism
+(`va_trampoline!`, `posix/src/spawn.rs:2204`) I never reached, and the
+conclusion: *no C program on this system can exec by the list form*.
+
+**Six rounds today rediscovered my own five-day-old work, more slowly, with
+a wrong published diagnosis on the way.** The artefact holding the answer
+was my own dropbox.
+
+**And then the older diagnosis turned out to rest on a misattribution.**
+Lane C flagged a tension they could not resolve: `execl_body` has opened
+with `if path.is_null() { set_errno(EFAULT); return -1; }` since
+2026-08-21, three weeks before the probe saw a NULL reach `linux_execve`.
+If the trampoline lost `%rdi`, that guard would have caught it.
+
+It resolves by reading, and cost one command. The probe line
+
+```
+[exec] linux_execve ENTERED and failed early: filename_ptr=0x0 errno=14
+```
+
+sits at line **557** of today's log, between `[syscall/linux] ... : OK`
+lines, 2,500 lines before the fixture runs. It is a **kernel self-test**
+deliberately passing NULL to check EFAULT -- `linux.rs:54128` is "execve
+user-marshalling NULL handling", `:86053` does exactly this for
+`execveat`. And **no `[exec]` probe fires anywhere near the fixture's
+failure at all.**
+
+So the 2026-09-16 note took a self-test's intentional NULL as evidence
+about `ctest-coreutils-runs`. The observation was true; the subject was
+wrong. That is dd-953's first costume -- a check reporting something true
+about the wrong thing -- and it has now cost two investigations.
+
+**What survives and what does not:**
+
+| claim | status |
+|---|---|
+| vector form execs, list form does not | **survives** -- independently confirmed today by fastpy `forkexec` |
+| `execl` is `execv` plus a `va_list` walk | **survives** -- read directly in `execl_body` |
+| the NULL arrives at the syscall | **withdrawn** -- that probe hit belongs to a self-test |
+| `va_trampoline` loses `%rdi` | **unsupported**, not disproved. It may still be right; the evidence cited for it was not evidence |
+| the `execl_body` null guard should have caught it | **resolved** -- there was nothing to catch |
+
+**Round 7's direction changes.** `ctest-coreutils-runs` is native-ABI, so
+it never enters `linux_execve`; it goes through `SYS_PROCESS_EXEC`, which
+had **no failure logging at all** until `391232edb` today. Both prior
+diagnoses were reading the Linux-ABI door while the fixture used the
+native one. The boot running now is the first that can say what the native
+path actually returns.
+
+**The lesson, and it is not "search harder".** I did search: I read the
+fixture, the kernel exec paths, `posix::execve`, `load_elf`, and the
+serial log. I did not read `requests/`, because I had classified it as
+*incoming asks to triage* rather than *what lane A already knows*. A
+dropbox is a record of findings as much as a queue of work, and mine
+contained the answer under a filename that states it outright.
+
 #### NARROWED by lane C, and one correction to how I framed the correlation
 
 **`execl` has no exec path of its own.** `posix/src/spawn.rs` `execl_body`

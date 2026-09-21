@@ -164134,7 +164134,9 @@ will key on `FileId` from the start, so this is the older table catching up
 rather than a new convention.
 
 ### [A] Three ring-3 self-tests have red-flagged every boot for days, and the guard that exists to prevent exactly this is green -- 2026-09-21
-**Status:** OPEN (diagnosed; the image is lane B's pipeline, the guard's corpus is lane A's `boot-test.sh` to extend)
+**Status:** OPEN -- **and the diagnosis below is WRONG in its first half.**
+Correction at the end of this entry, written within the hour. The binary is
+on the image. The failure is a kernel-side exec, which is lane A's
 
 **In short:** every boot fails three tests. The reason is that one small
 program is missing from the disk image the tests run against. There is a
@@ -164197,3 +164199,61 @@ above it in a 2.7 MB serial log. Everything upstream is green.
 
 The second half is the durable one: even after the image is rebuilt, the
 same gap lets the next missing binary through to a 600-second failure.
+
+#### CORRECTION, same day: the binary is there, and this is mine
+
+I verified the image with `debugfs` instead of believing the test's own
+error message, and the first half of the entry above is false:
+
+```
+    109  100755 (1)  1000  1000  796064  18-Sep-2026 03:44 true
+```
+
+`/bin/true` is present in `rootfs.ext4`, mode 0755, **796064 bytes -- the
+same size as `target/x86_64-slateos/release/true`**, in a `/bin` holding
+114 entries. The image is correct and lane B staged it correctly.
+
+**How I got it wrong.** The fixture prints:
+
+> `COULD NOT EXEC /mnt/bin/true -- it is not on the image, or is not
+> executable.`
+
+That is a **disjunction, and a guess** -- the fixture cannot see why exec
+failed, so it names the two likely causes. I took the first branch and
+wrote it up as a finding, including a confident story about manifest
+corpora. The manifest observation stands on its own (it really does not
+cover `/bin/true`), but it was not the cause of anything, and presenting it
+as the explanation made a true fact into a false diagnosis.
+
+**What the serial log actually shows**, six lines the entry above quoted
+without reading:
+
+```
+[ext4] Mounted vdb at /mnt                      <- the mount worked
+[cu] true (exec, run, exit 0 -- ...)
+[cow] Cloned address space: parent=... -> child=...   <- the fork worked
+[sched] Spawned task 153 (priority 16, cpu 0)
+[thread] Process 184 has no threads left - now zombie <- died immediately
+[cu] COULD NOT EXEC /mnt/bin/true ...
+```
+
+Mount succeeded, fork succeeded, the child was spawned and exited without
+running the program. So this is an **exec failure in the kernel** on a
+present, executable, correctly sized ELF -- `kernel/**`, lane A, mine. Not
+a staging gap and not lane B's to fix.
+
+**The lesson is the one I have been writing all day, pointed at me.** The
+fixture's message was true about what it could observe (exec returned an
+error) and a guess about why. I read the guess as the finding. dd-953 calls
+this a check reporting something true about the wrong thing; here the check
+was honest and explicitly offered two branches, and I collapsed them.
+
+**Three ring-3 tests fail together and they are one finding**, exactly as
+the harness comment beside them says: if `/bin/true` cannot exec, the pty
+and CPython rungs below are exercising the same broken path from further
+away. Fixing the exec should clear all three.
+
+**Still true from the original entry:** `rootfs.ext4.manifest` has 93
+entries and none for `/bin/true`, so the image guard's corpus genuinely
+excludes the binaries the rungs exec. That is worth widening on its own
+merits -- it just is not what broke this boot.

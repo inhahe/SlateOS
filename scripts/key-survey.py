@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rustlex  # noqa: E402
+import selftestflag  # noqa: E402
 
 # How a `Key::` variant is spelled where a human would read it. Several
 # spellings each, because apps differ and any one of them counts as named.
@@ -184,6 +185,49 @@ def is_key_list(body: str) -> bool:
     return keyish * 2 >= len(keys)
 
 
+
+# A run of keys written the way a person writes one, plus the two words that
+# stand for four keys each.
+#
+# WHY THIS EXISTS. Without it this survey reports keys as unnamed that the app
+# names perfectly well, and it did -- five times in one afternoon, each with a
+# different shape:
+#
+#   * `apps/klotski` draws "1-7: puzzle" and was reported as never naming
+#     `Num2`..`Num6`, because the literal text "Num2" is not in the string.
+#   * `apps/rush` the same, with "1-8".
+#   * `apps/compass` draws "1-0: select waypoint" -- which means 1 through 9
+#     and *then* 0, so an ascending expander produces an empty range and the
+#     row looks like it names nothing. Ten keys reported unnamed; none were.
+#   * `apps/sokoban` and `apps/snake` write "Arrows/WASD: move", which names
+#     eight keys in two words.
+#
+# Each false alarm cost a read of an app that turned out to be correct, and one
+# of them nearly cost an edit to an app that was already right.
+RANGE_RE = re.compile(r"(?<![\w-])([A-Za-z0-9])\s*-\s*([A-Za-z0-9])(?![\w-])")
+
+
+def spelled_out(haystack: str) -> set[str]:
+    """Every `Key::` variant the text names through a range or a group word."""
+    out: set[str] = set()
+    if re.search(r"\barrows?\b", haystack, re.IGNORECASE):
+        out |= {"Left", "Right", "Up", "Down"}
+    if re.search(r"\bwasd\b", haystack, re.IGNORECASE):
+        out |= {"W", "A", "S", "D"}
+    for lo, hi in RANGE_RE.findall(haystack):
+        if lo.isdigit() and hi.isdigit():
+            a, b = int(lo), int(hi)
+            # `1-0` is how a person writes "1 through 9 and then 0", and it is
+            # the spelling `apps/compass` uses. Read ascending it is empty.
+            digits = range(a, b + 1) if a <= b else list(range(a, 10)) + [0]
+            out |= {f"Num{d}" for d in digits}
+        elif lo.isalpha() and hi.isalpha():
+            a, b = ord(lo.upper()), ord(hi.upper())
+            if a <= b:
+                out |= {chr(c) for c in range(a, b + 1)}
+    return out
+
+
 def crate_sources(crate: Path) -> list[Path]:
     return sorted(p for p in (crate / "src").rglob("*.rs"))
 
@@ -223,15 +267,68 @@ def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
         return None
 
     haystack = " | ".join(literals)
+    spelled = spelled_out(haystack)
     unnamed = sorted(
         k
         for k in matched
-        if not any(n in haystack for n in NAMES.get(k, (k,)))
+        if k not in spelled and not any(n in haystack for n in NAMES.get(k, (k,)))
     )
     return len(matched), len(unnamed), unnamed, has_list
 
 
-def main() -> int:
+
+def _self_test() -> int:
+    r"""Cases for `spelled_out`, every one of them a false alarm this survey
+    actually raised before it could read these shapes.
+
+    The last two are the controls. `the barrows of old` must name nothing --
+    without a word boundary the arrow case matches inside any word containing
+    "arrow". And `press - to zoom out` must name nothing -- a lone hyphen is
+    the minus *key*, not a range, which is the same distinction
+    `guitk::shortcut::keystrokes` makes and for the same reason.
+
+    The boundary control earns its place twice over. These patterns were
+    written with `\b` through a heredoc, one level of escaping was lost, and
+    `\b` -- a *valid* Python escape -- became a literal backspace character
+    while `\w` in the neighbouring pattern stayed intact because it is not a
+    valid one and merely warned. The corrupted patterns matched nothing at all,
+    so every case that expects a match would have caught it -- but silently
+    returning "this app names no keys" is precisely the failure this survey
+    exists to avoid, and it would have read as a long work queue rather than a
+    bug.
+    """
+    cases: list[tuple[str, set[str], str]] = [
+        ("1-7: puzzle", {"Num1", "Num4", "Num7"}, "a digit range, as apps/klotski writes it"),
+        ("1-8: level", {"Num1", "Num8"}, "as apps/rush writes it"),
+        (
+            "1-0: select waypoint",
+            {"Num1", "Num9", "Num0"},
+            "1 through 9 and then 0 -- apps/compass; ascending it is empty",
+        ),
+        ("Arrows: move", {"Left", "Right", "Up", "Down"}, "one word, four keys"),
+        ("Arrows/WASD: steer", {"Left", "W", "A", "S", "D"}, "eight keys in two words"),
+        ("A-Z", {"A", "M", "Z"}, "a letter range"),
+        ("the barrows of old", set(), "control: no word boundary, so no match"),
+        ("press - to zoom out", set(), "control: a lone hyphen is the minus key"),
+    ]
+    bad = 0
+    for text, want, why in cases:
+        got = spelled_out(text)
+        ok = want <= got if want else not got
+        print(f"  {'ok  ' if ok else 'FAIL'} {why}")
+        if not ok:
+            print(f"       {text!r} -> {sorted(got)}, wanted {sorted(want)}")
+            bad += 1
+    if bad:
+        print(f"self-test: {bad} failure(s)")
+        return 1
+    print(f"self-test ok -- {len(cases)} case(s)")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if selftestflag.wants_selftest(argv):
+        return _self_test()
     rows = []
     apps = Path(__file__).resolve().parent.parent / "apps"
     for crate in sorted(apps.iterdir()):
@@ -256,4 +353,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

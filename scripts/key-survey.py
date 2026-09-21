@@ -508,6 +508,31 @@ def answered() -> dict[tuple[str, str], str]:
     return out
 
 
+#: The queue: keys that are a defect and are not fixed yet.
+#:
+#: Distinct from `ANSWERED`, and the distinction is the whole point. That file
+#: says "looked at, and not a defect". This one says "a defect, not fixed
+#: yet". An entry in the wrong file is how a bug quietly becomes a decision.
+BASELINE = Path(__file__).resolve().parent / "key-survey-baseline.txt"
+
+
+def baseline() -> set[tuple[str, str]]:
+    """`{(crate, key)}` still queued."""
+    out: set[tuple[str, str]] = set()
+    try:
+        text = io.open(BASELINE, encoding="utf-8").read()
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(chr(9))
+        if len(parts) >= 2:
+            out.add((parts[0], parts[1]))
+    return out
+
+
 def main(argv: list[str]) -> int:
     if selftestflag.wants_selftest(argv):
         return _self_test()
@@ -547,6 +572,32 @@ def main(argv: list[str]) -> int:
         print(f"{name:<22}{total:>5}{missing:>9}  {'yes ' if has_list else '--  '}  {shown}")
     print(f"\nqueue: {queue_apps} app(s), {queue_keys} key(s)")
 
+    # The gate. A key that is neither answered nor queued is new, and new is
+    # the case worth failing on: an app can be added tomorrow that binds eight
+    # keys and names none, and without this the total goes from 61 to 69 with
+    # nobody looking.
+    live = {(name, k) for _m, _t, name, keys, _l in rows for k in keys}
+    queued = baseline()
+    fresh = sorted(live - queued)
+    gone = sorted(queued - live)
+    if fresh:
+        print(f"\n{len(fresh)} key(s) answered by an app and named nowhere, "
+              f"not in {BASELINE.name}:")
+        for crate_name, key in fresh:
+            print(f"  {crate_name} {key}")
+        print("  Name them where the app draws them, or -- if this is one of")
+        print("  the shapes that only looks like a defect -- add it to")
+        print(f"  {ANSWERED.name} with a reason that says what makes it one.")
+    if gone:
+        print(f"\n{len(gone)} line(s) in {BASELINE.name} name a key that is "
+              f"no longer reported:")
+        for crate_name, key in gone:
+            print(f"  {crate_name} {key}")
+        print("  Fixed, most likely -- delete the lines in the same commit as")
+        print("  the fix. While one sits here that exact key cannot be")
+        print("  reported again, so a file left to rot suppresses the thing")
+        print("  it was written to track.")
+
     if answered_rows:
         print(f"{len(answered_rows)} already answered (--answered for why)")
         if show_answered:
@@ -577,7 +628,7 @@ def main(argv: list[str]) -> int:
         print("               re-offers the row with nothing recorded against")
         print("               it.")
         return 1
-    return 0
+    return 1 if (fresh or gone) else 0
 
 
 if __name__ == "__main__":

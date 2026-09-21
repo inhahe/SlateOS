@@ -1,0 +1,140 @@
+# Keys an app answers and names nowhere, not yet fixed.
+#
+# Fields: crate<TAB>key
+#
+# This is the queue, not a verdict. Every line is a key some app in this tree
+# answers and spells in no string of its own -- a thing a user can press and
+# cannot discover. They are being worked through one app at a time; fixing an
+# app means deleting its lines here in the same commit.
+#
+# WHAT THIS FILE IS FOR. Without it the survey reports a number and nothing
+# enforces it, so a new app can bind eight keys, name none of them, and the
+# count goes from 61 to 69 with nobody looking. With it, a key that is neither
+# answered (see key-survey-answered.txt) nor listed here fails the check.
+#
+# A LINE THAT NO LONGER MATCHES IS FATAL, not ignored. While it sits here that
+# exact key cannot be reported again, so a file left to rot silently
+# suppresses the thing it was written to track. Same rule, and the same
+# reason, as fields-written-never-read-baseline.txt.
+#
+# The difference from key-survey-answered.txt, which is easy to blur: that
+# file says "looked at, and not a defect". This one says "a defect, not fixed
+# yet". An entry in the wrong file is how a bug becomes a decision.
+
+
+# devicemanager
+devicemanager	E
+devicemanager	F
+devicemanager	F5
+devicemanager	R
+
+# mediaconvert
+mediaconvert	C
+mediaconvert	L
+mediaconvert	Num1
+mediaconvert	Num2
+
+# settings
+settings	C
+settings	F
+settings	V
+settings	X
+
+# asteroids
+asteroids	A
+asteroids	D
+asteroids	W
+
+# benchmark
+benchmark	Num4
+benchmark	Num5
+benchmark	Q
+
+# colorpicker
+colorpicker	C
+colorpicker	E
+colorpicker	V
+
+# fileassoc
+fileassoc	E
+fileassoc	F
+fileassoc	Q
+
+# notes
+notes	B
+notes	F
+notes	V
+
+# whiteboard
+whiteboard	A
+whiteboard	Y
+whiteboard	Z
+
+# wordsearch
+wordsearch	Num1
+wordsearch	Num2
+wordsearch	Num3
+
+# archivemanager
+archivemanager	A
+archivemanager	B
+
+# clipmanager
+clipmanager	O
+clipmanager	S
+
+# diskanalyzer
+diskanalyzer	F5
+diskanalyzer	L
+
+# diskcleanup
+diskcleanup	A
+diskcleanup	D
+
+# fontmanager
+fontmanager	F
+fontmanager	S
+
+# podcast
+podcast	O
+podcast	S
+
+# procexplorer
+procexplorer	F5
+procexplorer	V
+
+# soundrecorder
+soundrecorder	M
+soundrecorder	S
+
+# speedtest
+speedtest	E
+speedtest	Q
+
+# undelete
+undelete	A
+undelete	D
+
+# charmap
+charmap	C
+
+# connect4
+connect4	D
+
+# defrag
+defrag	Q
+
+# mandelbrot
+mandelbrot	Minus
+
+# netmanager
+netmanager	F5
+
+# partmanager
+partmanager	Z
+
+# startupmanager
+startupmanager	Q
+
+# sysinfo
+sysinfo	C

@@ -164132,3 +164132,68 @@ by owner, not by key. The new byte-range record-lock table (the ask in
 `requests/b-a-advisory-record-locking-is-a-stub-that-always-succeeds.md`)
 will key on `FileId` from the start, so this is the older table catching up
 rather than a new convention.
+
+### [A] Three ring-3 self-tests have red-flagged every boot for days, and the guard that exists to prevent exactly this is green -- 2026-09-21
+**Status:** OPEN (diagnosed; the image is lane B's pipeline, the guard's corpus is lane A's `boot-test.sh` to extend)
+
+**In short:** every boot fails three tests. The reason is that one small
+program is missing from the disk image the tests run against. There is a
+check whose whole job is to catch a stale or wrong image, and it passes --
+because the list it checks against does not include that program.
+
+**The failure, from the serial log rather than from inference:**
+
+```
+[cu] COULD NOT EXEC /mnt/bin/true -- it is not on the image, or is not executable.
+[cu] This is NOT a finding about the Rust userland. Check that
+[cu] create-ext4-rootfs.sh actually staged the manifest binaries.
+[spawn]   FAIL: ctest-coreutils-runs (ring 3) exit code was Some(11), expected 42
+```
+
+Three tests fail together and the first is the one that matters: *our own
+userland runs at all*, then *pty ^C signal delivery*, then *CPython REPL
+over a pty*. The harness comment beside the first says why they are one
+finding and not three -- if `/bin/true` cannot exec, the rungs below it are
+exercising the same broken path from further away, and passing would be
+worse than failing because it would look like evidence.
+
+**Why nothing caught it, which is the part worth keeping.**
+`boot-test.sh` has a guard built for precisely this, and its own comment
+states the failure mode:
+
+> The result is not a missing warning, it is a FALSE GREEN: the Path-Z
+> rungs run, they pass, and what they exercised was last week's binary.
+
+It ran and said: `ok rootfs.ext4 (85 staged artifacts match the tree, every
+fixture recipe has one)`. Both halves true. `rootfs.ext4.manifest` has **93
+entries and zero mention of `bin/true`** -- its header says it covers "the
+ctest/fastpy ELFs, the ported binaries, and CPython's stdlib zip". The
+coreutils binaries the rungs *exec* are not in that population.
+
+So the guard answers **"do the staged fixtures match the tree?"** and the
+failing test needs **"is `/bin/true` on the image?"**. A guard written to
+prevent a false green has one of its own, one level down, and for the same
+reason: a verdict is only as good as its corpus, and the corpus is
+invisible in the output (dd-942).
+
+**It is not simple staleness, which is what makes it interesting.** The
+image is *newer* than the binary: `rootfs.ext4` was packed 2026-09-18
+03:44, `target/x86_64-slateos/release/true` was built 2026-09-16 04:11.
+The binary existed, the image was made afterwards, and it still is not
+there. So the staging step did not silently lag -- it did not stage it.
+
+**Why it has survived days.** `boot-test.sh` does not build the image; it
+is a separate manual `wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh`.
+So the only feedback is a boot that goes red 600 seconds in with
+`InternalError`, and the diagnostic that names the real cause is 6 lines
+above it in a 2.7 MB serial log. Everything upstream is green.
+
+**Fix, in two halves that belong to different lanes:**
+
+| half | owner | what |
+|---|---|---|
+| stage the binaries | lane B | `create-ext4-rootfs.sh` / `ctest-fixtures.py` -- either stage them or say why they are absent |
+| widen the corpus | lane A | the guard should assert the image contains what the rungs will **exec**, not only what the fixture recipes **produce**. Those are different lists and only one of them is checked |
+
+The second half is the durable one: even after the image is rebuilt, the
+same gap lets the next missing binary through to a 600-second failure.

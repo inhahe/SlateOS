@@ -164604,6 +164604,43 @@ the harness comment beside them says: if `/bin/true` cannot exec, the pty
 and CPython rungs below are exercising the same broken path from further
 away. Fixing the exec should clear all three.
 
+#### SECOND rediscovery: lane A filed this too, on 2026-09-16, with better evidence
+
+`requests/a-b-ctest-pty-races-its-own-child-the-pty-is-fine.md`. Same day
+as the execl one, same lane, same dropbox. Everything below this heading I
+derived today was already there, and the prior note has a fact I never
+reached:
+
+> The parent writes `\003` **immediately after `forkpty` returns, before the
+> child has run at all**. `cur=173` is the parent. The scheduler boosts the
+> starved child twice and the parent still burns its 2,000,000-iteration
+> `waitpid` spin first, returns 45, and exits.
+
+It was measured with kernel probes on **both master-write paths and all
+three slave-read paths**, and its conclusion is stronger than mine: not
+"the budgets are equal so it is a photo finish" but *"nothing is wrong
+with the pty -- the `^C` reaches the input ring and the child is never
+scheduled to read it"*.
+
+That also sharpens the open question. The fixture's own comment says the
+readiness byte exists so *"the parent's 0x03 can never arrive before there
+is something to catch it -- this is the whole synchronisation of the
+test"*. If the parent is writing before the child has run, that
+synchronisation is not holding, which is a more specific defect than equal
+spin budgets and is still lane B's file.
+
+**Two rediscoveries in one session, both from `requests/a-*.md`.** 149
+outgoing requests filed by lane A, and I have never searched them. The
+rule I am writing down, because "remember to look" is not one: **before
+investigating any failing rung, grep `requests/a-*.md` for its name.** It
+costs one command and it would have saved two investigations today.
+
+What I add to the prior note rather than repeat: the two fixtures that
+fail by `execl` are the only two `execl` callers in the tree, and
+`ctest-pty` -- the third failing rung -- does not exec at all, so the
+harness's "these three are one finding" grouping is wrong in a way that
+will make an `execl` fix look incomplete.
+
 #### `ctest-pty`: exit 45 is masking exit 47, and the cause is equal spin budgets
 
 No probe needed -- it is arithmetic. `SPIN` is 2,000,000 and **both sides

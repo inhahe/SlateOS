@@ -97,6 +97,25 @@ const NO_TASKS_LINES: [&str; 3] = [
 pub const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 
 const WINDOW_WIDTH: f32 = 1100.0;
+
+/// Every key this program answers, and what it does.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("1 / 2 / 3", "Today / upcoming / all"),
+    ("4 / 5", "Overdue / completed"),
+    ("Up / Down", "Move the selection"),
+    ("Space / Enter", "Mark this reminder done, or not"),
+    ("S", "Next sort order"),
+    ("Z", "Snooze this reminder"),
+    ("B", "Show or hide the sidebar"),
+    ("D", "Show or hide the detail panel"),
+    ("C", "Show or hide completed subtasks"),
+    ("Escape", "Dismiss the notifications"),
+    ("Ctrl+O / Ctrl+S", "Open / save"),
+    ("F1 / ?", "This list"),
+];
 const WINDOW_HEIGHT: f32 = 720.0;
 const SIDEBAR_WIDTH: f32 = 220.0;
 const DETAIL_PANEL_WIDTH: f32 = 300.0;
@@ -1654,6 +1673,8 @@ pub struct RemindersApp {
     pub selected_task_id: Option<u64>,
     pub notifications: Vec<Notification>,
     pub sidebar_visible: bool,
+    /// Whether the shortcut list is up.
+    pub show_help: bool,
     pub detail_visible: bool,
     pub show_completed_subtasks: bool,
     /// The user's colours, replaced whenever the theme changes.
@@ -1667,6 +1688,7 @@ pub struct RemindersApp {
 impl RemindersApp {
     pub fn new(width: f32, height: f32, now: DateTime) -> Self {
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             picker: FilePicker::new(),
             choosing_snooze: false,
@@ -1983,6 +2005,26 @@ impl RemindersApp {
                 self.detail_visible = !self.detail_visible;
                 EventResult::Consumed
             }
+            // The third member of the group `B` and `D` are in.
+            // `show_completed_subtasks` was `true` at construction with no
+            // writer anywhere, so a finished subtask could never be put out of
+            // the way. Found by `scripts/frozen-flag-survey.py`, which has now
+            // turned up this same shape -- a display-toggle group with a
+            // member nobody wired -- in logviewer, diagram and here.
+            Key::C => {
+                self.show_completed_subtasks = !self.show_completed_subtasks;
+                EventResult::Consumed
+            }
+            // The shortcut list. Nothing in this program turns a keystroke
+            // into text, so `?` is free as well as `F1`.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Key::Slash if key.modifiers.shift => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -2230,6 +2272,18 @@ impl RemindersApp {
 
         // Last, so it is above everything.
         cmds.extend(self.picker.render(&self.palette, self.width, self.height));
+
+        // And the shortcut list over even that.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.width, self.height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
 
         cmds
     }
@@ -3798,6 +3852,120 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table beside it here, which would be a third copy of the same fact.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states().iter_mut().any(|app| {
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Lists chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<RemindersApp> {
+        let plain = populated();
+
+        // Parked in Upcoming, which is none of the other four, so every
+        // other digit has a view to come *from*: setting the view already in
+        // force is declined, and the guard needs one state per digit that is
+        // not that digit's own view.
+        let mut elsewhere = populated();
+        elsewhere.handle_event(&press(Key::Num2));
+
+        // With the selection moved, so the keys that go back have somewhere.
+        let mut moved = populated();
+        moved.handle_event(&press(Key::Down));
+
+        // With notifications up, the one state `Escape` can act in: it
+        // dismisses them and does nothing else, which is what the list says
+        // now -- the first version of that row claimed it cleared the
+        // selection too, and this guard is what caught the claim.
+        let mut notified = populated();
+        notified.notifications.push(Notification {
+            task_id: 1,
+            message: String::from("Reminder: something"),
+            triggered_at: notified.now,
+            dismissed: false,
+        });
+
+        vec![plain, elsewhere, moved, notified]
+    }
+
+    /// **Completed subtasks can be put out of the way.**
+    ///
+    /// `show_completed_subtasks` was `true` at construction with no writer
+    /// anywhere -- the third member of the group `B` (sidebar) and `D` (detail
+    /// panel) are already in. Asserts the effect, and that neither neighbour
+    /// moved with it, because `Consumed` alone cannot tell a toggle from a
+    /// fall-through.
+    #[test]
+    fn completed_subtasks_can_be_hidden() {
+        let mut app = populated();
+        let before = (
+            app.show_completed_subtasks,
+            app.sidebar_visible,
+            app.detail_visible,
+        );
+
+        app.handle_event(&press(Key::C));
+
+        assert_ne!(
+            app.show_completed_subtasks, before.0,
+            "C did not move the subtask filter"
+        );
+        assert_eq!(
+            (app.sidebar_visible, app.detail_visible),
+            (before.1, before.2),
+            "C moved one of its neighbours in the same group"
+        );
+    }
+
+    /// **The shortcut list reaches the window.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = populated();
+        assert!(
+            !drawn_help_text(&app).contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = drawn_help_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(*keys), "{keys:?} never reached the window");
+            assert!(shown.contains(*what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&press(Key::F1));
+        assert!(
+            !drawn_help_text(&app).contains("F1 or ? closes this"),
+            "F1 did not close it again"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn drawn_help_text(app: &RemindersApp) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     fn populated() -> RemindersApp {

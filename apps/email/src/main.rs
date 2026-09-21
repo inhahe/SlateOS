@@ -1794,6 +1794,40 @@ pub enum Panel {
     Settings,
 }
 
+/// Stepping and naming for [`SortOrder`].
+impl SortOrder {
+    /// Every order, in the order `Ctrl+S` steps through them.
+    ///
+    /// The same order the comparator is written in, so the two cannot drift.
+    pub const ALL: [Self; 5] = [
+        Self::DateDesc,
+        Self::DateAsc,
+        Self::SenderAsc,
+        Self::SubjectAsc,
+        Self::SizeDesc,
+    ];
+
+    /// What the window calls this order.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DateDesc => "newest first",
+            Self::DateAsc => "oldest first",
+            Self::SenderAsc => "sender",
+            Self::SubjectAsc => "subject",
+            Self::SizeDesc => "largest first",
+        }
+    }
+
+    /// The next order round the ring.
+    #[must_use]
+    pub fn next(self) -> Self {
+        let at = Self::ALL.iter().position(|o| *o == self).unwrap_or(0);
+        let ahead = at.saturating_add(1);
+        let wrapped = if ahead >= Self::ALL.len() { 0 } else { ahead };
+        Self::ALL.get(wrapped).copied().unwrap_or(Self::DateDesc)
+    }
+}
+
 /// Sort order for message list
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SortOrder {
@@ -1851,6 +1885,21 @@ pub enum ComposeField {
     Subject,
     /// The message itself.
     Body,
+}
+
+/// Stepping for [`ReadingPanePosition`].
+impl ReadingPanePosition {
+    /// Every position, in the order `Ctrl+P` steps through them.
+    pub const ALL: [Self; 3] = [Self::Right, Self::Bottom, Self::Off];
+
+    /// The next position round the ring.
+    #[must_use]
+    pub fn next(self) -> Self {
+        let at = Self::ALL.iter().position(|p| *p == self).unwrap_or(0);
+        let ahead = at.saturating_add(1);
+        let wrapped = if ahead >= Self::ALL.len() { 0 } else { ahead };
+        Self::ALL.get(wrapped).copied().unwrap_or(Self::Right)
+    }
 }
 
 /// Reading pane position
@@ -2121,6 +2170,19 @@ impl EmailApp {
                 Key::N => {
                     self.compose_new();
                     EventResult::Consumed
+                }
+                // The sort order and the reading pane, both drawn from
+                // and neither changeable: `sort_order` was `DateDesc` with no
+                // writer and five comparator arms, `reading_pane_position` was
+                // `Right` with no writer and decides the layout. Found by
+                // `scripts/frozen-flag-survey.py`.
+                Key::S => {
+                    self.sort_order = self.sort_order.next();
+                    return EventResult::Consumed;
+                }
+                Key::P => {
+                    self.reading_pane_position = self.reading_pane_position.next();
+                    return EventResult::Consumed;
                 }
                 Key::F => {
                     self.searching = true;
@@ -3503,6 +3565,73 @@ mod tests {
     // outside the tests -- about twenty are IMAP and SMTP command builders
     // with no socket to write to, and the rest are the client's own verbs.
     // ------------------------------------------------------------------
+
+    /// **The message list can be re-sorted, and the order follows.**
+    ///
+    /// `sort_order` was `DateDesc` at construction with no writer anywhere, so
+    /// the comparator's five arms were one reachable arm and four dead ones.
+    ///
+    /// Asserts the order of the listed messages, not the field: a key that
+    /// sets the enum while the comparator ignores it would pass the weaker
+    /// version.
+    #[test]
+    fn the_message_list_can_be_re_sorted() {
+        let mut app = seeded();
+        let subjects = |app: &EmailApp| -> Vec<String> {
+            app.current_messages()
+                .iter()
+                .map(|m| m.subject.clone())
+                .collect()
+        };
+        let by_date = subjects(&app);
+        assert!(by_date.len() > 1, "the fixture needs at least two messages");
+
+        // Step to "subject", which orders alphabetically rather than by time.
+        let mut guard = 0;
+        while app.sort_order != SortOrder::SubjectAsc && guard < SortOrder::ALL.len() {
+            assert_eq!(
+                app.handle_event(&key_ev(Key::S, true)),
+                EventResult::Consumed,
+                "Ctrl+S was not answered"
+            );
+            guard += 1;
+        }
+        assert_eq!(app.sort_order, SortOrder::SubjectAsc);
+
+        let by_subject = subjects(&app);
+        assert_ne!(by_subject, by_date, "re-sorting changed nothing");
+        let mut sorted = by_subject.clone();
+        sorted.sort();
+        assert_eq!(by_subject, sorted, "the subject order is not alphabetical");
+    }
+
+    /// **The reading pane can be moved and switched off.**
+    ///
+    /// `reading_pane_position` was `Right` with no writer, and it decides the
+    /// list's width and whether the pane is drawn at all -- so two of its
+    /// three positions were unreachable.
+    #[test]
+    fn the_reading_pane_can_be_moved_and_switched_off() {
+        let mut app = seeded();
+        assert_eq!(app.reading_pane_position, ReadingPanePosition::Right);
+
+        assert_eq!(
+            app.handle_event(&key_ev(Key::P, true)),
+            EventResult::Consumed,
+            "Ctrl+P was not answered"
+        );
+        assert_eq!(app.reading_pane_position, ReadingPanePosition::Bottom);
+
+        app.handle_event(&key_ev(Key::P, true));
+        assert_eq!(app.reading_pane_position, ReadingPanePosition::Off);
+
+        app.handle_event(&key_ev(Key::P, true));
+        assert_eq!(
+            app.reading_pane_position,
+            ReadingPanePosition::Right,
+            "the cycle did not come back round"
+        );
+    }
 
     fn key_ev(key: Key, ctrl: bool) -> Event {
         let mut modifiers = guitk::event::Modifiers::NONE;

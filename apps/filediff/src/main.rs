@@ -844,6 +844,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Shift+S", "Scroll the two panes together, or not"),
     ("Ctrl+F", "Search"),
     ("F3", "Find the next match"),
+    ("Ctrl+I", "Match case in the search, or not"),
     ("Alt+W", "Ignore whitespace, or stop ignoring it"),
     ("Alt+C", "Ignore case, or stop ignoring it"),
     ("F1", "This list"),
@@ -1442,6 +1443,21 @@ impl FileDiffApp {
                     self.search.next_match();
                 }
                 self.scroll_to_current_match();
+                EventResult::Consumed
+            }
+            // Whether the search matches case. `SearchState::case_sensitive`
+            // is handed to `textfind::Case::sensitive` on every search and
+            // was `false` with no writer, so finding `Config` also found
+            // `config` and there was no way to ask for only one of them --
+            // in a tool people open to find out which of two files says
+            // `MAX_SIZE` and which says `max_size`.
+            //
+            // Ahead of the text branch, which would otherwise type an `i`
+            // into the query. Alt+C beside it is a different question: that
+            // one is whether the *comparison* ignores case.
+            Key::I if key.modifiers.ctrl => {
+                self.search.case_sensitive = !self.search.case_sensitive;
+                self.rerun_search();
                 EventResult::Consumed
             }
             _ => {
@@ -2413,10 +2429,28 @@ impl FileDiffApp {
                 color: self.palette.text,
                 font_size: CONTENT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(bar_w - 140.0),
+                max_width: Some((bar_w - 290.0).max(60.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
+
+        // Whether case matters, and the key that changes it -- a search
+        // that silently folds case turns "not found" into a claim about the
+        // file rather than about the query.
+        tree.push(RenderCommand::Text {
+            x: bar_x + bar_w - 230.0,
+            y: bar_y + 10.0,
+            text: if self.search.case_sensitive {
+                "Case: on  Ctrl+I".to_string()
+            } else {
+                "Case: off  Ctrl+I".to_string()
+            },
+            color: self.palette.subtext0,
+            font_size: UI_FONT_SIZE,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(110.0),
+            overflow: TextOverflow::Ellipsis,
+        });
 
         // Match count
         let match_info = if self.search.matches.is_empty() {
@@ -4647,6 +4681,73 @@ mod tests {
             "alpha\nzulu\ncharlie\n",
             query,
         )
+    }
+
+    /// `Ctrl+I` decides whether the search matches case, and the bar says so.
+    ///
+    /// `SearchState::case_sensitive` is handed to `textfind::Case::sensitive`
+    /// on every search and was `false` at construction with no writer, so
+    /// finding `Config` also found `config` and there was no way to ask for
+    /// only one of them -- in a tool people open to find out which of two
+    /// files says `MAX_SIZE` and which says `max_size`.
+    #[test]
+    fn ctrl_i_decides_whether_the_search_matches_case() {
+        let mut app = searching_app_on(
+            ViewMode::Unified,
+            "Config here\nconfig there\n",
+            "Config here\nconfig there\n",
+            "config",
+        );
+        let folded = app.search.matches.len();
+        assert!(
+            folded >= 2,
+            "control: case-insensitively, both spellings should match; got {folded}"
+        );
+
+        assert_eq!(
+            app.handle_key(&ctrl(Key::I)),
+            EventResult::Consumed,
+            "Ctrl+I was ignored in the search bar"
+        );
+        assert!(app.search.case_sensitive, "Ctrl+I did not turn case on");
+        let exact = app.search.matches.len();
+        assert!(
+            exact < folded,
+            "with case on, {exact} matches should be fewer than {folded}"
+        );
+
+        app.handle_key(&ctrl(Key::I));
+        assert!(!app.search.case_sensitive, "Ctrl+I is a switch, not a door");
+        assert_eq!(
+            app.search.matches.len(),
+            folded,
+            "turning case back off did not restore the matches"
+        );
+    }
+
+    /// The search bar says which way case is set.
+    #[test]
+    fn the_search_bar_says_whether_case_matters() {
+        let mut app = searching_app(ViewMode::Unified, "alpha");
+        let texts = |a: &mut FileDiffApp| -> Vec<String> {
+            a.render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(
+            texts(&mut app).iter().any(|t| t == "Case: off  Ctrl+I"),
+            "the bar does not say case is off"
+        );
+        app.handle_key(&ctrl(Key::I));
+        assert!(
+            texts(&mut app).iter().any(|t| t == "Case: on  Ctrl+I"),
+            "the bar did not follow the setting"
+        );
     }
 
     /// The feature this whole section is about: matches were computed, counted

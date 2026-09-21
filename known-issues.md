@@ -160686,6 +160686,41 @@ and set at construction, which is an editor preserving what it opened. Same
 false-positive mode as `apps/installer`, and the same tell -- look at where the
 struct comes from.
 
+**One app has now yielded three separate findings in three passes, and that
+is the most useful thing the survey has taught me about how to use it.**
+`apps/regextester`:
+
+1. the `i`/`g`/`m` flag buttons, drawn as controls and unoperable;
+2. `active_tab`, so two of its three tabs were unreachable;
+3. `show_replace` and `show_groups` -- and `show_replace` is the worst of the
+   three, because `Tab` cycles focus *into* the replacement field while the
+   pane holding it is never drawn. The app's own shortcut list says Tab moves
+   between "the pattern, the text and the replacement".
+
+Each pass fixed what it found and moved on, and each time the app looked
+finished. **The lesson is to run the survey against one app until it reports
+nothing, rather than fixing its top row and going to the next app** -- a single
+frozen field is rarely the only one, because whatever habit produced it
+produced the others in the same sitting.
+
+**One row is a choice rather than a defect, and the difference is worth
+keeping.** `apps/explorer` threads a `ConflictPolicy` through `plan_copy` --
+`Skip`, `Overwrite`, `OverwriteIfNewer`, `Rename` -- and every production call
+site passes `Rename`. So three of the four are unreachable from the window and
+a copy onto an existing name always renames; the user is never asked and never
+offered a choice.
+
+That is **not** the same as the frozen flags above, and saying why matters:
+renaming never loses data, so the app is safe and merely inflexible, where a
+frozen `show_replace` or a sort nobody can change is a control drawn and not
+wired. The fix is also different in kind -- a conflict prompt is a dialog with
+three buttons and a decision about what the default should be, which is a
+feature to design rather than a key to bind.
+
+Filed here so the next reader does not have to re-derive it, and not fixed,
+because guessing at a destructive default is exactly the kind of choice that
+should not be made by whoever happens to be passing.
+
 **A second kind of noise, found by checking the two rows with the highest
 stakes.** `apps/installer`'s `wipe` and `auto_reboot` look frozen and are not:
 they are built from an answer file through `disk.get("wipe")` and
@@ -160768,6 +160803,41 @@ and aborts otherwise, precisely so a broad pattern cannot quietly hit more than
 it was aimed at. **A safety rail abandoned under time pressure is a safety rail
 that was never there.** The rule earns its keep most exactly when the edit
 feels too small to need it.
+
+**Update 2026-09-18 — the headline number was wrong, in both directions.**
+The survey's scope regex wanted `impl App for X` and every app here writes
+`impl oswindow::app::App for X`, so it matched none of them: 19 of the 20
+apps it had reported on were silently scanned *whole*, where a directory
+entry's `is_directory` counts as a frozen setting. Two-thirds of the number
+above was furniture, and the fallback that produced it was described in the
+docstring as "visible in the count" while being printed nowhere.
+
+Correcting it made the survey both shorter and longer. Scoped to the app
+struct alone it read 16 in 12 apps -- and `apps/lockscreen`'s
+`show_clock_seconds`, a real one already filed here, had vanished, because it
+lives one field away in a `LockScreenConfig`. Following singleton-held
+structs but not collection-held ones -- a type the crate ever puts in a
+`Vec` is data, so `apps/chess`'s `Move::is_castling` stays out -- gives
+**107 in 37 apps**, which is the first figure from this tool that means what
+the entry title claims.
+
+Four apps out of it so far:
+
+| App | Was | Now |
+|---|---|---|
+| `videoplayer` | a "Player Settings" screen drawing six settings, none changeable; `repeat` read by the playlist and set by nothing | one `SettingRow` list the renderer walks and a cursor indexes; `R` and `Shift+E` for the other two |
+| `passwordgen` | every passphrase capitalised and ending in a digit, for everyone, always | `Shift+C`/`Shift+D`/`Shift+S`, plus `M`; panel and handler are one list |
+| `diskimager` | "verify after write" and "compress" drawn as checkboxes with no writer | `V` and `C` |
+| `torrent`, `email`, `regextester` | see their own entries above | fixed earlier the same day |
+
+**The lesson is the one this file keeps recording, for the third time in a
+day: a checker whose population is defined by a name it expects will one day
+be handed a different name and say nothing.** `key-survey.py` matched
+`SHORTCUTS` and missed `HELP_ROWS`; `check-variant-lists.py` checks lists
+*named* `ALL`; this one wanted a bare trait name. Each was silent, and each
+reported a confident number while doing so. The cure that worked here was
+not a better regex -- it was **printing the count of things the tool could
+not scope**, so a population that collapses says so out loud.
 
 ## `TD-C-THE-REDRAW-SIGNAL-WAS-A-THIRD-LIST` -- **FIXED 2026-09-18** (lane C)
 
@@ -161855,6 +161925,191 @@ is the most convincing wrong answer this app can give. The module doc should
 describe the emulator it is rather than the one it will be. Spawning a real
 process is a much larger piece of work and is not a prerequisite for either.
 
+
+## `TD-C-THE-OVERLAY-WAS-DRAWN-ON-A-PATH-NOBODY-TOOK` -- **FIXED 2026-09-18** (lane C)
+
+**In short:** `apps/diskimager` has two methods called `render`. One belongs to
+the app itself; the other belongs to the trait the window system calls, and it
+just turns around and calls the first. I put the new shortcut list in the
+outer one. Everything still compiled, the app still worked, and the list was
+invisible to every piece of code in the crate that draws the app directly --
+which is all of its tests, and would be any embedder holding the concrete type.
+
+**How it surfaced.** The draw test failed with `"Ctrl+1 / Ctrl+2" never
+reached the window` while the key tests all passed. That pairing is the tell:
+the state changed, the handler ran, and nothing was drawn -- so the defect is
+on the drawing side, not the input side. Had I written only the key tests (the
+obvious ones -- they are what the feature *is*) the app would have shipped with
+a help key that opens nothing.
+
+**Why this shape is worth a name.** It is the same defect the rest of this
+app had, one level up. `verify_after_write` was a setting drawn on screen with
+no way to reach it; the shortcut card was a drawing placed on a path nothing
+reaches. In both cases the code is present, correct, and unreachable, and no
+compiler or lint says a word -- the outer `render` really is called, by the
+window system, in production. Only the tests take the other door.
+
+**The generalisation, checked rather than assumed.** Seventeen apps have been
+given a shortcut card. I checked every one of them for a second draw entry
+point that skips the card, because if the shape recurred the other sixteen
+would have shipped the same hole:
+
+| App | Draw entries | Card reached by |
+|---|---|---|
+| calendar | `frame`, trait `render`, `Probe::draw` | all three -- the latter two call `frame` |
+| imageviewer | trait `render` -> free `render(app)` | the one path |
+| slides, mindmap, spreadsheet, renamer, logviewer, reminders, diagram | `render_commands` | the one path |
+| pdfviewer, sudoku | `frame` | the one path |
+| filediff | `render_tree` | the one path |
+| explorer, hexeditor, jsonviewer, regextester | one `render` | the one path |
+| **diskimager** | **inherent `render` + trait `render`** | **the inherent one, since this fix** |
+
+So it was one app, not a pattern -- but the reason it was one app is that the
+other sixteen happen to funnel every caller through a single function. That is
+a property nothing enforces, and the next app to grow a second entry point
+will reintroduce this silently. The durable guard is the draw test itself:
+`the_shortcut_list_reaches_the_window` catches it in whichever app it happens
+to, because the test drives the app the way the crate's own callers do.
+
+**Fixed** in `96818ce94` by moving the call into the inherent render, ahead of
+both dialogs, so both doors reach it.
+
+## `TD-C-A-PASSWORD-POLICY-NOBODY-CAN-STATE` (lane C, 2026-09-18)
+
+**In short:** `apps/passwordgen` checks every password it makes against a
+rule set -- must contain a digit, must contain a symbol, must not be a common
+word -- and shows a compliance mark when it passes. The rule set is written
+into the program. If your employer requires sixteen characters and no
+symbols, this program cannot be told that, and its tick means "it matched
+*our* rules", not yours.
+
+**Where it lives.** `PasswordPolicy` in `apps/passwordgen/src/main.rs`:
+`require_digit`, `require_lowercase`, `require_symbol`, `require_uppercase`,
+`disallow_common`, all read by `policy.check()` and `policy.is_compliant()`
+(called from the status bar at line ~1799) and assigned nowhere outside
+tests.
+
+**Why it is not a keyboard fix, unlike the rest of that survey.** The four
+generation options fixed in `1e8c105d8` are choices a person makes per
+password -- longer, no symbols, one of each kind -- and a key is the right
+home for them. A policy is not that. It is a *standard somebody else sets*,
+it wants to persist across runs, and expressing "at least 16 characters" or
+"at least 3 of the 4 classes" needs more than a toggle. Binding `Shift+R` to
+"require a digit: no" would be a worse program: a compliance indicator whose
+rules the person being checked can quietly relax is not a compliance
+indicator.
+
+**What the repair wants.** A settings file, whose shape is **C-Q26** --
+this is the third app to want one (`apps/lockscreen`'s `show_clock_seconds`
+and `show_date`, `apps/markdowneditor`'s `autosave_enabled`), and the shape
+of that file is an operator question rather than a lane decision, since it
+sets where user preferences live for every app in the tree. Until then the
+policy is *safe* -- it is a reasonable default and it is honest about what it
+checked -- so this is a missing capability, not a wrong answer.
+
+**What is deliberately not on this list.** `PasswordAnalysis`'s
+`has_digits`, `has_uppercase`, `is_common`, `rating` and the rest show up in
+the same survey row and are not defects: they are measurements of a password,
+computed at construction and correctly never changed afterwards. The survey
+documents that false-positive mode; it is recorded here so the row is not
+re-investigated a third time.
+
+## `TD-C-THE-ARCHIVE-CREATION-OPTIONS-ARE-A-STRUCT-NOBODY-CALLS` (lane C, 2026-09-18)
+
+**In short:** `apps/archivemanager` can make a new archive, and it always
+makes the same kind: an empty ZIP at normal compression, no password, not
+split, no comment. The program contains a full set of options for this --
+format, compression level, encryption, splitting, whether to keep empty
+folders, whether to store full paths -- written out as a type with its own
+validation and its own tests. Nothing in the program ever builds one. The
+menu item that creates an archive calls a different function that takes a
+path and nothing else.
+
+**Where it lives.** `CreateArchiveSettings` in
+`apps/archivemanager/src/main.rs:1170`, with `Default`, a `validate()` that
+checks for an empty password when encryption is on, and tests at ~4822. Live
+code mentions the type exactly three times: its declaration, its `Default`,
+and its own `impl`. The creation path is `create_archive(&mut self, path:
+&Path)` at ~3064, which calls `backend::create_empty(path)`.
+
+**Why the frozen-flag survey pointed here.** It reported
+`CreateArchiveSettings::format` as read-and-never-written, which is true and
+understates it: the whole struct is unreached, so every field in it is. A
+survey that reports one field of a dead struct is telling you about the
+smallest visible part of a larger absence. Worth remembering when a row looks
+oddly specific -- ask what holds the field before asking what writes it.
+
+**Why this is not being fixed in passing.** Making the options reach the
+creation path is not wiring, it is building the feature: a new-archive dialog
+with a format list, a compression control, a password field, and a split
+size -- and `backend::create_empty` writes a ZIP, so honouring `format` means
+writers for the other formats that do not exist. Shipping a dialog whose
+format list has one working entry would be the defect this lane keeps
+finding, one level up.
+
+**What is safe about it today.** Creating an archive works and says what it
+did. Nothing claims the options exist: they are not drawn anywhere, so the
+program is silent about them rather than lying about them. That is the right
+order to leave it in, and it is why this is a gap rather than a bug.
+
+**What the repair wants, in order.** A new-archive dialog offering only what
+the backend can actually write -- today that is ZIP at the levels
+`CompressionLevel` names -- and the rest of the fields removed from
+`CreateArchiveSettings` until there is a writer behind them. An option struct
+should not outrun its backend; that is how a list with one working entry gets
+shipped.
+
+## `TD-C-A-FROZEN-FIELD-LICENSES-CONSTANTS-THAT-ASSUME-IT` -- **FIXED 2026-09-19** (lane C)
+
+**In short:** `apps/connect4` decided which colour you play in one place and
+wrote the answer out again, as words, somewhere else. While the first place
+could never change, the second was correct. The moment a key could change it,
+the program started announcing the machine's moves under the wrong colour.
+
+**What happened.** `human_player` was `Cell::Red` and `ai_player`
+`Cell::Yellow` at construction, with no writer in the crate -- a frozen field
+of the kind `scripts/frozen-flag-survey.py` exists to find. Unfreezing it with
+an `S` key was three lines. Then the game began saying "Yellow is
+thinking..." while the machine played Red, because `status_line` held the
+string
+
+    "Yellow is thinking...".to_string()
+
+rather than `self.ai_player.name()`. Two of them, in fact; "Yellow wins!" as
+well.
+
+**Why it is worth a name.** Every fix in this sweep unfreezes a field, and
+this is the failure mode that fix *creates*. A constant that duplicates a
+frozen field is not wrong while the field is frozen -- it is a correct
+statement about a value that cannot change -- so it reads as fine in review,
+type-checks, and has no lint. It becomes a lie at the instant the field gains
+a writer, and the commit that introduces the lie is the commit that fixes the
+defect. **The repair is never complete at the field; it ends wherever the old
+value was written down.**
+
+**The test shape that catches it.** Not "the status line is unchanged" and
+not "the status line contains Yellow" -- both pass against the defect. It has
+to assert the string names *the colour the machine is actually playing*:
+
+    assert!(app.status_line().contains(app.ai_player.name()));
+    assert!(!app.status_line().contains(app.human_player.name()));
+
+Read from the field, in the test, so the test cannot encode the assumption it
+is checking for.
+
+**Checked, not assumed.** The other six apps whose fields this sweep
+unfroze -- `videoplayer`, `qrcode`, `hexeditor`, `filesearch`,
+`archivemanager`, `systemrestore` -- were searched for production literals
+naming a variant of the thawed type. Every hit was in a test asserting a
+`label()`, which is what a test should do. `connect4` was the only one, and
+it is fixed in `3a96087a1`.
+
+**What would find the next one mechanically.** For a field the survey reports
+as frozen, take the string its current value renders to and look for that
+string in live code outside the type's own `label`/`Display`. That is a much
+narrower search than it sounds -- the survey has 25 open rows -- and it is
+worth running as part of each fix rather than as a gate, since the window in
+which it matters is the fix itself.
 ### [A] `faceunlock::verify()` returns Matched unconditionally, and my first attempt to document that understated it -- 2026-09-17
 
 **Status:** OPEN

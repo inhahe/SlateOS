@@ -326,6 +326,59 @@ pub enum FileCategory {
     Other,
 }
 
+impl FileCategory {
+    /// Every category, in the order the filter strip draws them.
+    ///
+    /// The strip used to build its own array of nine, and this enum has
+    /// eleven: `Font` and `Database` were categories the matcher understood,
+    /// that every file was sorted into, and that no chip ever offered. A
+    /// search for fonts could not be narrowed to fonts.
+    pub const ALL: [FileCategory; 11] = [
+        Self::Document,
+        Self::Image,
+        Self::Audio,
+        Self::Video,
+        Self::Archive,
+        Self::Code,
+        Self::Executable,
+        Self::Font,
+        Self::Database,
+        Self::Config,
+        Self::Other,
+    ];
+
+    /// The next choice in the strip, treating "no filter" as the first one.
+    ///
+    /// `None` is part of the cycle rather than a separate key, because the
+    /// way out of a filter has to be as reachable as the way in.
+    #[must_use]
+    pub fn step(current: Option<Self>, forward: bool) -> Option<Self> {
+        // Slot 0 is "no filter"; slot n+1 is `ALL[n]`. Saturating rather
+        // than modular because this crate denies plain arithmetic, and
+        // "past the end goes to the start" reads better than a remainder.
+        let at = match current {
+            None => 0,
+            Some(cat) => Self::ALL
+                .iter()
+                .position(|c| *c == cat)
+                .map_or(0, |i| i.saturating_add(1)),
+        };
+        let last = Self::ALL.len();
+        let next = if forward {
+            if at >= last { 0 } else { at.saturating_add(1) }
+        } else if at == 0 {
+            last
+        } else {
+            at.saturating_sub(1)
+        };
+        if next == 0 {
+            None
+        } else {
+            Self::ALL.get(next.saturating_sub(1)).copied()
+        }
+    }
+}
+
 impl fmt::Display for FileCategory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -677,6 +730,37 @@ pub enum SizeFilter {
 }
 
 impl SizeFilter {
+    /// Every band the strip offers, in the order it draws them.
+    ///
+    /// `Custom(min, max)` is deliberately absent: it carries two numbers that
+    /// a strip of chips cannot express, and it is reachable by a dialog that
+    /// does not exist yet. A chip that cannot say *which* custom range it
+    /// means would be a chip that does nothing.
+    pub const ALL: [SizeFilter; 7] = [
+        Self::Any,
+        Self::Empty,
+        Self::Tiny,
+        Self::Small,
+        Self::Medium,
+        Self::Large,
+        Self::VeryLarge,
+    ];
+
+    /// The next band, wrapping. A `Custom` range steps to the start.
+    #[must_use]
+    pub fn step(self, forward: bool) -> Self {
+        let at = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        let last = Self::ALL.len().saturating_sub(1);
+        let next = if forward {
+            if at >= last { 0 } else { at.saturating_add(1) }
+        } else if at == 0 {
+            last
+        } else {
+            at.saturating_sub(1)
+        };
+        Self::ALL.get(next).copied().unwrap_or(Self::Any)
+    }
+
     #[must_use]
     pub fn matches(self, size: u64) -> bool {
         match self {
@@ -719,6 +803,35 @@ pub enum DateFilter {
 }
 
 impl DateFilter {
+    /// Every date range, in the order the filter strip draws them.
+    ///
+    /// The strip drew five of these seven: `Yesterday` and `Older` were
+    /// understood by `matches` and offered by nothing.
+    pub const ALL: [DateFilter; 7] = [
+        Self::Any,
+        Self::Today,
+        Self::Yesterday,
+        Self::ThisWeek,
+        Self::ThisMonth,
+        Self::ThisYear,
+        Self::Older,
+    ];
+
+    /// The next range in the strip, wrapping.
+    #[must_use]
+    pub fn step(self, forward: bool) -> Self {
+        let at = Self::ALL.iter().position(|d| *d == self).unwrap_or(0);
+        let last = Self::ALL.len().saturating_sub(1);
+        let next = if forward {
+            if at >= last { 0 } else { at.saturating_add(1) }
+        } else if at == 0 {
+            last
+        } else {
+            at.saturating_sub(1)
+        };
+        Self::ALL.get(next).copied().unwrap_or(Self::Any)
+    }
+
     /// Check if a timestamp matches (relative to `now`)
     #[must_use]
     pub fn matches(self, timestamp: u64, now: u64) -> bool {
@@ -1304,6 +1417,45 @@ impl FileSearchApp {
                 self.show_preview = !self.show_preview;
                 EventResult::Consumed
             }
+            // The three filter strips, by position, because the strips are
+            // lists and their headings print these keys. Every one of them
+            // was drawn with a selection highlight and nothing could move the
+            // selection: a File Type strip that could not filter by type.
+            Key::Num1 if ctrl => {
+                self.criteria.category_filter =
+                    FileCategory::step(self.criteria.category_filter, !key.modifiers.shift);
+                self.rerun_with_filters()
+            }
+            Key::Num2 if ctrl => {
+                self.criteria.size_filter = self.criteria.size_filter.step(!key.modifiers.shift);
+                self.rerun_with_filters()
+            }
+            Key::Num3 if ctrl => {
+                self.criteria.date_filter = self.criteria.date_filter.step(!key.modifiers.shift);
+                self.rerun_with_filters()
+            }
+            // What the query means, and what the search reaches.
+            Key::R if ctrl => {
+                self.criteria.mode = match self.criteria.mode {
+                    SearchMode::Substring => SearchMode::Glob,
+                    SearchMode::Glob => SearchMode::Regex,
+                    SearchMode::Regex => SearchMode::Content,
+                    SearchMode::Content => SearchMode::Substring,
+                };
+                self.rerun_with_filters()
+            }
+            Key::U if ctrl => {
+                self.criteria.case_sensitive = !self.criteria.case_sensitive;
+                self.rerun_with_filters()
+            }
+            Key::H if ctrl => {
+                self.criteria.include_hidden = !self.criteria.include_hidden;
+                self.rerun_with_filters()
+            }
+            Key::K if ctrl => {
+                self.criteria.include_directories = !self.criteria.include_directories;
+                self.rerun_with_filters()
+            }
             _ => {
                 if key.text.is_empty() || ctrl {
                     return EventResult::Ignored;
@@ -1313,6 +1465,16 @@ impl FileSearchApp {
                 EventResult::Consumed
             }
         }
+    }
+
+    /// Run the search again after a filter moved, and say it was handled.
+    ///
+    /// Every filter key goes through here rather than setting a field and
+    /// stopping: the results on screen are the answer to the *previous*
+    /// filter, and leaving them there invites reading them as the new one's.
+    fn rerun_with_filters(&mut self) -> EventResult {
+        self.execute_search();
+        EventResult::Consumed
     }
 
     /// Sort by a column, reversing it if it is already the sort column.
@@ -1538,7 +1700,7 @@ impl FileSearchApp {
         cmds.push(RenderCommand::Text {
             x: x + 12.0,
             y: fy,
-            text: "File Type".to_string(),
+            text: "File Type (Ctrl+1)".to_string(),
             font_size: 11.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Bold,
@@ -1547,19 +1709,35 @@ impl FileSearchApp {
         });
         fy += 20.0;
 
-        let categories = [
-            FileCategory::Document,
-            FileCategory::Image,
-            FileCategory::Audio,
-            FileCategory::Video,
-            FileCategory::Archive,
-            FileCategory::Code,
-            FileCategory::Executable,
-            FileCategory::Config,
-            FileCategory::Other,
-        ];
+        // The "no filter" chip comes first, so the way out of a filter is
+        // as visible as the way in. Before this the strip drew only the
+        // eleven categories and clearing the filter had nothing to press.
+        let none_selected = self.criteria.category_filter.is_none();
+        if none_selected {
+            self.palette
+                .push_surface(cmds, x + 4.0, fy, w - 8.0, 22.0, 4.0, Surface::Card);
+        }
+        cmds.push(RenderCommand::Text {
+            x: x + 12.0,
+            y: fy + 4.0,
+            text: "All Types".to_string(),
+            font_size: 11.0,
+            color: if none_selected {
+                self.palette.ink(self.palette.blue)
+            } else {
+                self.palette.subtext1
+            },
+            font_weight: if none_selected {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            },
+            max_width: Some(w - 24.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        fy += 24.0;
 
-        for cat in &categories {
+        for cat in &FileCategory::ALL {
             let is_sel = self.criteria.category_filter == Some(*cat);
             if is_sel {
                 self.palette
@@ -1591,7 +1769,7 @@ impl FileSearchApp {
         cmds.push(RenderCommand::Text {
             x: x + 12.0,
             y: fy,
-            text: "Size".to_string(),
+            text: "Size (Ctrl+2)".to_string(),
             font_size: 11.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Bold,
@@ -1600,16 +1778,7 @@ impl FileSearchApp {
         });
         fy += 20.0;
 
-        let sizes = [
-            SizeFilter::Any,
-            SizeFilter::Empty,
-            SizeFilter::Tiny,
-            SizeFilter::Small,
-            SizeFilter::Medium,
-            SizeFilter::Large,
-            SizeFilter::VeryLarge,
-        ];
-        for sf in &sizes {
+        for sf in &SizeFilter::ALL {
             let is_sel = self.criteria.size_filter == *sf;
             if is_sel {
                 self.palette
@@ -1637,7 +1806,7 @@ impl FileSearchApp {
         cmds.push(RenderCommand::Text {
             x: x + 12.0,
             y: fy,
-            text: "Modified".to_string(),
+            text: "Modified (Ctrl+3)".to_string(),
             font_size: 11.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Bold,
@@ -1646,15 +1815,12 @@ impl FileSearchApp {
         });
         fy += 20.0;
 
-        let dates = [
-            DateFilter::Any,
-            DateFilter::Today,
-            DateFilter::ThisWeek,
-            DateFilter::ThisMonth,
-            DateFilter::ThisYear,
-        ];
-        for df in &dates {
+        for df in &DateFilter::ALL {
             let is_sel = self.criteria.date_filter == *df;
+            if is_sel {
+                self.palette
+                    .push_surface(cmds, x + 4.0, fy, w - 8.0, 22.0, 4.0, Surface::Card);
+            }
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: fy + 4.0,
@@ -1665,6 +1831,52 @@ impl FileSearchApp {
                 } else {
                     self.palette.subtext1
                 },
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w - 24.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            fy += 22.0;
+        }
+        // What the query means and what the walk reaches. These four were
+        // read by the matcher and drawn nowhere at all, so a search that
+        // silently skipped hidden files looked identical to one that found
+        // none.
+        fy += 12.0;
+        cmds.push(RenderCommand::Text {
+            x: x + 12.0,
+            y: fy,
+            text: "Search".to_string(),
+            font_size: 11.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+        fy += 20.0;
+
+        let yes_no = |on: bool| if on { "Yes" } else { "No" };
+        let options = [
+            format!("Match by (Ctrl+R): {}", self.criteria.mode),
+            format!(
+                "Case sensitive (Ctrl+U): {}",
+                yes_no(self.criteria.case_sensitive)
+            ),
+            format!(
+                "Hidden files (Ctrl+H): {}",
+                yes_no(self.criteria.include_hidden)
+            ),
+            format!(
+                "Folders (Ctrl+K): {}",
+                yes_no(self.criteria.include_directories)
+            ),
+        ];
+        for line in options {
+            cmds.push(RenderCommand::Text {
+                x: x + 12.0,
+                y: fy + 4.0,
+                text: line,
+                font_size: 11.0,
+                color: self.palette.subtext1,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2254,6 +2466,228 @@ mod tests {
         populate_sample_index(&mut app.index);
         app.execute_search();
         app
+    }
+
+    /// Every chip the three filter strips draw is one the search can be set
+    /// to, and every choice the matcher understands has a chip.
+    ///
+    /// The strips built their own arrays and were *subsets* of the enums they
+    /// drew from: nine of eleven file types, five of seven date ranges. So
+    /// `Font` and `Database` were categories every file was sorted into and
+    /// no chip ever offered, and `Yesterday` and `Older` were ranges
+    /// `DateFilter::matches` implemented for nobody.
+    #[test]
+    fn the_strips_draw_every_choice_the_matcher_understands() {
+        let mut app = indexed();
+        app.show_filters = true;
+        let texts = drawn(&app);
+
+        for cat in FileCategory::ALL {
+            assert!(
+                texts.iter().any(|t| t.contains(&cat.to_string())),
+                "the File Type strip never offers {cat}"
+            );
+        }
+        for df in DateFilter::ALL {
+            assert!(
+                texts.iter().any(|t| t == df.label()),
+                "the Modified strip never offers {}",
+                df.label()
+            );
+        }
+        for sf in SizeFilter::ALL {
+            assert!(
+                texts.iter().any(|t| t == sf.label()),
+                "the Size strip never offers {}",
+                sf.label()
+            );
+        }
+        assert!(
+            texts.iter().any(|t| t == "All Types"),
+            "nothing offers a way back out of a file-type filter"
+        );
+    }
+
+    /// Ctrl+1/2/3 step their strip, and stepping right round returns to the
+    /// start -- so every chip is reachable and none is a one-way door.
+    #[test]
+    fn the_filter_keys_reach_every_chip_and_come_back() {
+        let mut app = indexed();
+        app.show_filters = true;
+
+        let mut seen = vec![app.criteria.category_filter];
+        for _ in 0..FileCategory::ALL.len() {
+            assert_eq!(
+                app.handle_event(&press_ctrl(Key::Num1)),
+                EventResult::Consumed,
+                "Ctrl+1 was ignored"
+            );
+            seen.push(app.criteria.category_filter);
+        }
+        for cat in FileCategory::ALL {
+            assert!(
+                seen.contains(&Some(cat)),
+                "stepping the File Type strip never reached {cat}"
+            );
+        }
+        app.handle_event(&press_ctrl(Key::Num1));
+        assert_eq!(
+            app.criteria.category_filter, None,
+            "the File Type strip does not come back round to no filter"
+        );
+
+        let mut dates = vec![app.criteria.date_filter];
+        for _ in 1..DateFilter::ALL.len() {
+            app.handle_event(&press_ctrl(Key::Num3));
+            dates.push(app.criteria.date_filter);
+        }
+        for df in DateFilter::ALL {
+            assert!(
+                dates.contains(&df),
+                "stepping the Modified strip never reached {}",
+                df.label()
+            );
+        }
+
+        let mut sizes = vec![app.criteria.size_filter];
+        for _ in 1..SizeFilter::ALL.len() {
+            app.handle_event(&press_ctrl(Key::Num2));
+            sizes.push(app.criteria.size_filter);
+        }
+        for sf in SizeFilter::ALL {
+            assert!(
+                sizes.contains(&sf),
+                "stepping the Size strip never reached {}",
+                sf.label()
+            );
+        }
+    }
+
+    /// Shift steps the other way, or a strip of eleven is a long walk back.
+    #[test]
+    fn shift_steps_a_strip_backwards() {
+        let mut app = indexed();
+        app.handle_event(&press_ctrl(Key::Num1));
+        let forward = app.criteria.category_filter;
+        assert!(forward.is_some(), "control: Ctrl+1 set no filter");
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Num1,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        }));
+        assert_eq!(
+            app.criteria.category_filter, None,
+            "Ctrl+Shift+1 did not step back to where Ctrl+1 came from"
+        );
+    }
+
+    /// The filter reaches the results, not just the field.
+    #[test]
+    fn a_file_type_filter_narrows_what_the_search_returns() {
+        let mut app = indexed();
+        let all = app.results.len();
+        assert!(all > 0, "control: the sample index found nothing");
+
+        while app.criteria.category_filter != Some(FileCategory::Image) {
+            app.handle_event(&press_ctrl(Key::Num1));
+        }
+        assert!(
+            app.results.len() < all,
+            "filtering to Image left all {all} results in place"
+        );
+        assert!(
+            app.results
+                .iter()
+                .filter_map(|i| app.index.entries.get(*i))
+                .all(|e| e.category == FileCategory::Image),
+            "an Image filter returned something that is not an image"
+        );
+    }
+
+    /// The four search options answer their keys and the panel says so.
+    #[test]
+    fn the_search_options_answer_their_keys() {
+        /// A key, the row it changes, and how to read that row's value.
+        type OptionCheck = (Key, &'static str, fn(&FileSearchApp) -> String);
+        let checks: [OptionCheck; 4] = [
+            (Key::R, "Match by (Ctrl+R): ", |a| {
+                a.criteria.mode.to_string()
+            }),
+            (Key::U, "Case sensitive (Ctrl+U): ", |a| {
+                a.criteria.case_sensitive.to_string()
+            }),
+            (Key::H, "Hidden files (Ctrl+H): ", |a| {
+                a.criteria.include_hidden.to_string()
+            }),
+            (Key::K, "Folders (Ctrl+K): ", |a| {
+                a.criteria.include_directories.to_string()
+            }),
+        ];
+        for (key, label, read) in checks {
+            let mut app = indexed();
+            app.show_filters = true;
+            let before = read(&app);
+            let row_before = drawn(&app)
+                .into_iter()
+                .find(|t| t.starts_with(label))
+                .unwrap_or_else(|| panic!("the panel draws no row starting {label:?}"));
+
+            assert_eq!(
+                app.handle_event(&press_ctrl(key)),
+                EventResult::Consumed,
+                "{label} ignored its key"
+            );
+            assert_ne!(read(&app), before, "{label} did not change");
+
+            let row_after = drawn(&app)
+                .into_iter()
+                .find(|t| t.starts_with(label))
+                .unwrap_or_else(|| panic!("the row starting {label:?} vanished"));
+            assert_ne!(
+                row_before, row_after,
+                "{label} changed and the panel still reads {row_before:?}"
+            );
+        }
+    }
+
+    /// Hidden files are found only when asked for -- the effect, not the flag.
+    #[test]
+    fn hidden_files_are_found_only_when_asked_for() {
+        let mut app = indexed();
+        let hidden_visible = |a: &FileSearchApp| {
+            a.results
+                .iter()
+                .filter_map(|i| a.index.entries.get(*i))
+                .any(|e| e.is_hidden)
+        };
+        assert!(
+            app.index.entries.iter().any(|e| e.is_hidden),
+            "control: the sample index has no hidden entry to find"
+        );
+        assert!(
+            !hidden_visible(&app),
+            "a hidden file was in the results before Ctrl+H"
+        );
+        app.handle_event(&press_ctrl(Key::H));
+        assert!(
+            hidden_visible(&app),
+            "Ctrl+H did not bring the hidden files into the results"
+        );
+    }
+
+    fn drawn(app: &FileSearchApp) -> Vec<String> {
+        app.render_commands(1280.0, 800.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn press(k: Key) -> Event {

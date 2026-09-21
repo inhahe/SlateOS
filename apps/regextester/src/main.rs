@@ -1506,6 +1506,24 @@ impl Default for RegexFlags {
 ///
 /// **Each row is a key this program actually answers**, checked by
 /// `every_advertised_key_does_something`.
+/// The chips along the top of the Library tab, in the order they are drawn
+/// and the order `Ctrl+L` steps through them.
+///
+/// One list, not two. The renderer had this array inline and the key that
+/// steps it did not exist; adding the key with its own copy of the order is
+/// how the two drift apart, which is the defect this crate has now produced
+/// four times in four readings.
+const LIBRARY_FILTERS: [Option<PatternCategory>; 8] = [
+    None,
+    Some(PatternCategory::Validation),
+    Some(PatternCategory::Extraction),
+    Some(PatternCategory::Format),
+    Some(PatternCategory::Network),
+    Some(PatternCategory::DateTime),
+    Some(PatternCategory::Programming),
+    Some(PatternCategory::Custom),
+];
+
 const SHORTCUTS: &[(&str, &str)] = &[
     (
         "Ctrl+1 / Ctrl+2 / Ctrl+3",
@@ -1519,6 +1537,9 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Backspace", "Delete a character from the focused field"),
     ("Ctrl+I", "Case insensitive"),
     ("Ctrl+G", "Global"),
+    ("Ctrl+R", "Show or hide the replacement box"),
+    ("Ctrl+L", "Next category, in the library"),
+    ("Ctrl+Shift+G", "Show or hide the capture groups"),
     ("Ctrl+M", "Multiline"),
     ("F1", "This list"),
 ];
@@ -2527,18 +2548,8 @@ impl App {
         let content_y = TOOLBAR_HEIGHT + PADDING;
 
         // Category filter bar
-        let categories = [
-            None,
-            Some(PatternCategory::Validation),
-            Some(PatternCategory::Extraction),
-            Some(PatternCategory::Format),
-            Some(PatternCategory::Network),
-            Some(PatternCategory::DateTime),
-            Some(PatternCategory::Programming),
-            Some(PatternCategory::Custom),
-        ];
         let mut cat_x = PADDING;
-        for cat in &categories {
+        for cat in &LIBRARY_FILTERS {
             let label = cat.map_or("All", PatternCategory::label);
             let w = text::width(label, SMALL_TEXT) + 16.0;
             let selected = self.library_category_filter == *cat;
@@ -2908,10 +2919,15 @@ impl App {
                 // Cycles focus rather than inserting a tab: a regex tester's
                 // three fields are the whole interface, and Tab is how every
                 // form on every desktop moves between them.
+                // Skips the replacement while its pane is hidden. Until
+                // `Ctrl+R` existed the pane was *never* drawn -- `show_replace`
+                // was `false` with no writer -- so this cycle put the caret in
+                // a field nobody could see, and the shortcut list said Tab
+                // moved between three fields when one of them was invisible.
                 self.active_field = match self.active_field {
                     ActiveField::Pattern => ActiveField::Input,
-                    ActiveField::Input => ActiveField::Replace,
-                    ActiveField::Replace => ActiveField::Pattern,
+                    ActiveField::Input if self.show_replace => ActiveField::Replace,
+                    ActiveField::Input | ActiveField::Replace => ActiveField::Pattern,
                 };
                 true
             }
@@ -2943,6 +2959,50 @@ impl App {
             // Chords, because every printable character is typed into
             // whichever field has focus. Found by
             // `scripts/frozen-flag-survey.py` once it learned about enums.
+            // The two panes this window can draw and could not be asked
+            // for. `show_replace` was `false` with no writer, so the
+            // replacement box was never drawn and `replace_in_active` never
+            // ran; `show_groups` was `true` with no writer, so the capture
+            // groups could not be put away. Found by
+            // `scripts/frozen-flag-survey.py` on its third pass over this
+            // crate, after the flag buttons and the tabs.
+            // The chips along the top of the Library tab.
+            // `library_category_filter` was `None` at construction, read to
+            // highlight the selected chip and again to filter the entries,
+            // and written nowhere -- so eight chips were drawn and none could
+            // be chosen. Found on the fourth pass over this crate, by reading
+            // the line under a row the survey had reported as a false
+            // positive.
+            GKey::L if key.modifiers.ctrl => {
+                let at = LIBRARY_FILTERS
+                    .iter()
+                    .position(|c| *c == self.library_category_filter)
+                    .unwrap_or(0);
+                // A comparison rather than a remainder: `%` can divide by
+                // zero and this crate denies arithmetic that can.
+                let next = at.saturating_add(1);
+                let wrapped = if next >= LIBRARY_FILTERS.len() {
+                    0
+                } else {
+                    next
+                };
+                self.library_category_filter = LIBRARY_FILTERS.get(wrapped).copied().flatten();
+                true
+            }
+            GKey::R if key.modifiers.ctrl => {
+                self.show_replace = !self.show_replace;
+                // Hiding the pane takes the caret with it, rather than
+                // leaving it typing into something off screen.
+                if !self.show_replace && self.active_field == ActiveField::Replace {
+                    self.active_field = ActiveField::Pattern;
+                }
+                self.update_regex();
+                true
+            }
+            GKey::G if key.modifiers.ctrl && key.modifiers.shift => {
+                self.show_groups = !self.show_groups;
+                true
+            }
             GKey::Num1 if key.modifiers.ctrl => {
                 self.active_tab = ActiveTab::Tester;
                 true
@@ -4062,6 +4122,52 @@ mod tests {
         );
     }
 
+    /// **The library's category chips can be chosen, and the list follows.**
+    ///
+    /// `library_category_filter` was `None` at construction, read to highlight
+    /// the selected chip and again to filter the entries, and written
+    /// nowhere -- eight chips drawn and none selectable. Fourth defect found
+    /// in this one crate.
+    ///
+    /// Asserts the *entries on screen*, not the field: a key that sets the
+    /// filter while the list ignores it would pass the weaker version, which
+    /// is this crate's own `multiline` defect from earlier today.
+    #[test]
+    fn the_library_categories_can_be_chosen_and_filter_the_list() {
+        let mut app = App::new();
+        assert!(ctrl(&mut app, guitk::event::Key::Num2), "Ctrl+2 unanswered");
+
+        let shown = |app: &mut App| -> usize {
+            drawn_help_text(app)
+                .split(" | ")
+                .filter(|t| !t.is_empty())
+                .count()
+        };
+        let all = shown(&mut app);
+        assert!(app.library_category_filter.is_none(), "starts unfiltered");
+
+        // Step to the first real category; fewer entries have to be drawn.
+        assert!(ctrl(&mut app, guitk::event::Key::L), "Ctrl+L unanswered");
+        assert_eq!(
+            app.library_category_filter,
+            Some(PatternCategory::Validation),
+            "Ctrl+L did not step to the first category"
+        );
+        assert!(
+            shown(&mut app) < all,
+            "filtering to one category drew as much as no filter did"
+        );
+
+        // ...and round the ring, back to no filter.
+        for _ in 0..(LIBRARY_FILTERS.len() - 1) {
+            ctrl(&mut app, guitk::event::Key::L);
+        }
+        assert!(
+            app.library_category_filter.is_none(),
+            "the cycle did not come back to All"
+        );
+    }
+
     /// **The shortcut list reaches the window.**
     ///
     /// The guard above reads the list against the handler; this reads it
@@ -4101,6 +4207,80 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join(" | ")
+    }
+
+    /// A key with Ctrl and Shift held.
+    fn ctrl_shift(app: &mut App, k: guitk::event::Key) -> bool {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = true;
+        modifiers.shift = true;
+        app.handle_event(&guitk::event::Event::Key(guitk::event::KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }))
+    }
+
+    /// **The replacement box can be shown, and Tab stops skipping it.**
+    ///
+    /// `show_replace` was `false` at construction with no writer, so the pane
+    /// was never drawn and `replace_in_active` never ran -- while `Tab` cycled
+    /// the caret *into* the field it holds, and the shortcut list said Tab
+    /// moved between three fields. One of the three was invisible.
+    #[test]
+    fn the_replacement_box_can_be_shown_and_tab_follows_it() {
+        let mut app = App::new();
+
+        // Hidden: Tab goes pattern -> input -> pattern, never resting in a
+        // field the window is not drawing.
+        assert!(!app.show_replace, "the pane starts hidden");
+        assert_eq!(app.active_field, ActiveField::Pattern);
+        press(&mut app, guitk::event::Key::Tab, "");
+        assert_eq!(app.active_field, ActiveField::Input);
+        press(&mut app, guitk::event::Key::Tab, "");
+        assert_eq!(
+            app.active_field,
+            ActiveField::Pattern,
+            "Tab rested in the replacement field while its pane was hidden"
+        );
+
+        // Shown: the third field joins the cycle.
+        assert!(ctrl(&mut app, guitk::event::Key::R), "Ctrl+R unanswered");
+        assert!(app.show_replace, "Ctrl+R did not show the pane");
+        press(&mut app, guitk::event::Key::Tab, "");
+        press(&mut app, guitk::event::Key::Tab, "");
+        assert_eq!(
+            app.active_field,
+            ActiveField::Replace,
+            "the replacement field is drawn and Tab still skips it"
+        );
+
+        // Hiding it again takes the caret out rather than leaving it typing
+        // into something off screen.
+        assert!(ctrl(&mut app, guitk::event::Key::R));
+        assert_eq!(app.active_field, ActiveField::Pattern);
+    }
+
+    /// **The capture groups can be put away, and the chord is not the flag.**
+    ///
+    /// `Ctrl+Shift+G` sits above `Ctrl+G`, which toggles the global flag. A
+    /// guard narrows only the arm it is on, so the wrong order would send this
+    /// chord to the flag -- and both answer `true`, so only the effect tells
+    /// them apart.
+    #[test]
+    fn the_capture_groups_can_be_hidden_without_touching_the_global_flag() {
+        let mut app = App::new();
+        let global = app.flags.global;
+        assert!(app.show_groups, "the groups start shown");
+
+        assert!(ctrl_shift(&mut app, guitk::event::Key::G), "unanswered");
+
+        assert!(!app.show_groups, "Ctrl+Shift+G did not hide the groups");
+        assert_eq!(
+            app.flags.global, global,
+            "Ctrl+Shift+G fell through to the global flag"
+        );
     }
 
     /// A key with Ctrl held.
@@ -4196,17 +4376,36 @@ mod tests {
         assert!(app.compile_error.is_none());
     }
 
-    /// Tab cycles the three fields rather than inserting a tab character.
+    /// Tab cycles the fields on screen rather than inserting a tab
+    /// character.
+    ///
+    /// **This test used to assert the cycle reached `Replace` unconditionally,
+    /// and that was the defect written down as a requirement.** The
+    /// replacement pane is drawn only when `show_replace` is set, and
+    /// `show_replace` was `false` with no writer anywhere -- so the cycle this
+    /// test protected put the caret in a field the window never drew. The
+    /// pane can be opened now, and the cycle follows what is on screen.
     #[test]
-    fn tab_cycles_the_fields() {
+    fn tab_cycles_the_fields_that_are_on_screen() {
         let mut app = App::new();
         app.active_field = ActiveField::Pattern;
+        assert!(!app.show_replace, "the replacement pane starts hidden");
+
         press(&mut app, guitk::event::Key::Tab, "");
         assert_eq!(app.active_field, ActiveField::Input);
         press(&mut app, guitk::event::Key::Tab, "");
-        assert_eq!(app.active_field, ActiveField::Replace);
+        assert_eq!(
+            app.active_field,
+            ActiveField::Pattern,
+            "Tab rested in the replacement field while its pane was hidden"
+        );
+
+        // With the pane open the third field joins the cycle.
+        assert!(ctrl(&mut app, guitk::event::Key::R));
         press(&mut app, guitk::event::Key::Tab, "");
-        assert_eq!(app.active_field, ActiveField::Pattern);
+        press(&mut app, guitk::event::Key::Tab, "");
+        assert_eq!(app.active_field, ActiveField::Replace);
+
         assert!(
             app.pattern.is_empty(),
             "Tab typed a character into the field"

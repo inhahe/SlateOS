@@ -261,6 +261,62 @@ costs the other two lanes their merges.
 the head-of-line witness entry: `socket.rs:356`, `netstack_client.rs:158`, and
 `services/netstack/src/main.rs:2594`.*
 
+## C-Q26 — [C] Four programs have a preference with nowhere to keep it. Where do user settings live? — Status: OPEN (raised 2026-09-18)
+
+**In short:** several programs have a setting that ought to be yours to
+choose — whether the lock screen shows the date, whether the markdown editor
+saves as you type, what rules the password generator checks a password
+against. Right now each of those is decided in the program's source code and
+is the same for everybody. I can give some of them a key to press, but a key
+only lasts until the program closes: reopen it and it is back to the built-in
+answer. Making them stick means deciding where a program's settings are
+*kept*, and that is one decision for all ~280 programs rather than four
+separate ones, which is why I am asking rather than picking.
+
+**Why you are being asked.** Where settings live is visible to you: it
+decides whether your preferences survive a reinstall, whether you can copy
+them to another machine, whether you can edit them in a text editor, and
+whether one program's settings can be read by another. Those are all things
+you have opinions about and none of them are technical details. It is also
+close to impossible to change later — once programs write to a location, that
+location is the format.
+
+| Option | What changes |
+|---|---|
+| **A. One file per program, under a per-user settings directory** | `~/.config/lockscreen.yaml`, `~/.config/markdowneditor.yaml`, one per program, YAML as the design already requires elsewhere |
+| **B. One file for everything** | A single `~/.config/slateos.yaml` with a section per program |
+| **C. A settings service** | Programs ask a running service to read and write their settings; the service owns the files and can tell programs when something changed |
+
+*What changes, in one line each:*
+- **A** — you can open one program's settings in a text editor and see only that program's settings; deleting a program's file resets that program alone.
+- **B** — all your preferences are in one file you can copy to a new machine in a single step; a mistake while editing it can affect every program at once.
+- **C** — changing a setting takes effect immediately in every open window without reopening anything; it needs a service written first, so nothing lands for a while.
+
+**My recommendation: A.** It matches what the design already says about
+configuration (YAML, comments preserved), it is the one option where a
+program can be understood on its own, and it does not need anything built
+before the first program can use it. B's single file is genuinely nicer to
+back up, and that can be added later as an export. C is the best *eventual*
+answer — live updates across windows are worth having — but it is a service,
+and building one to unfreeze four booleans is the wrong order.
+
+**Where it bites, concretely:**
+
+| Program | The setting | What it does today |
+|---|---|---|
+| `apps/lockscreen` | `show_clock_seconds`, `show_date` | seconds hidden, date shown, for everyone |
+| `apps/markdowneditor` | `autosave_enabled` | off, for everyone |
+| `apps/passwordgen` | `PasswordPolicy` | checks its own built-in rules and shows a tick |
+| `apps/explorer` | `ConflictPolicy` | copying onto an existing name always renames, never asks |
+
+**If this is never answered:** nothing breaks and nothing gets worse. Each of
+those keeps its built-in answer, which is a defensible one in every case. The
+cost is that the whole class of "let the user decide" work stays shut: I can
+keep giving settings a key for the current session, but not one that is still
+set tomorrow. The survey that finds these is `scripts/frozen-flag-survey.py`,
+and it currently reports 99 such fields in 37 programs — most are per-session
+choices that a key does fix, and this question is about the remainder.
+
 ## C-Q25 — [C] The password manager can write your passwords to a plain file, or write a "backup" that restores nothing. Which? — Status: OPEN (raised 2026-09-17)
 
 **In short:** the credential manager holds logins you have typed in, and

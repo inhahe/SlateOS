@@ -370,6 +370,116 @@ impl PassphraseOptions {
     }
 }
 
+/// One switchable row of the options panel: its key, its name, what it
+/// reads, and what pressing the key does.
+///
+/// The panel used to build its rows inline and the key handler matched keys
+/// separately, so the two lists could drift -- and they had: the panel drew
+/// five rows and `must_include_each_class` was a sixth option with no row and
+/// no key, while `PassphraseOptions` had three more that were neither drawn
+/// nor reachable. Every passphrase this program produced was capitalised and
+/// ended in a digit, for everybody, because `capitalize` and `add_number`
+/// were `true` at construction and nothing else ever assigned them.
+///
+/// Holding the key beside the row is what keeps them together: a row cannot
+/// be drawn without naming the key that changes it, and `from_key` is the
+/// same list read the other way round.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptionRow {
+    Lowercase,
+    Uppercase,
+    Digits,
+    Symbols,
+    ExcludeAmbiguous,
+    EveryClass,
+    Capitalize,
+    EndWithDigit,
+    EndWithSymbol,
+}
+
+impl OptionRow {
+    /// Every row, in the order the panel draws them.
+    pub const ALL: [OptionRow; 9] = [
+        Self::Lowercase,
+        Self::Uppercase,
+        Self::Digits,
+        Self::Symbols,
+        Self::ExcludeAmbiguous,
+        Self::EveryClass,
+        Self::Capitalize,
+        Self::EndWithDigit,
+        Self::EndWithSymbol,
+    ];
+
+    /// The keystroke, as the panel prints it.
+    pub fn keys(self) -> &'static str {
+        match self {
+            Self::Lowercase => "L",
+            Self::Uppercase => "U",
+            Self::Digits => "D",
+            Self::Symbols => "S",
+            Self::ExcludeAmbiguous => "A",
+            Self::EveryClass => "M",
+            Self::Capitalize => "Shift+C",
+            Self::EndWithDigit => "Shift+D",
+            Self::EndWithSymbol => "Shift+S",
+        }
+    }
+
+    /// The name in the panel.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Lowercase => "Lowercase",
+            Self::Uppercase => "Uppercase",
+            Self::Digits => "Digits",
+            Self::Symbols => "Symbols",
+            Self::ExcludeAmbiguous => "Exclude Ambiguous",
+            Self::EveryClass => "One Of Each Kind",
+            Self::Capitalize => "Capitalise Words",
+            Self::EndWithDigit => "End With A Digit",
+            Self::EndWithSymbol => "End With A Symbol",
+        }
+    }
+
+    /// Which keystroke changes it, read from the printed label itself.
+    ///
+    /// `guitk::shortcut::keystrokes` parses the same string the panel
+    /// draws, so there is no third list to drift: the row prints
+    /// "Shift+C", and that string is what decides whether Shift+C matched.
+    /// A label this cannot parse is caught by
+    /// `every_option_row_names_a_keystroke_that_parses` rather than
+    /// quietly matching nothing.
+    pub fn from_key(key: Key, shift: bool) -> Option<Self> {
+        Self::ALL.into_iter().find(|row| {
+            guitk::shortcut::keystrokes(row.keys()).is_ok_and(|presses| {
+                presses
+                    .iter()
+                    .any(|p| p.key == key && p.modifiers.shift == shift)
+            })
+        })
+    }
+
+    /// Whether the row applies to what is being generated.
+    ///
+    /// The three passphrase rows are drawn dimmed rather than hidden in the
+    /// other modes, for the same reason the character classes are: a row that
+    /// appears and disappears as the kind changes is harder to find than one
+    /// that is always in the same place.
+    pub fn is_on(self, app: &PasswordApp) -> bool {
+        match self {
+            Self::Lowercase => app.password_opts.use_lowercase,
+            Self::Uppercase => app.password_opts.use_uppercase,
+            Self::Digits => app.password_opts.use_digits,
+            Self::Symbols => app.password_opts.use_symbols,
+            Self::ExcludeAmbiguous => app.password_opts.exclude_ambiguous,
+            Self::EveryClass => app.password_opts.must_include_each_class,
+            Self::Capitalize => app.passphrase_opts.capitalize,
+            Self::EndWithDigit => app.passphrase_opts.add_number,
+            Self::EndWithSymbol => app.passphrase_opts.add_symbol,
+        }
+    }
+}
+
 // ============================================================================
 // Where the randomness comes from
 // ============================================================================
@@ -1549,11 +1659,14 @@ impl PasswordApp {
             // sites that forbid symbols are common enough to make a generator
             // that cannot drop them useless for them. Nor could the
             // easy-to-misread characters be left out.
-            Key::L => self.toggle_class(CharClass::Lower),
-            Key::U => self.toggle_class(CharClass::Upper),
-            Key::D => self.toggle_class(CharClass::Digits),
-            Key::S => self.toggle_class(CharClass::Symbols),
-            Key::A => self.toggle_ambiguous(),
+            _ if OptionRow::from_key(key.key, key.modifiers.shift).is_some() => {
+                // `is_some` above, unwrapped here: the guard and the body ask
+                // the same list the same question, one keystroke apart.
+                match OptionRow::from_key(key.key, key.modifiers.shift) {
+                    Some(row) => self.toggle_option(row),
+                    None => EventResult::Ignored,
+                }
+            }
             Key::C => {
                 if self.history.is_empty() {
                     return EventResult::Ignored;
@@ -1590,6 +1703,38 @@ impl PasswordApp {
             CharClass::Upper => self.password_opts.use_uppercase = !on,
             CharClass::Digits => self.password_opts.use_digits = !on,
             CharClass::Symbols => self.password_opts.use_symbols = !on,
+        }
+        let kind = self.gen_kind;
+        self.generate(kind)
+    }
+
+    /// Change one option row, whichever it is.
+    ///
+    /// The class rows go through `toggle_class` so they keep its guard
+    /// against turning off the last one; the rest flip directly. Every arm
+    /// produces a new secret afterwards for the reason the kind keys do --
+    /// leaving the old one on screen invites reading it as the new setting's
+    /// output.
+    fn toggle_option(&mut self, row: OptionRow) -> EventResult {
+        match row {
+            OptionRow::Lowercase => return self.toggle_class(CharClass::Lower),
+            OptionRow::Uppercase => return self.toggle_class(CharClass::Upper),
+            OptionRow::Digits => return self.toggle_class(CharClass::Digits),
+            OptionRow::Symbols => return self.toggle_class(CharClass::Symbols),
+            OptionRow::ExcludeAmbiguous => return self.toggle_ambiguous(),
+            OptionRow::EveryClass => {
+                self.password_opts.must_include_each_class =
+                    !self.password_opts.must_include_each_class;
+            }
+            OptionRow::Capitalize => {
+                self.passphrase_opts.capitalize = !self.passphrase_opts.capitalize;
+            }
+            OptionRow::EndWithDigit => {
+                self.passphrase_opts.add_number = !self.passphrase_opts.add_number;
+            }
+            OptionRow::EndWithSymbol => {
+                self.passphrase_opts.add_symbol = !self.passphrase_opts.add_symbol;
+            }
         }
         let kind = self.gen_kind;
         self.generate(kind)
@@ -1917,67 +2062,23 @@ impl PasswordApp {
         });
         cy += 18.0;
 
-        let options = [
-            (
-                format!("Length (Left/Right): {}", self.password_opts.length),
-                true,
-            ),
-            (
-                format!(
-                    "Lowercase (L): {}",
-                    if self.password_opts.use_lowercase {
-                        "Yes"
-                    } else {
-                        "No"
-                    }
-                ),
-                self.password_opts.use_lowercase,
-            ),
+        let mut options = vec![(
+            format!("Length (Left/Right): {}", self.password_opts.length),
+            true,
+        )];
+        // Drawn from the same list the keys are read from, so a row
+        // cannot appear here without a key that changes it.
+        options.extend(OptionRow::ALL.map(|row| {
             (
                 format!(
-                    "Uppercase (U): {}",
-                    if self.password_opts.use_uppercase {
-                        "Yes"
-                    } else {
-                        "No"
-                    }
+                    "{} ({}): {}",
+                    row.label(),
+                    row.keys(),
+                    if row.is_on(self) { "Yes" } else { "No" }
                 ),
-                self.password_opts.use_uppercase,
-            ),
-            (
-                format!(
-                    "Digits (D): {}",
-                    if self.password_opts.use_digits {
-                        "Yes"
-                    } else {
-                        "No"
-                    }
-                ),
-                self.password_opts.use_digits,
-            ),
-            (
-                format!(
-                    "Symbols (S): {}",
-                    if self.password_opts.use_symbols {
-                        "Yes"
-                    } else {
-                        "No"
-                    }
-                ),
-                self.password_opts.use_symbols,
-            ),
-            (
-                format!(
-                    "Exclude Ambiguous (A): {}",
-                    if self.password_opts.exclude_ambiguous {
-                        "Yes"
-                    } else {
-                        "No"
-                    }
-                ),
-                self.password_opts.exclude_ambiguous,
-            ),
-        ];
+                row.is_on(self),
+            )
+        }));
 
         for (label, active) in &options {
             let text_color = if *active {
@@ -2399,6 +2500,168 @@ mod tests {
             key: k,
             pressed: true,
             modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    /// Every option row names a keystroke the shortcut parser understands.
+    ///
+    /// `OptionRow::from_key` decides by parsing the very string the panel
+    /// prints, and an unparseable one would simply match nothing -- a row
+    /// drawn with a key that does not work, which is the defect this whole
+    /// list exists to prevent. So the labels are checked directly.
+    #[test]
+    fn every_option_row_names_a_keystroke_that_parses() {
+        for row in OptionRow::ALL {
+            let parsed = guitk::shortcut::keystrokes(row.keys());
+            assert!(
+                parsed.is_ok(),
+                "{} is drawn with keys {:?}, which the shortcut parser \
+rejects: {:?}",
+                row.label(),
+                row.keys(),
+                parsed.err()
+            );
+        }
+    }
+
+    /// Pressing a row's key changes that row, and the panel says so.
+    #[test]
+    fn every_option_row_answers_its_key_and_the_panel_shows_it() {
+        for row in OptionRow::ALL {
+            let mut app = seeded_app();
+            let before = row.is_on(&app);
+            let want_before = format!(
+                "{} ({}): {}",
+                row.label(),
+                row.keys(),
+                if before { "Yes" } else { "No" }
+            );
+            assert!(
+                drawn(&mut app).contains(&want_before),
+                "control: the panel does not draw {want_before:?}"
+            );
+
+            let presses = guitk::shortcut::keystrokes(row.keys())
+                .unwrap_or_else(|e| panic!("{} has unparseable keys: {e:?}", row.label()));
+            let first = presses.first().expect("no keystroke");
+            let handled = app.handle_event(&Event::Key(KeyEvent {
+                key: first.key,
+                pressed: true,
+                modifiers: first.modifiers,
+                text: String::new(),
+            }));
+            assert_eq!(
+                handled,
+                EventResult::Consumed,
+                "{} ignored its own key {}",
+                row.label(),
+                row.keys()
+            );
+            assert_ne!(
+                row.is_on(&app),
+                before,
+                "{} did not change when {} was pressed",
+                row.label(),
+                row.keys()
+            );
+
+            let want_after = format!(
+                "{} ({}): {}",
+                row.label(),
+                row.keys(),
+                if row.is_on(&app) { "Yes" } else { "No" }
+            );
+            let after_texts = drawn(&mut app);
+            assert!(
+                after_texts.contains(&want_after),
+                "{} changed and the panel still does not draw {want_after:?}",
+                row.label()
+            );
+            assert!(
+                !after_texts.contains(&want_before),
+                "{} changed and the panel still draws the old {want_before:?}",
+                row.label()
+            );
+        }
+    }
+
+    /// The passphrase options reach the passphrase.
+    ///
+    /// `capitalize` and `add_number` were `true` at construction with no
+    /// writer in the crate, so every passphrase this program had ever
+    /// produced began each word with a capital and ended in a digit. A test
+    /// that only checked the flag would have passed against that.
+    #[test]
+    fn the_passphrase_options_reach_the_passphrase() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::W));
+        let with_both = app.current_password.clone();
+        assert!(
+            with_both.chars().any(char::is_uppercase),
+            "control: the default passphrase {with_both:?} is not capitalised"
+        );
+        assert!(
+            with_both.chars().last().is_some_and(|c| c.is_ascii_digit()),
+            "control: the default passphrase {with_both:?} does not end in a digit"
+        );
+
+        app.handle_event(&shift_press(Key::C));
+        assert!(
+            !app.current_password.chars().any(char::is_uppercase),
+            "Shift+C left the passphrase {:?} capitalised",
+            app.current_password
+        );
+
+        app.handle_event(&shift_press(Key::D));
+        assert!(
+            !app.current_password
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_ascii_digit()),
+            "Shift+D left the passphrase {:?} ending in a digit",
+            app.current_password
+        );
+
+        app.handle_event(&shift_press(Key::S));
+        assert!(
+            app.current_password
+                .chars()
+                .last()
+                .is_some_and(|c| SYMBOLS.contains(c)),
+            "Shift+S did not put a symbol on the end of {:?}",
+            app.current_password
+        );
+    }
+
+    /// `M` decides whether one of every selected kind is guaranteed.
+    #[test]
+    fn m_changes_whether_every_kind_is_guaranteed() {
+        let mut app = seeded_app();
+        let before = app.password_opts.must_include_each_class;
+        app.handle_event(&press(Key::M));
+        assert_ne!(
+            app.password_opts.must_include_each_class, before,
+            "M did not move the one-of-each-kind option"
+        );
+    }
+
+    /// Plain `C` still clears the history: the shifted rows must not have
+    /// swallowed the unshifted key.
+    #[test]
+    fn plain_c_still_clears_the_history() {
+        let mut app = seeded_app();
+        app.gen_password();
+        assert!(!app.history.is_empty(), "the fixture generated nothing");
+        app.handle_event(&press(Key::C));
+        assert!(app.history.is_empty(), "C stopped clearing the history");
+    }
+
+    fn shift_press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::shift(),
             text: String::new(),
         })
     }

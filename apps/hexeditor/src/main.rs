@@ -1964,8 +1964,18 @@ impl HexEditor {
             return EventResult::Consumed;
         }
 
-        // Enter in search bar: perform search.
+        // Enter in search bar: perform search. Shift goes the other way.
+        //
+        // `SearchDirection::Backward` and `find_backward` were written and
+        // tested, and `direction` was `Forward` at construction with nothing
+        // to change it -- so every search this program ran went forwards and
+        // the way back through a file was by starting again from the top.
         if key.key == Key::Enter && self.focused_panel == FocusedPanel::SearchBar {
+            self.search.query.direction = if key.modifiers.shift {
+                SearchDirection::Backward
+            } else {
+                SearchDirection::Forward
+            };
             self.perform_search();
             return EventResult::Consumed;
         }
@@ -2017,6 +2027,16 @@ impl HexEditor {
             // somebody half remembers.
             if key.key == Key::I && key.modifiers.ctrl {
                 self.search.query.case_sensitive = !self.search.query.case_sensitive;
+                self.perform_search();
+                return EventResult::Consumed;
+            }
+            // Whether the search runs past the end and starts again.
+            // `find_forward` and `find_backward` both take it and it was
+            // `true` with no writer, so a search could not be asked to stop
+            // at the end of the file -- which is the difference between "not
+            // below here" and "not in the file".
+            if key.key == Key::W && key.modifiers.ctrl {
+                self.search.query.wrap_around = !self.search.query.wrap_around;
                 self.perform_search();
                 return EventResult::Consumed;
             }
@@ -2337,7 +2357,13 @@ impl HexEditor {
         };
 
         self.search.query.pattern = pattern;
-        let from = self.active_doc().cursor.saturating_add(1);
+        // One step off the cursor, on the side the search is heading, or
+        // every press finds the match already under it.
+        let cursor = self.active_doc().cursor;
+        let from = match self.search.query.direction {
+            SearchDirection::Forward => cursor.saturating_add(1),
+            SearchDirection::Backward => cursor.saturating_sub(1),
+        };
         if let Some(offset) = self.active_doc().find_next(&self.search.query, from) {
             let vis = self.visible_lines();
             let doc = self.active_doc_mut();
@@ -3260,25 +3286,30 @@ impl HexEditor {
             color: input_color,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(bar_width - 120.0),
+            // Stops where the options begin. It used to reach to
+            // `bar_width - 120`, which was clear of one option and is not
+            // clear of three.
+            max_width: Some((bar_width - 400.0).max(60.0)),
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Whether case matters, and the key that changes it. A search box
-        // that silently ignores case -- or silently insists on it -- turns a
-        // miss into "it is not in the file", which is a claim about the file.
+        // What the search will do, and the keys that change it. A search
+        // box that silently ignores case -- or silently insists on it, or
+        // silently stops at the end of the file -- turns a miss into "it is
+        // not in the file", which is a claim about the file.
+        let on_off = |on: bool| if on { "on" } else { "off" };
         tree.push(RenderCommand::Text {
-            x: x + bar_width - 190.0,
+            x: x + bar_width - 340.0,
             y: y + 12.0,
-            text: if self.search.query.case_sensitive {
-                String::from("Case: on  Ctrl+I")
-            } else {
-                String::from("Case: off  Ctrl+I")
-            },
+            text: format!(
+                "Case: {} Ctrl+I   Wrap: {} Ctrl+W   Shift+Enter back",
+                on_off(self.search.query.case_sensitive),
+                on_off(self.search.query.wrap_around),
+            ),
             color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(115.0),
+            max_width: Some(265.0),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -5703,6 +5734,126 @@ mod tests {
         let mut editor = HexEditor::new(1200.0, 800.0);
         editor.documents[0] = HexDocument::from_data(data);
         editor
+    }
+
+    /// Shift+Enter walks back through the matches.
+    ///
+    /// `SearchDirection::Backward` and `find_backward` were written and
+    /// tested, and `direction` was `Forward` at construction with nothing in
+    /// the program to change it -- so every search went forwards, and the way
+    /// back through a file was to start again from the top and count.
+    #[test]
+    fn shift_enter_walks_back_through_the_matches() {
+        // "zz" at 0, 10 and 20, and nothing else that matches. Not "aa":
+        // every character of that is a hex digit, so the search box reads it
+        // as the byte 0xAA rather than as two letters, which is this
+        // program's documented first guess at what was typed.
+        let mut data = vec![0u8; 32];
+        for at in [0usize, 10, 20] {
+            data[at] = b'z';
+            data[at.saturating_add(1)] = b'z';
+        }
+        let mut editor = make_test_editor(data);
+        editor.focused_panel = FocusedPanel::SearchBar;
+        editor.search.input_text = String::from("zz");
+
+        // Forward to the second and third.
+        editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
+        assert_eq!(editor.active_doc().cursor, 10, "the first Enter");
+        editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
+        assert_eq!(editor.active_doc().cursor, 20, "the second Enter");
+
+        // And back.
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::NONE
+        };
+        editor.handle_key(&key_press(Key::Enter, shift));
+        assert_eq!(
+            editor.active_doc().cursor,
+            10,
+            "Shift+Enter did not go back to the previous match"
+        );
+        editor.handle_key(&key_press(Key::Enter, shift));
+        assert_eq!(
+            editor.active_doc().cursor,
+            0,
+            "Shift+Enter did not keep going back"
+        );
+    }
+
+    /// `Ctrl+W` decides whether a search runs past the end and starts again.
+    ///
+    /// Both `find_forward` and `find_backward` take `wrap_around` and it was
+    /// `true` with no writer, so a search could not be asked to stop at the
+    /// end -- which is the difference between "not below here" and "not in
+    /// the file".
+    #[test]
+    fn ctrl_w_decides_whether_the_search_starts_again_at_the_top() {
+        // Letters rather than hex digits, for the reason above.
+        let mut data = vec![0u8; 32];
+        data[0] = b'z';
+        data[1] = b'z';
+        let mut editor = make_test_editor(data);
+        editor.focused_panel = FocusedPanel::SearchBar;
+        editor.search.input_text = String::from("zz");
+
+        // Past the only match, wrapping on: it comes back round to it.
+        editor.active_doc_mut().cursor = 20;
+        assert!(editor.search.query.wrap_around, "control: wrap starts on");
+        editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
+        assert_eq!(
+            editor.active_doc().cursor,
+            0,
+            "with wrapping on, the search should have come back to the top"
+        );
+
+        // Wrapping off: it stays where it is rather than pretending.
+        editor.active_doc_mut().cursor = 20;
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            editor.handle_key(&key_press(Key::W, ctrl)),
+            EventResult::Consumed,
+            "Ctrl+W was ignored in the search bar"
+        );
+        assert!(
+            !editor.search.query.wrap_around,
+            "Ctrl+W did not turn it off"
+        );
+        editor.active_doc_mut().cursor = 20;
+        editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
+        assert_eq!(
+            editor.active_doc().cursor,
+            20,
+            "with wrapping off, the search should not have started again"
+        );
+    }
+
+    /// The search bar names every key that changes what the search does.
+    #[test]
+    fn the_search_bar_names_its_keys() {
+        let mut editor = make_test_editor(vec![0; 64]);
+        editor.focused_panel = FocusedPanel::SearchBar;
+        editor.search.visible = true;
+        let texts: Vec<String> = editor
+            .render(1200.0, 800.0)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        for hint in ["Ctrl+I", "Ctrl+W", "Shift+Enter"] {
+            assert!(
+                texts.iter().any(|t| t.contains(hint)),
+                "the search bar never mentions {hint}: {texts:?}"
+            );
+        }
     }
 
     fn key_press(key: Key, modifiers: Modifiers) -> KeyEvent {

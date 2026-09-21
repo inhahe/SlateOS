@@ -1257,6 +1257,29 @@ pub enum ViewMode {
     DirectoryView,
 }
 
+impl ViewMode {
+    /// The name the status bar shows, so a reader can tell which list they
+    /// are looking at. Without it, `Ctrl+L` changes the number of rows for
+    /// no stated reason -- an archive whose folders happen to be empty looks
+    /// identical in both modes.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FlatList => "All files",
+            Self::DirectoryView => "This folder",
+        }
+    }
+
+    /// The other one.
+    #[must_use]
+    pub fn other(self) -> Self {
+        match self {
+            Self::FlatList => Self::DirectoryView,
+            Self::DirectoryView => Self::FlatList,
+        }
+    }
+}
+
 /// What the file dialog currently on screen is being used to choose.
 ///
 /// One dialog serves three questions, so the answer has to carry which
@@ -1503,15 +1526,16 @@ impl AppState {
                 let selected = archive.selected_entries().len();
                 let total_files = archive.file_count;
                 let ratio = archive.overall_ratio();
+                let view = self.view_mode.label();
                 if selected > 0 {
                     let sel_size: u64 = archive.selected_entries().iter().map(|e| e.size).sum();
                     format!(
-                        "{selected} of {total_files} files selected ({}) | Ratio: {ratio:.1}%",
+                        "{selected} of {total_files} files selected ({}) | Ratio: {ratio:.1}% | View: {view} (Ctrl+L)",
                         ArchiveEntry::format_size(sel_size)
                     )
                 } else {
                     format!(
-                        "{total_files} files, {} dirs | {} -> {} | Ratio: {ratio:.1}%",
+                        "{total_files} files, {} dirs | {} -> {} | Ratio: {ratio:.1}% | View: {view} (Ctrl+L)",
                         archive.dir_count,
                         ArchiveEntry::format_size(archive.total_size),
                         ArchiveEntry::format_size(archive.total_compressed),
@@ -3348,6 +3372,14 @@ impl AppState {
             }
             Key::B if key.modifiers.ctrl => {
                 self.sidebar_visible = !self.sidebar_visible;
+                Action::Redraw
+            }
+            // The two listings. `visible_entries` has answered `FlatList`
+            // since it was written and nothing could ask it: an archive could
+            // only ever be read one directory at a time.
+            Key::L if key.modifiers.ctrl => {
+                self.view_mode = self.view_mode.other();
+                self.set_cursor(0, size.1);
                 Action::Redraw
             }
             Key::O if key.modifiers.ctrl => self.run_toolbar(ToolbarAction::Open),
@@ -6013,6 +6045,55 @@ mod tests {
         assert_eq!(state.current_dir, "");
         // At the root there is nowhere to go, and it says so by doing nothing.
         assert_eq!(state.handle_key(&key(Key::Backspace), SIZE), Action::None);
+    }
+
+    /// Both listings can be reached, and the status bar says which is up.
+    ///
+    /// `visible_entries` has always had two arms and `view_mode` was
+    /// `DirectoryView` at construction with no writer in the crate, so the
+    /// flat listing -- every entry in the archive, at once -- could not be
+    /// asked for. The archive could only be read one folder at a time.
+    #[test]
+    fn ctrl_l_switches_between_the_two_listings() {
+        let mut state = loaded();
+        let in_folder = state.visible_entries().len();
+        let all = state.archive.as_ref().map_or(0, |a| a.entries.len());
+        assert!(
+            in_folder < all,
+            "control: the fixture needs an archive where one folder holds \
+fewer than all {all} entries, and this one shows {in_folder}"
+        );
+        assert_eq!(state.view_mode, ViewMode::DirectoryView);
+
+        assert_eq!(
+            state.handle_key(&ctrl(Key::L), (900.0, 600.0)),
+            Action::Redraw,
+            "Ctrl+L was ignored"
+        );
+        assert_eq!(state.view_mode, ViewMode::FlatList);
+        assert_eq!(
+            state.visible_entries().len(),
+            all,
+            "the flat listing did not show every entry"
+        );
+        assert!(
+            state.status_text().contains("All files"),
+            "the status bar does not say which listing is up: {:?}",
+            state.status_text()
+        );
+
+        state.handle_key(&ctrl(Key::L), (900.0, 600.0));
+        assert_eq!(state.view_mode, ViewMode::DirectoryView);
+        assert_eq!(
+            state.visible_entries().len(),
+            in_folder,
+            "Ctrl+L did not come back to the folder listing"
+        );
+        assert!(
+            state.status_text().contains("This folder"),
+            "the status bar does not say which listing is up: {:?}",
+            state.status_text()
+        );
     }
 
     #[test]

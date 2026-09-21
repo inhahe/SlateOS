@@ -601,6 +601,12 @@ pub enum DetailTab {
 }
 
 impl DetailTab {
+    /// Every tab, in the order the strip draws them.
+    ///
+    /// The strip wrote its own array of four. One list, so a tab added here
+    /// appears there and is reachable by the key that walks it.
+    pub const ALL: [DetailTab; 4] = [Self::General, Self::Display, Self::Input, Self::Advanced];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::General => "General",
@@ -608,6 +614,21 @@ impl DetailTab {
             Self::Input => "Input",
             Self::Advanced => "Advanced",
         }
+    }
+
+    /// The next tab along, wrapping.
+    #[must_use]
+    pub fn step(self, forward: bool) -> Self {
+        let at = Self::ALL.iter().position(|t| *t == self).unwrap_or(0);
+        let last = Self::ALL.len().saturating_sub(1);
+        let next = if forward {
+            if at >= last { 0 } else { at.saturating_add(1) }
+        } else if at == 0 {
+            last
+        } else {
+            at.saturating_sub(1)
+        };
+        Self::ALL.get(next).copied().unwrap_or(Self::General)
     }
 }
 
@@ -1651,6 +1672,15 @@ impl RemoteDesktopApp {
                 self.current_view = MainView::History;
                 EventResult::Consumed
             }
+            // The detail tabs. Four were drawn with the active one
+            // highlighted and nothing moved the selection, so
+            // `render_detail_display`, `render_detail_input` and
+            // `render_detail_advanced` -- three whole pages of a profile's
+            // settings -- could not be looked at.
+            Key::Left | Key::Right if self.current_view == MainView::Connections => {
+                self.detail_tab = self.detail_tab.step(key.key == Key::Right);
+                EventResult::Consumed
+            }
             // Delete selected profile
             Key::Delete if self.current_view == MainView::Connections => {
                 if let Some(sel) = self.selected_profile {
@@ -2315,15 +2345,9 @@ impl RemoteDesktopApp {
         let pw = self.window_width - SIDEBAR_WIDTH - 2.0 * SECTION_PADDING;
 
         // Detail tab bar
-        let detail_tabs = [
-            DetailTab::General,
-            DetailTab::Display,
-            DetailTab::Input,
-            DetailTab::Advanced,
-        ];
         let dtab_width = 90.0;
         let mut dtx = px;
-        for dt in &detail_tabs {
+        for dt in &DetailTab::ALL {
             let is_active = *dt == self.detail_tab;
             let bg = if is_active {
                 self.palette.surface0
@@ -3693,6 +3717,93 @@ mod tests {
             modifiers,
             text: String::new(),
         })
+    }
+
+    /// Every detail tab can be opened, and each draws its own page.
+    ///
+    /// Four tabs were drawn with the active one highlighted and nothing moved
+    /// the selection, so `render_detail_display`, `render_detail_input` and
+    /// `render_detail_advanced` -- three whole pages of a connection
+    /// profile's settings -- could not be looked at.
+    #[test]
+    fn the_arrows_open_every_detail_tab() {
+        let mut app = RemoteDesktopApp::with_sample_data();
+        app.current_view = MainView::Connections;
+        // The detail panel draws a *profile*; with nothing selected there is
+        // no panel and every tab renders the same window, which is what the
+        // first version of this test discovered about its own fixture.
+        app.selected_profile = Some(0);
+        assert!(
+            !app.profiles.is_empty(),
+            "control: the fixture needs a profile to show the tabs of"
+        );
+
+        let mut seen = Vec::new();
+        let mut pages = Vec::new();
+        for _ in DetailTab::ALL {
+            seen.push(app.detail_tab);
+            pages.push(drawn_strings(&app));
+            assert_eq!(
+                app.handle_event(&press(Key::Right)),
+                EventResult::Consumed,
+                "Right was ignored on the connections view"
+            );
+        }
+        for tab in DetailTab::ALL {
+            assert!(
+                seen.contains(&tab),
+                "stepping the detail tabs never reached {}",
+                tab.label()
+            );
+        }
+        assert_eq!(
+            app.detail_tab, seen[0],
+            "stepping right round did not come back to the first tab"
+        );
+
+        // Each tab draws something the others do not, or the strip is a
+        // decoration over one page.
+        for (i, page) in pages.iter().enumerate() {
+            for (j, other) in pages.iter().enumerate() {
+                assert!(
+                    i == j || page != other,
+                    "the {} and {} tabs draw exactly the same page",
+                    seen[i].label(),
+                    seen[j].label()
+                );
+            }
+        }
+
+        // Left goes back the other way.
+        app.handle_event(&press(Key::Left));
+        assert_eq!(
+            app.detail_tab,
+            DetailTab::ALL[DetailTab::ALL.len() - 1],
+            "Left did not step back"
+        );
+    }
+
+    /// And they belong to the view that shows them.
+    #[test]
+    fn the_detail_arrows_do_nothing_on_the_other_views() {
+        let mut app = RemoteDesktopApp::with_sample_data();
+        app.current_view = MainView::History;
+        let before = app.detail_tab;
+        app.handle_event(&press(Key::Right));
+        assert_eq!(
+            app.detail_tab, before,
+            "Right changed a tab from a view that does not draw it"
+        );
+    }
+
+    fn drawn_strings(app: &RemoteDesktopApp) -> Vec<String> {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn press(k: Key) -> Event {

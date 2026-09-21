@@ -83,6 +83,23 @@ const CANNOT_RESTORE: &str =
 const CANNOT_CREATE: &str =
     "Cannot create a snapshot: this program has no filesystem access, so nothing was captured";
 
+/// What the list of snapshots is.
+///
+/// `CANNOT_RESTORE` and `CANNOT_CREATE` appear on a progress overlay, which
+/// is dismissed and gone. The *list* stays, and it is the thing a person
+/// reads: five restore points with dates, sizes and components, one of them
+/// marked as the current system. Nothing on screen said they are a model
+/// this program built at startup rather than snapshots of this machine.
+///
+/// That is the belief the two constants above exist to prevent -- somebody
+/// who thinks a restore point exists proceeds with the risky change it was
+/// taken for -- and a message that has to be provoked before it appears does
+/// not prevent it. This one is always on screen, for the same reason
+/// `apps/screenrecorder` draws its refusal unconditionally: there is no state
+/// in which these entries become real, so a condition here would be one that
+/// is always true.
+const SNAPSHOTS_ARE_NOT_REAL: &str = "Demonstration data: these are not snapshots of this machine, and none of them can restore anything";
+
 const WINDOW_WIDTH: f32 = 1050.0;
 const WINDOW_HEIGHT: f32 = 700.0;
 const HEADER_HEIGHT: f32 = 48.0;
@@ -184,6 +201,29 @@ impl SnapshotType {
             Self::PreInstall,
             Self::Scheduled,
         ]
+    }
+
+    /// The next filter choice, treating "no filter" as the first.
+    ///
+    /// `None` is inside the cycle rather than on a key of its own, because
+    /// the way out of a filter has to be as reachable as the way in -- a
+    /// filter you cannot clear hides snapshots and looks like a program that
+    /// has lost them.
+    #[must_use]
+    pub fn step_filter(current: Option<Self>) -> Option<Self> {
+        let types = Self::all();
+        let at = match current {
+            None => 0,
+            Some(ty) => types
+                .iter()
+                .position(|t| *t == ty)
+                .map_or(0, |i| i.saturating_add(1)),
+        };
+        if at >= types.len() {
+            None
+        } else {
+            types.get(at).copied()
+        }
     }
 
     /// Icon indicator color for each type.
@@ -2536,6 +2576,23 @@ impl SystemRestoreUI {
                     self.toggle_lock();
                     EventResult::Consumed
                 }
+                // The snapshot-type filter. `passes_filters` has consulted it
+                // since it was written and `type_filter` was `None` at
+                // construction with no writer, so the status bar's "Filter:"
+                // half could never appear and the list could not be narrowed
+                // to, say, the snapshots taken before an update.
+                Key::F => {
+                    self.type_filter = SnapshotType::step_filter(self.type_filter);
+                    // The selection is a snapshot id, and the filter may have
+                    // just hidden it. Leaving it selected would show the
+                    // details of a row that is not in the list, which reads
+                    // as the list being wrong rather than the filter working.
+                    let visible = self.visible_ids();
+                    if !self.selected_id.is_some_and(|id| visible.contains(&id)) {
+                        self.selected_id = visible.first().copied();
+                    }
+                    EventResult::Consumed
+                }
                 _ => EventResult::Ignored,
             };
         }
@@ -3047,6 +3104,19 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        // What those snapshots are. Beside the count rather than under
+        // it: the count is the claim this qualifies.
+        rt.push(RenderCommand::Text {
+            x: 360.0,
+            y: HEADER_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
+            text: SNAPSHOTS_ARE_NOT_REAL.to_owned(),
+            color: self.palette.ink(self.palette.yellow),
+            font_size: FONT_SIZE_SMALL,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some((self.window_width - 380.0).max(120.0)),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -5380,6 +5450,133 @@ mod tests {
             modifiers: guitk::event::Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    /// The snapshot list can be narrowed by type, and the status bar says so.
+    ///
+    /// `passes_filters` has consulted `type_filter` since it was written, and
+    /// the field was `None` at construction with no writer anywhere in the
+    /// crate -- so the status bar's "Filter: ..." half could never appear and
+    /// the list could not be narrowed to, say, the snapshots taken before an
+    /// update.
+    #[test]
+    fn ctrl_f_narrows_the_list_by_snapshot_type() {
+        let mut ui = SystemRestoreUI::new();
+        let all = ui.visible_ids().len();
+        assert!(all > 0, "control: the fixture has no snapshots");
+        assert!(
+            !status_text(&ui).contains("Filter:"),
+            "control: the status bar should say nothing about a filter yet"
+        );
+
+        let mut narrowed_somewhere = false;
+        for _ in SnapshotType::all() {
+            assert_eq!(
+                ui.handle_event(&press_ctrl(Key::F)),
+                EventResult::Consumed,
+                "Ctrl+F was ignored"
+            );
+            let Some(ty) = ui.type_filter else {
+                continue;
+            };
+            assert!(
+                status_text(&ui).contains(ty.label()),
+                "the status bar does not name the filter that is on: {:?}",
+                status_text(&ui)
+            );
+            let shown = ui.visible_ids();
+            if shown.len() < all {
+                narrowed_somewhere = true;
+            }
+            for id in &shown {
+                let snap = ui
+                    .manager
+                    .tree
+                    .get_snapshot(*id)
+                    .expect("a visible id must name a snapshot");
+                assert_eq!(
+                    snap.snapshot_type,
+                    ty,
+                    "a {} filter left a {} snapshot in the list",
+                    ty.label(),
+                    snap.snapshot_type.label()
+                );
+            }
+            // Whatever is selected has to be something the list is showing.
+            if let Some(sel) = ui.selected_id {
+                assert!(
+                    shown.contains(&sel),
+                    "the selection is a snapshot the filter has hidden"
+                );
+            }
+        }
+        assert!(
+            narrowed_somewhere,
+            "no filter value removed anything; the fixture cannot tell a \
+working filter from a broken one"
+        );
+
+        // One more step comes back out to no filter at all.
+        ui.handle_event(&press_ctrl(Key::F));
+        assert!(
+            ui.type_filter.is_none(),
+            "the filter does not cycle back to showing everything"
+        );
+        assert_eq!(
+            ui.visible_ids().len(),
+            all,
+            "clearing the filter did not bring every snapshot back"
+        );
+    }
+
+    fn status_text(ui: &SystemRestoreUI) -> String {
+        ui.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .find(|t| t.starts_with("View: "))
+            .unwrap_or_default()
+    }
+
+    /// The window says what the list of snapshots is.
+    ///
+    /// `CANNOT_RESTORE` and `CANNOT_CREATE` are drawn on a progress overlay,
+    /// which has to be provoked and is then dismissed. The list stays: five
+    /// restore points with dates, sizes and components, one marked as the
+    /// current system, and nothing saying they are a model this program built
+    /// at startup. That is precisely the belief those two constants exist to
+    /// prevent.
+    #[test]
+    fn the_window_says_the_snapshots_are_not_real() {
+        let ui = SystemRestoreUI::new();
+        let texts: Vec<String> = ui
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            texts.iter().any(|t| t.ends_with(" snapshots")),
+            "control: the header must be claiming a number of snapshots for \
+this test to be about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        // Against the words, not the constant: `t == SNAPSHOTS_ARE_NOT_REAL`
+        // passes with the constant rewritten to "Snapshots", which is the
+        // same defect wearing this test as cover.
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Demonstration data") && t.contains("restore anything")),
+            "the window lists restore points and does not say they are not real"
+        );
     }
 
     fn press_ctrl(k: Key) -> Event {

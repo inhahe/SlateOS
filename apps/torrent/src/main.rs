@@ -2202,6 +2202,26 @@ const CANNOT_TRANSFER_LINES: [&str; 3] = [
     "A torrent showing no progress is not an empty swarm -- nothing was ever asked for.",
 ];
 
+/// What the settings panel has to say about itself.
+///
+/// `CANNOT_TRANSFER_LINES` covers the transfers view. This covers the
+/// settings panel, which was the half those three lines never reached: a
+/// person reading "this client cannot download or upload anything" has been
+/// told the *transfers* do not happen, and may still reasonably believe that
+/// "Encryption: Prefer" and "DHT: Enabled" describe how this client behaves
+/// on a network.
+///
+/// They describe nothing. There is no network stack here, so none of these
+/// values has ever been consulted by anything but the line that draws it --
+/// the panel reads the value in order to print the value, which is the most
+/// persuasive form of a false claim a program can make, because the evidence
+/// is the program's own output at the moment the reader is checking.
+///
+/// The repair is this line and not a key. A control that moves and changes
+/// nothing is a claim; a fixed value beside an honest note is a gap.
+const SETTINGS_NOT_APPLIED: &str =
+    "Not applied: nothing reads these except this panel -- there is no network stack.";
+
 /// Columns of the Peers detail table.
 const PEER_COLUMNS: &[Column] = &[
     Column {
@@ -3909,6 +3929,18 @@ impl TorrentApp {
     fn render_settings(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
         let mut sy = y + 12.0;
         let label_x = x + 16.0;
+
+        cmds.push(RenderCommand::Text {
+            x: label_x,
+            y: sy,
+            text: SETTINGS_NOT_APPLIED.to_owned(),
+            font_size: 11.0,
+            color: self.palette.ink(self.palette.yellow),
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(w - 32.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        sy += 24.0;
         let value_x = x + 220.0;
         let max_val_w = w - 240.0;
 
@@ -4251,6 +4283,44 @@ mod tests {
     ///
     /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
     /// routing and reports whose tests notice. Sixteen of twenty did not.
+    /// The settings panel says its settings are not applied.
+    ///
+    /// `CANNOT_TRANSFER_LINES` tells a reader the transfers do not happen.
+    /// This panel separately reports "Encryption: Prefer" and "DHT: Enabled",
+    /// which a reader can believe describes how the client behaves on a
+    /// network -- and there is no network stack, so those values have never
+    /// been read by anything but the line that prints them.
+    #[test]
+    fn the_settings_panel_says_nothing_reads_these() {
+        let mut app = TorrentApp::new();
+        app.active_tab = Tab::Settings;
+        let texts: Vec<String> = app
+            .render_commands(1280.0, 800.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            texts.iter().any(|t| t.contains("Encryption:")),
+            "control: the panel must be drawing a setting for this to be \
+about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        // Against the words a reader sees, not against the constant: a test
+        // comparing with `SETTINGS_NOT_APPLIED` passes with the constant
+        // rewritten to "Settings", which would be the same defect wearing
+        // this test as cover.
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Not applied") && t.contains("nothing reads these")),
+            "the panel drew settings and did not say they are not applied"
+        );
+    }
+
     #[test]
     fn an_open_picker_takes_the_keyboard_from_the_list() {
         let mut app = TorrentApp::new();

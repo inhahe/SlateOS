@@ -1613,6 +1613,17 @@ pub enum DeinterlaceMode {
 }
 
 impl DeinterlaceMode {
+    /// The next mode, wrapping. `Auto` is last so the cycle returns to `Off`.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Blend,
+            Self::Blend => Self::Bob,
+            Self::Bob => Self::Yadif,
+            Self::Yadif => Self::Auto,
+            Self::Auto => Self::Off,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "Off",
@@ -1660,6 +1671,12 @@ pub enum Command {
     /// Shift the sound against the picture by this many milliseconds.
     AudioSync(i64),
     AddBookmark,
+    /// Step the repeat mode: off, one, all.
+    CycleRepeat,
+    /// Turn the equalizer's processing on or off.
+    ToggleEqualizerEnabled,
+    /// Change the Settings row the cursor is on.
+    ChangeSetting,
 }
 
 /// Which keystroke runs a command.
@@ -1775,10 +1792,15 @@ impl Shortcuts {
                 Press::Plain(Key::M),
                 Command::ToggleMute,
             ),
-            sc("Up", "Volume Up", Press::Plain(Key::Up), Command::VolumeUp),
+            sc(
+                "Up",
+                "Volume Up / Settings Row Up",
+                Press::Plain(Key::Up),
+                Command::VolumeUp,
+            ),
             sc(
                 "Down",
-                "Volume Down",
+                "Volume Down / Settings Row Down",
                 Press::Plain(Key::Down),
                 Command::VolumeDown,
             ),
@@ -1913,6 +1935,24 @@ impl Shortcuts {
                 "Add Bookmark",
                 Press::Ctrl(Key::B),
                 Command::AddBookmark,
+            ),
+            sc(
+                "R",
+                "Cycle Repeat Mode",
+                Press::Plain(Key::R),
+                Command::CycleRepeat,
+            ),
+            sc(
+                "Shift+E",
+                "Equalizer On / Off",
+                Press::Shift(Key::E),
+                Command::ToggleEqualizerEnabled,
+            ),
+            sc(
+                "Enter",
+                "Change the Selected Setting",
+                Press::Plain(Key::Enter),
+                Command::ChangeSetting,
             ),
             sc("0-9", "Seek to 0%-90%", Press::Digit, Command::SeekToDigit),
             // The keyboard's own media keys, which a player should honour and
@@ -2131,6 +2171,17 @@ pub enum OnFinishAction {
 }
 
 impl OnFinishAction {
+    /// The next action, wrapping.
+    pub fn next(self) -> Self {
+        match self {
+            Self::DoNothing => Self::PlayNext,
+            Self::PlayNext => Self::RepeatFile,
+            Self::RepeatFile => Self::ExitFullscreen,
+            Self::ExitFullscreen => Self::Quit,
+            Self::Quit => Self::DoNothing,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::DoNothing => "Do Nothing",
@@ -2158,6 +2209,80 @@ impl Default for PlayerPreferences {
             seek_large_step: 60_000,
             screenshot_config: ScreenshotConfig::default(),
             deinterlace: DeinterlaceMode::Auto,
+        }
+    }
+}
+
+/// One row of the Settings tab: what it is called, what it reads, what
+/// changing it does.
+///
+/// The panel used to build a `[(&str, &str); 6]` of labels and rendered
+/// values inside `render_settings`, and nothing anywhere could change one of
+/// them. Six preferences were drawn as "On"/"Off" for a user who had no way
+/// to make any of them read the other word -- `hardware_decode` was `true`
+/// for everybody, `on_finish` was `PlayNext` for everybody.
+///
+/// Making the row an enum with a `cycle` is what stops that recurring: the
+/// renderer walks this list, the cursor indexes this list, and Enter calls
+/// `cycle` on whatever it lands on. A row cannot be drawn without being
+/// changeable, because drawing it means being in this list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingRow {
+    ResumePlayback,
+    RememberVolume,
+    HardwareDecode,
+    SubtitleAutoLoad,
+    OnFinish,
+    Deinterlace,
+}
+
+impl SettingRow {
+    /// Every row, in the order the panel draws them.
+    pub const ALL: [SettingRow; 6] = [
+        Self::ResumePlayback,
+        Self::RememberVolume,
+        Self::HardwareDecode,
+        Self::SubtitleAutoLoad,
+        Self::OnFinish,
+        Self::Deinterlace,
+    ];
+
+    /// The name in the left column.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ResumePlayback => "Resume Playback",
+            Self::RememberVolume => "Remember Volume",
+            Self::HardwareDecode => "Hardware Decode",
+            Self::SubtitleAutoLoad => "Auto-load Subtitles",
+            Self::OnFinish => "On Finish",
+            Self::Deinterlace => "Deinterlace",
+        }
+    }
+
+    /// The value in the right column, as the panel prints it.
+    pub fn value(self, prefs: &PlayerPreferences) -> &'static str {
+        fn on_off(flag: bool) -> &'static str {
+            if flag { "On" } else { "Off" }
+        }
+        match self {
+            Self::ResumePlayback => on_off(prefs.resume_playback),
+            Self::RememberVolume => on_off(prefs.remember_volume),
+            Self::HardwareDecode => on_off(prefs.hardware_decode),
+            Self::SubtitleAutoLoad => on_off(prefs.subtitle_auto_load),
+            Self::OnFinish => prefs.on_finish.label(),
+            Self::Deinterlace => prefs.deinterlace.label(),
+        }
+    }
+
+    /// Move this row to its next value. Booleans flip; lists step and wrap.
+    pub fn cycle(self, prefs: &mut PlayerPreferences) {
+        match self {
+            Self::ResumePlayback => prefs.resume_playback = !prefs.resume_playback,
+            Self::RememberVolume => prefs.remember_volume = !prefs.remember_volume,
+            Self::HardwareDecode => prefs.hardware_decode = !prefs.hardware_decode,
+            Self::SubtitleAutoLoad => prefs.subtitle_auto_load = !prefs.subtitle_auto_load,
+            Self::OnFinish => prefs.on_finish = prefs.on_finish.next(),
+            Self::Deinterlace => prefs.deinterlace = prefs.deinterlace.next(),
         }
     }
 }
@@ -2249,6 +2374,8 @@ pub struct VideoPlayerApp {
 
     // Active tab in settings
     pub active_tab: PlayerTab,
+    /// Which row of the Settings tab the cursor is on.
+    pub settings_row: usize,
 
     // OSD messages
     pub osd_message: Option<String>,
@@ -2347,6 +2474,7 @@ impl VideoPlayerApp {
             recent: RecentHistory::default(),
             preferences: PlayerPreferences::default(),
             active_tab: PlayerTab::Player,
+            settings_row: 0,
             osd_message: None,
             osd_remaining_ms: 0,
         }
@@ -2731,8 +2859,23 @@ impl VideoPlayerApp {
             Command::Stop => self.stop(),
             Command::ToggleFullscreen => self.toggle_fullscreen(),
             Command::ToggleMute => self.toggle_mute(),
-            Command::VolumeUp => self.volume_up(),
-            Command::VolumeDown => self.volume_down(),
+            // On the Settings tab the list is what the arrows are for;
+            // there is no volume slider drawn there to move.
+            Command::VolumeUp => {
+                if self.active_tab == PlayerTab::Settings {
+                    self.settings_row = self.settings_row.saturating_sub(1);
+                } else {
+                    self.volume_up();
+                }
+            }
+            Command::VolumeDown => {
+                if self.active_tab == PlayerTab::Settings {
+                    let last = SettingRow::ALL.len().saturating_sub(1);
+                    self.settings_row = self.settings_row.saturating_add(1).min(last);
+                } else {
+                    self.volume_down();
+                }
+            }
             Command::SeekBy(ms) => {
                 if ms < 0 {
                     self.seek_backward(ms.unsigned_abs());
@@ -2792,6 +2935,32 @@ impl VideoPlayerApp {
             Command::AudioSync(ms) => {
                 self.audio_sync.adjust(ms);
                 self.show_osd(&format!("Audio {}", self.audio_sync.label()));
+            }
+            Command::CycleRepeat => {
+                self.repeat = self.repeat.cycle();
+                self.show_osd(&format!("Repeat: {}", self.repeat.label()));
+            }
+            Command::ToggleEqualizerEnabled => {
+                self.equalizer.enabled = !self.equalizer.enabled;
+                self.show_osd(if self.equalizer.enabled {
+                    "Equalizer on"
+                } else {
+                    "Equalizer off"
+                });
+            }
+            Command::ChangeSetting => {
+                // Deliberately does nothing outside the Settings tab rather
+                // than acting on a row the user cannot see.
+                if self.active_tab == PlayerTab::Settings {
+                    if let Some(row) = SettingRow::ALL.get(self.settings_row) {
+                        row.cycle(&mut self.preferences);
+                        self.show_osd(&format!(
+                            "{}: {}",
+                            row.label(),
+                            row.value(&self.preferences)
+                        ));
+                    }
+                }
             }
             Command::AddBookmark => {
                 let label = format!("Bookmark at {}", self.position.format());
@@ -4462,35 +4631,14 @@ impl VideoPlayerApp {
         });
 
         let prefs = &self.preferences;
-        let settings = [
-            (
-                "Resume Playback",
-                if prefs.resume_playback { "On" } else { "Off" },
-            ),
-            (
-                "Remember Volume",
-                if prefs.remember_volume { "On" } else { "Off" },
-            ),
-            (
-                "Hardware Decode",
-                if prefs.hardware_decode { "On" } else { "Off" },
-            ),
-            (
-                "Auto-load Subtitles",
-                if prefs.subtitle_auto_load {
-                    "On"
-                } else {
-                    "Off"
-                },
-            ),
-            ("On Finish", prefs.on_finish.label()),
-            ("Deinterlace", prefs.deinterlace.label()),
-        ];
+        let settings = SettingRow::ALL;
 
         let label_x = 20.0;
         let value_x = 220.0;
 
-        for (i, (name, value)) in settings.iter().enumerate() {
+        for (i, row) in settings.iter().enumerate() {
+            let (name, value) = (row.label(), row.value(prefs));
+            let selected = i == self.settings_row;
             let sy = top + 60.0 + i as f32 * 36.0;
 
             cmds.push(RenderCommand::FillRect {
@@ -4498,7 +4646,9 @@ impl VideoPlayerApp {
                 y: sy - 2.0,
                 width: self.width - 24.0,
                 height: 32.0,
-                color: if i % 2 == 0 {
+                color: if selected {
+                    self.palette.surface1
+                } else if i % 2 == 0 {
                     self.palette.surface0
                 } else {
                     self.palette.base
@@ -4517,9 +4667,9 @@ impl VideoPlayerApp {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            let value_color = if *value == "On" {
+            let value_color = if value == "On" {
                 self.palette.green
-            } else if *value == "Off" {
+            } else if value == "Off" {
                 self.palette.red
             } else {
                 self.palette.subtext1
@@ -6285,6 +6435,190 @@ test to be about anything -- it drew {} text command(s)",
     // ======================================================================
 
     use guitk::event::Modifiers;
+
+    /// Every row of the Settings tab can be changed from the keyboard, and
+    /// the panel draws the new value.
+    ///
+    /// This asserts the *drawn* value rather than the field, because the
+    /// defect being guarded is precisely a panel that shows a value nothing
+    /// can move: a test that only checked `app.preferences` would still pass
+    /// if the renderer went back to its own hardcoded copy of the list.
+    #[test]
+    fn every_settings_row_can_be_changed_and_the_panel_shows_it() {
+        for (i, row) in SettingRow::ALL.iter().enumerate() {
+            let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            app.active_tab = PlayerTab::Settings;
+            app.settings_row = i;
+            let before = row.value(&app.preferences).to_string();
+
+            let before_count = drawn_texts(&app).iter().filter(|t| **t == before).count();
+            assert!(
+                before_count > 0,
+                "control: the panel must draw {}'s value {before:?} before \
+this test can mean anything",
+                row.label()
+            );
+
+            assert!(
+                app.handle_event(&press(Key::Enter)),
+                "Enter on row {} of the settings list was not handled",
+                row.label()
+            );
+            let after = row.value(&app.preferences).to_string();
+            assert_ne!(
+                before,
+                after,
+                "Enter on {} left it reading {before:?}",
+                row.label()
+            );
+            // Counted rather than merely present: five of the six rows read
+            // "On" or "Off", so "the panel draws {after} somewhere" is
+            // satisfied by a *different* row and would pass against a
+            // renderer that ignored the change entirely. One fewer of the old
+            // word and one more of the new is a statement about this row.
+            let texts = drawn_texts(&app);
+            assert_eq!(
+                texts.iter().filter(|t| **t == before).count(),
+                before_count - 1,
+                "{} changed to {after:?} and the panel still drew {before:?} \
+as many times as before",
+                row.label()
+            );
+            assert!(
+                texts.contains(&after),
+                "{} now reads {after:?} and the panel does not draw it",
+                row.label()
+            );
+        }
+    }
+
+    /// Each row's `cycle` returns to where it started, so no value is a
+    /// one-way door the user cannot come back from.
+    #[test]
+    fn cycling_a_settings_row_comes_back_round() {
+        for row in SettingRow::ALL {
+            let mut prefs = PlayerPreferences::default();
+            let start = row.value(&prefs).to_string();
+            // Eight presses passes the longest list here (five) and lands
+            // back only if the cycle wraps.
+            let mut seen_other = false;
+            for _ in 0..40 {
+                row.cycle(&mut prefs);
+                if row.value(&prefs) != start {
+                    seen_other = true;
+                } else if seen_other {
+                    break;
+                }
+            }
+            assert!(seen_other, "{} never took another value", row.label());
+            assert_eq!(
+                row.value(&prefs),
+                start,
+                "{} does not cycle back to {start:?}",
+                row.label()
+            );
+        }
+    }
+
+    /// The arrows move the settings cursor only where the settings are.
+    #[test]
+    fn the_arrows_move_the_cursor_on_the_settings_tab_and_the_volume_elsewhere() {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.active_tab = PlayerTab::Settings;
+        app.handle_event(&press(Key::Down));
+        assert_eq!(app.settings_row, 1, "Down did not move the settings cursor");
+        app.handle_event(&press(Key::Up));
+        assert_eq!(app.settings_row, 0, "Up did not move it back");
+
+        // At the ends it stays put rather than wrapping into a row the eye
+        // has to hunt for at the other end of the list.
+        app.handle_event(&press(Key::Up));
+        assert_eq!(app.settings_row, 0, "Up at the top wrapped or ran off");
+        app.settings_row = SettingRow::ALL.len() - 1;
+        app.handle_event(&press(Key::Down));
+        assert_eq!(
+            app.settings_row,
+            SettingRow::ALL.len() - 1,
+            "Down at the bottom ran past the last row"
+        );
+
+        // And the volume still answers the same keys on the player itself.
+        let mut player = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        player.active_tab = PlayerTab::Player;
+        let before = player.volume.level();
+        player.handle_event(&press(Key::Up));
+        assert_ne!(
+            player.volume.level(),
+            before,
+            "Up on the player tab stopped changing the volume"
+        );
+        assert_eq!(player.settings_row, 0, "it moved the settings cursor too");
+    }
+
+    /// `Enter` outside the Settings tab must not change a setting the user
+    /// cannot see.
+    #[test]
+    fn enter_on_the_player_changes_no_setting() {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.active_tab = PlayerTab::Player;
+        let before = app.preferences.resume_playback;
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(
+            app.preferences.resume_playback, before,
+            "Enter changed a setting from a tab that does not show it"
+        );
+    }
+
+    /// The repeat mode and the equalizer switch were both read and never
+    /// written: the playlist consulted `repeat` to decide what came next, and
+    /// the equalizer drew its own on/off state, with nothing able to set
+    /// either.
+    #[test]
+    fn repeat_and_the_equalizer_switch_answer_their_keys() {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let before = app.repeat;
+        app.handle_event(&press(Key::R));
+        assert_ne!(app.repeat, before, "R did not move the repeat mode");
+
+        let eq = app.equalizer.enabled;
+        app.handle_event(&press_with(Key::E, shift()));
+        assert_ne!(
+            app.equalizer.enabled, eq,
+            "Shift+E did not switch the equalizer"
+        );
+        app.handle_event(&press_with(Key::E, shift()));
+        assert_eq!(
+            app.equalizer.enabled, eq,
+            "Shift+E is a switch, not a one-way door"
+        );
+    }
+
+    /// The shortcut panel and the dispatcher are one table; this checks the
+    /// keys it names are distinct, since two rows claiming one keystroke
+    /// means the second is printed and unreachable.
+    #[test]
+    fn no_two_shortcuts_claim_the_same_keystroke() {
+        let list = Shortcuts::list();
+        for (i, a) in list.iter().enumerate() {
+            for b in list.iter().skip(i + 1) {
+                assert_ne!(
+                    a.press, b.press,
+                    "{} and {} both claim the same keystroke",
+                    a.keys, b.keys
+                );
+            }
+        }
+    }
+
+    fn drawn_texts(app: &VideoPlayerApp) -> Vec<String> {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
 
     fn press(k: Key) -> Event {
         Event::Key(KeyEvent {

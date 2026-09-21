@@ -5484,6 +5484,21 @@ fn handle_find_key(app: &mut App, key: Key, modifiers: Modifiers) -> bool {
                 app.find_state.visible = false;
                 true
             }
+            // Match case. `case_sensitive` was `false` at construction with no
+            // writer anywhere, so `Case::sensitive(self.case_sensitive)` was
+            // handed `false` for every search this program has ever run --
+            // the find could not be made to match case. Found by
+            // `scripts/frozen-flag-survey.py`.
+            //
+            // `Ctrl+I` inside the find bar, which is what `apps/hexeditor` and
+            // `apps/jsonviewer` use for the same question. The global `Ctrl+I`
+            // is italic and lives in a different handler, so the two do not
+            // collide.
+            Key::Char('i' | 'I') => {
+                app.find_state.case_sensitive = !app.find_state.case_sensitive;
+                refresh_matches(app);
+                true
+            }
             // Replace, and replace every match. On the buttons the panel
             // draws, which are labels for these keys rather than targets for
             // a pointer that does not exist.
@@ -7461,6 +7476,42 @@ mod tests {
             shift,
             alt: false,
         }
+    }
+
+    /// **The find can be made to match case.**
+    ///
+    /// `case_sensitive` was `false` at construction with no writer anywhere,
+    /// so `Case::sensitive(self.case_sensitive)` received `false` for every
+    /// search this program has ever run. The setting existed, was read, and
+    /// could not be changed. Found by `scripts/frozen-flag-survey.py`.
+    ///
+    /// Asserts the *match count*, not the flag: a key that flips a boolean the
+    /// searcher ignores would pass the weaker version, which is the defect
+    /// `apps/regextester`'s `multiline` had.
+    #[test]
+    fn the_find_can_be_made_to_match_case() {
+        let mut app = App::new(1280.0, 800.0);
+        {
+            let doc = app.active_document_mut();
+            doc.lines = vec!["Beta".to_string(), "beta".to_string()];
+        }
+        app.refresh_cache();
+
+        app.find_state.visible = true;
+        app.find_state.query = "beta".to_string();
+        refresh_matches(&mut app);
+        let insensitive = app.find_state.matches.len();
+        assert_eq!(insensitive, 2, "the fixture should match both spellings");
+
+        assert!(
+            handle_find_key(&mut app, Key::Char('i'), ctrl(false)),
+            "Ctrl+I in the find bar was not answered"
+        );
+        assert!(app.find_state.case_sensitive, "the flag did not move");
+        assert!(
+            app.find_state.matches.len() < insensitive,
+            "matching case returned the same {insensitive} matches"
+        );
     }
 
     /// An app holding one document with three lines of known text.

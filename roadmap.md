@@ -1546,7 +1546,11 @@ Roadmap:
   (`TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES` closed, §434) — it was two bugs
   under one name, erasing them *and* stepping over them, and the 170/40
   `misplaced` that survive it are a deliberate divergence in where an erased
-  zero-advance glyph sits, not a residue. **Device tables are done too** (§440;
+  zero-advance glyph sits, not a residue. (That 170 is **1** as of
+  2026-09-21: the kern-charging half of the divergence stopped existing when
+  kerning moved onto the right-hand glyph, and the survivor is a mark
+  attachment HarfBuzz keeps through hiding and we discard — different
+  mechanism, same conclusion. §434 carries the measurement.) **Device tables are done too** (§440;
   `TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING` closed — they were
   its last open item), and the survey written to check them corrected the plan
   this line used to carry: not one of this host's 152 real device tables is on a

@@ -18042,6 +18042,38 @@ reader must not take that as a regression. That is what this section and the
 `known-issues.md` entry are for; if the number moves, or a string that is not
 in the ignorable set appears in that list, something real broke.
 
+**Update 2026-09-21 — the number moved, to 1, and nothing broke.** This
+paragraph asked a future reader to investigate that, so: host sweep, 556
+faces × 111 strings, `agree 60490`, `reordered 0`, `differ 0`,
+`misplaced 1`.
+
+The 169 went because **the kern-charging difference this section describes no
+longer exists.** On this section's own worked example — `a` CGJ `b` in Arial
+Rounded — both shapers now report `1203;0;0, 0;0;0, 1267;-13;0`: the kern is
+charged to the right-hand glyph as an x offset, which is what HarfBuzz was
+said here to do and we were said not to. The prose above is a record of what
+was true in August and is left standing as that; it is no longer a
+description of the code.
+
+**The one that survives is a different mechanism with the same conclusion.**
+`a` CGJ `b` in `SegUIVar.ttf`, whose `GPOS` attaches U+034F to its base as a
+mark. HarfBuzz keeps that attachment through hiding and reports the blank at
+x_offset −1042 — minus the *base's* advance, so it sits back on the `a`.
+`hide_ignorables` zeroes the offset, so ours sits at the pen, 1042. No kern
+is involved: `a`'s advance is 1042 and `b` starts there in both. Glyph 2's own
+advance is 561, so this is not HarfBuzz's `adjust_mark_offsets` either — it is
+mark-to-base attachment, kept rather than discarded.
+
+Ours is still kept, on this section's own argument: the x of an invisible
+zero-advance glyph is good for placing a caret on that character's cluster,
+and the pen is where the next glyph starts. But the *cost* is now one case,
+not 170, and a reader who finds `misplaced` above 1 should look at mark
+attachment before kerning.
+
+Corrected with it: `hide_ignorables` carried "The x offset goes for the same
+reason HarfBuzz zeroes it". HarfBuzz does not zero it. The comment now says
+what HarfBuzz measurably does and why we differ.
+
 **Measured.** Host sweep, 556 faces × 60 strings: `differ` on `f\u200di` from
 76 faces to 0, `misplaced` from 331 to 170. Khmer probe: 45/45 before and
 after — the Indic-family features read the joiners themselves and had to come

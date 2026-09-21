@@ -47,6 +47,9 @@ const INPUT_FONT_SIZE: f32 = 18.0;
 const NAME_FONT_SIZE: f32 = 14.0;
 /// Font size for descriptions and badges.
 const DESC_FONT_SIZE: f32 = 12.0;
+
+/// Space between a row's shortcut hint and the category badge to its right.
+const HINT_GAP: f32 = 8.0;
 /// Height of the "could not launch that" banner, when there is one.
 const ERROR_HEIGHT: f32 = 28.0;
 
@@ -1061,11 +1064,25 @@ impl LauncherState {
                 overflow: TextOverflow::Clip,
             });
 
-            // Shortcut hint (Ctrl+N) for first 8 results
+            // What key launches this row, written as a key rather than as
+            // `^1`. The caret is terminal notation, and this is a desktop
+            // launcher: a reader who has not met `^C` sees a caret and a
+            // digit. The author's own comment here said "Ctrl+N", so the
+            // intent was always the key -- only the spelling was shorthand.
+            //
+            // Right-aligned against the badge by measurement rather than
+            // left at the old fixed 40px offset. That offset was *not* broken
+            // by the longer spelling -- checked by running the test against
+            // it, and "Ctrl+1" still cleared the badge by about six pixels.
+            // It was chosen for a two-character hint and survived a
+            // six-character one by luck. The expression now states the
+            // relationship that is meant: sit HINT_GAP left of the badge,
+            // whatever the hint turns out to say.
             if i < 8 {
-                let hint = format!("^{}", i.saturating_add(1));
+                let hint = format!("Ctrl+{}", i.saturating_add(1));
+                let hint_width = text::measure(&hint, 10.0, FontWeightHint::Light);
                 cmds.push(RenderCommand::Text {
-                    x: input_width - badge_width - 40.0,
+                    x: input_width - badge_width - HINT_GAP - hint_width,
                     y: row_y + (ROW_HEIGHT - DESC_FONT_SIZE) / 2.0,
                     text: hint,
                     color: self.palette.subtext0,
@@ -1871,6 +1888,56 @@ mod tests {
         };
         launcher.handle_key(&bs);
         assert_eq!(launcher.query, "a");
+    }
+
+    /// **A row says which key launches it, in a notation a reader knows.**
+    ///
+    /// This drew `^1` -- terminal notation, in a desktop launcher, where a
+    /// reader who has not met `^C` sees a caret and a digit. `key-survey.py`
+    /// reported the eight digits as named nowhere and it was right: a name
+    /// only a convention decodes is not a name.
+    ///
+    /// **This is not the regression test for that change, and the difference
+    /// is worth writing down.** Run against the old fixed offset it passes:
+    /// the six-character hint still cleared the badge. It is a standing
+    /// invariant instead -- whatever a row's hint says, it ends before the
+    /// badge beside it -- checked against the badge actually drawn rather
+    /// than recomputed from the layout constants, since a test that redid the
+    /// arithmetic would agree with whatever the arithmetic did. A longer hint
+    /// or a larger font fails it. The spelling change did not, and saying so
+    /// stops this being read as evidence it never gave.
+    #[test]
+    fn a_row_says_which_key_launches_it() {
+        let mut launcher = LauncherState::new(1920.0, 1080.0);
+        launcher.show();
+        assert!(
+            !launcher.results.is_empty(),
+            "control: no rows, so nothing would be labelled and this passes empty"
+        );
+
+        let mut badge_left = f32::MAX;
+        let mut hints: Vec<String> = Vec::new();
+        for cmd in launcher.render() {
+            match cmd {
+                RenderCommand::FillRect { x, .. } => badge_left = x,
+                RenderCommand::Text { x, ref text, .. } if text.starts_with("Ctrl+") => {
+                    let right = x + text::measure(text, 10.0, FontWeightHint::Light);
+                    assert!(
+                        right <= badge_left,
+                        "{text:?} ends at {right} and the badge beside it starts at {badge_left}"
+                    );
+                    hints.push(text.clone());
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            hints.len(),
+            launcher.results.len().min(8),
+            "each of the first eight rows should name the key that launches it"
+        );
+        assert_eq!(hints.first().map(String::as_str), Some("Ctrl+1"));
     }
 
     #[test]

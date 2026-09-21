@@ -99,8 +99,26 @@ impl RecordLock {
 
 /// Every record lock held on one path.
 struct PathEntry {
+    /// Retained for `/proc` display and as the fallback key where the
+    /// filesystem has no stable inode. No longer the primary key.
     path: String,
+    /// Filesystem identity, when there is one. The real key: a record lock
+    /// taken under one name must be seen under every other name for the
+    /// same file, or two writers both believe they hold the range.
+    id: Option<crate::fs::vfs::FileId>,
     locks: Vec<RecordLock>,
+}
+
+/// Does this entry describe the same file as `(path, id)`?
+///
+/// Identity wins when both sides have one; otherwise the path. One function
+/// rather than four inline comparisons -- there are four entry points here,
+/// and four hand-written comparisons is how one of them ends up different.
+fn path_entry_matches(e: &PathEntry, path: &str, id: Option<crate::fs::vfs::FileId>) -> bool {
+    match (e.id, id) {
+        (Some(a), Some(b)) => a == b,
+        _ => e.path == path,
+    }
 }
 
 /// The record-lock table, keyed by resolved path.
@@ -175,7 +193,8 @@ pub fn set(
         lock_type,
     };
     let mut table = TABLE.lock();
-    let idx = match table.iter().position(|e| e.path == path) {
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
+    let idx = match table.iter().position(|e| path_entry_matches(e, path, id)) {
         Some(i) => i,
         None => {
             if table.len() >= MAX_LOCKED_PATHS {
@@ -183,6 +202,7 @@ pub fn set(
             }
             table.push(PathEntry {
                 path: String::from(path),
+                id,
                 locks: Vec::new(),
             });
             table.len().saturating_sub(1)
@@ -225,7 +245,8 @@ pub fn unlock(path: &str, owner: u64, start: u64, len: u64) -> crate::error::Ker
         start.saturating_add(len)
     };
     let mut table = TABLE.lock();
-    let Some(idx) = table.iter().position(|e| e.path == path) else {
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
+    let Some(idx) = table.iter().position(|e| path_entry_matches(e, path, id)) else {
         // Unlocking a path with no locks is not an error: POSIX lets a process
         // clear a range it does not hold.
         return Ok(());
@@ -270,7 +291,8 @@ pub fn query(
         lock_type,
     };
     let table = TABLE.lock();
-    let entry = table.iter().find(|e| e.path == path)?;
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
+    let entry = table.iter().find(|e| path_entry_matches(e, path, id))?;
     entry
         .locks
         .iter()
@@ -294,10 +316,14 @@ pub fn release_all(owner: u64) {
 /// Locks currently held on a path, for tests and `/proc`.
 #[must_use]
 pub fn list(path: &str) -> Vec<RecordLock> {
+    // Its own resolution. This is the fourth entry point into the table and
+    // the second time a missing one was caught by the compiler rather than by
+    // my own assertions -- the checks verify text, not scope.
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
     let table = TABLE.lock();
     table
         .iter()
-        .find(|e| e.path == path)
+        .find(|e| path_entry_matches(e, path, id))
         .map_or_else(Vec::new, |e| e.locks.clone())
 }
 

@@ -176,6 +176,18 @@ pub enum SealOp {
 // Internal state
 // ---------------------------------------------------------------------------
 
+/// Does this entry describe the same file as `(path, id)`?
+///
+/// Identity wins when both sides have one; otherwise the path is the key.
+/// One function rather than a comparison at each site, because two sites
+/// comparing by hand is how one of them ends up different.
+fn seal_entry_matches(e: &SealEntry, path: &Path, id: Option<crate::fs::vfs::FileId>) -> bool {
+    match (e.id, id) {
+        (Some(a), Some(b)) => a == b,
+        _ => e.path.as_path() == path,
+    }
+}
+
 /// A sealed file entry.
 #[derive(Debug, Clone)]
 struct SealEntry {
@@ -184,6 +196,15 @@ struct SealEntry {
     /// is a file that can never be sealed at all. See
     /// `design-decisions.md` §261.
     path: PathBuf,
+    /// Filesystem identity, when the filesystem provides one.
+    ///
+    /// The real key. A seal placed under one name and checked under another
+    /// used to read as *not sealed*, and seals are permanent -- the only
+    /// removal is deleting the file -- so that misread lasted the life of
+    /// the file. `None` means the filesystem reports `ino == 0` (devfs,
+    /// procfs, sysfs), and those cannot have two names for one object, so
+    /// the path fallback is exact there rather than approximate.
+    id: Option<crate::fs::vfs::FileId>,
     flags: SealFlags,
     sealed_at_ns: u64,
 }
@@ -217,7 +238,10 @@ pub fn add_seals(path: impl AsRef<Path>, new_seals: SealFlags) -> KernelResult<S
     let mut table = SEAL_TABLE.lock();
 
     // Check existing entry.
-    if let Some(entry) = table.iter_mut().find(|e| e.path.as_path() == path) {
+    // Resolved per call, not cached: if the name is repointed between
+    // sealing and checking, the identity should differ.
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
+    if let Some(entry) = table.iter_mut().find(|e| seal_entry_matches(e, path, id)) {
         // Cannot add seals if SEAL is already set.
         if entry.flags.contains(SealFlags::SEAL) {
             DENIED_OPS.fetch_add(1, Ordering::Relaxed);
@@ -234,6 +258,7 @@ pub fn add_seals(path: impl AsRef<Path>, new_seals: SealFlags) -> KernelResult<S
 
     let flags = new_seals;
     table.push(SealEntry {
+        id,
         path: path.to_path_buf(),
         flags,
         sealed_at_ns: now,
@@ -245,10 +270,16 @@ pub fn add_seals(path: impl AsRef<Path>, new_seals: SealFlags) -> KernelResult<S
 /// Get current seals for a file.
 pub fn get_seals(path: impl AsRef<Path>) -> SealFlags {
     let path = path.as_ref();
+    // Its own resolution: this is a separate entry point from `add_seals`,
+    // and the identity must be looked up here too. The first version of this
+    // change computed it in `add_seals` only and did not compile -- which is
+    // the failure mode worth having: a second call site silently comparing by
+    // name would have keyed half the table differently.
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
     let table = SEAL_TABLE.lock();
     table
         .iter()
-        .find(|e| e.path.as_path() == path)
+        .find(|e| seal_entry_matches(e, path, id))
         .map_or(SealFlags::NONE, |e| e.flags)
 }
 

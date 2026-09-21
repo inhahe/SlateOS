@@ -1234,9 +1234,33 @@ struct FileLock {
 #[derive(Debug, Clone)]
 struct PathLockEntry {
     /// Canonical path (after symlink resolution).
+    ///
+    /// Retained for `/proc` display and as the fallback key on filesystems
+    /// with no stable inode. It is no longer the primary key: two names for
+    /// one file used to get two entries and two exclusive locks.
     path: PathBuf,
+    /// Filesystem identity, when the filesystem provides one.
+    ///
+    /// This is the real key. `None` means the filesystem reports `ino == 0`
+    /// -- devfs, procfs, sysfs -- and those cannot have two names for one
+    /// object, so falling back to the path there is exact rather than
+    /// approximate. See known-issues 2026-09-21 for the per-filesystem
+    /// measurement.
+    id: Option<FileId>,
     /// Active locks on this path.
     locks: Vec<FileLock>,
+}
+
+/// Does this entry describe the same file as `(path, id)`?
+///
+/// Identity wins when both sides have one; otherwise the resolved path is
+/// the key. A free function rather than three inline comparisons because
+/// three sites comparing by hand is how one of them ends up different.
+fn lock_entry_matches(e: &PathLockEntry, path: &Path, id: Option<FileId>) -> bool {
+    match (e.id, id) {
+        (Some(a), Some(b)) => a == b,
+        _ => e.path.as_path() == path,
+    }
 }
 
 /// Global advisory lock table.
@@ -5532,7 +5556,11 @@ impl Vfs {
         let mut table = LOCK_TABLE.lock();
 
         // Find or create the entry for this path.
-        let entry_idx = table.iter().position(|e| e.path.as_path() == path);
+        // Identity of the file this path names, resolved per call. Not
+        // cached: if the name is repointed between operations the identity
+        // should differ, which is the whole reason for keying on it.
+        let id = Self::file_identity_resolved(path).unwrap_or(None);
+        let entry_idx = table.iter().position(|e| lock_entry_matches(e, path, id));
 
         if let Some(idx) = entry_idx {
             let entry = &mut table[idx];
@@ -5583,6 +5611,9 @@ impl Vfs {
                 return Err(KernelError::OutOfMemory);
             }
             table.push(PathLockEntry {
+                // Stored so a later lookup by a DIFFERENT name for the same
+                // file finds this entry rather than creating a second one.
+                id,
                 path: path.to_path_buf(),
                 locks: alloc::vec![FileLock { owner, lock_type }],
             });
@@ -5609,7 +5640,11 @@ impl Vfs {
         let path = path.as_ref();
         let mut table = LOCK_TABLE.lock();
 
-        if let Some(idx) = table.iter().position(|e| e.path.as_path() == path) {
+        // Identity of the file this path names, resolved per call. Not
+        // cached: if the name is repointed between operations the identity
+        // should differ, which is the whole reason for keying on it.
+        let id = Self::file_identity_resolved(path).unwrap_or(None);
+        if let Some(idx) = table.iter().position(|e| lock_entry_matches(e, path, id)) {
             let entry = &mut table[idx];
             entry.locks.retain(|l| l.owner != owner);
 
@@ -5653,7 +5688,11 @@ impl Vfs {
         let path = path.as_ref();
         let table = LOCK_TABLE.lock();
 
-        if let Some(entry) = table.iter().find(|e| e.path.as_path() == path) {
+        // Identity of the file this path names, resolved per call. Not
+        // cached: if the name is repointed between operations the identity
+        // should differ, which is the whole reason for keying on it.
+        let id = Self::file_identity_resolved(path).unwrap_or(None);
+        if let Some(entry) = table.iter().find(|e| lock_entry_matches(e, path, id)) {
             if entry.locks.is_empty() {
                 return Ok(None);
             }

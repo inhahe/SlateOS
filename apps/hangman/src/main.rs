@@ -16,6 +16,7 @@
 //! keyboard is measured from the room left rather than squeezed -- a key too
 //! small to hit is worse than no column.
 
+use appearance::AppearanceSettings;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
@@ -867,6 +868,23 @@ impl Stats {
 }
 
 // -- Main app struct ----------------------------------------------------
+/// The keys this game answers, raised by `F1` or `?`.
+///
+/// Three rows name the screen they work on, because this game has three and
+/// most of these keys belong to one of them. `H` is the odd one out and says
+/// so: it is a letter of the alphabet first, and only asks for the hint while
+/// the hint is unused and `h` itself unguessed -- after that it guesses `h`
+/// like any other letter.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Up / Down", "Choose a category"),
+    ("Enter", "Start the round, or deal a new word"),
+    ("A-Z", "Guess a letter, while playing"),
+    ("H", "Ask for the hint, while it is unused"),
+    ("1 / 2 / 3", "Easy, medium or hard words"),
+    ("Esc", "Back to the categories"),
+    ("F1 / ?", "This list"),
+];
+
 struct HangmanApp {
     /// The secret word (lowercase ASCII).
     word: Vec<u8>,
@@ -894,6 +912,8 @@ struct HangmanApp {
     /// same layout the user was looking at -- so the size is recorded when
     /// the frame is drawn and read back when the click lands.
     size: (f32, f32),
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 impl HangmanApp {
@@ -921,6 +941,7 @@ impl HangmanApp {
             rng: SeededRng::new(seed),
             category_cursor: 0,
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            show_help: false,
         };
         app.pick_word();
         app
@@ -1138,6 +1159,19 @@ impl HangmanApp {
                     self.draw_result(&mut f, &l);
                 }
             }
+        }
+
+        // Over the result panel as well as the board: the list is the one
+        // thing on screen a reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &guitk::palette::Palette::from_settings(&AppearanceSettings::default()),
+                (w, h),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
         }
         f
     }
@@ -1880,7 +1914,23 @@ impl HangmanApp {
     /// every key the game ignored still counted as handled.
     fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
-            Event::Key(ke) if ke.pressed => self.handle_key(ke.key),
+            // The help card is answered here rather than in `handle_key`,
+            // which takes a bare `Key` and so cannot tell `?` from `/`:
+            // `?` is Shift and the slash key, and the modifiers stop at this
+            // line. Escape closes the card before the screen beneath it gets
+            // to act on Escape, so a reader who opened the list and wants out
+            // does not also get thrown back to the categories.
+            Event::Key(ke) if ke.pressed => {
+                if ke.key == Key::F1 || (ke.key == Key::Slash && ke.modifiers.shift) {
+                    self.show_help = !self.show_help;
+                    return EventResult::Consumed;
+                }
+                if self.show_help && ke.key == Key::Escape {
+                    self.show_help = false;
+                    return EventResult::Consumed;
+                }
+                self.handle_key(ke.key)
+            }
             Event::Mouse(me) => self.handle_mouse(me),
             _ => EventResult::Ignored,
         }
@@ -3577,6 +3627,111 @@ mod tests {
             );
             assert!(!app.is_guessed(b'a'));
         }
+    }
+
+    /// One app per screen, because most of these keys belong to one screen.
+    ///
+    /// `Up`, `Down` and the category `Enter` only mean anything on the menu;
+    /// the letters, `H` and `Esc` only mean anything once a round is running.
+    /// Each of those refusals is correct, so the guard asks whether *some*
+    /// screen answers a key rather than whether one does.
+    fn help_states() -> Vec<HangmanApp> {
+        vec![test_app(), playing_app("crane")]
+    }
+
+    /// **Every key the shortcut list advertises is one this game answers.**
+    ///
+    /// The list and the handler are two copies of one fact and they drift --
+    /// `apps/rssreader` once shipped twenty-one shortcuts of which about four
+    /// worked. The label is parsed by `guitk::shortcut` rather than matched
+    /// against a table written beside it here, which would be a third copy.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states().iter_mut().any(|app| {
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and no screen answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/netscan`'s `wol_note` was written by the
+    /// model and drawn by nothing for three commits.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let size = (WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut app = playing_app("crane");
+        assert!(
+            !drawn_text(&app, size)
+                .join(" | ")
+                .contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        assert_eq!(
+            app.handle_event(&Event::Key(press(Key::F1))),
+            EventResult::Consumed,
+            "raising the list did not read as a redraw, so it would be invisible"
+        );
+        let drawn = drawn_text(&app, size).join(" | ");
+        for (keys, what) in SHORTCUTS {
+            assert!(drawn.contains(keys), "{keys:?} never reached the window");
+            assert!(drawn.contains(what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&Event::Key(press(Key::Escape)));
+        assert!(
+            !drawn_text(&app, size)
+                .join(" | ")
+                .contains("F1 or ? closes this"),
+            "Escape did not close it"
+        );
+        assert_eq!(
+            app.phase,
+            GamePhase::Playing,
+            "Escape closed the list and threw the round away with it"
+        );
+    }
+
+    /// **`?` raises the list; a plain `/` does not.**
+    ///
+    /// `handle_key` takes a bare `Key` and never sees a modifier, so the help
+    /// key has to be answered one level up in `handle_event`. The second half
+    /// is the part worth having: without reading `modifiers.shift` this would
+    /// pass on any slash, and the list would be advertising `?` while
+    /// answering a key nobody pressed.
+    #[test]
+    fn the_question_mark_raises_the_list_and_a_plain_slash_does_not() {
+        let size = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+        let mut asked = playing_app("crane");
+        for stroke in guitk::shortcut::keystrokes("?").unwrap_or_else(|e| panic!("{e}")) {
+            asked.handle_event(&Event::Key(stroke));
+        }
+        assert!(
+            drawn_text(&asked, size)
+                .join(" | ")
+                .contains("F1 or ? closes this"),
+            "? did not raise the list"
+        );
+
+        let mut slashed = playing_app("crane");
+        slashed.handle_event(&Event::Key(press(Key::Slash)));
+        assert!(
+            !drawn_text(&slashed, size)
+                .join(" | ")
+                .contains("F1 or ? closes this"),
+            "a plain / raised the list, so the Shift in ? is not being read"
+        );
     }
 
     /// Every string the frame draws, in the order it draws them.

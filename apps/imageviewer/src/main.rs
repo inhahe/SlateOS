@@ -59,6 +59,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("T", "Show or hide the thumbnails"),
     ("B", "Show or hide the toolbar"),
     ("S", "Show or hide the status bar"),
+    ("D", "How long each slide stays up"),
     ("F5", "Start or stop the slideshow"),
     ("Space", "Pause or resume the slideshow"),
     ("F11", "Full screen"),
@@ -1092,6 +1093,18 @@ impl ViewerState {
                 self.execute_action(ViewerAction::ToggleToolbar);
                 true
             }
+            // How long each picture stays up. `SlideshowInterval::next`
+            // was written with four options and had no caller, so the module
+            // doc's "configurable intervals" described a constant: five
+            // seconds, for everybody, with no way to ask for anything else.
+            Key::D if !ctrl => {
+                self.slideshow.interval = self.slideshow.interval.next();
+                // The clock restarts, or shortening the interval can change
+                // the picture at once -- which reads as the key advancing the
+                // slideshow rather than setting its pace.
+                self.slideshow.elapsed_ms = 0;
+                true
+            }
             Key::S if !ctrl => {
                 self.execute_action(ViewerAction::ToggleStatusBar);
                 true
@@ -1461,10 +1474,14 @@ fn render_image(
 
     // Slideshow overlay indicator
     if state.slideshow.active {
+        // The interval is on the badge because `D` changes it, and a
+        // setting that can be changed and not seen is a key that appears to
+        // do nothing: the next picture is three seconds or thirty away, and
+        // either way nothing happens at the moment of pressing.
         let indicator_text = if state.slideshow.paused {
-            "PAUSED"
+            format!("PAUSED {}", state.slideshow.interval.label())
         } else {
-            "SLIDESHOW"
+            format!("SLIDE {}", state.slideshow.interval.label())
         };
         let indicator_color = if state.slideshow.paused {
             with_alpha(state.palette.yellow, 200)
@@ -1489,7 +1506,7 @@ fn render_image(
         tree.push(RenderCommand::Text {
             x: area_x + area_w - 92.0,
             y: area_y + 14.0,
-            text: String::from(indicator_text),
+            text: indicator_text.clone(),
             color: indicator_color,
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
@@ -2170,6 +2187,79 @@ mod tests {
         full.fullscreen = true;
 
         vec![plain, full]
+    }
+
+    /// `D` changes how long each slide stays up, and the badge says so.
+    ///
+    /// `SlideshowInterval` has four options and a `next()` that cycles them,
+    /// and `SlideshowState::interval` was `FiveSeconds` at construction with
+    /// no writer in the crate. So the module doc's "Slideshow mode with
+    /// configurable intervals" described a constant, and `next()` -- written
+    /// and tested -- had no caller.
+    #[test]
+    fn d_changes_how_long_each_slide_stays_up() {
+        let mut state = ViewerState::new(1024.0, 768.0);
+        state.slideshow.active = true;
+        state.current_image = Some(ImageData {
+            width: 640,
+            height: 480,
+            image_id: VIEWER_IMAGE_ID,
+        });
+
+        let mut seen = vec![state.slideshow.interval];
+        for _ in 0..3 {
+            assert!(state.handle_key_event(&plain(Key::D)), "D was ignored");
+            seen.push(state.slideshow.interval);
+        }
+        for want in [
+            SlideshowInterval::ThreeSeconds,
+            SlideshowInterval::FiveSeconds,
+            SlideshowInterval::TenSeconds,
+            SlideshowInterval::ThirtySeconds,
+        ] {
+            assert!(
+                seen.contains(&want),
+                "cycling never reached {}",
+                want.label()
+            );
+        }
+        state.handle_key_event(&plain(Key::D));
+        assert_eq!(
+            state.slideshow.interval, seen[0],
+            "the intervals do not come back round"
+        );
+
+        // And the badge names the one in force. Without that, pressing `D`
+        // changes when the *next* picture arrives -- three seconds or thirty
+        // away -- and nothing happens at the moment of pressing.
+        let shown = help_text(&state);
+        assert!(
+            shown.contains(state.slideshow.interval.label()),
+            "the slideshow badge does not name the interval in force: {shown:?}"
+        );
+    }
+
+    /// The clock restarts when the interval changes.
+    #[test]
+    fn changing_the_interval_restarts_the_clock() {
+        let mut state = ViewerState::new(1024.0, 768.0);
+        state.slideshow.active = true;
+        state.slideshow.elapsed_ms = 4000;
+        state.handle_key_event(&plain(Key::D));
+        assert_eq!(
+            state.slideshow.elapsed_ms, 0,
+            "a shorter interval with the old clock still running can change \
+the picture at once, which reads as D advancing the slideshow"
+        );
+    }
+
+    fn plain(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
     }
 
     /// **The shortcut list reaches the window.**

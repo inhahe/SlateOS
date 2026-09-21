@@ -48,6 +48,7 @@ use appearance::Surface;
 use guitk::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use oswindow::app::{self, App, Response};
@@ -577,8 +578,6 @@ impl AlignOp {
 pub enum InteractionMode {
     /// Default: select and move nodes.
     Select,
-    /// Drawing a selection rectangle.
-    RectSelect,
     /// Creating a new node of a specific shape.
     AddNode(NodeShape),
     /// Creating a new edge (pick source, then target).
@@ -755,6 +754,7 @@ impl Clipboard {
 /// `every_advertised_key_does_something`, which reads each label with
 /// `guitk::shortcut` and presses every key it names.
 const SHORTCUTS: &[(&str, &str)] = &[
+    ("V / A / H", "Select / draw an arrow / move the canvas"),
     ("R / E / D", "Add a rectangle / ellipse / diamond"),
     ("F2 / Enter", "Name the selected box or arrow"),
     ("Delete / Backspace", "Delete what is selected"),
@@ -765,6 +765,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+0", "Back to actual size"),
     ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
     ("Ctrl+S", "Save"),
+    ("Escape", "Back to the Select tool"),
     ("F1 / ?", "This list"),
 ];
 
@@ -2116,24 +2117,108 @@ impl DiagramApp {
     /// node across the diagram at any other — which is why both mouse tests run
     /// at a zoom and a pan that are not the identity.
     fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        // The toolbar and the shape palette, before the canvas. Both were
+        // drawn with an active item highlighted and neither was hit-tested,
+        // so a click on a tool button was converted to canvas coordinates
+        // and handled as a click on the drawing underneath it.
+        if matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
+            if (0.0..TOOLBAR_HEIGHT).contains(&ev.y) && ev.x >= 0.0 {
+                if let Some((_, mode, _)) = self
+                    .tool_buttons()
+                    .into_iter()
+                    .find(|(rect, _, _)| rect.contains(ev.x, ev.y))
+                {
+                    return self.set_mode(mode);
+                }
+                // The band is claimed even between the buttons, so a click on
+                // the strip does not fall through to the canvas behind it.
+                return EventResult::Consumed;
+            }
+            if (0.0..PALETTE_WIDTH).contains(&ev.x)
+                && (TOOLBAR_HEIGHT..self.window_h - STATUS_BAR_HEIGHT).contains(&ev.y)
+            {
+                if let Some((_, shape)) = self
+                    .shape_buttons()
+                    .into_iter()
+                    .find(|(rect, _)| rect.contains(ev.x, ev.y))
+                {
+                    return self.set_mode(InteractionMode::AddNode(shape));
+                }
+                return EventResult::Consumed;
+            }
+        }
+
         let (cx, cy) = self.screen_to_canvas(ev.x, ev.y);
         match ev.kind {
-            MouseEventKind::Press(MouseButton::Left) => {
-                if let Some(id) = self.node_at(cx, cy) {
+            MouseEventKind::Press(MouseButton::Left) => match self.mode {
+                // Place one of this program's ten shapes where the pointer
+                // is. Seven of them had no other way in: `R`, `E` and `D`
+                // reach three, and the palette that offers the rest was
+                // decoration.
+                InteractionMode::AddNode(shape) => {
+                    let id = self.add_node(shape, cx, cy);
                     self.selection.select_single_node(id);
-                    self.drag_from = Some((cx, cy));
-                } else {
-                    self.selection.clear();
-                    self.drag_from = None;
+                    EventResult::Consumed
                 }
-                EventResult::Consumed
-            }
+                // Source, then target. `edge_source` was declared and
+                // initialised and read by nothing, so this program could draw
+                // boxes and never connect two of them -- in a diagram editor,
+                // where the connections are the diagram.
+                InteractionMode::AddEdge => {
+                    let Some(id) = self.node_at(cx, cy) else {
+                        // Clicking away cancels a half-drawn edge rather than
+                        // leaving it pending invisibly.
+                        self.edge_source = None;
+                        return EventResult::Consumed;
+                    };
+                    match self.edge_source.take() {
+                        None => {
+                            self.edge_source = Some(id);
+                            self.selection.select_single_node(id);
+                        }
+                        Some(from) if from == id => {
+                            // A node joined to itself draws an edge with
+                            // nowhere to go. Treated as changing your mind
+                            // about the source, which is what a second click
+                            // on the same box looks like.
+                            self.edge_source = Some(id);
+                        }
+                        Some(from) => {
+                            self.add_edge_reporting(from, id);
+                        }
+                    }
+                    EventResult::Consumed
+                }
+                InteractionMode::Pan => {
+                    self.drag_from = Some((cx, cy));
+                    EventResult::Consumed
+                }
+                InteractionMode::Select => {
+                    if let Some(id) = self.node_at(cx, cy) {
+                        self.selection.select_single_node(id);
+                        self.drag_from = Some((cx, cy));
+                    } else {
+                        self.selection.clear();
+                        self.drag_from = None;
+                    }
+                    EventResult::Consumed
+                }
+            },
             MouseEventKind::Move => {
                 let Some((fx, fy)) = self.drag_from else {
                     // Not dragging: a bare pointer move changes nothing, and
                     // answering `Consumed` would redraw on every pixel crossed.
                     return EventResult::Ignored;
                 };
+                if self.mode == InteractionMode::Pan {
+                    // The canvas moves under the pointer, so the point that
+                    // was grabbed stays under it. `screen_to_canvas` divides
+                    // by the zoom, so the delta is already in canvas units and
+                    // the pan offset is in screen ones.
+                    self.pan_x += (cx - fx) * self.zoom;
+                    self.pan_y += (cy - fy) * self.zoom;
+                    return EventResult::Consumed;
+                }
                 let ids: Vec<NodeId> = self.selection.nodes.clone();
                 if ids.is_empty() {
                     return EventResult::Ignored;
@@ -2221,6 +2306,13 @@ impl DiagramApp {
                 self.zoom = 1.0;
                 EventResult::Consumed
             }
+            // The three tools, on the letters drawing programs have used
+            // for thirty years: V for the pointer, A for the arrow being
+            // drawn, H for the hand. The toolbar offers the same three and
+            // could not be clicked until now.
+            Key::V => self.set_mode(InteractionMode::Select),
+            Key::A => self.set_mode(InteractionMode::AddEdge),
+            Key::H => self.set_mode(InteractionMode::Pan),
             // The canvas.
             Key::G => {
                 self.show_grid = !self.show_grid;
@@ -2253,6 +2345,16 @@ impl DiagramApp {
                 self.show_help = false;
                 EventResult::Consumed
             }
+            // Out of whatever tool is up, and out of a half-drawn edge.
+            // Escape backs out of the smallest thing first, and a pending
+            // source is smaller than the tool that picked it.
+            Key::Escape if self.edge_source.is_some() => {
+                self.edge_source = None;
+                EventResult::Consumed
+            }
+            Key::Escape if self.mode != InteractionMode::Select => {
+                self.set_mode(InteractionMode::Select)
+            }
             // New shapes, at the middle of the view so they land somewhere
             // visible rather than at the canvas origin.
             Key::R => self.add_shape_in_view(NodeShape::Rectangle),
@@ -2266,11 +2368,77 @@ impl DiagramApp {
     ///
     /// `delete_selection` above returns nothing, and a key that answers
     /// `Consumed` with an empty selection redraws an unchanged frame.
+    /// Join two nodes, and select the edge so the next `F2` names it.
+    ///
+    /// Selecting it is the whole difference between an edge you can label and
+    /// one you have to find again: `begin_labelling` works on the selection,
+    /// and an edge drawn on a busy canvas is the hardest thing in this
+    /// program to click on afterwards.
+    fn add_edge_reporting(&mut self, from: NodeId, to: NodeId) -> EventResult {
+        let id = self.add_edge(from, to);
+        self.selection.select_single_edge(id);
+        EventResult::Consumed
+    }
+
     fn delete_selection_reporting(&mut self) -> EventResult {
         if self.selection.nodes.is_empty() && self.selection.edges.is_empty() {
             return EventResult::Ignored;
         }
         self.delete_selection();
+        EventResult::Consumed
+    }
+
+    // ========================================================================
+    // Where the tool buttons and the shape buttons are
+    // ========================================================================
+
+    /// The toolbar's tool buttons: where each is drawn, and what it selects.
+    ///
+    /// One list, walked by the renderer and by the hit test. They were two
+    /// things before -- an array of three labels inside `render_toolbar`, and
+    /// no hit test at all, so the buttons were drawn with the active one
+    /// highlighted and a click on them was passed to the canvas underneath as
+    /// though the toolbar were not there.
+    fn tool_buttons(&self) -> [(Rect, InteractionMode, &'static str); 3] {
+        let mut bx = 8.0;
+        let mut next = || {
+            let r = Rect::new(bx, 6.0, 60.0, 28.0);
+            bx += 68.0;
+            r
+        };
+        [
+            (next(), InteractionMode::Select, "Select"),
+            (next(), InteractionMode::AddEdge, "Edge"),
+            (next(), InteractionMode::Pan, "Pan"),
+        ]
+    }
+
+    /// The shape palette's buttons: where each is drawn, and what it adds.
+    ///
+    /// Same story as the toolbar and worse in degree: ten shapes were drawn
+    /// down the sidebar, each highlighted when the mode named it, and the mode
+    /// was never set -- so seven of this program's ten shapes could not be
+    /// drawn at all and the other three only through `R`, `E` and `D`.
+    fn shape_buttons(&self) -> Vec<(Rect, NodeShape)> {
+        let mut by = TOOLBAR_HEIGHT + 36.0;
+        NodeShape::all()
+            .iter()
+            .map(|shape| {
+                let r = Rect::new(8.0, by, PALETTE_WIDTH - 16.0, SHAPE_BTN_H);
+                by += SHAPE_BTN_H + 4.0;
+                (r, *shape)
+            })
+            .collect()
+    }
+
+    /// Change tool, forgetting any half-drawn edge.
+    ///
+    /// A source node picked under the edge tool means nothing under the
+    /// others, and leaving it set would connect a node picked minutes ago to
+    /// the next one clicked.
+    fn set_mode(&mut self, mode: InteractionMode) -> EventResult {
+        self.mode = mode;
+        self.edge_source = None;
         EventResult::Consumed
     }
 
@@ -2384,45 +2552,47 @@ impl DiagramApp {
             width: 1.0,
         });
 
-        // Tool buttons.
-        let buttons = [
-            ("Select", self.mode == InteractionMode::Select),
-            ("Edge", self.mode == InteractionMode::AddEdge),
-            ("Pan", self.mode == InteractionMode::Pan),
-        ];
-
-        let mut bx = 8.0;
-        for (label, active) in &buttons {
-            let bg = if *active {
+        // Tool buttons, from the list `tool_buttons` lays out -- so a
+        // button drawn here is a button a click can reach.
+        let tools = self.tool_buttons();
+        for (rect, mode, label) in &tools {
+            let active = &self.mode == mode;
+            let bg = if active {
                 self.palette.blue
             } else {
                 self.palette.surface0
             };
-            let fg = if *active {
+            let fg = if active {
                 self.palette.crust
             } else {
                 self.palette.text
             };
             cmds.push(RenderCommand::FillRect {
-                x: bx,
-                y: 6.0,
-                width: 60.0,
-                height: 28.0,
+                x: rect.x,
+                y: rect.y,
+                width: rect.w,
+                height: rect.h,
                 color: bg,
                 corner_radii: CornerRadii::all(PANEL_CORNER),
             });
             cmds.push(RenderCommand::Text {
-                x: bx + 8.0,
-                y: 14.0,
+                x: rect.x + 8.0,
+                y: rect.y + 8.0,
                 text: String::from(*label),
                 color: fg,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(52.0),
+                max_width: Some(rect.w - 8.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            bx += 68.0;
         }
+        // Where the zoom controls start: past the last tool button, asked of
+        // the layout rather than accumulated through the loop. A carried
+        // `bx` had to be initialised to a value the loop then overwrote,
+        // which clippy called what it was -- a value assigned and never read.
+        let bx = tools
+            .last()
+            .map_or(8.0, |(rect, _, _)| rect.x + rect.w + 8.0);
 
         // Zoom controls.
         let zoom_text = self.zoom_percent_str();
@@ -2538,9 +2708,11 @@ impl DiagramApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Shape buttons.
+        // Shape buttons, from the list `shape_buttons` lays out.
         let mut by = pal_y + 36.0;
-        for shape in NodeShape::all() {
+        for (rect, shape) in self.shape_buttons() {
+            by = rect.y;
+            let shape = &shape;
             let is_active = matches!(self.mode, InteractionMode::AddNode(s) if s == *shape);
             let bg = if is_active {
                 shape.accent_color(&self.palette)
@@ -2554,10 +2726,10 @@ impl DiagramApp {
             };
 
             cmds.push(RenderCommand::FillRect {
-                x: 8.0,
-                y: by,
-                width: PALETTE_WIDTH - 16.0,
-                height: SHAPE_BTN_H,
+                x: rect.x,
+                y: rect.y,
+                width: rect.w,
+                height: rect.h,
                 color: bg,
                 corner_radii: CornerRadii::all(PANEL_CORNER),
             });
@@ -3611,7 +3783,6 @@ impl DiagramApp {
         // Mode indicator.
         let mode_str = match self.mode {
             InteractionMode::Select => "Mode: Select",
-            InteractionMode::RectSelect => "Mode: Rect Select",
             InteractionMode::AddNode(shape) => {
                 // Use a static label lookup to avoid returning a temp borrow.
                 match shape {
@@ -4166,7 +4337,14 @@ mod tests {
         let mut zoomed = DiagramApp::new(1000.0, 700.0);
         zoomed.handle_event(&press(Key::Equals));
 
-        vec![empty, drawn, undone, zoomed]
+        // ...and with a tool other than Select in hand, so `Escape` has
+        // somewhere to return from. It declines in the Select tool, which is
+        // correct -- there is nothing to back out of -- and is not the same
+        // thing as being unbound.
+        let mut tooled = DiagramApp::new(1000.0, 700.0);
+        tooled.handle_event(&press(Key::A));
+
+        vec![empty, drawn, undone, zoomed, tooled]
     }
 
     /// **The properties panel can be put away.**
@@ -4224,6 +4402,193 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join(" | ")
+    }
+
+    /// Every tool button can be clicked, and selects its tool.
+    ///
+    /// Three were drawn with the active one highlighted and the toolbar was
+    /// not hit-tested at all, so a click on one was converted to canvas
+    /// coordinates and handled as a click on the drawing underneath it.
+    #[test]
+    fn every_tool_button_selects_its_tool() {
+        for (rect, mode, label) in DiagramApp::new(1000.0, 700.0).tool_buttons() {
+            let mut app = DiagramApp::new(1000.0, 700.0);
+            app.mode = InteractionMode::Pan;
+            app.handle_event(&click_at(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0));
+            assert_eq!(
+                app.mode, mode,
+                "clicking the {label} button did not select that tool"
+            );
+        }
+    }
+
+    /// Every shape the palette offers can be placed on the canvas.
+    ///
+    /// Ten were drawn down the sidebar, each highlighted when the mode named
+    /// it, and nothing set the mode -- so seven of this program's ten shapes
+    /// could not be drawn at all, and the other three only through `R`, `E`
+    /// and `D`.
+    #[test]
+    fn every_shape_in_the_palette_can_be_placed() {
+        for (rect, shape) in DiagramApp::new(1000.0, 700.0).shape_buttons() {
+            let mut app = DiagramApp::new(1000.0, 700.0);
+            app.nodes.clear();
+
+            app.handle_event(&click_at(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0));
+            assert_eq!(
+                app.mode,
+                InteractionMode::AddNode(shape),
+                "clicking {} in the palette did not arm it",
+                shape.label()
+            );
+
+            // Well clear of the sidebar and the toolbar.
+            app.handle_event(&click_at(500.0, 400.0));
+            assert_eq!(
+                app.nodes.len(),
+                1,
+                "clicking the canvas with {} armed placed nothing",
+                shape.label()
+            );
+            assert_eq!(
+                app.nodes[0].shape, shape,
+                "the placed node is not the shape that was chosen"
+            );
+        }
+    }
+
+    /// Two boxes can be joined.
+    ///
+    /// `edge_source` was declared, initialised and read by nothing, and
+    /// `add_edge` was called only when building the sample diagram -- so this
+    /// program could draw boxes and never connect two of them, in an
+    /// application where the connections are the diagram.
+    #[test]
+    fn two_boxes_can_be_joined_with_an_edge() {
+        let mut app = DiagramApp::new(1000.0, 700.0);
+        app.nodes.clear();
+        app.edges.clear();
+        let a = app.add_node(NodeShape::Rectangle, 300.0, 300.0);
+        let b = app.add_node(NodeShape::Rectangle, 600.0, 300.0);
+
+        app.handle_event(&press(Key::A));
+        assert_eq!(
+            app.mode,
+            InteractionMode::AddEdge,
+            "A did not pick the tool"
+        );
+
+        let (ax, ay) = app.canvas_to_screen(300.0, 300.0);
+        let (bx, by) = app.canvas_to_screen(600.0, 300.0);
+        app.handle_event(&click_at(ax, ay));
+        assert_eq!(app.edge_source, Some(a), "the first click picked no source");
+        assert!(app.edges.is_empty(), "an edge appeared from one click");
+
+        app.handle_event(&click_at(bx, by));
+        assert_eq!(app.edges.len(), 1, "the second click drew no edge");
+        assert_eq!(app.edges[0].from_node, a);
+        assert_eq!(app.edges[0].to_node, b);
+        assert_eq!(
+            app.edge_source, None,
+            "the source is still pending after the edge was drawn"
+        );
+        assert_eq!(
+            app.selection.edges,
+            vec![app.edges[0].id],
+            "the new edge is not selected, so F2 cannot name it"
+        );
+    }
+
+    /// A box cannot be joined to itself.
+    #[test]
+    fn clicking_one_box_twice_does_not_join_it_to_itself() {
+        let mut app = DiagramApp::new(1000.0, 700.0);
+        app.nodes.clear();
+        app.edges.clear();
+        let a = app.add_node(NodeShape::Rectangle, 300.0, 300.0);
+        app.handle_event(&press(Key::A));
+        let (ax, ay) = app.canvas_to_screen(300.0, 300.0);
+        app.handle_event(&click_at(ax, ay));
+        app.handle_event(&click_at(ax, ay));
+        assert!(
+            app.edges.is_empty(),
+            "a node was joined to itself, drawing an edge with nowhere to go"
+        );
+        assert_eq!(app.edge_source, Some(a), "the source was forgotten instead");
+    }
+
+    /// Escape backs out of a half-drawn edge, then out of the tool.
+    #[test]
+    fn escape_forgets_the_pending_edge_then_returns_to_select() {
+        let mut app = DiagramApp::new(1000.0, 700.0);
+        app.nodes.clear();
+        app.add_node(NodeShape::Rectangle, 300.0, 300.0);
+        app.handle_event(&press(Key::A));
+        let (ax, ay) = app.canvas_to_screen(300.0, 300.0);
+        app.handle_event(&click_at(ax, ay));
+        assert!(app.edge_source.is_some(), "control: no pending source");
+
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(app.edge_source, None, "Escape did not forget the source");
+        assert_eq!(
+            app.mode,
+            InteractionMode::AddEdge,
+            "Escape left the tool as well as the source, in one press"
+        );
+
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(
+            app.mode,
+            InteractionMode::Select,
+            "a second Escape did not return to the Select tool"
+        );
+    }
+
+    /// Dragging with the hand tool moves the canvas.
+    #[test]
+    fn the_pan_tool_moves_the_canvas() {
+        let mut app = DiagramApp::new(1000.0, 700.0);
+        app.handle_event(&press(Key::H));
+        assert_eq!(app.mode, InteractionMode::Pan, "H did not pick the tool");
+
+        let before = (app.pan_x, app.pan_y);
+        app.handle_event(&click_at(500.0, 400.0));
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: 560.0,
+            y: 430.0,
+            kind: MouseEventKind::Move,
+        }));
+        assert_ne!(
+            (app.pan_x, app.pan_y),
+            before,
+            "dragging with the hand tool moved nothing"
+        );
+    }
+
+    /// Switching tools forgets a half-drawn edge.
+    #[test]
+    fn changing_tool_forgets_a_pending_edge_source() {
+        let mut app = DiagramApp::new(1000.0, 700.0);
+        app.nodes.clear();
+        app.add_node(NodeShape::Rectangle, 300.0, 300.0);
+        app.handle_event(&press(Key::A));
+        let (ax, ay) = app.canvas_to_screen(300.0, 300.0);
+        app.handle_event(&click_at(ax, ay));
+        assert!(app.edge_source.is_some(), "control: no pending source");
+
+        app.handle_event(&press(Key::V));
+        assert_eq!(
+            app.edge_source, None,
+            "a source picked under the edge tool survived into another one"
+        );
+    }
+
+    fn click_at(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
     }
 
     fn press(k: Key) -> Event {

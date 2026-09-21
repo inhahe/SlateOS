@@ -53,6 +53,12 @@
 //! - **Smart albums cannot be made either.** `create_smart_album` and the
 //!   rule matching behind it are tested and unreachable, exactly as ordinary
 //!   albums were until now.
+//! - **Slideshow transitions are names only.** `SlideshowTransition` has six
+//!   variants, `SlideshowState::transition` holds one, and the only thing
+//!   that ever read it was the control line printing its own name -- so the
+//!   window said "Fade" while pictures were replaced instantly. The name is
+//!   no longer drawn; performing a cross-fade needs an alpha-blended image
+//!   draw the toolkit does not offer.
 //! - **Nothing is exported.** `ExportOptions` records a format, a quality and
 //!   a size, has a `Default` and a test, and is read by nothing: no function
 //!   in this crate writes a picture anywhere. The feature list offered
@@ -1573,6 +1579,17 @@ pub struct SlideshowState {
     pub photo_ids: Vec<PhotoId>,
     pub current_index: usize,
     pub interval_ms: u64,
+    /// Which transition the slideshow would use between pictures.
+    ///
+    /// **Nothing performs it.** The only reader this field ever had was the
+    /// line that printed its own name in the slideshow controls, so the
+    /// window said "Fade" and pictures were replaced instantly. That is the
+    /// most persuasive shape a false claim takes: the evidence is the
+    /// program's own output at the moment somebody checks.
+    ///
+    /// Kept rather than deleted because it records what the six transitions
+    /// are for, and drawing a cross-fade needs an alpha-blended image draw
+    /// this toolkit does not have. The name is no longer printed.
     pub transition: SlideshowTransition,
     pub paused: bool,
     pub shuffle: bool,
@@ -4909,12 +4926,14 @@ impl PhotoApp {
         // Slideshow controls at bottom
         let ctrl_y = y + height - 40.0;
         let paused_label = if ss.paused { "Play" } else { "Pause" };
+        // The transition's name was printed here, and nothing performs
+        // one. A slideshow that says "Fade" and cuts is claiming something
+        // about what the viewer just saw.
         let progress = format!(
-            "{} / {}  |  {}  |  {}",
+            "{} / {}  |  {}",
             ss.current_index.saturating_add(1),
             ss.photo_ids.len(),
             paused_label,
-            ss.transition.label(),
         );
         cmds.push(RenderCommand::Text {
             x: x + width / 2.0 - 80.0,
@@ -7420,6 +7439,60 @@ mod tests {
     /// `start_slideshow` is a no-op without them. The first version of the
     /// test below used `new()` and its own control caught that: "no slideshow
     /// to advance" rather than a green pass proving nothing.
+    /// The slideshow does not name a transition it will not perform.
+    ///
+    /// `SlideshowState::transition` had exactly one reader: the control line
+    /// printing its own name. So the window read "Fade" and the pictures were
+    /// replaced instantly -- the panel reads the value in order to draw the
+    /// value, and the evidence for the claim is the program's own output at
+    /// the moment somebody checks it.
+    #[test]
+    fn the_slideshow_controls_do_not_name_a_transition() {
+        let mut app = app_with_photos("transition");
+        app.start_slideshow();
+        assert!(
+            app.slideshow.is_some(),
+            "control: the fixture must be running a slideshow"
+        );
+
+        let texts: Vec<String> = app
+            .render_commands(1400.0, 900.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // The control line specifically, not the whole window: "None" and
+        // "Zoom" are ordinary words other controls may legitimately use, and
+        // a test that failed on those would be testing the vocabulary.
+        let control_line = texts
+            .iter()
+            .find(|t| t.contains(" / ") && t.contains('|'))
+            .unwrap_or_else(|| {
+                panic!(
+                    "control: the slideshow control line should be on screen; the window drew {} text command(s)",
+                    texts.len()
+                )
+            });
+
+        for transition in [
+            SlideshowTransition::None,
+            SlideshowTransition::Fade,
+            SlideshowTransition::SlideLeft,
+            SlideshowTransition::SlideRight,
+            SlideshowTransition::Dissolve,
+            SlideshowTransition::Zoom,
+        ] {
+            assert!(
+                !control_line.contains(transition.label()),
+                "the slideshow control line names the {} transition and performs none: {control_line:?}",
+                transition.label()
+            );
+        }
+    }
+
     fn app_with_photos(tag: &str) -> PhotoApp {
         let mut app = PhotoApp::new();
         let dir = std::env::temp_dir().join("slateos-photomanager-slideshow");

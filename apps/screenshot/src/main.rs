@@ -1525,6 +1525,26 @@ impl ScreenshotApp {
             self.render_notification(&mut tree, notif);
         }
 
+        // And, on every view, what this program cannot do.
+        //
+        // `CANNOT_CAPTURE` was reachable only by pressing Capture and then
+        // reading a notification that fades after six seconds. Somebody who
+        // opens this window sees three capture buttons, a save location and a
+        // file format, and nothing telling them that none of it will produce
+        // a file -- which is the question they are here to have answered.
+        // Unconditional, because there is no state in which this program can
+        // read the screen.
+        tree.push(RenderCommand::Text {
+            x: 8.0,
+            y: 4.0,
+            text: String::from(CANNOT_CAPTURE),
+            color: self.palette.ink(self.palette.yellow),
+            font_size: 11.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some((self.window_width - 16.0).max(120.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+
         tree
     }
 
@@ -2359,6 +2379,46 @@ mod tests {
     /// The annotation colours are declared as derived rather than exempted:
     /// they are marks the user draws *into* the picture and that are saved
     /// with it, so they are content, not theme.
+    /// The window says it cannot take a screenshot, before you press
+    /// anything.
+    ///
+    /// `CANNOT_CAPTURE` was reachable only by pressing Capture and then
+    /// reading a notification that fades after six seconds. Somebody opening
+    /// this window sees three capture buttons, a save location and a file
+    /// format, and nothing saying that none of it will produce a file --
+    /// which is the question they came to have answered.
+    #[test]
+    fn every_view_says_no_screenshot_can_be_taken() {
+        for view in [
+            AppView::Menu,
+            AppView::RegionSelect,
+            AppView::Countdown,
+            AppView::Preview,
+        ] {
+            let mut app = ScreenshotApp::new(1280.0, 800.0);
+            app.view = view;
+            let texts: Vec<String> = app
+                .render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect();
+            // Against the words a reader sees rather than the constant:
+            // comparing with `CANNOT_CAPTURE` still passes with the constant
+            // rewritten to "Screenshots".
+            assert!(
+                texts.iter().any(|t| t.contains("Cannot take a screenshot")
+                    && t.contains("nothing was captured")),
+                "{view:?} does not say a screenshot cannot be taken; it drew \
+{} text command(s)",
+                texts.len()
+            );
+        }
+    }
+
     #[test]
     fn every_colour_the_screenshot_chrome_draws_comes_from_its_palette() {
         // All four views, with a capture in hand so Preview has something to

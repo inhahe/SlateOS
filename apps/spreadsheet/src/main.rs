@@ -108,6 +108,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
     ("Ctrl+B / Ctrl+I", "Bold / italic"),
     ("Ctrl+F / Ctrl+H", "Find / find and replace"),
+    ("Alt+C", "Find and replace: match case, or ignore it"),
     ("Ctrl+O / Ctrl+S", "Open / save"),
     ("Ctrl+T", "Show or hide the toolbar"),
     ("Ctrl+G", "Show or hide the gridlines"),
@@ -2040,6 +2041,8 @@ pub enum FindControl {
     Replace,
     /// Replace every match.
     ReplaceAll,
+    /// Match case, or ignore it.
+    MatchCase,
 }
 
 /// Where the find-and-replace panel and each of its controls are drawn.
@@ -4054,6 +4057,15 @@ impl SpreadsheetApp {
             }
         }
 
+        // Alt, ahead of the text branch, which would otherwise type a `c`
+        // into whichever box has the caret. Not Ctrl+I: that is italic here,
+        // and a key that means two things in one window is worse than an
+        // unfamiliar one.
+        if event.modifiers.alt && event.key == Key::C {
+            self.apply_find_control(FindControl::MatchCase);
+            return EventResult::Consumed;
+        }
+
         match event.key {
             Key::Escape => {
                 self.mode = InteractionMode::Normal;
@@ -5977,6 +5989,18 @@ impl SpreadsheetApp {
             FindControl::Field(FindField::Replace),
         ));
 
+        // The case switch, between the two boxes and the buttons.
+        //
+        // `FindReplace::case_sensitive` is handed to `textfind::Case` on every
+        // search *and* consulted by both replace paths, and it was `false`
+        // with no writer: so a replace of `id` also rewrote `ID` and `Id`,
+        // always, and a spreadsheet full of column headings could not be
+        // edited without hitting them.
+        controls.push((
+            Rect::new(dlg_x + 70.0, dlg_y + 92.0, 130.0, 18.0),
+            FindControl::MatchCase,
+        ));
+
         let btn_y = dlg_y + dlg_h - 34.0;
         let mut bx = dlg_x + 12.0;
         for (label, control) in [
@@ -6020,6 +6044,13 @@ impl SpreadsheetApp {
             FindControl::FindNext => self.find_next(),
             FindControl::Replace => self.replace_current_match(),
             FindControl::ReplaceAll => self.replace_all_matches(),
+            FindControl::MatchCase => {
+                self.find_replace.case_sensitive = !self.find_replace.case_sensitive;
+                // The results on screen answer the old question; leaving them
+                // there invites reading them as the new one's.
+                self.find_replace.results.clear();
+                self.find_replace.current_result = 0;
+            }
         }
     }
 
@@ -6195,6 +6226,30 @@ impl SpreadsheetApp {
                         color: self.palette.text,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(rect.w - 8.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
+                FindControl::MatchCase => {
+                    // Drawn as a box with a tick, and the key beside it, on
+                    // the pattern the rest of this tree uses for an option a
+                    // click and a keystroke both reach.
+                    let ticked = if self.find_replace.case_sensitive {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    };
+                    cmds.push(RenderCommand::Text {
+                        x: rect.x,
+                        y: rect.y,
+                        text: format!("{ticked} Match case  (Alt+C)"),
+                        font_size: SMALL_FONT,
+                        color: if self.find_replace.case_sensitive {
+                            self.palette.text
+                        } else {
+                            self.palette.subtext0
+                        },
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(rect.w),
                         overflow: TextOverflow::Ellipsis,
                     });
                 }
@@ -6987,6 +7042,107 @@ mod tests {
             !app.picker.is_open(),
             "a view toggle fell through to the save dialog"
         );
+    }
+
+    /// Find and replace can be told that case matters.
+    ///
+    /// `FindReplace::case_sensitive` is handed to `textfind::Case` on every
+    /// search and consulted by both replace paths, and it was `false` with no
+    /// writer in the crate. So a replace of `id` also rewrote `ID` and `Id`,
+    /// always -- and a sheet whose headings differ only in case could not be
+    /// edited without hitting them.
+    #[test]
+    fn alt_c_makes_find_and_replace_match_case() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.set_cell_input(CellAddr::new(0, 0), "id");
+        app.set_cell_input(CellAddr::new(0, 1), "ID");
+        app.set_cell_input(CellAddr::new(0, 2), "Id");
+
+        app.open_find_replace(FindField::Search);
+        app.find_replace.search_text = String::from("id");
+        app.find_next();
+        let folded = app.find_replace.results.len();
+        assert_eq!(
+            folded, 3,
+            "control: ignoring case, all three spellings should match"
+        );
+
+        assert_eq!(
+            app.handle_event(&alt(Key::C)),
+            EventResult::Consumed,
+            "Alt+C was ignored in the find panel"
+        );
+        assert!(
+            app.find_replace.case_sensitive,
+            "Alt+C did not turn matching on"
+        );
+        app.find_next();
+        assert_eq!(
+            app.find_replace.results.len(),
+            1,
+            "with case on, only the exact spelling should match"
+        );
+
+        app.handle_event(&alt(Key::C));
+        assert!(
+            !app.find_replace.case_sensitive,
+            "Alt+C is a switch, not a one-way door"
+        );
+    }
+
+    /// The panel draws the switch, and the click reaches it.
+    #[test]
+    fn the_find_panel_draws_the_case_switch_and_a_click_works_it() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.open_find_replace(FindField::Search);
+
+        let drawn = |a: &SpreadsheetApp| -> Vec<String> {
+            a.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(
+            drawn(&app).iter().any(|t| t == "[ ] Match case  (Alt+C)"),
+            "the panel does not draw the case switch"
+        );
+
+        // The control is in the same list the hit test walks, so a click on
+        // where it is drawn has to reach it.
+        let panel = app.find_panel();
+        let (rect, _) = panel
+            .controls
+            .iter()
+            .find(|(_, control)| *control == FindControl::MatchCase)
+            .expect("the panel lays out no case switch");
+        let (cx, cy) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+        app.handle_mouse_event(&MouseEvent {
+            x: cx,
+            y: cy,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert!(
+            app.find_replace.case_sensitive,
+            "a click on the case switch did not work it"
+        );
+        assert!(
+            drawn(&app).iter().any(|t| t == "[x] Match case  (Alt+C)"),
+            "the switch moved and the panel still draws it unticked"
+        );
+    }
+
+    fn alt(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.alt = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
     }
 
     fn ctrl(k: Key) -> Event {
@@ -9135,15 +9291,29 @@ mod tests {
                     stroke.text.is_empty(),
                     "a stroke carrying text would be eaten by the edit catch-all"
                 );
-                let mut app = SpreadsheetApp::new(1280.0, 800.0);
-                assert_eq!(
-                    app.handle_event(&Event::Key(stroke.clone())),
-                    EventResult::Consumed,
+                // Several states, not one. A key that belongs to a panel
+                // declines while that panel is shut, which is correct and is
+                // not the same thing as being unbound -- `Alt+C` is the find
+                // panel's, and a single-state guard called it unanswered.
+                let answered = key_states().iter_mut().any(|app| {
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
                     "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
                     stroke.key
                 );
             }
         }
+    }
+
+    /// States a shortcut might need in order to be able to act.
+    fn key_states() -> Vec<SpreadsheetApp> {
+        let fresh = SpreadsheetApp::new(1280.0, 800.0);
+        // With the find panel up, so its own keys have something to work on.
+        let mut finding = SpreadsheetApp::new(1280.0, 800.0);
+        finding.open_find_replace(FindField::Search);
+        vec![fresh, finding]
     }
 
     /// **The shortcut list reaches the window.**

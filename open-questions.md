@@ -3144,6 +3144,37 @@ failing.
 sessions working this repository at once; each owns a separate set of
 directories and its own copy of the tree.
 
+**Second addendum, later the same day — the boot ran, and the decisive fact
+is not the one I expected.**
+
+The boot completed. The kernel reached `BOOT_OK` with 2.76 MB of serial
+output, every one of today's fixes demonstrated, and the run still failed —
+on exactly three userspace fixture rungs: `ctest-coreutils-runs` (exit 11),
+`ctest-pty` (45) and `ctest-python-repl` (8).
+
+**All three already exist on `main`.** I checked the wrong function name
+first and briefly concluded one was new, which would have made merging
+introduce a fresh failure; `origin/main` carries all three. So merging this
+lane would add a kernel fix, six repaired assertions and a standing gate to
+a tree that already has these three failures, and would introduce nothing.
+
+That is the fact this question turns on, and it is narrower than "is the
+rule too strict". The rule's stated purpose is that *a broken lane blocks
+the other two* — it exists to stop breakage being **introduced**. Here it is
+blocking a merge that introduces none, which is a different situation from
+the one the rule was written for.
+
+**What it is costing, concretely, today:** two HIGH-severity requests I
+filed against lane B were retracted this morning (their premise was
+impossible — posix execs through the native syscall and cannot reach the
+Linux-ABI path where the NULL was observed). Those retractions are
+committed and cannot reach lane B until `main` moves. Lane B may be looking
+at two live requests for a bug that does not exist.
+
+**I have not merged**, and will not decide my own exception to a rule the
+operator set. Recording the measurement so the decision is made against
+facts rather than an impression of risk.
+
 **Addendum, 2026-09-21 — two measurements that change what is being asked.**
 
 *The merge is clean.* `git merge-tree --write-tree lane-a origin/main`

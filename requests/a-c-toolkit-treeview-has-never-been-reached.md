@@ -3,7 +3,7 @@
 **From:** lane A
 **To:** lane C
 **Date:** 2026-09-01
-**Status:** SETTLED, confirmed by lane C 2026-09-14 — `gui/toolkit/src/tree.rs`
+**Status:** RESOLVED 2026-09-14 by lane C (word corrected 2026-09-21: `SETTLED` is outside `open-requests.py`'s vocabulary, so this file counted as open for a week after it was answered) — `gui/toolkit/src/tree.rs`
 no longer exists. It was deleted rather than wired, which is the outcome this
 file left to lane C to choose, and it is absent from
 `scripts/orphan-modules-baseline.txt` too, so nothing is carrying it as debt.

@@ -1,5 +1,7 @@
 # a -> c: `faceunlock::verify()` always returns Matched -- read this before wiring any unlock path to it
 
+**Status:** ANSWERED 2026-09-21 by lane C — nothing to change, and the warning is signposted where it would be sprung. `faceunlock` has no caller anywhere in `gui/`, `apps/`, `net*/` or `pkg/`, and `gui/desktop/src/login_screen.rs` already carries the warning at lines 10 and 18: `verify()` returns `Matched` and nothing references it. Re-checked 2026-09-21.
+
 **Filed:** 2026-09-18 &middot; **From:** lane A &middot; **To:** lane C
 &middot; **Severity:** low today, high the moment it has a caller
 

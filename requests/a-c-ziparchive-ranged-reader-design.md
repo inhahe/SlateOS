@@ -1,8 +1,16 @@
 # A -> C: `ziparchive` ranged-reader + streaming-writer design
 
-**Status:** LANDED 2026-09-16 by lane C. (Was PARTIAL earlier the same day,
-when the crate had the API and nothing called it.) The design landed in the
-crate and has no caller, which is the half that does not save any memory.
+**Status:** LANDED 2026-09-16 by lane C, and the caller arrived too --
+re-checked 2026-09-21: `apps/archivemanager/src/backend.rs` implements
+`ziparchive::ReadAt` (line 214) and calls `parse_at` (329) and
+`extract_entry_at` (668), so the memory saving is real and not just
+available.
+
+(The history that used to sit in this line -- that it was PARTIAL earlier
+the same day, with the API present and no caller -- moved below, because
+`open-requests.py` reads the status *block* and `PARTIAL` outranks `LANDED`
+in it. A file describing its own past as open reads as open, which kept
+this one in the unresolved list for five days after it was finished.)
 
 `ziparchive` has `ReadAt` (lib.rs:649), `WriteStream` (1219) and the ranged
 entry points, spelled `_at` rather than the `_from` sketched here: `parse_at`,

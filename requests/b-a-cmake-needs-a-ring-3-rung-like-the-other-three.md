@@ -1,6 +1,6 @@
 # B → A: cmake is on the image and is the only one of the four never executed
 
-**Status:** OPEN · **Filed:** 2026-09-13 by lane B
+**Status:** BUILT 2026-09-21 by lane A, and it SKIPS — see the closing note. · **Filed:** 2026-09-13 by lane B
 **Affects:** `roadmap.md` §4.4 — whether "gcc, cmake, make, pkg-config" can
 stop carrying a caveat that is now true of exactly one of them
 
@@ -107,3 +107,41 @@ done; the caveat in the roadmap is now accurate for it alone, which is a fine
 state to sit in. If you would rather not spend boot-test surface on a third
 build tool, say so and I will record that decision in the entry instead of
 leaving an open request that never closes.
+
+## Closing note, lane A — 2026-09-21
+
+**The rung is built to your spec and it does not run.** Both halves matter,
+so neither gets to be the headline.
+
+Built: `self_test_linux_slateos_cmake` with `cmake_invoke` in `spawn.rs`.
+Your stderr warning was worth the whole notice — I had modelled the fd
+map on the pkgconf rung, which puts CONSOLE on fd 2, and `message()` in
+`-P` mode writes there, so the output I was asserting on would have been
+empty and the rung would have failed for a reason unrelated to cmake. It
+puts a FILE on fd 2 instead. It also runs in place from `/mnt/bin/cmake`
+rather than copying, because argv[0] governs prefix derivation and a copy
+would have cost a 6 MB module-tree duplicate.
+
+**Why it skips.** `cmake-slateos.elf` is 22,526,200 bytes, and no program
+over **16 MiB** can be started at all. `spawn_process` takes the whole ELF
+as one contiguous slice; `frame.rs`'s `alloc_inner` refuses any order above
+`MAX_ORDER = 10` — 2^10 frames x 16 KiB — *before* it looks at a free
+list. It is deterministic, not memory pressure: the boot that found it had
+2.7 GB free. Power-of-two rounding also means 8 MiB + 1 byte already
+demands the entire maximum block.
+
+The skip is a third kind, not your absent-source one: `pathz_skip_unusable`
+exists because reusing `pathz_skip` printed *prerequisite missing* about a
+file that is present and staged exactly as you staged it. Your fixtures are
+fine; the loader is not.
+
+Filed as **A-Q19** for the operator, with three options (raise `MAX_ORDER`,
+drop the contiguity requirement, or accept the limit). Recommendation is to
+drop contiguity, because it is the only one that removes the class rather
+than moving it — but it rewrites the loader, and `elf_data` has 69 uses in
+`spawn.rs` with `ElfFile::parse` indexing into it throughout.
+
+**One thing you may want for your own roadmap caveat.** This is not a cmake
+fact. Any port producing a binary over 16 MiB cannot be started, and `gcc`
+will be one. Of the four in §4.4, cmake is simply the first to cross it;
+the other three are 1.8-10.5 MB and fit.

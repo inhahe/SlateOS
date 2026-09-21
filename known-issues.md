@@ -161772,8 +161772,31 @@ parser. **Do not teach the guard to skip.** Either split the panel so the key
 rows are their own list, or keep one list whose first column is strictly
 keystrokes and move `Click` and `Goal` into the description column.
 
-**The working order.** `apps/towers` first, since it is one app and its list
-is unchecked. Then the 56, largest first
+### Progress, and a third app off the queue that needed nothing
+
+`apps/towers` is **done** -- its sheet is split into `RULES` and `SHORTCUTS`,
+`N` is advertised at last, `F1` and `?` join `H`, and three guards hold it.
+That closes the one-app second front.
+
+`apps/videoplayer` sits at the top of the first front with 31 keys and "no
+list", and **needs nothing at all** -- it has the best key documentation in the
+suite. Its `Shortcut { keys, action, press, command }` table is drawn by the
+help panel *and* searched by the key handler
+(`Shortcuts::list().iter().find(|sc| sc.press.matches(event))`), so the printed
+label and the working binding are one object and cannot drift. Its doc comment
+even records removing `Ctrl+O` and `Ctrl+S` because the tree has no file
+chooser and no framebuffer read-back -- the exact defect `apps/paint` shipped,
+caught here as a matter of course because deleting the row and deleting the
+binding are the same edit. Written up as design-decisions 866, which adopts
+that shape as the preferred one where an app already has a command type.
+
+**That is three of the first four apps opened off this queue that needed no
+work** -- `sokoban` (footer), `minesweeper` (guard under another name),
+`videoplayer` (single table) -- against one that needed a great deal
+(`paint`). The queue is a list of *candidates* and behaves like one. Read
+before editing, and expect to close entries with a note rather than a change.
+
+**The working order.** The 56, largest first
 (`videoplayer` 31, `hangman` 29, `wordle` 29, `crossword` 27, `rssreader` 26,
 `editor` 19, `paint` 17 ...). Then the 25 prose-form. Then read the 10 and
 expect to close most of them with no change, recording *why* each needed

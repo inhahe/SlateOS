@@ -510,6 +510,17 @@ static IRQ_STACK_BOTTOM: [AtomicU64; crate::smp::MAX_CPUS] = {
 /// conservative: the 2026-09-15 writeback self-deadlock was a softirq
 /// re-entering a lock, so softirq context is worth covering. It does mean
 /// `in_hardirq()` means *interrupt context*, not strictly *hard IRQ*.
+///
+/// **This is not the CPU-time accounting counter, and the resemblance is
+/// the trap.** `cputime::irq_depth` counts the same physical fact with
+/// the same type, per-CPU, for a different purpose: exact cycle
+/// attribution. This one is a conservative context marker -- it spans
+/// softirq, and `enter_hardirq_for_test()` sets it with no interrupt
+/// involved at all, which is precisely what the accounting counter must
+/// never permit. Comparing the two by shape says duplicate; the
+/// distinguishing facts are one caller and one requirement. See the
+/// `irq_depth` field in `cputime.rs` for why merging them corrupts
+/// `/proc` and throttles the timer.
 static HARDIRQ_DEPTH: [AtomicU64; crate::smp::MAX_CPUS] = {
     const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; crate::smp::MAX_CPUS]

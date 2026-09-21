@@ -159815,10 +159815,20 @@ sealed, and a write succeeds. An unenforced *irrevocable* restriction is
 worse than no restriction, because the word invites reliance.
 
 **And its `/proc` output makes the gap unreadable.** `sealing::stats()`
-reports a `denied` count, which can only ever be 0 because nothing checks a
-seal to deny anything. "0 denied" reads as *nobody has tried* rather than
-*nothing is enforced* -- dd-942 in the one place a reader would look to find
-out. Same shape as `binfmt`'s `stats()` returning zeros for an uninitialised
+reports a `denied` count that reads 0 on any ordinary boot, so "0 denied"
+looks like *nobody has tried* rather than *nothing in the write path asks*
+-- dd-942 in the one place a reader would look to find out.
+
+*(Corrected 2026-09-21: this said the count "can only ever be 0 because
+nothing checks a seal to deny anything", and that is false. `DENIED_OPS`
+IS incremented, in `check_seals` at lines 216 and 269 -- but `check_seals`
+has exactly one caller outside its module, `kshell`, a command a human
+types. So the counter is live and reachable, just not from anything that
+writes a file. `secpolicy` carried the same overstatement of mine and is
+corrected too. Found by trying to MEASURE the class rather than trusting my
+own prose: a scan for atomic counters in `fs/` that are loaded but never
+incremented returned zero candidates, which contradicted what I had
+published twice. The scan was right.)* Same shape as `binfmt`'s `stats()` returning zeros for an uninitialised
 table, and as the lock-context corpus reading `clean` over a population of
 its own fixtures.
 

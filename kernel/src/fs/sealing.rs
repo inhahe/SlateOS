@@ -9,9 +9,16 @@
 //! restriction, because the word invites reliance -- which is why this
 //! paragraph is first rather than a footnote.
 //!
-//! Note also that `stats()`'s `denied` count can only ever be 0, since
-//! nothing checks a seal in order to deny anything. In `/proc` that reads
-//! as *nobody has tried*, not as *nothing is enforced*.
+//! Note also what `stats()`'s `denied` count is worth. It IS incremented
+//! -- `DENIED_OPS.fetch_add` in `check_seals` -- but `check_seals` has one
+//! caller outside this module, `kshell`, which is a command a human types.
+//! No write or truncate path calls it. So the count reads 0 on any boot
+//! where nobody ran that command, and in `/proc` that reads as *nobody has
+//! tried* rather than *nothing in the write path asks*.
+//!
+//! (An earlier version of this note said the count "can only ever be 0".
+//! That was false: one kshell command moves it. The counter is reachable,
+//! just not from anything that writes a file.)
 //!
 //! Enforcement belongs in the VFS write and truncate paths and needs a
 //! capability story; tracked in `known-issues.md`.

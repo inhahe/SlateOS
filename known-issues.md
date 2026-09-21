@@ -161570,7 +161570,17 @@ The 33-row list is now a `SHORTCUTS` const drawn by `render_card` behind `F1`.
 has somewhere to go, which is the `apps/spreadsheet` case design-decisions 863
 carved out.
 
-## `TD-C-NINETY-ONE-APPS-BIND-KEYS-AND-NAME-THEM-NOWHERE` (lane C, 2026-09-21) -- **OPEN**
+## `TD-C-NINETY-ONE-APPS-BIND-KEYS-AND-NAME-THEM-NOWHERE` (lane C, 2026-09-21) -- **OPEN, AND THE NUMBER IN THE TITLE IS WRONG**
+
+> **Read this first (added 2026-09-21, hours after filing).** The title says
+> ninety-one and the real figure is **26 apps and 68 keys, of which about 38
+> are genuine**. The entry below is kept as filed because the way the number
+> came down is worth more than the number: six apps were opened off the queue
+> and five needed nothing, each invisible to the survey for a different reason,
+> and fixing the survey to see those shapes shrank the queue by two thirds. The
+> slug is left alone because it is what a triage grep keys on; the marker says
+> what the title does not. The live queue is the tail of
+> `python scripts/key-survey.py`.
 
 **In short:** most of the apps in this suite answer keyboard shortcuts and
 never tell you what they are. Of 127 apps that bind a letter, digit or

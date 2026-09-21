@@ -164604,6 +164604,48 @@ the harness comment beside them says: if `/bin/true` cannot exec, the pty
 and CPython rungs below are exercising the same broken path from further
 away. Fixing the exec should clear all three.
 
+#### The three failures are at least TWO findings, not one
+
+`main.rs` frames them as one: *if `/bin/true` cannot exec, none of the
+rungs below is testing what its name says.* That is sound reasoning about
+`ctest-coreutils-runs` being a precondition, and it is wrong about the
+third rung, which never execs anything.
+
+| rung | exit | mechanism |
+|---|---|---|
+| `ctest-coreutils-runs` | 11 | `execl` of `/mnt/bin/true` failed |
+| `ctest-python-repl` | 8 | `execl` of `/bin/python3` failed |
+| `ctest-pty` | **45** | `waitpid(kid, &status, WNOHANG)` never returned the child's pid within `SPIN` |
+
+Exactly two C fixtures in the tree call `execl`, and they are the first
+two. **None calls `execv`.** `ctest-pty` does not exec at all: its child
+`forkpty`s, checks `isatty`, installs a `SIGINT` handler and spins.
+
+**And its failure is a starvation, not a fault.** The kernel log shows the
+child DID finish -- `Process 205 has no threads left - now zombie` -- and
+three lines earlier:
+
+```
+[sched] Anti-starvation: cur=173 boosted 1 task to priority 0: [174(p16)]
+```
+
+The scheduler had to boost the child out of starvation, and the parent's
+`WNOHANG` + `sched_yield()` spin ran out of `SPIN` before the child got
+far enough. The fixture's own comment predicts this shape: *"WNOHANG means
+the child must run to exit, and it cannot while this loop owns the
+quantum."* `sched_yield()` is the mitigation and it was not sufficient.
+
+**Why this matters more than a third bug.** Someone fixing `execl` will
+expect all three rungs to clear, because the harness says they are one
+finding. Two will clear. The third will not, and the natural reading of
+that is *"the `execl` fix is incomplete"* -- sending the next round back
+into the exec path it just left. A wrong grouping costs more than a
+missing one.
+
+`ctest-pty`'s half is **lane A's**: `sched_yield`, the anti-starvation
+boost and the quantum are kernel, not fixture. The `execl` half is lane
+B's. They are unrelated and should be worked separately.
+
 #### ROUND 6: a passing control in the SAME boot kills every structural theory
 
 The evidence was in the serial log the whole time, 557 lines below the

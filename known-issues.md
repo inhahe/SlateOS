@@ -161713,64 +161713,67 @@ prose-form apps are the opposite case and almost certainly still need a list:
 `apps/videoplayer` binds 31 keys and has one prose mention, which is not a list
 by any reading.
 
-### The second front, and it is the higher-yield one
+### The second front -- retracted the same day; it was a measurement error
 
-Counting the apps that *have* a list says nothing about whether the list is
-true. 39 apps carry one; **18 of them have neither guard** -- not
-`every_advertised_key_does_something`, which reads the list against the
-handler, and not `the_shortcut_list_reaches_the_window`, which reads it against
-the screen. It is the same 18 for both:
+**What this section said for about twenty minutes:** that 39 apps carry a key
+list, **18 of them have no guard**, and that chasing those eighteen was the
+higher-yield front because `apps/paint`'s unguarded list had been 8 of 33 dead.
 
-```
-magnifier 25, life 17, mandelbrot 15, connect4 14, flood 12, game2048 10,
-minesweeper 8, nim 8, towers 8, maze 7, pipes 7, simon 7, wordsearch 7,
-sliding 6, lightsout 5, memory 5, mixer 3, tictactoe 3
-```
+**That number was wrong, and how it was got wrong is the useful part.** It came
+from grepping each crate for the *names* `every_advertised_key_does_something`
+and `the_shortcut_list_reaches_the_window`. `apps/minesweeper` came back
+"unguarded" and has guarded its list since the day it was written -- its tests
+are called `every_key_the_footer_names_does_something` and
+`the_footer_names_the_keys_that_do_something`. The scan was keyed on one
+spelling of a name, which is the failure this file has a whole catalogue about.
 
-**Expect these to be wrong, not merely unguarded.** `apps/paint`'s list was
-unguarded and 8 of its 33 rows were dead -- two for a Save and an Open that no
-code path reached, and six for a `Key`-to-`char` fallback that listed 16 of 26
-letters and no punctuation, so whole chords produced no character at all.
-`apps/rssreader` shipped 21 rows of which about four worked. A list nobody
-checks is a list that drifts, and these eighteen have never been checked by
-anything.
+**Three measurements of one question, in order:**
 
-This front is also much cheaper per app: the list already exists, so the work
-is adding two tests and fixing what they name. Paint took one guard to find six
-defects that six separate readings had missed.
+| keyed on | answer |
+|---|---|
+| the two test *names* | 18 unguarded |
+| any mention of the list's identifier from test code | 1 unguarded |
+| a test that *iterates* the list (`for .. in NAME`, `NAME.iter()`) | 3 unguarded |
 
-**`apps/game2048` is on this list and is a special case:** it has a list *and*
-a working help overlay, raised by `H` rather than `F1`. That predates
-design-decisions 863 and is exactly the failure 863 exists to prevent, so it
-wants `F1` and `?` added to the overlay it already has, plus the two guards.
+None of the three is the property. The second counts `apps/paint`'s old
+`assert!(!shortcuts.is_empty())` as a guard, which guarded nothing -- it is the
+exact test that sat beside 8 dead rows for the program's whole life. The third
+misses `apps/life`, which checks its rows by index rather than by iterating,
+and `apps/mixer`, which pairs each row with an action.
 
-**But the guard cannot simply be dropped on them, and here is why.** A rough
-static pass over the eighteen -- expanding each row's first column to the `Key`
-variants it names and asking whether the crate mentions them -- returns a lot
-of suspects, and reading them shows most are not dead keys but rows that are
-**not keystrokes at all**: `Click`, `Click a cell`, `Wheel`, `Goal`, `Two tiles
-alike`. These lists are *how to play* panels, not shortcut cards, and their
-first column is a mix of keys and prose.
+**Settled by reading, which is what it needed all along: one app.**
+`apps/towers` mentions `HELP_ROWS` twice and both are in *drawing* code -- no
+test refers to it at all. `apps/life` and `apps/mixer` are genuinely checked,
+in shapes no regex of mine recognised.
 
-That matters because `guitk::shortcut::keystrokes` returns `UnknownKey` rather
-than skipping what it cannot read -- deliberately, and the reasoning is in its
-own doc comment: "a guard test handed a shorter list than it asked for would
-pass while checking less". So the guard would *panic* on `Goal` rather than
-report anything, and the tempting fix -- skip rows that do not parse -- is
-precisely the hole that lets a genuinely dead key hide behind a label nobody
-taught the parser. **Do not teach the guard to skip.** Either split the panel
-so the key rows are their own list, or keep one list whose first column is
-strictly keystrokes and move `Click` and `Goal` into the description or a
-separate panel.
+**So this front is one app, not eighteen, and the first front is the real
+work.** `apps/paint` stays the argument for writing the guard -- it found six
+defects nobody suspected -- but it was not evidence of a widespread pattern,
+because the population it seemed to belong to did not exist. Its list was
+unusual in being a `Vec` returned by a function rather than a const, which is
+also why the survey never counted it as a list at all.
 
-A second, duller obstacle in the same pass: several rows write ranges with
-spaces -- `1 - 9`, `1 - 7`, `1 - 4`. `keystrokes` accepts a range only as an
-exact `X-Y`, on purpose, so that the `-` key itself is never mistaken for one.
-Those rows need the spaces removed, which is a real edit and not a cosmetic
-one: today they are unparseable.
+**One finding from that retracted pass is still worth keeping,** because it
+applies to any list a guard is put on. Several of these panels are *how to
+play* rather than *shortcuts*, and their first column mixes keys with prose:
+`Click`, `Click a cell`, `Wheel`, `Goal`, `Two tiles alike`. Several others
+write ranges with spaces -- `1 - 9`, `1 - 7`, `1 - 4`.
 
-**The working order, revised.** Do the 18 above first -- they are cheaper and
-likelier to be hiding real defects. Then take the 56, largest first
+`guitk::shortcut::keystrokes` refuses both. It returns `UnknownKey` rather than
+skipping what it cannot read, deliberately, and its doc comment gives the
+reason: "a guard test handed a shorter list than it asked for would pass while
+checking less". A range is accepted only as an exact `X-Y`, so that the `-` key
+itself is never mistaken for one.
+
+So a guard dropped on one of those panels *panics* rather than reporting, and
+the tempting repair -- teach it to skip rows it cannot parse -- is precisely
+the hole that lets a genuinely dead key hide behind a label nobody taught the
+parser. **Do not teach the guard to skip.** Either split the panel so the key
+rows are their own list, or keep one list whose first column is strictly
+keystrokes and move `Click` and `Goal` into the description column.
+
+**The working order.** `apps/towers` first, since it is one app and its list
+is unchecked. Then the 56, largest first
 (`videoplayer` 31, `hangman` 29, `wordle` 29, `crossword` 27, `rssreader` 26,
 `editor` 19, `paint` 17 ...). Then the 25 prose-form. Then read the 10 and
 expect to close most of them with no change, recording *why* each needed

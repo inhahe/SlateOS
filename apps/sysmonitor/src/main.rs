@@ -942,7 +942,7 @@ impl SysMonitorState {
         self.system_info.running_count = running as u32;
 
         self.status_message = format!(
-            "{total} processes ({running} running) | CPU: {:.1}% | Mem: {} / {} | Refresh: {} (F5)",
+            "{total} processes ({running} running) | CPU: {:.1}% | Mem: {} / {} | Refresh: {}",
             self.system_info.cpu_overall,
             format_bytes(self.system_info.used_memory),
             format_bytes(self.system_info.total_memory),
@@ -1644,6 +1644,23 @@ impl SysMonitorState {
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w * 0.6),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        // The refresh keys, drawn unconditionally.
+        //
+        // Not appended to `status_message`: that string is replaced wholesale
+        // when `/proc` cannot be read -- "Cannot read /proc ..." -- so keys
+        // named inside it disappear exactly when a reader is most likely to be
+        // hunting for a way to retry.
+        tree.push(RenderCommand::Text {
+            x: w * 0.62,
+            y: y + 5.0,
+            text: String::from("F5 refresh now  |  Ctrl+R interval"),
+            color: self.palette.subtext0,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(w * 0.2),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -4703,6 +4720,55 @@ mod tests {
         assert_eq!(result, EventResult::Consumed);
         // Should have triggered refresh, resetting ms_since_refresh
         assert_eq!(s.ms_since_refresh, 0);
+    }
+
+    /// **The status line names both refresh keys, and both do something.**
+    ///
+    /// `F5` refreshes now and `Ctrl+R` cycles the interval. Neither was named
+    /// anywhere until 2026-09-21; the line that reports the interval is where
+    /// a reader looks for them, so that is where they are.
+    #[test]
+    fn the_status_line_names_the_refresh_keys() {
+        let s = SysMonitorState::new();
+        let drawn = s
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            drawn.contains("F5 refresh now  |  Ctrl+R interval"),
+            "the status bar never names the refresh keys"
+        );
+
+        let mut s = SysMonitorState::new();
+
+        // F5 refreshes and says so.
+        s.status_message.clear();
+        s.handle_key(&KeyEvent {
+            key: Key::F5,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert_eq!(s.status_message, "Refreshed", "F5 did not refresh");
+
+        // Ctrl+R moves the interval to a different one.
+        let before = s.refresh_interval;
+        s.handle_key(&KeyEvent {
+            key: Key::R,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        });
+        assert_ne!(
+            s.refresh_interval, before,
+            "Ctrl+R did not change the refresh interval"
+        );
     }
 
     /// **Every tab says which number key selects it, and that key selects it.**

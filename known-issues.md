@@ -164684,6 +164684,26 @@ missing one.
 boost and the quantum are kernel, not fixture. The `execl` half is lane
 B's. They are unrelated and should be worked separately.
 
+#### The `execl` correlation, with every confounder checked off
+
+`debugfs` on the image, so this is the bytes and not the manifest:
+
+| binary | inode | mode | size | call path | result |
+|---|---|---|---|---|---|
+| `cat` | 19 | 0755 | 2,710,648 | fastpy `os.execv` | **OK** |
+| `true` | 109 | 0755 | 796,064 | C `execl` | fails (exit 11) |
+| `python3` | 81 | 0755 | 10,468,016 | C `execl` | fails (exit 8) |
+
+Same directory, same mode, all staged, sizes spanning 13x. Both fixtures
+`#define BIN "/mnt/bin/"`, so the `/bin/python3` in exit 8's description is
+stale prose from before the path fix, not the path used -- checked, because
+if it had still been `/bin` the second data point would have collapsed and
+the correlation with it.
+
+Two of two `execl` callers fail; the one `execv` caller succeeds; no C
+fixture in the tree uses `execv`. That is as clean as this gets without
+changing lane B's code.
+
 #### ROUND 6: a passing control in the SAME boot kills every structural theory
 
 The evidence was in the serial log the whole time, 557 lines below the

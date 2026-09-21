@@ -77349,6 +77349,43 @@ buys safety in Python that it does not buy in `sh`, and for shell the rule
 has to be the stronger one: **never edit a script that is executing; put the
 change in a new file.**
 
+**A proxy should report when it has stopped being one.** Lane C's cure, and
+the most useful thing in dd-953 that is not a diagnosis. Their
+`frozen-flag-survey.py` is a proxy engine by construction -- *no assignment
+to this field by name* standing in for *the user cannot change this* -- and
+it was wrong three ways in one week, each silently:
+
+| failure | why nothing said so |
+|---|---|
+| scope regex wanted `impl App for X`; every app writes `impl oswindow::app::App for X` | it matched none and **fell back to scanning whole crates** without announcing the fallback |
+| `*self = Self::new(..)` writes every field | no by-name search can see it |
+| `.field = Type { .. }` from outside | same |
+
+Two-thirds of one headline number was furniture. **The fix was not a better
+regex.** It was making the tool print the count of what it could not scope,
+so the proxy announces the moment it stops being one.
+
+**Applied to my own instrument within the hour, and it corrected a claim I
+had made.** `build/scan-guest-output.py` had always *stated* that it cannot
+see kernel-prefixed lines. Made to count them:
+
+```
+population: 47626 lines, of which 44022 are kernel-prefixed and INVISIBLE
+to this scanner by design; 109 unprefixed lines were eligible.
+```
+
+**It examines 109 lines out of 47,626 -- 0.23%.** In prose that limitation
+read as a caveat; as a number it is the whole story. And it revises what its
+verdicts were worth: when I wrote that a boot log was "otherwise clean", the
+population that covered was 109 lines, not a boot. The intermittent `listen`
+failure found the same day is a `[netsock]`-prefixed line -- **invisible to
+this scanner** -- and was found by grepping the log directly, which at the
+time I did not register as evidence about the tool.
+
+So the general form is stronger than "document your limits": a stated limit
+cannot be weighed, and a reader has no way to tell 30 excluded lines from
+30,000. **A limit that is not counted is a limit nobody can price.**
+
 **The checker is a third copy** -- lane C's, and the strongest of the
 operational ones. Five of their apps print a list of their keyboard
 shortcuts on screen. That printed list and the key handler are **two copies

@@ -127,3 +127,12 @@ screenshot	show_notification	whether to announce a save that never occurs
 # `Default` and a test, and is read by nothing." A format picker is built
 # when something obeys it.
 photomanager	format	export options for an export the module doc says does not exist
+
+# `discovery_method` is read by exactly one thing: the settings line printing
+# its own name. The panel reads the value in order to draw the value, and the
+# module doc says outright that this program has no network access. That line
+# now ends "not applied: no network access", so a key would change a word on a
+# line that says the word means nothing. `phase` is a field of `ScanProgress`
+# -- where a scan has got to, not a setting.
+netscan	discovery_method	read only to print itself, on a line that says it is not applied
+netscan	phase	how far a scan has got; a progress reading, not a setting

@@ -89,7 +89,10 @@ KNOWN LIMITS, in the tool's own voice rather than a reader's:
 
   * A field written only through `..Default::default()`, or by a
     destructuring assignment, is not seen as written and would be
-    reported wrongly. `*self = ...` *is* seen: a struct whose impl
+    reported wrongly. **This limit has no count and no delegate.** Nothing
+    else in the tree catches those either, so it is not handed off to
+    anything -- and a limit with neither a size nor an owner is the weakest
+    kind this tool has. It is stated here rather than described as covered. `*self = ...` *is* seen: a struct whose impl
     replaces itself wholesale has every one of its fields counted as
     written, which is how `apps/credmanager`'s `NewEntryForm::set_kind`
     -- a real setter with a real caller, writing `kind` without the
@@ -638,8 +641,27 @@ def main(argv: list[str]) -> int:
         )
         for crate_name, field in stale:
             print(f"  {crate_name}.{field}")
-        print("Remove or rewrite them: an answer about code that has changed "
-              "is not an answer.")
+        # Three reasons a line goes stale and they want opposite actions,
+        # so this does not say "remove them". Lane A spent a morning on the
+        # same distinction: nine doc links naming renamed-away functions,
+        # and two could not be repaired by substituting the successor --
+        # the sentence around them described a technique that had been
+        # deleted, not renamed, so the mechanical fix would have turned a
+        # dead link into a live falsehood. **Actionable is not the same as
+        # mechanical**, and the mechanical answer is the one that looks
+        # green.
+        print("  Why it is stale decides what to do, and the three")
+        print("  answers differ:")
+        print("    fixed   -- the field has a writer now. Delete the")
+        print("               line; the reason it carried is in the")
+        print("               commit that fixed it.")
+        print("    renamed -- still frozen under another name.")
+        print("               Re-point the line. Deleting it loses the")
+        print("               reasoning, and the next run re-offers the")
+        print("               row with nothing recorded against it.")
+        print("    gone    -- the field was deleted. Delete the line,")
+        print("               and check its reason did not describe")
+        print("               something that outlived it.")
         return 1
     return 0
 

@@ -71,6 +71,27 @@ use std::collections::VecDeque;
 
 const WINDOW_WIDTH: f32 = 1100.0;
 const WINDOW_HEIGHT: f32 = 780.0;
+/// What the discovery settings amount to.
+///
+/// `start_scan` already refuses and explains, and that refusal takes the
+/// results summary's place -- but only once Scan has been pressed. Before
+/// that the window shows a target box, a discovery method, a timeout and a
+/// concurrency, which is the full apparatus of a scanner, and says nothing.
+/// Somebody reading the settings to decide what to scan has not pressed
+/// anything yet.
+///
+/// This is the fourth app in this sweep with a refusal attached to the action
+/// and nothing on the window it is read from -- after `apps/torrent`,
+/// `apps/systemrestore` and `apps/screenshot`. The shape is worth stating
+/// once more: **a refusal at the moment of acting does not cover the window
+/// somebody reads beforehand.**
+///
+/// `discovery_method` is read by exactly one thing, the line this appears
+/// on -- the panel reads the value in order to print the value -- so the
+/// method is not a setting with an effect to reach, and a key for it would
+/// be a control that changes a word.
+const CONFIG_NOT_APPLIED: &str = "not applied: no network access";
+
 const TITLE_BAR_HEIGHT: f32 = 38.0;
 const CONFIG_PANEL_HEIGHT: f32 = 140.0;
 const SIDEBAR_WIDTH: f32 = 300.0;
@@ -84,7 +105,6 @@ const TAB_HEIGHT: f32 = 30.0;
 const CORNER_RADIUS: f32 = 6.0;
 const SMALL_RADIUS: f32 = 4.0;
 
-const MAX_HISTORY_ENTRIES: usize = 50;
 /// Vertical space a truncated list keeps for its "N more" line.
 ///
 /// Reserved whether or not the line is drawn, so that how many rows fit does
@@ -2749,10 +2769,11 @@ impl NetScanApp {
             x: PADDING,
             y: method_y,
             text: format!(
-                "Discovery: {}  |  Timeout: {}ms  |  Concurrency: {}",
+                "Discovery: {}  |  Timeout: {}ms  |  Concurrency: {}  |  {}",
                 self.config.discovery_method.label(),
                 self.config.timeout_ms,
                 self.config.concurrency,
+                CONFIG_NOT_APPLIED,
             ),
             color: self.palette.subtext0,
             font_size: 11.0,
@@ -5525,6 +5546,42 @@ mod tests {
         assert!(app.history.is_empty());
     }
 
+    /// The settings line says the settings are not applied, before anything
+    /// is pressed.
+    ///
+    /// `start_scan` refuses and explains, and that refusal takes the results
+    /// summary's place -- but only once Scan has been pressed. Before that
+    /// the window shows a target box, a discovery method, a timeout and a
+    /// concurrency, which is the whole apparatus of a scanner, and said
+    /// nothing. Somebody reading the settings to decide what to scan has not
+    /// pressed anything yet.
+    #[test]
+    fn the_settings_line_says_they_are_not_applied() {
+        let app = NetScanApp::new();
+        assert!(app.scan_note.is_none(), "control: nothing pressed yet");
+
+        let texts: Vec<String> = app
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        let line = texts
+            .iter()
+            .find(|t| t.starts_with("Discovery: "))
+            .unwrap_or_else(|| panic!("control: the settings line is not drawn: {texts:?}"));
+        // Against the words rather than the constant: comparing with
+        // `CONFIG_NOT_APPLIED` passes with the constant rewritten to "ok".
+        assert!(
+            line.contains("not applied") && line.contains("no network access"),
+            "the settings line does not say they are not applied: {line:?}"
+        );
+    }
+
     /// A scan produces no result, because no scan happened.
     ///
     /// This asserted `results.is_some()` and `!history.is_empty()` until
@@ -5588,15 +5645,6 @@ mod tests {
             note.contains("Not a scannable target"),
             "a typo was reported as a missing network: {note:?}"
         );
-    }
-
-    #[test]
-    fn test_app_scan_history_limit() {
-        let mut app = NetScanApp::new();
-        for _ in 0..MAX_HISTORY_ENTRIES + 5 {
-            app.start_scan();
-        }
-        assert!(app.history.len() <= MAX_HISTORY_ENTRIES);
     }
 
     #[test]

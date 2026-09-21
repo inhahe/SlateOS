@@ -58671,3 +58671,26 @@ advancing the release-boot marker off a FAILED boot (lane A, 2026-09-17).
   reasoned judgement with its evidence" -- which I read twice today while
   concluding I must not use it, having taken the precedent from its example
   and not the permission from its text.
+
+## netscan's scan history has no cap, and the test for one could not fail (lane C, 2026-09-21)
+
+`MAX_HISTORY_ENTRIES = 50` existed, was referenced by exactly one thing --
+`test_app_scan_history_limit` -- and was enforced nowhere. That test called
+`start_scan()` fifty-five times and asserted `history.len() <= 50`.
+
+`start_scan` refuses: this program has no network access, and a `ScanResult`
+filed in a durable history *is* the claim that a scan ran, which is why the
+refusal records nothing. So the list was empty at every one of those fifty-five
+calls and the assertion was `0 <= 50`. It passed for a reason with nothing to
+do with its name, and would have gone on passing if the cap were deleted, set
+to zero, or set to a million.
+
+Both are removed: the constant was the only `never used` warning in the crate,
+and the test's real content -- that a refused scan files nothing -- is already
+asserted by `test_app_start_scan`, which says so in its own doc comment.
+
+**What has to happen when scanning exists.** The cap comes back at the point
+where a `ScanResult` is appended, and its test has to push entries *through
+that path* rather than through a call that refuses. The shape to avoid is the
+one just removed: a bound asserted over a collection that nothing fills is a
+test of the fixture, not of the bound.

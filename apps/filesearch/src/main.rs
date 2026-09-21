@@ -730,13 +730,21 @@ pub enum SizeFilter {
 }
 
 impl SizeFilter {
-    /// Every band the strip offers, in the order it draws them.
+    /// The bands the strip offers, in the order it draws them.
     ///
-    /// `Custom(min, max)` is deliberately absent: it carries two numbers that
-    /// a strip of chips cannot express, and it is reachable by a dialog that
-    /// does not exist yet. A chip that cannot say *which* custom range it
-    /// means would be a chip that does nothing.
-    pub const ALL: [SizeFilter; 7] = [
+    /// **Named `CHIPS` and not `ALL` because it is deliberately short.**
+    /// `Custom(min, max)` is absent: it carries two numbers that a strip of
+    /// chips cannot express, and it is reachable by a dialog that does not
+    /// exist yet. A chip that cannot say *which* custom range it means would
+    /// be a chip that does nothing.
+    ///
+    /// `scripts/check-variant-lists.py` checks any list whose name claims
+    /// totality against its enum's variant count, and reported this one at
+    /// 7 of 8 the first time it ran after the strip was wired. The tree's
+    /// convention is the one it describes: name it `ALL` and it is checked,
+    /// name it anything else and the doc comment beside it says why it is
+    /// short. This is that doc comment.
+    pub const CHIPS: [SizeFilter; 7] = [
         Self::Any,
         Self::Empty,
         Self::Tiny,
@@ -749,8 +757,8 @@ impl SizeFilter {
     /// The next band, wrapping. A `Custom` range steps to the start.
     #[must_use]
     pub fn step(self, forward: bool) -> Self {
-        let at = Self::ALL.iter().position(|s| *s == self).unwrap_or(0);
-        let last = Self::ALL.len().saturating_sub(1);
+        let at = Self::CHIPS.iter().position(|s| *s == self).unwrap_or(0);
+        let last = Self::CHIPS.len().saturating_sub(1);
         let next = if forward {
             if at >= last { 0 } else { at.saturating_add(1) }
         } else if at == 0 {
@@ -758,7 +766,7 @@ impl SizeFilter {
         } else {
             at.saturating_sub(1)
         };
-        Self::ALL.get(next).copied().unwrap_or(Self::Any)
+        Self::CHIPS.get(next).copied().unwrap_or(Self::Any)
     }
 
     #[must_use]
@@ -1778,7 +1786,7 @@ impl FileSearchApp {
         });
         fy += 20.0;
 
-        for sf in &SizeFilter::ALL {
+        for sf in &SizeFilter::CHIPS {
             let is_sel = self.criteria.size_filter == *sf;
             if is_sel {
                 self.palette
@@ -2495,7 +2503,7 @@ mod tests {
                 df.label()
             );
         }
-        for sf in SizeFilter::ALL {
+        for sf in SizeFilter::CHIPS {
             assert!(
                 texts.iter().any(|t| t == sf.label()),
                 "the Size strip never offers {}",
@@ -2550,11 +2558,11 @@ mod tests {
         }
 
         let mut sizes = vec![app.criteria.size_filter];
-        for _ in 1..SizeFilter::ALL.len() {
+        for _ in 1..SizeFilter::CHIPS.len() {
             app.handle_event(&press_ctrl(Key::Num2));
             sizes.push(app.criteria.size_filter);
         }
-        for sf in SizeFilter::ALL {
+        for sf in SizeFilter::CHIPS {
             assert!(
                 sizes.contains(&sf),
                 "stepping the Size strip never reached {}",

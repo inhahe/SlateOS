@@ -127,3 +127,39 @@ screenshot	show_notification	whether to announce a save that never occurs
 # `Default` and a test, and is read by nothing." A format picker is built
 # when something obeys it.
 photomanager	format	export options for an export the module doc says does not exist
+
+# `discovery_method` is read by exactly one thing: the settings line printing
+# its own name. The panel reads the value in order to draw the value, and the
+# module doc says outright that this program has no network access. That line
+# now ends "not applied: no network access", so a key would change a word on a
+# line that says the word means nothing. `phase` is a field of `ScanProgress`
+# -- where a scan has got to, not a setting.
+netscan	discovery_method	read only to print itself, on a line that says it is not applied
+netscan	phase	how far a scan has got; a progress reading, not a setting
+
+# --- readings and per-datum facts, each checked at the use site ------------
+# Not settings: a value the program measures, parses or is handed, which is
+# read-only by nature. Every line here was confirmed by reading what sets it
+# rather than by the struct's name, after `explorer.ctrl` turned out to live
+# in a drag-modifier record and not in the app at all.
+weather	condition	a reading on `CurrentWeather` and the forecast rows
+weather	wind_dir	ditto
+dbviewer	is_error	a property of a `QueryResult`, set by the constructor that made it
+explorer	ctrl	a field of `dropzone`'s drag modifiers, taken from the event
+pinball	side	which side a `Flipper` is, fixed when the table is built
+tetris	kind	which piece an `ActivePiece` is, fixed when it spawns
+vpnmanager	purpose	what an open `Picker` was opened for, passed to `open_picker`
+
+# `battery_charging` is read inside `if let Some(pct) =
+# self.system_info.battery_percent`, and nothing in live code ever sets
+# `battery_percent` -- `Some(72)` appears once, in a test. So the battery
+# block never draws, and the field is read by a branch production cannot
+# enter. Nothing is claimed on screen, which is the right state for a reading
+# this system has no source for; if `/proc` ever grows one, the block is
+# already written.
+sysmonitor	battery_charging	read only inside a battery block that never draws
+
+# `mediaconvert`'s panel draws SETTINGS_NOT_APPLIED -- "nothing reads these
+# except this panel" -- and there is no converter in this tree. `output_naming`
+# picks how a converted file would be named.
+mediaconvert	output_naming	names an output of a conversion that cannot happen

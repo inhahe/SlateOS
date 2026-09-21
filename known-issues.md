@@ -160489,7 +160489,7 @@ about a program that was working correctly, or nearly hid a real one. This
 entry lists them with the instance that caught each, because the fix is not
 "be careful" -- it is knowing the specific shapes.
 
-**It started at seven and is at fifteen**, all in the same day, and the slug
+**It started at seven and is at seventeen**, all in the same day, and the slug
 keeps the original number because renaming it would break every reference to
 it. The later seven are not more of the same: 8 and 12 are about *coverage* --
 which files a sweep read, which configuration a build compiled -- 11 and 13 are
@@ -160613,6 +160613,73 @@ rather than deleted.
    reading it. **No probe found one that reading did not.** The probes were
    worth running only as a way of choosing what to read.
 
+**16. The pipe answered instead of the program** (2026-09-21, both lanes).
+`cmd | head` reports *head's* exit status, so `cmd 2>&1 | head -5; echo $?`
+prints `0` whatever `cmd` did. Worse, when the output outruns the pipe buffer
+`head` exits first and the writer takes SIGPIPE -- **exit 141, which is
+128+13 and looks like an ordinary failure code rather than a shell artefact.**
+Lane A had a `git push` killed that way and read the surviving local
+fast-forward as a failed push, and had a gate come back 141 instead of 1.
+
+This lane hit the reading half twice on 2026-09-21 and caught both:
+`... | tail -5; echo "EXIT=$?"` printed `0` while the tool exited 1, and a
+`git merge --ff-only` that printed `fatal:` was followed by `MERGE_RC=0`.
+Both were caught by noticing the *words* disagreed with the number, which is
+luck, not method.
+
+The measurement that separates the two halves: `PIPESTATUS[0]` after
+`python scripts/key-survey.py 2>&1 | head -5` is **0**, because 45 lines fit
+the pipe buffer and the writer finished before the reader left. So the SIGPIPE
+half is conditional on output size -- which means it appears when a file grows
+and not before, and the command that was fine yesterday is the one that lies
+tomorrow.
+
+The rule, and it costs nothing: **never read a status through a pipe.**
+Redirect to a file and echo `$?`, then read the file. Every verification in
+this lane's sweep does that; every *display* that pipes is followed by a
+separate redirected run when the status matters.
+
+**And its sibling, which is the more general half** (lane A, same day):
+*never let a status-bearing command be anything but the last thing in an
+invocation, and if it cannot be, capture `$?` into a variable immediately.*
+A pipe is only one way to lose a status -- a trailing `grep`, `tail` or
+`echo` does it just as thoroughly. Their instance is the one worth keeping:
+a backgrounded chain ended in a `grep`, the harness reported **exit 0** over
+a log containing `BOOT_RC=1`, and `chain.sh` carries a fifteen-line comment
+about that exact failure written by the same hand after seven false
+"succeeded" notifications. The fix was inside the script; the reintroduction
+was in the line that called it. That is what makes this a rule and not a
+lapse -- knowing the fault does not protect the next invocation.
+
+**17. The control tested the axis that was already working** (lane A,
+2026-09-21). Lane A measured `unsafe` blocks lacking a `// SAFETY:` comment
+at 318 of 2214, ran a control for a placement their scanner might miss --
+the comment written as the first line *inside* the block -- and it found 4.
+The number barely moved, so they recorded the instrument as sound. It was
+not: a SAFETY comment governing a group of reads, separated from the first
+`unsafe` by one *safe* statement, defeats a backward walk that stops at the
+first non-comment line. The real figure was 21 of 2210. **They were
+measuring "has a comment immediately above" and reporting it as "has a
+SAFETY comment".**
+
+The lesson is about the control and not the regex: **a passing control
+licenses only the failure it simulates, and the confidence it produces is
+general.** Theirs varied placement *after* the block; the fault was
+placement *before but separated*, an axis it never touched -- and a control
+that passes is far more persuasive than no control, so running it made them
+more confident and no more correct.
+
+Applied here within the hour. This lane's frozen-flag zero rested on one
+planted defect: a writer removed from an already-scoped struct in an
+already-covered crate. The 569 fields the survey *sets aside* are precisely
+the axes that control never varied. Three more were run: a frozen bool one
+level down in a singleton sub-struct (reported), a frozen fieldless enum
+(reported), and a frozen bool in a type the crate stores in a `Vec`
+(silent). That last one is the interesting case, because "correctly
+excluded" and "blind" are indistinguishable from a silence -- so the same
+type, with the same field, was changed to be held singly instead, and it
+became reported. Varying the axis is what separates the two readings.
+
 **Why this is filed rather than merely learned.** The three probes written
 today (frozen fields, displayed-but-unchangeable labels, admit-yet-claim) all
 over-report, and a future session that trusts their output will file working
@@ -160620,7 +160687,7 @@ programs as broken. The entry they live in
 (`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
 says why the failure is systematic rather than a matter of care.
 
-## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18)
+## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18) -- **CLOSED 2026-09-21**
 
 **In short:** 60 boolean fields across 25 apps are read by the program and
 never written by it. The renderer draws from them, the behaviour depends on
@@ -160808,6 +160875,28 @@ shows feed health, so wiring a key would add the feature rather than restore
 it. Deleting a finished feature and shipping an unfinished one are opposite
 mistakes, and the flags look identical from here.
 
+**Both were settled on 2026-09-21, and one of the two readings above was
+wrong.** `show_feed_health` is not unfinished. "Nothing else in the app shows
+feed health" was a claim about the *name*: `feed.health.is_healthy()` colours
+every row of the sidebar and `record_success` runs on every refresh, both in
+live code -- checked with `rustlex.live_code`, which on the same day turned
+out to have been blanking production code and is why the claim went unchecked
+the first time. The health data is real and already on screen as a colour;
+the overlay is the detail behind it. So wiring `H` **restores a finished
+feature**, and that is done.
+
+`show_add_feed_dialog` was the superseded one, and it is deleted. `A` opens
+an inline add-feed prompt, so the dialog was a second way to do a thing that
+has a first way, reachable by nobody. The operator's own rule for this class,
+from their answers to `open-questions.md`: "Why not delete all of them that
+don't work... The ones that don't work but could work later can simply be
+added when we actually implement them?"
+
+The general point survives the correction and is sharper for it: the two
+flags looked identical *from the flag*. What separated them was what the rest
+of the program does with the data behind each -- which is a question the
+survey cannot ask and a reader can.
+
 So the survey's output is a list of *questions about intent*, not a list of
 patches. A flag frozen because nobody wired the toggle and a flag frozen
 because its home is a configuration file that does not exist yet look identical
@@ -160873,6 +160962,30 @@ Four apps out of it so far:
 | `passwordgen` | every passphrase capitalised and ending in a digit, for everyone, always | `Shift+C`/`Shift+D`/`Shift+S`, plus `M`; panel and handler are one list |
 | `diskimager` | "verify after write" and "compress" drawn as checkboxes with no writer | `V` and `C` |
 | `torrent`, `email`, `regextester` | see their own entries above | fixed earlier the same day |
+
+**Closed 2026-09-21 at nought open.** The survey reports
+`0 field(s) in 0 app(s)`, out of 888 scanned, with 52 rows recorded in
+`scripts/frozen-flag-answered.txt` as looked-at-and-not-defects and the rest
+fixed. The apps that got a key or a control out of this, in order:
+`regextester`, `torrent`, `email`, `diskimager`, `videoplayer`,
+`passwordgen`, `filesearch`, `credmanager`, `screenrecorder`,
+`archivemanager`, `systemrestore`, `hexeditor`, `filediff`, `qrcode`,
+`ircclient`, `connect4`, `remotedesktop`, `photomanager`, `spreadsheet`,
+`explorer`, `imageviewer`, `diagram`, `netscan`, `rssreader`.
+
+**A zero is the easiest number to get wrong**, because a survey that has
+stopped working reports it too. This one was checked by putting a defect
+back: commenting out the writer `H` gained in `apps/diskimager` returns
+`1 field(s) in 1 app(s)  diskimager  hash_algorithm`, and restoring it
+returns nought. The count is of a live instrument.
+
+**What the answers file is for, and what it is not.** 52 rows say "looked
+at, not a defect" with a reason that has to state *what makes it so* --
+a measurement computed once, a setting whose feature says on screen that it
+does not exist, a decision with the operator. A line naming a field the
+survey no longer reports fails the run, so an answer cannot quietly outlive
+the code it was about. That check fired once already, on six `mediaconvert`
+rows that were answering a question the tool had got wrong.
 
 **The lesson is the one this file keeps recording, for the third time in a
 day: a checker whose population is defined by a name it expects will one day
@@ -163333,6 +163446,188 @@ shape to look at is that each of the 124 cases builds a repository from
 scratch; a shared fixture would trade isolation for time, which is a real
 tradeoff and not an obvious win.
 
+## `TD-C-A-PUSH-THAT-TIMED-OUT-HAD-ALREADY-LANDED` (lane C, 2026-09-21)
+
+**Status:** OPEN (procedure, not code)
+
+**In short:** pushing `main` runs a long check battery before the bytes leave
+the machine. It takes longer than the ten minutes a foreground command is
+allowed, so the command is killed — and the push finishes anyway, on the
+server, after the client is gone. Pushing again then fails with a message
+that reads like a conflict and means the opposite: it is already done.
+
+**What it looks like.** Twice today `git push origin main` was killed at the
+ten-minute ceiling with no output. The log held pages of the pre-push gate's
+own selftest narration — `ok refuses a stateful module`, `ok an undeclared
+difference is refused` — so the command was working, not hung. Re-running it
+in the background produced:
+
+```
+ ! [remote rejected]  main -> main (cannot lock ref 'refs/heads/main':
+   is at ee8b797a0... but expected e616c737c...)
+```
+
+"Expected `e616c737c`" is the value *this* push was written against; "is at
+`ee8b797a0`" is the commit it was trying to create. The remote had the push
+already. The wording invites the opposite reading — that somebody else moved
+the ref — and the check that settles it in one command is
+`git fetch origin && git log --oneline -1 origin/main`.
+
+**Why it matters beyond the wasted minutes.** The dangerous response is the
+obvious one: see a rejection, assume a race, and reach for a fetch-merge-push
+cycle that rebuilds work already on the server. Nothing was lost here, but
+the same sequence with a `--force` in it is how a lane loses somebody else's
+commits.
+
+**What to do instead, and what this lane now does.**
+
+| | |
+|---|---|
+| push `main` | background it (`run_in_background`), never foreground |
+| a push that "times out" | check `origin/main` before re-running; it may have landed |
+| a `cannot lock ref` rejection | read both hashes — `is at` is your own commit if it succeeded |
+
+**Not fixed, because the fix is not mine.** The battery is the pre-push hook
+in the shared tree and it earns its runtime: it has caught a control byte in
+`known-issues.md` and a line-ending fault in this lane alone. Shortening it
+is a decision about what the gate stops checking, which is lane A's hook and
+a conversation rather than an edit. What is recorded here is the
+*misreading*, which cost a false alarm and is free to avoid.
+
+## `TD-C-THE-LEXER-BLANKED-PRODUCTION-CODE-AND-EVERY-CHECKER-BELIEVED-IT` -- **FIXED 2026-09-21** (lane C)
+
+**Status:** FIXED 2026-09-21
+
+**In short:** the helper that removes test code from a Rust file, before any
+of our twenty-six checkers reads it, was deleting live code as well. In one
+app it deleted 70% of the program. Every checker pointed at that file was
+looking at its type declarations and nothing else, and reporting confidently
+on what it found.
+
+**The mechanism.** `scripts/rustlex.py`'s `live_code` blanks each
+`#[cfg(test)]` item by matching its braces. To find the item it looked for
+the next `{`. But an attribute can sit on a **struct field**, which ends at a
+comma and has no braces of its own:
+
+```rust
+    #[cfg(test)]
+    rng: SeededRng,
+}
+
+impl SpeedTestUI {          // <- the next `{` is this one
+    pub fn start_test(&mut self) { ... }
+```
+
+The brace match therefore consumed the whole `impl`. In
+`apps/speedtest/src/main.rs` that is `start_test`, the tick handler, and
+every assignment to `phase` -- so `scripts/frozen-flag-survey.py` reported
+`phase` as a field nothing writes while eight live assignments sat inside the
+blanked region. I only found it because I refused to believe the survey
+against what I could read in the file.
+
+**This is the third instance of one assumption**, and `live_code`'s own doc
+comment already names the first two: it replaced
+`src.split("#[cfg(test)]")[0]` -- "the first attribute is the last thing in
+the file" -- and then a `mod` special case, "the first `#[cfg(test)] mod`
+is". Now: "the next `{` belongs to this attribute". Each time the repair was
+the same: stop inferring the item's extent from a character, and read what
+the attribute is actually on.
+
+**Measured, 3,147 files containing `#[cfg(test)]`:**
+
+| | before | after |
+|---|---|---|
+| live characters | 45,317,463 | 45,422,645 (+105,182) |
+| share of non-blank source | 64.6% | 64.7% |
+| files gaining >1000 chars | | 6 |
+| files losing anything | | 0 |
+
+| file | live before | after |
+|---|---|---|
+| `apps/speedtest/src/main.rs` | 29% | 56% |
+| `userspace/coreutils/src/bin/bc.rs` | 51% | 71% |
+| `userspace/m4/src/main.rs` | 47% | 76% |
+| `gui/compositor/src/lib.rs` | 47% | 49% |
+| `gui/window/src/lib.rs` | 60% | 69% |
+| `apps/mandelbrot/src/main.rs` | 46% | 53% |
+
+**The aggregate is the point.** 64.6% to 64.7% is nothing, and that is why
+this lasted: the damage was six files deep, not spread thin. `live_code`'s
+docstring says it in as many words, about the *previous* instance -- "**a
+floor on the total cannot see a hole in the distribution** -- which is worth
+remembering before trusting one anywhere else." It was worth remembering
+about the very function it is written on.
+
+**A second shape, found by looking for it rather than waiting for it.** An
+attribute also lands on a *statement*:
+`#[cfg(test)] self.computes.set(..);` in `apps/mandelbrot`. The first version
+of the repair stopped at commas and braces, so it ran to the enclosing
+block's `}` and blanked every live statement after it -- the same defect, one
+shape along. Mandelbrot hid it, because there the statement happens to be the
+last in its block; a synthetic case with a statement following it did not.
+`_field_end` now knows three terminators: a field or variant ends at its
+comma, a statement at its semicolon, and the last of either at the `}` or `)`
+that closes the container -- which belongs to the container, so the scan
+stops before it.
+
+**Verified across the consumers rather than assumed.** All twenty-six
+importers of `rustlex` were run against the fixed lexer; the seven `check-*`
+gates all exit 0. Making *more* code visible is exactly what trips a ratchet
+written while the code was invisible, so this was checked before the commit
+rather than discovered in another lane's build.
+
+**Nine fixtures** now pin it in `rustlex.py`'s own self-test, including the
+two regressions the repair could have introduced: a `fn` whose argument list
+contains a comma must still be treated as a block, and a last field with no
+trailing comma must not eat its struct's closing brace.
+
+## `TD-C-A-LIMIT-NEEDS-A-COUNT-AND-A-DELEGATION-NEEDS-A-WITNESS` (lane C, 2026-09-21)
+
+**Status:** OPEN (a practice, recorded from three instances in two lanes)
+
+**In short:** a checker can be honest about what it does not cover and still
+mislead, in two different ways. It can *state* a limit without saying how big
+it is, so nobody can weigh it. Or it can hand the uncovered part to another
+tool — and nobody ever runs that tool. Both read as diligence.
+
+**The three instances, one day, two lanes.**
+
+| the claim | what was true |
+|---|---|
+| `frozen-flag-survey`: "construction is not a write; some types are data" | three exclusion rules, each a sentence, together setting aside **569 fields against 888 scanned** — more than it judged |
+| lane A's `scan-guest-output`: "reads only unprefixed lines" | the eligible population was **109 lines of 47,626**, 0.23% |
+| lane A's `check-doc-links`: "the other three classes do not need a gate — rustdoc reports them the moment anyone runs `cargo doc`" | **every mention of `cargo doc` in the repository is inside that sentence.** Nobody had ever run it. First run: 94 seconds, 430 warnings in the kernel |
+
+**The two cures are different and neither substitutes for the other.**
+
+*A limit needs a count.* A reader cannot tell thirty excluded fields from
+three thousand, and the prose reads identically either way. The fix is to
+print the size of what was set aside next to the answer -- which is what
+`frozen-flag-survey` does now, and which immediately showed its set-aside
+population to be the larger one.
+
+*A delegation needs a witness.* "Tool X covers the rest" is a claim about
+tool X's existence and use, and **no test on either side of the handoff can
+see it** -- the delegating tool's suite proves the delegating tool works, and
+the delegate has no suite because nobody runs it. The only check is to go and
+run the thing the docstring names. Lane A's five-month gap is the cost of not
+asking.
+
+**And a third relative, from the same exchange: a proxy inside the guard.**
+Lane A's `--roots` floor refuses a verdict when a scan sees fewer than five
+*crates*, reporting "1 crate(s), 807 file(s), 6,078 link(s)" in the same
+breath. The floor is right -- an empty scan must not read as clean -- but it
+counts the wrong noun for a tree that is one crate. Same shape as this lane's
+scope regex matching `impl App for X` when every app writes
+`impl oswindow::app::App for X`: the proxy and the thing came apart, and
+nothing said so.
+
+**What this lane does about it now.** Every checker docstring gets read for
+the phrase "X covers the rest", and X gets run. `frozen-flag-survey`'s one
+such handoff is the `..Default::default()` and destructuring-assignment case:
+nothing catches those, so it is a limit with no count and no delegate, which
+by the rule above is the weakest kind. It is not fixed; it has stopped being
+described as covered.
 ### [A] A guard written to protect the operator's files reported them safe while unable to see them, and a `head` killed the push it was watching -- 2026-09-21
 **Status:** FIXED 2026-09-21 (both defects; main merged at b8607ee03 with the operator's three files intact)
 

@@ -124,6 +124,8 @@ Run from anywhere: `python scripts/frozen-flag-survey.py [--all] [--answered]`.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import io
 import re
 import sys
@@ -245,6 +247,48 @@ APP_IMPL_OWNER_RE = re.compile(
     r"\bimpl\s+(?:[A-Za-z_]\w*\s*::\s*)*App\s+for\s+([A-Z]\w*)"
 )
 
+
+@dataclass
+class Excluded:
+    """What the survey could not look at, counted rather than described.
+
+    Every number here was a sentence in the docstring first -- "types held by
+    the many are data", "an enum with a `&mut self` method can change without
+    being assigned", "construction is not a write". Each is true and none of
+    them could be weighed: a reader cannot tell thirty excluded fields from
+    three thousand, and this survey's headline has been wrong by a factor of
+    three twice without the number moving.
+
+    Lane A put the general form in `design-decisions.md` §953 after measuring
+    their own guest-output scanner: it had always stated that it reads only
+    unprefixed lines, and made to count them, the eligible population was 109
+    lines of 47,626 -- 0.23%. **A limit that is not counted is a limit nobody
+    can price.**
+    """
+
+    #: Structs reached from the app's state but skipped because the crate also
+    #: stores that type by the many -- a `Vec<FileEntry>` makes `FileEntry` a
+    #: description of one file, not a setting.
+    data_types: int = 0
+    #: Enums skipped because some `impl` of theirs takes `&mut self`, so a
+    #: value can change without ever being assigned.
+    mutable_enums: int = 0
+    #: Fields skipped because their whole struct is replaced somewhere --
+    #: `*self = ..` or `.field = Type { .. }` -- which writes every field in
+    #: it without naming one.
+    wholesale: int = 0
+    #: Crates with no `impl <path::>App for X` to scope the scan to.
+    unscoped_crates: int = 0
+
+    def add(self, other: "Excluded") -> None:
+        self.data_types += other.data_types
+        self.mutable_enums += other.mutable_enums
+        self.wholesale += other.wholesale
+        self.unscoped_crates += other.unscoped_crates
+
+    def total_fields(self) -> int:
+        """Fields kept out of the judgement, however they got there."""
+        return self.wholesale
 
 #: Types that hold *many* of something. A field of one is a per-datum field.
 #:
@@ -414,7 +458,7 @@ def owned_state(code: str) -> tuple[str, bool, set[str]]:
 
 
 
-def survey(crate: Path) -> tuple[list[str], int, bool]:
+def survey(crate: Path) -> tuple[list[str], int, bool, Excluded]:
     """`(frozen names, fields scanned, whether the app struct was found)`.
 
     The third value is not a detail. With it a row means "a setting of this
@@ -424,9 +468,19 @@ def survey(crate: Path) -> tuple[list[str], int, bool]:
     when the answer it meant to give was neither.
     """
     code = crate_live_code(crate)
+    skipped = Excluded()
     if not code.strip():
-        return [], 0, True
+        return [], 0, True, skipped
     body, scoped, walked = owned_state(code)
+    if not scoped:
+        skipped.unscoped_crates = 1
+    # Counted where they are decided, not re-derived: `held_by_the_many` and
+    # `judgeable_enums` are the two places a type is set aside, and this is
+    # the same question asked of the same answer.
+    by_the_many = held_by_the_many(code)
+    skipped.data_types = len(by_the_many & walked) if walked else 0
+    all_enums = set(re.findall(r"\benum\s+([A-Z]\w*)", code))
+    skipped.mutable_enums = len(all_enums - judgeable_enums(code))
     # Declared in the app's own struct; written (or not) anywhere in the crate.
     names = set(FIELD_RE.findall(body))
     for enum in judgeable_enums(code):
@@ -451,6 +505,7 @@ def survey(crate: Path) -> tuple[list[str], int, bool]:
     # A field of a struct something replaces wholesale has a writer, even
     # though no assignment to it by name exists to be found.
     wholesale = replaced_wholesale(code, walked)
+    skipped.wholesale = len(wholesale & set(names))
     frozen = [
         name
         for name in names
@@ -458,7 +513,7 @@ def survey(crate: Path) -> tuple[list[str], int, bool]:
         and read_re(name).search(code)
         and not written_re(name).search(code)
     ]
-    return frozen, len(names), scoped
+    return frozen, len(names), scoped, skipped
 
 
 #: Rows already looked at and found not to be defects.
@@ -492,14 +547,16 @@ def main(argv: list[str]) -> int:
     show_all = "--all" in argv
     show_answered = "--answered" in argv
     known = answered()
+    set_aside = Excluded()
     rows: list[tuple[int, str, list[str], bool]] = []
     answered_rows: list[tuple[str, str, str]] = []
     total_fields = 0
     for crate in sorted((ROOT / "apps").iterdir()):
         if not crate.is_dir():
             continue
-        frozen, count, scoped = survey(crate)
+        frozen, count, scoped, skipped = survey(crate)
         total_fields += count
+        set_aside.add(skipped)
         open_fields = []
         for field in frozen:
             reason = known.get((crate.name, field))
@@ -544,6 +601,24 @@ def main(argv: list[str]) -> int:
         for n, name, frozen, _ in shown_loose:
             shown = ", ".join(frozen[:6]) + ("..." if len(frozen) > 6 else "")
             print(f"  {name:<18}{n:>3}  {shown}")
+
+    # What the scan could not look at, as numbers. Each of these was a
+    # sentence in the docstring and nothing else, and a reader cannot tell
+    # thirty excluded fields from three thousand -- lane A measured the
+    # same blind spot in their guest-output scanner and found its eligible
+    # population was 109 lines of 47,626. See `design-decisions.md` §953.
+    print(
+        f"\nset aside: {set_aside.data_types} type(s) the crate also "
+        f"stores by the many (data, not settings); "
+        f"{set_aside.mutable_enums} enum(s) with a `&mut self` method "
+        f"(can change without being assigned); {set_aside.wholesale} "
+        f"field(s) in structs something replaces whole"
+    )
+    if set_aside.unscoped_crates:
+        print(
+            f"            {set_aside.unscoped_crates} crate(s) with no "
+            f"`App` impl to scope to, counted separately above"
+        )
 
     if answered_rows:
         print(f"\n{len(answered_rows)} already answered (--answered for why)")

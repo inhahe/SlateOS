@@ -160903,6 +160903,22 @@ have to be true for it to be false, that is the moment. A conclusion that has
 absorbed three facts and predicted none of them is not better supported than it
 was; it is a conclusion three facts have failed to dislodge.
 
+**A third instance, this lane's, an hour after writing the entry.** Fifteen
+apps into the shortcut-card programme I decided the expensive part was the
+mechanical anchor-finding -- the app struct, the palette field, where the
+render function closes -- and wrote `scripts/shortcut-scaffold.py` to report
+all of it in one call instead of three or four greps. Measured *after* writing:
+7.7s on `apps/stopwatch`, and slow enough on `apps/contacts` that a 180-second
+self-test run timed out. The greps it replaced take about a second each. It was
+slower than the thing it optimised, and it was deleted unused.
+
+The conclusion never tested was "the anchors are what cost". They are not. The
+cost is reading each handler closely enough to say what its keys do, which is
+where `apps/kanban`'s `Ctrl+S` (advertised as save, actually search) and
+`apps/passwordgen`'s invented `Up / Down` row were caught, and which no tool
+can shorten. Every minute spent on the scaffold was spent making the cheap half
+cheaper.
+
 **Lane A's step, which is better than "be more sceptical" because it changes
 what you do:** when a peer's correction arrives, write the sentence *"this
 would make my conclusion false if ..."* before writing anything else. If it

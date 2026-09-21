@@ -10489,6 +10489,31 @@ fn gen_secureboot() -> Vec<u8> {
         crate::fs::secureboot::stats();
     out.push_str(&format!("key_count: {}\n", key_count));
     out.push_str(&format!("record_count: {}\n", record_count));
+
+    // The keys themselves, not just how many there are. `list_keys()` has
+    // always been here and this generator printed the count and stopped --
+    // the same defect lane C filed for /proc/memlayout and
+    // /proc/servicemgr. This was a third instance, found while answering a
+    // request that asked for a syscall to read what /proc should already
+    // have been publishing.
+    //
+    // The counts above stay: rows AS WELL AS the summary, so anything
+    // parsing `key_count:` keeps working.
+    //
+    // The fingerprint is not truncated. It is the point of the row -- an
+    // operator comparing it against a vendor publication needs all of it,
+    // and a shortened one invites a match on a prefix.
+    let keys = crate::fs::secureboot::list_keys();
+    out.push_str("Keys:\n");
+    for k in &keys {
+        out.push_str(&format!(
+            "  {:<4} {:<5} {:<28} {}\n",
+            k.id,
+            k.key_type.label(),
+            k.subject,
+            k.fingerprint
+        ));
+    }
     out.push_str(&format!("total_verified: {}\n", total_verified));
     out.push_str(&format!("total_rejected: {}\n", total_rejected));
     out.push_str(&format!("ops: {}\n", ops));

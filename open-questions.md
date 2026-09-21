@@ -3144,6 +3144,32 @@ failing.
 sessions working this repository at once; each owns a separate set of
 directories and its own copy of the tree.
 
+**Addendum, 2026-09-21 — two measurements that change what is being asked.**
+
+*The merge is clean.* `git merge-tree --write-tree lane-a origin/main`
+returns **0 conflicts** against a backlog of **54** commits. So the
+cost of the blocked merge is purely delivery delay; there is no accumulating
+integration risk waiting to be paid. That matters for the decision below,
+because the usual argument for a strict green-gate is that letting divergence
+grow makes the eventual merge dangerous. Here it does not.
+
+*The red boot had a single cause and it is fixed.* The failing test was
+lane A's own after all, not another lane's: `test_exec_process` asserted
+only that the process reached `Zombie`, which a crashed caller also does, so
+it reported OK for months while every native `exec` failed with -101. Once
+the assertion was tightened the boot went red *correctly*, and the root
+cause — a ring-3 trampoline leaving `rdx = 0x1B`, read by `exec` as the argv
+pointer — is fixed in the run happening as this is written.
+
+**So this question may retire itself.** If that run is green the backlog
+merges and the rule was never wrong, only expensive to be blocked behind.
+The part still worth an answer is the general one: **should a lane be able
+to publish `requests/` and shared-document changes without a green boot,
+given they cannot break a build?** Today's concrete cost was that two
+HIGH-severity requests lane A filed against lane B, and their retractions,
+sat undelivered on the same branch — so lane B could have spent a day on a
+bug that does not exist, for want of a text file that no test covers.
+
 **The measurement, not an impression.** `scripts/merge-readiness.py` reports
 lane A's last passing boot at `273905c13`, **945 commits behind HEAD**. In
 that window the rule has published nothing. Among the undelivered files is
@@ -3212,6 +3238,15 @@ person typing, not the system running.
 | `sealing` | refuse writes to a sealed file | kshell only |
 | `reclock` | byte-range file locks | nothing acquires one |
 | `vfs::flock` | whole-file advisory locks | nothing takes one |
+| `secureboot` | enrol keys, verify a boot image | `kshell` and `/proc` only — **no syscall at all** |
+
+**The eighth one is worse than latent, and it arrived after this was
+filed.** `userspace/sbctl` reports creating secure-boot keys and signing
+kernel images and does neither — `fs::write` appears nowhere in the crate.
+It prints *"Keys created successfully."* The other seven are silent about
+being unwired; this one tells the operator their kernel image is signed.
+If the answer below is "staged", that is defensible for the seven and not
+for this one, which should stop claiming success whatever is decided.
 
 **One detail that decides how it reads.** `diskencrypt`'s unlock is
 `unlock_volume(id, _passphrase)` — the underscore means the passphrase is

@@ -196,13 +196,29 @@ impl Rights {
     /// decides it.
     pub const SET_KEYLAYOUT: Self = Self(1 << 21);
 
+    /// Set a display's backlight level.
+    ///
+    /// Its own bit rather than `WRITE` on a display handle, matching the
+    /// other system-wide settings: `SET_CREDENTIALS`, `SET_HOSTNAME` and
+    /// `SET_KEYLAYOUT` are each distinct for the same reason -- holding a
+    /// capability on a thing should not imply authority to change a global
+    /// property of it.
+    ///
+    /// **Weaker than its neighbours, deliberately.** `SET_KEYLAYOUT` argues
+    /// its case on the grounds that a layout decides what every password
+    /// prompt receives. Brightness has no comparable claim: the worst a
+    /// holder can do is darken a screen, which is annoying and not a
+    /// disclosure. It is a right because this kernel has no ambient
+    /// authority, not because the operation is dangerous.
+    pub const SET_BRIGHTNESS: Self = Self(1 << 22);
+
     /// Every distinct right, in declaration order.
     ///
     /// Exists so that [`the aliasing assertion below`](self) can be stated
     /// once over the whole set rather than pairwise by hand. Convenience
     /// *combinations* (`ALL`, `READ_ONLY`, …) are deliberately absent — they
     /// are unions of these and would defeat the check.
-    const DISTINCT: [Self; 16] = [
+    const DISTINCT: [Self; 17] = [
         Self::READ,
         Self::WRITE,
         Self::EXECUTE,
@@ -219,6 +235,7 @@ impl Rights {
         Self::MEMORY_LOCK,
         Self::SET_HOSTNAME,
         Self::SET_KEYLAYOUT,
+        Self::SET_BRIGHTNESS,
     ];
 
     // --- Convenience combinations ---

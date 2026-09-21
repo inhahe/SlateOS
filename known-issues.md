@@ -165726,3 +165726,322 @@ reached for Linux's `start_thread` as the precedent and needn't have.
 registers. Measured before writing it: the six correct sites define 6 of 6,
 `spawn.rs` defined 0 of 6, and nothing sits in between, so the rule needs no
 threshold. Run against the tree it named `spawn.rs:2954` and nothing else.
+
+### [A] A missing `int3` made the exec bug look nondeterministic: same address, different exception each boot -- 2026-09-21
+**Status:** RESOLVED by the same batch that fixed the exec bug (the int3 is now emitted). Recorded because the *symptom* was actively misleading.
+
+**In short:** when the exec syscall failed, the test program ran off the end
+of its own code into whatever bytes followed. Those bytes were never set, so
+the crash they produced differed from build to build -- the same bug
+reporting a different fault each time, which reads like an intermittent
+problem rather than a constant one.
+
+**The alignment, which is exact:**
+
+| fact | value |
+|---|---|
+| where the caller died | `rip = 0x4000000016` = stub base **+ 22** |
+| length of the stub | 22 bytes (`B8`+5, `48 BF`+10, `BE`+5, `0F 05`+2) |
+| what `build_exec_test_elf`'s doc promised at +22 | `int3 ; unreachable -- exec does not return on success` |
+| what it emitted there | nothing. No `0xCC` anywhere in the builder |
+| what `emit-int3.py` now writes | `buf[c + 22] = 0xCC;` |
+
+**Why it mattered beyond tidiness.** Across investigations the same failure
+presented as **#GP (13)** on one build and **#NM (7)** on another, at the
+*same* address. Neither is what running past the end of a function should
+produce in any principled way -- they are whatever the uninitialised padding
+happened to decode as. A reader comparing two logs sees one address and two
+exception numbers, and the natural inference is that the fault is
+intermittent and therefore timing- or memory-dependent. It was neither: the
+exec failure underneath was perfectly deterministic (`rdx = 0x1B` every
+time), and only the *epitaph* varied.
+
+With the `int3` present, a failed exec now traps as **#BP (3)** at a known
+offset, every time. The failure becomes one signal instead of a family of
+them.
+
+**The general shape, which is worth more than this instance:** a doc comment
+promising a trap that the code does not emit is not a documentation defect.
+It is a *diagnostic* defect, and it degrades exactly when you need the
+diagnosis -- the trap is unreachable on the success path, so its absence is
+invisible until something fails, at which point it converts a clean halt
+into a random one. `build_exec_test_elf` carried that promise long enough
+for the bug to be investigated six times underneath it.
+
+### [A] Swept for syscalls that consult a module nothing initialises: exactly one existed, and I had just written it -- 2026-09-21
+**Status:** CLOSED (one instance, fixed in `7572d82e4`; sweep found no others)
+
+**In short:** several kernel modules refuse to work until something calls
+their `init_defaults()`. For most of them the only thing that ever does is a
+`/proc` read or a shell command, which happen late in boot. If a *syscall*
+reaches such a module before then, it gets a flat refusal. I created one of
+these this morning without noticing, so I checked whether there were others.
+There were not.
+
+**The instance.** `sys_dns_resolve` began consulting `fs::nameservice`, whose
+`with_state` returns `NotSupported` when the table is unset. Its
+`init_defaults` is called from `procfs.rs` (a `/proc/nameservice` read, at
+`main.rs:4427`) and `kshell.rs`. The new hosts-table self-test runs from
+`self_test_fs` at `main.rs:1697` -- earlier. So the lookup would have got
+`NotSupported`, fallen through to DNS, and sent `localhost` to the wire:
+**the exact bug the change was written to fix, one layer down.**
+
+**The sweep, narrowed twice because the first two numbers were not the
+defect:**
+
+| question | answer |
+|---|---|
+| modules with an `init_defaults()` | 312 |
+| ...whose only callers are `procfs`/`kshell`/themselves | 283 |
+| ...**and** that a syscall handler actually consults | **1** |
+| ...that survives reading the match | **0** |
+
+283 is not a bug count. Most of those modules are consulted *only* from
+`/proc` and `kshell` as well, which is the separate problem filed as A-Q21 --
+counting them here would have been the same over-reporting I corrected three
+times today. The single survivor was `fdtable`, and it is a false positive:
+the one reference under `kernel/src/syscall/` is inside a comment
+(`// fdtable::MAX_FDS`), and `MAX_FDS` is a constant that needs no state.
+
+**Why the negative result is worth writing down.** "No other syscall has
+this problem" is the kind of claim that is usually an assumption. Here it is
+a measurement, and the measurement is cheap to repeat: modules with
+`init_defaults`, intersected with modules named under `kernel/src/syscall/`,
+minus those a syscall path initialises itself. Anyone adding a syscall that
+reaches a stateful module should re-run it, or simply follow
+`sys_hostname_set`, `sys_domainname_set` and `sys_keylayout_set`, which all
+open by calling their module's `init_defaults` for exactly this reason.
+
+### [A] Addendum: three of `netdiag`'s diagnostics invent their answers, not just `dns_lookup` -- 2026-09-21
+**Status:** OPEN · supersedes the scope (not the content) of the `netdiag` entry above
+
+**In short:** I reported this afternoon that one command in the network
+diagnostics tool invents its answer. Reading the rest: the ping command
+invents its answer too, and it does so by looking at the *spelling* of the
+address you typed.
+
+**`ping` decides latency from the hostname string.** No packet leaves:
+
+| host looks like | reported latency |
+|---|---|
+| `127.*` or `localhost` | 50 us |
+| `192.168.*` or `10.*` | 1500 us |
+| anything else | 25000 us |
+
+So `ping 10.0.0.99` on a network with no such host reports 1.5 ms and
+success, because the string starts with `10.`. A diagnostic that answers
+from the shape of its input cannot report the one condition it exists to
+detect.
+
+**The exact scope, after correcting my own first count.** I initially said
+all four diagnostics fabricate. `connectivity_check` does not: it returns
+`state.connectivity`, a stored field, and rung 7 of the self-test proves
+it by setting `NoInternet` and reading it back. The `simulate` marker I
+counted was in `set_connectivity`'s doc comment, not in the getter — the
+sixth time today a textual marker stood in for the code and answered
+wrongly.
+
+| function | what it does |
+|---|---|
+| `ping` | latency from the spelling of the host. **Invents** |
+| `traceroute` | a fixed four-hop list regardless of destination. **Invents** |
+| `dns_lookup` | hardcoded for `localhost`, invented otherwise. **Invents** |
+| `connectivity_check` | returns a stored field faithfully. **Does not invent** — but nothing in the tree ever updates that field from reality |
+
+The fourth wants a different remedy from the other three: not a refusal,
+but a writer. It is not lying about what it measured; it is reporting a
+measurement nobody takes.
+
+**Its self-tests assert the fabricated constants.** `[2/10] ping localhost`
+checks `r.latency_us == 50`; `[3/10] ping remote` checks `25000`. Those
+rungs are green on every boot and would stay green if the network stack were
+deleted -- they test the lookup table, which is the same defect as the six
+`Zombie`-only tests swept from `spawn.rs` today, in a different costume.
+
+**The fix, and it is the one I told another lane to make.** Two hours before
+writing this I answered `b-a-sbctl-needs-a-userspace-door-to-fs-secureboot`,
+where `sbctl` reports creating secure-boot keys it never writes, with: *it
+could say "not supported on this build" today and stop actively
+misinforming, and that is worth doing before the door lands rather than
+after.* `netdiag` is mine and is the same defect. The honest half is
+identical and cheap: **return `NotSupported` instead of a number**, and let
+the self-test assert the refusal.
+
+That is strictly better than the current state even though it makes the
+tool do less, because the current state is not "a tool that does little" --
+it is a tool that answers confidently and wrongly, on the screen someone
+opens *because* they already suspect the network is broken.
+
+**Deferred, with the same trigger as before:** the queued batches are
+a running verification boot. This one changes self-test expectations, which
+is exactly the kind of change that turns one red boot into an ambiguous one,
+so it waits for a green base rather than riding along.
+
+### [A] The `FileId` keying fix is designed, and its fallback is correct rather than a compromise -- 2026-09-21
+**Status:** DESIGNED, not written (needs a compiler and a green base). Resolves the open design question in the path-keyed entries above.
+
+**In short:** five kernel tables remember a file by its name instead of by
+the file, so two names for one file get two answers. The fix is to key on
+the filesystem identity instead. The question that was open: what to do on
+a filesystem that has no such identity. It turns out not to be a problem.
+
+**The mechanism fits without a new resolution step.** `flock_resolved`
+already holds an *already-resolved* path, and
+`Vfs::file_identity_resolved(path) -> KernelResult<Option<FileId>>` takes
+exactly that. So no re-resolution, and no second TOCTOU window opened by
+the fix. `FileId` is `{ fs_id: u64, ino: u64 }`.
+
+**Why the `None` case is safe, which is the part that was unclear.**
+`file_identity_resolved` returns `Ok(None)` when `ino == 0`, documented as
+*filesystem has no stable per-object identity ... lets the caller degrade*.
+Degrading means falling back to the name -- which sounds like
+reintroducing the bug. Measured which filesystems take that path:
+
+| filesystem | sets `ino: 0` | has hard links |
+|---|---|---|
+| `ext4` | 0 of 15 sites | yes |
+| `memfs` | 0 of 16 | yes |
+| `fat` | 1 of 3 | no (FAT has no link count) |
+| `devfs` | 5 of 5 | no |
+| `procfs` | 30 of 31 | no |
+| `sysfs` | 58 of 58 | no |
+
+So every filesystem that can have two names for one file has a stable
+inode, and every filesystem without one cannot have two names for one
+file. **The fallback is not a weaker path taken reluctantly -- on the
+filesystems that take it, a name IS the identity.** That closes the
+question the earlier entries left open.
+
+**Two call shapes, and each table needs the right one.** Only `flock`
+already holds a resolved path; `sealing`, `capsettings` and `reclock` take
+a raw one straight from `kshell` and do no resolution at all (measured: 0
+references to `resolve_follow` or `file_identity` between them). So:
+
+| site | call |
+|---|---|
+| `vfs::flock_resolved` | `file_identity_resolved(path)` -- path already resolved, adds no new lookup |
+| `sealing`, `capsettings`, `reclock` | `Vfs::file_identity(path)`, which does `resolve_follow` then the same thing |
+
+Resolving at *each* operation is correct rather than a cost: if a symlink
+is repointed between sealing a file and checking the seal, the identity
+SHOULD differ -- that is the whole reason for keying on the file. Caching
+one identity at seal time would recreate the original bug with an extra
+step.
+
+**What to write:** key each of the five on `FileId` where
+`file_identity_resolved` yields one, and on the resolved path where it
+yields `None`, with a comment at each site giving the reason above so the
+fallback is not later read as laziness. `funlock_all(owner)` and
+`handle::close` need no change: they iterate by owner, not by key.
+
+### [A] BLKDISCARD/BLKSECDISCARD/BLKZEROOUT: scoped, and one of the three must refuse -- 2026-09-21
+**Status:** SCOPED, not written. Lane B asked in `requests/b-a-blkdiscard-needs-blkdiscard-or-it-stays-a-zero-fill.md`.
+
+**In short:** the `blkdiscard` tool used to print that it had destroyed a disk
+and destroy nothing. Lane B made it real where it could and made the rest
+**refuse**, naming the kernel call it needs. That call is mine.
+
+**There is a real discard path to dispatch to.** `blkdev.rs` defines
+`supports_discard()` and `discard(start_sector, count)` on the `BlockDevice`
+trait, so this is not a case of returning `EOPNOTSUPP` and calling it honest.
+
+**The three are not one change, and that is the point:**
+
+| ioctl | plan |
+|---|---|
+| `BLKDISCARD` (0x1277) | real: check `supports_discard()`, bytes to sectors, call `discard` |
+| `BLKZEROOUT` (0x127F) | real, but a *different* operation: write zeros. Must not share the discard arm |
+| `BLKSECDISCARD` (0x127D) | **must refuse** with `EOPNOTSUPP`. No device here offers a secure-erase guarantee, and a secure discard that is silently an ordinary discard is the exact defect lane B refused to ship |
+
+Lane B put the reasoning best: a discard *tells the device the blocks are
+free*, whereas writing zeros dirties every block, spends flash endurance, and
+leaves the drive with **more** live data than before. The three differ in
+kind, so mapping them onto one implementation would be the same lie one layer
+down.
+
+**The unsolved step, and it is where a bug would live.** `sys_ioctl` receives
+an fd; `blkdev::with_device(name, ...)` looks devices up by **name**. So the
+arm needs fd -> path -> device name, and `/dev/sda1` must not silently discard
+`/dev/sda`. A partition-vs-whole-disk confusion in a discard arm destroys the
+wrong extent, so that mapping wants writing deliberately rather than as a
+one-liner inside the ioctl.
+
+**Argument shape, from lane B so it is not ambiguous:** all three take a
+pointer to `[u64; 2]` = `{ start_byte, length_bytes }`, returning 0 or `-errno`.
+
+### [A] exit 11 narrowed: the exec syscall is never reached, so the bug is upstream of exec -- 2026-09-21
+**Status:** OPEN, but four candidates eliminated by measurement. Needs one diagnostic from lane B to finish.
+
+**In short:** a test program reports it could not run `/mnt/bin/true`. The
+message blames the file. The file is fine, the disk is mounted, the
+permissions are granted, and the kernel call that would run it is never even
+made. Whatever fails, fails before that.
+
+**Eliminated, each by reading this boot's log rather than by reasoning:**
+
+| candidate | evidence it is not the cause |
+|---|---|
+| the file is missing | `debugfs`: inode 109, mode 0755, 796,064 bytes. The message's *or is not executable* half is false too |
+| `/mnt` is not mounted | `[vfs] Mounted ext4 filesystem at '/mnt' (rw)` |
+| the exec syscall fails | **no `[exec] NATIVE exec FAILED` line accompanies the failure**, and none for `linux_execve` either. posix reads the ELF *before* calling `SYS_PROCESS_EXEC`, so the syscall was never reached |
+| no capability to open it | the rung grants `(File, 0, READ|EXECUTE)`; the comment beside it records this theory as already tested and dropped |
+| something about `/mnt/bin` | **fastpy execs from that exact directory and passes** -- three rungs resolve `cat` over `PATH ["/mnt/bin"]`, one of them `fork`+`execv` in the child |
+
+**So the failure is inside posix's read-the-ELF-then-exec sequence, before
+the syscall.** That is a much smaller region than *exec is broken*, which is
+where this bug has sat while being misattributed twice -- first to a missing
+file, then to `execl` losing its path. Both guesses came from the fixture's
+own error text.
+
+**The probe earned its place by proving a NEGATIVE.** `log-exec-argv-regs`
+was added to say *why* a native exec failed. Its value here was the absence
+of its own output: no line means the syscall was never entered, which
+converts a whole class of theories into a fact. A probe that only speaks on
+failure is still informative when silent, provided you know it would have
+spoken.
+
+**What is needed next, and it is small.** posix's `execv` returns -1 without
+saying which step failed -- open, fstat, mmap, read, or the syscall. One
+diagnostic naming the failing step would finish this. Filed at lane B as
+`requests/a-b-execv-should-say-which-step-failed.md`.
+
+### [A] ctest-pty exit 45 is a scheduling question, not necessarily a budget one -- 2026-09-21
+**Status:** OPEN, narrowed. Recorded because the obvious fix (raise `SPIN`) may be the wrong one.
+
+**In short:** a test waits for its child to finish by asking repeatedly, up
+to a fixed number of tries, yielding the processor between asks. It runs out
+of tries. The tempting fix is more tries. That is only right if the child was
+going to run eventually.
+
+**What exit 45 actually is.** `services/ctest-pty/main.c:489` -- the
+`waitpid(kid, &status, WNOHANG)` loop completed `SPIN` iterations without the
+child being reaped. The fixture's own comment states the dependency it is
+resting on: *WNOHANG means the child must run to exit, and it cannot while
+this loop owns the quantum.*
+
+So the rung passes only if `sched_yield()` hands the CPU to the child.
+
+**`sched_yield` is not a no-op, which was the first thing worth ruling out.**
+`sys_sched_yield` -> `sched::yield_now()` -> `schedule_inner(true,
+SwitchKind::Voluntary)`, which reports an RCU quiescent state and
+**re-enqueues** the caller (`PER_CPU_SCHED.enqueue(current_id, prio, cpu)`).
+It is a real voluntary reschedule.
+
+**What is therefore still open, stated as a question rather than a theory:**
+whether the child is *picked* after the parent re-enqueues. That depends on
+the per-priority queue discipline and on CPU placement -- the queues are
+per-CPU, so a child enqueued on a CPU that is not scheduling would starve
+regardless of how many times the parent yields. I have not established
+either, and will not guess: the last two diagnoses of this fixture family
+were guesses from an error message and both were wrong.
+
+**Why this matters more than the rung.** If the child can starve, raising
+`SPIN` makes the test pass by spinning longer against a fairness bug --
+converting a reproducible failure into an intermittent one, which is strictly
+worse. If the child cannot starve, `SPIN` is simply too small and raising it
+is correct and boring. Those need different work and the log cannot tell them
+apart.
+
+**Next step:** instrument the pick, not the budget. A one-line count of how
+many times the parent yielded while the child stayed un-picked separates the
+two cases in a single boot.

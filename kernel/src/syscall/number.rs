@@ -5395,6 +5395,29 @@ pub const SYS_DOMAINNAME_SET: u64 = 1073;
 /// Chosen number 1074, next free slot after 1073.
 pub const SYS_KEYLAYOUT_SET: u64 = 1074;
 
+/// `SYS_BRIGHTNESS_SET` -- set a display's backlight level.
+///
+/// `arg0`: display id. `arg1`: level, 0-100. Requires
+/// [`crate::cap::Rights::SET_BRIGHTNESS`] on `ResourceType::Process`.
+///
+/// **Why it exists.** `brightness::set_brightness` worked and was reachable
+/// only from `kshell`. The Power settings page offered a slider, read the
+/// percentage back at the operator, and changed nothing, because there was
+/// no call it could make. Found by lane C.
+///
+/// **No matching get, on purpose.** `/proc/brightness` publishes a row per
+/// display carrying the current level, exactly as `/proc/keylayout` does for
+/// [`SYS_KEYLAYOUT_SET`] above -- a second read path would give one value two
+/// sources that can disagree.
+///
+/// `_up`/`_down` are deliberately not exposed: they are derivable from this,
+/// and separate step arithmetic per caller is how `displaycal`,
+/// `energysaver` and `powerprofile` each ended up with a private
+/// `set_brightness` of their own.
+///
+/// Chosen number 1075, next free slot after 1074.
+pub const SYS_BRIGHTNESS_SET: u64 = 1075;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

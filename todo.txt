@@ -58694,3 +58694,59 @@ where a `ScanResult` is appended, and its test has to push entries *through
 that path* rather than through a call that refuses. The shape to avoid is the
 one just removed: a bound asserted over a collection that nothing fills is a
 test of the fixture, not of the bound.
+
+## Brightness has a designed syscall and no implementation (lane A, 2026-09-21)
+
+`gui/desktop/src/power_settings.rs` makes real `set_brightness_battery` and
+`set_brightness_ac` calls with nothing beneath them: an operator moves the
+slider, watches the percentage update, and the screen does not change.
+Filed by lane C as `requests/c-a-brightness-has-setters-and-no-door.md`.
+
+The READ half is already done -- `/proc/brightness` carries a per-display
+row with the level. What is missing is the write.
+
+**The fix, written 2026-09-21 and awaiting only a verification boot:**
+1075` (next free after 1074), `arg0` = display id, `arg1` = level 0-100,
+calling `brightness::set_brightness`, which already exists and validates.
+
+**Set-only on purpose.** `SYS_KEYLAYOUT_SET` (1074) was added for the same
+class of problem and deliberately has no read syscall, because
+`/proc/keylayout` already publishes the value and a second read path gives
+one value two sources that can disagree. `/proc/brightness` now publishes
+the level, so the same reasoning applies.
+
+**Open sub-question, deliberately not decided alone:** whether this needs a
+dedicated `Rights` bit (22 is free; 21 is `SET_KEYLAYOUT`). `SET_KEYLAYOUT`
+earns one by arguing a layout decides what every password prompt receives.
+Brightness has no comparable claim and on Linux the session user sets it
+freely. Asked lane C for a view from the desktop side.
+
+**No longer deferred: written the same afternoon.** The entry above was
+filed as a deferral and the trigger fired sooner than expected — the
+syscall, the rights bit, the dispatch registration and a self-test are all
+written and dry-run clean, waiting only on the verification boot they ride
+in with. What remains genuinely open is the sub-question: whether
+brightness deserves a dedicated right at all. Lane C has been asked.
+
+## The font write-door is deferred on a condition in lane C's tree (lane A, 2026-09-21)
+
+`fs::fontsettings` has working setters and no userspace door. Lane C asked
+in `requests/c-a-expose-font-role-defaults-to-userspace.md` (Ask 2) and
+offered "not until the settings surface is settled" as a complete answer.
+That is the answer.
+
+**Why, and it is not effort:** `apps/settings`' Fonts page falls through to
+`build_placeholder_page`, which draws "This page is under construction". A
+door built now would be a setter whose only caller is a placeholder --
+an eighth instance of the seven modules that are implemented, tested,
+reporting into `/proc`, and reachable from nothing but `kshell`
+(`open-questions.md` A-Q21).
+
+**Trigger: when the Fonts page stops falling through to
+`build_placeholder_page`.** That condition lives in lane C's tree, not
+mine, so they will know first and have been asked to say so.
+
+Note the asymmetry with the brightness entry above, because the two
+requests look identical: brightness has a live consumer and gets built,
+fonts has a placeholder and waits. The discriminator is whether anything
+is already waiting, not whether the setter exists.

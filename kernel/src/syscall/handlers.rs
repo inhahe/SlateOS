@@ -7213,6 +7213,43 @@ pub fn sys_domainname_set(args: &SyscallArgs) -> SyscallResult {
 /// See `number.rs`'s
 /// [`SYS_KEYLAYOUT_SET`](crate::syscall::number::SYS_KEYLAYOUT_SET) for why
 /// this exists and why no getter is paired with it.
+/// `SYS_BRIGHTNESS_SET` -- set a display's backlight level.
+///
+/// `arg0`: display id. `arg1`: level, 0-100.
+///
+/// The capability is checked before either argument is validated, for the
+/// reason `name_set_gated` gives: an unprivileged caller must not be able to
+/// discover which display ids exist by watching which values change the
+/// error it gets back.
+pub fn sys_brightness_set(args: &SyscallArgs) -> SyscallResult {
+    use crate::cap::ResourceType;
+    use crate::proc::thread;
+
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    if !pcb::has_capability_type(
+        pid,
+        ResourceType::Process,
+        crate::cap::Rights::SET_BRIGHTNESS,
+    ) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+
+    let (Ok(display_id), Ok(level)) = (u32::try_from(args.arg0), u32::try_from(args.arg1)) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+
+    // Range is `set_brightness`'s to enforce, not this layer's: it already
+    // clamps against the display's own minimum, which this handler does not
+    // know and must not duplicate.
+    match crate::fs::brightness::set_brightness(display_id, level) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 pub fn sys_keylayout_set(args: &SyscallArgs) -> SyscallResult {
     // The layout table has to exist before a name can be looked up in it. A
     // failure here is a kernel-side problem rather than anything the caller

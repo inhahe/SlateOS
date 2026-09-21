@@ -367,9 +367,16 @@ check_selftest_failures() {
             _pf_hits=$(grep -rl "$_pf_rung" "$PROJECT_ROOT"/requests/a-*.md 2>/dev/null | head -3)
             if [ -n "$_pf_hits" ]; then
                 echo "  prior lane-A findings mentioning $_pf_rung:"
-                # shellcheck disable=SC2086
-                for _pf_f in $_pf_hits; do
-                    echo "    ${_pf_f##*/}"
+                # Read line-by-line rather than word-splitting: this tree
+                # lives under `E:\visual studio projects\`, so every path
+                # here contains spaces and `for f in $list` emitted a line
+                # reading `visual` and another reading `studio` for each
+                # hit. The SC2086 suppression that used to sit here was the
+                # warning being right -- it was disabled rather than heeded,
+                # and the gate has been printing garbage beside real
+                # findings ever since.
+                printf '%s\n' "$_pf_hits" | while IFS= read -r _pf_f; do
+                    [ -n "$_pf_f" ] && echo "    ${_pf_f##*/}"
                 done
             fi
         done

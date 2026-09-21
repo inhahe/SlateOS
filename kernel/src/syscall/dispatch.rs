@@ -23,10 +23,10 @@ use crate::serial_println;
 
 use super::handlers;
 use super::number::{
-    MAX_SYSCALL_NR, SYS_ARP_TABLE, SYS_CAP_QUERY, SYS_CAP_REQUEST, SYS_CAP_REQUEST_CANCEL,
-    SYS_CAP_REQUEST_STATUS, SYS_CHANNEL_CLOSE, SYS_CHANNEL_CREATE, SYS_CHANNEL_PEER_CRED,
-    SYS_CHANNEL_RECV, SYS_CHANNEL_RECV_CAPS, SYS_CHANNEL_RECV_TIMEOUT, SYS_CHANNEL_SEND,
-    SYS_CHANNEL_SEND_BLOCKING, SYS_CHANNEL_SEND_CAPS, SYS_CHANNEL_SEND_TIMEOUT,
+    MAX_SYSCALL_NR, SYS_ARP_TABLE, SYS_BRIGHTNESS_SET, SYS_CAP_QUERY, SYS_CAP_REQUEST,
+    SYS_CAP_REQUEST_CANCEL, SYS_CAP_REQUEST_STATUS, SYS_CHANNEL_CLOSE, SYS_CHANNEL_CREATE,
+    SYS_CHANNEL_PEER_CRED, SYS_CHANNEL_RECV, SYS_CHANNEL_RECV_CAPS, SYS_CHANNEL_RECV_TIMEOUT,
+    SYS_CHANNEL_SEND, SYS_CHANNEL_SEND_BLOCKING, SYS_CHANNEL_SEND_CAPS, SYS_CHANNEL_SEND_TIMEOUT,
     SYS_CHANNEL_TRY_RECV, SYS_CLOCK_ADJTIME, SYS_CLOCK_MONOTONIC, SYS_CLOCK_REALTIME,
     SYS_CLOCK_SETTIME, SYS_CONSOLE_READ_CHAR, SYS_CONSOLE_TRY_READ_CHAR, SYS_CONSOLE_WRITE,
     SYS_CP_CLOSE, SYS_CP_CREATE, SYS_CP_NOTIFY, SYS_CP_REGISTER, SYS_CP_TRY_WAIT,
@@ -389,6 +389,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_HOSTNAME_SET as usize] = Some(handlers::sys_hostname_set);
     handlers[SYS_DOMAINNAME_SET as usize] = Some(handlers::sys_domainname_set);
     handlers[SYS_KEYLAYOUT_SET as usize] = Some(handlers::sys_keylayout_set);
+    handlers[SYS_BRIGHTNESS_SET as usize] = Some(handlers::sys_brightness_set);
 
     // io_ring (260–269).
     handlers[SYS_IO_RING_SETUP as usize] = Some(handlers::sys_io_ring_setup);
@@ -1100,6 +1101,57 @@ fn test_dispatch_dns_hosts() -> KernelResult<()> {
     Ok(())
 }
 
+/// `SYS_BRIGHTNESS_SET` is registered and refuses a caller without the right.
+///
+/// **This test cannot show that the gate ever grants, and that is not an
+/// oversight.** `pcb::has_capability_type` has no kernel bypass, so a
+/// kernel-context caller is always refused; a gate that refused *everyone*
+/// would pass this unchanged. `SYS_KEYLAYOUT_SET` has the same shape and
+/// carries its granted arm as a ring-3 fixture for exactly this reason --
+/// see the comment beside `self_test_ctest_keylayout` in `main.rs`.
+///
+/// What it does rule out:
+///
+/// * **never registered** -- an empty dispatch slot returns
+///   `NoSuchSyscall` (-10), which this asserts against explicitly;
+/// * **ungated** -- with no capability check the call would reach
+///   `set_brightness` and return 0.
+fn test_dispatch_brightness_gated() -> KernelResult<()> {
+    let args = SyscallArgs {
+        arg0: 0,
+        arg1: 50,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let r = dispatch(SYS_BRIGHTNESS_SET, &args);
+
+    if r.value == i64::from(KernelError::NoSuchSyscall as i32) {
+        serial_println!("[dispatch]   FAIL: SYS_BRIGHTNESS_SET is not registered (NoSuchSyscall)");
+        return Err(KernelError::InternalError);
+    }
+    if r.value == 0 {
+        serial_println!("[dispatch]   FAIL: SYS_BRIGHTNESS_SET succeeded for a caller holding no");
+        serial_println!(
+            "[dispatch]          SET_BRIGHTNESS right -- the capability gate is missing"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if r.value != i64::from(KernelError::PermissionDenied as i32) {
+        serial_println!(
+            "[dispatch]   FAIL: SYS_BRIGHTNESS_SET refused with {}, expected PermissionDenied",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[dispatch]   SYS_BRIGHTNESS_SET registered and capability-gated (grant arm needs ring 3): OK"
+    );
+    Ok(())
+}
+
 pub fn self_test_fs() -> KernelResult<()> {
     serial_println!("[syscall] Running post-mount dispatch self-test...");
 
@@ -1109,6 +1161,7 @@ pub fn self_test_fs() -> KernelResult<()> {
     test_dispatch_itimer()?;
     test_dispatch_uts_name()?;
     test_dispatch_dns_hosts()?;
+    test_dispatch_brightness_gated()?;
 
     serial_println!("[syscall] Post-mount dispatch self-test PASSED");
     Ok(())

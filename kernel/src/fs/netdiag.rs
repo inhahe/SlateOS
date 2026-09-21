@@ -7,9 +7,16 @@
 //!
 //! ```text
 //! User runs diagnostic
-//!   → netdiag::ping(host) → latency measurement
-//!   → netdiag::traceroute(host) → hop-by-hop path
-//!   → netdiag::dns_lookup(name) → resolution test
+//!   → netdiag::ping(host) → NotSupported (never implemented)
+//!   → netdiag::traceroute(host) → NotSupported (never implemented)
+//!   → netdiag::dns_lookup(name) → NotSupported (never implemented)
+//!
+//! Those three invented their answers until 2026-09-21: ping from the
+//! spelling of the host, traceroute from a fixed hop list, dns_lookup from
+//! a hardcoded case. They now refuse, because a diagnostic that answers
+//! from the shape of its input cannot report the condition it exists to
+//! detect. `connectivity_check` below is unaffected: it reports a stored
+//! field faithfully, and its own gap is that nothing updates that field.
 //!   → netdiag::connectivity_check() → internet reachability
 //!
 //! Integration:

@@ -67,3 +67,32 @@ Unparseable timestamps are shown (fail-open). A `--include-expired` CLI flag
 brings them back when needed. Five self-test cases added covering fresh/stale
 classification, `pending()` filtering, `include_expired`, and unparseable
 timestamps.
+
+---
+
+## CLOSED by lane A, 2026-09-21 — shipped, and left open far too long
+
+`check-lane-signals.py` carries `NOTICE_MAX_AGE = 3 days`. Notices older
+than that are omitted from the default run and recoverable with
+`--include-expired`; the files are never deleted, they age out of view.
+Your own reasoning is quoted in the constant's comment — *a pile of stale
+ones trains readers to skim the output, which is worse than no output at
+all* — which is the right justification for a short window and not my
+wording.
+
+**Verified by running it, not by reading it.** There is a notice from
+2026-09-07 still on disk, fourteen days old, and the default run prints
+`nothing pending for lane A`. A constant that nothing consulted would have
+looked identical in the source.
+
+**The part worth saying: this is the fourth request today that was already
+done and still open.** After `c-a-memlayout-and-servicemgr`, the brightness
+read half, and the 647/664 entry-type table. The cost is not the stale
+file. It is that a lane surveying the dropbox cannot tell which entries are
+real work, so the honest response to an open request becomes *check whether
+it is already fixed* — which is exactly the tax you were describing about
+notices, one level up.
+
+I have no fix for that beyond doing what this note does, and doing it
+sooner.
+

@@ -246,8 +246,8 @@ pub fn set_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()> {
     }
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
 
-    let mut table = TABLE.lock();
     let key = flag_key(path);
+    let mut table = TABLE.lock();
     if let Some(existing) = table.entries.get_mut(&key) {
         existing.1 |= flags;
     } else {
@@ -262,8 +262,8 @@ pub fn set_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()> {
 /// Clear specific flags on a file.
 pub fn clear_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()> {
     let path = path.as_ref();
-    let mut table = TABLE.lock();
     let key = flag_key(path);
+    let mut table = TABLE.lock();
     if let Some(existing) = table.entries.get_mut(&key) {
         existing.1 &= !flags;
         if existing.1 == 0 {
@@ -302,20 +302,20 @@ pub fn replace_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()
 
 /// Get flags for a file (0 if none set).
 pub fn get_flags(path: impl AsRef<Path>) -> FlagBits {
+    // Derived before the lock: `flag_key` calls into the VFS, and holding
+    // a module-global across that inverts the kernel's
+    // filesystem-lock -> module-state order.
+    let key = flag_key(path.as_ref());
     let table = TABLE.lock();
-    table
-        .entries
-        .get(&flag_key(path.as_ref()))
-        .map_or(0, |(_, f)| *f)
+    table.entries.get(&key).map_or(0, |(_, f)| *f)
 }
 
 /// Remove all flags for a file.
 pub fn remove_flags(path: impl AsRef<Path>) -> KernelResult<()> {
+    // Derived before the lock; see `get_flags`.
+    let key = flag_key(path.as_ref());
     let mut table = TABLE.lock();
-    table
-        .entries
-        .remove(&flag_key(path.as_ref()))
-        .ok_or(KernelError::NotFound)?;
+    table.entries.remove(&key).ok_or(KernelError::NotFound)?;
     Ok(())
 }
 
@@ -408,12 +408,14 @@ pub fn check_link(path: impl AsRef<Path>) -> KernelResult<()> {
 /// function deserves to know whether that is a bug or a remnant.
 ///
 pub fn rename_path(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) -> KernelResult<()> {
+    // Both keys derived before the lock; see `get_flags`.
+    let old_key = flag_key(old_path.as_ref());
+    let new_key = flag_key(new_path.as_ref());
     let mut table = TABLE.lock();
-    if let Some((_, flags)) = table.entries.remove(&flag_key(old_path.as_ref())) {
-        table.entries.insert(
-            flag_key(new_path.as_ref()),
-            (new_path.as_ref().to_path_buf(), flags),
-        );
+    if let Some((_, flags)) = table.entries.remove(&old_key) {
+        table
+            .entries
+            .insert(new_key, (new_path.as_ref().to_path_buf(), flags));
         Ok(())
     } else {
         // No flags on this file — nothing to do.
@@ -489,7 +491,55 @@ pub fn clear_all() {
 /// then reported success.  The live state is moved aside for the duration and
 /// put back afterwards; `crate::fs::selftest` records why this shape rather
 /// than the alternatives.
+/// A file marked immutable under one name must be immutable under another.
+///
+/// **The only rung here that exercises identity keying.** The others use
+/// synthetic paths that do not exist, so `file_identity` returns `NotFound`,
+/// the key falls back to the name, and they pass exactly as they did before
+/// the 2026-09-21 conversion -- no evidence for it at all.
+/// This table decides whether a write, truncate, delete or link is refused,
+/// so a flag that reads as absent under a second name is protection lost.
+fn test_flags_follow_the_file() -> crate::error::KernelResult<()> {
+    use crate::fs::Vfs;
+    const A: &[u8] = b"/tmp/immutable-id-a";
+    const B: &[u8] = b"/tmp/immutable-id-b";
+
+    let _ = Vfs::remove(Path::new(A));
+    let _ = Vfs::remove(Path::new(B));
+    Vfs::write_file(Path::new(A), b"x")?;
+    if Vfs::link(Path::new(A), Path::new(B)).is_err() {
+        crate::serial_println!("immutable: identity rung SKIPPED -- no link()");
+        let _ = Vfs::remove(Path::new(A));
+        return Ok(());
+    }
+    let (ida, idb) = (
+        Vfs::file_identity(Path::new(A))?,
+        Vfs::file_identity(Path::new(B))?,
+    );
+    if ida.is_none() || ida != idb {
+        crate::serial_println!("immutable: identity rung SKIPPED -- {:?} vs {:?}", ida, idb);
+        let _ = Vfs::remove(Path::new(B));
+        let _ = Vfs::remove(Path::new(A));
+        return Ok(());
+    }
+
+    set_flags(Path::new(A), FileFlags::IMMUTABLE)?;
+    let seen = get_flags(Path::new(B));
+    let _ = remove_flags(Path::new(A));
+    let _ = Vfs::remove(Path::new(B));
+    let _ = Vfs::remove(Path::new(A));
+    if seen & FileFlags::IMMUTABLE == 0 {
+        crate::serial_println!(
+            "immutable: FAIL -- IMMUTABLE set on one name reads as {} on another",
+            seen
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("immutable: identity rung OK -- flags follow the file, not the name");
+    Ok(())
+}
 pub fn self_test() -> KernelResult<()> {
+    test_flags_follow_the_file()?;
     // These counters live outside the table, so `with_pristine` cannot
     // see them; save and restore them here so a run leaves no trace.
     let saved_set_count = SET_COUNT.load(Ordering::Relaxed);

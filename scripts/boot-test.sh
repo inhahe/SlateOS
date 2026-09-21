@@ -527,6 +527,62 @@ check_bench_coverage() {
 # failed to reach the marker, so a loose match there costs nothing.
 #
 # Returns 0 if the log shows a dead kernel, 1 otherwise.
+# Fail a boot in which a file-identity rung SKIPPED instead of running.
+#
+# WHY THIS EXISTS: the four rungs that prove the path-keyed tables (flock,
+# sealing, record locks, immutable flags) now key on FileId rather than on a
+# path string each open with two `return Ok(())` escapes -- one if /tmp cannot
+# hard-link, one if the two names do not resolve to one identity. Both print
+# SKIPPED and both return SUCCESS, because a kernel that genuinely cannot
+# hard-link should not fail a boot over it.
+#
+# The consequence is that all four can no-op and the run is still green, with
+# `check_selftest_failures` silent -- it greps for "self-test failed", and a
+# skip does not fail. That is byte-for-byte the defect the rungs were written
+# to close: before the conversion they used synthetic paths that do not exist,
+# so identity lookup returned NotFound, keying fell back to the path, and they
+# passed identically with the conversion and without it. A rung that cannot
+# distinguish the fix from its absence is not evidence, and 26 tcc rungs
+# already no-op'd for weeks here once before (see report_pathz_skips).
+#
+# So a skip FAILS, unlike Path-Z's. The difference is that Path-Z skips on a
+# missing git-ignored image -- an expected, external condition -- whereas
+# these skip only if something measured is false: memfs implements `link`
+# (memfs.rs `fn link` -> `resolve_ino` -> `link_ino`) and assigns every file a
+# nonzero inode (0 of 16 construction sites leave `ino: 0`), and /tmp is a
+# tmpfs. If a skip ever fires, one of those three facts has changed and the
+# right outcome is to be told immediately, not to bank a green boot.
+#
+# Counted by one shared marker rather than four per-rung patterns, so a fifth
+# rung is covered by construction instead of by remembering to add it here.
+check_identity_rungs() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    local ran skipped
+    # grep -c exits 1 on zero matches but still prints 0, so `|| true` keeps
+    # the count and drops the status.
+    ran="$(grep -ac 'identity rung OK' "$file" 2>/dev/null || true)"
+    skipped="$(grep -ac 'identity rung SKIPPED' "$file" 2>/dev/null || true)"
+    if [ "${skipped:-0}" -gt 0 ]; then
+        echo "=== FILE-IDENTITY RUNG SKIPPED ($skipped of 4) ==="
+        grep -a 'identity rung SKIPPED' "$file" | head -4 | sed 's/^/  /'
+        echo "  A skip here means /tmp cannot hard-link, or two names for one"
+        echo "  file do not share an inode. Either falsifies the premise of the"
+        echo "  FileId conversion (kernel/src/fs/{vfs,sealing,reclock,immutable}.rs)."
+        return 1
+    fi
+    # Fewer than four means a rung did not reach its verdict at all -- an
+    # early `?` on an unrelated error, or a self_test that stopped being
+    # called. Neither prints FAIL, so nothing else would notice.
+    if [ "${ran:-0}" -lt 4 ]; then
+        echo "=== FILE-IDENTITY RUNGS INCOMPLETE ($ran of 4 reached a verdict) ==="
+        echo "  Expected one 'identity rung OK' from each of flock, sealing,"
+        echo "  record locks and immutable flags. A missing one means the rung"
+        echo "  returned early or is no longer called from main.rs."
+        return 1
+    fi
+    return 0
+}
 kernel_is_dead() {
     local file="$1"
     [ -f "$file" ] || return 1
@@ -5989,6 +6045,20 @@ check_variant_lists() {
     # that sets only the registers it needs has the rest forwarded as
     # syscall arguments. The bad site defined 0 of 6 and every good site
     # defines 6 of 6, so this rule needs no threshold.
+    # The identity-rung gate is a bash function in THIS file, so nothing
+    # else in the tree can notice if an edit stops it firing. It reports on
+    # rungs that return SUCCESS when they skip, which means a silent gate and
+    # a no-op rung produce the same green boot -- and the gate did not fire
+    # for its first two runs, scoring 4 of 7 while never executing at all.
+    echo "=== Checking the file-identity rung gate still fires ==="
+    if ! run_checker identity-rung-gate-selftest "$py" "$PROJECT_ROOT/scripts/selftest-boot-gate-identity.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check_identity_rungs no longer" >&2
+        echo "distinguishes a rung that ran from one that skipped, so a boot" >&2
+        echo "in which all four file-identity rungs no-op'd would pass." >&2
+        return 1
+    fi
+
     echo "=== Checking that every ring-3 entry defines the argument registers ==="
     if ! run_checker ring3-entry-regs-selftest "$py" "$PROJECT_ROOT/scripts/check-ring3-entry-regs.py" --self-test; then
         echo "" >&2
@@ -9179,6 +9249,10 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1
         fi
+        if ! check_identity_rungs "$SERIAL_FILE"; then
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but a file-identity rung did not run) ==="
+            exit 1
+        fi
         if ! check_liveness_failures "$SERIAL_FILE"; then
             echo "=== Boot test FAILED ($WAIT_MARKER reached but the liveness watchdog reported) ==="
             exit 1
@@ -9265,6 +9339,10 @@ if [ -f "$SERIAL_FILE" ]; then
         echo "$WAIT_MARKER found."
         if ! check_selftest_failures "$SERIAL_FILE"; then
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
+            exit 1
+        fi
+        if ! check_identity_rungs "$SERIAL_FILE"; then
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but a file-identity rung did not run) ==="
             exit 1
         fi
         if ! check_liveness_failures "$SERIAL_FILE"; then

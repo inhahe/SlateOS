@@ -9068,10 +9068,78 @@ fn acl_gate_self_test() -> KernelResult<()> {
 /// confirms the root filesystem cannot be unmounted, then unmounts and
 /// verifies the mount is gone.  Runs on any root (in-memory or disk-backed),
 /// so it is called unconditionally during boot.
+/// Two names for one file must share one lock entry.
+///
+/// **This is the only test that exercises identity keying at all.** The other
+/// lock self-tests use synthetic paths like `/test/a` which do not exist, so
+/// `Vfs::file_identity` returns `NotFound` and `flock_resolved` falls back to
+/// keying by path -- exactly the pre-2026-09-21 behaviour. Those tests pass
+/// identically before and after the change, which makes them worthless as
+/// evidence for it.
+///
+/// This one uses `/tmp` (memfs, which has real inodes) and a hard link, so
+/// the two paths resolve to one `FileId`. It fails on the old path-keyed code
+/// -- where the second `flock` would succeed, granting two exclusive locks on
+/// one file -- and passes on the new.
+fn test_flock_shares_one_entry_across_hard_links() -> KernelResult<()> {
+    use crate::serial_println;
+    const A: &[u8] = b"/tmp/flock-id-a";
+    const B: &[u8] = b"/tmp/flock-id-b";
+
+    // Best-effort cleanup from an earlier run; absence is fine.
+    let _ = Vfs::remove(Path::new(A));
+    let _ = Vfs::remove(Path::new(B));
+
+    Vfs::write_file(Path::new(A), b"x")?;
+    if Vfs::link(Path::new(A), Path::new(B)).is_err() {
+        // No hard-link support on this mount: the property cannot be tested
+        // here, and saying so beats reporting OK for a test that did nothing.
+        serial_println!("[vfs]   identity rung SKIPPED -- /tmp does not support link()");
+        let _ = Vfs::remove(Path::new(A));
+        return Ok(());
+    }
+
+    // Both names must resolve to the same identity, or the test below proves
+    // nothing about identity keying.
+    let ida = Vfs::file_identity(Path::new(A))?;
+    let idb = Vfs::file_identity(Path::new(B))?;
+    if ida.is_none() || ida != idb {
+        serial_println!(
+            "[vfs]   identity rung SKIPPED -- {:?} and {:?} differ or are absent",
+            ida,
+            idb
+        );
+        let _ = Vfs::remove(Path::new(A));
+        let _ = Vfs::remove(Path::new(B));
+        return Ok(());
+    }
+
+    Vfs::flock(Path::new(A), 1, LockType::Exclusive)?;
+    let second = Vfs::flock(Path::new(B), 2, LockType::Exclusive);
+    let _ = Vfs::funlock(Path::new(A), 1);
+    let _ = Vfs::remove(Path::new(B));
+    let _ = Vfs::remove(Path::new(A));
+
+    if second.is_ok() {
+        serial_println!("[vfs]   FAIL: flock on a second name for the same file succeeded --");
+        serial_println!("[vfs]         two exclusive locks on one file");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[vfs]   identity rung OK -- flock keys on identity, not name (hard link)");
+    Ok(())
+}
+
 pub fn mount_self_test() -> KernelResult<()> {
     use crate::serial_println;
 
     serial_println!("[vfs] Running mount/unmount self-test...");
+
+    // The identity-keying rung. Wired here as a separate edit because the
+    // applier that defined it had no assertion that it was CALLED -- the three
+    // sibling appliers asserted `count == 2` (definition plus one call) and
+    // this one did not, so it silently produced exactly the defect it exists
+    // to close: a correct, tested function nothing invokes.
+    test_flock_shares_one_entry_across_hard_links()?;
 
     // A scratch mount point that boot setup never uses (boot mounts ext4 at
     // /mnt, so avoid that path entirely).

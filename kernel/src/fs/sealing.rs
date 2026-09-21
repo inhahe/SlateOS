@@ -235,12 +235,13 @@ pub fn add_seals(path: impl AsRef<Path>, new_seals: SealFlags) -> KernelResult<S
     SEAL_OPS.fetch_add(1, Ordering::Relaxed);
     let now = crate::timekeeping::clock_monotonic();
 
+    // Derived before the lock: `Vfs::file_identity` calls into the VFS,
+    // and holding SEAL_TABLE across that inverts the kernel's
+    // filesystem-lock -> module-state order.
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
     let mut table = SEAL_TABLE.lock();
 
     // Check existing entry.
-    // Resolved per call, not cached: if the name is repointed between
-    // sealing and checking, the identity should differ.
-    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
     if let Some(entry) = table.iter_mut().find(|e| seal_entry_matches(e, path, id)) {
         // Cannot add seals if SEAL is already set.
         if entry.flags.contains(SealFlags::SEAL) {
@@ -354,7 +355,68 @@ pub fn clear_all() {
 // Self-tests
 // ---------------------------------------------------------------------------
 
+/// A seal placed under one name must be seen under every other name.
+///
+/// **The only rung here that exercises identity keying.** The rest of this
+/// module's self-test uses paths like `/test/important.txt`, which do not
+/// exist -- `Vfs::file_identity` returns `NotFound`, `flag_key` falls back to
+/// the name, and the rung passes exactly as it did before the 2026-09-21
+/// conversion. Those rungs are no evidence for it.
+///
+/// This matters more here than for locks: seals are permanent by design, the
+/// only removal being deletion of the file. A seal that reads as absent under
+/// a second name is wrong for the life of the file, not for the life of a
+/// process.
+fn test_seal_follows_the_file_not_the_name() -> KernelResult<()> {
+    use crate::fs::Vfs;
+    const A: &[u8] = b"/tmp/seal-id-a";
+    const B: &[u8] = b"/tmp/seal-id-b";
+
+    let _ = Vfs::remove(Path::new(A));
+    let _ = Vfs::remove(Path::new(B));
+    Vfs::write_file(Path::new(A), b"x")?;
+    if Vfs::link(Path::new(A), Path::new(B)).is_err() {
+        serial_println!("sealing::self_test: identity rung SKIPPED -- no link()");
+        let _ = Vfs::remove(Path::new(A));
+        return Ok(());
+    }
+
+    // Verify the premise before asserting on it: if the two names do not
+    // resolve to one identity, a later assertion proves nothing about keying.
+    let (ida, idb) = (
+        Vfs::file_identity(Path::new(A))?,
+        Vfs::file_identity(Path::new(B))?,
+    );
+    if ida.is_none() || ida != idb {
+        serial_println!(
+            "sealing::self_test: identity rung SKIPPED -- {:?} vs {:?}",
+            ida,
+            idb
+        );
+        let _ = Vfs::remove(Path::new(B));
+        let _ = Vfs::remove(Path::new(A));
+        return Ok(());
+    }
+
+    add_seals(Path::new(A), SealFlags::WRITE)?;
+    let seen = get_seals(Path::new(B));
+    let _ = Vfs::remove(Path::new(B));
+    let _ = Vfs::remove(Path::new(A));
+
+    if !seen.contains(SealFlags::WRITE) {
+        serial_println!(
+            "sealing::self_test: FAIL -- seal set on one name reads as {:?} on another",
+            seen
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "sealing::self_test: identity rung OK -- a seal follows the file, not the name"
+    );
+    Ok(())
+}
 pub fn self_test() -> KernelResult<()> {
+    test_seal_follows_the_file_not_the_name()?;
     serial_println!("[sealing] Running self-test...");
 
     test_add_get_seals();

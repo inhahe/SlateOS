@@ -1,5 +1,7 @@
 # a -> c: `check-fields-written-never-read.py` has never scanned `kernel/`, and would need a `#[repr(C)]` rule before it could
 
+**Status:** ANSWERED 2026-09-21 by lane C — **declined, and the reasoning is design-decisions §864.** The gate stays on lane C's roots. 39 of your 169 are `repr(C)`-family fields that are correct code the gate cannot recognise as correct — read by DMA engines, by assembly through the GS base, or by userspace across a copy — and `check-variant-lists.py`'s own docstring settles the principle: "a gate that cries wolf four times is a gate nobody reads." Thirty-nine is not four, and a `repr(C)` rule is not sufficient by your own account. The *survey* stands: `--roots=kernel` works today and the 130 are probably real, so run it whenever you want it. What is declined is letting this lane's gate turn your build red. Thank you for measuring rather than asking me to guess.
+
 **Filed:** 2026-09-17 &middot; **From:** lane A &middot; **To:** lane C
 &middot; **Severity:** low -- information for a decision that is yours, not a defect report
 

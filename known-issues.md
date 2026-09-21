@@ -161765,6 +161765,45 @@ model):
    actually drawn. The first catches a list that over-promises, the second a
    list that is written and never rendered.
 
+**What the first sixteen apps taught about writing those two tests**, because
+every one of these cost a round and the next person should not pay for them
+again:
+
+*The guard almost always needs several states, and almost every failure it
+reports first is a **correct refusal** rather than a missing binding.* Observed
+so far: `set_view`/`set_tab` answering `Ignored` for the view you are already
+on, so no single state can answer all of `1-6`; `step_location` refusing to
+walk off either end; undo and redo unable to both have work in one state, since
+undoing is what creates the redo; `Esc` needing something open to leave;
+`Ctrl+S` returning `None` with no storage path; a stopwatch key needing a
+running stopwatch. Build the set, use `.any()`, and say in the test *why* each
+state is there -- that comment is the whole value, because the next reader's
+instinct will be to delete the state.
+
+*The "nothing acts behind the card" test needs a control, and the control is
+the half that finds the bugs.* Five times the negative assertion watched a
+quantity the action does not move -- `messages.len()` after a `Delete` that
+files to Trash, `alarms.len()` after an `N` that opens an editor, a `playing`
+flag an app with no audio backend never sets -- and every one passed while
+testing nothing. Press the same key with the card **down** and assert it *does*
+act. See shape 21 in the catalogue.
+
+*Read what the action does before choosing what to watch.* `delete_message`
+sounds like it deletes; it files. `toggle_play` sounds like it plays; it writes
+`NO_AUDIO` to a status line.
+
+*Write the list from the handler, not from memory.* `apps/passwordgen`'s first
+draft advertised `Up / Down` for "move through the options" and the app binds
+neither key -- written from a glance at a `toggle_option` call. The guard
+caught it on its first run, which is the pleasant case; nothing else would
+have.
+
+*Check whether the app already has a better arrangement before adding a card.*
+`apps/passwordgen`'s option rows print their own keystrokes and parse the
+printed label to match them, guarded by two existing tests; `apps/videoplayer`
+drives the whole thing off one table. Copying those keys into a `SHORTCUTS`
+const would add the third copy the arrangement exists to avoid.
+
 **Two things that will bite whoever does this.**
 
 *The label is parsed, so it has to be parseable.* `guitk::shortcut::keystrokes`

@@ -164727,6 +164727,46 @@ missing one.
 boost and the quantum are kernel, not fixture. The `execl` half is lane
 B's. They are unrelated and should be worked separately.
 
+#### NARROWED by lane C, and one correction to how I framed the correlation
+
+**`execl` has no exec path of its own.** `posix/src/spawn.rs` `execl_body`
+ends:
+
+```rust
+let ret = match mode {
+    ExecLMode::Direct => execv(path, argv),
+    ExecLMode::SearchPath => execvp(path, argv),
+    ExecLMode::WithEnv => execve(path, argv, envp),
+```
+
+So `execl` **is** `execv` plus a `va_list` walk, and everything below that
+call is shared with the arm that works. That kills the second of my two
+remaining candidates outright: it cannot be anything about `true` or
+`python3` that `cat` lacks, because that would all be below `execv` and
+identical. **What is left is the walk, or what the walk produces.**
+
+**And a correction to my own framing.** I wrote that two of two `execl`
+callers fail while the `execv` caller succeeds. True, but it implies a
+control I did not have: there is **no C `execv`, `execvp` or `execlp`
+anywhere in `services/`** -- three `execl` call sites in two files, and
+nothing else. The only `execv` in evidence is fastpy's, a different
+language and runtime. So the sample contained no C-side control, and
+"every C `execl` fails, no C `execv` is tried" is not a correlation, it is
+a description of a sample with one arm.
+
+The delegation is what rescues the conclusion, and it is stronger than the
+correlation was: since `execl` calls `execv`, and an `execv` demonstrably
+works in the same boot, the difference is provably above that call.
+
+**The specific thing to read first**, from lane C: pass 1 walks a *copy* of
+the `VaList` and the comment carries the load-bearing assumption -- "the
+cursors are per-copy, while the register save and overflow areas they index
+are only ever read." If any cursor lives behind a pointer the copy shares,
+pass 1 consumes what pass 2 re-reads and `argv` comes out wrong: an exec
+that fails with the exec path blameless. `EXECL_STACK_ARGV` is 64 and both
+failing sites pass one or two arguments, so the heap branch is not
+involved.
+
 #### The `execl` correlation, with every confounder checked off
 
 `debugfs` on the image, so this is the bytes and not the manifest:

@@ -164604,6 +164604,52 @@ the harness comment beside them says: if `/bin/true` cannot exec, the pty
 and CPython rungs below are exercising the same broken path from further
 away. Fixing the exec should clear all three.
 
+#### ROUND 6: a passing control in the SAME boot kills every structural theory
+
+The evidence was in the serial log the whole time, 557 lines below the
+failure. From the same boot:
+
+> `[spawn]   fastpy-on-SlateOS 'forkexec' (ring 3: os.fork cloned the
+> process, the child os.execv'd 'cat' over PATH ["/mnt/bin"], and the
+> parent os.waitpid'd + os.WEXITSTATUS-decoded the child's exit): OK`
+
+A ring-3 process forked, and **the child exec'd a binary out of
+`/mnt/bin`** -- the same directory as `/mnt/bin/true` -- and it passed.
+That one line kills, simultaneously:
+
+| theory | why it is dead |
+|---|---|
+| the binary is not staged | `cat` is staged and runs, from the same dir |
+| the path is wrong | the same `/mnt/bin` prefix works |
+| a forked child cannot exec | this child did |
+| a forked child cannot read ext4 | it read `cat` to exec it |
+| capabilities do not survive fork | and `Spawned child inherits parent capabilities: OK` is its own rung |
+| the native exec syscall is broken | fastpy is native-ABI and uses it |
+
+**What differs between the arm that works and the arm that fails** is not
+structural at all. It is the call form:
+
+| | working | failing |
+|---|---|---|
+| caller | fastpy `os.execv` | C fixture `execl(path, path, (char *)0)` |
+| posix entry | `execv` -- argv already an array | `execl_body` -- variadic, walks a `VaList` |
+| target | `/mnt/bin/cat` | `/mnt/bin/true` |
+
+So the remaining hypotheses are two, both in userspace: the **variadic**
+`execl` path specifically, or something about the `true` binary that `cat`
+does not have. Both live in lane B's tree (`posix/src/spawn.rs`, the
+fixture), which is why this entry stops at the localisation.
+
+**The method note, because five rounds is a lot.** Rounds 1-5 each
+proposed a structural cause, and each cost a boot to disprove. The control
+that disproves all six at once was already sitting in the first serial log
+any of them produced -- it just was not looked for, because nobody asked
+*"does anything in this boot already do the thing I think is broken?"*
+That question is free and should come before any theory that costs 90
+minutes. dd-954 says a control licenses only the axis it varies; the
+corollary is that **a passing control you did not write is still a
+control**, and a long log usually contains one.
+
 #### The control that cleared the capability theory varied four axes at once
 
 Round 4 dropped the capability theory on a measured comparison:

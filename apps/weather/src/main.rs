@@ -920,6 +920,25 @@ pub enum ActiveView {
 }
 
 /// Main application state.
+/// The keys this program answers, raised by `F1` or `?`.
+///
+/// Nothing here takes typed text, so `?` is free and design-decisions 863 says
+/// to bind it where it is.
+///
+/// The app named none of these before the list existed.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("1-6", "Dashboard, hourly, daily, alerts, places, settings"),
+    ("Tab", "The next view"),
+    ("Up / Down", "Another place"),
+    ("Left / Right", "Scroll the hourly strip"),
+    ("Home", "Back to the start of it"),
+    ("U", "Celsius or Fahrenheit"),
+    ("W", "Wind units"),
+    ("P", "Pressure units"),
+    ("T", "24-hour or 12-hour"),
+    ("F1 / ?", "This list"),
+];
+
 pub struct WeatherApp {
     /// The current observation, if anything has fetched one.
     ///
@@ -946,12 +965,15 @@ pub struct WeatherApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 impl WeatherApp {
     /// Create a new app. It knows no weather and no locations.
     pub fn new(width: f32, height: f32) -> Self {
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             // All empty. Nothing here can reach a weather service.
             //
@@ -1146,6 +1168,20 @@ impl WeatherApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
+
+        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal: letting keys through would mean changing the units of a
+            // reading the reader cannot see.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         let views = [
             ActiveView::Dashboard,
             ActiveView::HourlyDetail,
@@ -1304,6 +1340,17 @@ impl WeatherApp {
             ActiveView::Alerts => self.render_alerts_view(&mut cmds, title_y),
             ActiveView::Locations => self.render_locations_view(&mut cmds, title_y),
             ActiveView::SettingsView => self.render_settings_view(&mut cmds, title_y),
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.width, self.height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
         }
 
         cmds
@@ -2794,6 +2841,91 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    /// Every string the window draws, joined.
+    fn drawn(app: &WeatherApp) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// The hourly strip has to be scrollable for `Left`/`Right`/`Home` to have
+    /// work, which is what the sample weather provides -- an app with no
+    /// forecast in it refuses them correctly.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                // Two views, because `set_view` deliberately answers `Ignored`
+                // for the view you are already looking at -- pressing `2` on
+                // the hourly page redraws nothing, on purpose. So no single
+                // state can answer all six digits, and the union of these two
+                // answers every one.
+                let answered = [ActiveView::Dashboard, ActiveView::HourlyDetail]
+                    .into_iter()
+                    .any(|view| {
+                        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
+                        app.active_view = view;
+                        app.scroll_hourly(40.0);
+                        // Off the first place, so `Up` has somewhere to go
+                        // back to -- stepping past either end is refused, and
+                        // correctly.
+                        app.step_location(1);
+                        app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                    });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
+        assert!(
+            !drawn(&app).contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = drawn(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        // `U` behind the card must not change the units of a reading the
+        // reader cannot see.
+        let units = app.settings.temp_unit;
+        app.handle_event(&press(Key::U));
+        assert_eq!(
+            app.settings.temp_unit, units,
+            "U changed the units through the card"
+        );
+
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !drawn(&app).contains("F1 or ? closes this"),
+            "Escape did not close it"
+        );
+
+        app.handle_event(&press(Key::U));
+        assert_ne!(
+            app.settings.temp_unit, units,
+            "control: U does nothing even with the card down"
+        );
     }
 
     #[test]

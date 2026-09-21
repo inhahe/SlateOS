@@ -34813,11 +34813,19 @@ pub fn self_test_linux_slateos_cmake() -> KernelResult<()> {
         }
         // An OutOfMemory here is an ENVIRONMENT fact, not a cmake defect,
         // and the split matches `pathz_fixtures_missing`'s: absent source
-        // skips, present-but-broken fails. This binary is 22.5 MB, and the
-        // buddy allocator rounds a request to a power-of-two frame count,
-        // so loading it needs a 32 MiB CONTIGUOUS block. A 20.5 MB file is
-        // the same order and loads fine -- whether the block exists depends
-        // on fragmentation at this point in the boot, not on the file.
+        // skips, present-but-broken fails. But it is a PERMANENT fact, not
+        // a transient one. This binary is 22.5 MB, `large_order` rounds it
+        // to order 11, and `frame.rs` `alloc_inner` refuses any order above
+        // MAX_ORDER = 10 before it examines a single free list. The ceiling
+        // on one kernel allocation is 2^10 frames x 16 KiB = 16 MiB, so this
+        // skip fires on EVERY boot until either that rises or
+        // `spawn_process` stops needing the whole ELF as one slice.
+        //
+        // An earlier version of this comment blamed fragmentation and cited
+        // python312.zip at 20.5 MB as loading fine at the same order. That
+        // zip is never read into kernel memory -- it is existence-checked
+        // here and then read by CPython itself from ring 3 -- so it was
+        // never evidence about the allocator at all.
         //
         // So this skips rather than reds the boot, and it skips through
         // `pathz_skip` so the lost coverage is COUNTED. A rung that
@@ -34828,9 +34836,10 @@ pub fn self_test_linux_slateos_cmake() -> KernelResult<()> {
             pathz_skip_unusable(
                 format_args!("{RUNG}"),
                 CMAKE,
-                "no 32 MiB contiguous block (the buddy allocator rounds a \
-                 22.5 MB request up to 2048 frames); fragmentation at this \
-                 point in the boot, not a missing file",
+                "22.5 MB exceeds the 16 MiB ceiling on any single kernel \
+                 allocation -- rounded to order 11, and frame.rs MAX_ORDER \
+                 is 10, so alloc_inner refuses it before consulting the \
+                 free lists. Deterministic, not fragmentation",
             );
             return Ok(());
         }

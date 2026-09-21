@@ -164604,6 +164604,44 @@ the harness comment beside them says: if `/bin/true` cannot exec, the pty
 and CPython rungs below are exercising the same broken path from further
 away. Fixing the exec should clear all three.
 
+#### `ctest-pty`: the yield chain is correct end to end, so the starvation is elsewhere
+
+Walked it rather than assuming, because "yield does not really yield" is
+the obvious first theory and it is wrong here:
+
+| step | what it does |
+|---|---|
+| `posix::sched_yield()` | `syscall1(SYS_SLEEP, 0)` -- note: **not** `SYS_YIELD` |
+| `sys_sleep(0)` | *"Zero sleep -> just yield"*, calls `sched::yield_now()` |
+| `yield_now()` | counts a voluntary switch, reports an RCU quiescent state, `schedule_inner(true, Voluntary)` |
+| `schedule_inner(requeue=true)` | `PER_CPU_SCHED.enqueue(current_id, prio, cpu)` -- back of its priority level |
+
+The `SYS_SLEEP(0)` spelling is surprising when `SYS_YIELD` exists two
+constants away, but it is not a defect: it lands on the same `yield_now()`.
+
+**So the remaining question is a real scheduler one.** Both sides spin with
+`sched_yield()` -- the parent on `waitpid(WNOHANG)`, the child waiting for
+its `SIGINT` handler to fire -- and the parent exhausted `SPIN` first. If
+yielding rotates correctly, why did the scheduler have to rescue the child
+with `Anti-starvation: ... boosted 1 task to priority 0: [174(p16)]`?
+
+The exit order says the child never finished on its own:
+
+```
+[thread] Process 204 has no threads left - now zombie   <- the PARENT gave up
+[pty] master closed: SIGHUP+SIGCONT to group 205
+[signal] Process 205 continued
+[thread] Process 205 has no threads left - now zombie   <- the child, killed by the HUP
+```
+
+Two readings remain and they belong to different lanes. Either the fixture
+races itself -- both sides spin the same `SPIN` and the parent must outlast
+the child plus signal latency, which is lane B's to size -- or a task that
+yields every iteration is still starving a same-priority peer, which is
+lane A's. **Not guessing between them**: the next probe is a count of
+voluntary switches per task across the rung, which `VOLUNTARY_SWITCHES`
+already maintains per CPU and nothing currently reports.
+
 #### The three failures are at least TWO findings, not one
 
 `main.rs` frames them as one: *if `/bin/true` cannot exec, none of the

@@ -3130,6 +3130,65 @@ failure does not name the limit, it just dies.
 `kernel/src/mm/heap.rs` (`large_order`). Full measurement and three
 retracted claims of mine in `known-issues.md`, 2026-09-21.
 
+## A-Q20 — [A] A lane may only publish work after a green test run, and lane A's has been red for 945 commits. What should a blocked lane do? — Status: OPEN
+
+**In short:** the three sessions hand work to each other by putting files in
+a shared folder, and those files only become visible once a session's work
+is merged into the main copy. Merging is only allowed after a full test run
+passes. Lane A's test run has been failing for days — on a test belonging to
+another session — so nothing lane A has written in that time has reached
+anybody, including the notes asking for help with the very thing that is
+failing.
+
+**One term, because it is unavoidable.** A *lane* is one of the three Claude
+sessions working this repository at once; each owns a separate set of
+directories and its own copy of the tree.
+
+**The measurement, not an impression.** `scripts/merge-readiness.py` reports
+lane A's last passing boot at `273905c13`, **945 commits behind HEAD**. In
+that window the rule has published nothing. Among the undelivered files is
+`requests/a-b-execl-fails-where-execv-succeeds-in-the-same-boot.md`, written
+specifically to get another lane's eyes on the failure that is causing the
+block.
+
+**Why it is self-reinforcing rather than just unlucky.** The state that
+blocks publishing is the state that produces the most mail: a session stuck
+on something it cannot fix alone writes requests. So the queue grows fastest
+exactly while the channel is shut. And it is invisible from inside — the push
+succeeds, the file exists, the outgoing-request tool lists it, and nothing
+anywhere says *nobody can see this*.
+
+**What is NOT being asked.** Not whether to relax testing before publishing
+code. `merge-readiness.py` reports that of 13 incoming commits touching 11
+files, **none is in lane A's scope**, and lane A's own gates pass — 3938
+seconds of them. The failing rungs are another lane's fixtures, already
+present on `main`, failing identically before and after.
+
+| option | *What changes:* | cost |
+|---|---|---|
+| **A. Let `requests/**` and the shared `.md` docs reach `main` without the boot gate** | a blocked lane can still ask for help; code still waits for green | the cleanest fix. These files have no compilation, no test and no runtime, so they cannot make `main` red. Someone must still resist the temptation to slip a code change alongside |
+| **B. A lane may merge when every failing rung is outside its own scope and already failing on `main`** | a lane blocked by another lane's fixture can publish | matches the rule's purpose, but needs a definition of "already failing on `main`" that cannot be gamed, and someone has to check it honestly |
+| **C. Keep the rule; rely on asking another lane to relay** | nothing changes | it works — this is how the execl finding reached lane B today — but only when the blocked lane thinks to ask. A lane that files and moves on never does, and that is the common case |
+| **D. Keep the rule unchanged and treat the block as the signal** | a red tree stops a lane entirely until fixed | defensible, and it is roughly what has happened. The cost is 945 commits and counting |
+
+**Recommendation: A, and it is narrow on purpose.** It fixes the specific
+harm — a stuck lane cannot ask for help — without touching how code is
+gated, and it needs no judgement call at merge time, which is what makes B
+risky. B is defensible as a second step once someone has written down how
+"already failing on `main`" is established.
+
+**If this is never answered:** nothing breaks and the count keeps rising.
+Lane A keeps working and keeps pushing to its own branch, so no work is
+lost. What is lost is every cross-lane message it writes, silently, with
+the sender believing it was sent — which is how a request filed on
+2026-09-16 naming the exact cause of today's failure sat unread while a
+whole session rediscovered it.
+
+**Where it bites:** `roadmap.md` → "Three-Agent Parallel Execution" (the
+`requests/` protocol and hazard 1), `CLAUDE.md` → "never merge a red tree",
+`scripts/merge-readiness.py`. Full write-up in `known-issues.md`,
+2026-09-21.
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

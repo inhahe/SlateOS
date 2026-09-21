@@ -353,6 +353,26 @@ check_selftest_failures() {
     if grep -iq "self-test failed" "$file"; then
         echo "SELF-TEST FAILURE detected in serial log:"
         grep -in "self-test failed" "$file" || true
+
+        # Lane A's own dropbox is a record of findings, not only a queue of
+        # asks.  On 2026-09-21 a whole session re-derived two diagnoses that
+        # were already filed in requests/ on 2026-09-16 -- with better
+        # evidence than the rediscovery produced.  149 outgoing requests
+        # existed and none had ever been searched.
+        #
+        # The fixture name is in hand exactly here, so the search is free at
+        # the one moment it is worth doing.  A hint, never a gate: it cannot
+        # fail a run and a miss costs nothing.
+        for _pf_rung in $(grep -io "ctest-[a-z0-9-]*" "$file" | sort -u); do
+            _pf_hits=$(grep -rl "$_pf_rung" "$PROJECT_ROOT"/requests/a-*.md 2>/dev/null | head -3)
+            if [ -n "$_pf_hits" ]; then
+                echo "  prior lane-A findings mentioning $_pf_rung:"
+                # shellcheck disable=SC2086
+                for _pf_f in $_pf_hits; do
+                    echo "    ${_pf_f##*/}"
+                done
+            fi
+        done
         return 1
     fi
     return 0

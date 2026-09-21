@@ -6638,6 +6638,37 @@ pub fn take_exec_inherited_fds(pid: ProcessId) -> Vec<(i32, u8, u64)> {
 ///
 /// Prevents a parent from allocating unbounded kernel heap for a child
 /// that may never read the data.
+///
+/// # Deliberately larger than `ARG_MAX`, and why
+///
+/// `sysconf(_SC_ARG_MAX)` reports **128 KiB** and libc's `execve` refuses
+/// above it (`EXEC_PACKED_MAX`, `posix/src/spawn.rs`). This constant is
+/// twice that, so a caller that bypasses libc -- a static binary issuing
+/// `SYS_PROCESS_EXEC`, or a runtime with its own syscall layer -- is
+/// allowed more than `sysconf` advertises. Lane B asked whether that gap
+/// was intended; it is, and the reason is that **the two numbers answer
+/// different questions**:
+///
+/// - `ARG_MAX` is a *portability promise*: the largest list a program can
+///   rely on working. Lowering it breaks programs; raising it is safe.
+/// - this constant is a *resource bound*: the most kernel heap one
+///   process may make another allocate. It exists to be refused at, and
+///   it is the only one of the two an attacker cannot route around.
+///
+/// Making them equal would tie a security bound to a compatibility
+/// number, so raising `ARG_MAX` later -- a compatibility decision -- would
+/// silently raise how much kernel heap an unprivileged process can pin.
+/// That is the wrong coupling to create for the sake of one number.
+///
+/// What was genuinely wrong was that nothing said so. The gap held only
+/// because libc refused first, which is the shape lane B named in the
+/// request: *"happens not to collide" is a property that stops holding
+/// quietly*. It is now a stated invariant rather than a coincidence:
+/// **this constant must be >= `EXEC_PACKED_MAX`**, and if `ARG_MAX` is
+/// ever raised, raise this first.
+///
+/// See `requests/b-a-libc-now-refuses-at-half-the-limit-your-kernel-
+/// enforces.md`.
 const MAX_ARGS_BYTES: usize = 256 * 1024;
 
 /// Store initial arguments and environment in a child process's PCB.

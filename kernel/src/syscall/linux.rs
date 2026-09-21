@@ -4232,7 +4232,10 @@ fn dispatch_memfd_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(buf, len_usize) {
         return linux_err(linux_errno_for(e));
     }
-    let mut kbuf = alloc::vec![0u8; len_usize];
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(len_usize) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
     // SAFETY: validate_user_read confirmed [buf, +len) is readable;
     // copy_from_user re-checks under SMAP.
     let r = unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), len_usize) };
@@ -4265,7 +4268,10 @@ fn dispatch_memfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(buf, cap_usize) {
         return linux_err(linux_errno_for(e));
     }
-    let mut kbuf = alloc::vec![0u8; cap_usize];
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(cap_usize) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
     let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
     let n = match crate::ipc::memfd::read(h, &mut kbuf) {
         Ok(v) => v,
@@ -4494,7 +4500,10 @@ fn dispatch_signalfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         };
 
         // Build the records for as many masked-pending signals as we can drain.
-        let mut out = alloc::vec![0u8; total_bytes];
+        let mut out = match crate::mm::user::alloc_zeroed_vec(total_bytes) {
+            Ok(v) => v,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        };
         let mut produced = 0usize;
         while produced < max_records {
             let Some(sig) = crate::proc::signal::take_pending_in_mask(caller, mask) else {
@@ -25181,7 +25190,10 @@ fn sys_vmsplice(args: &SyscallArgs) -> SyscallResult {
     // MAX_RW_COUNT.  Mapping faults on the segment payloads surface later, at
     // copy time, exactly like every other user-copy in the kernel.
     let caller_pml4 = crate::mm::page_table::cr3_to_pml4(crate::mm::page_table::read_cr3());
-    let mut iov_raw = alloc::vec![0u8; iov_bytes];
+    let mut iov_raw = match crate::mm::user::alloc_zeroed_vec(iov_bytes) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
     if let Err(e) = crate::mm::user::copy_from_user_as(caller_pml4, args.arg1, &mut iov_raw) {
         return linux_err(linux_errno_for(e));
     }
@@ -30878,15 +30890,19 @@ fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let nfds_usize = nfds as usize;
     let len = nfds_usize.saturating_mul(8);
-    let mut buf: Vec<u8> = Vec::new();
-    if buf.try_reserve_exact(len).is_err() {
-        return linux_err(errno::ENOMEM);
-    }
-    buf.resize(len, 0);
+    let mut buf = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
 
     // Read the pollfd array in once.  We re-compute revents from this
     // local copy on every loop iteration so the user-visible writes
     // happen at most once at the end.
+    // SAFETY: `copy_from_user` requires `kernel_dst` to be a valid
+    // writable kernel buffer of at least `len` bytes. `buf` is exactly
+    // `len` bytes, allocated immediately above. The USER range needs no
+    // guarantee from us: copy_from_user validates it and returns
+    // InvalidAddress rather than faulting.
     let r = unsafe { crate::mm::user::copy_from_user(fds_ptr, buf.as_mut_ptr(), len) };
     if let Err(e) = r {
         return linux_err(linux_errno_for(e));
@@ -30972,6 +30988,9 @@ fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
 
     // Written back once, on both the ready and the timed-out path: a caller that
     // got 0 still needs the cleared revents the last scan left in `buf`.
+    // SAFETY: `copy_to_user` requires `kernel_src` to be readable for
+    // `len` bytes. `buf` is the same `len`-byte allocation filled above,
+    // still owned and still in scope. The user range is validated inside.
     let w = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), fds_ptr, len) };
     if let Err(e) = w {
         return linux_err(linux_errno_for(e));
@@ -31147,21 +31166,18 @@ fn select_core(
 
     // Snapshot the three input fd_sets.  Each is `len` bytes.  An
     // input pointer that is NULL is treated as the all-zero set.
-    let mut rd: Vec<u8> = Vec::new();
-    if rd.try_reserve_exact(len).is_err() {
-        return linux_err(errno::ENOMEM);
-    }
-    rd.resize(len, 0);
-    let mut wr: Vec<u8> = Vec::new();
-    if wr.try_reserve_exact(len).is_err() {
-        return linux_err(errno::ENOMEM);
-    }
-    wr.resize(len, 0);
-    let mut ex: Vec<u8> = Vec::new();
-    if ex.try_reserve_exact(len).is_err() {
-        return linux_err(errno::ENOMEM);
-    }
-    ex.resize(len, 0);
+    let mut rd = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let mut wr = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let mut ex = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
 
     for (ptr, dst) in [
         (readfds_ptr, &mut rd),
@@ -31169,6 +31185,9 @@ fn select_core(
         (exceptfds_ptr, &mut ex),
     ] {
         if ptr != 0 {
+            // SAFETY: `dst` is one of `rd`/`wr`/`ex`, each exactly `len` bytes,
+            // so the kernel destination is writable for `len`. `ptr` is
+            // user-supplied and validated inside the call.
             let r = unsafe { crate::mm::user::copy_from_user(ptr, dst.as_mut_ptr(), len) };
             if let Err(e) = r {
                 return linux_err(linux_errno_for(e));
@@ -31179,21 +31198,18 @@ fn select_core(
     // Output fd_sets — Linux semantics: only bits for ready fds are
     // set; all other bits are zero.  Start from all-zero and OR in
     // the ready bits.
-    let mut rd_out: Vec<u8> = Vec::new();
-    if rd_out.try_reserve_exact(len).is_err() {
-        return linux_err(errno::ENOMEM);
-    }
-    rd_out.resize(len, 0);
-    let mut wr_out: Vec<u8> = Vec::new();
-    if wr_out.try_reserve_exact(len).is_err() {
-        return linux_err(errno::ENOMEM);
-    }
-    wr_out.resize(len, 0);
-    let mut ex_out: Vec<u8> = Vec::new();
-    if ex_out.try_reserve_exact(len).is_err() {
-        return linux_err(errno::ENOMEM);
-    }
-    ex_out.resize(len, 0);
+    let mut rd_out = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let mut wr_out = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    let mut ex_out = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
 
     let pid = caller_pid();
     #[allow(clippy::cast_sign_loss)]
@@ -31370,6 +31386,9 @@ fn select_core(
         (exceptfds_ptr, &ex_out),
     ] {
         if ptr != 0 {
+            // SAFETY: `src` is one of the `_out` buffers, each `len` bytes and
+            // fully initialised by the scan above, so it is readable for `len`.
+            // `ptr` is user-supplied and validated inside the call.
             let w = unsafe { crate::mm::user::copy_to_user(src.as_ptr(), ptr, len) };
             if let Err(e) = w {
                 return linux_err(linux_errno_for(e));
@@ -31404,6 +31423,10 @@ fn sys_select(args: &SyscallArgs) -> SyscallResult {
             return linux_err(linux_errno_for(e));
         }
         let mut tv = [0u8; 16];
+        // SAFETY: `tv` is a `[u8; 16]` on this frame, so the kernel
+        // destination is writable for exactly the 16 bytes requested.
+        // `args.arg4` was range-checked by `validate_user_write` directly
+        // above, and copy_from_user checks it again rather than trusting us.
         let r = unsafe { crate::mm::user::copy_from_user(args.arg4, tv.as_mut_ptr(), 16) };
         if let Err(e) = r {
             return linux_err(linux_errno_for(e));
@@ -31853,7 +31876,10 @@ fn epoll_wait_core(
     #[allow(clippy::cast_sign_loss)]
     let max = maxevents as usize;
     // Output buffer: up to `maxevents` packed 12-byte epoll_event records.
-    let mut out: Vec<u8> = vec![0u8; max.saturating_mul(12)];
+    let mut out = match crate::mm::user::alloc_zeroed_vec(max.saturating_mul(12)) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
 
     // The caller's deadline is absolute from here, so the rebuild loop below
     // cannot extend the wait by restarting it: each pass gets only what is left.
@@ -33637,7 +33663,10 @@ fn sys_get_mempolicy(args: &SyscallArgs) -> SyscallResult {
         let aligned = m.wrapping_add(63) & !63u64;
         let copy = aligned.div_ceil(8) as usize;
         if copy > 0 {
-            let mut buf = alloc::vec![0u8; copy];
+            let mut buf = match crate::mm::user::alloc_zeroed_vec(copy) {
+                Ok(v) => v,
+                Err(e) => return linux_err(linux_errno_for(e)),
+            };
             if set_bit0 {
                 if let Some(first) = buf.first_mut() {
                     *first = 1;
@@ -39610,7 +39639,10 @@ fn socket_recvmsg(entry: FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     let peek = (flags & msgflags::MSG_PEEK) != 0;
     // Single receive into staging (skip the daemon round-trip entirely for a
     // zero-length receive buffer).
-    let mut kbuf = alloc::vec![0u8; cap_total];
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(cap_total) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
     let n = if cap_total == 0 {
         0
     } else {
@@ -42577,7 +42609,10 @@ fn pread_file_to_user(handle: u64, offset: u64, buf: u64, len: usize) -> Result<
         return Ok(0);
     }
     crate::mm::user::validate_user_write(buf, len).map_err(linux_errno_for)?;
-    let mut kbuf = alloc::vec![0u8; len];
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return Err(linux_errno_for(e)),
+    };
     let n = crate::fs::handle::read_at(handle, offset, &mut kbuf).map_err(linux_errno_for)?;
     if n > 0 {
         // SAFETY: validate_user_write succeeded for `len ≥ n` bytes
@@ -42615,7 +42650,10 @@ fn pwrite_file_from_user(handle: u64, offset: u64, buf: u64, len: usize) -> Resu
         return Ok(0);
     }
     crate::mm::user::validate_user_read(buf, len).map_err(linux_errno_for)?;
-    let mut kbuf = alloc::vec![0u8; len];
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return Err(linux_errno_for(e)),
+    };
     // SAFETY: validate_user_read succeeded; copy_from_user uses STAC/CLAC.
     let r = unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), len) };
     r.map_err(linux_errno_for)?;
@@ -42634,7 +42672,10 @@ fn pread_memfd_to_user(handle: u64, offset: u64, buf: u64, len: usize) -> Result
         return Ok(0);
     }
     crate::mm::user::validate_user_write(buf, len).map_err(linux_errno_for)?;
-    let mut kbuf = alloc::vec![0u8; len];
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return Err(linux_errno_for(e)),
+    };
     let n = crate::ipc::memfd::read_at(
         crate::ipc::memfd::MemFdHandle::from_raw(handle),
         offset,
@@ -42675,7 +42716,10 @@ fn pwrite_memfd_from_user(handle: u64, offset: u64, buf: u64, len: usize) -> Res
         return Ok(0);
     }
     crate::mm::user::validate_user_read(buf, len).map_err(linux_errno_for)?;
-    let mut kbuf = alloc::vec![0u8; len];
+    let mut kbuf = match crate::mm::user::alloc_zeroed_vec(len) {
+        Ok(v) => v,
+        Err(e) => return Err(linux_errno_for(e)),
+    };
     // SAFETY: validate_user_read succeeded; copy_from_user uses STAC/CLAC.
     let r = unsafe { crate::mm::user::copy_from_user(buf, kbuf.as_mut_ptr(), len) };
     r.map_err(linux_errno_for)?;
@@ -43559,7 +43603,11 @@ fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
     //   u64 d_ino + s64 d_off + u16 d_reclen + u8 d_type
     // followed by NUL-terminated name, padded to 8-byte alignment.
     const HDR: usize = 19;
-    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(buf_cap);
+    let mut out = match crate::mm::user::alloc_zeroed_vec(buf_cap) {
+        Ok(v) => v,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
+    out.clear();
     let mut written: usize = 0;
     let mut consumed: usize = 0;
 

@@ -161540,6 +161540,69 @@ existing overlay, not a new one.
 working for whoever reads the source. It is a discoverability gap, not a bug,
 which is why it is an entry here rather than an operator question.
 
+### Correction, 2026-09-21, same day: 91 is the count of a *shape*, not of the gap
+
+The first app opened off this queue disproved the headline. `apps/sokoban`
+appears in the 91, and it already names every key it binds, in a permanent
+two-line footer that changes with the screen:
+
+```rust
+const SELECT_FOOTER: [&str; 2] = ["Up/Down: choose   Enter: play", "1-9: jump to a level"];
+const PLAY_FOOTER: [&str; 2] = [
+    "Arrows/WASD: move   Z: undo   R: restart",
+    "Esc: menu   N: next level",
+];
+```
+
+Drawn by `draw_footer` on every frame, and covering all four of its screens'
+bindings. That is precisely the case design-decisions 863 already carved out --
+"a list already on screen needs no key to raise it, and adding one would mean
+drawing the same list twice" -- so the correct amount of work on `apps/sokoban`
+is none. Adding an `F1` card would have been a second copy of a list that is
+already right, which is the very defect
+`TD-C-A-PRINTED-KEY-LIST-IS-A-SECOND-COPY` exists about.
+
+**What the survey's `list` column actually means.** It looks for a `const` or
+`static` of `(&str, &str)` whose first column reads as key labels. `sokoban`'s
+footer is `[&str; 2]` of pre-joined sentences, so the detector cannot see it,
+and correctly does not claim to -- the module docstring says it reports
+candidates rather than verdicts, and names "an app may name its keys in prose
+the user reads elsewhere" as the third thing it cannot know. The 91 was read
+as the size of the gap when it is the size of a shape.
+
+**Re-measured, two axes rather than one.** Of the 91:
+
+| | apps | what they print |
+|---|---|---|
+| separator form | **10** | `"Z: undo"`, `"Arrows/WASD: move"` -- a real hint line |
+| prose form only | **25** | `"Press F5 to refresh"` -- at least one key named in a sentence |
+| neither | **56** | nothing in any string literal that reads as a key hint |
+
+The second axis is the one that matters methodologically: the first pass found
+only the separator form and reported 81 as the gap. Adding the prose pattern
+moved 25 apps out of it. **A single pattern could not tell "this app says
+nothing" from "this app says it in a shape my regex does not match"** -- the
+same reading that made the first pass of this very entry wrong.
+
+**So the real queue is at most 56, and is probably smaller still.** Both
+numbers are string-literal counts, and a literal is not proof it is drawn --
+`apps/netscan`'s `wol_note` was written by the model and drawn by nothing.
+`sokoban` was confirmed by reading `draw_footer`; the other nine separator-form
+apps (`compass`, `rush`, `nonogram`, `battleship`, `klotski`, `reversi`,
+`checkers`, `snake`, `dots`) are *candidates for needing nothing* and each
+wants the same two-minute read before any work is done on it. The 25
+prose-form apps are the opposite case and almost certainly still need a list:
+`apps/videoplayer` binds 31 keys and has one prose mention, which is not a list
+by any reading.
+
+**The working order, revised.** Take the 56 first, largest first
+(`videoplayer` 31, `hangman` 29, `wordle` 29, `crossword` 27, `rssreader` 26,
+`editor` 19, `paint` 17 ...). Then the 25 prose-form. Then read the 10 and
+expect to close most of them with no change, recording *why* each needed
+nothing so the next reader does not re-open it -- the survey will keep
+reporting all 91 until it learns the footer shape, and an answer that is not
+written down is one that gets rediscovered.
+
 ## `TD-C-A-PRINTED-KEY-LIST-IS-A-SECOND-COPY` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** Five apps print a list of their keys on screen. That list is a

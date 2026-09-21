@@ -1,6 +1,34 @@
 //! Immutable and append-only file flags.
 //!
-//! Provides `chattr`-style file flags that restrict modifications:
+//! **NOTHING CONSULTS THESE FLAGS, AND THERE IS A WORKING IMMUTABLE
+//! ELSEWHERE.** Both halves matter, and the second is why this notice is
+//! first: a reader who finds this module concludes either that file
+//! immutability is unimplemented or that this is how to get it, and both
+//! conclusions are wrong.
+//!
+//! *What works:* `vfs::FileAttr::IMMUTABLE`, checked in `fs/vfs.rs`,
+//! honoured by FAT as `ATTR_READ_ONLY` in `fs/fat.rs`, and verified on
+//! every boot -- `[ext4] immutable: write, truncate and unlink are all
+//! refused, and allowed again once cleared: OK`. **Use that.**
+//!
+//! *What this module is:* a separate store with zero `vfs::` references.
+//! Its `check_write`/`check_delete`/`check_truncate`/`check_link`/
+//! `check_metadata` predicates are real and are called by `kshell` -- a
+//! human typing a command -- and by nothing else. No VFS write path asks
+//! them anything, so a program writing a file flagged here succeeds.
+//!
+//! *And the privilege claim was false.* This doc said "Only a privileged
+//! user can set/clear the flag"; `set_flags` contains no capability, uid
+//! or privilege check of any kind. That sentence came from the Design
+//! Reference below, which opens with **"Consider:"** -- a proposal,
+//! rendered here in the present tense.
+//!
+//! Which of the two models survives is a consolidation decision with a
+//! real caller on one side (`fat.rs`, ext4) and a `/proc` file on the
+//! other; see `known-issues.md`. The design below is kept because it is
+//! the shape of the missing work, not because it describes today.
+//!
+//! Intended: `chattr`-style file flags that restrict modifications:
 //! - **Immutable**: file cannot be modified, deleted, renamed, or linked.
 //!   Only a privileged user can set/clear the flag.
 //! - **Append-only**: file can only be appended to, not overwritten or

@@ -118,6 +118,51 @@ IGNORE = {
 
 KEY_RE = re.compile(r"\bKey::([A-Za-z][A-Za-z0-9]*)")
 
+# A key enum that carries the key in the variant's *payload*.
+#
+# `apps/markdowneditor` defines its own `Key` -- `Char(char)`, `Function(u8)`
+# -- and bridges the toolkit's into it. `KEY_RE` reads the variant name, so
+# the survey saw two keys called `Char` and `Function` and none of the twelve
+# letters the app answers. It reported a text editor with 56 `Key::Char` sites
+# as having two unnamed keys: the instrument was blind, and blindness here
+# reads as *clean*, which is the worst direction for a survey to fail in.
+#
+# Only a **pattern** counts, and that distinction is load-bearing rather than
+# fussy. The bridge is `GKey::F1 => Key::Function(1)` for all twelve function
+# keys, so reading payloads without it would have swapped a blind spot for
+# twelve keys this app does not bind -- `markdowneditor` binds no function key
+# at all. A pattern stands to the left of its arm's `=>`; a construction
+# stands to the right of one, which is a fact about the text on the line.
+#
+# The limitation, stated here rather than discovered later: a pattern split
+# across lines (`Key::Char('a')` on one line, `| Key::Char('b') => {` on the
+# next) loses the first alternative, because the `=>` is not on its line.
+# Nothing in this tree is written that way; if something ever is, this
+# undercounts silently, so the self-test pins the shapes that do occur.
+PAYLOAD_RE = re.compile(r"(?<![A-Za-z0-9_])Key::(Char|Function)\s*\(([^)]*)\)(.*)")
+PAYLOAD_CHAR = re.compile(r"'([A-Za-z0-9])'")
+PAYLOAD_NUM = re.compile(r"(?<![A-Za-z0-9_])([0-9]{1,2})(?![0-9])")
+
+# The variant names themselves are never keys -- the key is what they carry.
+PAYLOAD_VARIANTS = frozenset({"Char", "Function"})
+
+
+def payload_keys(code: str) -> set[str]:
+    """Keys named inside `Key::Char('x')` / `Key::Function(5)` patterns."""
+    out: set[str] = set()
+    for variant, payload, rest in PAYLOAD_RE.findall(code):
+        if "=>" not in rest:
+            continue
+        if variant == "Char":
+            for ch in PAYLOAD_CHAR.findall(payload):
+                out.add(ch.upper() if ch.isalpha() else f"Num{ch}")
+        else:
+            for num in PAYLOAD_NUM.findall(payload):
+                if 1 <= int(num) <= 12:
+                    out.add(f"F{int(num)}")
+    return out
+
+
 # A printed key list, found by its *shape* rather than its name.
 #
 # This looked for the identifiers `SHORTCUTS` and `ALL_KEY_ACTIONS`, which is
@@ -287,8 +332,12 @@ def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
         # comment about Command::new once poisoned a grep for it.
         code = rustlex.strip_noise(live, keep_literals=False)
         matched.update(KEY_RE.findall(code))
+        # The payload scan needs the literals `code` has just blanked, so it
+        # reads a second pass with comments stripped and literals kept.
+        matched.update(payload_keys(rustlex.strip_noise(live, keep_literals=True)))
         literals.extend(rustlex.string_literals(live))
 
+    matched -= PAYLOAD_VARIANTS
     matched -= IGNORE
     matched -= CONVENTIONAL
     if not matched:
@@ -351,7 +400,37 @@ def _self_test() -> int:
         ("F5", "F5: refresh", True, "a multi-character name is a substring match"),
         ("Esc", "Esc: back", True, "ditto"),
     ]
+    # `payload_keys` cases. Every one is a line that occurs in
+    # `apps/markdowneditor`, and the controls are the three shapes that
+    # separate "this app answers this key" from "this key appears here":
+    # the bridge that builds one, the catch-all that binds one, and the test
+    # that presses one. Without them the payload scan reports 21 keys for an
+    # app that binds 9.
+    payloads: list[tuple[str, set[str], str]] = [
+        ("Key::Char('h' | 'H' | 'f' | 'F') => {", {"H", "F"},
+         "one arm, four spellings, two keys"),
+        ("Key::Function(5) => app.refresh(),", {"F5"},
+         "a function key carried in the payload"),
+        ("Key::Char('2') => app.heading(2),", {"Num2"},
+         "a digit in a payload is the digit key"),
+        ("GKey::F1 => Key::Function(1),", set(),
+         "control: the bridge builds a key, it does not answer one"),
+        ("_ => Key::Char(printable(ev)?),", set(),
+         "control: a catch-all building a key from typed text"),
+        ("Key::Char(c) => app.insert(c),", set(),
+         "control: a binding, not a literal -- this is text input"),
+        ("handle_key(&mut app, Key::Char('q'), mods);", set(),
+         "control: a test presses it; no arm in the app answers it"),
+    ]
     bad = 0
+    for code, want_keys, why in payloads:
+        got_keys = payload_keys(code)
+        ok = got_keys == want_keys
+        print(f"  {'ok  ' if ok else 'FAIL'} {why}")
+        if not ok:
+            print(f"       payload_keys({code!r}) -> {sorted(got_keys)},"
+                  f" wanted {sorted(want_keys)}")
+            bad += 1
     for name, hay, want_hit, why in named:
         got_hit = names_the_key(name, hay)
         ok = got_hit == want_hit
@@ -369,7 +448,7 @@ def _self_test() -> int:
     if bad:
         print(f"self-test: {bad} failure(s)")
         return 1
-    print(f"self-test ok -- {len(cases) + len(named)} case(s)")
+    print(f"self-test ok -- {len(cases) + len(named) + len(payloads)} case(s)")
     return 0
 
 

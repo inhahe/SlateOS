@@ -85,6 +85,36 @@ of the survivor is "the fix is incomplete" — which would send the next round
 back into the exec path it had just correctly left. Worth knowing before you
 read the next run's results rather than after.
 
+## STOP — the fault is not in `posix/` at all
+
+**Nothing in this file is work for lane B.** Lane A's native-exec probe fired on
+its first boot and located the fault in the kernel:
+
+```
+[spawn]   Exec test: mapped 136 bytes of target ELF at 0x5000000000
+[exec] NATIVE exec FAILED -> -101 (elf_len=136)
+[exception] Killing task 96 - General Protection Fault (#GP)
+```
+
+`-101` is `InvalidAddress`: **`SYS_PROCESS_EXEC` cannot read the ELF the caller
+mapped**, and the caller then crashes on the instruction after the syscall.
+
+**The `execl`/`execv` split that this whole file reasons from was a
+coincidence.** fastpy's `os.execv` works because fastpy is **Linux-ABI** and
+routes through `linux_execve`; the C fixtures are **native-ABI** and route
+through `SYS_PROCESS_EXEC`. The real split is native versus Linux ABI, and in
+the sample the call form happened to line up with the ABI exactly. Every C
+fixture calls `execl`, every Linux-ABI caller uses the vector form, and neither
+fact was about the call form.
+
+My narrowing below -- that `execl` *is* `execv` plus a `va_list` walk -- is
+still correct as a reading of `spawn.rs`. It is simply not where the fault
+lives. `va_trampoline` is **not** something to spend time on.
+
+I am leaving the rest of this file standing rather than deleting it, for the
+third time today, because it is what I sent you and a correction that hides the
+claim teaches nothing about how the claim was reached.
+
 ## CORRECTION, same day, before you act on the section below
 
 **Do not start on `va_trampoline` on the strength of the 2026-09-16 request.**

@@ -160479,7 +160479,7 @@ about a program that was working correctly, or nearly hid a real one. This
 entry lists them with the instance that caught each, because the fix is not
 "be careful" -- it is knowing the specific shapes.
 
-**It started at seven and is at fifteen**, all in the same day, and the slug
+**It started at seven and is at sixteen**, all in the same day, and the slug
 keeps the original number because renaming it would break every reference to
 it. The later seven are not more of the same: 8 and 12 are about *coverage* --
 which files a sweep read, which configuration a build compiled -- 11 and 13 are
@@ -160602,6 +160602,32 @@ rather than deleted.
    `podcast`'s timestamp, `markdowneditor`'s find panel -- was confirmed by
    reading it. **No probe found one that reading did not.** The probes were
    worth running only as a way of choosing what to read.
+
+**16. The pipe answered instead of the program** (2026-09-21, both lanes).
+`cmd | head` reports *head's* exit status, so `cmd 2>&1 | head -5; echo $?`
+prints `0` whatever `cmd` did. Worse, when the output outruns the pipe buffer
+`head` exits first and the writer takes SIGPIPE -- **exit 141, which is
+128+13 and looks like an ordinary failure code rather than a shell artefact.**
+Lane A had a `git push` killed that way and read the surviving local
+fast-forward as a failed push, and had a gate come back 141 instead of 1.
+
+This lane hit the reading half twice on 2026-09-21 and caught both:
+`... | tail -5; echo "EXIT=$?"` printed `0` while the tool exited 1, and a
+`git merge --ff-only` that printed `fatal:` was followed by `MERGE_RC=0`.
+Both were caught by noticing the *words* disagreed with the number, which is
+luck, not method.
+
+The measurement that separates the two halves: `PIPESTATUS[0]` after
+`python scripts/key-survey.py 2>&1 | head -5` is **0**, because 45 lines fit
+the pipe buffer and the writer finished before the reader left. So the SIGPIPE
+half is conditional on output size -- which means it appears when a file grows
+and not before, and the command that was fine yesterday is the one that lies
+tomorrow.
+
+The rule, and it costs nothing: **never read a status through a pipe.**
+Redirect to a file and echo `$?`, then read the file. Every verification in
+this lane's sweep does that; every *display* that pipes is followed by a
+separate redirected run when the status matters.
 
 **Why this is filed rather than merely learned.** The three probes written
 today (frozen fields, displayed-but-unchangeable labels, admit-yet-claim) all

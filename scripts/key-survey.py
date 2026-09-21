@@ -301,6 +301,22 @@ def names_the_key(name: str, haystack: str) -> bool:
     return name in haystack
 
 
+# A string with an escape character in it is not a label a reader sees.
+#
+# `apps/terminal` writes the sequences it sends to the program inside as
+# string literals: "\x1b[Z" is back-tab and "\x1b[{};{}R" is a cursor
+# position report. Those contain a standalone Z and R, so the survey read
+# them as the terminal naming those keys -- and a terminal names no key,
+# it forwards them. Two of the keys it forwards therefore read as *named*.
+#
+# That is the same failure direction as shape 23 and it was found the same
+# way: not by the report looking wrong, but by an answer file line going
+# stale, which asked why a key was no longer being reported.
+def is_label(literal: str) -> bool:
+    """Is this literal text somebody reads, rather than bytes sent somewhere?"""
+    return not any(mark in literal for mark in (r"\x1b", r"\u{1b}", chr(27)))
+
+
 def crate_sources(crate: Path) -> list[Path]:
     return sorted(p for p in (crate / "src").rglob("*.rs"))
 
@@ -335,7 +351,7 @@ def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
         # The payload scan needs the literals `code` has just blanked, so it
         # reads a second pass with comments stripped and literals kept.
         matched.update(payload_keys(rustlex.strip_noise(live, keep_literals=True)))
-        literals.extend(rustlex.string_literals(live))
+        literals.extend(l for l in rustlex.string_literals(live) if is_label(l))
 
     matched -= PAYLOAD_VARIANTS
     matched -= IGNORE
@@ -422,7 +438,21 @@ def _self_test() -> int:
         ("handle_key(&mut app, Key::Char('q'), mods);", set(),
          "control: a test presses it; no arm in the app answers it"),
     ]
+    # `is_label` cases. The terminal's own escape sequences were being read
+    # as the terminal naming keys, which made two forwarded keys look named.
+    labels: list[tuple[str, bool, str]] = [
+        (r"\x1b[Z", False, "an escape sequence is bytes, not a label"),
+        (r"\x1b[{};{}R", False, "the cursor report that made R look named"),
+        ("Ctrl+R  Refresh", True, "a label that happens to name the same key"),
+    ]
     bad = 0
+    for text, want_label, why in labels:
+        got_label = is_label(text)
+        ok = got_label == want_label
+        print(f"  {'ok  ' if ok else 'FAIL'} {why}")
+        if not ok:
+            print(f"       is_label({text!r}) -> {got_label}")
+            bad += 1
     for code, want_keys, why in payloads:
         got_keys = payload_keys(code)
         ok = got_keys == want_keys
@@ -448,14 +478,43 @@ def _self_test() -> int:
     if bad:
         print(f"self-test: {bad} failure(s)")
         return 1
-    print(f"self-test ok -- {len(cases) + len(named) + len(payloads)} case(s)")
+    print(f"self-test ok -- {len(cases) + len(named) + len(payloads) + len(labels)} case(s)")
     return 0
+
+
+#: Keys already looked at and found not to be a defect.
+#:
+#: See `key-survey-answered.txt` for the rules. The one that matters is that a
+#: line naming a key this survey no longer reports is an *error*: an answer
+#: about code that has since changed reads as a decision somebody made about
+#: the code as it is now, and nobody did.
+ANSWERED = Path(__file__).resolve().parent / "key-survey-answered.txt"
+
+
+def answered() -> dict[tuple[str, str], str]:
+    """`{(crate, key): reason}` from the answers file."""
+    out: dict[tuple[str, str], str] = {}
+    try:
+        text = io.open(ANSWERED, encoding="utf-8").read()
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(chr(9))
+        if len(parts) >= 3:
+            out[(parts[0], parts[1])] = parts[2]
+    return out
 
 
 def main(argv: list[str]) -> int:
     if selftestflag.wants_selftest(argv):
         return _self_test()
+    show_answered = "--answered" in argv
+    known = answered()
     rows = []
+    answered_rows: list[tuple[str, str, str]] = []
     apps = Path(__file__).resolve().parent.parent / "apps"
     for crate in sorted(apps.iterdir()):
         if not crate.is_dir():
@@ -463,18 +522,61 @@ def main(argv: list[str]) -> int:
         result = survey(crate)
         if result is None:
             continue
-        total, missing, unnamed, has_list = result
-        rows.append((missing, total, crate.name, unnamed, has_list))
+        total, _missing, unnamed, has_list = result
+        kept = []
+        for key in unnamed:
+            reason = known.get((crate.name, key))
+            if reason is None:
+                kept.append(key)
+            else:
+                answered_rows.append((crate.name, key, reason))
+        rows.append((len(kept), total, crate.name, kept, has_list))
 
     rows.sort(key=lambda r: (-r[0], -r[1], r[2]))
     listed = sum(1 for r in rows if r[4])
     print(f"{len(rows)} apps bind a letter, digit or function key; {listed} carry a key list\n")
     print(f"{'app':<22}{'keys':>5}{'unnamed':>9}  list  unnamed keys")
+    queue_apps = 0
+    queue_keys = 0
     for missing, total, name, unnamed, has_list in rows:
         if missing == 0:
             continue
+        queue_apps += 1
+        queue_keys += missing
         shown = ", ".join(unnamed[:10]) + ("..." if len(unnamed) > 10 else "")
         print(f"{name:<22}{total:>5}{missing:>9}  {'yes ' if has_list else '--  '}  {shown}")
+    print(f"\nqueue: {queue_apps} app(s), {queue_keys} key(s)")
+
+    if answered_rows:
+        print(f"{len(answered_rows)} already answered (--answered for why)")
+        if show_answered:
+            for crate_name, key, reason in sorted(answered_rows):
+                print(f"  {crate_name} {key}: {reason}")
+
+    # An answer about a key this survey no longer reports is not harmless. It
+    # reads as a decision somebody made about the code as it is now, and the
+    # code has moved -- the key may have been named, renamed or unbound, and
+    # those three want different things done with the line.
+    stale = sorted(set(known) - {(c, k) for c, k, _ in answered_rows})
+    if stale:
+        print(
+            f"\n{len(stale)} line(s) in {ANSWERED.name} name a key this "
+            f"survey no longer reports:"
+        )
+        for crate_name, key in stale:
+            print(f"  {crate_name} {key}")
+        print("  Why it is stale decides what to do, and the three answers")
+        print("  differ:")
+        print("    named   -- the app names the key now. Delete the line; the")
+        print("               reason it carried is in the commit that did it.")
+        print("    unbound -- the app no longer answers the key at all.")
+        print("               Delete it, and check the reason did not describe")
+        print("               something that outlived the binding.")
+        print("    moved   -- still unnamed, under another key. Re-point the")
+        print("               line rather than deleting it, or the next run")
+        print("               re-offers the row with nothing recorded against")
+        print("               it.")
+        return 1
     return 0
 
 

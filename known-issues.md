@@ -160882,6 +160882,22 @@ have to be true for it to be false, that is the moment. A conclusion that has
 absorbed three facts and predicted none of them is not better supported than it
 was; it is a conclusion three facts have failed to dislodge.
 
+**Lane A's step, which is better than "be more sceptical" because it changes
+what you do:** when a peer's correction arrives, write the sentence *"this
+would make my conclusion false if ..."* before writing anything else. If it
+cannot be completed, it really was a refinement. Both of theirs completed in
+one line.
+
+**And their sharper variant, which is the nastier half.** Both corrections this
+lane sent were about *call form* -- `execl` versus `execv` -- and lane A went on
+reasoning inside that frame for six rounds. What ended it was *ABI*: `posix`
+execs through the native `SYS_PROCESS_EXEC`, so a C fixture cannot reach
+`linux_execve` at all. The facts were true and they answered the question being
+asked; **the question was wrong**. A correct answer to the wrong question is
+indistinguishable from progress -- it arrives with the feel of a narrowing,
+because it *is* one, of a space that does not contain the answer. Recorded on
+their side as design-decisions 955.
+
 ## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18) -- **CLOSED 2026-09-21**
 
 **In short:** 60 boolean fields across 25 apps are read by the program and

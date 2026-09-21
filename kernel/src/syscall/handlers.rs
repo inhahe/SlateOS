@@ -14063,6 +14063,17 @@ pub fn sys_dns_resolve(args: &SyscallArgs) -> SyscallResult {
     // `init_defaults`, but nothing consulted it -- so `localhost` went out
     // on the wire and failed. Requested in
     // requests/b-a-sys-dns-resolve-never-consults-the-hosts-table.md.
+    // The hosts table has to exist before a name can be looked up in it, and
+    // nothing guarantees it does: `init_defaults`' other callers are a
+    // `/proc/nameservice` read (main.rs:4427) and a `kshell` command, both
+    // later in boot than `self_test_fs` (main.rs:1697). Without this the
+    // first caller finds an uninitialised table, gets `NotSupported`, and
+    // falls through to the wire -- which is the bug this whole change exists
+    // to fix, reintroduced one layer down.
+    //
+    // `sys_hostname_set` and `sys_domainname_set` open the same way for the
+    // same reason. It is idempotent: it returns at once if state exists.
+    crate::fs::nameservice::init_defaults();
     if let Ok(found) = crate::fs::nameservice::resolve(name) {
         // No indexing and no arithmetic: `indexing_slicing` and
         // `arithmetic_side_effects` are both active in this crate, and this

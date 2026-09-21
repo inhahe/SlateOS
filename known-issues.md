@@ -164253,6 +164253,56 @@ the harness comment beside them says: if `/bin/true` cannot exec, the pty
 and CPython rungs below are exercising the same broken path from further
 away. Fixing the exec should clear all three.
 
+#### Round 5's discriminator answered, and it eliminates the whole exec theory
+
+`linux_exec_common` already wraps the exec path and prints
+`[exec] execve(...) FAILED -> errno N` on every negative return. It was
+added in `fec0ab339` precisely because *"the fixture can only report THAT
+exec failed; the kernel knows the errno and had never been asked"*.
+
+**It did not fire.** Establishing that took checking the instrument first:
+
+| check | result |
+|---|---|
+| wrapper present at booted commit `37ff910f2` | yes |
+| early probe present too | yes |
+| do they work? | yes -- line 557 logs `linux_execve ENTERED and failed early: filename_ptr=0x0 errno=14`, and lines 3563+ log successful execs |
+| any `[exec]` line at the failure (~3126) | **none** |
+
+So the child process **never entered `execve`**. Every theory about exec --
+wrong path, missing file, missing capability, ELF rejection, the 16 MiB
+ceiling -- is eliminated at once, because none of them can be reached
+without the syscall being made.
+
+What the log establishes, and nothing more:
+
+```
+[cu] true (exec, run, exit 0 -- ...)          fixture announces the attempt
+[cow] Cloned address space: parent -> child   fork() SUCCEEDED
+[sched] Spawned task 153 (priority 16, cpu 0)
+[thread] Spawned thread (task 153) in process 184
+[thread] Process 184 has no threads left - now zombie
+[sched] Task 153 exiting
+```
+
+No fault, no exception, no exec. The child was created and exited. **The
+fault is between `fork()` returning in the child and the child issuing
+`execve`** -- which is a handful of instructions in the fixture's libc.
+
+**The process lesson, which cost me this whole session.** That wrapper's
+doc comment lists the three theories already tried and disproved: *not
+staged; wrong path; no capability*. I spent this session re-running the
+first one -- rebuilding the argument that the binary was missing, writing
+it up, pushing it, and having to retract it. The comment naming my theory
+as already-dead was inside the function I eventually read, and I read it
+**last**. Reading the code that owns the failure before theorising about
+it is not a refinement of method, it is the method.
+
+**Next probe belongs at the fork boundary, not the exec one.** A diagnostic
+on the child's first return from `fork_process_clone` would say whether the
+child ever ran userspace instructions at all. Do not spend another boot on
+an exec theory: the instrument has already ruled that family out.
+
 **Still true from the original entry:** `rootfs.ext4.manifest` has 93
 entries and none for `/bin/true`, so the image guard's corpus genuinely
 excludes the binaries the rungs exec. That is worth widening on its own

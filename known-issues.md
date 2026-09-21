@@ -161452,6 +161452,94 @@ function-key columns first and its digit column last. Digits are nearly always
 a size, a level or a view, and an app that draws "Levels 1-8" has named all
 eight to a reader while naming two to a substring search.
 
+## `TD-C-NINETY-ONE-APPS-BIND-KEYS-AND-NAME-THEM-NOWHERE` (lane C, 2026-09-21) -- **OPEN**
+
+**In short:** most of the apps in this suite answer keyboard shortcuts and
+never tell you what they are. Of 127 apps that bind a letter, digit or
+function key, **36 carry a key list and 91 do not.** There is nothing to
+press and nothing on screen: the only way to find out that `R` restarts a
+level or `Ctrl+G` finds the next match is to read the source. The decision
+about *how* an app should show its keys was already taken (design-decisions
+863: `F1` always, `?` as well where nothing needs to type one) and the
+toolkit support already exists -- what is missing is doing it 91 times.
+
+**How the number is got.** `python scripts/key-survey.py`. The printed table
+only shows apps that also have *unnamed* keys, so the 91 are not all visible
+in its output; the full queue comes from `survey()`'s fourth return value.
+The count is candidates, not verdicts -- see the module docstring for the
+three things it cannot know.
+
+**What "done" looks like for one app**, all of it already established by the
+twelve apps that have been through it (`apps/jsonviewer` is the clearest
+model):
+
+1. `const SHORTCUTS: &[(&str, &str)]` listing the keys the app really binds,
+   last row `("F1 / ?", "This list")`.
+2. A `show_help` flag toggled by `Key::F1` or `Shift`+`Slash`, closed by
+   `Escape`, and **guarded against stealing a keystroke from a text field** --
+   `jsonviewer` gates the whole block behind `if !typing`.
+3. `guitk::shortcut::render_card(...)` in `render`, drawn last so it is on top.
+4. Two tests: `every_advertised_key_does_something`, which parses each label
+   with `guitk::shortcut::keystrokes` and asserts the app consumes it, and
+   `the_shortcut_list_reaches_the_window`, which asserts each row's text is
+   actually drawn. The first catches a list that over-promises, the second a
+   list that is written and never rendered.
+
+**Two things that will bite whoever does this.**
+
+*The label is parsed, so it has to be parseable.* `guitk::shortcut::keystrokes`
+understands `/` and `,` alternatives, the word `Arrows`, and exact ranges like
+`A-Z` or `1-9` (**no spaces** -- `1 - 9` is not a range). It does **not**
+understand `WASD`, which four games bind as movement (`apps/asteroids`,
+`apps/game2048`, `apps/snake`, `apps/sokoban`). Either write them out as
+`W, A, S, D` or add a `wasd` case beside the existing `arrows` one, which is
+the same shape of abbreviation and probably the right fix.
+
+*A key can be advertised and still be refused in the state the test starts in.*
+`apps/sokoban` answers `Enter` in its level menu but deliberately ignores it on
+an unsolved board, so `every_advertised_key_does_something` passes or fails
+depending on which screen the sample app is on. The list is per-app work, not a
+sweep: the row has to name the mode (`"Enter / Space", "Next level, once this
+one is solved"`) and the test's sample app has to be in a state where the key
+means something.
+
+**Known false positives in the queue.** `apps/terminal` tops the survey with 41
+keys, and they are *encodings* rather than shortcuts -- `Key::A => Some(0x01)`
+is how a control character is produced, not a command the user should be told
+about. `apps/markdowneditor`'s two are `Key::Char` and `Key::Function`, which
+are variant names and not keys. Neither needs a list.
+
+**The queue, most keys first** (from the run of 2026-09-21):
+
+```
+videoplayer 31, wordle 29, hangman 29, crossword 27, rssreader 26, editor 19,
+paint 17, sokoban 16, kanban 16, filesearch 16, compass 15, metronome 14,
+rush 13, musicplayer 13, automator 13, torrent 12, remotedesktop 12,
+worldclock 11, klotski 11, dictionary 11, weather 10, stickynotes 10, snake 10,
+passwordgen 10, sysmonitor 9, pomodoro 9, benchmark 9, screenrecorder 8,
+launcher 8, alarmclock 8, yahtzee 7, screenshot 7, notes 7, ebook 7,
+contacts 7, snippets 6, mediaconvert 6, email 6, dbviewer 6, archivemanager 6,
+whiteboard 5, tetris 5, systemrestore 5, stopwatch 5, settings 5, match3 5,
+dots 5, credmanager 5, asteroids 5, startupmanager 4, pinball 4, mahjong 4,
+freecell 4, fileassoc 4, devicemanager 4, charmap 4, typingtutor 3, sysinfo 3,
+spades 3, solitaire 3, procexplorer 3, colorpicker 3, unitconverter 2,
+undelete 2, speedtest 2, soundrecorder 2, pong 2, podcast 2, partmanager 2,
+pacman 2, nonogram 2, markdowneditor 2, hearts 2, habits 2, gomoku 2,
+fontmanager 2, flashcards 2, diskcleanup 2, diskanalyzer 2, clipmanager 2,
+breakout 2, battleship 2, tmux 1, taskscheduler 1, reversi 1, netscan 1,
+netmanager 1, defrag 1, chess 1, checkers 1, terminal 41 (false positive)
+```
+
+**A related gap found while measuring, worth fixing with the first batch:**
+`apps/game2048` *has* a help overlay and raises it with `H`, and `Escape`
+closes it. That predates 863 and is exactly the failure 863 names -- a user who
+learns `F1` from one app finds it dead here. It needs `F1` and `?` added to the
+existing overlay, not a new one.
+
+**If this is never done,** nothing breaks and nothing gets worse; the keys keep
+working for whoever reads the source. It is a discoverability gap, not a bug,
+which is why it is an entry here rather than an operator question.
+
 ## `TD-C-A-PRINTED-KEY-LIST-IS-A-SECOND-COPY` -- **FIXED 2026-09-18** (lane C)
 
 **In short:** Five apps print a list of their keys on screen. That list is a

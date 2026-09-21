@@ -161744,6 +161744,31 @@ a working help overlay, raised by `H` rather than `F1`. That predates
 design-decisions 863 and is exactly the failure 863 exists to prevent, so it
 wants `F1` and `?` added to the overlay it already has, plus the two guards.
 
+**But the guard cannot simply be dropped on them, and here is why.** A rough
+static pass over the eighteen -- expanding each row's first column to the `Key`
+variants it names and asking whether the crate mentions them -- returns a lot
+of suspects, and reading them shows most are not dead keys but rows that are
+**not keystrokes at all**: `Click`, `Click a cell`, `Wheel`, `Goal`, `Two tiles
+alike`. These lists are *how to play* panels, not shortcut cards, and their
+first column is a mix of keys and prose.
+
+That matters because `guitk::shortcut::keystrokes` returns `UnknownKey` rather
+than skipping what it cannot read -- deliberately, and the reasoning is in its
+own doc comment: "a guard test handed a shorter list than it asked for would
+pass while checking less". So the guard would *panic* on `Goal` rather than
+report anything, and the tempting fix -- skip rows that do not parse -- is
+precisely the hole that lets a genuinely dead key hide behind a label nobody
+taught the parser. **Do not teach the guard to skip.** Either split the panel
+so the key rows are their own list, or keep one list whose first column is
+strictly keystrokes and move `Click` and `Goal` into the description or a
+separate panel.
+
+A second, duller obstacle in the same pass: several rows write ranges with
+spaces -- `1 - 9`, `1 - 7`, `1 - 4`. `keystrokes` accepts a range only as an
+exact `X-Y`, on purpose, so that the `-` key itself is never mistaken for one.
+Those rows need the spaces removed, which is a real edit and not a cosmetic
+one: today they are unparseable.
+
 **The working order, revised.** Do the 18 above first -- they are cheaper and
 likelier to be hiding real defects. Then take the 56, largest first
 (`videoplayer` 31, `hangman` 29, `wordle` 29, `crossword` 27, `rssreader` 26,

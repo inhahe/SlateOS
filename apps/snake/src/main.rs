@@ -289,6 +289,19 @@ pub enum Difficulty {
 }
 
 /// The three difficulties, in the order the footer offers them.
+/// The keyboard reminder drawn under the board.
+///
+/// **Every entry reads `keys: what it does`, separated by runs of two or more
+/// spaces, and that shape is load-bearing.** `the_hint_names_every_key_it_
+/// answers` parses this line back into keystrokes with
+/// `guitk::shortcut::keystrokes` and presses each one, so the reminder is
+/// checked against the handler rather than trusted.
+///
+/// `1-3` was missing until 2026-09-21. The three difficulties have always had
+/// keys and there are clickable Easy/Medium/Hard buttons for them, so the
+/// feature was reachable with a mouse and invisible to the keyboard.
+const HINT_LINE: &str = "Arrows/WASD: steer   P: pause   R: again   B: wrap   1-3: level";
+
 pub const DIFFICULTIES: [Difficulty; 3] = [Difficulty::Easy, Difficulty::Medium, Difficulty::Hard];
 
 impl Difficulty {
@@ -1541,7 +1554,7 @@ impl SnakeApp {
         label_left(
             f,
             &Label {
-                text: "Arrows/WASD: steer   P: pause   R: again   B: wrap",
+                text: HINT_LINE,
                 size: l.small,
                 weight: FontWeightHint::Regular,
                 color: OVERLAY0,
@@ -1896,6 +1909,53 @@ mod tests {
 
     /// A game from a known seed, so a test that says "the food is here" is
     /// saying something that stays true.
+    /// **Every key the hint names is one this game answers.**
+    ///
+    /// The hint and the handler are two copies of one fact and they drift.
+    /// This one had: `1`, `2` and `3` pick the difficulty, have always done,
+    /// and the hint never said so -- there are clickable Easy/Medium/Hard
+    /// buttons, so the feature was reachable with a mouse and invisible to
+    /// the keyboard.
+    ///
+    /// The keys are read back out of `HINT_LINE` rather than written again
+    /// here: a table beside this test would be a third copy, free to drift
+    /// from both of the other two.
+    #[test]
+    fn the_hint_names_every_key_it_answers() {
+        let mut checked = 0usize;
+        for entry in HINT_LINE.split("  ") {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            let Some((keys, what)) = entry.split_once(": ") else {
+                panic!("hint entry {entry:?} is not `keys: what it does`");
+            };
+            for stroke in guitk::shortcut::keystrokes(keys).unwrap_or_else(|e| panic!("{e}")) {
+                // Two headings, because steering back along your own neck is a
+                // move the game is right to refuse: a snake running right
+                // cannot turn left. One board could never answer all four
+                // arrows, and a guard that demanded it would be asking for a
+                // worse game.
+                let answered = [
+                    placed(&[(5, 5), (5, 4), (5, 3)], Direction::Right),
+                    placed(&[(5, 5), (6, 5), (7, 5)], Direction::Up),
+                ]
+                .iter_mut()
+                .any(|app| probe::key(app, &stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the hint says {keys:?} {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+                checked = checked.saturating_add(1);
+            }
+        }
+        // A hint that parsed to nothing would otherwise pass, which is how a
+        // guard goes quiet without going red.
+        assert!(checked >= 14, "only {checked} keystrokes were checked");
+    }
+
     fn game() -> SnakeApp {
         SnakeApp::with_seed(7)
     }

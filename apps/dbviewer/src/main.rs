@@ -3428,6 +3428,28 @@ impl DbTab {
 // ============================================================================
 
 /// Main application state.
+/// The keys this program answers, raised by `F1`.
+///
+/// `?` is not a second way in: the SQL editor and the filter boxes take typed
+/// text, so a `?` has somewhere to go here -- the `apps/spreadsheet` case in
+/// design-decisions 863.
+///
+/// Every letter below reaches its shortcut only when nothing has the keyboard;
+/// with the editor focused they are characters, which is why the rows say so.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("N", "A new tab"),
+    ("E", "The SQL editor"),
+    ("F", "The filter builder"),
+    ("R", "The results panel"),
+    ("S", "The schema panel"),
+    ("D", "The diagram panel"),
+    ("PageUp / PageDown", "A page of rows at a time"),
+    ("Tab", "Move the keyboard on"),
+    ("Enter", "Run the query, or add the filter"),
+    ("Esc", "Give the keyboard back"),
+    ("F1", "This list"),
+];
+
 pub struct DbViewerApp {
     /// The open or save picker. Holds the dialog, the saving flag and
     /// the routing eleven applications used to write out by hand.
@@ -3469,6 +3491,8 @@ pub struct DbViewerApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 impl Default for DbViewerApp {
@@ -3483,6 +3507,7 @@ impl DbViewerApp {
         let tab = DbTab::new(Database::new(""));
 
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             picker: FilePicker::new(),
             file_intent: FileIntent::ImportCsv,
@@ -3774,6 +3799,19 @@ impl DbViewerApp {
         // Last, so it is above everything.
         for cmd in self.picker.render(&self.palette, l.window.w, l.window.h) {
             f.push(cmd);
+        }
+
+        // Last, so it is over the file dialog too: the list is the one
+        // thing on screen a reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (l.window.w, l.window.h),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
         }
         f
     }
@@ -5533,6 +5571,21 @@ impl DbViewerApp {
 
     /// Route a keystroke to whatever has the keyboard.
     fn handle_key(&mut self, event: &KeyEvent) {
+        // Ahead of the text handling below: `F1` is not a character, and a
+        // reader with the editor focused still wants the keys.
+        if event.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return;
+        }
+        if self.show_help {
+            // Modal. Letting keys through would mean running a query you
+            // cannot see.
+            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return;
+        }
+
         if !event.pressed {
             return;
         }
@@ -5767,6 +5820,106 @@ mod tests {
 
     /// A fresh viewer holds no database and says so, not "no tables".
     ///
+    /// Everything the window draws, including colours and rectangles.
+    ///
+    /// Not just the text: `Tab` moves the keyboard focus, which this app shows
+    /// as a highlight rather than a word, so a text-only snapshot reports it as
+    /// doing nothing. That is the first thing the guard below caught, and it
+    /// was the guard being too narrow rather than the app being wrong.
+    fn window_snapshot(app: &DbViewerApp) -> String {
+        format!("{:?}", app.frame(WINDOW_WIDTH, WINDOW_HEIGHT).commands())
+    }
+
+    /// Every string the window draws, joined.
+    fn drawn(app: &DbViewerApp) -> String {
+        app.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **Every key the list advertises changes something.**
+    ///
+    /// This app's key handler returns `()` and `on_event` answers `Redraw` to
+    /// everything, so there is no consumed/ignored signal to assert on. What
+    /// is left is the window itself: an advertised key that changes no drawn
+    /// string is one a user pressing it would call broken.
+    ///
+    /// That is a weaker test than the `EventResult` guards elsewhere in the
+    /// tree and it is worth naming as weaker -- a key could change state the
+    /// window does not draw at all and fail this wrongly. None here does, but
+    /// the margin is thinner than it looks: the first version compared only
+    /// the drawn *text* and reported `Tab` as dead, because focus is a
+    /// highlight and not a word.
+    #[test]
+    fn every_advertised_key_changes_the_window() {
+        for (label, what) in SHORTCUTS {
+            if *label == "F1" {
+                continue; // covered by the card test below, which asserts more
+            }
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                // Two focus states, because `Tab` and `Esc` cannot both have
+                // work in one. From the editor with no filter builder open,
+                // `Tab` maps `Focus::Editor` back to `Focus::Editor` and is a
+                // genuine no-op; from `Focus::None` it moves. `Esc` is the
+                // other way round.
+                let answered = [Focus::Editor, Focus::None].into_iter().any(|focus| {
+                    let mut app = DbViewerApp::new();
+                    app.focus = focus;
+                    let before = window_snapshot(&app);
+                    app.handle_key(&stroke);
+                    window_snapshot(&app) != before
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and {:?} changed nothing on screen",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = DbViewerApp::new();
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_key(&probe::press(Key::F1));
+        let shown = drawn(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        // A key behind the card does not act: `N` would open a tab the reader
+        // cannot see. The control below presses it with the card down.
+        let tabs = app.tabs.len();
+        app.handle_key(&probe::press(Key::N));
+        assert_eq!(app.tabs.len(), tabs, "N opened a tab through the card");
+
+        app.handle_key(&probe::press(Key::Escape));
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+
+        app.handle_key(&probe::press(Key::N));
+        assert_ne!(
+            app.tabs.len(),
+            tabs,
+            "control: N does nothing even with the card down"
+        );
+    }
+
     /// `DbViewerApp::new` called `Database::sample()`, so the window opened on
     /// a file called `sample.db` with users, orders and the rest. A filename
     /// is a claim that a file exists -- the test `apps/ebook` failed and

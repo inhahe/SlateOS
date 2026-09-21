@@ -1943,6 +1943,27 @@ fn chip_width(label: &str) -> f32 {
 // ============================================================================
 
 /// The sticky-notes window: the store, the caret, and where the notes are kept.
+/// The keys this program answers, raised by `F1`.
+///
+/// `?` is deliberately not a second way in. Notes take typed text and the
+/// search box takes a query, so a `?` has somewhere to go here -- the
+/// `apps/spreadsheet` case design-decisions 863 carved out.
+///
+/// Before this list existed the app named **none** of its ten chords.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+N", "A new note"),
+    ("Ctrl+S", "Save"),
+    ("Ctrl+E", "Export"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+F", "Find, in the sidebar"),
+    ("Ctrl+B", "Show or hide the sidebar"),
+    ("Ctrl+G", "Snap notes to the grid"),
+    ("Ctrl+L", "Cycle the line style"),
+    ("Ctrl+Q", "Quit"),
+    ("Esc", "Leave the note you are editing"),
+    ("F1", "This list"),
+];
+
 pub struct StickyNotesApp {
     pub store: NoteStore,
     autosave: AutoSave,
@@ -1974,6 +1995,8 @@ pub struct StickyNotesApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 impl Default for StickyNotesApp {
@@ -1987,6 +2010,7 @@ impl StickyNotesApp {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             store: NoteStore::new(),
             autosave: AutoSave::new(AUTOSAVE_MS),
@@ -2203,6 +2227,19 @@ impl StickyNotesApp {
 
         self.draw_sidebar(&mut frame, height);
         self.draw_toolbar(&mut frame, width, height);
+
+        // Over the sidebar and the toolbar: the list is the one thing on
+        // screen a reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
         frame
     }
 
@@ -3064,6 +3101,21 @@ impl StickyNotesApp {
         let size = Self::clamped(size);
         let m = event.modifiers;
 
+        // Above the Ctrl block and above the text handling below it: a note
+        // takes typed characters, and `F1` is not one.
+        if event.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return Action::Redraw;
+        }
+        if self.show_help {
+            // The card is modal. Letting keys through would mean typing into a
+            // note you cannot see.
+            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return Action::Redraw;
+        }
+
         if m.ctrl && !m.alt {
             let canvas = self.canvas_rect(size.0, size.1);
             return match event.key {
@@ -3692,6 +3744,130 @@ mod tests {
     /// A note's geometry now has exactly one description — the frame the
     /// renderer records as it paints — so these ask the renderer rather than a
     /// second copy of the arithmetic that could drift away from it.
+    /// A note to leave, somewhere to save to, and an edit already made.
+    ///
+    /// Three of these keys are correctly refused without that setup, and each
+    /// cost a round of this test to discover: `Ctrl+S` and `Ctrl+E` return
+    /// `Action::None` with no storage path, and `Ctrl+Z` has nothing to take
+    /// back on a fresh note. None of them is a missing binding.
+    fn advertised_fixture(scratch: &ScratchDir) -> StickyNotesApp {
+        let mut app = StickyNotesApp::with_storage(scratch.path("notes.txt"));
+        let id = app.store.create_note(40.0, 40.0);
+        // `undo_active` works on the *active* note, which is a different
+        // thing from the focused one -- creating a note does not make it
+        // active, and without this Ctrl+Z reads as unbound.
+        app.store.set_active(Some(id));
+        app.focus = Some(Focus::Body(id));
+        // Recorded through the note's own editing API rather than by pressing
+        // a letter. `probe::press` carries no `text`, and this app inserts
+        // from the event's text, so a synthetic letter types nothing -- a
+        // fixture built that way leaves the undo history empty and `Ctrl+Z`
+        // reads as unbound.
+        if let Some(note) = app.store.get_note_mut(id) {
+            note.insert_char(0, 0, 'a');
+        }
+        app
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// This app named none of its ten chords before the list existed, and the
+    /// survey reported only two of them -- it matched a key name as a
+    /// substring, so any capital `S` anywhere in the crate's strings counted
+    /// as naming `Ctrl+S`.
+    ///
+    /// Two states, because `Ctrl+Z` and `Ctrl+Y` cannot both have work in one:
+    /// an edit that has not been undone offers nothing to redo, and undoing it
+    /// is what makes the redo available. A guard demanding one state answer
+    /// both would be asking for an app that redoes what was never undone.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let scratch = ScratchDir::new("stickynotes-advertised");
+                let mut edited = advertised_fixture(&scratch);
+
+                let mut undone = advertised_fixture(&scratch);
+                undone.undo_active();
+
+                let answered = [&mut edited, &mut undone]
+                    .into_iter()
+                    .any(|app| probe::key(app, &stroke) != Action::None);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = StickyNotesApp::new();
+        let drawn = |a: &StickyNotesApp| {
+            a.draw(StickyNotesApp::SIZE)
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        probe::key(&mut app, &probe::press(Key::F1));
+        let shown = drawn(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// **A shortcut pressed behind the card does not act.**
+    ///
+    /// The card is modal, and this app is the reason that matters: a reader
+    /// consulting the keys must not be rearranging their desktop while they
+    /// read. `Ctrl+B` is the one asserted because its effect is *observable* --
+    /// an earlier version of this test pressed a plain letter and checked the
+    /// note text, and passed whether or not the card was up, because a
+    /// synthetic press carries no text and types nothing either way.
+    #[test]
+    fn a_shortcut_behind_the_card_does_not_act() {
+        let mut app = StickyNotesApp::new();
+        let before = app.store.sidebar_visible();
+
+        probe::key(&mut app, &probe::press(Key::F1));
+        probe::key(&mut app, &probe::ctrl(Key::B));
+        assert_eq!(
+            app.store.sidebar_visible(),
+            before,
+            "Ctrl+B acted through the shortcut card"
+        );
+
+        // Control: with the card down, the same chord does act -- otherwise
+        // this test would pass just as well on an app that had lost Ctrl+B.
+        probe::key(&mut app, &probe::press(Key::F1));
+        probe::key(&mut app, &probe::ctrl(Key::B));
+        assert_ne!(
+            app.store.sidebar_visible(),
+            before,
+            "control: Ctrl+B does nothing even with the card down"
+        );
+    }
+
     #[test]
     fn test_note_title_bar_and_grip_are_separate_targets() {
         let mut app = StickyNotesApp::new();

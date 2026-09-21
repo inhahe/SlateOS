@@ -127,6 +127,37 @@ pub enum Tab {
 }
 
 impl Tab {
+    /// The tab a number key selects, or `None` for a digit with no tab.
+    ///
+    /// The position in [`Tab::ALL`], one-based, and the *only* place that
+    /// relation is written. It used to be a six-arm `match` in the key
+    /// handler, with the caption drawn from `label()` alone -- so the keys
+    /// worked, the tab bar said "Overview" and nothing anywhere said that `1`
+    /// was how you got there.
+    #[must_use]
+    pub fn from_digit(digit: usize) -> Option<Self> {
+        Self::ALL.get(digit.checked_sub(1)?).copied()
+    }
+
+    /// The number key that selects this tab.
+    #[must_use]
+    pub fn digit(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|t| *t == self)
+            .map_or(0, |i| i.saturating_add(1))
+    }
+
+    /// What the tab bar draws: the key, then the name.
+    ///
+    /// Used by the drawing *and* by the click hit-test, which measure the same
+    /// string -- two measurements of different strings would put every tab's
+    /// click box in the wrong place.
+    #[must_use]
+    pub fn caption(self) -> String {
+        format!("{} {}", self.digit(), self.label())
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
@@ -911,7 +942,7 @@ impl SysMonitorState {
         self.system_info.running_count = running as u32;
 
         self.status_message = format!(
-            "{total} processes ({running} running) | CPU: {:.1}% | Mem: {} / {} | Refresh: {}",
+            "{total} processes ({running} running) | CPU: {:.1}% | Mem: {} / {} | Refresh: {} (F5)",
             self.system_info.cpu_overall,
             format_bytes(self.system_info.used_memory),
             format_bytes(self.system_info.total_memory),
@@ -1108,29 +1139,27 @@ impl SysMonitorState {
 
         match key.key {
             // Tab cycling
-            Key::Num1 if key.modifiers == Modifiers::NONE => {
-                self.active_tab = Tab::Overview;
-                EventResult::Consumed
-            }
-            Key::Num2 if key.modifiers == Modifiers::NONE => {
-                self.active_tab = Tab::Processes;
-                EventResult::Consumed
-            }
-            Key::Num3 if key.modifiers == Modifiers::NONE => {
-                self.active_tab = Tab::Cpu;
-                EventResult::Consumed
-            }
-            Key::Num4 if key.modifiers == Modifiers::NONE => {
-                self.active_tab = Tab::Memory;
-                EventResult::Consumed
-            }
-            Key::Num5 if key.modifiers == Modifiers::NONE => {
-                self.active_tab = Tab::Disk;
-                EventResult::Consumed
-            }
-            Key::Num6 if key.modifiers == Modifiers::NONE => {
-                self.active_tab = Tab::Network;
-                EventResult::Consumed
+            // One arm, and the digit-to-tab relation lives in `Tab::from_digit`
+            // so that the tab bar's caption cannot disagree with it.
+            Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 | Key::Num6
+                if key.modifiers == Modifiers::NONE =>
+            {
+                let digit = match key.key {
+                    Key::Num1 => 1,
+                    Key::Num2 => 2,
+                    Key::Num3 => 3,
+                    Key::Num4 => 4,
+                    Key::Num5 => 5,
+                    Key::Num6 => 6,
+                    _ => return EventResult::Ignored,
+                };
+                match Tab::from_digit(digit) {
+                    Some(tab) => {
+                        self.active_tab = tab;
+                        EventResult::Consumed
+                    }
+                    None => EventResult::Ignored,
+                }
             }
             Key::Tab if key.modifiers == Modifiers::NONE => {
                 self.cycle_tab_forward();
@@ -1266,7 +1295,7 @@ impl SysMonitorState {
                 if my < TAB_BAR_HEIGHT {
                     let mut tab_x = 0.0f32;
                     for tab in &Tab::ALL {
-                        let tab_w = tab_width(tab.label());
+                        let tab_w = tab_width(&tab.caption());
                         if mx >= tab_x && mx < tab_x + tab_w {
                             self.active_tab = *tab;
                             return EventResult::Consumed;
@@ -1539,8 +1568,8 @@ impl SysMonitorState {
 
         let mut tx = 0.0f32;
         for tab in &Tab::ALL {
-            let label = tab.label();
-            let tab_w = tab_width(label);
+            let label = tab.caption();
+            let tab_w = tab_width(&label);
             let is_active = *tab == self.active_tab;
 
             if is_active {
@@ -1574,7 +1603,7 @@ impl SysMonitorState {
             tree.push(RenderCommand::Text {
                 x: tx + 12.0,
                 y: 9.0,
-                text: label.to_string(),
+                text: label.clone(),
                 color: text_color,
                 font_size: 12.0,
                 font_weight,
@@ -4674,6 +4703,59 @@ mod tests {
         assert_eq!(result, EventResult::Consumed);
         // Should have triggered refresh, resetting ms_since_refresh
         assert_eq!(s.ms_since_refresh, 0);
+    }
+
+    /// **Every tab says which number key selects it, and that key selects it.**
+    ///
+    /// The relation between a digit and a tab used to be a six-arm `match` in
+    /// the key handler, and the tab bar drew `label()` alone. So `1` through
+    /// `6` worked, the bar read "Overview", and nothing anywhere on screen
+    /// said that `1` was how you reached it -- six keys a user could only find
+    /// by reading the source.
+    ///
+    /// `Tab::from_digit` is now the single place the relation is written, and
+    /// `caption()` is built from it, so the bar cannot disagree with the
+    /// handler. This presses each digit and reads the bar back, which is the
+    /// half a type cannot enforce.
+    #[test]
+    fn every_tab_names_the_key_that_selects_it() {
+        for tab in Tab::ALL {
+            let digit = tab.digit();
+            let key = match digit {
+                1 => Key::Num1,
+                2 => Key::Num2,
+                3 => Key::Num3,
+                4 => Key::Num4,
+                5 => Key::Num5,
+                6 => Key::Num6,
+                other => panic!("tab {tab:?} wants digit {other}, which this test cannot press"),
+            };
+
+            let mut s = SysMonitorState::new();
+            s.handle_key(&KeyEvent {
+                key,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            });
+            assert_eq!(s.active_tab, tab, "{digit} did not reach {tab:?}");
+
+            let drawn = s
+                .render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
+            assert!(
+                drawn.contains(&tab.caption()),
+                "the tab bar never draws {:?}, so nothing says {digit} selects it",
+                tab.caption()
+            );
+        }
     }
 
     #[test]

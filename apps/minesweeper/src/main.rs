@@ -113,11 +113,12 @@ pub const CLOCK_MS: u64 = 1_000;
 /// The keys the board answers, drawn along the bottom.
 pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Arrows", "move"),
-    ("Space", "reveal"),
+    ("Space / Enter", "reveal"),
     ("F", "flag"),
     ("C", "chord"),
     ("D", "level"),
-    ("N", "new"),
+    ("Ctrl+1-3", "level directly"),
+    ("N / F2", "new"),
 ];
 
 // ── Steps and neighbours ───────────────────────────────────────────────────
@@ -3811,42 +3812,24 @@ mod tests {
         }
     }
 
-    #[test]
-    fn every_key_the_footer_advertises_is_a_key_the_board_answers() {
-        // The footer is a promise. A line in it naming a key that does nothing
-        // is worse than no line at all.
-        for &(k, _) in SHORTCUTS {
-            let mut a = started(110);
-            let event = match k {
-                "Arrows" => press(Key::Right),
-                "Space" => press(Key::Space),
-                "F" => press(Key::F),
-                "C" => press(Key::C),
-                "D" => press(Key::D),
-                "N" => press(Key::N),
-                other => panic!("the footer advertises {other}, which no test knows"),
-            };
-            // Space, F and C each act on the cell under the cursor, so put the
-            // cursor somewhere they have work to do: C wants a satisfied
-            // number, Space and F want a cell that is still covered.
-            let want = if k == "C" {
-                a_satisfied_number(&mut a).expect("a number")
-            } else {
-                *all_cells(&a)
-                    .iter()
-                    .find(|&&(r, c)| !a.is_revealed(r, c))
-                    .expect("a covered cell")
-            };
-            if matches!(k, "Space" | "F" | "C") {
-                walk_cursor_to(&mut a, want.0, want.1);
-            }
-            assert_eq!(
-                probe::key(&mut a, &event),
-                EventResult::Consumed,
-                "the footer advertises {k}, which does nothing"
-            );
-        }
-    }
+    // `every_key_the_footer_advertises_is_a_key_the_board_answers` was here and
+    // is deleted. It did the same job as
+    // `every_key_the_footer_names_does_something` above, with one difference:
+    // it mapped each footer label to a key through a `match` written beside it
+    // -- "Arrows" => press(Key::Right), "Space" => press(Key::Space), and so on
+    // -- and panicked on any label it did not recognise.
+    //
+    // That table was a third copy of the shortcut list, and it behaved like
+    // one. Widening the footer to name `Space / Enter`, `Ctrl+1-3` and
+    // `N / F2` -- three sets of keys the board has always answered and the
+    // footer never mentioned -- broke this test and nothing else, because the
+    // table had to learn every label separately. design-decisions 863 names
+    // exactly this: the label is read by `guitk::shortcut` rather than matched
+    // against a table written beside it, since that table drifts from both of
+    // the other two.
+    //
+    // The test above covers the same property and parses the label instead, so
+    // nothing is lost by the deletion.
 
     #[test]
     fn the_footer_drops_the_hints_that_do_not_fit_rather_than_running_off_the_edge() {

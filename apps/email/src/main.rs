@@ -1839,6 +1839,30 @@ pub enum SortOrder {
 }
 
 /// Main email application
+/// The keys this program answers, raised by `F1`.
+///
+/// `?` is not a second way in: the search box and the compose form both take
+/// typed text, so a `?` has somewhere to go -- the `apps/spreadsheet` case in
+/// design-decisions 863.
+///
+/// The app named none of these before the list existed. The survey reported
+/// six of them and there were more, because it matched a key name as a
+/// substring: any capital `S` in any string counted as naming `S`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Up / Down", "Move through the messages"),
+    ("Left / Right", "Previous / next mailbox"),
+    ("R", "Reply to this message"),
+    ("F", "Forward it"),
+    ("U", "Mark it unread"),
+    ("S", "Flag it"),
+    ("Delete", "Delete it"),
+    ("Ctrl+N", "Compose"),
+    ("Ctrl+F", "Search"),
+    ("Ctrl+S", "Change the sort order"),
+    ("Ctrl+P", "Move the reading pane"),
+    ("F1", "This list"),
+];
+
 pub struct EmailApp {
     pub accounts: Vec<EmailAccount>,
     pub mailboxes: Vec<Mailbox>,
@@ -1873,6 +1897,8 @@ pub struct EmailApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 /// A field of the compose form.
@@ -1920,6 +1946,7 @@ impl EmailApp {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             accounts: Vec::new(),
             mailboxes: Vec::new(),
@@ -2158,6 +2185,21 @@ impl EmailApp {
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
         // The compose window takes every key while it is open, or typing a
         // subject containing `d` would delete the message behind it.
+        // Above the compose form and the search box, because `F1` is not text
+        // and a reader may want the keys from either.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal: letting keys through would mean deleting a message you
+            // cannot see.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         if self.active_panel == Panel::Compose {
             return self.handle_compose_key(key);
         }
@@ -2900,6 +2942,18 @@ impl EmailApp {
             max_width: Some(width - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
+
+        // Over the reading pane and the compose form both.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         cmds
     }
@@ -3661,6 +3715,105 @@ mod tests {
         let mut app = EmailApp::new();
         app.seed_sample_mail();
         app
+    }
+
+    /// Every string the window draws, joined.
+    fn drawn(app: &EmailApp) -> String {
+        app.render_commands(1200.0, 800.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// A message has to be selected for `R`, `F`, `U`, `S` and `Delete` to
+    /// have work -- all five act on the selection and are correctly refused
+    /// without one, which is not the same as being unbound.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut app = seeded();
+                app.handle_event(&press(Key::Down));
+                assert_eq!(
+                    app.handle_event(&Event::Key(stroke.clone())),
+                    EventResult::Consumed,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = seeded();
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = drawn(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// **A key pressed behind the card does not act.**
+    ///
+    /// This one matters more here than in most apps: `Delete` behind the card
+    /// would destroy a message the reader cannot see. The control presses the
+    /// same key with the card down, so the test cannot pass on an app that has
+    /// lost `Delete` altogether.
+    #[test]
+    fn a_key_behind_the_card_does_not_act() {
+        // `delete_message` moves to Trash and only *removes* a message that is
+        // already there, so the observable is the mailbox and not the count.
+        // The first version of this test watched `messages.len()`, and its
+        // control caught that: the card-down case changed nothing either.
+        let mailbox_of = |app: &EmailApp, id: u64| {
+            app.messages
+                .iter()
+                .find(|m| m.id == id)
+                .map(|m| m.mailbox.clone())
+                .unwrap_or_default()
+        };
+
+        let mut app = seeded();
+        app.handle_event(&press(Key::Down));
+        let id = app.selected_message.expect("a message is selected");
+        let before = mailbox_of(&app, id);
+        assert_ne!(before, "Trash", "the fixture must not start in Trash");
+
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(
+            mailbox_of(&app, id),
+            before,
+            "Delete moved a message through the shortcut card"
+        );
+
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(
+            mailbox_of(&app, id),
+            "Trash",
+            "control: Delete does nothing even with the card down"
+        );
     }
 
     /// A test cannot call `main`, so the mail the window opens on lives in a

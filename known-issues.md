@@ -160497,9 +160497,11 @@ about a program that was working correctly, or nearly hid a real one. This
 entry lists them with the instance that caught each, because the fix is not
 "be careful" -- it is knowing the specific shapes.
 
-**It started at seven and is at seventeen**, all in the same day, and the slug
+**It started at seven and is at twenty**, and the slug
 keeps the original number because renaming it would break every reference to
-it. The later seven are not more of the same: 8 and 12 are about *coverage* --
+it. 18 and 19 are the two that are not failure shapes at all -- 18 is the
+question that ends a run of them and 19 is about the cost of a grouping you
+were handed. The later ones are not more of the same: 8 and 12 are about *coverage* --
 which files a sweep read, which configuration a build compiled -- 11 and 13 are
 about *lists*, which is where this has cost the most, and 14 and 15 are about the
 *query itself* rather than the reading -- 14 puts the answer where the filter
@@ -160716,6 +160718,97 @@ over-report, and a future session that trusts their output will file working
 programs as broken. The entry they live in
 (`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
 says why the failure is systematic rather than a matter of care.
+
+**18. The artefact already contained its own counter-example** (lane A,
+2026-09-21, and lane C the same day). Not a failure shape but the question
+that ends them, and it is free. Lane A's `ctest-coreutils-runs` had failed six
+rounds, each round proposing a structural cause -- not staged, wrong path,
+missing capability, forked child cannot exec, native exec syscall broken -- and
+each costing a ~90 minute boot to disprove. The thing that killed all six was
+in the *first* log any of those rounds produced: one `[spawn]` line recording a
+ring-3 process forking and the child exec'ing a binary out of the same
+directory, in the same boot. A 2.7 MB log with 275 verdicts in it almost
+certainly holds one that contradicts your theory.
+
+**The rule: before any theory that costs a boot, a build or an hour, ask
+whether anything in the run you already have does the thing you believe is
+broken.** dd-954 says a passing control licenses only the axis it varies; the
+corollary is that **a passing control you did not write is still a control.**
+Looking is free and theorising is not.
+
+This lane had the same day from the other end. Six apps were opened off a "the
+app never names its keyboard shortcuts" queue and five needed nothing, and in
+every case the answer was in the app's own source: a footer the detector could
+not match, a guard under a different name, a table of structs rather than
+tuples, a `1-0` range an ascending expander reads as empty. Six apps read
+before the instrument was fixed instead. The queue was the artefact holding its
+own counter-example, and reading one app closely would have said so as loudly
+as reading six.
+
+**19. A wrong grouping costs more than a missing one** (lane A, 2026-09-21).
+Lane A was handed three red test rungs grouped as one finding. The grouping is
+reasonable -- if `/bin/true` cannot exec, the rungs below it exercise the same
+broken path from further away -- and it is wrong: the third never execs at all,
+and its exit 45 is `waitpid(WNOHANG)` exhausting its spin. So a correct fix to
+the first clears two of three, and **the natural reading of the survivor is
+"the fix is incomplete"**, sending the next round straight back into the path it
+had just correctly left.
+
+That is the asymmetry worth keeping. A *missing* grouping costs a second look.
+A *wrong* one launders an unrelated bug into evidence against a correct fix,
+and the evidence is persuasive precisely because the fix really was incomplete
+-- for the other thing. Check a grouping you were handed before you spend
+anything on it, including one a harness produced.
+
+This lane generated exactly that failure twice in one day, both in
+`known-issues.md` where a future reader would have acted on it: "18 apps have
+an unguarded key list" (it was one -- the scan keyed on a *test name*, and
+`apps/minesweeper`'s guard is called something else) and "91 apps name no keys"
+(26 apps, about 38 real). Both were groupings that would have sent the next
+reader somewhere wrong. Both were retracted in the file they were committed to
+rather than quietly corrected, because an entry that silently becomes right
+teaches nobody why it was wrong.
+
+**20. The measurement was true, reproducible, and about something else**
+(lane A, 2026-09-21). A five-day-old diagnosis, filed under a filename that
+stated its conclusion, rested on one serial line:
+
+```
+[exec] linux_execve ENTERED and failed early: filename_ptr=0x0 errno=14
+```
+
+The line is real and fires on every boot. It is a **kernel self-test
+deliberately passing NULL to check `EFAULT`** -- `linux.rs:54128`, "execve
+user-marshalling NULL handling" -- sitting about 2,500 lines *before* the
+fixture it was read as describing ever runs. No probe fires anywhere near the
+fixture's actual failure. The diagnosis was a correct observation attached to
+the wrong subject, and it stood as the explanation of a failing test for five
+days.
+
+**Nothing about the observation itself says which subject it belongs to.** It
+is true, it reproduces, it names the right syscall and the right errno, and it
+is adjacent in the log to the thing being investigated only in the sense that
+both are in the same 2.7 MB file. Every property a measurement can have in its
+own right, this one had.
+
+This lane raised the thread that unpicked it, and got the answer wrong in an
+instructive way: asked how a NULL could reach the syscall when the guard that
+rejects NULLs predates the observation by three weeks, it offered three
+resolutions -- the NULL arises lower down, the guard is bypassed, the probe
+read the wrong register. **All three assumed the hit belonged to the fixture.**
+"True, and about something else" was not on the list.
+
+The relation to 19 is worth naming, because the two are the same failure at
+different scales. A wrong *grouping* launders a second bug into evidence
+against a correct fix. A wrong *attribution* launders a self-test into evidence
+about production code. In both the damage is not that the evidence is weak --
+it is that the evidence is **strong**, and pointed at the wrong thing.
+
+**The practical rule:** before a log line becomes a diagnosis, establish that
+it belongs to the run of the thing you are diagnosing -- by line number against
+the subject's own first line, by pid, by anything. And for the inverse, which
+is the same rule from the other end: a probe's *silence* is evidence only once
+something you know fails has passed through that probe and been seen.
 
 ## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18) -- **CLOSED 2026-09-21**
 
@@ -161580,7 +161673,30 @@ The 33-row list is now a `SHORTCUTS` const drawn by `render_card` behind `F1`.
 has somewhere to go, which is the `apps/spreadsheet` case design-decisions 863
 carved out.
 
-## `TD-C-NINETY-ONE-APPS-BIND-KEYS-AND-NAME-THEM-NOWHERE` (lane C, 2026-09-21) -- **OPEN**
+## `TD-C-NINETY-ONE-APPS-BIND-KEYS-AND-NAME-THEM-NOWHERE` (lane C, 2026-09-21) -- **OPEN, AND THE NUMBER IN THE TITLE IS WRONG**
+
+> **Read this first (added 2026-09-21; this note has itself been wrong once).**
+> The title says ninety-one. The figure has moved three times in one day and
+> the current one is **55 apps and 259 keys**. Do not trust any number written
+> here; run `python scripts/key-survey.py` and read its tail.
+>
+> | reading | count | what changed |
+> |---|---|---|
+> | as filed | 91 apps | apps with no `(&str, &str)` const -- a count of a *shape*, not of the gap |
+> | after teaching the survey ranges and group words | 26 apps, 68 keys | `1-7` names `Num2`; `Arrows/WASD` names eight keys |
+> | after fixing single-letter matching | **55 apps, 259 keys** | `"A" in "Add City"` had been counting as naming the `A` key |
+>
+> **The middle reading is the instructive one, because it was mine and I
+> announced it as a two-thirds reduction.** I had found the survey
+> over-reporting, fixed that, re-measured, and wrote the result down as the
+> truth. What I never checked was whether it *under*-reported as well -- and it
+> did, far more: the substring match on single letters was hiding about 190
+> keys while I was congratulating the tool on losing 23. Varying one axis
+> licenses conclusions about that axis and no other, which is shape 17 in the
+> catalogue below, applied to my own correction of the thing shape 17 is about.
+>
+> The entry body is kept as filed. The slug is left alone because it is what a
+> triage grep keys on.
 
 **In short:** most of the apps in this suite answer keyboard shortcuts and
 never tell you what they are. Of 127 apps that bind a letter, digit or
@@ -161782,8 +161898,124 @@ parser. **Do not teach the guard to skip.** Either split the panel so the key
 rows are their own list, or keep one list whose first column is strictly
 keystrokes and move `Click` and `Goal` into the description column.
 
-**The working order.** `apps/towers` first, since it is one app and its list
-is unchecked. Then the 56, largest first
+### Progress, and a third app off the queue that needed nothing
+
+`apps/towers` is **done** -- its sheet is split into `RULES` and `SHORTCUTS`,
+`N` is advertised at last, `F1` and `?` join `H`, and three guards hold it.
+That closes the one-app second front.
+
+`apps/videoplayer` sits at the top of the first front with 31 keys and "no
+list", and **needs nothing at all** -- it has the best key documentation in the
+suite. Its `Shortcut { keys, action, press, command }` table is drawn by the
+help panel *and* searched by the key handler
+(`Shortcuts::list().iter().find(|sc| sc.press.matches(event))`), so the printed
+label and the working binding are one object and cannot drift. Its doc comment
+even records removing `Ctrl+O` and `Ctrl+S` because the tree has no file
+chooser and no framebuffer read-back -- the exact defect `apps/paint` shipped,
+caught here as a matter of course because deleting the row and deleting the
+binding are the same edit. Written up as design-decisions 866, which adopts
+that shape as the preferred one where an app already has a command type.
+
+**That is three of the first four apps opened off this queue that needed no
+work** -- `sokoban` (footer), `minesweeper` (guard under another name),
+`videoplayer` (single table) -- against one that needed a great deal
+(`paint`). The queue is a list of *candidates* and behaves like one. Read
+before editing, and expect to close entries with a note rather than a change.
+
+### `apps/launcher`: named at run time, invisible to a static survey
+
+Top of the real queue with six unnamed keys, and it needs nothing.
+`Ctrl+1`..`Ctrl+8` pick the nth result and the launcher draws the hint beside
+each of the first eight rows -- as `format!("^{}", i + 1)`, so the digit is
+computed at run time and the source literal is `"^{}"`. No survey over string
+literals can see that, and this one should not pretend to.
+
+Caret-notation support was added for it and then removed: a measurement showed
+**zero** string literals in the whole `apps/` tree match caret notation, so the
+feature fired nowhere. Its only possible effect was a false negative -- a
+footnote marker in prose read as naming a key, making the survey go quiet
+wrongly. Speculative generality in a checker is worse than in ordinary code,
+because the only thing it can do is hide something.
+
+This is the first entry for the answered-file when that exists, and the reason
+is *the keys are named at run time*, not *this is inconvenient to fix*.
+
+### The two directions, and which tool owns each
+
+Every per-app guard in this tree -- `every_advertised_key_does_something`,
+`every_key_the_footer_names_does_something`, and the two written today for
+`apps/klotski` and `apps/snake` -- runs in **one direction only**: it takes
+each row of the printed list and checks that something answers it. Nothing in
+any of them can notice a key that *works and is not printed*.
+
+That is exactly how `apps/minesweeper` came to have `F2` and `1`/`2`/`3` bound
+and unadvertised while carrying a guard that passes: `F2` is an alias for `N`
+and the three digits pick the difficulty, and the footer names neither. Its
+guard is correct and complete for what it does. It is simply the other
+direction.
+
+**The reverse direction cannot be a unit test** -- a test cannot enumerate the
+arms of a `match` -- and it does not need to be, because
+`scripts/key-survey.py` already does precisely that: it collects every `Key::`
+variant the crate mentions in live code and asks whether the app's own drawn
+strings name it. So:
+
+| direction | owner |
+|---|---|
+| everything advertised works | the per-app guard test |
+| everything that works is advertised | `scripts/key-survey.py` |
+
+**The survey should become a gate, and cannot be one yet.** Today it prints a
+report nobody is obliged to act on, which is why `F2` sat unadvertised. The
+proper end state is a non-zero exit when an app binds a key it never names,
+with an answered-file for the genuine exceptions -- `apps/terminal`'s 26
+control-character encodings (`Key::A => Some(0x01)` is not a shortcut),
+`apps/paint`'s `J` and `Q` (present in its `Key`-to-`char` table, bound to
+nothing), `apps/markdowneditor`'s `Char` and `Function` (variant names, not
+keys) -- on the same terms as `scripts/frozen-flag-answered.txt`: every line
+carries a reason, and the reason has to say what *makes* it not a defect.
+
+**Order matters.** Seeding that file with all 26 apps would be a suppression
+list wearing an answered-file's clothes. Fix the ~38 genuine ones first, then
+close the loop with an answered-file holding only the ~30 true exceptions.
+After that no app can gain a key without naming it.
+
+### Triage of the 10 hint-printing apps -- 6 need nothing, 3 need one row each
+
+Read rather than edited, which is the point. For each, the keys it binds were
+compared against the keys its own drawn hints name, **with digit ranges
+expanded** -- `1-7: puzzle` covers `Num1`..`Num7`, and a first pass that
+matched on the literal `Num2` reported six false gaps in `apps/klotski` alone.
+That is the same misreading as `apps/sokoban`, three times over.
+
+| app | verdict |
+|---|---|
+| `rush`, `nonogram`, `battleship`, `reversi`, `checkers`, `dots` | **need nothing** -- every key they bind is named in a hint they draw |
+| `sokoban` | **needs nothing** -- verified earlier by reading `draw_footer` |
+| `compass` | **needs nothing** -- see the correction below |
+| `klotski` | advertise `P` -- **done** |
+| `snake` | advertise `1`, `2`, `3` -- the difficulty keys -- **done** |
+
+**`apps/compass` was wrong in this table for about an hour, and it is the
+fourth app off this queue that needed nothing.** Its `draw_help` already
+draws `"1-0: select waypoint"`, and re-checking with that understood leaves it
+with no unadvertised key at all. Two separate bugs in my own scan hid it: the
+hint pattern required the first token to look like a key *name*, so a row
+beginning with a digit was never recognised as a hint; and the range expander
+read `1-0` as `range(1, 1)`, which is empty -- `1-0` means 1 through 9 and then
+0, which no ascending expander gets right. The hint is correct and readable by
+a person; it is only machine-hostile, and `guitk::shortcut::keystrokes` would
+refuse it too, since a range there must ascend.
+
+**Every automated pass over this question has over-reported, in a different way
+each time** -- `sokoban` (footer the detector cannot see), `minesweeper` (guard
+under another name), `klotski` (literal `Num2` vs the range `1-7`), `videoplayer`
+(table of structs, not tuples), `compass` (digit-led row, descending range).
+Five mechanisms, five false alarms. The queue is worth having because it points
+at candidates, and **every candidate has to be read before it is edited.**
+
+**The working order.** The three above first -- each is one row in a hint line
+that already exists. Then the 56, largest first
 (`videoplayer` 31, `hangman` 29, `wordle` 29, `crossword` 27, `rssreader` 26,
 `editor` 19, `paint` 17 ...). Then the 25 prose-form. Then read the 10 and
 expect to close most of them with no change, recording *why* each needed

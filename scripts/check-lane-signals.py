@@ -21,7 +21,9 @@ different traffic class:
 WHY THE GIT COMMON DIR
 ----------------------
 Every worktree shares one git common directory -- verified: all three lanes
-report `D:/visual studio projects/os/.git`. A file there is visible to all
+report `E:/visual studio projects/os/.git`. (Re-verified 2026-09-21 after the
+D:-to-E: migration; it said `D:` until then, which was true when written and
+quietly wrong afterwards.) A file there is visible to all
 three *immediately*, on every branch, with no merge and no push. That is
 exactly the property an operational signal needs, and the boot lock
 (`$_common_git/slateos-boot-lock`) already relies on it, so the pattern is

@@ -344,6 +344,26 @@ pub fn check_link(path: impl AsRef<Path>) -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Update flag table when a file is renamed.
+///
+/// **NOTHING CALLS THIS, so flags do not survive a rename.** A `grep` for
+/// `immutable::rename_path` across `kernel/src` returns this definition and
+/// two calls from this module's own self-test. No VFS rename path invokes it.
+///
+/// The consequence is not subtle: mark a file immutable, rename it, and the
+/// entry stays under the old name while the file answers to the new one, so
+/// the check that refuses a write finds nothing and permits it.
+///
+/// **Do not fix this by wiring it in.** The table is keyed by path, and this
+/// function is the compensation that keying requires. `flock`, `sealing` and
+/// `reclock` were converted to key on `FileId` on 2026-09-21, which makes the
+/// compensation unnecessary -- an inode survives a rename, so the entry
+/// follows the file. Wiring this in instead leaves a table that needs a
+/// correction for every operation that moves a name, and the next one (link,
+/// mount-move) needs another. See `known-issues.md` 2026-09-21.
+///
+/// The self-test calls it directly, which is why it is green. That is the
+/// defect, not the evidence: the test exercises the one path production does
+/// not take.
 pub fn rename_path(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) -> KernelResult<()> {
     let mut table = TABLE.lock();
     if let Some(flags) = table.entries.remove(old_path.as_ref()) {

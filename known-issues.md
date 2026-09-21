@@ -160830,6 +160830,27 @@ The related failure, worth naming because it is the same error one level up:
 choosing the observable requires reading what the action *does*, not what its
 name suggests. `delete_message` sounds like it deletes. It files.
 
+**After six instances the misses have a shape, and it is predictive rather
+than descriptive: the wrong observable is always the field whose name matches
+the verb.**
+
+| the key ran | I watched | what actually moves |
+|---|---|---|
+| `delete_message` | `messages.len()` | the message's `mailbox` |
+| `toggle_play` | `is_playing` | `status_message` -- there is no audio backend |
+| `StartPause` | `running` | `state: TimerState`; `running` is the event loop's own flag |
+| `N` (new alarm) | `alarms.len()` | `editor.is_some()` -- it opens a form |
+
+Every one of those is the field a reader would name if asked "what does this
+key change?" without opening the function. That is exactly why it is the wrong
+one: the name is the *intent*, and the bug being hunted is a gap between intent
+and code. **Reaching for the similarly-named field re-asserts the assumption
+the test exists to check.**
+
+The cheap habit that beats it: before writing the assertion, read the function
+the key calls and write down the *last line that assigns something*. That line
+names the observable. In all four rows above it is one grep away.
+
 **The worst instance of this shape is lane A's, and unlike the five above it
 shipped** (2026-09-21). A kernel boot-test rung asserted exactly one thing:
 that the process reached `Zombie`. A successful exec ends with the target

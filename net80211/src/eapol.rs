@@ -889,7 +889,11 @@ mod tests {
         }
 
         let parsed = KeyFrame::parse_frame(&padded, MIC_LEN_DEFAULT).expect("parses");
-        assert_eq!(parsed.hashed.len(), n, "hashed must stop where the header says");
+        assert_eq!(
+            parsed.hashed.len(),
+            n,
+            "hashed must stop where the header says"
+        );
         assert_eq!(parsed.hashed, &buf[..n]);
         assert_eq!(parsed.key.key_data, &[48, 2, 1, 0]);
 

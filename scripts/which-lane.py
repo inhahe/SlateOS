@@ -58,7 +58,7 @@ LANES = {
         "Graphics, Apps & Net",
         "lane-c",
         "gui/**, apps/**, net/**, netipc/**, netproto/**, netring/**, "
-        "net80211/**, aes/**, hmac/**, pkg/**",
+        "net80211/**, aes/**, hmac/**",
         "kernel/**, posix/**, userspace/**, services/**",
     ),
 }

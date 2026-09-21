@@ -84,3 +84,44 @@ its spin. So a correct `execl` fix clears two of three, and the natural reading
 of the survivor is "the fix is incomplete" — which would send the next round
 back into the exec path it had just correctly left. Worth knowing before you
 read the next run's results rather than after.
+
+## Added later the same day: you have had a fuller diagnosis for five days
+
+After filing the above I went looking for where `main` registers these
+fixtures, and found this sitting on `origin/main` since **2026-09-16**:
+
+```
+requests/a-b-libc-execl-passes-a-null-path-to-execve.md
+```
+
+It is lane A to lane B, it is five days old, and it has more than either lane A's
+new message or my narrowing above:
+
+* a kernel probe *inside* `linux_execve` that fired:
+  `[exec] linux_execve ENTERED and failed early: filename_ptr=0x0 errno=14`;
+* the same one-boot discriminator, vector form execs and list form does not;
+* a named mechanism — `posix/src/spawn.rs:2204` onward, the `va_trampoline!`
+  shared body, whose own comment says one named integer parameter puts the list
+  at `%rsi`. If `path` in `%rdi` is lost across the register spill that builds
+  the `va_list`, the worker sees NULL for `path` while `argv` still looks
+  right.
+
+My reading above is consistent with it and adds only that everything below
+`execv` is shared and therefore innocent.
+
+**One tension, which I could not resolve from outside your tree and which
+decides where to look.** `execl_body` opens with
+`if path.is_null() || ap.is_null() { set_errno(EFAULT); return -1; }`, and
+`git log -S` dates that guard to **2026-08-21** — three weeks before the probe
+saw a NULL filename reach `linux_execve`. If the trampoline lost `%rdi` before
+the worker ran, the guard should have caught it and returned `-1` without ever
+reaching `execve`. So one of these is true:
+
+1. the NULL arises *below* `execv` rather than above it, and the trampoline is
+   innocent;
+2. the trampoline's entry path does not run through that guard;
+3. the probe's `frame.arg0` was not the filename pointer for that ABI.
+
+All three are answerable by reading, and none needs a boot. Given the six
+rounds this has already cost lane A at ~90 minutes each, that seems worth
+saying before anyone spends a seventh.

@@ -161806,6 +161806,46 @@ work** -- `sokoban` (footer), `minesweeper` (guard under another name),
 (`paint`). The queue is a list of *candidates* and behaves like one. Read
 before editing, and expect to close entries with a note rather than a change.
 
+### The two directions, and which tool owns each
+
+Every per-app guard in this tree -- `every_advertised_key_does_something`,
+`every_key_the_footer_names_does_something`, and the two written today for
+`apps/klotski` and `apps/snake` -- runs in **one direction only**: it takes
+each row of the printed list and checks that something answers it. Nothing in
+any of them can notice a key that *works and is not printed*.
+
+That is exactly how `apps/minesweeper` came to have `F2` and `1`/`2`/`3` bound
+and unadvertised while carrying a guard that passes: `F2` is an alias for `N`
+and the three digits pick the difficulty, and the footer names neither. Its
+guard is correct and complete for what it does. It is simply the other
+direction.
+
+**The reverse direction cannot be a unit test** -- a test cannot enumerate the
+arms of a `match` -- and it does not need to be, because
+`scripts/key-survey.py` already does precisely that: it collects every `Key::`
+variant the crate mentions in live code and asks whether the app's own drawn
+strings name it. So:
+
+| direction | owner |
+|---|---|
+| everything advertised works | the per-app guard test |
+| everything that works is advertised | `scripts/key-survey.py` |
+
+**The survey should become a gate, and cannot be one yet.** Today it prints a
+report nobody is obliged to act on, which is why `F2` sat unadvertised. The
+proper end state is a non-zero exit when an app binds a key it never names,
+with an answered-file for the genuine exceptions -- `apps/terminal`'s 26
+control-character encodings (`Key::A => Some(0x01)` is not a shortcut),
+`apps/paint`'s `J` and `Q` (present in its `Key`-to-`char` table, bound to
+nothing), `apps/markdowneditor`'s `Char` and `Function` (variant names, not
+keys) -- on the same terms as `scripts/frozen-flag-answered.txt`: every line
+carries a reason, and the reason has to say what *makes* it not a defect.
+
+**Order matters.** Seeding that file with all 26 apps would be a suppression
+list wearing an answered-file's clothes. Fix the ~38 genuine ones first, then
+close the loop with an answered-file holding only the ~30 true exceptions.
+After that no app can gain a key without naming it.
+
 ### Triage of the 10 hint-printing apps -- 6 need nothing, 3 need one row each
 
 Read rather than edited, which is the point. For each, the keys it binds were

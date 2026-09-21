@@ -9028,6 +9028,22 @@ fn gen_servicemgr() -> Vec<u8> {
     out.push_str(&format!("total_stops: {}\n", total_stops));
     out.push_str(&format!("total_failures: {}\n", total_failures));
     out.push_str(&format!("ops: {}\n", ops));
+
+    // One line per service: `running: 3` says three of what. Name,
+    // state and startup type are what lane C asked for and what the
+    // subsystem models.
+    let svc_rows = servicemgr::list_services();
+    out.push_str("Services:\n");
+    for svc in &svc_rows {
+        out.push_str(&format!(
+            "  {:<20} {:<12} {:<12} {}\n",
+            svc.name,
+            svc.state.label(),
+            svc.startup_type.label(),
+            svc.display_name
+        ));
+    }
+
     out.into_bytes()
 }
 
@@ -9243,6 +9259,23 @@ fn gen_brightness() -> Vec<u8> {
     out.push_str(&format!("total_adjustments: {}\n", adjustments));
     out.push_str(&format!("total_auto: {}\n", auto));
     out.push_str(&format!("ops: {}\n", ops));
+
+    // Per-display rows. Without these a program cannot even READ the
+    // current level, which lane C reported alongside the missing write
+    // path. The write path is still missing and this does not supply it.
+    let disp_rows = brightness::list_displays();
+    out.push_str("Displays:\n");
+    for d in &disp_rows {
+        out.push_str(&format!(
+            "  {:<3} {:<20} {:>3}%  min {:>3}%  [{}]\n",
+            d.id,
+            d.name,
+            d.brightness,
+            d.min_brightness,
+            d.mode.label()
+        ));
+    }
+
     out.into_bytes()
 }
 
@@ -9500,6 +9533,18 @@ fn gen_fontsettings() -> Vec<u8> {
     out.push_str(&format!(
         "text_scale_percent: {}\n",
         cfg.as_ref().map_or(100, |c| c.text_scale_percent)
+    ));
+    out.push_str(&format!(
+        "default_family: {}\n",
+        cfg.as_ref().map_or("N/A", |c| c.default_family.as_str())
+    ));
+    out.push_str(&format!(
+        "monospace_family: {}\n",
+        cfg.as_ref().map_or("N/A", |c| c.monospace_family.as_str())
+    ));
+    out.push_str(&format!(
+        "document_family: {}\n",
+        cfg.as_ref().map_or("N/A", |c| c.document_family.as_str())
     ));
     out.push_str(&format!("total_changes: {}\n", changes));
     out.push_str(&format!("ops: {}\n", ops));
@@ -10983,6 +11028,27 @@ fn gen_memlayout() -> Vec<u8> {
     out.push_str(&format!("total_kernel: {}\n", kernel));
     out.push_str(&format!("queries: {}\n", queries));
     out.push_str(&format!("ops: {}\n", ops));
+
+    // The rows the three totals above are sums over. Requested by lane C:
+    // a reader could learn there are eleven regions and nothing about any
+    // of them. Appended AFTER the totals rather than replacing them, so
+    // anything parsing `region_count:` keeps working.
+    //
+    // NOT the firmware E820 map, which lane C was careful to distinguish
+    // and which this kernel does not retain: these are the kernel's own.
+    let regions_list = crate::fs::memlayout::list_regions();
+    out.push_str("Regions:\n");
+    for r in &regions_list {
+        out.push_str(&format!(
+            "  {:#018x}-{:#018x}  {:>12} B  [{}]  {}\n",
+            r.start,
+            r.end(),
+            r.size,
+            r.region_type.label(),
+            r.description
+        ));
+    }
+
     out.into_bytes()
 }
 

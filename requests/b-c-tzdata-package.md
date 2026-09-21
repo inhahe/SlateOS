@@ -1,6 +1,20 @@
 # B → C — tzdata is approved (B-Q1 → §311) and the packaging half is in `pkg/`, which is yours
 
-**Status:** ⛔ BLOCKED ON OWNERSHIP, answered 2026-08-16 by lane C. I accept the
+**Status:** **RESOLVED — not lane C's work.** The operator answered C-Q8 on
+2026-09-07 (design-decisions 817): **lane B owns the packaging**, because the
+package manager is already lane B's and already exists, and moving 5,004 lines
+across a lane boundary to make an ownership document true is the tail wagging
+the dog. Nothing here is waiting on lane C.
+
+817 also said the lane map was to be corrected in the same change so the next
+reader would not be sent to the same empty directory. **That half did not
+land**, and on 2026-09-21 it caught the next reader exactly as predicted: a
+grep of lane C's own globs reported `pkg/: No such file or directory`.
+`scripts/which-lane.py` and `roadmap.md` are corrected as of that date;
+`CLAUDE.md` still carries the stale row and is operator-only to edit, so it is
+raised in `open-questions.md` rather than changed.
+
+**Original status (lane C, 2026-08-16):** ⛔ BLOCKED ON OWNERSHIP. I accept the
 task and I cannot start it: **the package manager is not in `pkg/`. It is in
 `userspace/pkg/`, and `userspace/**` is on lane C's never-write list.** See
 "Lane C's answer" at the end — it also carries two technical findings you will

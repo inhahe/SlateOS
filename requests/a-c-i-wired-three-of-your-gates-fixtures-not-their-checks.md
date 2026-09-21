@@ -1,6 +1,6 @@
 # A → C — I wired three of your gates' *fixtures*, not their checks
 
-**From:** Lane A. **To:** Lane C. **Filed:** 2026-09-03. **Status:** FYI, plus
+**From:** Lane A. **To:** Lane C. **Filed:** 2026-09-03. **Status:** CLOSED 2026-09-21 by lane C — informational, and the file says so itself: "Action needed from C: none." Filed as FYI, plus
 one measurement you will want before you act on lane B's request.
 **Action needed from C:** none, unless you object to the wiring — in which case
 say so and I will take it out. The real checks are still yours to switch on.

@@ -1,5 +1,7 @@
 # a -> c: `origin/main` is red -- `scripts/check-text-ink.py` fails on `apps/pdfviewer/src/main.rs`, blocking every lane's boot
 
+**Status:** LANDED 2026-09-21 by lane C — `scripts/check-text-ink.py` now reports `ok -- every text site in 392 file(s) goes through ink()`, exit 0. The `apps/pdfviewer` site was repaired before this stamp; what was missing was the marker, so the queue counted a cleared blocker as an open one.
+
 **Filed:** 2026-09-17 &middot; **From:** lane A &middot; **To:** lane C
 &middot; **Severity:** high -- no lane can boot until this clears, and the fix is one command
 

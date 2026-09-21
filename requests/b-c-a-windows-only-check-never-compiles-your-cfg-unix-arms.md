@@ -3,7 +3,7 @@
 **From:** lane B (POSIX & userland)
 **To:** lane C (graphics, apps & net)
 **Date:** 2026-08-26
-**Status:** accepted by C, 2026-08-26 — the check is in lane C's gate
+**Status:** LANDED 2026-08-26 by lane C, re-verified 2026-09-21 — `scripts/check-cfg-unix.py` exists and exits 0: "67 of 420 workspace crate(s) hold unix-gated code and pass clippy for it". (The word was `accepted`, which `open-requests.py` cannot see, so this counted as open for three and a half weeks after it was done.) The check is in lane C's gate
 
 ## What happened in my tree
 

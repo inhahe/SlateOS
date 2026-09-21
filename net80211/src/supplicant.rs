@@ -326,22 +326,21 @@ impl<'a> Handshake<'a> {
     /// established state — which matters, because a rejected frame is by
     /// definition one an attacker may have sent.
     pub fn on_eapol(&mut self, eapol_frame: &[u8], out: &mut [u8]) -> Result<Outcome, Error> {
-        let body = eapol::body(eapol_frame).ok_or(Error::Malformed)?;
-        let key = eapol::KeyFrame::parse(body, self.mic_len).ok_or(Error::Malformed)?;
-        let message = key.message().ok_or(Error::Unexpected)?;
-
         // The MIC covers the frame from its first octet, so verifying one needs
         // the frame and not the body — but it must be the frame the *sender*
         // hashed, which is the header plus exactly the body length the header
         // declares. An EAPOL frame rides inside an 802.11 or Ethernet data
         // frame and is padded to that frame's minimum length, so `eapol_frame`
         // routinely has octets on the end that the sender never hashed.
-        // Trimming here rather than at each check keeps the two verifiers from
-        // disagreeing about where the frame ends.
-        let frame_len = eapol::HEADER_LEN
-            .checked_add(body.len())
-            .ok_or(Error::Malformed)?;
-        let frame = eapol_frame.get(..frame_len).ok_or(Error::Malformed)?;
+        //
+        // `parse_frame` hands that range back alongside the body, so this
+        // function never computes it. That is deliberate: the authenticator in
+        // the kernel tree used to reconstruct the same quantity from its own
+        // side, and two verifiers trimming separately are two chances to
+        // disagree about where the frame ends.
+        let eapol::ParsedFrame { key, hashed: frame } =
+            eapol::KeyFrame::parse_frame(eapol_frame, self.mic_len).ok_or(Error::Malformed)?;
+        let message = key.message().ok_or(Error::Unexpected)?;
 
         // The MIC algorithm is dictated by the Key Descriptor Version rather
         // than by the AKM, and version 1 (HMAC-MD5 over RC4-wrapped key data)
@@ -1099,8 +1098,9 @@ mod tests {
     #[test]
     fn message_two_carries_our_nonce_our_rsn_element_and_a_verifiable_mic() {
         let (_, out2, len2, _, _) = run_handshake();
-        let body = eapol::body(&out2[..len2]).expect("a body");
-        let kf = eapol::KeyFrame::parse(body, eapol::MIC_LEN_DEFAULT).expect("parses");
+        let kf = eapol::KeyFrame::parse_frame(&out2[..len2], eapol::MIC_LEN_DEFAULT)
+            .expect("parses")
+            .key;
 
         assert_eq!(kf.message(), Some(Message::PairwiseM2));
         assert_eq!(kf.nonce, SNONCE);
@@ -1124,8 +1124,9 @@ mod tests {
     #[test]
     fn message_four_is_empty_secure_and_echoes_the_third_counter() {
         let (_, _, _, out4, len4) = run_handshake();
-        let body = eapol::body(&out4[..len4]).expect("a body");
-        let kf = eapol::KeyFrame::parse(body, eapol::MIC_LEN_DEFAULT).expect("parses");
+        let kf = eapol::KeyFrame::parse_frame(&out4[..len4], eapol::MIC_LEN_DEFAULT)
+            .expect("parses")
+            .key;
 
         assert_eq!(kf.message(), Some(Message::PairwiseM4));
         assert!(kf.key_data.is_empty());
@@ -1164,8 +1165,9 @@ mod tests {
         );
 
         // And the reply is a real message 4, not a stub.
-        let body = eapol::body(&out[..outcome.len()]).expect("a body");
-        let kf = eapol::KeyFrame::parse(body, eapol::MIC_LEN_DEFAULT).expect("parses");
+        let kf = eapol::KeyFrame::parse_frame(&out[..outcome.len()], eapol::MIC_LEN_DEFAULT)
+            .expect("parses")
+            .key;
         assert_eq!(kf.message(), Some(Message::PairwiseM4));
         assert_eq!(kf.replay_counter, 3);
     }

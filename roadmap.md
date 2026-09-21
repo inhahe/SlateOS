@@ -154,7 +154,7 @@ shape for routine housekeeping. Do not wait for it to fire.
 |------|------|---|----------------------|--------------|
 | **A** | **Kernel & Core** | `.claude` (or unset) | `kernel/**`, `bench/**`, `toolchain/x86_64-slateos.json`, `scripts/boot-test.sh`, `scripts/run-timeout.py`, `scripts/wedge-soak.sh` | `posix/**`, `userspace/**`, `gui/**`, `apps/**`, `net/**`, `services/**` |
 | **B** | **POSIX & Userland** | `.claude-account-b` | `posix/**`, `userspace/**`, `services/**`, `init/**`, `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh` | `kernel/**`, `gui/**`, `apps/**`, `net/**` |
-| **C** | **Graphics, Apps & Net** | `.claude-account-c` | `gui/**`, `apps/**`, `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `net80211/**`, `aes/**`, `hmac/**`, `pkg/**` | `kernel/**`, `posix/**`, `userspace/**`, `services/**` |
+| **C** | **Graphics, Apps & Net** | `.claude-account-c` | `gui/**`, `apps/**`, `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `net80211/**`, `aes/**`, `hmac/**` | `kernel/**`, `posix/**`, `userspace/**`, `services/**` |
 
 Rationale for the cut: the workspace already splits three ways almost
 exactly along these lines. `kernel` and `posix` are the two `no_std`
@@ -193,8 +193,18 @@ owner for the rebuild avoids two agents racing on `rootfs.ext4`.
 
 **Owns:** the compositor, window manager, desktop shell, GUI toolkit,
 clipboard/notifications/credentials/remote (`gui/**`), every application
-(`apps/**` — ~200 crates), the userspace networking crates (`net/**`,
-`netipc`, `netproto`, `netring`) and the package manager (`pkg/**`).
+(`apps/**` — ~200 crates), and the userspace networking crates (`net/**`,
+`netipc`, `netproto`, `netring`).
+
+**Not the package manager.** This row read "and the package manager
+(`pkg/**`)" until 2026-09-21. There is no top-level `pkg/`; the package
+manager is `userspace/pkg/`, which is lane B's. The mismatch stalled
+`requests/b-c-tzdata-package.md` for three weeks -- lane C accepted a task it
+was structurally unable to start -- and design-decisions 817 settled it on
+2026-09-07: **lane B owns the packaging work**, and the map was to be
+corrected in the same change. The ownership half landed and the map half did
+not, so the trap 817 describes stayed set and caught the next reader on
+2026-09-21. This is that correction.
 
 **Note the two graphics half-crossings.** `kernel/src/compositor.rs`,
 `kernel/src/drm/`, `kernel/src/fb.rs` and `kernel/src/font.rs` are the
@@ -1546,7 +1556,11 @@ Roadmap:
   (`TD-FONT-DOES-NOT-HIDE-DEFAULT-IGNORABLES` closed, §434) — it was two bugs
   under one name, erasing them *and* stepping over them, and the 170/40
   `misplaced` that survive it are a deliberate divergence in where an erased
-  zero-advance glyph sits, not a residue. **Device tables are done too** (§440;
+  zero-advance glyph sits, not a residue. (That 170 is **1** as of
+  2026-09-21: the kern-charging half of the divergence stopped existing when
+  kerning moved onto the right-hand glyph, and the survivor is a mark
+  attachment HarfBuzz keeps through hiding and we discard — different
+  mechanism, same conclusion. §434 carries the measurement.) **Device tables are done too** (§440;
   `TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING` closed — they were
   its last open item), and the survey written to check them corrected the plan
   this line used to carry: not one of this host's 152 real device tables is on a

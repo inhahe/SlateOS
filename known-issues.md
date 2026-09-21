@@ -97362,7 +97362,15 @@ investigation before the work could start:
   client's, chosen at creation, so an `AboveNormal` layer would let any
   program put itself above the taskbar. It needed a *tier within* a layer.
 
-## `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C, 2026-08-26) -- original entry follows — **open**, tech debt
+### The original entry, for the record
+
+**`TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C,
+2026-08-26)** -- as filed, when twelve of the seventeen actions had nowhere to
+go. Demoted from a `##` heading to bold on 2026-09-21: it is a quoted copy of
+the entry above, and as a heading every triage count saw this entry twice --
+once closed and once open. Same defect as the two recorded in
+`scripts/check-known-issues-index.py`, hidden for two weeks longer because the
+backticked spelling was outside what that checker could see.
 
 **In short:** The Settings panel has a "Window rules" page where you can say
 things like *"the editor should always open maximised on desktop 2"* or *"chat
@@ -160680,6 +160688,28 @@ excluded" and "blind" are indistinguishable from a silence -- so the same
 type, with the same field, was changed to be held singly instead, and it
 became reported. Varying the axis is what separates the two readings.
 
+*Third instance, 2026-09-21, and the first found in a test written minutes
+earlier rather than in old code.* `net80211`'s new `parse_frame` refuses a
+header whose EAPOL Packet Type is not `KEY`. Two tests were written for it,
+one of them named
+`a_body_passed_as_a_frame_is_refused_by_the_packet_type_check`. Both passed. The check was then deleted to see which tests noticed,
+and **that one still passed** -- a body's octets 2-3 read as a five-figure
+length that overruns the buffer, so the rejection was coming from the length
+and the test's name was a claim no assertion in it could see. Renamed to
+`a_message_2_body_passed_as_a_frame_is_refused_by_both_checks`, which is
+what it can establish.
+
+Two things worth carrying forward. First, the cheapest way to find a shape-17
+test is **to delete the mechanism it is named after and re-run**; it took one
+minute here and needs no reasoning about what the test covers. Second, the
+deletion paid for itself twice: explaining why only *one* of the two tests
+depended on the check required working out what the octet in that position
+really holds, which produced a counterexample to the reasoning the check had
+been suggested on -- message 4 and group message 2 put `0x03` there, which is
+`packet_type::KEY` itself. A justification that had been accepted as obvious
+was wrong for two of six cases, and nothing but the planted defect was ever
+going to surface it. See design-decisions.md 865.
+
 **Why this is filed rather than merely learned.** The three probes written
 today (frozen fields, displayed-but-unchangeable labels, admit-yet-claim) all
 over-report, and a future session that trusts their output will file working
@@ -161439,6 +161469,327 @@ and the two tests each app needs are written once and copied --
 function-key columns first and its digit column last. Digits are nearly always
 a size, a level or a view, and an app that draws "Levels 1-8" has named all
 eight to a reader while naming two to a substring search.
+
+## `TD-C-PAINT-CANNOT-SAVE-YOUR-PICTURE-AND-SAYS-IT-CAN` (lane C, 2026-09-21) -- **FIXED 2026-09-21**
+
+**In short:** you can draw in `apps/paint` and you cannot keep what you drew.
+There is no Save, no Open, no menu item and no key that reaches one -- yet the
+program carries a list of its own shortcuts saying `Ctrl+S` saves as BMP and
+`Ctrl+O` opens one. Neither key does anything. The list is not drawn on screen
+either, so the false claim is currently invisible, which is the only reason
+nobody has hit it.
+
+**The three parts, each verified rather than inferred.**
+
+*1. The file capability exists and only tests can reach it.* `save_bmp(path)`,
+`load_bmp(path)`, `encode_bmp` and the BMP decoder are all implemented and
+tested. `grep` for callers of `save_bmp` outside its own definition returns
+exactly one hit, `apps/paint/src/main.rs:4458`, and `#[cfg(test)] mod tests`
+begins at line 4407 -- so the only caller is a test. There is no file picker,
+no `Target::Save`, no `"Open"` string anywhere in the crate.
+
+*2. Two keys are advertised for it and neither is handled.*
+`PaintApp::shortcuts_list()` returns 33 rows including `("Ctrl+S", "Save as
+BMP")` and `("Ctrl+O", "Open BMP")`. `handle_key_press`'s `ctrl` branch matches
+`z y c x v n + = - 0 f` and then `return false`. `S` and `O` are not in it; as
+*plain* keys they select the Selection and Ellipse tools, so the letters are
+live and the chords are dead.
+
+*3. The list reaches no screen.* `shortcuts_list()` has two references in the
+whole crate: its definition, and `test_shortcuts_list`. Nothing draws it. It is
+a 33-row promise kept alive by one test -- the same shape as `apps/rssreader`'s
+overlay of twenty-one shortcuts of which four worked, except that this one is
+not even visible enough to be noticed as wrong.
+
+**A fourth, found in the same read.** `handle_text_char` -- the text tool's
+typing path -- also has exactly two references: its definition and one test.
+The live key path (`handle_key` -> `handle_key_press`) never calls it, and
+`handle_key_press` maps bare letters to tools. So with the Text tool active,
+typing `Hi` does not type `Hi`: `h` flips the canvas horizontally and `i`
+switches to the eyedropper. The text tool cannot be typed into at all.
+
+**Why this is one entry and not four.** All four are the same failure with
+different endings: a capability is built, a claim about it is written, and
+nothing joins either to a user. The tests pass throughout, because each test
+calls the function directly -- which is exactly what makes a test unable to
+notice that nothing else does.
+
+**What the proper fix looks like.** `gui/toolkit/src/dialog.rs` already has a
+`FilePicker` and `apps/markdowneditor` already drives one, so Save and Open are
+a wiring job rather than a new subsystem: `Ctrl+S` and `Ctrl+O` raise the
+picker, its answer goes to `save_bmp`/`load_bmp`. The text tool needs
+`handle_key_press` to route a character to `handle_text_char` while the Text
+tool is placing text, before the tool-letter match. The list should become the
+`SHORTCUTS` const that design-decisions 863 describes, drawn by
+`guitk::shortcut::render_card` behind `F1`, with
+`every_advertised_key_does_something` guarding it -- that guard is what would
+have caught `Ctrl+S` on the day it was written.
+
+**Order matters here.** Add the guard *before* wiring the keys: it fails on
+`Ctrl+S` and `Ctrl+O` and names them, which is the difference between fixing
+two keys and believing there were only two to fix.
+
+**If this is never done,** a user who draws something loses it when the window
+closes, having been told there is a key that saves. This is the most damaging
+entry currently open in this lane's list, because unlike a missing shortcut it
+destroys work the user has already done.
+
+### Fixed the same day, and the guard found five more
+
+`Ctrl+S` and `Ctrl+O` now raise `guitk::dialog::FilePicker` and its answer goes
+to `save_bmp`/`load_bmp`. The dialog takes the keyboard while it is up, because
+a dialog that does not is not modal -- without that, typing `blue.bmp` would
+also be typing tool shortcuts into the canvas behind it and the `b` would swap
+to the pencil.
+
+**The guard was added first, and that was the whole value of it.** Its first
+run failed on `Ctrl+S`, as expected. Its next five runs failed on keys nobody
+had suspected:
+
+| key | what was wrong |
+|---|---|
+| `Ctrl++`, `Ctrl+-`, `Ctrl+0` | zoom chords: a chord produces no text, and the `Key`-to-`char` fallback listed only letters, so no character ever arrived |
+| `Ctrl+F` | fit-to-window: `Key::F` was simply missing from that same list |
+| `[`, `]` | brush size: not letters either |
+
+The fallback listed 16 of the 26 letters and none of the punctuation. It now
+maps all 26 and the five non-letter keys this program binds, so the class is
+closed rather than the six instances. **Had the keys been wired without the
+guard, five of the eight would still be dead** -- which is the argument for
+writing the guard before the fix rather than after it.
+
+`Enter`, `Delete` and `Escape` turned out to be *correct* refusals on a blank
+canvas -- they finish a polygon, clear a selection, and cancel whichever is in
+progress. So the guard takes a small set of states and asks whether any of them
+answers the key, rather than demanding a blank canvas answer everything.
+
+The text tool is routed too: a character typed while a text box is being placed
+goes to `handle_text_char` before the tool-letter match.
+`typing_with_the_text_tool_types_instead_of_firing_shortcuts` pins it, and was
+confirmed to fail with the routing removed. It carries a control -- the same
+letters with no text box still select their tools -- because a test of only the
+typing case would pass equally well if the tool shortcuts had been deleted.
+
+Two smaller things fixed in passing: `save_bmp` and `load_bmp` took `&str` and
+now take `&Path` (both turned it straight back into a `Path`, and the `&str`
+forced UTF-8 on a filename), which let a `to_string_lossy` be deleted from the
+one test that called them.
+
+The 33-row list is now a `SHORTCUTS` const drawn by `render_card` behind `F1`.
+`?` is deliberately *not* a second way in: this app has a text tool, so a `?`
+has somewhere to go, which is the `apps/spreadsheet` case design-decisions 863
+carved out.
+
+## `TD-C-NINETY-ONE-APPS-BIND-KEYS-AND-NAME-THEM-NOWHERE` (lane C, 2026-09-21) -- **OPEN**
+
+**In short:** most of the apps in this suite answer keyboard shortcuts and
+never tell you what they are. Of 127 apps that bind a letter, digit or
+function key, **36 carry a key list and 91 do not.** There is nothing to
+press and nothing on screen: the only way to find out that `R` restarts a
+level or `Ctrl+G` finds the next match is to read the source. The decision
+about *how* an app should show its keys was already taken (design-decisions
+863: `F1` always, `?` as well where nothing needs to type one) and the
+toolkit support already exists -- what is missing is doing it 91 times.
+
+**How the number is got.** `python scripts/key-survey.py`. The printed table
+only shows apps that also have *unnamed* keys, so the 91 are not all visible
+in its output; the full queue comes from `survey()`'s fourth return value.
+The count is candidates, not verdicts -- see the module docstring for the
+three things it cannot know.
+
+**What "done" looks like for one app**, all of it already established by the
+twelve apps that have been through it (`apps/jsonviewer` is the clearest
+model):
+
+1. `const SHORTCUTS: &[(&str, &str)]` listing the keys the app really binds,
+   last row `("F1 / ?", "This list")`.
+2. A `show_help` flag toggled by `Key::F1` or `Shift`+`Slash`, closed by
+   `Escape`, and **guarded against stealing a keystroke from a text field** --
+   `jsonviewer` gates the whole block behind `if !typing`.
+3. `guitk::shortcut::render_card(...)` in `render`, drawn last so it is on top.
+4. Two tests: `every_advertised_key_does_something`, which parses each label
+   with `guitk::shortcut::keystrokes` and asserts the app consumes it, and
+   `the_shortcut_list_reaches_the_window`, which asserts each row's text is
+   actually drawn. The first catches a list that over-promises, the second a
+   list that is written and never rendered.
+
+**Two things that will bite whoever does this.**
+
+*The label is parsed, so it has to be parseable.* `guitk::shortcut::keystrokes`
+understands `/` and `,` alternatives, the word `Arrows`, and exact ranges like
+`A-Z` or `1-9` (**no spaces** -- `1 - 9` is not a range). It does **not**
+understand `WASD`, which four games bind as movement (`apps/asteroids`,
+`apps/game2048`, `apps/snake`, `apps/sokoban`). Either write them out as
+`W, A, S, D` or add a `wasd` case beside the existing `arrows` one, which is
+the same shape of abbreviation and probably the right fix.
+
+*A key can be advertised and still be refused in the state the test starts in.*
+`apps/sokoban` answers `Enter` in its level menu but deliberately ignores it on
+an unsolved board, so `every_advertised_key_does_something` passes or fails
+depending on which screen the sample app is on. The list is per-app work, not a
+sweep: the row has to name the mode (`"Enter / Space", "Next level, once this
+one is solved"`) and the test's sample app has to be in a state where the key
+means something.
+
+**Known false positives in the queue.** `apps/terminal` tops the survey with 41
+keys, and they are *encodings* rather than shortcuts -- `Key::A => Some(0x01)`
+is how a control character is produced, not a command the user should be told
+about. `apps/markdowneditor`'s two are `Key::Char` and `Key::Function`, which
+are variant names and not keys. Neither needs a list.
+
+**The queue, most keys first** (from the run of 2026-09-21):
+
+```
+videoplayer 31, wordle 29, hangman 29, crossword 27, rssreader 26, editor 19,
+paint 17, sokoban 16, kanban 16, filesearch 16, compass 15, metronome 14,
+rush 13, musicplayer 13, automator 13, torrent 12, remotedesktop 12,
+worldclock 11, klotski 11, dictionary 11, weather 10, stickynotes 10, snake 10,
+passwordgen 10, sysmonitor 9, pomodoro 9, benchmark 9, screenrecorder 8,
+launcher 8, alarmclock 8, yahtzee 7, screenshot 7, notes 7, ebook 7,
+contacts 7, snippets 6, mediaconvert 6, email 6, dbviewer 6, archivemanager 6,
+whiteboard 5, tetris 5, systemrestore 5, stopwatch 5, settings 5, match3 5,
+dots 5, credmanager 5, asteroids 5, startupmanager 4, pinball 4, mahjong 4,
+freecell 4, fileassoc 4, devicemanager 4, charmap 4, typingtutor 3, sysinfo 3,
+spades 3, solitaire 3, procexplorer 3, colorpicker 3, unitconverter 2,
+undelete 2, speedtest 2, soundrecorder 2, pong 2, podcast 2, partmanager 2,
+pacman 2, nonogram 2, markdowneditor 2, hearts 2, habits 2, gomoku 2,
+fontmanager 2, flashcards 2, diskcleanup 2, diskanalyzer 2, clipmanager 2,
+breakout 2, battleship 2, tmux 1, taskscheduler 1, reversi 1, netscan 1,
+netmanager 1, defrag 1, chess 1, checkers 1, terminal 41 (false positive)
+```
+
+**A related gap found while measuring, worth fixing with the first batch:**
+`apps/game2048` *has* a help overlay and raises it with `H`, and `Escape`
+closes it. That predates 863 and is exactly the failure 863 names -- a user who
+learns `F1` from one app finds it dead here. It needs `F1` and `?` added to the
+existing overlay, not a new one.
+
+**If this is never done,** nothing breaks and nothing gets worse; the keys keep
+working for whoever reads the source. It is a discoverability gap, not a bug,
+which is why it is an entry here rather than an operator question.
+
+### Correction, 2026-09-21, same day: 91 is the count of a *shape*, not of the gap
+
+The first app opened off this queue disproved the headline. `apps/sokoban`
+appears in the 91, and it already names every key it binds, in a permanent
+two-line footer that changes with the screen:
+
+```rust
+const SELECT_FOOTER: [&str; 2] = ["Up/Down: choose   Enter: play", "1-9: jump to a level"];
+const PLAY_FOOTER: [&str; 2] = [
+    "Arrows/WASD: move   Z: undo   R: restart",
+    "Esc: menu   N: next level",
+];
+```
+
+Drawn by `draw_footer` on every frame, and covering all four of its screens'
+bindings. That is precisely the case design-decisions 863 already carved out --
+"a list already on screen needs no key to raise it, and adding one would mean
+drawing the same list twice" -- so the correct amount of work on `apps/sokoban`
+is none. Adding an `F1` card would have been a second copy of a list that is
+already right, which is the very defect
+`TD-C-A-PRINTED-KEY-LIST-IS-A-SECOND-COPY` exists about.
+
+**What the survey's `list` column actually means.** It looks for a `const` or
+`static` of `(&str, &str)` whose first column reads as key labels. `sokoban`'s
+footer is `[&str; 2]` of pre-joined sentences, so the detector cannot see it,
+and correctly does not claim to -- the module docstring says it reports
+candidates rather than verdicts, and names "an app may name its keys in prose
+the user reads elsewhere" as the third thing it cannot know. The 91 was read
+as the size of the gap when it is the size of a shape.
+
+**Re-measured, two axes rather than one.** Of the 91:
+
+| | apps | what they print |
+|---|---|---|
+| separator form | **10** | `"Z: undo"`, `"Arrows/WASD: move"` -- a real hint line |
+| prose form only | **25** | `"Press F5 to refresh"` -- at least one key named in a sentence |
+| neither | **56** | nothing in any string literal that reads as a key hint |
+
+The second axis is the one that matters methodologically: the first pass found
+only the separator form and reported 81 as the gap. Adding the prose pattern
+moved 25 apps out of it. **A single pattern could not tell "this app says
+nothing" from "this app says it in a shape my regex does not match"** -- the
+same reading that made the first pass of this very entry wrong.
+
+**So the real queue is at most 56, and is probably smaller still.** Both
+numbers are string-literal counts, and a literal is not proof it is drawn --
+`apps/netscan`'s `wol_note` was written by the model and drawn by nothing.
+`sokoban` was confirmed by reading `draw_footer`; the other nine separator-form
+apps (`compass`, `rush`, `nonogram`, `battleship`, `klotski`, `reversi`,
+`checkers`, `snake`, `dots`) are *candidates for needing nothing* and each
+wants the same two-minute read before any work is done on it. The 25
+prose-form apps are the opposite case and almost certainly still need a list:
+`apps/videoplayer` binds 31 keys and has one prose mention, which is not a list
+by any reading.
+
+### The second front -- retracted the same day; it was a measurement error
+
+**What this section said for about twenty minutes:** that 39 apps carry a key
+list, **18 of them have no guard**, and that chasing those eighteen was the
+higher-yield front because `apps/paint`'s unguarded list had been 8 of 33 dead.
+
+**That number was wrong, and how it was got wrong is the useful part.** It came
+from grepping each crate for the *names* `every_advertised_key_does_something`
+and `the_shortcut_list_reaches_the_window`. `apps/minesweeper` came back
+"unguarded" and has guarded its list since the day it was written -- its tests
+are called `every_key_the_footer_names_does_something` and
+`the_footer_names_the_keys_that_do_something`. The scan was keyed on one
+spelling of a name, which is the failure this file has a whole catalogue about.
+
+**Three measurements of one question, in order:**
+
+| keyed on | answer |
+|---|---|
+| the two test *names* | 18 unguarded |
+| any mention of the list's identifier from test code | 1 unguarded |
+| a test that *iterates* the list (`for .. in NAME`, `NAME.iter()`) | 3 unguarded |
+
+None of the three is the property. The second counts `apps/paint`'s old
+`assert!(!shortcuts.is_empty())` as a guard, which guarded nothing -- it is the
+exact test that sat beside 8 dead rows for the program's whole life. The third
+misses `apps/life`, which checks its rows by index rather than by iterating,
+and `apps/mixer`, which pairs each row with an action.
+
+**Settled by reading, which is what it needed all along: one app.**
+`apps/towers` mentions `HELP_ROWS` twice and both are in *drawing* code -- no
+test refers to it at all. `apps/life` and `apps/mixer` are genuinely checked,
+in shapes no regex of mine recognised.
+
+**So this front is one app, not eighteen, and the first front is the real
+work.** `apps/paint` stays the argument for writing the guard -- it found six
+defects nobody suspected -- but it was not evidence of a widespread pattern,
+because the population it seemed to belong to did not exist. Its list was
+unusual in being a `Vec` returned by a function rather than a const, which is
+also why the survey never counted it as a list at all.
+
+**One finding from that retracted pass is still worth keeping,** because it
+applies to any list a guard is put on. Several of these panels are *how to
+play* rather than *shortcuts*, and their first column mixes keys with prose:
+`Click`, `Click a cell`, `Wheel`, `Goal`, `Two tiles alike`. Several others
+write ranges with spaces -- `1 - 9`, `1 - 7`, `1 - 4`.
+
+`guitk::shortcut::keystrokes` refuses both. It returns `UnknownKey` rather than
+skipping what it cannot read, deliberately, and its doc comment gives the
+reason: "a guard test handed a shorter list than it asked for would pass while
+checking less". A range is accepted only as an exact `X-Y`, so that the `-` key
+itself is never mistaken for one.
+
+So a guard dropped on one of those panels *panics* rather than reporting, and
+the tempting repair -- teach it to skip rows it cannot parse -- is precisely
+the hole that lets a genuinely dead key hide behind a label nobody taught the
+parser. **Do not teach the guard to skip.** Either split the panel so the key
+rows are their own list, or keep one list whose first column is strictly
+keystrokes and move `Click` and `Goal` into the description column.
+
+**The working order.** `apps/towers` first, since it is one app and its list
+is unchecked. Then the 56, largest first
+(`videoplayer` 31, `hangman` 29, `wordle` 29, `crossword` 27, `rssreader` 26,
+`editor` 19, `paint` 17 ...). Then the 25 prose-form. Then read the 10 and
+expect to close most of them with no change, recording *why* each needed
+nothing so the next reader does not re-open it -- the survey will keep
+reporting all 91 until it learns the footer shape, and an answer that is not
+written down is one that gets rediscovered.
 
 ## `TD-C-A-PRINTED-KEY-LIST-IS-A-SECOND-COPY` -- **FIXED 2026-09-18** (lane C)
 

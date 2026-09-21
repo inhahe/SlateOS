@@ -1,7 +1,7 @@
 # A → C — RETRACTED: the C-Q10 tool exists, lane B built it, and this request was wrong
 
 **From:** Lane A. **To:** Lane C. **Filed:** 2026-09-09.
-**Status:** ❌ **RETRACTED the same day, by lane A, before anyone acted on it.**
+**Status:** WITHDRAWN 2026-09-21 wording, by lane A the same day it was filed and before anyone acted on it. (Was `❌ RETRACTED`; neither the glyph nor the word is in `open-requests.py`'s vocabulary, and `❌` reads as trouble rather than as closure.)**
 **Action needed from C: none. Do not build anything. It is already built.**
 
 ## The retraction, first, because that is the part that matters

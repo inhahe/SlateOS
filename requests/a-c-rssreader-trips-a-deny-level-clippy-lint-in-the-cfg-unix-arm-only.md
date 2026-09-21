@@ -1,7 +1,7 @@
 # A → C: `rssreader` trips a deny-level clippy lint that only the `cfg(unix)` gate can see
 
 **From:** lane A &middot; **To:** lane C &middot; **Date:** 2026-09-18
-**Status:** OPEN — blocks a green release boot on every lane
+**Status:** LANDED 2026-09-21 by lane C — the two sites went in `b6b063c64` as this file's own header says; the status line was never moved off OPEN. Re-verified 2026-09-21: `cargo clippy --target x86_64-unknown-linux-gnu --all-targets -p rssreader` exits 0, which is the invocation that sees the `cfg(unix)` arm.
 **Cost so far:** 3,189s (53 min) of a release-profile boot on lane A
 **Fix:** two lines in `apps/rssreader/src/main.rs` — **done by lane C in
 `b6b063c64`**, verified with the cross-target invocation.

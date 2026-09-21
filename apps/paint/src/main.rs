@@ -32,6 +32,7 @@ use guitk::rng::{RandomSource, SeededRng};
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
+use std::path::Path;
 use std::process::ExitCode;
 
 use std::collections::VecDeque;
@@ -1540,7 +1541,59 @@ impl Default for DragState {
 // ============================================================================
 
 /// The complete paint application state.
+/// The keys this program answers, raised by `F1`.
+///
+/// `?` is deliberately not a second way in, unlike most apps in this suite:
+/// the text tool takes typed characters, so a `?` has somewhere to go here.
+/// design-decisions 863 makes `F1` the key that never fails for exactly this
+/// case.
+///
+/// Was `shortcuts_list()`, a `Vec` built by a function that nothing but one
+/// test ever called -- 33 rows of promises that reached no screen.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+Z", "Undo"),
+    ("Ctrl+Y", "Redo"),
+    ("Ctrl+C", "Copy selection"),
+    ("Ctrl+V", "Paste"),
+    ("Ctrl+X", "Cut selection"),
+    ("Ctrl+S", "Save as BMP"),
+    ("Ctrl+O", "Open BMP"),
+    ("Ctrl+N", "New canvas"),
+    ("Ctrl++", "Zoom in"),
+    ("Ctrl+-", "Zoom out"),
+    ("Ctrl+0", "Actual size"),
+    ("Ctrl+F", "Fit to window"),
+    ("B", "Pencil/Brush tool"),
+    ("L", "Line tool"),
+    ("R", "Rectangle tool"),
+    ("O", "Ellipse tool"),
+    ("U", "Rounded Rectangle"),
+    ("P", "Polygon tool"),
+    ("G", "Fill (bucket) tool"),
+    ("E", "Eraser tool"),
+    ("T", "Text tool"),
+    ("I", "Eyedropper tool"),
+    ("A", "Spray can tool"),
+    ("S", "Selection tool"),
+    ("X", "Swap FG/BG colors"),
+    ("[", "Decrease brush size"),
+    ("]", "Increase brush size"),
+    ("H", "Flip horizontal"),
+    ("V", "Flip vertical"),
+    ("F5", "Toggle grid"),
+    ("Enter", "Finish polygon / place text"),
+    ("Escape", "Cancel / deselect"),
+    ("Delete", "Clear selection"),
+    ("F1", "This list"),
+];
+
 pub struct PaintApp {
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
+    /// The open/save dialog, when one is up.
+    pub picker: guitk::dialog::FilePicker,
+    /// What the last open or save did, drawn in the status bar.
+    pub file_status: Option<String>,
     /// Window width.
     pub window_width: f32,
     /// Window height.
@@ -1637,6 +1690,9 @@ impl PaintApp {
         )];
 
         Self {
+            show_help: false,
+            picker: guitk::dialog::FilePicker::new(),
+            file_status: None,
             theme: Palette::from_settings(&appearance::AppearanceSettings::default()),
             window_width,
             window_height,
@@ -1722,6 +1778,11 @@ impl PaintApp {
     /// Returns whether anything changed, which is what `App::on_event` turns
     /// into a repaint.
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // The file dialog is modal, so it gets first refusal on everything
+        // while it is up -- see `picker_took`.
+        if self.picker.is_open() && self.picker_took(event) {
+            return true;
+        }
         match event {
             Event::Resize { width, height } => {
                 #[allow(clippy::cast_precision_loss)]
@@ -1782,6 +1843,39 @@ impl PaintApp {
 
     /// Translate a toolkit key into the vocabulary this app's handlers speak.
     ///
+    /// Give the open/save dialog first refusal on an event while it is up.
+    ///
+    /// A dialog that does not take the keyboard is not modal: without this,
+    /// typing a filename would also be typing tool shortcuts into the canvas
+    /// behind it, and `b` in `blue.bmp` would swap to the pencil.
+    fn picker_took(&mut self, event: &Event) -> bool {
+        // Read before `handle`: choosing a path takes the dialog down, so a
+        // flag read afterwards would be answering about a picker that is no
+        // longer up.
+        let saving = self.picker.is_saving();
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
+        {
+            guitk::dialog::Picked::Chose(path) => {
+                self.file_status = Some(if saving {
+                    match self.save_bmp(&path) {
+                        Ok(()) => format!("Saved {}", path.display()),
+                        Err(e) => e,
+                    }
+                } else {
+                    match self.load_bmp(&path) {
+                        Ok(()) => format!("Opened {}", path.display()),
+                        Err(e) => e,
+                    }
+                });
+                true
+            }
+            guitk::dialog::Picked::Handled | guitk::dialog::Picked::Cancelled => true,
+            guitk::dialog::Picked::Ignored => false,
+        }
+    }
+
     /// The app predates the toolkit's `Key` enum and its handlers take a
     /// `char` plus a private `SpecialKey`. Translating at this seam rather than
     /// converting the handlers is deliberate: the handlers' meaning is "the
@@ -1790,6 +1884,20 @@ impl PaintApp {
     /// `TD-ONLY-ONE-KEYBOARD-LAYOUT` is closed this function is the one place
     /// that has to learn about layouts.
     fn handle_key(&mut self, key: &KeyEvent) -> bool {
+        // The card is raised here rather than in `handle_key_press`, which is
+        // given a `char` and would have to be told about a key that produces
+        // none. Escape closes it before `SpecialKey::Escape` reaches the
+        // canvas, so a reader who opened the list and wants out does not also
+        // drop their selection or their half-built polygon.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return true;
+        }
+        if self.show_help && key.key == Key::Escape {
+            self.show_help = false;
+            return true;
+        }
+
         if let Some(special) = match key.key {
             Key::Enter => Some(SpecialKey::Enter),
             Key::Escape => Some(SpecialKey::Escape),
@@ -1811,19 +1919,39 @@ impl PaintApp {
             Key::A => Some('a'),
             Key::B => Some('b'),
             Key::C => Some('c'),
+            Key::D => Some('d'),
             Key::E => Some('e'),
+            Key::F => Some('f'),
             Key::G => Some('g'),
+            Key::H => Some('h'),
+            Key::I => Some('i'),
+            Key::J => Some('j'),
+            Key::K => Some('k'),
             Key::L => Some('l'),
+            Key::M => Some('m'),
             Key::N => Some('n'),
             Key::O => Some('o'),
             Key::P => Some('p'),
+            Key::Q => Some('q'),
             Key::R => Some('r'),
             Key::S => Some('s'),
             Key::T => Some('t'),
+            Key::U => Some('u'),
             Key::V => Some('v'),
+            Key::W => Some('w'),
             Key::X => Some('x'),
             Key::Y => Some('y'),
             Key::Z => Some('z'),
+            // The keys this app binds that are not letters. A chord
+            // produces no text on most layouts, and a synthetic event carries
+            // none at all, so anything the shortcut list names has to be
+            // reachable from the `Key` alone. `typed` still wins where it is
+            // present, so a layout that puts these elsewhere is unaffected.
+            Key::Equals => Some('='),
+            Key::Minus => Some('-'),
+            Key::Num0 => Some('0'),
+            Key::LeftBracket => Some('['),
+            Key::RightBracket => Some(']'),
             _ => None,
         };
         let Some(ch) = typed.or(from_key) else {
@@ -2309,15 +2437,14 @@ impl PaintApp {
     /// truncates first: a save interrupted part-way used to leave the image on
     /// disk as a fragment. An image is one blob behind a header, so a partial
     /// write is not a partially-recovered picture — it is an unopenable file.
-    pub fn save_bmp(&self, path: &str) -> Result<(), String> {
+    pub fn save_bmp(&self, path: &Path) -> Result<(), String> {
         let flat = self.flatten();
         let data = encode_bmp(&flat);
-        safeio::write_atomically(std::path::Path::new(path), &data)
-            .map_err(|e| format!("Failed to save BMP: {e}"))
+        safeio::write_atomically(path, &data).map_err(|e| format!("Failed to save BMP: {e}"))
     }
 
     /// Loads a BMP file into the active layer (replaces its content).
-    pub fn load_bmp(&mut self, path: &str) -> Result<(), String> {
+    pub fn load_bmp(&mut self, path: &Path) -> Result<(), String> {
         let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
         let buf = decode_bmp(&data).ok_or_else(|| "Invalid BMP format".to_string())?;
 
@@ -2830,6 +2957,26 @@ impl PaintApp {
 
         if self.color_picker.is_open {
             self.render_color_picker_dialog(&mut cmds);
+        }
+
+        if self.picker.is_open() {
+            cmds.extend(
+                self.picker
+                    .render(&self.theme, self.window_width, self.window_height),
+            );
+        }
+
+        // Over the colour dialog and the file dialog both: the list is the one
+        // thing on screen a reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.theme,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
         }
 
         cmds
@@ -4062,45 +4209,6 @@ impl PaintApp {
     // Keyboard shortcut descriptions (for help/about)
     // ========================================================================
 
-    /// Returns a list of keyboard shortcuts with descriptions.
-    pub fn shortcuts_list() -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("Ctrl+Z", "Undo"),
-            ("Ctrl+Y", "Redo"),
-            ("Ctrl+C", "Copy selection"),
-            ("Ctrl+V", "Paste"),
-            ("Ctrl+X", "Cut selection"),
-            ("Ctrl+S", "Save as BMP"),
-            ("Ctrl+O", "Open BMP"),
-            ("Ctrl+N", "New canvas"),
-            ("Ctrl++", "Zoom in"),
-            ("Ctrl+-", "Zoom out"),
-            ("Ctrl+0", "Actual size"),
-            ("Ctrl+F", "Fit to window"),
-            ("B", "Pencil/Brush tool"),
-            ("L", "Line tool"),
-            ("R", "Rectangle tool"),
-            ("O", "Ellipse tool"),
-            ("U", "Rounded Rectangle"),
-            ("P", "Polygon tool"),
-            ("G", "Fill (bucket) tool"),
-            ("E", "Eraser tool"),
-            ("T", "Text tool"),
-            ("I", "Eyedropper tool"),
-            ("A", "Spray can tool"),
-            ("S", "Selection tool"),
-            ("X", "Swap FG/BG colors"),
-            ("[", "Decrease brush size"),
-            ("]", "Increase brush size"),
-            ("H", "Flip horizontal"),
-            ("V", "Flip vertical"),
-            ("F5", "Toggle grid"),
-            ("Enter", "Finish polygon / place text"),
-            ("Escape", "Cancel / deselect"),
-            ("Delete", "Clear selection"),
-        ]
-    }
-
     // ========================================================================
     // Full keyboard/mouse input dispatch (simplified)
     // ========================================================================
@@ -4147,6 +4255,14 @@ impl PaintApp {
                     self.zoom_actual();
                     return true;
                 }
+                's' | 'S' => {
+                    self.picker.open_to_write("untitled.bmp");
+                    return true;
+                }
+                'o' | 'O' => {
+                    self.picker.open_to_read();
+                    return true;
+                }
                 'f' | 'F' => {
                     self.zoom_fit();
                     return true;
@@ -4154,6 +4270,17 @@ impl PaintApp {
                 _ => {}
             }
             return false;
+        }
+
+        // A character typed while the text tool is placing text is *text*,
+        // not a tool shortcut. Until 2026-09-21 the live key path never
+        // reached `handle_text_char` at all -- its only callers were its own
+        // definition and one test -- so typing "Hi" into a text box flipped
+        // the canvas horizontally and switched to the eyedropper. It goes
+        // after the Ctrl branch, so Ctrl+S still saves while typing, and
+        // before the tool letters, which is the whole point.
+        if self.handle_text_char(key) {
+            return true;
         }
 
         // Shape mode toggle with shift
@@ -4450,12 +4577,14 @@ mod tests {
         // panic -- which the `remove_file` trailer this replaces did not.
         let scratch = scratchdir::ScratchDir::new("slate_paint_routing");
         let path = scratch.path("drawing.bmp");
-        let path_str = path.to_string_lossy().to_string();
 
         let app = PaintApp::new(800.0, 600.0);
 
         let before = safeio::writes_performed();
-        app.save_bmp(&path_str).expect("save_bmp");
+        // `&path` rather than a `to_string_lossy` of it: a filename is bytes,
+        // and the lossy conversion this used to need went away with the `&str`
+        // signature it was there to satisfy.
+        app.save_bmp(&path).expect("save_bmp");
         let after = safeio::writes_performed();
 
         assert!(
@@ -5916,9 +6045,166 @@ mod tests {
 
     #[test]
     fn test_shortcuts_list() {
-        let shortcuts = PaintApp::shortcuts_list();
-        assert!(!shortcuts.is_empty());
-        assert!(shortcuts.iter().any(|(k, _)| *k == "Ctrl+Z"));
+        assert!(!SHORTCUTS.is_empty());
+        assert!(SHORTCUTS.iter().any(|(k, _)| *k == "Ctrl+Z"));
+    }
+
+    /// Everything the window draws, as one string.
+    fn help_text(app: &PaintApp) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// The list and the handler are two copies of one fact and they drift.
+    /// This list drifted the whole way: it lived in a `Vec` that nothing but a
+    /// test ever called, so for its entire life nothing compared it to
+    /// anything. The first run of this guard failed on `Ctrl+S` and `Ctrl+O`,
+    /// which it advertised for a Save and an Open that no key, menu or button
+    /// reached -- see `TD-C-PAINT-CANNOT-SAVE-YOUR-PICTURE-AND-SAYS-IT-CAN`.
+    /// Canvases chosen so that between them every advertised key has work.
+    ///
+    /// Three of these keys are *correctly* refused on a blank canvas, and each
+    /// is the reason for one of these states. `Enter` finishes a polygon or
+    /// places text and means nothing otherwise; `Delete` clears a selection
+    /// and there is nothing to clear; `Escape` cancels whichever of those is
+    /// in progress. Advertising them is right -- they are real keys with real
+    /// jobs -- so the guard asks whether *some* state answers a key rather
+    /// than whether a blank one does.
+    fn help_states() -> Vec<PaintApp> {
+        let mut mid_polygon = PaintApp::new(1024.0, 768.0);
+        mid_polygon.current_tool = Tool::Polygon;
+        mid_polygon.polygon_builder.add_point(10, 10);
+        mid_polygon.polygon_builder.add_point(40, 10);
+        mid_polygon.polygon_builder.add_point(40, 40);
+
+        let mut with_selection = PaintApp::new(1024.0, 768.0);
+        with_selection.selection = Some(Selection {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+            content: None,
+        });
+
+        vec![PaintApp::new(1024.0, 768.0), mid_polygon, with_selection]
+    }
+
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|app| app.handle_event(&Event::Key(stroke.clone())));
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// A bare key press, as the window would deliver it with no text.
+    fn bare(key: Key) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    /// **Typing into the text tool types, instead of firing tool shortcuts.**
+    ///
+    /// `handle_text_char` was written, tested, and never called by anything
+    /// the user could reach: its only two references in the crate were its own
+    /// definition and a test that called it directly. So with the Text tool
+    /// placing a box, typing "hi" ran the *shortcuts* for `h` and `i` -- the
+    /// canvas flipped horizontally and the tool became the eyedropper, which
+    /// also ends the text box you were typing into.
+    ///
+    /// The second half is the control. A test that only checked the typing
+    /// case would pass just as well if the tool letters had been deleted
+    /// outright, which would be a far worse program.
+    #[test]
+    fn typing_with_the_text_tool_types_instead_of_firing_shortcuts() {
+        let mut typing = PaintApp::new(1024.0, 768.0);
+        typing.current_tool = Tool::Text;
+        // A text box is being placed: this is what `handle_text_char` reads.
+        typing.drag.start_x = 20;
+
+        for key in [Key::H, Key::I] {
+            assert!(typing.handle_event(&bare(key)), "{key:?} was not handled");
+        }
+        assert_eq!(
+            typing.text_input.text, "hi",
+            "the letters did not become text"
+        );
+        assert_eq!(
+            typing.current_tool,
+            Tool::Text,
+            "typing a letter changed the tool out from under the text box"
+        );
+
+        // Control: the same letters with no text box being placed are still
+        // the tool shortcuts they have always been.
+        let mut drawing = PaintApp::new(1024.0, 768.0);
+        assert!(drawing.handle_event(&bare(Key::I)));
+        assert_eq!(
+            drawing.current_tool,
+            Tool::Eyedropper,
+            "I stopped selecting the eyedropper"
+        );
+        assert!(drawing.text_input.text.is_empty(), "a shortcut became text");
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. This program is why the pair is needed: its list
+    /// was correct-looking Rust that no frame ever drew.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = PaintApp::new(1024.0, 768.0);
+        assert!(
+            !help_text(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        assert!(
+            app.handle_event(&Event::Key(KeyEvent {
+                key: Key::F1,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: String::new(),
+            })),
+            "F1 did not read as a redraw, so the list would be invisible"
+        );
+        let drawn = help_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(drawn.contains(keys), "{keys:?} never reached the window");
+            assert!(drawn.contains(what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        }));
+        assert!(
+            !help_text(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
     }
 
     // ---- Canvas coordinate conversion round-trip ----

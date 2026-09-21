@@ -2218,10 +2218,28 @@ fn hide_ignorables(
         glyph.key = GlyphKey::outline(space);
         // Advance *and* the kern charged to it, because the kern was added
         // into the advance when it was charged and leaving it would make the
-        // recorded pieces stop summing to the width. The x offset goes for the
-        // same reason HarfBuzz zeroes it — a zero-advance glyph that is still
-        // displaced would drag its blank somewhere — and the y offset stays,
-        // also as in HarfBuzz, because nothing is drawn for it to move.
+        // recorded pieces stop summing to the width. The x offset goes
+        // because a zero-advance glyph that is still displaced would drag its
+        // blank somewhere, and the y offset stays because nothing is drawn
+        // for it to move.
+        //
+        // **HarfBuzz does not zero the x offset, and this comment used to say
+        // it did.** Measured 2026-09-21 on `a` CGJ `b` in `SegUIVar.ttf`,
+        // whose `GPOS` attaches U+034F to its base as a mark: HarfBuzz keeps
+        // the attachment and reports the hidden glyph at x_offset -1042,
+        // which is minus the base's advance, putting the blank back on the
+        // letter it attached to. We report 0, leaving it at the pen. Both are
+        // invisible -- a space glyph with no advance -- so nothing a reader
+        // sees differs, and it is the one remaining `misplaced` in the
+        // 556-face sweep.
+        //
+        // Ours is kept for the reason §434 gives: the x of an invisible
+        // zero-advance glyph is good for placing a caret on that character's
+        // cluster, and the pen is where the next glyph starts. Anyone
+        // changing it should know it is a *mark attachment* being discarded
+        // here, not a kern -- §434's account of this divergence describes
+        // kern charging, which stopped diverging when kerning moved onto the
+        // right-hand glyph.
         glyph.advance = 0.0;
         glyph.kern_next = 0.0;
         glyph.offset.0 = 0.0;

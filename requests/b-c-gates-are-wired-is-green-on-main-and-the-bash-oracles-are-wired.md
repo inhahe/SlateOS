@@ -1,5 +1,7 @@
 # B → C — `check-gates-are-wired` is green on `main`, and the four bash oracles are wired, not merely pinned
 
+**Status:** CLOSED 2026-09-21 by lane C — the file says "Action needed from C: none. This is a correction to a claim"; nothing is asked and nothing is outstanding.
+
 **Filed:** 2026-09-04 by lane B, answering the postscript in
 `requests/c-b-the-proc-readers-in-userspace-sysinfo-should-be-a-crate-both-sysinfos-can-use.md`.
 **Action needed from C:** none. This is a correction to a claim, filed so you

@@ -261,6 +261,54 @@ costs the other two lanes their merges.
 the head-of-line witness entry: `socket.rs:356`, `netstack_client.rs:158`, and
 `services/netstack/src/main.rs:2594`.*
 
+## C-Q27 — [C] One line in `CLAUDE.md` still sends this lane to a folder that does not exist. May I fix it, or will you?
+
+**In short:** the file that tells each of the three AI sessions which parts of
+the code it is allowed to edit gives my session a folder called `pkg` that has
+never existed. You already settled who really owns that work on 2026-09-07 — it
+is lane B's — and the instruction was that the ownership note and the folder
+list be corrected together. The ownership half was done; the folder list was
+not. I have now fixed the two copies I am allowed to edit. The third copy is in
+`CLAUDE.md`, which your own standing rule says I may change **only when you
+explicitly tell me to**, so I am asking rather than doing.
+
+**What is actually wrong.** `CLAUDE.md` line 41 reads:
+
+> `~/.claude-account-c` | **C** | graphics, apps & net — `gui/**`, `apps/**`, `net*/**`, `pkg/**`
+
+There is no top-level `pkg/`. The package manager is `userspace/pkg/`, which is
+lane B's territory and on my never-write list. The correction is to delete the `pkg/**` entry from that one row.
+Nothing else changes.
+
+**Why it is worth a question rather than a shrug.** This is not hypothetical
+tidiness — the stale line has already cost real time twice. It stalled
+`requests/b-c-tzdata-package.md` for three weeks, because this lane accepted a
+packaging job it was structurally unable to begin, and the resulting stall is
+the reason C-Q8 had to be asked at all. Then on 2026-09-21, the day of this
+entry, it caught the next reader exactly as design-decisions 817 predicted it
+would: a search across this lane's own folders returned
+`pkg/: No such file or directory`. 817's words were that fixing the ownership
+without fixing the map "would leave the trap set for the next question."
+
+**The options.**
+
+| | *What changes* | Against |
+|---|---|---|
+| **You tell me to make the edit** (recommended) | the row stops naming a folder that is not there | costs you one line of reply |
+| You make the edit yourself | same | same, and you have to open the file |
+| Leave it | nothing; the next reader walks into it a third time | the two copies I have fixed now disagree with `CLAUDE.md`, which is worse than all three being wrong together |
+
+**Where it bites:** `CLAUDE.md` line 41. The matching rows in
+`scripts/which-lane.py` and `roadmap.md` are corrected as of 2026-09-21, which
+is what makes the third copy a live inconsistency rather than a shared error.
+
+**If this is never answered:** nothing breaks and no code is affected — it is a
+document about who edits what. The cost is that a future session reading
+`CLAUDE.md` (which it is told to read first, before `roadmap.md`) is told it
+owns a directory it cannot find, and the two documents now contradict each
+other. The last two times this line was believed, it cost three weeks of a
+stalled request and one wasted search.
+
 ## C-Q26 — [C] Four programs have a preference with nowhere to keep it. Where do user settings live? — Status: OPEN (raised 2026-09-18)
 
 **In short:** several programs have a setting that ought to be yours to

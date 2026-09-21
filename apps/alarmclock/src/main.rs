@@ -1822,6 +1822,28 @@ fn wrap_step(value: u8, step: Step, modulus: i32) -> u8 {
 // ============================================================================
 
 /// Top-level application state.
+/// The keys this program answers, raised by `F1`.
+///
+/// `?` is not a second way in: the alarm editor takes a typed time, so a `?`
+/// has somewhere to go -- the `apps/spreadsheet` case in design-decisions 863.
+///
+/// Four rows name the tab they belong to. `Space`, `L` and `R` reach the
+/// stopwatch only while the stopwatch is up, and `N` the alarm list only while
+/// that is; a list that did not say so would be advertising keys that look
+/// broken three quarters of the time.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("1-3", "Alarms, timer, stopwatch"),
+    ("Tab", "The next tab"),
+    ("F", "24-hour or 12-hour"),
+    ("N", "A new alarm, on the alarm tab"),
+    ("Space", "Start or stop, on the stopwatch"),
+    ("L", "Take a lap, on the stopwatch"),
+    ("R", "Reset it, on the stopwatch"),
+    ("Esc", "Leave the editor, or give the keyboard back"),
+    ("Ctrl+Q", "Quit"),
+    ("F1", "This list"),
+];
+
 pub struct AlarmClockApp {
     pub active_tab: ActiveTab,
     pub time_format: TimeFormat,
@@ -1868,11 +1890,14 @@ pub struct AlarmClockApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 impl AlarmClockApp {
     pub fn new() -> Self {
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             active_tab: ActiveTab::default(),
             time_format: TimeFormat::default(),
@@ -2398,6 +2423,16 @@ impl AlarmClockApp {
                 content.h,
                 self.lap_scroll,
             ),
+        }
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
         }
         f
     }
@@ -3053,6 +3088,21 @@ impl AlarmClockApp {
             return Action::None;
         }
         let m = event.modifiers;
+
+        // Above the editor, for the same reason Ctrl+Q is: a reader with a
+        // time half-typed still wants the keys.
+        if event.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return Action::Redraw;
+        }
+        if self.show_help {
+            // Modal. Letting keys through would mean resetting a stopwatch the
+            // reader cannot see.
+            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return Action::Redraw;
+        }
 
         // Ctrl-Q closes, and is checked before anything else so it works even
         // with a text field focused.
@@ -4280,6 +4330,94 @@ mod tests {
         let id = app.create_alarm(8, 30);
         assert_eq!(app.alarms.len(), 1);
         assert!(app.find_alarm(id).is_some());
+    }
+
+    /// Every string the window draws, joined.
+    fn drawn(app: &AlarmClockApp) -> String {
+        app.draw(AlarmClockApp::SIZE)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// One app per tab, because most of these keys belong to one: `Space`, `L`
+    /// and `R` are the stopwatch's and `N` is the alarm list's. Each is
+    /// correctly refused elsewhere, which is why the list names the tab.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [ActiveTab::Alarm, ActiveTab::Timer, ActiveTab::Stopwatch]
+                    .into_iter()
+                    .any(|tab| {
+                        let mut app = AlarmClockApp::new();
+                        app.active_tab = tab;
+                        // Running, so `L` has a lap to take and `R` something to
+                        // reset. Both are correctly refused on a stopped clock.
+                        app.stopwatch.start();
+                        // And the editor open, so `Esc` has something to leave --
+                        // Escape with nothing open is a correct refusal too.
+                        if tab == ActiveTab::Alarm {
+                            probe::key(&mut app, &probe::press(Key::N));
+                        }
+                        probe::key(&mut app, &stroke) != Action::None
+                    });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and no tab answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = AlarmClockApp::new();
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        probe::key(&mut app, &probe::press(Key::F1));
+        let shown = drawn(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        // `N` behind the card must not open the new-alarm editor over a list
+        // the reader cannot see. The observable is the *editor*, not the alarm
+        // count: `N` opens a form and the alarm appears only when it is
+        // confirmed, so watching `alarms.len()` would have passed on an app
+        // that had lost `N` entirely -- which is what the control below caught
+        // on this test's first run.
+        assert!(
+            app.editor.is_none(),
+            "the fixture must start with no editor"
+        );
+        probe::key(&mut app, &probe::press(Key::N));
+        assert!(app.editor.is_none(), "N opened the editor through the card");
+
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+
+        probe::key(&mut app, &probe::press(Key::N));
+        assert!(
+            app.editor.is_some(),
+            "control: N does nothing even with the card down"
+        );
     }
 
     #[test]

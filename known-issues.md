@@ -160487,7 +160487,7 @@ about a program that was working correctly, or nearly hid a real one. This
 entry lists them with the instance that caught each, because the fix is not
 "be careful" -- it is knowing the specific shapes.
 
-**It started at seven and is at twenty-one**, and the slug
+**It started at seven and is at twenty-two**, and the slug
 keeps the original number because renaming it would break every reference to
 it. 18 and 19 are the two that are not failure shapes at all -- 18 is the
 question that ends a run of them and 19 is about the cost of a grouping you
@@ -160845,6 +160845,42 @@ observable was real, the assertion was true, and the quantity it watched could
 not tell the two outcomes apart. A sixth app's help-card test passing wrongly
 costs a reader nothing; a boot rung passing wrongly cost six rounds at ~90
 minutes each, because it was the evidence that the exec path worked.
+
+**22. The disconfirming fact was absorbed as a refinement** (lane A,
+2026-09-21; this lane the same morning). The most expensive shape here so far,
+and the hardest to see from inside, because the conclusion comes out of the
+exchange looking *better* supported.
+
+Lane A held that a C `execl` was passing a NULL path to `execve`. This lane
+gave them two facts over the following weeks, neither intended as a refutation:
+that `execl` *is* `execv` plus a `va_list` walk, so everything below the
+delegation is shared with the arm that works; and that their discriminator had
+no C-side control, there being no C `execv` anywhere in `services/` to compare
+against. Both were reasons the conclusion could not stand. **Both were read as
+narrowings and the conclusion was kept** -- each one attached to it as detail
+about *how* it was true. It was finally withdrawn on a third ground that made
+it impossible rather than merely unsupported: `posix`'s `execl`, `execv` and
+`execve` all funnel to the *native* syscall, so a C fixture cannot produce a
+`linux_execve` log line at all.
+
+This lane did the same thing in miniature the same morning, and did not
+recognise it until lane A wrote the sentence. Having found `key-survey.py`
+over-reporting, fixing that, re-measuring and announcing a two-thirds
+reduction, every further fact gathered was about the direction already decided
+to be the problem. The question never asked was whether it *under*-reported,
+which it did, by three times as much.
+
+**The distinction from the rest of this catalogue.** 19 is a wrong grouping, 20
+a wrong attribution, 21 an assertion watching the wrong quantity -- all of them
+errors *in* a measurement. This one is an error in what a correct measurement
+is allowed to do: a fact that bears on whether the conclusion is true is filed
+under how it is true. Nothing is miscounted and nothing is misread.
+
+**The tell, stated so it can be used:** when a new fact arrives and the next
+move is to make the conclusion *more specific* rather than to ask what would
+have to be true for it to be false, that is the moment. A conclusion that has
+absorbed three facts and predicted none of them is not better supported than it
+was; it is a conclusion three facts have failed to dislodge.
 
 ## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18) -- **CLOSED 2026-09-21**
 

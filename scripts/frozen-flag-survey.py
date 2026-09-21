@@ -89,7 +89,10 @@ KNOWN LIMITS, in the tool's own voice rather than a reader's:
 
   * A field written only through `..Default::default()`, or by a
     destructuring assignment, is not seen as written and would be
-    reported wrongly. `*self = ...` *is* seen: a struct whose impl
+    reported wrongly. **This limit has no count and no delegate.** Nothing
+    else in the tree catches those either, so it is not handed off to
+    anything -- and a limit with neither a size nor an owner is the weakest
+    kind this tool has. It is stated here rather than described as covered. `*self = ...` *is* seen: a struct whose impl
     replaces itself wholesale has every one of its fields counted as
     written, which is how `apps/credmanager`'s `NewEntryForm::set_kind`
     -- a real setter with a real caller, writing `kind` without the

@@ -493,7 +493,25 @@ const _: () = {
 /// mechanism. `design-decisions.md` §928.
 const _: () = {
     assert!(
-        Rights::DISTINCT.len() == 16,
+        // 17 as of 2026-09-21: SET_BRIGHTNESS was added for
+        // SYS_BRIGHTNESS_SET. The decision this pin demands, made and
+        // recorded rather than merely unblocked:
+        //
+        //   INIT_PROCESS  no
+        //   INIT_FILE     no
+        //   INIT_SOCKET   no
+        //
+        // Because that is what its three neighbours do. SET_CREDENTIALS,
+        // SET_HOSTNAME and SET_KEYLAYOUT are all system-wide-setting rights
+        // and none of them is in any INIT_* class -- those grant only the
+        // twelve generic rights, READ through DEBUG. init has no reason to
+        // dim a screen, and the compositor that does should hold the right
+        // explicitly rather than inherit it from being root.
+        //
+        // This pin did its job: the right was added, committed and pushed
+        // before the build was run, and the const assertion is what caught
+        // it rather than a boot two hours later.
+        Rights::DISTINCT.len() == 17,
         "a right was added or removed. Decide, SEPARATELY FOR EACH OF THE THREE \
          CLASSES init is granted, whether it should hold the new right: add it \
          to Rights::INIT_PROCESS, Rights::INIT_FILE and Rights::INIT_SOCKET as \

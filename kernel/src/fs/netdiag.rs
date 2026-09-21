@@ -28,7 +28,6 @@
 #![allow(dead_code)]
 
 use crate::sync::PreemptSpinMutex as Mutex;
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -198,128 +197,43 @@ pub fn init_defaults() {
 }
 
 /// Simulate a ping to a host.
-pub fn ping(host: &str, count: u32) -> KernelResult<DiagResult> {
-    with_state(|state| {
-        let id = state.next_id;
-        state.next_id += 1;
-        state.total_pings += 1;
-
-        // Simulate latency based on host type.
-        let latency = if host.starts_with("127.") || host == "localhost" {
-            50 // 0.05ms
-        } else if host.starts_with("192.168.") || host.starts_with("10.") {
-            1500 // 1.5ms
-        } else {
-            25000 // 25ms
-        };
-
-        let result = DiagResult {
-            id,
-            diag_type: DiagType::Ping,
-            target: String::from(host),
-            status: DiagStatus::Success,
-            latency_us: latency,
-            hops: Vec::new(),
-            resolved: String::new(),
-            speed_kbps: 0,
-            info: format!(
-                "{} packets sent, {} received, avg {}us",
-                count, count, latency
-            ),
-            timestamp_ns: crate::hpet::elapsed_ns(),
-        };
-        store_result(state, result.clone());
-        Ok(result)
-    })
+pub fn ping(_host: &str, _count: u32) -> KernelResult<DiagResult> {
+    // Refuses because no ICMP path exists. Until 2026-09-21 this returned
+    // a latency derived from the SPELLING of the host -- `127.*` or
+    // `localhost` got 50us, `192.168.*`/`10.*` got 1500us, anything else
+    // 25000us -- and reported Success. No packet was ever sent.
+    //
+    // A diagnostic that answers from the shape of its input cannot report
+    // the one condition it exists to detect: `ping 10.0.0.99` on a network
+    // with no such host reported 1.5ms and success.
+    //
+    // The counter is deliberately not incremented. A refused ping is not a
+    // ping, and `/proc/netdiag` showing `total_pings` above zero for work
+    // never attempted would be this defect one level down.
+    Err(KernelError::NotSupported)
 }
 
-/// Simulate a traceroute.
-pub fn traceroute(host: &str) -> KernelResult<DiagResult> {
-    with_state(|state| {
-        let id = state.next_id;
-        state.next_id += 1;
-        state.total_traces += 1;
-
-        let hops = alloc::vec![
-            TraceHop {
-                hop_number: 1,
-                address: String::from("192.168.1.1"),
-                hostname: String::from("gateway"),
-                latency_us: 800,
-                reached: true
-            },
-            TraceHop {
-                hop_number: 2,
-                address: String::from("10.0.0.1"),
-                hostname: String::from("isp-router"),
-                latency_us: 5000,
-                reached: true
-            },
-            TraceHop {
-                hop_number: 3,
-                address: String::from("72.14.233.1"),
-                hostname: String::from("backbone"),
-                latency_us: 12000,
-                reached: true
-            },
-            TraceHop {
-                hop_number: 4,
-                address: String::from(host),
-                hostname: String::from(host),
-                latency_us: 25000,
-                reached: true
-            },
-        ];
-
-        let result = DiagResult {
-            id,
-            diag_type: DiagType::Traceroute,
-            target: String::from(host),
-            status: DiagStatus::Success,
-            latency_us: 25000,
-            hops,
-            resolved: String::new(),
-            speed_kbps: 0,
-            info: format!("4 hops to {}", host),
-            timestamp_ns: crate::hpet::elapsed_ns(),
-        };
-        store_result(state, result.clone());
-        Ok(result)
-    })
+pub fn traceroute(_host: &str) -> KernelResult<DiagResult> {
+    // Refuses. Until 2026-09-21 this returned a fixed four-hop list --
+    // 192.168.1.1 labelled `gateway`, then 10.0.0.1 -- regardless of the
+    // destination asked for. It carried no `Simulate` comment, which is why
+    // a scan for that marker missed it: the comment is a proxy, the code is
+    // the signal.
+    Err(KernelError::NotSupported)
 }
 
-/// Simulate a DNS lookup.
-pub fn dns_lookup(name: &str) -> KernelResult<DiagResult> {
-    with_state(|state| {
-        let id = state.next_id;
-        state.next_id += 1;
-        state.total_lookups += 1;
-
-        let resolved = if name == "localhost" {
-            String::from("127.0.0.1")
-        } else {
-            // Simulate resolved address.
-            format!("93.184.{}.{}", name.len() % 256, (name.len() * 7) % 256)
-        };
-
-        let result = DiagResult {
-            id,
-            diag_type: DiagType::DnsLookup,
-            target: String::from(name),
-            status: DiagStatus::Success,
-            latency_us: 3500,
-            hops: Vec::new(),
-            resolved: resolved.clone(),
-            speed_kbps: 0,
-            info: format!("{} → {}", name, resolved),
-            timestamp_ns: crate::hpet::elapsed_ns(),
-        };
-        store_result(state, result.clone());
-        Ok(result)
-    })
+pub fn dns_lookup(_name: &str) -> KernelResult<DiagResult> {
+    // Refuses. Until 2026-09-21 this hardcoded `localhost` -> 127.0.0.1 and
+    // invented an address for everything else. The hardcoded pair duplicated
+    // the hosts table, so the tool agreed with the real resolver by
+    // coincidence of two constants and would have kept agreeing after
+    // someone edited the hosts file.
+    //
+    // Real resolution lives behind `SYS_DNS_RESOLVE`, which consults
+    // `fs::nameservice` (Cache, Files, Dns) as of the same day.
+    Err(KernelError::NotSupported)
 }
 
-/// Check connectivity status.
 pub fn connectivity_check() -> KernelResult<ConnectivityStatus> {
     with_state(|state| {
         state.total_checks += 1;
@@ -413,28 +327,34 @@ fn self_test_inner() {
     assert!(list_results(10).is_empty());
     crate::serial_println!("  [1/10] empty initial: OK");
 
-    // 2: Ping localhost.
-    let r = ping("127.0.0.1", 4).expect("ping");
-    assert_eq!(r.status, DiagStatus::Success);
-    assert_eq!(r.latency_us, 50);
-    crate::serial_println!("  [2/10] ping localhost: OK");
+    // 2-5: the three inventing diagnostics must REFUSE.
+    //
+    // These rungs used to assert the fabricated constants -- latency 50 for
+    // anything spelled `127.*`, 25000 for anything else, a four-hop list, a
+    // non-empty resolved address. They were green on every boot and would
+    // have stayed green if the network stack were deleted, because they
+    // tested a lookup table.
+    //
+    // Asserting the refusal is a real assertion: it fails if someone
+    // reintroduces an invented answer, which is the regression that matters.
+    assert!(ping("127.0.0.1", 4).is_err());
+    assert!(ping("example.com", 4).is_err());
+    crate::serial_println!("  [2/10] ping refuses (no ICMP path): OK");
+    crate::serial_println!("  [3/10] ping refuses for remote too: OK");
 
-    // 3: Ping remote.
-    let r = ping("example.com", 4).expect("ping2");
-    assert_eq!(r.latency_us, 25000);
-    crate::serial_println!("  [3/10] ping remote: OK");
+    assert!(traceroute("example.com").is_err());
+    crate::serial_println!("  [4/10] traceroute refuses (no hop discovery): OK");
 
-    // 4: Traceroute.
-    let r = traceroute("example.com").expect("trace");
-    assert_eq!(r.hops.len(), 4);
-    assert!(r.hops[0].hop_number == 1);
-    crate::serial_println!("  [4/10] traceroute: OK");
+    assert!(dns_lookup("example.com").is_err());
+    crate::serial_println!("  [5/10] dns_lookup refuses (use SYS_DNS_RESOLVE): OK");
 
-    // 5: DNS lookup.
-    let r = dns_lookup("example.com").expect("dns");
-    assert!(!r.resolved.is_empty());
-    assert_eq!(r.status, DiagStatus::Success);
-    crate::serial_println!("  [5/10] DNS lookup: OK");
+    // And a refusal must not have counted as work: `/proc/netdiag` reporting
+    // pings it never sent would be the same defect one level down.
+    let (_, pings_after, traces_after, lookups_after, _) = stats();
+    assert_eq!(pings_after, 0);
+    assert_eq!(traces_after, 0);
+    assert_eq!(lookups_after, 0);
+    crate::serial_println!("  [5b/10] refusals did not increment the counters: OK");
 
     // 6: Connectivity check.
     let status = connectivity_check().expect("check");

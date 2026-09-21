@@ -31870,7 +31870,7 @@ fn epoll_wait_core(
     timeout_ms_signed: i64,
 ) -> SyscallResult {
     use crate::proc::linux_fd::HandleKind;
-    use alloc::{vec, vec::Vec};
+    use alloc::vec::Vec;
 
     let caller = match caller_pid() {
         Some(p) => p,

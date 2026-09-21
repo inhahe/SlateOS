@@ -544,6 +544,22 @@ on the same day, to the same lane:**
    one from the log of the run you are relying on. A branch name is a moving
    target and a background job is exactly where it moves.
 
+**A fifth hazard, which is structural rather than a slip: a red tree cannot
+deliver its mail.** The rule is merge-when-green, and the only way a
+`requests/` file reaches another lane is that merge. So a lane blocked on a
+failing test *also* cannot post -- and the longer it is blocked the more
+undeliverable mail piles up behind it, precisely when it most wants another
+lane's eyes. On 2026-09-21 `origin/lane-a` was 34 commits ahead of `main` while
+its boot test had been red for six rounds, and a request it had filed for lane
+B was invisible to lane B the whole time.
+
+Two ways out, and both are cheap. **A `requests/` file is a document, not
+code** -- cherry-picking one onto `main` cannot make `main` red and does not
+drag the rest of the branch with it. Or ask a lane with a green tree to relay
+it, which is what happened here and is why the message got through. The trap is
+filing it and moving on, because nothing anywhere reports that a request has
+not been delivered.
+
 **A note on stale paths in this file.** Every `D:/visual studio projects/...`
 in the procedures above was repointed to `E:` on 2026-09-21. The tree moved on
 2026-09-06 and the `D:` copy still exists with working git, so those commands

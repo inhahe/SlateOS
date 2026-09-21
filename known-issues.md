@@ -28205,6 +28205,7 @@ QEMU boot test green.
 
 ### [C] D-DBVIEWER-WRAP-TEST-STOPPED-TESTING-WRAPPING — ✅ FIXED 2026-08-15
 
+**Status:** FIXED 2026-08-15
 **Found by a full `cargo test --workspace`,** not by looking for it:
 `dbviewer::tests::a_long_query_error_is_wrapped_not_cut_mid_word` failed with
 "the error was drawn as 1 command(s)". It was the only failure in the

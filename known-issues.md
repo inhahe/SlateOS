@@ -160935,6 +160935,43 @@ indistinguishable from progress -- it arrives with the feel of a narrowing,
 because it *is* one, of a space that does not contain the answer. Recorded on
 their side as design-decisions 955.
 
+**23. The instrument could not read it, so it reported compliance** (lane C,
+2026-09-21). `scripts/key-survey.py` identifies a key by the variant's *name*:
+`Key::Escape`. `apps/markdowneditor` defines its own `Key` with the key in the
+payload -- `Char('h')`, `Function(5)` -- so the survey read the names "Char"
+and "Function", concluded the app bound two keys, and reported a text editor
+with 56 binding sites as having two unnamed ones. It sat near the bottom of a
+36-app queue looking nearly done.
+
+The tell is not in the output. The output is unremarkable by construction --
+that is the whole failure. **The tell is a question nobody asks of a scanner:
+what does it do with input it cannot parse?** Three answers exist -- raise,
+report-as-unreadable, skip -- and the default in every regex-based tool is
+skip, because skipping is what a regex does when it does not match. A skip is
+indistinguishable from a pass. So: *for any survey, ask what it does with what
+it cannot read; if the answer is "nothing", the clean rows are the ones to
+distrust.*
+
+**The asymmetry that makes this worse than the three before it.** This survey
+has now been wrong four times, and the first three over-reported -- 91 apps,
+then 26 of 68, then 55 of 259. Every one was found within a day, because an
+over-report is self-correcting: you read the rows it offers and find nothing
+in them. Under-reporting has no such loop. The app drops off the list, and
+dropping off the list is precisely what being fixed looks like. **An
+instrument that fails toward clean deletes its own evidence**, which is why
+the three noisy versions of this tool were cheap and this one was not.
+
+**The trap inside the fix.** Reading the payload naively swaps a blind spot
+for twelve keys the app does not bind: the bridge `GKey::F1 =>
+Key::Function(1)` constructs all twelve function keys, and `markdowneditor`
+binds no function key at all. The distinction that holds is textual -- a
+pattern stands to the left of its arm's `=>`, a construction to the right of
+one. Three of the seven new self-test cases are controls taken from that: the
+bridge that builds a key, the catch-all that binds one, and the test that
+presses one. Without those three the scan reports 21 keys where the app
+answers 9. A correction to an instrument needs its own controls, or it is just
+the next version to be retracted.
+
 ## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18) -- **CLOSED 2026-09-21**
 
 **In short:** 60 boolean fields across 25 apps are read by the program and
@@ -164442,3 +164479,47 @@ such handoff is the `..Default::default()` and destructuring-assignment case:
 nothing catches those, so it is a limit with no count and no delegate, which
 by the rule above is the weakest kind. It is not fixed; it has stopped being
 described as covered.
+
+## `TD-C-MARKDOWNEDITOR-NAMES-ITS-KEYS-IN-A-FIELD-NOTHING-READS` -- **FIXED 2026-09-21** (lane C)
+
+**In short:** `apps/markdowneditor` answers ten keyboard shortcuts and writes
+every one of them down in a place no user can ever see: the `tooltip` field of
+its toolbar buttons. Nothing in the crate reads that field, and a tooltip needs
+a hover, which this app cannot receive -- it handles no mouse event of any
+kind. So the editor had bold, italic, link, find, undo and save on keys, and
+told nobody. One of the keys it advertised there, `Ctrl+O`, was bound to
+nothing at all.
+
+**Why no gate caught it.** Three nearly did, and the gap between them is the
+interesting part:
+
+| gate | why it was silent |
+|---|---|
+| `check-fields-written-never-read.py` | reports fields only *tests* read. Nothing reads `tooltip` at all, which it leaves to `dead_code` |
+| `dead_code` | the field is `pub` on a `pub` struct in a binary, so it is not dead by the compiler's reckoning |
+| `key-survey.py` | counted the tooltip strings as the keys being named -- a string literal is not proof the string is drawn, which its own docstring says it cannot know |
+
+The survey could not see the keys either, for a separate reason recorded as
+shape 23: this app defines its own `Key` with the key in the payload
+(`Char('h')`), and the survey read variant *names*. It reported a text editor
+with 56 binding sites as having two unnamed keys.
+
+**Fixed** by giving it the shape the other hundred apps use -- a `SHORTCUTS`
+table, `F1`, and `guitk::shortcut::render_card` -- plus:
+
+* **`Ctrl+O` now opens the file picker.** It was advertised and answered by
+  nothing. The toolbar's Open button cannot be clicked either, so this was the
+  only route left to a file that was not already open.
+* **`handle_key` returns whether it answered the key.** It returned `()`, so
+  "did this program answer this keystroke?" could only be inferred from some
+  field moving -- and choosing that field is the mistake this tree has made six
+  times, always by picking the observable whose name matches the verb. Now the
+  guard asks the handler directly. It also stops a stray key repainting the
+  whole document, which was a real if small bug.
+* **No `?` row.** An unmodified character key inserts itself into the document
+  here, so `?` would cost a question mark in a markdown file to buy a list `F1`
+  already opens -- the second app where `?` was not free, after `apps/ebook`.
+
+The card check sits above the find panel's branch, which returns before
+everything below it. This is the third app where that placement was the
+difference between a list and a modal with no exit.

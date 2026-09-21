@@ -28,11 +28,6 @@ devicemanager	F
 devicemanager	F5
 devicemanager	R
 
-# mediaconvert
-mediaconvert	C
-mediaconvert	L
-mediaconvert	Num1
-mediaconvert	Num2
 
 # settings
 settings	C

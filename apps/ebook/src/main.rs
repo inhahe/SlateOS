@@ -1158,6 +1158,34 @@ pub enum AppView {
 // ============================================================================
 
 /// The ebook reader application.
+/// The keys this program answers, raised by `F1`.
+///
+/// **`?` is not a second way in, and cannot be.** `/` opens the search box and
+/// the arm that does it does not look at Shift, so `?` opens a search too.
+/// Binding it to the card would take a key this program already answers -- the
+/// `apps/spreadsheet` case in design-decisions 863, arrived at from the other
+/// direction.
+///
+/// Most rows name the view they belong to, because this app has five and the
+/// same keys mean different things on them: `Up`/`Down` choose a book in the
+/// library and a chapter in the contents, and `Enter` opens whichever.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Up / Down", "Choose a book, a chapter or a bookmark"),
+    ("Enter", "Open what is chosen"),
+    ("Left / Right", "A page back or on, while reading"),
+    ("PageUp / PageDown", "The same"),
+    ("Home / End", "First / last page"),
+    ("T", "The table of contents"),
+    ("B", "Bookmark this page"),
+    ("Ctrl+B", "The bookmark list"),
+    ("S", "Change the reading theme"),
+    ("/", "Search the book"),
+    ("N", "The next match; Shift+N the one before"),
+    ("= / -", "Bigger / smaller type"),
+    ("Esc", "Back, or close the search"),
+    ("F1", "This list"),
+];
+
 pub struct EbookApp {
     pub library: Vec<Book>,
     pub reading_states: Vec<ReadingState>,
@@ -1184,6 +1212,8 @@ pub struct EbookApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 impl EbookApp {
@@ -1192,6 +1222,7 @@ impl EbookApp {
         let library = sample_library();
         let reading_states = library.iter().map(|_| ReadingState::new()).collect();
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             library,
             reading_states,
@@ -1690,6 +1721,22 @@ impl EbookApp {
             return false;
         }
 
+        // Above the view dispatch, so the card works from all five and closes
+        // from all five. `F1` alone: `?` is Shift and the slash key, and the
+        // slash arm below opens the search without looking at Shift.
+        if event.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return true;
+        }
+        if self.show_help {
+            // Modal. Letting keys through would mean turning pages the reader
+            // cannot see.
+            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return true;
+        }
+
         match self.view {
             AppView::Library => self.handle_library_key(event),
             AppView::Reading => {
@@ -2047,6 +2094,17 @@ impl EbookApp {
                 self.render_reading(&tc, &mut cmds);
                 self.render_bookmark_list_overlay(&tc, &mut cmds);
             }
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
         }
 
         cmds
@@ -2851,6 +2909,92 @@ mod tests {
             modifiers: Modifiers::default(),
             text: String::new(),
         }
+    }
+
+    /// Every string the window draws, joined.
+    fn card_text(app: &EbookApp) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// Four views, because the same keys mean different things on them:
+    /// `Up`/`Down` choose a book in the library and a chapter in the contents,
+    /// `Enter` opens whichever, and the paging keys only mean anything while
+    /// reading. Each refusal elsewhere is correct.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [
+                    AppView::Library,
+                    AppView::Reading,
+                    AppView::TableOfContents,
+                    AppView::BookmarkList,
+                ]
+                .into_iter()
+                .any(|view| {
+                    let mut app = app_with_long_book();
+                    app.view = view;
+                    app.handle_key_event(&stroke)
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and no view answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the half that matters: `Right` behind the card must not
+    /// turn the page, and asserting only that it does not would pass on an app
+    /// that had lost paging altogether.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = app_with_long_book();
+        app.view = AppView::Reading;
+        assert!(
+            !card_text(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_key_event(&make_key(Key::F1));
+        let shown = card_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let page = app.current_page();
+        app.handle_key_event(&make_key(Key::Right));
+        assert_eq!(
+            app.current_page(),
+            page,
+            "Right turned the page through the shortcut card"
+        );
+
+        app.handle_key_event(&make_key(Key::Escape));
+        assert!(
+            !card_text(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+
+        app.handle_key_event(&make_key(Key::Right));
+        assert_ne!(
+            app.current_page(),
+            page,
+            "control: Right does nothing even with the card down"
+        );
     }
 
     fn make_key_with_mod(key: Key, modifiers: Modifiers) -> KeyEvent {

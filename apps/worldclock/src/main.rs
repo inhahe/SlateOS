@@ -419,6 +419,31 @@ struct ClockEntry {
     pinned: bool,
 }
 
+/// The keys this program answers, raised by `F1` or `?`.
+///
+/// Nothing here takes typed text -- the city picker filters on its own keys --
+/// so `?` is free, and design-decisions 863 says to bind it where it is.
+///
+/// Before this list existed the app named **none** of its eleven keys. The
+/// survey reported only two as unnamed, because it matched a key name as a
+/// substring and the button label "Add City" counted as naming `A`, "Grid" as
+/// naming `G` and "Pin" as naming `P`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Left / Right / H / L", "Choose a clock"),
+    ("Space", "An hour later there"),
+    ("Shift+Space", "An hour earlier"),
+    ("R", "Back to now"),
+    ("N", "Add a city"),
+    ("Delete / X", "Remove this clock"),
+    ("P", "Pin it to the front"),
+    ("Home", "Make it your home clock"),
+    ("G / V", "Grid or list"),
+    ("A", "Analogue or digital faces"),
+    ("T", "24-hour or 12-hour"),
+    ("S", "Show seconds"),
+    ("F1 / ?", "This list"),
+];
+
 pub struct WorldClockApp {
     width: f32,
     height: f32,
@@ -463,6 +488,8 @@ pub struct WorldClockApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 impl WorldClockApp {
@@ -501,6 +528,7 @@ impl WorldClockApp {
         ];
 
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
@@ -944,6 +972,19 @@ impl WorldClockApp {
 
         if self.show_picker {
             self.draw_picker(&mut frame, &layout);
+        }
+
+        // Over the picker too: the list is the one thing on screen a reader
+        // asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
         }
 
         frame
@@ -1768,6 +1809,21 @@ pub fn handle_event(state: &mut WorldClockApp, event: &Event) -> EventResult {
 }
 
 fn handle_key(state: &mut WorldClockApp, key: &KeyEvent) -> EventResult {
+    // Above the picker, so the card can be raised and dismissed from either
+    // screen, and `Escape` closes the card before the picker acts on it.
+    if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+        state.show_help = !state.show_help;
+        return EventResult::Consumed;
+    }
+    if state.show_help {
+        // The card is modal: it takes every key, and a few dismiss it. Letting
+        // the rest through would mean changing a clock you cannot see.
+        if matches!(key.key, Key::Escape | Key::Enter | Key::Space) {
+            state.show_help = false;
+        }
+        return EventResult::Consumed;
+    }
+
     if state.show_picker {
         return handle_picker_key(state, key);
     }
@@ -2017,6 +2073,85 @@ mod tests {
     /// Send a key the way the window does.
     fn press(app: &mut WorldClockApp, k: Key) -> EventResult {
         probe::key(app, &probe::press(k))
+    }
+
+    /// States chosen so that between them every advertised key has work.
+    ///
+    /// `Left` is refused on the first clock and `Right` on the last, both
+    /// correctly, so one of these has the selection in the middle.
+    fn help_states() -> Vec<WorldClockApp> {
+        let mut middle = sample_app();
+        middle.selected_clock = 2;
+        vec![sample_app(), middle]
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// This app named none of its eleven keys before the list existed, and the
+    /// survey reported only two of them as unnamed -- it matched a key name as
+    /// a substring, so the button label "Add City" counted as naming `A`,
+    /// "Grid" as naming `G` and "Pin" as naming `P`.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|app| probe::key(app, &stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = sample_app();
+        assert!(
+            text_containing(&app.frame(1000.0, 700.0), "F1 or ? closes this").is_none(),
+            "the list is up before anybody asked for it"
+        );
+
+        assert_eq!(
+            press(&mut app, Key::F1),
+            EventResult::Consumed,
+            "F1 did not read as a redraw, so the list would be invisible"
+        );
+        let frame = app.frame(1000.0, 700.0);
+        for (keys, what) in SHORTCUTS {
+            assert!(
+                text_containing(&frame, keys).is_some(),
+                "{keys:?} never reached the window"
+            );
+            assert!(
+                text_containing(&frame, what).is_some(),
+                "{what:?} never reached the window"
+            );
+        }
+
+        press(&mut app, Key::Escape);
+        assert!(
+            text_containing(&app.frame(1000.0, 700.0), "F1 or ? closes this").is_none(),
+            "Escape did not close it"
+        );
+    }
+
+    /// **The card is modal, and a key behind it does not act.**
+    ///
+    /// Raising the list and pressing `T` must not quietly switch the clocks to
+    /// 12-hour behind it -- a reader consulting the keys should not be
+    /// changing settings while they read.
+    #[test]
+    fn a_key_pressed_behind_the_card_does_not_act() {
+        let mut app = sample_app();
+        let before = app.use_24h;
+        press(&mut app, Key::F1);
+        press(&mut app, Key::T);
+        assert_eq!(app.use_24h, before, "T acted through the shortcut card");
     }
 
     #[test]

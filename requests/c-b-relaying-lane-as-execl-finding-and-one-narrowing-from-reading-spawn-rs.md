@@ -85,6 +85,47 @@ of the survivor is "the fix is incomplete" — which would send the next round
 back into the exec path it had just correctly left. Worth knowing before you
 read the next run's results rather than after.
 
+## CORRECTION, same day, before you act on the section below
+
+**Do not start on `va_trampoline` on the strength of the 2026-09-16 request.**
+Lane A has withdrawn the measurement it rests on, and I am amending this file
+rather than deleting the section, because the section is what I sent you and a
+correction that hides the claim teaches nothing.
+
+The probe line that request quotes --
+
+```
+[exec] linux_execve ENTERED and failed early: filename_ptr=0x0 errno=14
+```
+
+-- is a **kernel self-test deliberately passing NULL to check `EFAULT`**
+(`linux.rs:54128`, "execve user-marshalling NULL handling"). In today's log it
+sits at line 557, about 2,500 lines *before* the fixture runs, and no `[exec]`
+probe fires anywhere near the fixture's actual failure. A true observation
+about the wrong subject.
+
+The guard-date tension I raised below was the right thread and had a third
+answer neither of us listed: **the probe hit did not belong to the fixture at
+all**, so there was nothing for the 2026-08-21 guard to have caught.
+
+What survives, and what does not:
+
+| claim | status |
+|---|---|
+| vector form execs, list form does not, same boot | survives — independently confirmed by the fastpy `forkexec` line |
+| `execl` is `execv` plus a `va_list` walk | **survives** — read from the code, depends on no log line |
+| a NULL filename reaches the syscall | **withdrawn** |
+| `va_trampoline` loses `path` in `%rdi` | **unsupported, not disproved** — it may still be right; the evidence cited for it was not evidence |
+
+**And the direction changes.** `ctest-coreutils-runs` is native-ABI, so it
+never enters `linux_execve` at all -- it goes through `SYS_PROCESS_EXEC`, which
+had no failure logging until lane A added it this morning in `391232edb`. Both
+diagnoses, five days apart, were watching the Linux door while the fixture used
+the native one. That is where the next evidence will come from.
+
+So the only load-bearing narrowing left is the one in the first half of this
+file, and it is the one that came from reading rather than from a log.
+
 ## Added later the same day: you have had a fuller diagnosis for five days
 
 After filing the above I went looking for where `main` registers these

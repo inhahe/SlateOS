@@ -718,9 +718,18 @@ impl Layout {
 
 /// The keyboard reminder, in the order the footer draws it. The second line is
 /// the one dropped first when the footer has room for only one.
+///
+/// **Every entry reads `keys: what it does`, separated by runs of two or more
+/// spaces, and that shape is load-bearing.**
+/// `the_footer_names_every_key_it_answers` parses these lines back into
+/// keystrokes with `guitk::shortcut::keystrokes` and presses each one, so the
+/// reminder is checked against the handler rather than trusted. `P` was
+/// missing from it until 2026-09-21 -- the key had always worked and there is
+/// a `Prev` button for it, so it was reachable by mouse and invisible to the
+/// keyboard.
 const FOOTER_LINES: [&str; 2] = [
     "Enter: select   Arrows: move   Z: undo",
-    "N/Tab: next   R: restart   1-7: puzzle",
+    "N/Tab: next   P: prev   R: restart   1-7: puzzle",
 ];
 
 /// The buttons, in the order `Layout::button_rects` lays them out.
@@ -1782,6 +1791,60 @@ mod tests {
 
     /// The size the probe helpers draw at.
     const SIZE: (f32, f32) = Klotski::SIZE;
+
+    /// **Every key the footer names is one this game answers.**
+    ///
+    /// The footer and the handler are two copies of one fact and they drift.
+    /// This one had: `P` steps back a puzzle, has done from the start, and the
+    /// footer never said so -- there is a `Prev` button, so the feature was
+    /// reachable with a mouse and invisible to the keyboard.
+    ///
+    /// The list is read back out of `FOOTER_LINES` itself rather than written
+    /// again here. A table of expected keys beside this test would be a third
+    /// copy, free to drift from both of the other two, which is the mistake
+    /// `apps/rssreader` made -- its overlay and its checker agreed with each
+    /// other and neither agreed with the program.
+    #[test]
+    fn the_footer_names_every_key_it_answers() {
+        let mut checked = 0usize;
+        for line in FOOTER_LINES {
+            for entry in line.split("  ") {
+                let entry = entry.trim();
+                if entry.is_empty() {
+                    continue;
+                }
+                let Some((keys, what)) = entry.split_once(": ") else {
+                    panic!("footer entry {entry:?} is not `keys: what it does`");
+                };
+                for stroke in guitk::shortcut::keystrokes(keys).unwrap_or_else(|e| panic!("{e}")) {
+                    let answered = help_states()
+                        .iter_mut()
+                        .any(|g| probe::key(g, &stroke) == EventResult::Consumed);
+                    assert!(
+                        answered,
+                        "the footer says {keys:?} {what:?}, and nothing answers {:?}",
+                        stroke.key
+                    );
+                    checked = checked.saturating_add(1);
+                }
+            }
+        }
+        // Without this the test would pass on a footer that parsed to nothing,
+        // which is exactly how a guard goes quiet without going red.
+        assert!(checked >= 12, "only {checked} keystrokes were checked");
+    }
+
+    /// Boards chosen so that between them every key the footer names has work.
+    ///
+    /// `Z` needs a move to take back, and `Enter` needs a piece under the
+    /// cursor to pick up or put down. Both correctly do nothing otherwise.
+    fn help_states() -> Vec<Klotski> {
+        let mut moved = Klotski::new();
+        for key in [Key::Enter, Key::Down, Key::Enter] {
+            probe::key(&mut moved, &probe::press(key));
+        }
+        vec![Klotski::new(), moved]
+    }
 
     fn game() -> Klotski {
         Klotski::new()

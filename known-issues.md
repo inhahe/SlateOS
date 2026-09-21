@@ -160610,7 +160610,7 @@ programs as broken. The entry they live in
 (`TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE`) says so; this one
 says why the failure is systematic rather than a matter of care.
 
-## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18)
+## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18) -- **CLOSED 2026-09-21**
 
 **In short:** 60 boolean fields across 25 apps are read by the program and
 never written by it. The renderer draws from them, the behaviour depends on
@@ -160885,6 +160885,30 @@ Four apps out of it so far:
 | `passwordgen` | every passphrase capitalised and ending in a digit, for everyone, always | `Shift+C`/`Shift+D`/`Shift+S`, plus `M`; panel and handler are one list |
 | `diskimager` | "verify after write" and "compress" drawn as checkboxes with no writer | `V` and `C` |
 | `torrent`, `email`, `regextester` | see their own entries above | fixed earlier the same day |
+
+**Closed 2026-09-21 at nought open.** The survey reports
+`0 field(s) in 0 app(s)`, out of 888 scanned, with 52 rows recorded in
+`scripts/frozen-flag-answered.txt` as looked-at-and-not-defects and the rest
+fixed. The apps that got a key or a control out of this, in order:
+`regextester`, `torrent`, `email`, `diskimager`, `videoplayer`,
+`passwordgen`, `filesearch`, `credmanager`, `screenrecorder`,
+`archivemanager`, `systemrestore`, `hexeditor`, `filediff`, `qrcode`,
+`ircclient`, `connect4`, `remotedesktop`, `photomanager`, `spreadsheet`,
+`explorer`, `imageviewer`, `diagram`, `netscan`, `rssreader`.
+
+**A zero is the easiest number to get wrong**, because a survey that has
+stopped working reports it too. This one was checked by putting a defect
+back: commenting out the writer `H` gained in `apps/diskimager` returns
+`1 field(s) in 1 app(s)  diskimager  hash_algorithm`, and restoring it
+returns nought. The count is of a live instrument.
+
+**What the answers file is for, and what it is not.** 52 rows say "looked
+at, not a defect" with a reason that has to state *what makes it so* --
+a measurement computed once, a setting whose feature says on screen that it
+does not exist, a decision with the operator. A line naming a field the
+survey no longer reports fails the run, so an answer cannot quietly outlive
+the code it was about. That check fired once already, on six `mediaconvert`
+rows that were answering a question the tool had got wrong.
 
 **The lesson is the one this file keeps recording, for the third time in a
 day: a checker whose population is defined by a name it expects will one day

@@ -160487,7 +160487,7 @@ about a program that was working correctly, or nearly hid a real one. This
 entry lists them with the instance that caught each, because the fix is not
 "be careful" -- it is knowing the specific shapes.
 
-**It started at seven and is at nineteen**, and the slug
+**It started at seven and is at twenty**, and the slug
 keeps the original number because renaming it would break every reference to
 it. 18 and 19 are the two that are not failure shapes at all -- 18 is the
 question that ends a run of them and 19 is about the cost of a grouping you
@@ -160758,6 +160758,47 @@ an unguarded key list" (it was one -- the scan keyed on a *test name*, and
 reader somewhere wrong. Both were retracted in the file they were committed to
 rather than quietly corrected, because an entry that silently becomes right
 teaches nobody why it was wrong.
+
+**20. The measurement was true, reproducible, and about something else**
+(lane A, 2026-09-21). A five-day-old diagnosis, filed under a filename that
+stated its conclusion, rested on one serial line:
+
+```
+[exec] linux_execve ENTERED and failed early: filename_ptr=0x0 errno=14
+```
+
+The line is real and fires on every boot. It is a **kernel self-test
+deliberately passing NULL to check `EFAULT`** -- `linux.rs:54128`, "execve
+user-marshalling NULL handling" -- sitting about 2,500 lines *before* the
+fixture it was read as describing ever runs. No probe fires anywhere near the
+fixture's actual failure. The diagnosis was a correct observation attached to
+the wrong subject, and it stood as the explanation of a failing test for five
+days.
+
+**Nothing about the observation itself says which subject it belongs to.** It
+is true, it reproduces, it names the right syscall and the right errno, and it
+is adjacent in the log to the thing being investigated only in the sense that
+both are in the same 2.7 MB file. Every property a measurement can have in its
+own right, this one had.
+
+This lane raised the thread that unpicked it, and got the answer wrong in an
+instructive way: asked how a NULL could reach the syscall when the guard that
+rejects NULLs predates the observation by three weeks, it offered three
+resolutions -- the NULL arises lower down, the guard is bypassed, the probe
+read the wrong register. **All three assumed the hit belonged to the fixture.**
+"True, and about something else" was not on the list.
+
+The relation to 19 is worth naming, because the two are the same failure at
+different scales. A wrong *grouping* launders a second bug into evidence
+against a correct fix. A wrong *attribution* launders a self-test into evidence
+about production code. In both the damage is not that the evidence is weak --
+it is that the evidence is **strong**, and pointed at the wrong thing.
+
+**The practical rule:** before a log line becomes a diagnosis, establish that
+it belongs to the run of the thing you are diagnosing -- by line number against
+the subject's own first line, by pid, by anything. And for the inverse, which
+is the same rule from the other end: a probe's *silence* is evidence only once
+something you know fails has passed through that probe and been seen.
 
 ## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18) -- **CLOSED 2026-09-21**
 

@@ -88,6 +88,7 @@ impl Error for UnknownKey {}
 /// | `Ctrl+/` | one stroke — a `/` straight after `+` is a key, not a separator |
 /// | `Ctrl+F / /` | two strokes — the second `/` is the key, not an empty part |
 /// | `0-9, A-F` | sixteen strokes — a range, and `,` separates like `/` does |
+/// | `Ctrl+1-3` | three strokes — a range with a modifier held over all of it |
 ///
 /// Modifier names are matched without case, as are key names of more than one
 /// character; a single-character name is a key cap (`A` and `a` are the same
@@ -135,7 +136,7 @@ pub fn keystrokes(label: &str) -> Result<Vec<KeyEvent>, UnknownKey> {
         // one. Apps reach for this constantly -- a hex editor's digits, a
         // game's eight levels -- and spelling it out as `0 / 1 / 2 / ...`
         // to satisfy a parser would be the list bending to the checker.
-        if let Some(run) = span(chord) {
+        if let Some(run) = modified_span(chord) {
             strokes.extend(run);
             continue;
         }
@@ -225,7 +226,17 @@ fn split_alternatives(label: &str) -> Vec<&str> {
 }
 
 /// One `Ctrl+Shift+X` chord.
-fn chord_to_stroke(chord: &str) -> Option<KeyEvent> {
+/// Peel the modifier names off the front of a chord, returning them and the
+/// key name that is left.
+///
+/// `None` if a `+`-separated head is not a modifier: `Foo+A` names no key at
+/// all rather than quietly naming `A`.
+///
+/// One copy, shared by [`chord_to_stroke`] and [`modified_span`]. It was
+/// inlined in the first of those, and a second copy in the second is exactly
+/// the shape this module keeps finding in the apps it serves -- two lists of
+/// modifier spellings, and one of them learning `option` a year late.
+fn split_modifiers(chord: &str) -> Option<(Modifiers, &str)> {
     let mut modifiers = Modifiers::NONE;
     let mut rest = chord;
     while let Some((head, tail)) = rest.split_once('+') {
@@ -242,6 +253,32 @@ fn chord_to_stroke(chord: &str) -> Option<KeyEvent> {
         }
         rest = tail;
     }
+    Some((modifiers, rest))
+}
+
+/// A run of keys with a modifier held across all of it, like `Ctrl+1-3`.
+///
+/// Apps write a run of chords this way for the same reason they write a run of
+/// plain keys as `1-9`: it is how a person writes it. `apps/minesweeper` picks
+/// its difficulty with `Ctrl+1` through `Ctrl+3`. Without this the printed row
+/// has to read `Ctrl+1 / Ctrl+2 / Ctrl+3` -- the list bending to fit the
+/// parser, which is the trade this module exists to refuse.
+///
+/// Subsumes the unmodified case: `1-9` peels no modifiers and spans as before.
+fn modified_span(chord: &str) -> Option<Vec<KeyEvent>> {
+    let (held, rest) = split_modifiers(chord)?;
+    let mut out = span(rest)?;
+    for ev in &mut out {
+        ev.modifiers.ctrl |= held.ctrl;
+        ev.modifiers.shift |= held.shift;
+        ev.modifiers.alt |= held.alt;
+        ev.modifiers.super_key |= held.super_key;
+    }
+    Some(out)
+}
+
+fn chord_to_stroke(chord: &str) -> Option<KeyEvent> {
+    let (mut modifiers, rest) = split_modifiers(chord)?;
     let (key, shifted) = key_from_name(rest.trim())?;
     if shifted {
         modifiers.shift = true;
@@ -891,6 +928,35 @@ mod tests {
             vec![Key::Left, Key::Right, Key::Up, Key::Down]
         );
         assert_eq!(keys("arrows").len(), 4);
+    }
+
+    #[test]
+    fn a_range_can_carry_a_modifier() {
+        let got = keystrokes("Ctrl+1-3").expect("parses");
+        assert_eq!(got.len(), 3);
+        assert_eq!(
+            got.iter().map(|e| e.key).collect::<Vec<_>>(),
+            vec![Key::Num1, Key::Num2, Key::Num3]
+        );
+        assert!(
+            got.iter().all(|e| e.modifiers.ctrl),
+            "the Ctrl was dropped on the way through the range"
+        );
+
+        // The unmodified case still works, and picks up no modifier.
+        let plain = keystrokes("1-3").expect("parses");
+        assert_eq!(plain.len(), 3);
+        assert!(plain.iter().all(|e| !e.modifiers.ctrl));
+
+        // Control: a bare `-` is the minus key, not an empty range, even with
+        // a modifier in front of it.
+        let minus = keystrokes("Ctrl+-").expect("parses");
+        assert_eq!(minus.len(), 1);
+        assert_eq!(minus[0].key, Key::Minus);
+        assert!(minus[0].modifiers.ctrl);
+
+        // Control: a head that is not a modifier name is not a key.
+        assert!(keystrokes("Foo+1-3").is_err());
     }
 
     #[test]

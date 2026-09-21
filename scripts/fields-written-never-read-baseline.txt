@@ -429,11 +429,11 @@ net80211/src/supplicant.rs:mic_algo
 # control removed, which is a decision per app and not a sweep. This file's own
 # header says it: a triage queue, not an amnesty.
 #
-# `apps/editor`'s is the worst of them. `Ctrl+E` turns on "use regular
-# expressions" in the find bar, no search code consults the flag, and the find
-# bar draws no indicator either -- so the setting and its failure are both
-# invisible.
+# `apps/editor`'s was the worst of them and is FIXED: `Ctrl+E` turned on "use
+# regular expressions", no search code consulted the flag, and the find bar drew
+# no indicator, so the key did nothing and said nothing. The flag and the key
+# are deleted; regex searching stays wanted and needs `apps/regextester`'s
+# engine extracted first. Line removed from the list below.
 apps/camera/src/main.rs:fullscreen_preview
-apps/editor/src/main.rs:use_regex
 apps/logviewer/src/main.rs:wrap_lines
 apps/videoplayer/src/main.rs:chapter_list_visible

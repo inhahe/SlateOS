@@ -1377,7 +1377,13 @@ pub struct FindState {
     pub query: String,
     pub replace_text: String,
     pub case_sensitive: bool,
-    pub use_regex: bool,
+    // `use_regex` was here and is deleted. `Ctrl+E` toggled it, no search
+    // code ever read it, and the find bar drew no indicator -- so the key did
+    // nothing and said nothing, which is worse than not having it. Regex
+    // searching is still wanted: `apps/regextester` holds a working
+    // `RegexCompiler`, and wiring it here means first extracting that engine
+    // out of an app binary into something two apps can depend on. Tracked in
+    // `known-issues.md` -> `TD-C-FIVE-TOGGLES-THAT-READ-ONLY-THEMSELVES`.
     pub matches: Vec<(usize, usize, usize)>, // (line, start_col, end_col)
     pub current_match: usize,
 }
@@ -1394,7 +1400,6 @@ impl FindState {
             query: String::new(),
             replace_text: String::new(),
             case_sensitive: false,
-            use_regex: false,
             matches: Vec::new(),
             current_match: 0,
         }

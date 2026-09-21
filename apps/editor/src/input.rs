@@ -395,11 +395,6 @@ impl EditorState {
                     self.refresh_matches();
                     Some(Response::Redraw)
                 }
-                Key::E => {
-                    self.find.use_regex = !self.find.use_regex;
-                    self.refresh_matches();
-                    Some(Response::Redraw)
-                }
                 _ => None,
             };
         }

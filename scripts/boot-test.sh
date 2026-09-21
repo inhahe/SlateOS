@@ -7928,7 +7928,100 @@ check_cfg_unix() {
     exit 1
 }
 
+# Every intra-doc link in the kernel, which is the only crate nothing checks.
+#
+# `scripts/check-doc-links.py` gates one class -- a link naming something that
+# exists nowhere -- and its docstring says plainly why that is enough: "The
+# other three do not need one: rustdoc reports them the moment anyone runs
+# `cargo doc`."  That is a correct argument resting on a false premise.  Every
+# mention of `cargo doc` in this repository is inside that docstring; nothing
+# has ever run it.  The first run, on 2026-09-21, found 430 warnings.
+#
+# And that checker cannot cover this tree even when invited: `--roots kernel`
+# refuses a verdict because the kernel is one crate and its floor is five
+# (asked of lane B in requests/a-b-your-doc-link-gate-refuses-a-verdict-on-a-
+# single-crate-root.md).  So this gate is not a second copy of that one -- it
+# is the only thing covering 6,000 links.
+#
+# Two ceilings rather than one number, because the two classes differ in kind:
+#
+#   unclosed HTML tags   ceiling 0, and it means zero.  Markdown reads
+#                        `Vec<u8>` in prose as a tag and can SWALLOW the text
+#                        after it, so this class removes documentation rather
+#                        than merely failing to link it.  There were 64; there
+#                        are none; a new one is a hard failure.
+#
+#   unresolved links     a ratchet, not a zero.  Most of the remainder is
+#                        prose that merely looks like link syntax (`argv[0]`,
+#                        `buf[i]`), which rustdoc cannot tell from a real link
+#                        and neither can this gate.  Denying all of them would
+#                        be a gate that cries wolf, and a bypassed gate is not
+#                        a gate -- check-doc-links.py's own words, and the
+#                        reason it refuses to resolve paths at all.
+#
+# Both counts are printed on every run, pass or fail.  A gate whose silence
+# and whose success look identical is the failure mode the push hook's own
+# tally comment describes, and this one costs a line to avoid.
+#
+# COST: 94s and 146s measured cold on this box, minutes apart -- a range,
+# not a number, and 1-2s when the doc cache is warm. ~2-3% of a gate phase that is 86%
+# of a passing run.  It sits in the gate phase, before Step 1, so a doc
+# regression is reported 94 seconds in rather than after a two-hour boot.
+check_kernel_docs() {
+    # Raise this ONLY by lowering it. It is a ratchet, and the number is the
+    # count on the commit that introduced the gate, not a target.
+    local ceiling=296
+    local log start rc unresolved tags secs
+
+    echo "=== Checking the kernel's intra-doc links (nothing else runs rustdoc) ==="
+    log="$PROJECT_ROOT/build/check-kernel-docs.log"
+    start="$(date +%s)"
+    # Same `&& rc=0 || rc=$?` reasoning as check_cfg_unix: this file runs under
+    # `set -e`, so a plain command whose status we want to read needs it.
+    RUSTDOCFLAGS="-W rustdoc::broken_intra_doc_links" \
+        cargo doc -p kernel --no-deps >"$log" 2>&1 && rc=0 || rc=$?
+    secs=$(( $(date +%s) - start ))
+
+    if [ "$rc" -ne 0 ]; then
+        echo "=== kernel doc build FAILED (rc=$rc, ${secs}s) ===" >&2
+        tail -40 "$log" >&2
+        return 1
+    fi
+
+    # `grep -c` exits 1 on no matches, which `set -e` would take as fatal, so
+    # the `|| true` is load-bearing and not defensive noise. It still prints 0.
+    unresolved=$(grep -cE '^warning: unresolved link to' "$log" || true)
+    tags=$(grep -cE '^warning: unclosed HTML tag' "$log" || true)
+
+    # Said out loud every run. See the block comment above.
+    echo "    unresolved intra-doc links: ${unresolved} (ceiling ${ceiling})"
+    echo "    unclosed HTML tags:         ${tags} (ceiling 0)"
+    echo "    rustdoc took ${secs}s; full output in build/check-kernel-docs.log"
+
+    if [ "$tags" -gt 0 ]; then
+        echo "=== FAIL: $tags unclosed HTML tag(s) in kernel doc comments ===" >&2
+        echo "    Markdown reads <name> as a tag and can swallow the text after" >&2
+        echo "    it, so this DELETES documentation. Wrap the token in backticks:" >&2
+        echo "    Offenders:" >&2
+        grep -A2 'unclosed HTML tag' "$log" | grep -E '^ *--> ' | head -20 >&2
+        return 1
+    fi
+
+    if [ "$unresolved" -gt "$ceiling" ]; then
+        echo "=== FAIL: unresolved intra-doc links rose to $unresolved (was $ceiling) ===" >&2
+        echo "    A link that does not resolve renders as literal bracketed text." >&2
+        echo "    Qualify it (crate::error::KernelError::X), or if the brackets" >&2
+        echo "    are prose rather than a link, make them a code span." >&2
+        grep -B1 -A3 'unresolved link to' "$log" | tail -40 >&2
+        return 1
+    fi
+
+    if [ "$unresolved" -lt "$ceiling" ]; then
+        echo "    (ratchet: lower the ceiling in check_kernel_docs to ${unresolved})"
+    fi
+}
 check_cfg_unix
+check_kernel_docs
 
 # --- The gate phase ends here ------------------------------------------------
 #

@@ -164604,6 +164604,49 @@ the harness comment beside them says: if `/bin/true` cannot exec, the pty
 and CPython rungs below are exercising the same broken path from further
 away. Fixing the exec should clear all three.
 
+#### `ctest-pty`: exit 45 is masking exit 47, and the cause is equal spin budgets
+
+No probe needed -- it is arithmetic. `SPIN` is 2,000,000 and **both sides
+use it**:
+
+```c
+child:   for (long i = 0; i < SPIN; i++) { if (got_sigint) _exit(77); sched_yield(); }
+         _exit(78);                      /* handler never ran */
+parent:  for (long i = 0; i < SPIN && w <= 0; i++) { waitpid(WNOHANG); sched_yield(); }
+         if (w != kid) return 45;
+```
+
+If the `SIGINT` never arrives, the child must burn all 2,000,000
+iterations before it can report 78. The parent is yielding in lockstep, so
+it burns its own 2,000,000 over the same wall-clock and gives up at
+essentially the same instant. **The parent cannot outlast the child by
+construction**, so the child's verdict is unreachable whenever the signal
+does not arrive.
+
+That is why the scheduler's anti-starvation boost appears: it is not the
+cause, it is the scheduler doing its job on a pair of tasks that are
+yielding at each other two million times.
+
+**So 45 is standing in for 47, and 47 is the one that matters.** The
+fixture's own table calls it *"THE INTERESTING ONE -- the line discipline
+did not turn 0x03 into a SIGINT that crossed into the child"*, and it is
+kernel-owned. Every run so far has reported the race instead of the
+verdict.
+
+**There is an irony worth recording**, because it is the same defect one
+turn of the screw along. That exit table was rewritten precisely to stop
+47 meaning four things at once -- the comment says so: *"47 meant 'the ^C
+did not become a SIGINT' and also 'isatty said no' and also 'signal()
+refused' ... and no run could tell which"*. The ambiguity was fixed and
+the reachability was not, so the disambiguated code cannot be reached.
+**A code that cannot fire is as uninformative as one that means four
+things.**
+
+**The ask is one constant**, and it is lane B's file: give the parent a
+larger budget than the child (`SPIN * 2`, or make the child's loop shorter).
+Then a missing SIGINT reports 47 and lands in lane A's court with a real
+diagnosis instead of a race.
+
 #### `ctest-pty`: the yield chain is correct end to end, so the starvation is elsewhere
 
 Walked it rather than assuming, because "yield does not really yield" is

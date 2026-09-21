@@ -2548,6 +2548,24 @@ impl EditorState {
         );
 
         // Match count
+        // The case-sensitivity state and the key that changes it. Both were
+        // missing: `Ctrl+I` toggled `case_sensitive`, the panel drew no
+        // indicator, and the only way to tell which mode you were in was that
+        // the match count moved. A toggle whose state is invisible is a
+        // setting the user cannot check.
+        let case_info = if self.find.case_sensitive {
+            "Aa on  (Ctrl+I)"
+        } else {
+            "Aa off (Ctrl+I)"
+        };
+        tree.text(
+            panel_x + 200.0,
+            panel_y + 64.0,
+            case_info,
+            self.palette.subtext0,
+            11.0,
+        );
+
         let match_info = format!("{} match(es)", self.find.matches.len());
         tree.text(
             panel_x + 8.0,
@@ -5411,6 +5429,59 @@ mod external_merge_tests {
                 .as_ref()
                 .is_some_and(|p| p.review.is_some()),
             "V did not open the merge review"
+        );
+    }
+
+    /// **The find panel shows whether case matters, and names the key.**
+    ///
+    /// `Ctrl+I` toggled `case_sensitive` and the panel drew no indicator, so
+    /// the only way to tell which mode you were in was that the match count
+    /// moved. A toggle whose state is invisible is a setting the user cannot
+    /// check. The key is pressed here as well as looked for, so the label
+    /// cannot name a key that does nothing.
+    #[test]
+    fn the_find_panel_shows_case_sensitivity_and_names_its_key() {
+        let drawn = |editor: &EditorState| {
+            editor
+                .render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+
+        let (_scratch, path) = temp_path("casekey");
+        std::fs::write(
+            &path,
+            b"hello Hello
+",
+        )
+        .expect("write");
+        let mut editor = EditorState::new();
+        editor.open_file(&path).expect("open");
+        editor.find_visible = true;
+        assert!(
+            drawn(&editor).contains("Aa off (Ctrl+I)"),
+            "the panel never says case is off"
+        );
+
+        editor.handle_event(&Event::Key(guitk::event::KeyEvent {
+            key: guitk::event::Key::I,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
+        }));
+        assert!(
+            editor.find.case_sensitive,
+            "Ctrl+I did not turn case sensitivity on"
+        );
+        assert!(
+            drawn(&editor).contains("Aa on  (Ctrl+I)"),
+            "the panel never says case is on"
         );
     }
 

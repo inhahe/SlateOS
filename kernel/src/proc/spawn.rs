@@ -1082,6 +1082,26 @@ pub(crate) struct UserEntryInfo {
 ///
 /// - [`KernelError::InvalidExecutable`] if the ELF binary is invalid.
 /// - [`KernelError::OutOfMemory`] if any allocation fails.
+/// # Size ceiling
+///
+/// **`elf_data` must be one contiguous slice, so no executable larger than
+/// 16 MiB can be started.** The slice normally comes from
+/// [`crate::fs::Vfs::read_file`], whose `Vec` goes to the kernel heap;
+/// `heap.rs`'s `large_order` rounds the frame count up to a power of two,
+/// and `frame.rs`'s `alloc_inner` refuses any order above
+/// [`crate::mm::frame::BUDDY_MAX_ORDER`] (10) *before* it examines a free
+/// list. 2^10 frames x 16 KiB = 16 MiB.
+///
+/// The refusal is therefore deterministic and unrelated to free memory: the
+/// boot that found it had 2.7 GB free. Because the sizes double, an
+/// executable of 8 MiB + 1 byte already demands the whole maximum block.
+///
+/// The number itself was always documented, on `BUDDY_MAX_ORDER`. What was
+/// missing was this sentence -- nothing connected the allocator's largest
+/// block to the largest program that can run, and the two sit in different
+/// files with no reference between them. `cmake-slateos.elf` at 22,526,200
+/// bytes is the first port to cross it; see `open-questions.md` A-Q19 for
+/// whether to lift it.
 pub fn spawn_process(elf_data: &[u8], options: &SpawnOptions<'_>) -> KernelResult<SpawnResult> {
     spawn_process_inner(elf_data, options, None, &[], CapInherit::All)
 }

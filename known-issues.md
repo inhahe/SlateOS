@@ -163416,7 +163416,22 @@ the first thing to cross it. The other four spikes are 1.8-10.5 MB and fit.
 | stop requiring contiguity in `spawn_process` | the honest fix. The ELF is parsed and its segments copied into the new address space; it does not need to be one slice to do that. Touches the loader, which every process start goes through |
 | document it as a supported limit | free, and what this entry does for now |
 
-Not attempting the first two on the strength of one blocked self-test. The
-limit is now written down, which is what was actually missing -- it was
-unrecorded before today and the only reason I met it is that I happened to
-port something large enough.
+Not attempting the first two on the strength of one blocked self-test.
+
+*(Corrected within the hour: this said the limit "was unrecorded before
+today". It was not. `frame.rs` exports `BUDDY_MAX_ORDER` and its doc reads
+"Order N = 2^N frames. Order 10 = 1024 frames = 16 MiB" -- the number has
+been there, correct, in the allocator's public diagnostics section. What was
+missing is the CONSEQUENCE: nothing connected "the largest single allocation
+is 16 MiB" to "therefore no executable above 16 MiB can start", and the two
+facts sit in different files with no reference between them. A reader of
+`spawn_process` has no reason to visit the allocator's diagnostics
+constants, and a reader of that constant is thinking about fragmentation
+histograms, not the ELF loader.
+
+That is a different defect from an undocumented limit and a more
+interesting one: **the fact was present and its implication was not
+derivable from where it sat.** Fixed by connecting them -- `spawn_process`
+now carries a `# Size ceiling` section naming the limit and citing
+`BUDDY_MAX_ORDER`, so the implication is visible at the place it is met
+rather than in the file that happens to own the number.)*

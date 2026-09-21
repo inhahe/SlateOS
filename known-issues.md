@@ -161709,6 +161709,58 @@ The 33-row list is now a `SHORTCUTS` const drawn by `render_card` behind `F1`.
 has somewhere to go, which is the `apps/spreadsheet` case design-decisions 863
 carved out.
 
+## `TD-C-FIVE-TOGGLES-THAT-READ-ONLY-THEMSELVES` (lane C, 2026-09-21) -- **OPEN**
+
+**In short:** five programs have a switch you can flip that nothing anywhere
+looks at. `apps/editor`'s `Ctrl+E` is the clearest: it turns "use regular
+expressions" on and off in the find bar, and the flag it sets has exactly three
+mentions in the whole crate -- where it is declared, where it is initialised to
+`false`, and where `Ctrl+E` inverts it. No search code consults it. Pressing the
+key does nothing at all, and nothing on screen changes either, so there is not
+even a wrong answer to notice.
+
+**The five**, each the only live mention of the field being its own toggle:
+
+| app | field | the control |
+|---|---|---|
+| `apps/editor` | `use_regex` | `Ctrl+E` in the find bar |
+| `apps/camera` | `fullscreen_preview` | |
+| `apps/logviewer` | `wrap_lines` | |
+| `apps/settings` | `checking_for_updates` | |
+| `apps/videoplayer` | `chapter_list_visible` | |
+
+**Why the existing gate does not catch them, which is the part worth keeping.**
+`scripts/check-fields-written-never-read.py` exists for exactly this defect and
+reports `ok: no new write-only fields`. It is right by its own rule: a field
+written as
+
+```rust
+self.find.use_regex = !self.find.use_regex;
+```
+
+**is read** -- by the expression that writes it. A boolean toggled against
+itself reads itself once, and that single read is enough to look used. The
+detector's own docstring records it learning to match any receiver so it could
+see a test read; this is the same lesson one turn further on, where the read it
+can see is one that means nothing.
+
+**The fix to the checker** is to discount a read that appears on the
+right-hand side of an assignment to the same path -- `x.f = !x.f` should count
+as a write and not as a read. That is a small change and it is what turns these
+five from a thing I noticed into a thing the tree reports.
+
+**How they were found**, because the route matters: not by the gate and not by
+reading the apps, but by the key-list programme. `apps/editor` showed five keys
+the survey said were never named; tracing `Ctrl+E` to say what it *did* is what
+turned up a flag with no reader. The key survey keeps surfacing defects that
+are not about keys, because "what does this key do" is a question nobody had
+been asking of these apps.
+
+**If this is never done,** five settings keep lying: a user turns regex
+searching on and gets literal matching, with the switch apparently accepted.
+`apps/editor`'s is the worst of the five because the find bar also draws no
+indicator, so both the setting and its failure are invisible.
+
 ## `TD-C-NINETY-ONE-APPS-BIND-KEYS-AND-NAME-THEM-NOWHERE` (lane C, 2026-09-21) -- **OPEN, AND THE NUMBER IN THE TITLE IS WRONG**
 
 > **Read this first (added 2026-09-21; this note has itself been wrong once).**

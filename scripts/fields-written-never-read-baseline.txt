@@ -414,3 +414,26 @@ net/httpclient/src/lib.rs:expires
 # struct is harder to check against the spec than one present and unused.
 net80211/src/supplicant.rs:key_data_len
 net80211/src/supplicant.rs:mic_algo
+
+# --- found 2026-09-21 by teaching the checker about self-toggles -----------
+#
+# These four were invisible until `SELF_TOGGLE` was added. A boolean flipped
+# against itself -- `self.find.use_regex = !self.find.use_regex;` -- READS the
+# field on the right-hand side, and that single read was enough to look used.
+# The checker now counts such a line as a write only.
+#
+# All four are the same user-facing defect and are tracked together in
+# `known-issues.md` -> `TD-C-FIVE-TOGGLES-THAT-READ-ONLY-THEMSELVES`: a control
+# the user can operate that nothing anywhere consults. They are listed here
+# rather than fixed on the spot because each needs its feature built or its
+# control removed, which is a decision per app and not a sweep. This file's own
+# header says it: a triage queue, not an amnesty.
+#
+# `apps/editor`'s is the worst of them. `Ctrl+E` turns on "use regular
+# expressions" in the find bar, no search code consults the flag, and the find
+# bar draws no indicator either -- so the setting and its failure are both
+# invisible.
+apps/camera/src/main.rs:fullscreen_preview
+apps/editor/src/main.rs:use_regex
+apps/logviewer/src/main.rs:wrap_lines
+apps/videoplayer/src/main.rs:chapter_list_visible

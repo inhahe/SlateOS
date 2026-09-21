@@ -26,11 +26,13 @@
 //! and `unused_imports` among them, which is what let a program whose `main`
 //! discarded its own app compile without a word of complaint.
 
+use appearance::AppearanceSettings;
 use guitk::color::Color;
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
@@ -682,6 +684,23 @@ enum GamePhase {
 }
 
 /// The game: the word, the guesses made against it, and the running totals.
+/// The keys this game answers, raised by `F1` or `?`.
+///
+/// Two rows name the state they need, because two of these keys are refused
+/// outside it and a list that did not say so would be advertising a key that
+/// looks broken. `H` is a letter of the alphabet first and reaches the
+/// hard-mode switch only where no letter could go; `N` reaches the new word
+/// only once the game is over, for the same reason.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("A-Z", "Type a letter into the row"),
+    ("Backspace", "Rub out the last letter"),
+    ("Enter", "Submit the row"),
+    ("1 / 2 / 3", "Four, five or six letters"),
+    ("H", "Hard mode, before the first guess"),
+    ("N / Esc", "A new word, once the game is over"),
+    ("F1 / ?", "This list"),
+];
+
 pub struct Wordle {
     difficulty: Difficulty,
     /// The word to be found, padded out to [`MAX_WORD`].
@@ -704,6 +723,8 @@ pub struct Wordle {
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against.
     size_drawn: (f32, f32),
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 impl Wordle {
@@ -727,6 +748,7 @@ impl Wordle {
             best_streak: 0,
             hard_mode: false,
             size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            show_help: false,
         }
     }
 
@@ -1125,6 +1147,22 @@ impl Wordle {
         if !ev.pressed {
             return EventResult::Ignored;
         }
+        // The help card is answered *before* the modifier bail below, and that
+        // order is the whole reason `?` works: `?` is Shift and the slash key,
+        // so a bail that drops every modified key would drop it, and the list
+        // would advertise a key of its own that did nothing.
+        if ev.key == Key::F1 || (ev.key == Key::Slash && ev.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        // Escape closes the card before it deals a new word. A reader who
+        // opened the list and wants out should not find they have thrown away
+        // the finished board behind it.
+        if self.show_help && ev.key == Key::Escape {
+            self.show_help = false;
+            return EventResult::Consumed;
+        }
+
         // A shifted or control-held key belongs to whatever binds it, not to
         // the puzzle.
         if ev.modifiers != Modifiers::NONE {
@@ -1194,6 +1232,19 @@ impl Wordle {
         self.draw_keyboard(&mut f, &l);
         self.draw_footer(&mut f, &l);
         self.draw_over(&mut f, &l);
+
+        // Over the end-of-game panel as well as the board: the list is the one
+        // thing on screen a reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &Palette::from_settings(&AppearanceSettings::default()),
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
         f
     }
 
@@ -3022,9 +3073,15 @@ mod tests {
     }
 
     /// A key that is not a letter and not one of the shortcuts is not ours.
+    ///
+    /// `F1` was in this list until 2026-09-21, when it became the key that
+    /// raises the shortcut card. It is replaced by `F2` rather than simply
+    /// dropped: the point of this test is that unclaimed keys are passed on,
+    /// and a list that only shrinks each time a key is claimed ends up
+    /// checking nothing.
     #[test]
     fn a_key_the_game_has_no_use_for_is_left_alone() {
-        for key in [Key::Tab, Key::F1, Key::Left, Key::Space] {
+        for key in [Key::Tab, Key::F2, Key::Left, Key::Space] {
             let mut g = game();
             assert_eq!(
                 probe::key(&mut g, &probe::press(key)),
@@ -3167,6 +3224,98 @@ mod tests {
 
     /// Every string the game draws at its usual size, in the order it draws
     /// them.
+    /// Games chosen so that between them every advertised key has work to do.
+    ///
+    /// One game cannot answer them all, and every refusal involved is correct:
+    /// `2` is refused by a game already on Normal, `Backspace` by a row with
+    /// nothing in it, and `N` and `Esc` reach the new word only once the game
+    /// is over. Rebuilt for each keystroke by the caller, because the letters
+    /// would otherwise fill the row and the sixth `A` would be refused for a
+    /// reason that has nothing to do with the list.
+    fn help_states() -> Vec<Wordle> {
+        let mut easy = game();
+        probe::key(&mut easy, &probe::press(Key::Num1));
+
+        let mut started = game();
+        probe::key(&mut started, &probe::press(Key::Q));
+
+        vec![game(), easy, started, lost()]
+    }
+
+    /// **Every key the shortcut list advertises is one this game answers.**
+    ///
+    /// The list on screen and the handler behind it are two copies of one
+    /// fact, and they drift -- `apps/rssreader` once shipped an overlay of
+    /// twenty-one shortcuts of which about four worked. The label is parsed by
+    /// `guitk::shortcut` rather than matched against a table written beside it
+    /// here, which would be a third copy drifting from both.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|g| probe::key(g, &stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/netscan`'s `wol_note` was written by the
+    /// model and drawn by nothing for three commits, with every model-level
+    /// test passing.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut g = game();
+        assert!(
+            !shown(&g).join(" | ").contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::F1)),
+            EventResult::Consumed,
+            "raising the list did not read as a redraw, so it would be invisible"
+        );
+        let drawn = shown(&g).join(" | ");
+        for (keys, what) in SHORTCUTS {
+            assert!(drawn.contains(keys), "{keys:?} never reached the window");
+            assert!(drawn.contains(what), "{what:?} never reached the window");
+        }
+
+        probe::key(&mut g, &probe::press(Key::Escape));
+        assert!(
+            !shown(&g).join(" | ").contains("F1 or ? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// **`?` raises the list even though the puzzle drops modified keys.**
+    ///
+    /// `?` is Shift and the slash key, and `handle_key` returns `Ignored` for
+    /// anything with a modifier held -- correctly, since a shifted letter
+    /// belongs to whatever binds it rather than to the guess. So the help key
+    /// has to be answered before that bail, and this is the test that says so:
+    /// move the block below it and this fails while every other test passes.
+    #[test]
+    fn the_question_mark_raises_the_list_despite_the_modifier_bail() {
+        let mut g = game();
+        for stroke in guitk::shortcut::keystrokes("?").unwrap_or_else(|e| panic!("{e}")) {
+            probe::key(&mut g, &stroke);
+        }
+        assert!(
+            shown(&g).join(" | ").contains("F1 or ? closes this"),
+            "? did not raise the list"
+        );
+    }
+
     fn shown(g: &Wordle) -> Vec<String> {
         shown_sized(g, (WINDOW_WIDTH, WINDOW_HEIGHT))
     }

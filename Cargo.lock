@@ -3359,6 +3359,7 @@ dependencies = [
 name = "wordle"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

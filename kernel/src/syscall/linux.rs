@@ -6755,7 +6755,7 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 ///   2. Clear the range — unmap any present 4 KiB subpages and split/remove
 ///      the covering VMAs — exactly as Linux silently replaces a MAP_FIXED
 ///      range.
-///   3. Register a *demand-paged* 4 KiB-granular [`VmaKind::Anonymous`] VMA.
+///   3. Register a *demand-paged* 4 KiB-granular [`crate::mm::vma::VmaKind::Anonymous`] VMA.
 ///      The per-subpage fault resolver zero-fills it on touch and shares the
 ///      straddled 16 KiB frame with the adjacent file-backed data segment.
 fn linux_anon_mmap_fixed(pid: u64, addr: u64, length: u64, prot: u64) -> SyscallResult {
@@ -7658,7 +7658,7 @@ fn brk_ceiling(brk_start: u64) -> u64 {
 ///   *unchanged* current break rather than an errno — `glibc`'s `__sbrk`
 ///   detects "the break did not move" and reports `ENOMEM` itself.
 ///
-/// The heap is a single demand-paged [`VmaKind::Brk`] VMA spanning
+/// The heap is a single demand-paged [`crate::mm::vma::VmaKind::Brk`] VMA spanning
 /// `[brk_start, round_up(brk_current))`.  Growth extends that VMA and
 /// charges `RLIMIT_AS` for the added virtual span (physical frames are
 /// allocated lazily on first touch); shrinkage unmaps + frees any
@@ -12226,7 +12226,7 @@ fn linux_vma_overlap_bytes(pid: u64, start: u64, end: u64) -> u64 {
 /// is allocated zeroed, the corresponding file bytes are read into it
 /// (`read_at`), and it is mapped at `prot`-derived permissions.  Bytes past
 /// EOF stay zero, matching Linux's page-tail zero-fill.  A [`Vma`] of kind
-/// [`VmaKind::Fixed`] ("already fully backed") is registered so
+/// [`crate::mm::vma::VmaKind::Fixed`] ("already fully backed") is registered so
 /// `/proc/<pid>/maps` reflects the mapping and the fault resolver treats a
 /// fault in the range as a bug.
 ///
@@ -30868,7 +30868,7 @@ fn empty_set_wait(timeout_ms_signed: i64) -> SyscallResult {
 /// its current entry, which is the behaviour the pre-existing per-scan lookup
 /// already had and which this change deliberately does not alter.
 fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
-    use alloc::{vec, vec::Vec};
+    use alloc::vec::Vec;
 
     // Quick path: no fds, just a timed (or infinite) sleep.
     if nfds == 0 {
@@ -30878,7 +30878,11 @@ fn poll_core(fds_ptr: u64, nfds: u64, timeout_ms_signed: i64) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let nfds_usize = nfds as usize;
     let len = nfds_usize.saturating_mul(8);
-    let mut buf: Vec<u8> = vec![0; len];
+    let mut buf: Vec<u8> = Vec::new();
+    if buf.try_reserve_exact(len).is_err() {
+        return linux_err(errno::ENOMEM);
+    }
+    buf.resize(len, 0);
 
     // Read the pollfd array in once.  We re-compute revents from this
     // local copy on every loop iteration so the user-visible writes
@@ -31134,7 +31138,7 @@ fn select_core(
     len: usize,
     timeout_ms_signed: i64,
 ) -> SyscallResult {
-    use alloc::{vec, vec::Vec};
+    use alloc::vec::Vec;
 
     // Quick path: no fds, just a timed (or infinite) sleep.
     if nfds == 0 || len == 0 {
@@ -31143,9 +31147,21 @@ fn select_core(
 
     // Snapshot the three input fd_sets.  Each is `len` bytes.  An
     // input pointer that is NULL is treated as the all-zero set.
-    let mut rd: Vec<u8> = vec![0; len];
-    let mut wr: Vec<u8> = vec![0; len];
-    let mut ex: Vec<u8> = vec![0; len];
+    let mut rd: Vec<u8> = Vec::new();
+    if rd.try_reserve_exact(len).is_err() {
+        return linux_err(errno::ENOMEM);
+    }
+    rd.resize(len, 0);
+    let mut wr: Vec<u8> = Vec::new();
+    if wr.try_reserve_exact(len).is_err() {
+        return linux_err(errno::ENOMEM);
+    }
+    wr.resize(len, 0);
+    let mut ex: Vec<u8> = Vec::new();
+    if ex.try_reserve_exact(len).is_err() {
+        return linux_err(errno::ENOMEM);
+    }
+    ex.resize(len, 0);
 
     for (ptr, dst) in [
         (readfds_ptr, &mut rd),
@@ -31163,9 +31179,21 @@ fn select_core(
     // Output fd_sets — Linux semantics: only bits for ready fds are
     // set; all other bits are zero.  Start from all-zero and OR in
     // the ready bits.
-    let mut rd_out: Vec<u8> = vec![0; len];
-    let mut wr_out: Vec<u8> = vec![0; len];
-    let mut ex_out: Vec<u8> = vec![0; len];
+    let mut rd_out: Vec<u8> = Vec::new();
+    if rd_out.try_reserve_exact(len).is_err() {
+        return linux_err(errno::ENOMEM);
+    }
+    rd_out.resize(len, 0);
+    let mut wr_out: Vec<u8> = Vec::new();
+    if wr_out.try_reserve_exact(len).is_err() {
+        return linux_err(errno::ENOMEM);
+    }
+    wr_out.resize(len, 0);
+    let mut ex_out: Vec<u8> = Vec::new();
+    if ex_out.try_reserve_exact(len).is_err() {
+        return linux_err(errno::ENOMEM);
+    }
+    ex_out.resize(len, 0);
 
     let pid = caller_pid();
     #[allow(clippy::cast_sign_loss)]
@@ -37220,6 +37248,7 @@ fn validate_sockaddr_in(addr_ptr: u64, addr_len: i32) -> Result<(), SyscallResul
 /// So the userspace-observable matrix for accept / accept4 / recvfrom
 /// is:
 ///
+/// ```text
 ///     | (addr_ptr,    addrlen_ptr) | Linux  | Pre-batch | Now    |
 ///     |----------------------------|--------|-----------|--------|
 ///     | (NULL,        NULL)        | Ok     | Ok        | Ok     |
@@ -37229,6 +37258,7 @@ fn validate_sockaddr_in(addr_ptr: u64, addr_len: i32) -> Result<(), SyscallResul
 ///
 ///     (a) The valid `addrlen_ptr` is never read; Linux doesn't see
 ///         it.
+/// ```
 ///
 /// Pre-batch we collapsed both "half-NULL" cases to -EINVAL,
 /// hijacking Linux's -EFAULT for `(valid_sa, NULL_ulen)` and

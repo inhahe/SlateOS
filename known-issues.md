@@ -161713,7 +161713,39 @@ prose-form apps are the opposite case and almost certainly still need a list:
 `apps/videoplayer` binds 31 keys and has one prose mention, which is not a list
 by any reading.
 
-**The working order, revised.** Take the 56 first, largest first
+### The second front, and it is the higher-yield one
+
+Counting the apps that *have* a list says nothing about whether the list is
+true. 39 apps carry one; **18 of them have neither guard** -- not
+`every_advertised_key_does_something`, which reads the list against the
+handler, and not `the_shortcut_list_reaches_the_window`, which reads it against
+the screen. It is the same 18 for both:
+
+```
+magnifier 25, life 17, mandelbrot 15, connect4 14, flood 12, game2048 10,
+minesweeper 8, nim 8, towers 8, maze 7, pipes 7, simon 7, wordsearch 7,
+sliding 6, lightsout 5, memory 5, mixer 3, tictactoe 3
+```
+
+**Expect these to be wrong, not merely unguarded.** `apps/paint`'s list was
+unguarded and 8 of its 33 rows were dead -- two for a Save and an Open that no
+code path reached, and six for a `Key`-to-`char` fallback that listed 16 of 26
+letters and no punctuation, so whole chords produced no character at all.
+`apps/rssreader` shipped 21 rows of which about four worked. A list nobody
+checks is a list that drifts, and these eighteen have never been checked by
+anything.
+
+This front is also much cheaper per app: the list already exists, so the work
+is adding two tests and fixing what they name. Paint took one guard to find six
+defects that six separate readings had missed.
+
+**`apps/game2048` is on this list and is a special case:** it has a list *and*
+a working help overlay, raised by `H` rather than `F1`. That predates
+design-decisions 863 and is exactly the failure 863 exists to prevent, so it
+wants `F1` and `?` added to the overlay it already has, plus the two guards.
+
+**The working order, revised.** Do the 18 above first -- they are cheaper and
+likelier to be hiding real defects. Then take the 56, largest first
 (`videoplayer` 31, `hangman` 29, `wordle` 29, `crossword` 27, `rssreader` 26,
 `editor` 19, `paint` 17 ...). Then the 25 prose-form. Then read the 10 and
 expect to close most of them with no change, recording *why* each needed

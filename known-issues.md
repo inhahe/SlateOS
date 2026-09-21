@@ -161796,7 +161796,30 @@ work** -- `sokoban` (footer), `minesweeper` (guard under another name),
 (`paint`). The queue is a list of *candidates* and behaves like one. Read
 before editing, and expect to close entries with a note rather than a change.
 
-**The working order.** The 56, largest first
+### Triage of the 10 hint-printing apps -- 6 need nothing, 3 need one row each
+
+Read rather than edited, which is the point. For each, the keys it binds were
+compared against the keys its own drawn hints name, **with digit ranges
+expanded** -- `1-7: puzzle` covers `Num1`..`Num7`, and a first pass that
+matched on the literal `Num2` reported six false gaps in `apps/klotski` alone.
+That is the same misreading as `apps/sokoban`, three times over.
+
+| app | verdict |
+|---|---|
+| `rush`, `nonogram`, `battleship`, `reversi`, `checkers`, `dots` | **need nothing** -- every key they bind is named in a hint they draw |
+| `sokoban` | **needs nothing** -- verified earlier by reading `draw_footer` |
+| `compass` | advertise `1`..`9`, `0` -- they select a waypoint |
+| `klotski` | advertise `P` |
+| `snake` | advertise `1`, `2`, `3` -- the difficulty keys |
+
+`apps/compass` is the one to be careful about, and it is why this was read
+rather than trusted: ten digit keys in an app with typed coordinate fields look
+exactly like text entry, which is the `apps/terminal` false positive. They are
+not. `Key::Num1 => 0` ... `Key::Num0 => 9` selects the waypoint at that index,
+which is a real shortcut and genuinely unadvertised.
+
+**The working order.** The three above first -- each is one row in a hint line
+that already exists. Then the 56, largest first
 (`videoplayer` 31, `hangman` 29, `wordle` 29, `crossword` 27, `rssreader` 26,
 `editor` 19, `paint` 17 ...). Then the 25 prose-form. Then read the 10 and
 expect to close most of them with no change, recording *why* each needed

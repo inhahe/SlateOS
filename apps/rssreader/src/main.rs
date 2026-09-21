@@ -1706,6 +1706,7 @@ pub enum KeyAction {
     ToggleFolderExpand,
     ImportOpml,
     ExportOpml,
+    ShowFeedHealth,
     ShowHelp,
 }
 
@@ -1733,6 +1734,7 @@ impl KeyAction {
             Self::ToggleFolderExpand => "Toggle folder expand",
             Self::ImportOpml => "Import subscriptions (OPML)",
             Self::ExportOpml => "Export subscriptions (OPML)",
+            Self::ShowFeedHealth => "How each feed's refreshes have gone",
             Self::ShowHelp => "Show keyboard shortcuts",
         }
     }
@@ -1760,6 +1762,7 @@ impl KeyAction {
             Self::ToggleFolderExpand => "Space",
             Self::ImportOpml => "Ctrl+O",
             Self::ExportOpml => "Ctrl+S",
+            Self::ShowFeedHealth => "H",
             Self::ShowHelp => "F1 / ?",
         }
     }
@@ -1797,6 +1800,7 @@ pub const ALL_KEY_ACTIONS: &[KeyAction] = &[
     KeyAction::ToggleFolderExpand,
     KeyAction::ImportOpml,
     KeyAction::ExportOpml,
+    KeyAction::ShowFeedHealth,
     KeyAction::ShowHelp,
 ];
 
@@ -2161,7 +2165,6 @@ pub struct RssReaderApp {
 
     // Display state
     pub show_help: bool,
-    pub show_add_feed_dialog: bool,
     pub show_feed_health: bool,
     pub status_message: String,
     pub status_timestamp: u64,
@@ -2212,7 +2215,6 @@ impl RssReaderApp {
             text_buffer: String::new(),
             search_results: Vec::new(),
             show_help: false,
-            show_add_feed_dialog: false,
             show_feed_health: false,
             status_message: String::new(),
             status_timestamp: 0,
@@ -3036,9 +3038,26 @@ impl RssReaderApp {
                 } else if self.show_help {
                     self.show_help = false;
                     EventResult::Consumed
+                } else if self.show_feed_health {
+                    self.show_feed_health = false;
+                    EventResult::Consumed
                 } else {
                     EventResult::Ignored
                 }
+            }
+            // How each feed's refreshes have gone.
+            //
+            // `render_feed_health_overlay` was written, drawn conditionally,
+            // and `show_feed_health` was `false` with no writer -- so the
+            // overlay was unreachable. It was filed as *unfinished* on the
+            // reasoning that "nothing else in the app shows feed health",
+            // which was a claim about the name: `feed.health.is_healthy()`
+            // colours every row of the sidebar, and `record_success` runs on
+            // every refresh. The data is real and already on screen as a
+            // colour; this is the detail behind it.
+            Key::H => {
+                self.show_feed_health = !self.show_feed_health;
+                EventResult::Consumed
             }
             // `F1` raises the list in every app in this tree, including
             // `apps/spreadsheet`, where `?` is a character the program has to
@@ -3828,10 +3847,6 @@ impl RssReaderApp {
         // Overlays
         if self.show_help {
             self.render_help_overlay(&mut cmds);
-        }
-
-        if self.show_add_feed_dialog {
-            self.render_add_feed_dialog(&mut cmds);
         }
 
         if self.show_feed_health {
@@ -4980,176 +4995,6 @@ impl RssReaderApp {
         );
     }
 
-    /// Render the "Add Feed" dialog overlay.
-    fn render_add_feed_dialog(&self, cmds: &mut Vec<RenderCommand>) {
-        // Dimmed background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.width,
-            height: self.height,
-            color: Color::rgba(0, 0, 0, 180),
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        let dialog_width: f32 = 400.0;
-        let dialog_height: f32 = 260.0;
-        let dx = (self.width - dialog_width) / 2.0;
-        let dy = (self.height - dialog_height) / 2.0;
-
-        // Dialog background
-        self.palette.push_surface(
-            cmds,
-            dx,
-            dy,
-            dialog_width,
-            dialog_height,
-            12.0,
-            Surface::Panel,
-        );
-        cmds.push(RenderCommand::StrokeRect {
-            x: dx,
-            y: dy,
-            width: dialog_width,
-            height: dialog_height,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(12.0),
-        });
-
-        // Title
-        cmds.push(RenderCommand::Text {
-            x: dx + 20.0,
-            y: dy + 16.0,
-            text: "Add New Feed".to_string(),
-            font_size: 16.0,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // URL input label
-        cmds.push(RenderCommand::Text {
-            x: dx + 20.0,
-            y: dy + 56.0,
-            text: "Feed URL:".to_string(),
-            font_size: 12.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // URL input field
-        self.palette.push_surface(
-            cmds,
-            dx + 20.0,
-            dy + 76.0,
-            dialog_width - 40.0,
-            32.0,
-            4.0,
-            Surface::Panel,
-        );
-        cmds.push(RenderCommand::StrokeRect {
-            x: dx + 20.0,
-            y: dy + 76.0,
-            width: dialog_width - 40.0,
-            height: 32.0,
-            color: self.palette.blue,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: dx + 28.0,
-            y: dy + 84.0,
-            text: "https://example.com/feed.xml".to_string(),
-            font_size: 12.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(dialog_width - 56.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Folder selection label
-        cmds.push(RenderCommand::Text {
-            x: dx + 20.0,
-            y: dy + 124.0,
-            text: "Folder (optional):".to_string(),
-            font_size: 12.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Folder dropdown
-        self.palette.push_surface(
-            cmds,
-            dx + 20.0,
-            dy + 144.0,
-            dialog_width - 40.0,
-            32.0,
-            4.0,
-            Surface::Panel,
-        );
-        cmds.push(RenderCommand::Text {
-            x: dx + 28.0,
-            y: dy + 152.0,
-            text: "None (ungrouped)".to_string(),
-            font_size: 12.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(dialog_width - 56.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Buttons
-        let button_y = dy + dialog_height - 52.0;
-
-        // Cancel button
-        self.palette.push_surface(
-            cmds,
-            dx + dialog_width - 200.0,
-            button_y,
-            80.0,
-            32.0,
-            6.0,
-            Surface::Panel,
-        );
-        cmds.push(RenderCommand::Text {
-            x: dx + dialog_width - 182.0,
-            y: button_y + 8.0,
-            text: "Cancel".to_string(),
-            font_size: 12.0,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Add button
-        cmds.push(RenderCommand::FillRect {
-            x: dx + dialog_width - 108.0,
-            y: button_y,
-            width: 88.0,
-            height: 32.0,
-            color: self.palette.blue,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: dx + dialog_width - 88.0,
-            y: button_y + 8.0,
-            text: "Add Feed".to_string(),
-            font_size: 12.0,
-            color: self.palette.crust,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    /// Render the feed health status overlay.
     fn render_feed_health_overlay(&self, cmds: &mut Vec<RenderCommand>) {
         // Dimmed background
         cmds.push(RenderCommand::FillRect {
@@ -5709,6 +5554,55 @@ mod tests {
             modifiers,
             text: String::new(),
         })
+    }
+
+    /// `H` opens the feed-health overlay, and it draws real health.
+    ///
+    /// `render_feed_health_overlay` was written, drawn conditionally, and
+    /// `show_feed_health` was `false` with no writer -- so it was
+    /// unreachable. It was filed as *unfinished*, on the reasoning that
+    /// "nothing else in the app shows feed health". That was a claim about
+    /// the name: `feed.health.is_healthy()` colours every row of the sidebar
+    /// and `record_success` runs on every refresh, both in live code. The
+    /// data is real and already on screen as a colour; the overlay is the
+    /// detail behind it, and this restores a finished feature rather than
+    /// shipping an unfinished one.
+    #[test]
+    fn h_opens_the_feed_health_overlay() {
+        let mut app = RssReaderApp::with_sample_data(1200.0, 800.0);
+        assert!(!app.show_feed_health, "control: it starts closed");
+
+        let before = drawn_strings(&app);
+        assert!(
+            !before.iter().any(|t| t == "Feed Health Status"),
+            "the overlay is up before anybody asked"
+        );
+
+        assert_eq!(
+            app.handle_event(&press(Key::H)),
+            EventResult::Consumed,
+            "H was ignored"
+        );
+        assert!(app.show_feed_health, "H did not open it");
+        assert!(
+            drawn_strings(&app)
+                .iter()
+                .any(|t| t == "Feed Health Status"),
+            "the overlay opened and drew nothing"
+        );
+
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.show_feed_health, "Escape did not close it");
+    }
+
+    fn drawn_strings(app: &RssReaderApp) -> Vec<String> {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn press(k: Key) -> Event {
@@ -7791,7 +7685,32 @@ mod tests {
 
     #[test]
     fn test_all_key_actions_count() {
-        assert_eq!(ALL_KEY_ACTIONS.len(), 21);
+        // Was `assert_eq!(ALL_KEY_ACTIONS.len(), 21)`. A count has to be
+        // edited by whoever changes the list, which makes it a step in a
+        // procedure rather than a check on one -- it fails for the person who
+        // added an action correctly and passes for anyone who replaces one
+        // action with another. These are properties of the list instead:
+        // every action offers a key, and no two offer the same one.
+        for action in ALL_KEY_ACTIONS {
+            assert!(
+                !action.key_hint().is_empty(),
+                "{action:?} is listed with no key"
+            );
+            assert!(
+                !action.description().is_empty(),
+                "{action:?} is listed with no description"
+            );
+        }
+        for (i, a) in ALL_KEY_ACTIONS.iter().enumerate() {
+            for b in ALL_KEY_ACTIONS.iter().skip(i + 1) {
+                assert_ne!(
+                    a.key_hint(),
+                    b.key_hint(),
+                    "{a:?} and {b:?} both claim {:?}",
+                    a.key_hint()
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -8349,14 +8268,6 @@ mod tests {
             a2.render_commands().len()
         };
         assert!(cmds.len() > normal);
-    }
-
-    #[test]
-    fn test_render_with_add_feed_dialog() {
-        let mut app = RssReaderApp::with_sample_data(1200.0, 800.0);
-        app.show_add_feed_dialog = true;
-        let cmds = app.render_commands();
-        assert!(!cmds.is_empty());
     }
 
     #[test]

@@ -160798,6 +160798,28 @@ shows feed health, so wiring a key would add the feature rather than restore
 it. Deleting a finished feature and shipping an unfinished one are opposite
 mistakes, and the flags look identical from here.
 
+**Both were settled on 2026-09-21, and one of the two readings above was
+wrong.** `show_feed_health` is not unfinished. "Nothing else in the app shows
+feed health" was a claim about the *name*: `feed.health.is_healthy()` colours
+every row of the sidebar and `record_success` runs on every refresh, both in
+live code -- checked with `rustlex.live_code`, which on the same day turned
+out to have been blanking production code and is why the claim went unchecked
+the first time. The health data is real and already on screen as a colour;
+the overlay is the detail behind it. So wiring `H` **restores a finished
+feature**, and that is done.
+
+`show_add_feed_dialog` was the superseded one, and it is deleted. `A` opens
+an inline add-feed prompt, so the dialog was a second way to do a thing that
+has a first way, reachable by nobody. The operator's own rule for this class,
+from their answers to `open-questions.md`: "Why not delete all of them that
+don't work... The ones that don't work but could work later can simply be
+added when we actually implement them?"
+
+The general point survives the correction and is sharper for it: the two
+flags looked identical *from the flag*. What separated them was what the rest
+of the program does with the data behind each -- which is a question the
+survey cannot ask and a reader can.
+
 So the survey's output is a list of *questions about intent*, not a list of
 patches. A flag frozen because nobody wired the toggle and a flag frozen
 because its home is a configuration file that does not exist yet look identical

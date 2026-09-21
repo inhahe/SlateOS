@@ -42682,7 +42682,7 @@ fn pwrite_memfd_from_user(handle: u64, offset: u64, buf: u64, len: usize) -> Res
 ///   - Otherwise, return `Ok(min(len, rlim_cur - offset))`, allowing
 ///     a partial write up to the limit.
 ///
-/// The truncate paths use [`rlimit_fsize_check_size`] instead because
+/// The truncate paths use [`rlimit_fsize_check_size_for_caller`] instead because
 /// they're asserting an exact new file size, not writing bytes.
 fn rlimit_fsize_clip_for_caller(offset: u64, len: u64) -> Result<u64, i32> {
     let Some(pid) = caller_pid() else {

@@ -117112,7 +117112,7 @@ fn cmd_ping6(args: &str) {
 ///
 /// Usage:
 ///   udp6 send `<ipv6-addr>` `<port>` `<message>`   — send a UDP datagram
-///   udp6 listen `<port>` [timeout_ms]           — listen for datagrams
+///   udp6 listen `<port>` `[timeout_ms]`           — listen for datagrams
 fn cmd_udp6(args: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
@@ -143592,12 +143592,12 @@ impl AwkPattern {
 
 /// The statements this shell's `awk` can run.
 ///
-/// The enum exists so that [`awk_exec_action`] and [`awk_validate_program`]
+/// The enum exists so that [`awk_exec_action`] and [`awk_compile_program`]
 /// cannot disagree about what is supported: both go through
 /// [`awk_classify_stmt`], and adding a variant is the only way to widen the
 /// set. A separate `is_supported` predicate beside the executor's `match` arms
 /// would be a second copy of the same list, which is the shape that drifted in
-/// [`awk_compare`].
+/// `awk_compare`, since replaced by [`awk_parse_cmp`].
 enum AwkStmt<'a> {
     /// `print` / `print $0` — the whole record, byte for byte.
     PrintRecord,
@@ -143607,7 +143607,7 @@ enum AwkStmt<'a> {
 
 /// Recognise one awk statement, or `None` if this shell cannot run it.
 ///
-/// `None` is a refusal, not a no-op: [`awk_validate_program`] turns it into
+/// `None` is a refusal, not a no-op: [`awk_compile_program`] turns it into
 /// `awk: unsupported statement: '…'` and exit 2 before any rule runs. See
 /// design-decisions §294 for why the whole program is refused rather than the
 /// recognised parts being run.
@@ -143630,7 +143630,7 @@ fn awk_classify_stmt(stmt: &str) -> Option<AwkStmt<'_>> {
 /// because `$0` and the fields are now bytes: a record that is not valid UTF-8
 /// is printed as it was read instead of being replaced or dropped.
 ///
-/// Every statement here has already been accepted by [`awk_validate_program`],
+/// Every statement here has already been accepted by [`awk_compile_program`],
 /// so the unrecognised arms are unreachable for any program that gets this far.
 /// They are still written as skips rather than panics: a panic in the kernel
 /// shell takes the kernel with it, and an escape from the validator should cost
@@ -143761,8 +143761,10 @@ fn awk_compile_program(
 /// Evaluate a print expression, expanding $N, NR, NF, and string literals.
 ///
 /// `None` if any argument is an expression this shell cannot evaluate. Like
-/// [`awk_pattern_eval`], whether the answer is `Some` depends on `expr` alone,
-/// which is what lets [`awk_validate_program`] ask with a dummy record.
+/// [`awk_compile_pattern`], whether the answer is `Some` depends on `expr`
+/// alone, which is what lets [`awk_compile_program`] settle the question
+/// before any input is read — it no longer asks with a dummy record, because
+/// the compiled pattern is what runs.
 ///
 /// The arguments are joined with a single space, which is `OFS`'s default and
 /// the only value this shell supports; assigning `OFS` is an unsupported

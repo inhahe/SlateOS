@@ -10891,7 +10891,7 @@ pub fn self_test_fastpy_slateos_fileio2() -> KernelResult<()> {
 /// **Promotion (2026-07-23):** `cat` is no longer loaded from a `/tests`
 /// fixture. It is *installed* at `/bin/cat` (mounted at `/mnt/bin`) like any
 /// other shipping command, and this harness resolves it **by command name**
-/// through the PATH ([`resolve_command`]/[`COMMAND_PATH`]) — the exact
+/// through the PATH ([`pathz_command`]/[`COMMAND_PATH`]) — the exact
 /// resolve+load step init or a shell performs before `exec` — then spawns it
 /// with `argv[0] = "cat"`. This makes `cat` the first fastpy binary promoted
 /// from a boot self-test fixture to a real `/bin` component invoked as a

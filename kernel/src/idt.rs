@@ -1114,7 +1114,7 @@ struct SavedRegisters {
 
 /// Get a mutable pointer to the saved registers on the kernel stack.
 ///
-/// The ISR stub layout is: [saved GPRs][error_code][InterruptStackFrame].
+/// The ISR stub layout is: `[saved GPRs][error_code][InterruptStackFrame]`.
 /// `frame_ptr` points to the InterruptStackFrame.  The saved GPRs start
 /// at `frame_ptr - 8 (error code) - 15*8 (GPRs) = frame_ptr - 128`.
 ///

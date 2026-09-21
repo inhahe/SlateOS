@@ -285,7 +285,7 @@ pub fn destroy(id: u32) -> KernelResult<()> {
 /// Saves the current session's console state and scrollback, then
 /// restores the target session's state.  The caller (kshell) is
 /// responsible for saving/restoring shell context (CWD, env, history)
-/// using [`save_shell_context`] and [`take_shell_context`] before and
+/// using [`save_shell_context`] and [`get_shell_context`] before and
 /// after calling this function.
 pub fn switch(target_id: u32) -> KernelResult<()> {
     let table = TABLE.lock();

@@ -1401,7 +1401,7 @@ pub fn self_test_udp_dns(dns_ip: &[u8; 4]) -> KernelResult<Option<()>> {
 /// EUI-64 link-local, derived from the NIC MAC) is routed into the daemon's RX
 /// FIFO instead of the wire. The test binds a UDP socket on a fixed port, sends a
 /// datagram to `[me.ip6]:port`, then polls for it to come back. Because
-/// [`udp_sock_send6`] uses the socket's own local port as the UDP source, the
+/// [`NetstackConn::udp_send_to6`] uses the socket's own local port as the UDP source, the
 /// looped-back datagram is delivered to the very socket that sent it. A received
 /// datagram whose source header reports `AF_INET6`, the local link-local address,
 /// and the sent payload proves: kernel client → `OP_UDP_SEND6` → daemon v6 TX →

@@ -8312,13 +8312,21 @@ pub fn sys_process_kill(args: &super::dispatch::SyscallArgs) -> super::dispatch:
 /// log that every boot reads.
 pub fn sys_process_exec_with_frame(frame: &mut super::entry::SyscallFrame) -> i64 {
     let elf_len = frame.arg1 as usize;
+    // arg0 too: on 2026-09-21 this probe reported InvalidAddress (-101) for a
+    // 136-byte ELF the caller had demonstrably mapped, and the next question
+    // is whether the ADDRESS arrived intact. `build_exec_test_elf` plants it
+    // as a `movabs rdi, <imm64>`, so a bad immediate and a bad mapping look
+    // identical from here -- and guessing between them is what cost six
+    // rounds on the sibling bug.
+    let elf_ptr = frame.arg0;
     let rc = sys_process_exec_with_frame_inner(frame);
     if rc < 0 {
         serial_println!(
-            "[exec] NATIVE exec FAILED -> {} (elf_len={}) -- the ELF bytes come \
+            "[exec] NATIVE exec FAILED -> {} (elf_ptr={:#x} elf_len={}) -- the bytes come \
              from the caller, so this is after posix read the file and before \
              the image was validated",
             rc,
+            elf_ptr,
             elf_len
         );
     }

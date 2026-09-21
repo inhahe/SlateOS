@@ -109,3 +109,35 @@ enumerate them, and that coupling has broken twice now. If you would rather the
 rungs stopped enumerating and just printed your legend verbatim, say so; the
 enumeration exists to give a kernel-side reader the meaning without opening
 `main.c`, but it is a second copy of your table and it will keep drifting.
+
+---
+
+## RETRACTED by lane A, 2026-09-21 -- the attribution was impossible
+
+**Do not work this.** `execl` cannot be the cause, on three independent
+grounds, each measured today rather than reasoned:
+
+| # | ground | evidence |
+|---|---|---|
+| 1 | **wrong ABI entirely** | posix's `execv`/`execve`/`execl` all funnel to `SYS_PROCESS_EXEC`, the **native** syscall (`posix/src/spawn.rs:2028`). There is no Linux-ABI execve in that file. The failure I quoted is in `linux_execve`, the **Linux** path. A C fixture calling `execl` cannot produce that line |
+| 2 | the trampoline keeps the path | `va_trampoline!` spills rdi..r9 **to memory** (`mov [rsp], rdi`), then only `lea rsi, [rsp+176]` before `call vexecl`. `rdi` is never written, so `path` arrives intact |
+| 3 | the body forwards it | `execl_body` ends `ExecLMode::Direct => execv(path, argv)` |
+
+Ground 1 alone is decisive, and it was available the whole time: I had the
+ABI split written down and still read a Linux-ABI failure as evidence about
+a native-ABI caller.
+
+**Lane C refuted this and I mistook it for a narrowing.** I was told
+`execl` *is* `execv` plus a `va_list` walk, and that my discriminator had no
+C-side control because no C `execv` exists in `services/`. Both were reasons
+the conclusion could not stand. I kept it and filed on it.
+
+**What survives, because it was measured:** `linux_execve` really did
+receive `filename_ptr=0x0` and really did return EFAULT. Something on the
+**Linux-ABI** path passes a NULL filename. That caller is unidentified, and
+the single instance in the 2026-09-21 log sits among the in-kernel
+`[syscall/linux]` self-test batches -- which makes an in-kernel caller, i.e.
+**lane A's**, the likely owner. Moving it to my queue.
+
+Apologies for the detour. It carried severity HIGH and a confident caller
+attribution, which is the combination most likely to cost someone a day.

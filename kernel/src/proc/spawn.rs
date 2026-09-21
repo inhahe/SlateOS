@@ -2951,6 +2951,59 @@ pub(crate) extern "C" fn userspace_entry_trampoline(info_raw: u64) {
             "push {rflags}",   // RFLAGS
             "push {cs}",       // CS
             "push {rip}",      // RIP
+            // Every IRETQ operand is now on the stack, so all GP registers
+            // are dead and may be cleared. Two reasons this is required and
+            // not hygiene:
+            //
+            //   1. Without it, ring 3 reads kernel register residue at its
+            //      first instruction. Disassembled from the 2026-09-21
+            //      release kernel: rbp still holds a KERNEL STACK ADDRESS
+            //      (push rbp; mov rbp, rsp with no leave before the iretq),
+            //      and rbx/r8..r15 are untouched by this function entirely.
+            //      That is a kernel-address leak handed to ring 3.
+            //   2. A user stub that sets only the registers it needs still
+            //      has the rest forwarded as syscall arguments. That is how
+            //      SYS_PROCESS_EXEC came to read argv from rdx = 0x1B --
+            //      the USER_DS selector this very function loads into edx
+            //      to push as SS -- so it read user address 27
+            //   3. And rdx=0x1B is an ABI VIOLATION in its own right.
+            //      System V x86-64 says rdx at process entry holds a
+            //      function pointer to register with atexit, or zero.
+            //      0x1B is neither. It is harmless here only because
+            //      our __libc_start_main names that parameter
+            //      `_rtld_fini` and never calls it -- a conforming
+            //      runtime would call (*rtld_fini)() at exit and jump
+            //      to address 27. So zero is not merely A defined
+            //      value for rdx; it is THE value the ABI specifies.
+            //      and return InvalidAddress (-101) for a perfectly valid
+            //      ELF -- see known-issues.md 2026-09-21.
+            //
+            // Why ZERO, and why that is not a matter of taste: all four
+            // ring-3 entries define this boundary in the way their own
+            // semantics demand. `fork.rs` and `thread_clone.rs` RESTORE the
+            // saved set, because a child inherits. And
+            // `sys_process_exec_with_frame_inner` ZEROES arg0..arg5, rbx,
+            // rbp and r12..r15 before returning to a new image, because a
+            // new image inherits nothing. Fresh spawn is that same
+            // new-image case, and was the only one defining nothing.
+            // rsp is deliberately untouched -- IRETQ
+            // pops its frame from it. 32-bit `xor` zero-extends, clearing
+            // the full 64-bit register in a shorter encoding.
+            "xor eax, eax",
+            "xor ebx, ebx",
+            "xor ecx, ecx",
+            "xor edx, edx",
+            "xor esi, esi",
+            "xor edi, edi",
+            "xor ebp, ebp",
+            "xor r8d, r8d",
+            "xor r9d, r9d",
+            "xor r10d, r10d",
+            "xor r11d, r11d",
+            "xor r12d, r12d",
+            "xor r13d, r13d",
+            "xor r14d, r14d",
+            "xor r15d, r15d",
             "iretq",
             ss = in(reg) user_ds,
             rsp_val = in(reg) user_rsp,
@@ -8803,18 +8856,31 @@ pub fn self_test_ctest_python_repl() -> KernelResult<()> {
                 //
                 // Its wording says "missing from the image or not
                 // executable" and BOTH halves are false here: debugfs
-                // reports inode 80, mode 0755, 10,468,016 bytes. So this is
-                // the same defect as ctest-coreutils-runs' exit 11 --
-                // libc's execl passes a NULL path to execve and the kernel
-                // correctly returns EFAULT. Two independent fixtures, both
-                // files present, both execs failing.
+                // reports inode 80, mode 0755, 10,468,016 bytes.
+                //
+                // THE CAUSE IS NOT KNOWN, and an earlier version of this
+                // message asserted one. It said libc's execl passes a NULL
+                // path to execve. It does not: posix/src/spawn.rs's
+                // execl_body ends ExecLMode::Direct => execv(path, argv),
+                // forwarding path unchanged. The single linux_execve
+                // filename_ptr=0x0 line in the serial log sits among the
+                // in-kernel [syscall/linux] self-test batches, so it was
+                // never shown to come from this fixture at all.
+                //
+                // What is measured stays: the file is present and
+                // executable, and the exec fails anyway. What was removed
+                // is a cause nobody checked -- and the sentence telling
+                // the reader not to look at the image, which is how a
+                // wrong diagnosis costs someone else an afternoon.
                 concat!(
-                    "8: /bin/python3 could not be EXEC'd -- but it IS on the ",
-                    "image (inode 80, mode 0755). Do not go looking at the ",
-                    "image: this is libc's execl passing a NULL path to ",
-                    "execve, the same defect as ctest-coreutils-runs' exit ",
-                    "11. See requests/a-b-libc-execl-passes-a-null-path-to-",
-                    "execve.md"
+                    "8: /bin/python3 could not be EXEC'd -- and it IS on the ",
+                    "image (inode 80, mode 0755, 10,468,016 bytes, verified ",
+                    "with debugfs). So the image is NOT the thing to fix. ",
+                    "The cause is UNEXPLAINED: an earlier version of this ",
+                    "message blamed libc execl passing a NULL path, which ",
+                    "posix/src/spawn.rs disproves -- execl_body forwards ",
+                    "path unchanged to execv. Do not spend the afternoon ",
+                    "on that lead; it was mine and it was wrong."
                 )
             }
             _ => "an unexpected code; see services/ctest-python-repl/main.c",
@@ -33368,6 +33434,23 @@ fn test_spawn_faulting_process() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // Zombie cannot separate this from the failure it must exclude:
+    // the null write did not fault; the process ran to SYS_EXIT instead, which is a zombie too.
+    // NOT an exact code: the exception path sets no constant this
+    // file can name -- every KILLED_EXIT_CODE use is on the
+    // exec-failure path. A clean exit is the one outcome that
+    // disproves the claim, so that is what is asserted.
+    let code_fault = pcb::exit_code(result.pid);
+    if code_fault == Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: fault test reached Zombie but exit code was {:?}, expected anything but Some(0)",
+            code_fault
+        );
+        serial_println!("[spawn]          the null write did not fault; the process ran to SYS_EXIT instead");
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
     pcb::destroy(result.pid);
 
     serial_println!("[spawn]   Faulting process killed (kernel survived): OK");
@@ -33406,6 +33489,20 @@ fn test_spawn_stack_growth() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // Zombie cannot separate this from the failure it must exclude:
+    // stack growth failed and an unresolvable #PF killed it, which is a zombie too.
+    // Exact: the ELF ends SYS_EXIT(0), so the value is known.
+    let code_growth = pcb::exit_code(result.pid);
+    if code_growth != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: growth test reached Zombie but exit code was {:?}, expected Some(0)",
+            code_growth
+        );
+        serial_println!("[spawn]          stack growth failed and an unresolvable #PF killed it");
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
     pcb::destroy(result.pid);
 
     serial_println!("[spawn]   Stack growth (128 KiB past initial): OK");
@@ -33430,6 +33527,11 @@ fn test_spawn_stack_growth() -> KernelResult<()> {
 /// successful exec never returns, so a failed one traps. How it dies is
 /// not the point; the line in the log is.
 fn test_exec_process_failure_is_reported() -> KernelResult<()> {
+    // Snapshot the probe's counter. Zombie alone cannot distinguish a
+    // correctly-refused exec from a wrongly-successful one, so termination
+    // is not evidence the probe fired -- the counter is.
+    let logs_before = crate::syscall::handlers::native_exec_fail_logs();
+
     // A caller whose exec cannot succeed: zero-length image.
     let caller_elf = elf::build_exec_test_elf(0x0000_0050_0000_0000, 0);
     let options = SpawnOptions::new("spawn-test-exec-fail");
@@ -33443,6 +33545,24 @@ fn test_exec_process_failure_is_reported() -> KernelResult<()> {
         serial_println!(
             "[spawn]   FAIL: exec-failure control expected Zombie, got {:?}",
             state
+        );
+        return Err(KernelError::InternalError);
+    }
+    // The point of this control: the probe must have LOGGED. Exactly one
+    // more line, not `at least one` -- a >= test would also pass if some
+    // unrelated exec failed in the same window, and loose assertions are why
+    // the positive test stayed green while every exec was failing.
+    let logs_after = crate::syscall::handlers::native_exec_fail_logs();
+    if logs_after != logs_before.wrapping_add(1) {
+        serial_println!(
+            "[spawn]   FAIL: exec-failure control saw {} probe log(s), expected exactly 1",
+            logs_after.wrapping_sub(logs_before)
+        );
+        serial_println!(
+            "[spawn]          the process died, but the probe did not report it,"
+        );
+        serial_println!(
+            "[spawn]          so an absent [exec] NATIVE line proves nothing"
         );
         return Err(KernelError::InternalError);
     }
@@ -33650,6 +33770,24 @@ fn test_seh_handler_exit() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // Zombie alone cannot tell this apart from the failure it is
+    // supposed to exclude: the handler never ran and the #PF killed it,
+    // and that is a zombie too. Both ELFs end `xor edi, edi` before
+    // SYS_EXIT, so success is exit code 0; a kill sets
+    // KILLED_EXIT_CODE = -126. Read before destroy(), which drops the PCB.
+    let seh_code = pcb::exit_code(result.pid);
+    if seh_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: SEH exit reached Zombie but exit code was {:?}, expected Some(0)",
+            seh_code
+        );
+        serial_println!(
+            "[spawn]          the handler never ran and the #PF killed it"
+        );
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
     thread::on_thread_exit(result.task_id);
     pcb::destroy(result.pid);
 
@@ -33695,6 +33833,24 @@ fn test_seh_handler_resume() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // Zombie alone cannot tell this apart from the failure it is
+    // supposed to exclude: the ud2 killed it instead of resuming past it,
+    // and that is a zombie too. Both ELFs end `xor edi, edi` before
+    // SYS_EXIT, so success is exit code 0; a kill sets
+    // KILLED_EXIT_CODE = -126. Read before destroy(), which drops the PCB.
+    let seh_code = pcb::exit_code(result.pid);
+    if seh_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: SEH resume reached Zombie but exit code was {:?}, expected Some(0)",
+            seh_code
+        );
+        serial_println!(
+            "[spawn]          the ud2 killed it instead of resuming past it"
+        );
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
     thread::on_thread_exit(result.task_id);
     pcb::destroy(result.pid);
 

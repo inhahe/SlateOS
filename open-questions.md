@@ -3189,6 +3189,57 @@ whole session rediscovered it.
 `scripts/merge-readiness.py`. Full write-up in `known-issues.md`,
 2026-09-21.
 
+## A-Q21 — [A] Seven security modules are built but nothing uses them. Staged for later, or believed to be working? — Status: OPEN
+
+**In short:** the kernel has seven pieces of code whose job is to say
+"no" — checking passwords, unlocking encrypted disks, deciding who may
+open a file. All seven are written and tested. None of them is called by
+anything except a command typed by hand into the kernel's own shell. So
+nothing in the running system currently asks permission from any of them.
+I cannot tell from the code whether that is the plan or an oversight, and
+the answer changes what should happen next.
+
+**The seven, and what reaches each.** "Reached from kshell only" means the
+single caller outside the module is the kernel's interactive shell — a
+person typing, not the system running.
+
+| module | its job | reached from |
+|---|---|---|
+| `authbroker` | authenticate a principal | kshell only |
+| `diskencrypt` | unlock an encrypted volume | kshell only |
+| `capsettings` | may this user reach this path | kshell only |
+| `secpolicy` | allow/deny by policy | kshell only |
+| `sealing` | refuse writes to a sealed file | kshell only |
+| `reclock` | byte-range file locks | nothing acquires one |
+| `vfs::flock` | whole-file advisory locks | nothing takes one |
+
+**One detail that decides how it reads.** `diskencrypt`'s unlock is
+`unlock_volume(id, _passphrase)` — the underscore means the passphrase is
+not used at all, and its comment says so plainly: *"Simulated passphrase
+check (in real implementation, derive key and verify)"*. Candid in the
+file; invisible to anyone reading the function's name.
+
+| option | *What changes:* | cost |
+|---|---|---|
+| **A. It is staged — write that down** | nothing runs differently; each module gains a header saying it is not yet enforced, and one list tracks them | an hour. Stops the next person (me, twice already) re-deriving "nothing calls this" while judging how serious a bug is |
+| **B. It should be live — wire it up** | a wrong passphrase stops unlocking a volume; a sealed file stops accepting writes; `/proc` denial counts start moving | real work, module by module, and **each one activates its own latent defects on the day it is connected** — several key their tables by pathname, so two names for one file get two answers |
+| **C. Leave as is** | nothing changes | free, and the modules keep reading as finished when looked at individually |
+
+**Recommendation: A now, B per-module later.** A is cheap and removes the
+specific trap: these all currently look complete in isolation. B is the
+right destination but is not one decision — it is seven, each wanting its
+own fix-first-then-connect, because connecting one before fixing its keying
+turns a dormant bug into a live one.
+
+**If this is never answered:** nothing breaks today, and that is exactly the
+risk. The modules look finished, their `/proc` counters read zero, and a
+zero reads as *nothing was denied* rather than *nothing asked*. The cost
+arrives the first time someone wires one up believing it already worked.
+
+**Where it bites:** `kernel/src/fs/{authbroker,diskencrypt,capsettings,
+secpolicy,sealing,reclock}.rs` and `vfs.rs`'s `flock_resolved`. Full
+measurement, one grep per row, in `known-issues.md` 2026-09-21.
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

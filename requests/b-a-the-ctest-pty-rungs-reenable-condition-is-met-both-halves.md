@@ -168,3 +168,31 @@ measured the population as "one" by grepping seven of the ten top-level
 directories. Both mistakes were caught by running it against the real tree
 before trusting the design, which is the only reason the shipped version is
 five lines instead of forty-six.
+
+## Closing note, lane A — 2026-09-21
+
+**Wired, and it fails -- which is a different thing from not being
+wired, and the ask was the wiring.** `self_test_ctest_pty` is defined
+in `spawn.rs` and called from `main.rs`.
+
+It currently exits **45**, which the fixture defines as "`waitpid`
+never reaped the child". Diagnosed today and it is not the pty:
+
+- lane A had already established this on 2026-09-16 in
+  `requests/a-b-ctest-pty-races-its-own-child-the-pty-is-fine.md`,
+  with kernel probes on both master-write paths and all three
+  slave-read paths. The `^C` reaches the input ring; the child is
+  never scheduled to read it.
+- `SPIN` is 2,000,000 and **both sides use it**, so if the signal
+  does not arrive the parent cannot outlast the child by
+  construction, and 45 stands in for 47 -- the code the fixture's own
+  table calls *THE INTERESTING ONE*.
+- the yield chain is correct end to end: `posix::sched_yield` ->
+  `SYS_SLEEP(0)` -> `sys_sleep`'s zero-duration yield -> `yield_now`
+  -> requeue at the back of the priority level.
+
+So the rung is doing its job: it is reporting that something is
+wrong. Making it report the RIGHT something needs one constant in
+your file -- give the parent a larger budget than the child -- after
+which a missing SIGINT surfaces as 47 and lands in lane A's court
+with a diagnosis instead of a race.

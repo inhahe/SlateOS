@@ -5973,6 +5973,31 @@ check_variant_lists() {
     # 2026-09-14 two lanes reasoned from first principles about a rule this tree
     # already enforced. Generated, never hand-edited: --check refuses a stale
     # copy, because a hand-maintained index is a document that rots.
+    # Six places in this kernel reach ring 3. Five define the general
+    # purpose registers -- idt.rs and syscall/entry.rs pop them, fork.rs and
+    # thread_clone.rs load them from a saved frame -- and on 2026-09-21 the
+    # sixth defined none, so a freshly spawned process read kernel register
+    # residue at its first instruction, including a kernel heap pointer in
+    # rdi. It also made a valid exec return InvalidAddress, because a stub
+    # that sets only the registers it needs has the rest forwarded as
+    # syscall arguments. The bad site defined 0 of 6 and every good site
+    # defines 6 of 6, so this rule needs no threshold.
+    echo "=== Checking that every ring-3 entry defines the argument registers ==="
+    if ! run_checker ring3-entry-regs-selftest "$py" "$PROJECT_ROOT/scripts/check-ring3-entry-regs.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-ring3-entry-regs.py no longer" >&2
+        echo "agrees with its own cases." >&2
+        return 1
+    fi
+    if ! run_checker ring3-entry-regs "$py" "$PROJECT_ROOT/scripts/check-ring3-entry-regs.py" "$PROJECT_ROOT/kernel/src"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  A transition to ring 3 leaves a" >&2
+        echo "syscall-argument register undefined, so userspace reads kernel" >&2
+        echo "register residue and its first syscall may carry a garbage" >&2
+        echo "argument." >&2
+        return 1
+    fi
+
     echo "=== Checking that the script index is current ==="
     if ! run_checker script-index-selftest "$py" "$PROJECT_ROOT/scripts/gen-script-index.py" --self-test; then
         echo "" >&2

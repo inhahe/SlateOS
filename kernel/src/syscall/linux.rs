@@ -2860,10 +2860,24 @@ fn linux_execve(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     let ptr = frame.arg0;
     let rc = linux_execve_inner(frame);
     if rc < 0 {
+        let _task = crate::sched::current_task_id();
+        let _pid = crate::proc::thread::owner_process(_task);
         crate::serial_println!(
             "[exec] linux_execve ENTERED and failed early: filename_ptr={:#x} errno={}",
             ptr,
             -rc
+        );
+        // Name the caller. This line was read as evidence about a C fixture's
+        // execl on 2026-09-16, and two requests were filed against another
+        // lane on that reading. posix execs through the NATIVE syscall and
+        // cannot reach here at all, so the attribution was impossible -- but
+        // nothing in the output contradicted it, because the output never
+        // said who called. Now it does.
+        crate::serial_println!(
+            "[exec]   caller: task={} pid={:?} name={:?} (Linux ABI; native execs do not reach here)",
+            _task,
+            _pid,
+            _pid.and_then(crate::proc::pcb::name)
         );
     }
     rc

@@ -96,6 +96,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-refusals-refuse.py` | Refuse a shell block that announces a refusal and then returns success. |
 | `scripts/check-release-staleness.py` | Gate: refuse to push when the release-profile boot test is stale. |
 | `scripts/check-requests-not-deleted.py` | Gate: a `requests/` file may be stamped, but not deleted. |
+| `scripts/check-ring3-entry-regs.py` | Every transition to ring 3 must leave the syscall-argument registers DEFINED. |
 | `scripts/check-roadmap-done.py` | Gate: a roadmap entry marked `[x]` must not name a crate that does not exist. |
 | `scripts/check-scratch-config.py` | Every test that can write a settings file runs inside a scratch directory. |
 | `scripts/check-self-tests-wired.py` | Fail if a kernel `self_test` exists that nothing ever calls. |
@@ -393,4 +394,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_383 scripts._
+_384 scripts._

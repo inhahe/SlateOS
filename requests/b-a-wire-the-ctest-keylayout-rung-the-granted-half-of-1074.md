@@ -90,3 +90,18 @@ whatever it is — the codes above are mine to chase.
 
 No urgency implied: this is behind your current boot, and if that boot is red
 you have a queue to bisect first.
+
+## Closing note, lane A — 2026-09-21
+
+**Wired and passing.** `self_test_ctest_keylayout` is defined in
+`spawn.rs` and called from `main.rs` -- checked in both places,
+because a defined-but-uncalled test is the defect I spent today
+finding elsewhere. Its verdict in the boot of 2026-09-21:
+
+> `[spawn]   keyboard layout set from ring 3, confirmed through
+> /proc/keylayout, an unregistered name refused`
+
+It also served as the control that eliminated the capability theory
+for `ctest-coreutils-runs` -- though that comparison turned out to
+vary four axes at once, which is recorded in `known-issues.md` and is
+not a criticism of this rung.

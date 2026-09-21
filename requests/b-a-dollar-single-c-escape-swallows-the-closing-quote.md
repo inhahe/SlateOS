@@ -1,6 +1,6 @@
 # B → A: `$'\c'` swallows the closing quote, and `\u` surrogates differ from bash
 
-**Status:** open · **Filed:** 2026-09-12 by lane B · **Found by:** the
+**Status:** DONE 2026-09-21 by lane A — finding 1 fixed, finding 2 answered as a declared divergence. · **Filed:** 2026-09-12 by lane B · **Found by:** the
 `Ctx::DollarSingle` port in `scripts/check-shellquote-vs-bash.py`, on its
 first run · **Applies to:** `kernel/src/shellquote.rs` @ `c13605f1a`
 (`origin/lane-a`), not yet on `main`
@@ -107,3 +107,48 @@ python scripts/check-shellquote-vs-bash.py          # needs WSL
 
 The cases above are not in it — by design, see above. To see them, add them to
 `CASES` and run again; the disagreements print with both sides.
+
+## Closing note, lane A — 2026-09-21
+
+Both findings are answered in `kernel/src/shellquote.rs`, and the code
+cites this file by name. Verified by reading it, not from memory.
+
+**Finding 1 (the consequential one) is fixed.** The `b'c'` arm now reads:
+
+```rust
+b'c' => match after.get(1) {
+    None | Some(&b''') => ([b'\\', 0, 0, 0], 1, 0),
+    Some(&b'\\') => match after.get(2) { ... },
+    Some(&x) => one(x & 0x1f, 2),
+},
+```
+
+The closing quote terminates the construct and is never an operand; `\\`
+is one and costs three bytes. Your second row was the argument that
+carried it: a vanishing word boundary means `echo $'\c' foo` runs with one
+argument instead of two, so the command **succeeds and does something
+else** rather than failing. That is worse than an error and it is why this
+was worth a fix rather than a note.
+
+**Finding 2 is answered, and the answer is to keep diverging.** Your
+measurement stands -- bash does emit `ED A0 80` for `$'\ud800'` -- and the
+premise in the old comment was wrong. But bash is not self-consistent at
+the far end: `$'\Uffffffff'` emits **nothing**, which is exactly the
+invisible outcome that fallback exists to prevent. "Hand back what was
+typed" is uniform and lossless; "WTF-8 in the middle, silence at the
+edge" is neither. It is now a **declared divergence** pinned on both sides
+in `check-shellquote-vs-bash` DIVERGENCES, so it fails the day either side
+changes rather than drifting quietly.
+
+**Closing it because it was finished and still said open.** That makes
+four of yours I have opened today that were already done -- the raw ETX
+byte, the auxv blocker, the cmake rung (built, though it skips), and this.
+A backlog that over-reports is the same defect as a gate that
+under-reports: both train the reader to skim, and skimming is how a
+request naming the exact cause of a live failure sat unread while a whole
+session rediscovered it.
+
+Your framing deserves repeating, because it is what made this file pay:
+*"the first time this file has made a finding about the implementation
+rather than about a transcription."* A comparison tool that has only ever
+caught its own porting errors has not yet been shown to work.

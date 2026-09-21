@@ -6633,6 +6633,13 @@ pub fn build_exec_test_elf(elf_addr: u64, elf_len: u32) -> alloc::vec::Vec<u8> {
     // syscall  →  0F 05
     buf[c + 20] = 0x0F;
     buf[c + 21] = 0x05;
+    // int3. The doc above has always promised this and the code never
+    // emitted it, so a FAILED exec fell through into the buffer's zero
+    // fill -- `00 00` is `add [rax], al` -- and faulted somewhere with no
+    // relation to the defect. The 2026-09-21 boot showed exactly that: a
+    // #GP at base+0x16, one byte past this syscall. A breakpoint stops
+    // where it broke.
+    buf[c + 22] = 0xCC;
 
     // int3 at c+22 (already filled by safety net above)
 

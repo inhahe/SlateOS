@@ -8319,18 +8319,54 @@ pub fn sys_process_exec_with_frame(frame: &mut super::entry::SyscallFrame) -> i6
     // identical from here -- and guessing between them is what cost six
     // rounds on the sibling bug.
     let elf_ptr = frame.arg0;
+    // Captured before the call: `inner` takes `&mut frame`. These three are
+    // the argv/envp registers a user stub may never have set -- until the
+    // ring-3 trampoline began zeroing registers they held kernel residue,
+    // and a nonzero arg2 makes `inner` read argv from it.
+    let argv_ptr_seen = frame.arg2;
+    let argv_len_seen = frame.arg3;
+    let envp_ptr_seen = frame.arg4;
     let rc = sys_process_exec_with_frame_inner(frame);
     if rc < 0 {
-        serial_println!(
-            "[exec] NATIVE exec FAILED -> {} (elf_ptr={:#x} elf_len={}) -- the bytes come \
+        // Count the probe firing so its control can ASSERT it fired.
+        // `test_exec_process_failure_is_reported` exists to license reading
+        // silence -- to prove an absent line means the syscall was not
+        // reached rather than that the probe is broken -- but it asserted
+        // only that the process became a Zombie, which happens whether exec
+        // was refused (the caller traps on int3) or wrongly succeeded (the
+        // target exits). So it reported OK without establishing its own
+        // premise. Same hole as the positive test had before 2026-09-21.
+        NATIVE_EXEC_FAIL_LOGS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        serial_println!(            "[exec] NATIVE exec FAILED -> {} (elf_ptr={:#x} elf_len={}) -- the bytes come \
              from the caller, so this is after posix read the file and before \
              the image was validated",
             rc,
             elf_ptr,
             elf_len
         );
+        serial_println!(
+            "[exec]   argv/envp regs as received: arg2(argv)={:#x} \
+             arg3(argv_len)={} arg4(envp)={:#x} -- a NONZERO argv with a \
+             garbage length is read as a user pointer and yields -101",
+            argv_ptr_seen,
+            argv_len_seen,
+            envp_ptr_seen
+        );
     }
     rc
+}
+
+/// How many times the native-exec failure probe has logged.
+///
+/// Read by `proc::spawn`'s exec-failure control, which must assert that the
+/// probe fired rather than infer it from the process having died -- death is
+/// ambiguous there, a logged line is not.
+pub static NATIVE_EXEC_FAIL_LOGS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Snapshot of [`NATIVE_EXEC_FAIL_LOGS`] for the control's before/after pair.
+pub fn native_exec_fail_logs() -> u64 {
+    NATIVE_EXEC_FAIL_LOGS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 fn sys_process_exec_with_frame_inner(frame: &mut super::entry::SyscallFrame) -> i64 {
@@ -14021,6 +14057,46 @@ pub fn sys_dns_resolve(args: &SyscallArgs) -> SyscallResult {
         Ok(s) => s,
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
     };
+
+    // Cache and hosts file first. `fs::nameservice` declares the resolve
+    // order as Cache, Files, Dns and holds `127.0.0.1 localhost` from
+    // `init_defaults`, but nothing consulted it -- so `localhost` went out
+    // on the wire and failed. Requested in
+    // requests/b-a-sys-dns-resolve-never-consults-the-hosts-table.md.
+    if let Ok(found) = crate::fs::nameservice::resolve(name) {
+        // No indexing and no arithmetic: `indexing_slicing` and
+        // `arithmetic_side_effects` are both active in this crate, and this
+        // shape needs neither allow.
+        let mut octets = [0u8; 4];
+        let mut fields = found.address.split('.');
+        let mut parsed = true;
+        for slot in &mut octets {
+            let Some(field) = fields.next() else {
+                parsed = false;
+                break;
+            };
+            match field.parse::<u8>() {
+                Ok(v) => *slot = v,
+                Err(_) => {
+                    parsed = false;
+                    break;
+                }
+            }
+        }
+        // The trailing `fields.next().is_none()` rejects `1.2.3.4.5`. An
+        // IPv6 hit -- the table's own `::1` -- fails the u8 parse and falls
+        // through to DNS rather than being truncated into four bytes, which
+        // would answer with a different address than the one found.
+        if parsed && fields.next().is_none() {
+            // SAFETY: `validate_user_write(args.arg2, 4)` succeeded above and
+            // nothing has slept since, unlike the DNS path below which
+            // re-validates after its network round-trip.
+            match unsafe { crate::mm::user::copy_to_user(octets.as_ptr(), args.arg2, 4) } {
+                Ok(()) => return SyscallResult::ok(0),
+                Err(e) => return SyscallResult::err(e),
+            }
+        }
+    }
 
     match crate::net::dns::resolve(name) {
         Ok(ip) => {

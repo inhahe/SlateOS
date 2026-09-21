@@ -165410,3 +165410,319 @@ sibling had none. The probe's first run found this in its first minute.
 
 Without the second, the same fix could regress and the rung would go on
 saying OK.
+
+### [A] `netdiag`'s DNS lookup is simulated and cannot fail, so the tool a person runs to diagnose name resolution always says it works -- 2026-09-21
+**Status:** OPEN (fix scoped below; deliberately not bundled into an unverified batch of 22)
+
+**In short:** the kernel has a network-diagnostics tool with a `dns_lookup`
+command. It does not look anything up. It returns `127.0.0.1` for the name
+`localhost` because that string is hardcoded in it, and invents an address
+for everything else. Someone typing it to find out why a name will not
+resolve is told the name resolves.
+
+**Measured:** `kernel/src/fs/netdiag.rs` `dns_lookup`:
+
+```rust
+    let resolved = if name == "localhost" {
+        String::from("127.0.0.1")
+    } else {
+        // Simulate resolved address.
+```
+
+It never calls `fs::nameservice::resolve` or `net::dns::resolve`. Reachable
+from `kshell.rs:81476`, i.e. a command a human types; `procfs` touches only
+`stats()`.
+
+**Two things follow, and the second is the sharper one.**
+
+1. The hardcoded `localhost -> 127.0.0.1` **duplicates the hosts table**,
+   which holds exactly that mapping. So the tool agrees with the real
+   resolver by coincidence of two constants, and would keep agreeing after
+   someone edited the hosts file.
+2. **It cannot fail.** A diagnostic whose purpose is to report a failure has
+   no path that reports one. `[5/10] DNS lookup: OK` in every boot log is a
+   test of the simulation.
+
+**Related, same file:** `[2/10] ping localhost: OK` is `ping("127.0.0.1", 4)`.
+The name is in the message and never in the call -- which is how this
+morning's `sys_dns_resolve` hosts-table fix nearly shipped unexercised
+behind a log line that appears to cover it.
+
+**The fix, and why it is not one line.** Point `dns_lookup` at
+`fs::nameservice::resolve` first and `net::dns::resolve` on `NotFound` --
+the order `nameservice` already declares. But that changes what the module
+self-test means, and the self-test must change with it:
+
+| rung | today | after |
+|---|---|---|
+| `[3/10] ping remote` | `ping("example.com")`, asserts latency 25000 | a real lookup of `example.com` has no DNS server in QEMU; must expect failure or skip |
+| `[5/10] DNS lookup` | asserts success on a simulation | assert `localhost` -> 127.0.0.1 from the **table**, and that an unknown name FAILS |
+
+That second row is the point of doing it at all: the rung has to gain a
+failing case, because a diagnostic that cannot report failure is the defect,
+not the missing lookup.
+
+**Why it is recorded rather than done now:** 22 changes are queued and
+unverified behind a running boot, and this one alters a self-test's
+expectations -- the exact kind of change that turns one red boot into an
+ambiguous one. It is the first thing to pick up once the batch is green.
+
+### [A] Seven security-shaped kernel modules are reachable only from `kshell`, so nothing in the system enforces with any of them -- 2026-09-21
+**Status:** OPEN -- **observation, not a bug report.** No single module is broken; the layer is unconnected. Extends the path-keyed entry above, which turns out to be a symptom of this.
+
+**In short:** the kernel contains a set of modules that decide whether
+something is allowed -- seals, security policy, per-path capabilities, file
+locks, disk-encryption unlock, authentication. All are implemented and
+tested, and several report statistics into `/proc`. Not one of them is
+consulted by any code that actually does the thing it would be guarding.
+The only way to reach them is to type a command into the kernel shell.
+
+**Measured, one grep per row: callers outside the module's own file.**
+
+| module | entry point | reached from |
+|---|---|---|
+| `fs/sealing.rs` | `check_seals` | `kshell` only |
+| `fs/secpolicy.rs` | `check_access` | `kshell` only |
+| `fs/capsettings.rs` | `check_access(uid, path)` | `kshell` only |
+| `fs/diskencrypt.rs` | `unlock_volume(id, _passphrase)` | `kshell` only |
+| `fs/authbroker.rs` | `authenticate(principal, method)` | `kshell` only |
+| `fs/reclock.rs` | record locks | a self-test, and `release_all` on process exit. **Nothing acquires** |
+| `fs/vfs.rs` | `flock_resolved` | reachable, but nothing in-tree takes an advisory lock |
+
+**Note the signature in row 4.** `unlock_volume(id: u32, _passphrase: &str)`
+-- the parameter is underscore-prefixed, so the passphrase is not merely
+simulated, it is structurally unused. The comment says
+*"Simulated passphrase check (in real implementation, derive key and
+verify)"*. That is honest, and it is one `pub fn` away from a caller who
+would reasonably assume it checks.
+
+**Why this is one entry and not seven.** Every one of these modules was
+filed -- by me, this week -- as low severity *because nothing relies on it
+yet*. Written seven times, that reads as seven small risks. Written once, it
+reads as what it is: **a security layer that is built and not wired in**,
+whose individual defects (path-keying, simulated checks, counters that can
+only read zero) are all held harmless by the same single fact. The first
+commit that connects any one of them removes that protection for that
+module only, and it will be a commit about wiring, so its diff will not
+mention the defect it activates.
+
+**The `/proc` consequence, already recorded for two of these (dd-942).** A
+reader who sees `denied: 0` concludes *nothing was denied*. The truth is
+*nothing asked*. That reading is available today for `sealing` and
+`secpolicy`; the others export statistics of the same shape.
+
+**What I am NOT claiming.** That any of this is a bug. A layer built ahead
+of its callers is a legitimate way to build an OS, and the comments are
+candid about what is simulated. The claim is narrower and worth making:
+**the project does not currently have a place where that staging is
+written down**, so each module reads as finished when looked at alone, and
+I have now twice re-derived "oh, nothing calls this" from scratch while
+assessing severity.
+
+**Suggested next step, for the operator rather than for me:** decide whether
+this layer is staged-for-later or believed-to-be-live. Those need different
+things -- a tracking list in the first case, wiring work in the second --
+and it is not a call I should make by reading greps.
+
+### [A] The path-keyed table class is five, not three -- and every one of them is low-severity for the same single reason -- 2026-09-21
+**Status:** OPEN (no code change; this corrects the scope and the severity reasoning of the entries above)
+
+**In short:** several kernel tables that decide whether something may be
+touched remember the file by *name* instead of by the file itself, so a
+second name for the same file slips past them. Three were known. There are
+five. More importantly, the reason all five were filed as low severity is
+not five separate reasons -- it is one, and it can stop being true in a
+single commit that looks unrelated.
+
+**Two more instances, same shape:**
+
+| table | key | what it answers |
+|---|---|---|
+| `fs/reclock.rs` | `RecordLock { path: String }` | byte-range record locks |
+| `fs/capsettings.rs` | `PathRequirement { path: String }` | `check_access(uid, path)` -- may this user reach this path |
+
+`capsettings` is the one to watch: the others are *advisory* locks, which
+only bind programs that cooperate, but this one is shaped like a permission
+check. A hard link would walk past it.
+
+**The single fact holding all five up.** Each entry says its severity is low
+because nothing relies on the table yet. That is the *same* observation five
+times, and it is measurable rather than assumed:
+
+| table | only callers outside its own module |
+|---|---|
+| `capsettings::check_access` | `kshell.rs` -- a command a human types. **No enforcement path.** |
+| `reclock` | `main.rs` self-test, and `pcb.rs` `release_all(pid)` on exit. **Nothing acquires.** |
+| `sealing::check_seals` | `kshell` (recorded earlier today) |
+| `secpolicy::check_access` | `kshell` (recorded earlier today) |
+| `vfs::flock_resolved` | reachable, but nothing in-tree takes advisory locks |
+
+So the mitigation is not "these are minor bugs". It is **"no enforcement
+path consults any of them"** -- one condition, shared. The first commit that
+wires *any* of these into a real check makes that table's defect live, and
+that commit will be about wiring, not about keying, so nothing in its diff
+will mention the bug it activates.
+
+**The proposed rule does not mechanize, and here is the measurement.** The
+flock entry suggests a standing rule instead of three fixes. I tried to
+build it. `kernel/src` has **80** path-comparison lookup sites across **25**
+files, and most are correct: `devfs`, `cgroupfs`, `index`, `fontmgr` are
+namespaces, where the name *is* the thing being identified. Filtering to
+files that also mention a permission error narrows 25 to 8, which is better
+but still mostly noise. The distinguishing feature is *what question the
+table answers*, and no regex sees that.
+
+Recorded so the next person does not rediscover it: this class wants five
+individual fixes keyed on `FileId`, plus a note on each table, not a gate.
+Compare the ring-3 register gate written the same day, which *was* worth
+building -- there the good sites scored 6 of 6 and the bad one 0 of 6, with
+nothing in between. A rule is worth mechanizing when the population
+separates cleanly, and this one does not.
+
+### [A] Six spawn self-tests asserted that a process DIED in order to prove it LIVED -- swept and closed -- 2026-09-21
+**Status:** FIXED (all six). Recorded for the shape, and to stop the next person re-running my scan and reading 16 as 16 defects.
+
+**In short:** a group of kernel self-tests checked only that a test program
+had finished, and concluded from that it had done its job. But a program
+that crashes has also finished. So each of these tests printed a confident
+success line for the one failure it was written to catch.
+
+| test | claimed | why `Zombie` could not show it |
+|---|---|---|
+| Test 4 faulting process | a null write faulted and the kernel survived | if the fault never fired, the program reaches `SYS_EXIT(0)` -- also a zombie |
+| Test 5 stack growth | growth past the initial allocation worked | if it failed, an unresolvable `#PF` kills it -- also a zombie |
+| Test 6 exec | the image was replaced | a crashed caller is a zombie. **This one was live**: every exec was failing with -101 and the test was green |
+| Test 6b exec-failure control | the failure probe fired | asserted termination, never that the probe logged |
+| Test 8 SEH exit | the handler ran | its own doc says *"Without SEH, the page fault would kill the process"* -- four lines above *"becomes a zombie -- confirming the handler ran"* |
+| Test 8b SEH resume | execution resumed past `ud2` | dying on the `ud2` is what happens if SEH does nothing |
+
+**The class is generational, which is the useful part.** It is not scattered
+at random: it is exactly the original numbered `Test 4..8` core spawn tests.
+Everything written later -- `self_test_fastpy_slateos_forkexec` (which
+discriminates exit codes 100/102/110/111 with a distinct message each),
+`self_test_linux_execveat`, the tcc and make_cc harnesses, the minishell
+suite -- already checks exit codes. So the convention improved and the first
+generation was never revisited. That is worth knowing because it predicts
+where else to look: the oldest tests in any file, not a uniform sample.
+
+**The scan that found it has a high false-positive rate, and the number
+moves with its window.** Do not re-run it and act on the count:
+
+| window around the `Zombie` assertion | flagged |
+|---|---|
+| +-12 lines | 23 |
+| +-20 lines | 17 |
+| +-30 lines | 16 |
+
+Of ~16 flagged, only **6** were real. The rest check the exit code somewhere
+the regex cannot follow: `self_test_linux_execveat` tests
+`exit_nf != Some(EXEC_FAIL)` thirteen lines down; the minishell suite passes
+its code to a `diag(ec1)` helper, so the string `exit_code` never appears
+near the assertion at all. A grep for `exit_code` cannot see a check made
+through a variable or a function, and I twice concluded a test was broken
+before reading it.
+
+**The rule that would have prevented all six:** a test must assert an
+outcome that its failure mode cannot also produce. "The process ended" is
+almost never that, because ending is what both success and every crash have
+in common. Where the expected value is known, assert it exactly; where it
+is not -- Test 4's kill code is set by no constant this tree names -- assert
+the negation of success rather than inventing a value.
+
+### [A] A freshly spawned process enters ring 3 with undefined registers; `rdx` holds 0x1B, which is the seven-round `exec` bug -- 2026-09-21
+**Status:** ROOT CAUSE CONFIRMED by disassembly (fix written, gate written). Supersedes the fragmentation/address-validation theories below.
+
+**In short:** when the kernel starts a new program it jumps into it without
+clearing the CPU's scratch registers, so the program begins with leftover
+kernel values in them. One of those leftovers, 27, was then read by the
+kernel as the address of a program's argument list, which is why starting a
+program via `exec` had been failing with a meaningless address error for
+seven rounds of investigation.
+
+**The proof is a disassembly of the exact binary that produced the failure**
+(`target/x86_64-unknown-none/release/kernel`, built 12:25:42, whose 12:31
+serial log holds the `-101`). The end of `userspace_entry_trampoline`:
+
+```
+  movl  $0x1b,  %edx        ; rdx = 0x1B  = USER_DS selector
+  movl  $0x202, %esi        ; rsi = 0x202 = RFLAGS
+  movl  $0x23,  %edi        ; rdi = 0x23  = USER_CS selector
+  pushq %rdx / %rax / %rsi / %rdi / %rcx    ; the five IRETQ words
+  iretq                     ; <-- nothing cleared, nothing restored
+```
+
+**The chain, now with no inferred link left in it:**
+
+| step | fact |
+|---|---|
+| 1 | the trampoline loads `0x1B` into `edx` to push as SS, and never clears it |
+| 2 | so a fresh process's first instruction runs with `rdx = 0x1B` |
+| 3 | `test_exec_process`'s stub sets `rax`, `rdi`, `rsi` -- **not** `rdx` |
+| 4 | `sys_process_exec_with_frame_inner`: `argv_len = if arg2 == 0 { 0 } else { arg3 }`; `arg2` **is** `rdx` = `0x1B`, nonzero |
+| 5 | so it calls `read_user_vec(0x1B, arg3, ARGV_MAX)` -- address **27** |
+| 6 | 27 is in the unmapped first page -> `InvalidAddress` -> **-101** |
+
+Everything observed now has a cause. `elf_len=136` was always right, the
+range check on `arg0` always passed, `0x50_0000_0000` was always far below
+`USER_SPACE_END = 2^47`, and the mapping was always present -- because **the
+ELF was never the problem**. The failing read was of `argv`, an argument the
+error code never mentions and the caller never set.
+
+**A claim of mine from earlier today, retracted.** I wrote that the leak
+handed ring 3 *"a kernel heap pointer in `rdi`"*, reasoning that `info_raw`
+arrives in `rdi` per the SysV ABI and that nothing overwrites it. The
+disassembly shows `rdi` **is** overwritten -- with `0x23`. The class was
+right and the register was wrong, and I had asserted the register.
+
+The leak is real but it is somewhere else. At the `iretq`:
+
+| register | value at ring-3 entry | severity |
+|---|---|---|
+| `rbp` | **a kernel stack address** -- `pushq %rbp; movq %rsp, %rbp` with no `leave` before the `iretq` | the actual leak: defeats kernel-stack address randomisation |
+| `rdx`, `rsi`, `rdi` | `0x1B`, `0x202`, `0x23` | harmless as data, but see the chain above -- `rdx` is what broke `exec` |
+| `rax`, `rcx` | the process's own `rsp` and entry point | harmless, it knows both |
+| `rbx`, `r8`-`r15` | untouched by this function: whatever the scheduler left | unaudited, and unauditable without fixing it |
+
+So the security finding stands and its specifics changed. That is the third
+time today that reading the artefact beat reasoning from a convention, and
+the second time I published the reasoning first.
+
+**The FPU surface is already clean, which is the strongest evidence this
+was an oversight rather than a decision.** I checked the obvious sibling
+leak -- x87/SSE state, where `xmm` registers are 128 bits wide and
+optimised `memcpy` runs through them, so kernel bytes could ride out in
+them. It is handled: every task-construction site in `sched/task.rs`
+(962, 1048, 1202) assigns `FpuState::new_default_boxed()`, and
+`sched/fpu.rs` exists largely to make that allocation cheap. So the
+kernel already takes deliberate care to hand a new task clean floating-
+point state, and handed it dirty general-purpose registers beside it.
+
+**A third consequence, latent rather than live.** System V x86-64 says
+`rdx` at process entry holds a function pointer to register with
+`atexit`, or zero. `0x1B` is neither. It does no harm *today* only
+because our `__libc_start_main` names that parameter `_rtld_fini` and
+never calls it -- verified: the identifier appears in the signature and
+nowhere in the body. A **conforming** runtime, such as a real glibc or
+musl binary ported in later, calls `(*rtld_fini)()` on exit and would
+jump to address 27. So the safety of this is currently resting on a
+parameter staying unused, which is not a property anyone is maintaining
+on purpose.
+
+That also settles the VALUE, not just the need: zero is not merely *a*
+defined setting for `rdx`, it is the one the ABI specifies for "no
+function to register".
+
+**The fix, and why zero is not a matter of taste.** All four ring-3 entries
+define this boundary as their semantics demand: `fork.rs` and
+`thread_clone.rs` **restore** the saved set, because a child inherits;
+`sys_process_exec_with_frame_inner` **zeroes** `arg0..arg5`, `rbx`, `rbp`,
+`r12..r15`, because a new image inherits nothing. Fresh spawn is the fourth
+new-image case and the only one defining nothing. So zeroing is what the
+sibling path with identical semantics already does 60 lines away -- I had
+reached for Linux's `start_thread` as the precedent and needn't have.
+
+**Standing gate:** `scripts/check-ring3-entry-regs.py` requires every
+`iretq`/`sysretq` reaching ring 3 to define all six syscall-argument
+registers. Measured before writing it: the six correct sites define 6 of 6,
+`spawn.rs` defined 0 of 6, and nothing sits in between, so the rule needs no
+threshold. Run against the tree it named `spawn.rs:2954` and nothing else.

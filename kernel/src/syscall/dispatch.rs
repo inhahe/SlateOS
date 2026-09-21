@@ -1027,6 +1027,79 @@ pub fn self_test() -> KernelResult<()> {
 /// mount, "root is not writable yet" is a fact about the boot stage; after it,
 /// it is a defect, and answering a defect with a SKIP is how these two came to
 /// spend their whole lives unrun.
+/// `SYS_DNS_RESOLVE` must consult the hosts table before the network.
+///
+/// `fs::nameservice::init_defaults` installs `127.0.0.1 localhost loopback`
+/// and `::1 localhost ip6-localhost`, and declares a resolve order of Cache,
+/// Files, Dns. Until 2026-09-21 this syscall called `net::dns::resolve`
+/// directly, so `localhost` went out on the wire and failed.
+///
+/// Nothing else in the boot covers this. `[2/10] ping localhost: OK` is
+/// `ping("127.0.0.1", 4)` -- the name appears in the message and never in
+/// the call.
+fn test_dispatch_dns_hosts() -> KernelResult<()> {
+    // (name, expected) -- None means the lookup MUST NOT answer in IPv4.
+    let cases: [(&[u8], Option<[u8; 4]>); 3] = [
+        (b"localhost", Some([127, 0, 0, 1])),
+        (b"loopback", Some([127, 0, 0, 1])),
+        // Alias of the `::1` entry. This syscall writes four bytes, so a
+        // truncated answer would name a different host than the one found.
+        (b"ip6-localhost", None),
+    ];
+
+    for (name, expect) in cases {
+        let mut out = [0u8; 4];
+        let args = SyscallArgs {
+            arg0: name.as_ptr() as u64,
+            arg1: name.len() as u64,
+            arg2: out.as_mut_ptr() as u64,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let r = dispatch(SYS_DNS_RESOLVE, &args);
+        match expect {
+            Some(want) => {
+                if r.value != 0 {
+                    serial_println!(
+                        "[dispatch]   FAIL: SYS_DNS_RESOLVE({:?}) returned {}; the hosts table was not consulted",
+                        core::str::from_utf8(name).unwrap_or("?"),
+                        r.value
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                if out != want {
+                    serial_println!(
+                        "[dispatch]   FAIL: {:?} resolved to {:?}, expected {:?}",
+                        core::str::from_utf8(name).unwrap_or("?"),
+                        out,
+                        want
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            None => {
+                if r.value == 0 {
+                    serial_println!(
+                        "[dispatch]   FAIL: {:?} is an IPv6 hosts entry but answered {:?} in four bytes",
+                        core::str::from_utf8(name).unwrap_or("?"),
+                        out
+                    );
+                    serial_println!(
+                        "[dispatch]          a truncated address resolves a DIFFERENT host than the one found"
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+        }
+    }
+
+    serial_println!(
+        "[dispatch]   SYS_DNS_RESOLVE honours the hosts table (localhost, alias, IPv6 refused): OK"
+    );
+    Ok(())
+}
+
 pub fn self_test_fs() -> KernelResult<()> {
     serial_println!("[syscall] Running post-mount dispatch self-test...");
 
@@ -1035,6 +1108,7 @@ pub fn self_test_fs() -> KernelResult<()> {
     test_dispatch_chroot()?;
     test_dispatch_itimer()?;
     test_dispatch_uts_name()?;
+    test_dispatch_dns_hosts()?;
 
     serial_println!("[syscall] Post-mount dispatch self-test PASSED");
     Ok(())

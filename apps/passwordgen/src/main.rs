@@ -1252,6 +1252,43 @@ pub enum GenKind {
     Bulk,
 }
 
+/// The keys this program answers, raised by `F1`.
+///
+/// `?` is not a second way in: on the analyser tab every printable key is part
+/// of the password being measured, so a `?` has somewhere to go -- the
+/// `apps/spreadsheet` case in design-decisions 863.
+///
+/// The five generator letters name what they make, which is the only reason
+/// they are letters rather than a menu.
+///
+/// **The option keys are deliberately not here.** Each `OptionRow` prints its
+/// own keystroke in the panel and `OptionRow::from_key` parses that printed
+/// label to decide the match -- one string, drawn and matched, with
+/// `every_option_row_names_a_keystroke_that_parses` and
+/// `every_option_row_answers_its_key_and_the_panel_shows_it` already holding
+/// it. Copying those keys into this list would be the third copy that
+/// arrangement exists to avoid.
+///
+/// An earlier draft of this list carried a `Up / Down` row for "move through
+/// the options". This app binds neither key; the row was written from a glance
+/// at `toggle_option` and was pure invention.
+/// `every_advertised_key_does_something` caught it on its first run, which is
+/// the guard working on the author rather than on the app.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("1-3", "Generator, analyser, history"),
+    ("Tab", "The next tab"),
+    ("P", "A password"),
+    ("W", "A passphrase"),
+    ("N", "A PIN"),
+    ("R", "A pronounceable one"),
+    ("B", "A batch of them"),
+    ("Space / Enter", "Another of the same kind"),
+    ("Left / Right", "Shorter / longer"),
+    ("C", "Clear the history"),
+    ("Ctrl+E", "Export"),
+    ("F1", "This list"),
+];
+
 pub struct PasswordApp {
     pub password_opts: PasswordOptions,
     pub passphrase_opts: PassphraseOptions,
@@ -1293,6 +1330,8 @@ pub struct PasswordApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 /// What the user is told when there is no entropy to generate from.
@@ -1326,6 +1365,7 @@ impl PasswordApp {
 
     fn with_random(rng: AppRandom) -> Self {
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             password_opts: PasswordOptions::default(),
             passphrase_opts: PassphraseOptions::default(),
@@ -1589,6 +1629,22 @@ impl PasswordApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
+        // Before the analyser branch, for the same reason Ctrl+E is: on that
+        // tab every printable key is the password being measured, and `F1` is
+        // not printable.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal. Letting keys through would mean generating a password the
+            // reader cannot see, over the one they were looking at.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         // Before the analyser branch: on that tab every printable key is the
         // password being measured, and Ctrl+E must not be typed into it.
         if key.modifiers.ctrl && key.key == Key::E {
@@ -1839,6 +1895,17 @@ impl PasswordApp {
         let right_x = LEFT_PANEL_WIDTH;
         let right_w = width - LEFT_PANEL_WIDTH;
         self.render_right_panel(&mut cmds, right_x, content_y, right_w, content_h);
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         cmds
     }
@@ -2484,6 +2551,96 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    /// Every string the window draws, joined. (The other `drawn` in this
+    /// module takes `&mut` and a different size; this one is for the card.)
+    fn card_text(app: &PasswordApp) -> String {
+        app.render_commands(1100.0, 760.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// Seeded rather than `new`, because the system CSPRNG is unavailable in a
+    /// test process and the generators then *refuse* -- documented behaviour,
+    /// and it would read here as five dead letters.
+    ///
+    /// `C` clears the history and is refused with an empty one, so the fixture
+    /// generates first.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                // Two tabs, because `set_tab` deliberately answers `Ignored`
+                // for the tab you are already on -- so no single state can
+                // answer all three digits, and these two between them do.
+                let answered = [ActiveTab::Generator, ActiveTab::History]
+                    .into_iter()
+                    .any(|tab| {
+                        let mut app = seeded_app();
+                        app.handle_event(&press(Key::P));
+                        app.active_tab = tab;
+                        app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                    });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the half that matters: `P` behind the card must not
+    /// replace the password on screen, and asserting only that it does not
+    /// would pass on an app that had lost `P` altogether.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::P));
+        assert!(
+            !card_text(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = card_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let before = app.current_password.clone();
+        assert!(
+            !before.is_empty(),
+            "the fixture must have generated something"
+        );
+        app.handle_event(&press(Key::P));
+        assert_eq!(
+            app.current_password, before,
+            "P generated a new password through the shortcut card"
+        );
+
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !card_text(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+
+        app.handle_event(&press(Key::P));
+        assert_ne!(
+            app.current_password, before,
+            "control: P does nothing even with the card down"
+        );
     }
 
     fn typed(c: char) -> Event {

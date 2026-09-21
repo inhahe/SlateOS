@@ -638,8 +638,27 @@ def main(argv: list[str]) -> int:
         )
         for crate_name, field in stale:
             print(f"  {crate_name}.{field}")
-        print("Remove or rewrite them: an answer about code that has changed "
-              "is not an answer.")
+        # Three reasons a line goes stale and they want opposite actions,
+        # so this does not say "remove them". Lane A spent a morning on the
+        # same distinction: nine doc links naming renamed-away functions,
+        # and two could not be repaired by substituting the successor --
+        # the sentence around them described a technique that had been
+        # deleted, not renamed, so the mechanical fix would have turned a
+        # dead link into a live falsehood. **Actionable is not the same as
+        # mechanical**, and the mechanical answer is the one that looks
+        # green.
+        print("  Why it is stale decides what to do, and the three")
+        print("  answers differ:")
+        print("    fixed   -- the field has a writer now. Delete the")
+        print("               line; the reason it carried is in the")
+        print("               commit that fixed it.")
+        print("    renamed -- still frozen under another name.")
+        print("               Re-point the line. Deleting it loses the")
+        print("               reasoning, and the next run re-offers the")
+        print("               row with nothing recorded against it.")
+        print("    gone    -- the field was deleted. Delete the line,")
+        print("               and check its reason did not describe")
+        print("               something that outlived it.")
         return 1
     return 0
 

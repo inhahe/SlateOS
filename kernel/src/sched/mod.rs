@@ -10612,71 +10612,134 @@ fn test_sleep_ns() -> KernelResult<()> {
         SLEEPER_DONE.store(1, Ordering::Release);
     }
 
-    SLEEP_START.store(0, Ordering::Relaxed);
-    SLEEP_END.store(0, Ordering::Relaxed);
-    SLEEPER_DONE.store(0, Ordering::Relaxed);
+    // A 20ms sleep measured 988ms once, on 2026-09-18. The only kernel change
+    // between that boot and the green one before it was `//!` comment text in
+    // four `fs/` modules, which cannot alter runtime timing; across the 19
+    // boots before it this same measurement ran 20.8ms..32.8ms (median 22.1),
+    // so 988ms was 30x the observed maximum. Two `cargo` builds were running
+    // on the host at the time, and the guest clock follows host wall time
+    // (`boot-test.sh` passes neither `-icount` nor `-rtc clock=vm`), so a host
+    // stall inflates this number directly -- and in-guest it is
+    // indistinguishable from a timer that never fired.
+    //
+    // So the fix is a retry, NOT a looser ceiling. Raising the bound would
+    // trade away the one thing this test detects, and dd-951 is the rule it
+    // would break: a baseline that relaxes a signal needs that signal's
+    // readers enumerated first, and this signal has exactly one reader -- the
+    // assertion below. A one-off host stall does not repeat; a timer that is
+    // not firing overshoots every attempt. Panic only when all of them do.
+    const ATTEMPTS: usize = 3;
+    const CEILING_NS: u64 = 500_000_000;
+    const FLOOR_NS: u64 = 5_000_000;
 
-    let pml4 = crate::mm::page_table::active_pml4_phys();
-    let _id = spawn(
-        b"test-sleep-ns",
-        task::DEFAULT_PRIORITY,
-        sleeper_task,
-        0,
-        pml4,
-    )?;
+    let mut measured = [0_u64; ATTEMPTS];
+    let mut passed_on: Option<usize> = None;
 
-    // Wait for the sleeper to complete.  Use a spin loop that does NOT
-    // hold the scheduler lock constantly — the hrtimer callback calls
-    // try_wake() from the timer ISR, and if that fails (SCHED lock held
-    // by the interrupted yield_now), the deferred wake mechanism picks
-    // it up on the next schedule_inner call.
-    let deadline = crate::apic::tick_count().saturating_add(50);
-    loop {
-        if SLEEPER_DONE.load(Ordering::Acquire) != 0 {
+    for attempt in 0..ATTEMPTS {
+        let nth = attempt.saturating_add(1);
+        SLEEP_START.store(0, Ordering::Relaxed);
+        SLEEP_END.store(0, Ordering::Relaxed);
+        SLEEPER_DONE.store(0, Ordering::Relaxed);
+
+        let pml4 = crate::mm::page_table::active_pml4_phys();
+        let _id = spawn(
+            b"test-sleep-ns",
+            task::DEFAULT_PRIORITY,
+            sleeper_task,
+            0,
+            pml4,
+        )?;
+
+        // Wait for the sleeper to complete.  Use a spin loop that does NOT
+        // hold the scheduler lock constantly -- the hrtimer callback calls
+        // try_wake() from the timer ISR, and if that fails (SCHED lock held
+        // by the interrupted yield_now), the deferred wake mechanism picks
+        // it up on the next schedule_inner call.
+        //
+        // The budget is real time, not APIC ticks. The previous version used
+        // `tick_count() + 50` while its panic message called that "500ms" --
+        // two different units, equal only if a tick is exactly 10ms. On the
+        // 988ms boot the tick budget outlasted the overshoot, so the guard
+        // that was supposed to cap this wait never fired, and its message
+        // would have been wrong if it had. `now_ns()` reads the HPET or the
+        // TSC, both free-running, so this deadline still expires even when
+        // the APIC timer is precisely what is broken.
+        let wait_deadline_ns = crate::hrtimer::now_ns().saturating_add(2_000_000_000);
+        loop {
+            if SLEEPER_DONE.load(Ordering::Acquire) != 0 {
+                break;
+            }
+            if crate::hrtimer::now_ns() >= wait_deadline_ns {
+                break;
+            }
+            // Spin without holding any locks -- allows timer ISR to fire
+            // and process hrtimers.  Yield periodically to give the sleeper
+            // CPU time after it's woken.
+            for _ in 0..1000 {
+                core::hint::spin_loop();
+            }
+            yield_now();
+        }
+
+        assert!(
+            SLEEPER_DONE.load(Ordering::Acquire) != 0,
+            "sleep_ns: sleeper task did not complete within 2s of real time (attempt {} of {})",
+            nth,
+            ATTEMPTS,
+        );
+
+        let start = SLEEP_START.load(Ordering::Acquire);
+        let end = SLEEP_END.load(Ordering::Acquire);
+        assert!(end > start, "sleep_ns: end time not after start");
+
+        let elapsed_ns = end.saturating_sub(start);
+        if let Some(slot) = measured.get_mut(attempt) {
+            *slot = elapsed_ns;
+        }
+
+        // A sleep that returns too EARLY is a correctness bug and host load
+        // cannot cause it, so it fails on the first attempt with no retry.
+        assert!(
+            elapsed_ns >= FLOOR_NS,
+            "sleep_ns too short: {}ns (expected >= 5ms)",
+            elapsed_ns,
+        );
+
+        if elapsed_ns <= CEILING_NS {
+            passed_on = Some(nth);
             break;
         }
-        if crate::apic::tick_count() >= deadline {
-            break;
-        }
-        // Spin without holding any locks — allows timer ISR to fire
-        // and process hrtimers.  Yield periodically to give the sleeper
-        // CPU time after it's woken.
-        for _ in 0..1000 {
-            core::hint::spin_loop();
-        }
-        yield_now();
+
+        serial_println!(
+            "[sched]   sleep_ns: attempt {} of {} overshot ({}.{:03}ms for a 20ms request); retrying, because a host stall does not repeat and a dead timer does",
+            nth,
+            ATTEMPTS,
+            elapsed_ns / 1_000_000,
+            (elapsed_ns % 1_000_000) / 1000,
+        );
+        reap_dead_tasks();
     }
 
-    let done = SLEEPER_DONE.load(Ordering::Acquire);
-    assert!(
-        done != 0,
-        "sleep_ns: sleeper task did not complete within 500ms"
-    );
+    let Some(nth) = passed_on else {
+        panic!(
+            "sleep_ns too long on all {} attempts: {}ns, {}ns, {}ns (expected <= 500ms for a 20ms request; every attempt overshooting means the timer is not firing, where one would have meant the host stalled)",
+            ATTEMPTS,
+            measured.first().copied().unwrap_or(0),
+            measured.get(1).copied().unwrap_or(0),
+            measured.get(2).copied().unwrap_or(0),
+        );
+    };
 
-    let start = SLEEP_START.load(Ordering::Acquire);
-    let end = SLEEP_END.load(Ordering::Acquire);
-    assert!(end > start, "sleep_ns: end time not after start");
-
-    let elapsed_ns = end.saturating_sub(start);
-    // We requested 20ms (20_000_000 ns).
-    // With hrtimer + tick shortening, actual should be >= 10ms and <= 200ms.
-    // (Lower bound accounts for timer granularity; upper bound for QEMU
-    // TCG scheduling delays where virtual timer ticks may bunch.)
-    assert!(
-        elapsed_ns >= 5_000_000,
-        "sleep_ns too short: {}ns (expected >= 5ms)",
-        elapsed_ns,
-    );
-    assert!(
-        elapsed_ns <= 500_000_000,
-        "sleep_ns too long: {}ns (expected <= 500ms, indicates timer didn't fire)",
-        elapsed_ns,
-    );
-
+    // Report which attempt carried the verdict even on success: "PASSED"
+    // first time and "PASSED" after a retry are different facts about the
+    // host, and dd-942 is about precisely the verdict that hides which.
+    let elapsed_ns = measured.get(nth.saturating_sub(1)).copied().unwrap_or(0);
     serial_println!(
-        "[sched]   sleep_ns: PASSED (slept {}.{:03}ms for 20ms request)",
+        "[sched]   sleep_ns: PASSED (slept {}.{:03}ms for 20ms request, attempt {} of {})",
         elapsed_ns / 1_000_000,
         (elapsed_ns % 1_000_000) / 1000,
+        nth,
+        ATTEMPTS,
     );
 
     reap_dead_tasks();

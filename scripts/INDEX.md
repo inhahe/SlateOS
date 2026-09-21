@@ -183,6 +183,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/flake-hunt.sh` | flake-hunt.sh — run a crate's test suite N times and report only the runs |
 | `scripts/fold-diff.sh` | Differential test: our fold against GNU fold. |
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
+| `scripts/frozen-flag-survey.py` | Boolean fields an app reads and can never change. |
 | `scripts/gen-chmod-fixture.sh` | Measure GNU chmod's answer for a cross product of mode strings, starting |
 | `scripts/gen-human-fixture.sh` | Regenerate userspace/coreutils/tests/data/human-gnu.txt — the table of |
 | `scripts/gen-oils-bind-tables.py` | Regenerate `userspace/oils/src/bind_tables.rs` from the reference bash. |
@@ -202,6 +203,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/join-probe.py` | Ad-hoc measurement of GNU `join`. Not part of the build; kept only so the |
 | `scripts/kasan-build.sh` | kasan-build.sh — build the kernel with LLVM's KernelAddressSanitizer. |
 | `scripts/kasan-check-preshadow.py` | kasan-check-preshadow.py — prove the pre-shadow window is uninstrumented. |
+| `scripts/key-survey.py` | Which apps answer keys they never name on screen? |
 | `scripts/ki_archive.py` | Move lane B's resolved entries from `known-issues.md` into the archive. |
 | `scripts/ki_dupes.py` | Detect entries that exist in BOTH `known-issues.md` and its resolved archive. |
 | `scripts/ki_split.py` | Fence-aware structural scanner for `known-issues.md`. |
@@ -391,4 +393,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_381 scripts._
+_383 scripts._

@@ -3548,7 +3548,42 @@ check_lane_signals
 # another lane, and charging that to the gates would make a contended host look
 # like an expensive checker.  It shows up in `script_seconds` minus the three
 # phases, which is where an unexplained wait belongs.
+# --- build-contention notice (advisory only; never blocks) ----------------
+#
+# Three lanes share one 12-core box. The boot lock serialises QEMU between
+# them but NOT compilation, so another lane's `cargo test --workspace` runs
+# straight through this script's gates. On 2026-09-18 that, plus my own
+# concurrent builds, took the gate phase from a 2701s reference to 5326s and
+# the run died at its timeout with the kernel still compiling.
+#
+# This does not prevent any of that. It makes it legible, which is the
+# actual injury -- a slow phase with no explanation costs hours of
+# investigation, and one printed line turns it into a fact.
+#
+# It deliberately does NOT try to say whose processes they are. `ps -W`
+# reports an exe path and no working directory, so a cargo process cannot be
+# attributed to a lane, and a confident wrong attribution is worse than an
+# honest count. It does not need to: this is called only at instants when
+# THIS run owns no cargo -- before its first gate, and after the build has
+# exited -- so a non-zero count is somebody else by construction.
+contention_notice() {
+    _when="$1"
+    _n=$(ps -W 2>/dev/null | grep -ciE 'cargo\.exe|rustc\.exe' || true)
+    # `grep -c` exits 1 on zero matches, which under `set -e` would abort a
+    # boot over an idle machine. `|| true` is load-bearing, not defensive.
+    case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
+    if [ "$_n" -gt 0 ]; then
+        echo "=== NOTE: $_n cargo/rustc process(es) running at $_when ==="
+        echo "    This run owns none at this point, so they belong to another"
+        echo "    lane. Expect this phase to take longer than the reference"
+        echo "    timings; it is contention, not a regression. (Advisory only.)"
+    else
+        echo "=== box quiet at $_when: no other lane is building ==="
+    fi
+}
+
 GATES_START_EPOCH="$(date +%s)"
+contention_notice "the start of the gate phase"
 
 # Per-gate wall-clock, appended by `run_checker` (scripts/run-checker.sh) as one
 # `<label>\t<seconds>\t<exit>` row per gate.  Read back at the end of the phase.
@@ -7089,9 +7124,15 @@ check_python_suites() {
         # would cost is this loop's readable shape: it echoes everything a
         # checker prints, and forty-odd suites' full output in place of the
         # one-line-per-suite table below is a worse log, not a better one.
+        # Per-suite wall clock. Two boots died inside this phase at their
+        # timeout with nothing here reporting a duration, so the only
+        # evidence available afterwards was how far the alphabet got. One
+        # number per suite turns that into an attribution.
+        suite_start=$(date +%s)
         out="$(PYTHONIOENCODING=:replace "$py" -u "$f" 2>&1)" && rc=0 || rc=$?
+        suite_secs=$(( $(date +%s) - suite_start ))
         if [ "$rc" -eq 0 ]; then
-            printf '    %-32s %s\n' "$(basename "$f")" "$(printf '%s\n' "$out" | tail -1)"
+            printf '    %-32s %5ss  %s\n' "$(basename "$f")" "$suite_secs" "$(printf '%s\n' "$out" | tail -1)"
             # A passing suite is reported by its LAST LINE ONLY, so a suite that
             # drops a group and still ends with "all N passed" reports a skip
             # that nothing above this line can see.  That is not hypothetical:
@@ -8712,6 +8753,7 @@ fi
 # --- END BOOT-LOCK-REGION ---
 
 # Step 4: Boot QEMU
+contention_notice "the moment before QEMU"
 echo "=== Booting QEMU (timeout: ${TIMEOUT}s, cpu: $QEMU_CPU) ==="
 rm -f "$SERIAL_FILE"
 # Removed together with the serial log, and for the identical reason: both are

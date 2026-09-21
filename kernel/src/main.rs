@@ -4057,6 +4057,18 @@ extern "C" fn kernel_main() -> ! {
                 proc::spawn::self_test_linux_slateos_make_cc(),
             );
 
+            // Path Z Part 61: run our own cross-compiled CMake on target, driving
+            // the five `-P` script fixtures lane B staged in /usr/share/cmake-selftest.
+            // The last of the roadmap's four toolchain ports whose "shipped is not
+            // run" caveat was still true. Runs in place from /mnt so cmake's
+            // argv[0]-derived prefix finds /mnt/share/cmake-4.4 without copying a
+            // 6 MB module tree into the VFS -- see the rung's doc comment.
+            selftest::dispatch_debug(
+                "Path-Z real CMake",
+                selftest::Severity::Diagnostic,
+                proc::spawn::self_test_linux_slateos_cmake(),
+            );
+
             // Path Z Part 40: a multi-TU C project that #includes its own project header
             // via `#include "..."` (the project-relative quote form, distinct from the
             // still-blocked <system_header.h> glibc-tree form). tcc's preprocessor must

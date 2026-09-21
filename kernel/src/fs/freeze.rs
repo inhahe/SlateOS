@@ -542,9 +542,32 @@ fn test_auto_thaw_tracking() {
 
     // Should have time remaining (close to 5 minutes).
     assert!(entry.time_until_thaw_ns > 0);
-    assert!(entry.frozen_duration_ns < 1_000_000_000); // Less than 1 second.
-
-    let _ = before; // Used to verify timing sanity.
+    // Compare two clocks that stall together, not one clock against a
+    // constant. This was `frozen_duration_ns < 1_000_000_000` -- a
+    // one-second ceiling on a filesystem frozen microseconds earlier. The
+    // ratio is ~1000x, so it passed bench.rs's "N times, not N percent"
+    // test comfortably, and it was still unsafe: that test assumes the
+    // noise is PROPORTIONAL. A slower machine stretches everything by a
+    // factor and a ratio bound survives by construction; a descheduled VM
+    // does not stretch, it stops, for an absolute number of milliseconds.
+    // On 2026-09-18 a 20ms sleep elsewhere in this kernel measured 988ms
+    // under host contention -- 12ms inside that ceiling. It had not failed
+    // yet; it was one slightly worse afternoon away, and it would have
+    // failed as a *filesystem freeze bug*, which is a bad thing to spend an
+    // hour on.
+    //
+    // `before` was already captured and then discarded by
+    // `let _ = before; // Used to verify timing sanity.` -- a comment
+    // asserting the line does what the line is written not to do. Using it
+    // is both the honest assertion and what that comment always claimed.
+    let test_elapsed_ns = crate::timekeeping::clock_monotonic().saturating_sub(before);
+    assert!(
+        entry.frozen_duration_ns <= test_elapsed_ns,
+        "frozen_duration_ns {} exceeds the {}ns this test itself took; the \
+         freeze bookkeeping is measuring something other than the freeze",
+        entry.frozen_duration_ns,
+        test_elapsed_ns,
+    );
 
     force_thaw(mp).unwrap();
     serial_println!("[freeze]   auto_thaw_tracking: ok");

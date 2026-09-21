@@ -28850,6 +28850,8 @@ stand and neither has been done:
 
 ### [A] B-BENCH-RUN-CONTAMINATED-BY-ANOTHER-LANE-PRUNING-ITS-TARGET-DIR — 2026-08-15 — attribution recorded
 
+**Status:** OPEN
+
 **Why this entry exists.** The bench run at `e384f46a2` reported three
 regressions. It also, by luck, is the first run where the contaminating host
 activity was *identified* rather than merely suspected — so it is worth writing
@@ -28901,6 +28903,8 @@ the host is busy elsewhere, so it reads its cleanest possible verdict on exactly
 the runs that are most disturbed.
 
 ### [A] TOOLING-A-A-TRAILING-AMPERSAND-BACKGROUNDS-THE-WHOLE-&&-CHAIN-INCLUDING-THE-cd — 2026-08-15 — ⚠️ HIT, recovered
+
+**Status:** OPEN
 
 **What I ran** (intending: background a sampler, then run the benchmark in my
 own lane):
@@ -45609,6 +45613,8 @@ that is P22(b)/(c), still unmeasured. §229 stands either way.
 
 ### [A] The contamination verdict said `Canary OK` on run 3 — the positional model is the more sensitive instrument, not a refinement of it — 2026-08-19
 
+**Status:** OPEN
+
 **In short:** the suite has two ways of noticing that other activity on the
 machine spoiled its measurements. On the run where we deliberately spoiled them,
 the *older and more authoritative* one — the one whose word decides whether a
@@ -45709,6 +45715,8 @@ that a check which cannot fire is indistinguishable from one that passes.
   measurement comes first.
 
 ### [A] Three scorecard benchmarks emit no `MEASURED-AS` line, so they cannot be used as load-window bounds — 2026-08-19
+
+**Status:** OPEN
 
 **In short:** the load-window tool needs a benchmark name to mark where a
 disturbance starts or stops. Three of the suite's 86 scored benchmarks —
@@ -47285,6 +47293,8 @@ individual hooks, is where the fix belongs.
 ---
 
 ### [A] CORRECTION — "zero KASAN reports" in the `B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` closure was verified with a matcher that could not fire — 2026-08-19
+
+**Status:** OPEN
 
 **In short:** When I closed that bug I wrote in `roadmap.md` that two instrumented
 boots reached `BOOT_OK` with "zero KASAN reports". The check behind that claim
@@ -157068,6 +157078,8 @@ of its entries and wrong about one, which is the hardest shape to notice.
 
 ### [A] The rule that an IRQ-reachable lock must never be taken with a plain `lock()` is load-bearing prose, and this bug has now happened three times in five weeks -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** if a lock can be grabbed by an interrupt handler, then every
 *other* place that grabs it has to switch interrupts off first. Otherwise an
 interrupt can arrive while an ordinary task is holding the lock, and the
@@ -157261,6 +157273,8 @@ believed: three of the five named locks whose try_lock path is the
 
 ### [A] Operational, for all three lanes: stopping a backgrounded shell script does not stop the script -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** if you background a shell script that runs long jobs and then
 stop it, the tool reports success and the job keeps running. Start a
 replacement and you now have two, racing each other in the same worktree.
@@ -157394,6 +157408,8 @@ than three rows that do not work: the first looks like a feature that works.
 
 ### [A] The line that exists to prevent a vacuous verdict was counting its own controls -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** a check prints how many things it examined, so that finding
 nothing wrong cannot be confused with looking at nothing. On its first
 honest boot it printed `over 2 class(es) -- clean`. Both of those two were
@@ -157431,6 +157447,8 @@ number was made of, which is the same question 942 is about, pointed at my
 own output instead of somebody else's.
 
 ### [A] Why that corpus is near-empty, and what it makes the check worth -- 2026-09-17
+
+**Status:** OPEN
 
 Having found that the lock-context check's population was two synthetic
 classes, the next question is whether the *real* number can be anything but
@@ -157483,6 +157501,8 @@ Not done yet; recorded so the zero is not mistaken for completeness.
 
 ### [A] Confirmed on boot `4e9595a63`: the lock-context check has been reporting nothing about nothing -- 2026-09-17
 
+**Status:** OPEN
+
 With the controls excluded from the population, the line reads:
 
 ```
@@ -157499,6 +157519,8 @@ future regression, and the `VACUOUS` word is what stops it reading as a
 clean bill of health in the meantime.
 
 ### [A] The leaf-claim check's first real boot: four sites in `fs/notify.rs`, and a report I cannot act on yet -- 2026-09-17
+
+**Status:** OPEN
 
 It fired 8 times (its cap) across **four distinct sites**, all in one file:
 `fs/notify.rs` lines 330, 394, 440, 481.
@@ -157536,6 +157558,8 @@ next boot names the outer lock -- and on this session's record (five findings,
 five false) they should not be assumed real.
 
 ### [A] dd-70 split the lock types on cost, and never benchmarked the type it created -- 2026-09-17
+
+**Status:** OPEN
 
 `bench_lock_primitives` has four arms. `RAW` is a bare `spin::Mutex`;
 `TRACKED` and `TRACKED_B` are `crate::sync::Mutex`. There is **no**
@@ -158249,6 +158273,8 @@ list.
 
 ### [A] `check-fields-written-never-read.py` has never scanned `kernel/`: 169 fields, 39 of them correct by design -- 2026-09-17
 
+**Status:** OPEN
+
 Prompted by lane C's
 `TD-C-A-FIELD-ONLY-EVER-INITIALISED-IS-INVISIBLE-TO-EVERY-CHECK-WE-HAVE`,
 which found 347 candidates in `gui/` and `apps/`. The obvious next question
@@ -158294,6 +158320,8 @@ Triaging those 130 is ordinary lane A work and needs no gate. Recorded here
 so the number is not rediscovered from scratch.
 
 ### [A] dd-70's "leaf" premise is not occasionally wrong, it is systematically wrong: 1256 nested acquisitions per boot -- 2026-09-17
+
+**Status:** OPEN
 
 Boot `eb764a380`, with the reports deduped by site pair:
 
@@ -158356,6 +158384,8 @@ already written down: that is `open-questions.md`, not a unilateral sweep.
 
 ### [A] `devpower` reports device power states it never applies, and `/proc` published them undisclosed -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** a kernel module says it manages the power state of PCI
 devices. It keeps a table of which device is in which power state, shows
 that table in `/proc`, and never writes a single power register. So a reader
@@ -158414,6 +158444,8 @@ not dead state.
 
 ### [A] The power-management family: four modules that claim to act, actuate nothing, and publish it through `/proc` -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** the kernel has four modules for saving power -- device power
 states, power profiles, an energy saver and a game mode. Between them they
 promise to set the CPU governor, dim the display, throttle apps and suppress
@@ -158464,6 +158496,8 @@ reading is what dd-945 requires, and it is cheap; wiring the actuation is a
 real feature and is not claimed to be in scope.
 
 ### [A] DRM plane geometry is write-only: an atomic commit can move or scale a plane and nothing happens -- 2026-09-17
+
+**Status:** OPEN
 
 **In short:** a graphics "plane" is a layer the display hardware can place
 and scale on screen -- how a cursor or a video overlay gets positioned. The
@@ -158656,6 +158690,8 @@ uploading before dropping is refused at exactly the moment a cache is working
 as designed.
 ### [A] Module docs that link a subsystem the file never calls: 8 of 807 kernel modules, and one real new claim -- 2026-09-17
 
+**Status:** OPEN
+
 Lane C's `TD-C-A-MODULE-DOC-IS-THE-ONE-CLAIM-NOTHING-CHECKS` says a `//!`
 feature list is the one claim in the tree with no instrument, because both
 existing scanners read strings the program *draws*. True, and I had already
@@ -158844,6 +158880,8 @@ pinned SHA.
 on the commit they were given. What is broken is the inference from "the push
 succeeded" to "what is on the server has been checked".
 ### [A] 340 of 430 `kernel/src/fs` modules have no consumer but `/proc` -- and for a microkernel that is mostly right. The defect is what their docs say -- 2026-09-17
+
+**Status:** OPEN
 
 **In short:** most of the kernel's "feature" modules keep a setting, show it
 in `/proc`, and do nothing else. That sounds alarming and mostly is not: this
@@ -159063,6 +159101,8 @@ and is worth doing properly rather than papering over at the call site.
 
 ### [A] Twice in one day a lane-C gate went out green from lane C and red from lane A, and where the gate sits decided what it cost -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** a check that only runs late catches mistakes after they have
 been shared, so the person who pays is whoever tries to build next -- never
 the person who made the mistake. It happened twice today with the same lane's
@@ -159155,6 +159195,8 @@ stop calling it, not to concentrate harder.
 
 ### [A] `check-selftest-reinit`'s rule is right and one case short: "empty and live" is still broken for a table something registers into at boot -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** a self-test that wipes its module's table must switch the table
 back on before it finishes, and a checker enforces that across 273 call
 sites. But "switched back on and empty" is only harmless if the table fills
@@ -159204,6 +159246,8 @@ Recorded so the next person wiring a stats module reads it before choosing a
 call site, which is the cheapest place for this to be known.
 
 ### [A] The byte count I used as proof was anti-correlated with the truth -- 2026-09-17
+
+**Status:** OPEN
 
 The strongest single piece of evidence this session produced for its own
 recurring lesson, and it is against me.
@@ -159756,6 +159800,8 @@ a reader that was never wired up. That one the gate *did* find. This one it
 did not, and the difference between the two is the thing worth knowing.
 ### [A] Eight security-named `fs/` modules claim to enforce something and nothing calls them; `sealing` is the worst of them -- 2026-09-17
 
+**Status:** OPEN
+
 **In short:** the kernel has a feature that lets a program mark a file
 permanently unchangeable. You can set the mark, `/proc` will list the file as
 marked, and **nothing stops anyone writing to it.** The same shape covers
@@ -159818,7 +159864,48 @@ targeted correction rather than a sweep, because changing `provides` to
 rewrite dd-951 warns about. Recorded first so the finding exists
 independently of whether the wording gets fixed.
 
+#### Triage complete 2026-09-18: 5 docs corrected, 3 were already honest
+
+All nine modules in the table above have now been read rather than
+inferred from their names -- which matters, because inferring purpose from
+a name and a signature list is exactly how I called `binfmt` a registry
+when its line 1 says *statistics*.
+
+| module | line 1 says | verdict | action |
+|---|---|---|---|
+| `sealing` | "place **irrevocable restrictions**" | false | doc states the gap |
+| `authbroker` | "**Implements** a Plan 9 Factotum-inspired ... broker" | false | doc states the gap |
+| `filevault` | "**Provides** per-folder encryption" | false | doc states the gap |
+| `faceunlock` | "**Provides** facial recognition ... verification" | false, and `verify()` always succeeds | doc leads with ALWAYS SUCCEEDS |
+| `secpolicy` | "mandatory access control policy **engine**" | false | doc states the gap (this update) |
+| `immutable` | "**Provides** `chattr`-style file flags" | duplicate of a working mechanism | separate entry; not a missing feature |
+| `secmod` | "Security Module **Statistics** ... **monitoring** ... **Tracks**" | **honest** | none |
+| `diskencrypt` | "encryption **management** ... encryption **status** ... **settings panel interface**" | **honest** | none |
+| `integrity` | (the control) | **honest**, and really enforces | none |
+
+**`secpolicy` was the one addition.** Its `check_access` has exactly one
+caller outside the module -- `kshell.rs:101079`, a command a human types --
+so `set_mode(Enforcing)` changes what `/proc` reports and nothing else. The
+word *mandatory* is the dangerous part: it is the claim that stops the next
+person adding their own check. Its architecture block also advertises
+`secpolicy::check(...)`, which does not exist under that name.
+
+**Three were left alone because they are accurate**, and that is the half of
+this triage worth keeping. `secmod` and `diskencrypt` use *statistics*,
+*monitoring*, *tracks*, *management*, *status*, *settings panel interface* --
+all true of stores that store. Editing them would have replaced correct text
+with a warning about a problem they do not have, and a sweep that cannot
+tell those two from the other five would have done exactly that. The
+distinction is not detectable from the directory, the naming, or the caller
+count: `secmod` and `authbroker` have identical caller profiles (0 outside
+`/proc`, `kshell` and self-test) and opposite verdicts. **Only line 1
+separates them**, which is the rule that came out of the `binfmt` error and
+is the reason this pass read nine module docs instead of grepping for nine
+caller counts.
+
 ### [A] The leaf-claim cap was reporting 27% of the truth: 89 distinct site pairs, not 24 -- 2026-09-17
+
+**Status:** OPEN
 
 With the counting cap raised to 256 and the printing cap left at 24, boot
 `3a29fd0d2` reports:
@@ -162056,3 +162143,1181 @@ string in live code outside the type's own `label`/`Display`. That is a much
 narrower search than it sounds -- the survey has 25 open rows -- and it is
 worth running as part of each fix rather than as a gate, since the window in
 which it matters is the fix itself.
+### [A] `faceunlock::verify()` returns Matched unconditionally, and my first attempt to document that understated it -- 2026-09-17
+
+**Status:** OPEN
+
+**In short:** the face-unlock check does not check anything. For any enrolled
+user it returns "matched" without comparing a face, a template, or a number
+-- the code says so in a comment. Nothing calls it today, so nothing is
+unlocked wrongly; the danger is entirely in what the next caller would
+believe.
+
+```rust
+// Simulate match (always matches enrolled user).
+enrollment.verify_count += 1;
+enrollment.last_verified_ns = now;
+state.total_matches += 1;
+Ok(VerifyResult::Matched)
+```
+
+The only branches that can refuse are `!state.enabled` (CameraError), an
+absent enrolment (NoEnrollment), and the liveness flag when the caller itself
+passes `is_live: false`. So the decision is the *caller's* to make, and a
+caller passing `is_live: true` for an enrolled id is always authenticated.
+
+**The part worth recording is the draft I nearly shipped.** Correcting the
+module doc, I wrote that `verify()` "compares stored numbers, not a face".
+That is more accurate than the original claim and still wrong in the
+dangerous direction -- it describes a weak comparison where there is none.
+Reading the function before writing the sentence is what caught it.
+
+Lane C stated this rule this morning and I had quoted it hours earlier:
+**an overstatement is caught the first time somebody tries the feature; an
+understatement is believed, so nobody tries.** Their example was
+`apps/whiteboard` telling users their work could not be saved while Ctrl+S
+was writing an SVG. Mine would have been a security function described as
+weak when it is absent -- and a reader who believes it is weak looks for a
+stronger comparison, not for a missing one.
+
+So the note in `faceunlock.rs` now leads with `verify()` ALWAYS SUCCEEDS, and
+records that the first draft softened it. A doc that reads as diligent and
+still misleads is worse than the blunt original, because it has already
+spent the reader's suspicion.
+
+**Fixed alongside** (docs only, dd-950 -- the claim is the shape of the
+intended work, so it is restated as intent rather than deleted): `sealing`
+leads with NOT ENFORCED YET, `authbroker` with "records credentials; does not
+broker anything", `filevault` with "encrypts nothing; a folder marked as a
+vault is stored in plaintext". `diskencrypt` deliberately untouched -- its
+doc already says "management", "encryption *status*" and "settings panel
+interface", and correcting accurate text is the sweep I declined, not the fix
+I justified.
+
+**Not fixed:** the implementations. Real face recognition needs a camera
+stack; seal enforcement needs the VFS write path and a capability story.
+Those are features, and dd-950's point is that these modules are the outline
+of them rather than dead weight.
+
+### [A] Two implementations of file immutability: one real and tested, one decorative -- and I nearly recorded the real one as fake -- 2026-09-18
+**Status:** OPEN
+
+**In short:** the kernel can mark a file unchangeable, and that genuinely
+works -- writes, truncates and deletes are all refused, checked on every
+boot. There is also a *second* module for the same feature which does
+nothing, and whose opening comment describes it as the mechanism. A reader
+who finds that one first concludes the protection is missing.
+
+**The working one.** `vfs::FileAttr::IMMUTABLE`, checked at `vfs.rs:5206`
+(`is_writable`) and `:5249` (the `W_OK` access path), honoured by FAT as
+`ATTR_READ_ONLY` (`fat.rs:3312`, `:4430`), and verified by self-tests on
+every boot:
+
+```
+[ext4]   immutable: write, truncate and unlink are all refused, and allowed again once cleared: OK
+[memfs]  immutable write rejected: OK
+[memfs]  immutable remove rejected: OK
+```
+
+**The decorative one.** `kernel/src/fs/immutable.rs`: zero `vfs::`
+references, so it shares nothing with the mechanism above; its only caller
+outside `/proc` and `kshell` is its own self-test dispatch in `main.rs`. Its
+doc says it *"Provides `chattr`-style file flags that restrict
+modifications"* and that *"Only a privileged user can set/clear the flag"* --
+and `set_flags` contains no capability, uid or privilege check of any kind.
+So both halves of that sentence are false, while an identically-named,
+actually-enforced attribute lives one module away.
+
+This is lane C's shape, not a new one: their
+`c-a-two-desktop-icon-models-and-mine-cannot-be-wired-until-we-pick` is the
+same problem -- two models for one concept, where the question is which to
+keep rather than what to build.
+
+#### The near-miss, which is worth more than the finding
+
+I was one command from recording that **neither** mechanism was enforced.
+The reasoning that got me there was not careless, which is what makes it
+worth writing down:
+
+1. `grep FileAttr kernel/src/fs/vfs.rs` found the check inside
+   `Vfs::is_writable`.
+2. `grep Vfs::is_writable` found exactly one caller, `vfs.rs:7304`.
+3. That line is inside `pub fn self_test()` -- so the only caller of the
+   predicate that checks IMMUTABLE is a test.
+
+Every step is true, and the conclusion -- "the immutable check has no
+caller" -- is false, because enforcement does not go through that predicate
+at all. `write_file`, `truncate` and `unlink` refuse on their own paths, and
+`is_writable` is a separate convenience that happens to share the check.
+
+**What settled it in one command was asking whether the TEST PASSES**, not
+where the call site is. `[ext4] immutable: write, truncate and unlink are all
+refused ... OK` on every boot is direct evidence of the behaviour; a call-site
+search is evidence about one route to it. I had spent the day insisting that
+a green verdict needs its corpus examined, and then nearly took a *call-graph
+absence* as proof of a behavioural absence -- the same substitution in the
+other direction.
+
+It also matters which way the error pointed. Recording a missing protection
+that exists tells a reader to build something already built, and worse, tells
+them not to rely on something they can rely on. Lane C's rule about
+understatement applies to protections as much as to features: an
+understatement is believed, so nobody checks.
+
+**Action taken:** none to the code. Which of the two immutable models
+survives is a consolidation decision with a caller (`fat.rs`, `ext4`) on one
+side and a `/proc` file on the other, and it is not a decision one lane
+should take silently. The doc claim in `immutable.rs` is the part that
+actively misleads and is the first thing to fix; the duplication itself can
+wait for someone who wants the feature.
+
+### [A] A timing self-test panicked the kernel over a 988ms sleep, and the boot it failed differed from the green one before it only in comment text -- 2026-09-18
+**Status:** FIXED 2026-09-18, boot-verified on ebb683642 -- `[sched] sleep_ns: PASSED (slept 37.892ms for 20ms request, attempt 1 of 3)`. No retry was needed, and the attempt number is reported either way, which is the dd-942 half: PASSED first time and PASSED after a retry are different facts. Note 37.892ms is a new maximum -- the prior observed range was 20.8-32.8ms -- so the measurement keeps drifting up, still far inside the 500ms ceiling
+
+**In short:** the kernel checks at startup that asking to sleep for 20
+milliseconds really does take about 20 milliseconds. On one boot it took 988,
+so the check killed the boot. Nothing in the kernel had changed that could
+affect timing -- the only difference from the previous working boot was
+comment text -- and two compilers were running on the host at the time. The
+check could not tell "the machine was busy" from "the timer is broken", and
+treated the first as the second.
+
+**The evidence that it is not a regression**, in the order it was gathered:
+
+| question | answer |
+|---|---|
+| what changed since the last boot? | `git diff 3a29fd0d2..a17b8e0fa -- kernel/`: 4 files, 50 insertions, **all `//!` doc comment text** in `fs/{authbroker,faceunlock,filevault,sealing}.rs` |
+| anything touching the timer? | no match for `hrtimer`, `apic`, `sched`, `timer`, `sync.rs` or `lockdep` in the changed-file list |
+| is 988ms within normal spread? | no. Across the 19 prior boots that logged it: min 20.768ms, median 22.083ms, max 32.826ms. 988ms is **30x the observed maximum** |
+| were neighbouring measurements also inflated? | no. A deliberately forced ~10ms spin measured 13ms 2,700 lines later; the `[multiwait]` waits all landed at 22-50ms |
+| could the host inflate it? | yes, directly. `boot-test.sh` passes neither `-icount` nor `-rtc clock=vm`, so the guest clock follows host wall time -- and two `cargo` processes were running while QEMU booted |
+
+Comment text cannot alter runtime timing, so the change set exonerates itself.
+
+#### The second defect, which is the one worth keeping
+
+The test's two bounds were **written in different units, and its message
+asserted they were the same one.** The wait budget was
+`apic::tick_count().saturating_add(50)` while the panic attached to it read
+*"did not complete within 500ms"* -- equal only if a tick is exactly 10ms.
+
+That is not academic: on this boot the tick budget outlasted the 988ms
+overshoot, so the guard meant to cap the wait never fired, and the elapsed
+assertion downstream is what caught it. Had the tick guard fired, it would
+have reported "500ms" about a wait of some other length. A bound whose
+message is in units it does not measure is a bound that lies exactly when it
+is needed. Found only because the two assertions *disagreed* -- `done != 0`
+passed while elapsed said 988ms -- which is impossible if both are 500ms.
+
+#### The fix is a retry, not a looser ceiling
+
+Raising the bound is the obvious move and the wrong one: the ceiling is the
+only reader of this signal, and widening it trades away the sole thing the
+test detects (dd-951 -- enumerate a signal's readers before relaxing it).
+
+A one-off host stall does not repeat; a timer that is not firing overshoots
+every attempt. So the test now measures up to 3 times, passes on the first
+that lands under the ceiling, and panics only if **all** overshoot -- printing
+all three numbers, because the single retried figure that is never shown is
+dd-942 again. The too-short assertion still fails on attempt one: host load
+cannot make a sleep return early, so an early return is a real bug with no
+benign reading. The wait budget is now `now_ns()`-based, which reads the HPET
+or TSC -- both free-running, so the deadline still expires when the APIC timer
+is the broken thing.
+
+**What is still unresolved:** whether that 988ms was host contention or a
+latent timer stall. The retry does not answer it, it makes the boot survive
+it -- and makes the answer legible next time, since three overshoots now
+print three numbers instead of killing the boot on one. The boot lock
+serialises QEMU between lanes but does **not** stop another lane compiling
+while a boot runs, which is the contention path that remains open.
+
+### [A] The heading convention `known-issues.md` documents is invisible to every triage count taken of it, and 48 of the uncounted entries were mine -- 2026-09-18
+**Status:** OPEN (lane A's 25 stamped; the gate rule and lanes B/C's 8 remain)
+
+**In short:** this file asks each entry to carry a one-line status so anyone
+can count what is still broken. The counting is done by a text search that
+only recognises the *older* of the two heading styles in use -- so entries
+written in the style the instructions actually ask for are missed. Most of
+the missed ones are mine, and none of them had the status line either.
+
+**Three nested populations, none of them the file's contents.** Measured, not
+estimated:
+
+| what | count | what it misses |
+|---|---|---|
+| `grep -c '^## TD-'` -- the triage grep named in `check-known-issues-index.py`'s own docstring | 429 | 36 backticked `` ## `TD- `` headings, and all 62 `### [lane]` ones |
+| the checker's own pattern, `^## (TD-[A-Z]-.*)$` | 356 | additionally 73 single-agent-era subsystem names (`TD-FONT-`, `TD-COMPOSITOR-`, `TD-KASAN-`) |
+| entries in the documented current style, `### [A]` / `### [B]` / `### [C]` | 62 | seen by **neither** |
+
+So the checker's uniqueness and uppercase-marker rules -- both written after a
+firing, both correct -- run over 356 of 518 entries, and the 62 written in the
+style `roadmap.md`:379 prescribes (`### [C] ...`) are outside every count.
+
+#### Corrected the same day: 740 entries, not 518, and the entry you are reading undercounted by 222
+
+The census above lists three populations and calls them "none of them the
+file's contents". **The list of three was itself not the file's contents.**
+I enumerated the shapes I thought of and reported the total as though it
+were the file. Full count:
+
+| shape | count | documented triage grep `^## TD-` | checker regex |
+|---|---|---|---|
+| `## TD-<letter>-` | 356 | sees | sees |
+| `## TD-<SUBSYSTEM>-` (`TD-FONT-`, `TD-KASAN-`) | 73 | sees | **misses** |
+| `` ## `TD- `` (backticked) | 43 | **misses** | **misses** |
+| **`### TD-`** | **201** | **misses** | **misses** |
+| `### [A]` / `### [B]` / `### [C]` | 67 | **misses** | **misses** |
+| **total** | **740** | **429 (58%)** | **356 (48%)** |
+
+So the triage grep every number in this project comes from sees **58%** of
+the file, and the checker that enforces unique slugs and uppercase markers
+covers **48%**. The 201-entry `### TD-` population is the largest single
+blind spot and I had not looked for it at all.
+
+**How it surfaced, which is the part worth keeping.** Not by re-counting. A
+scanner I wrote to find real errors inside passing boots flagged
+`selftest: not valid UTF-8, and this stage cannot handle arbitrary bytes yet`
+as unexplained. I grepped `known-issues.md` for that message text, got
+nothing, and concluded the limitation was untracked -- and was about to file
+it. The helper's own doc comment says *"Tracked in `known-issues.md` ->
+`TD-KSHELL-LINE-EDITOR-IS-UTF8`"*, and that entry has been at line 18907
+since 2026-08-13. It is a `### TD-<SUBSYSTEM>-` heading, so it fails both
+counters on both counts.
+
+That is dd-953's *silence vs absence* row -- contributed by lane C and
+written by me the same hour -- catching me inside the hour: I searched for
+the message rather than the subject, got silence, and read it as absence.
+And it is the duplicate direction of the immutability near-miss: not "a
+working thing reported broken" but "a tracked thing reported untracked",
+which would have put a second entry in a file whose whole problem is that
+nobody can count it.
+
+**What this changes about the fix.** The earlier plan -- teach the checker
+the `### [lane]` convention once lanes B and C have stamped their 8 -- is
+now the smaller half. `### TD-` is 3x larger than `### [lane]` and is not a
+lane convention at all; it is the single-agent era's heading style, which
+means it belongs to no one and nobody will volunteer for it. Any real fix
+has to either normalise the five shapes or make the counter accept all of
+them; the second is a one-line regex and the first is 740 edits, so the
+counter should move.
+
+Deliberately not doing that in this pass: a counter that suddenly reports
+740 where every previous number said ~430 needs the other two lanes to know
+why before it lands, which is the same sequencing argument as the gate above.
+
+**And the status line those 62 were supposed to carry was mostly absent.**
+`known-issues.md`'s own preamble: *"Put a `**Status:** ...` line immediately
+under the heading -- `OPEN` / `FIXED <date>` / `RESOLVED <date>`"*. On finding
+this, 6 of 62 had one. **48 of the 56 missing were lane A's -- mine.** I wrote
+the rule's violation 48 times while writing entries about verdicts taken over
+the wrong population.
+
+**Why a blanket stamp was the wrong fix, and what was done instead.** The 55
+lane-A entries are not one kind of thing:
+
+| shape | n | status meaningful? |
+|---|---|---|
+| plain issue, no status anywhere | 25 | yes -- stamped `OPEN` |
+| status word IS the heading (`### [A] RESOLVED -- ...`) | 12 | already greppable; left alone |
+| experiment log (`PREDICTION P22`, `RESULT P23`) | 9 | no -- a verdict, not a status |
+| already compliant | 7 | -- |
+| correction record | 2 | no -- nothing to close |
+
+The 25 were stamped `OPEN`, deliberately, including 6 whose bodies claim a
+fix: on reading, every one of those is a **doc-level** fix (`devpower`'s
+`/proc` header, `syshealth.rs:18`, `faceunlock`'s "docs only") while the
+feature gap the entry is about remains. `OPEN` is also the safe direction: a
+wrong `OPEN` costs someone an investigation and then self-corrects, whereas a
+wrong `FIXED` is never revisited. The 11 non-issues were left unstamped rather
+than forced into a vocabulary with no slot for them -- which is the part that
+still needs deciding.
+
+**What is deliberately NOT done: extending the checker.** The obvious fix is
+to make `check-known-issues-index.py` enforce the `### [lane]` convention
+too. That gate would immediately fail on lane B's 7 and lane C's 1 unstamped
+entries -- reddening two trees over a rule they have not been told about,
+which is exactly what cost lane A two pre-flight runs (658s and 2022s) on
+2026-09-17 when lane C's new gates fired on lane A's tree. The order has to
+be: notify, let them stamp, then gate.
+
+### [A] `Path-Z prerequisites: complete` is measured over rungs, so the only missing artifact is the one it cannot report -- 2026-09-18
+**Status:** OPEN (the blind spot closes when the cmake rung lands; the per-lane image divergence does not)
+
+**In short:** the boot prints a line confirming that everything the
+toolchain tests need is present. It is counted by asking each test whether
+its files are there. `cmake` is on the list of things that should be in the
+image, is **not** in mine, and has no test -- so nothing asks, nothing is
+missing, and the line says complete. It is also the case that two lanes
+building the image from the same commit get different images, because what
+gets staged depends on build output git does not carry.
+
+**The verdict.** Boot `a17b8e0fa`:
+
+```
+[spawn] Path-Z prerequisites: complete -- 0 rungs skipped
+```
+
+That is honest about what it measures. `pathz_fixtures_missing`
+(`spawn.rs:144`) checks each rung's own fixture list, calls `pathz_skip` on
+an absent source, and the count is surfaced at end of boot precisely so lost
+coverage is visible rather than silent -- the design is already dd-942-aware,
+which is what makes the gap interesting instead of careless.
+
+**The population is rungs, and the thing at risk is artifacts.** Measured:
+
+| spike artifact | staged by `create-ext4-rootfs.sh` from | named by a rung's fixture list | absence visible? |
+|---|---|---|---|
+| `bash-slateos.elf` | `build/spike/` | yes (1 ref) | yes -- skip counted |
+| `pkgconf-slateos.elf` | `build/spike/` | yes (2 refs) | yes -- skip counted |
+| `make-slateos.elf` | `build/spike/` | yes (2 refs) | yes -- skip counted |
+| `python-slateos.elf` + `python312.zip` | `build/spike/` | yes (1 ref) | yes -- skip counted |
+| **`cmake-slateos.elf` + `cmake-data`** | `build/spike/` | **no (0 refs)** | **no -- nothing to skip** |
+
+So `0 rungs skipped` is true, and the artifact that is actually absent is
+the only one it structurally cannot mention. A missing prerequisite becomes
+visible only when something tries to use it -- dd-946's publisher/subscriber
+shape, arriving this time as a *coverage* verdict rather than a feature.
+
+**And cmake really is absent here.** Three independent confirmations rather
+than one, because the whole point of this entry is not trusting a single
+signal:
+
+1. `build/spike/cmake-slateos.elf` does not exist in this worktree.
+2. `create-ext4-rootfs.sh:1291` stages `/bin/cmake` only inside
+   `if [ -e "$CMAKE_SLATE" ] && [ -d "$CMAKE_DATA/share" ]`.
+3. Grepping `rootfs.ext4` itself: the fixtures are there
+   (`slateos-deliberate-failure`, `slateos-input-payload`, `cmake-selftest`)
+   and the binary's own strings are not (`Could not find CMAKE_ROOT`,
+   `CMakeDetermineCCompiler`).
+
+Lane B's five fixtures shipped and the binary they exercise did not.
+
+**The second half, which does not close with the rung.** Seven staged paths
+resolve under `$ROOT_DIR/build/`, which is gitignored:
+
+```
+BASH_SLATE  PKGCONF_SLATE  MAKE_SLATE  CMAKE_SLATE  CMAKE_DATA  PY_SLATE  PY_ZIP
+```
+
+So the image's contents depend on which spikes the *building lane happens to
+have built*, and the artifact cannot travel through git. Two lanes running
+the same script at the same commit get different images, and therefore
+different boot coverage, with nothing in either boot saying so. Lane B's
+request states "cmake is staged and linked and that is my half done" --
+true where they are, false where I am, and neither statement is wrong.
+
+That is the *where* twin of dd-937/938: an artifact true when written does
+not say when it stopped being true, and one true where written does not say
+where it stops being true.
+
+#### Measured one level deeper 2026-09-18: the divergence is not only the artifact
+
+Three caches with three different scopes, which is why this is structural
+rather than an oversight:
+
+| thing | scope | set by |
+|---|---|---|
+| source tarballs | **shared** between lanes | `SLATE_ZIG_CACHE=$HOME/.cache/slateos` |
+| spike artifacts (`*-slateos.elf`) | **per-lane** | `SLATE_SPIKE=$SLATE_ROOT/build/spike` |
+| `zig` itself | **per-lane if present, else shared** | declared `SLATE_ZIG=$SLATE_SPIKE/zig/zig`, but `slate_ensure_zig` reassigns it to the shared cache when no pinned per-worktree copy exists |
+| `toolchain/sysroot/lib/libc.a` | **per-lane** | gitignored at `.gitignore:68` |
+
+So `cmake-4.4.3.tar.gz` was downloaded once (2026-09-11, cached, still
+there) while the binary built from it exists in exactly one tree. And the
+last row is the one that matters most: **the thing the spike proves a claim
+about is itself per-lane.** "cmake links clean against our `libc.a`" is a
+statement about one lane's libc at one moment, not about the project.
+
+*(Corrected within the hour: the `zig` row first said flatly "per-lane",
+which I took from the variable's declaration at `worktree.sh:90` without
+accounting for `slate_ensure_zig` reassigning it at lines 306/314/348. It
+prefers a pinned per-worktree copy and falls back to the shared cache; in
+this tree it resolved to the shared one, `build/spike/zig` does not exist,
+and the function reported `/home/inhahe/.cache/slateos/zig-.../zig`. Reading
+a declaration and not the call is the same error as reading a name and not
+line 1 -- caught here only because I ran the function and read where the
+file actually landed.)*
+
+**Concretely, and this is why copying is not the shortcut it looks like:**
+
+| | timestamp |
+|---|---|
+| `os-lane-b/build/spike/cmake-slateos.elf` | 22,525,984 bytes, 2026-09-15 19:31 |
+| `os-lane-a/toolchain/sysroot/lib/libc.a` | 11,782,644 bytes, 2026-09-16 02:16 |
+
+Lane B's binary predates my libc by about seven hours, so copying it would
+trip `create-ext4-rootfs.sh`'s own guard -- *"cmake-slateos.elf is OLDER
+than the sysroot libc.a -- it links a stale libc and proves nothing about
+the current one"* -- and a rung built on it would report a green verdict
+about a libc that is not the one in this tree. The guard is right and it is
+the reason the build has to be local. Worth recording that the shortcut was
+considered and refused on evidence, not skipped on principle.
+
+**Proper fix, in two parts.** (a) Add the cmake rung -- which converts a
+silently missing artifact into a counted skip, and is wanted on its own
+merits (`requests/b-a-cmake-needs-a-ring-3-rung-like-the-other-three.md`).
+(b) Make the verdict count *intended* artifacts, not just rung fixtures: the
+staging script already knows all seven and prints a line per artifact, so
+the honest verdict is one that reconciles what the script staged against
+what the rungs found, rather than only the latter. Without (b) the next
+artifact added without a rung reproduces this exactly.
+
+### [A] `getcwd(NULL, n)` returns EINVAL, so bash cannot learn its own directory -- on every boot, inside a rung that reports OK -- 2026-09-18
+**Status:** OPEN (root-caused; the fix is in `posix/**`, filed to lane B)
+
+**In short:** the shell prints an error at startup saying it cannot work out
+which directory it is in. It has done this on every boot for at least 20
+boots, nobody had recorded it, and the test that runs the shell reports
+success -- because the test checks what it asked the shell to do and not
+what the shell said on its way there.
+
+**The symptom**, in every one of 20 serial logs, and in none of
+`known-issues.md` or `todo.txt` before this entry:
+
+```
+shell-init: error retrieving current directory: getcwd: cannot access parent directories: Invalid argument
+```
+
+It is emitted by process `spawn-test-bash` -- `self_test_bash_on_slateos_libc`
+-- and the very next verdict line for that rung is:
+
+```
+[spawn]   GNU bash 5.2 on our own libc.a (ring 3: static ELF, no glibc and no
+ld.so; arrays, parameter/arithmetic/brace expansion and its own `>` redirection
+all ran against posix/src; read back 55 bytes == expected, exit 0): OK
+```
+
+The rung is not lying. It asserts arrays, expansions and redirection, and all
+of those work. It never asserts anything about the shell's *stderr*, so a
+real error there is outside the verdict's corpus -- dd-942, in the one place
+a reader would look to find out whether bash works.
+
+**Root cause, verified on both sides rather than inferred.**
+
+| side | evidence |
+|---|---|
+| what bash asks for | `bash-5.2/builtins/common.c:636` calls `getcwd(0, PATH_MAX)` and `:638` falls back to `getcwd(0, 0)`. **Both pass a NULL buffer.** The message at `:642` prints `strerror(errno)` as its third field, which is where "Invalid argument" comes from |
+| what we return | `posix/src/unistd.rs:392`: `if buf.is_null() || size == 0 { set_errno(EINVAL); return null_mut(); }` |
+
+So the two conditions are collapsed into one branch, and only one of them
+belongs there. `getcwd(buf, 0)` with a non-NULL `buf` **is** EINVAL and that
+half is right. `getcwd(NULL, n)` is the **GNU allocate form**: glibc mallocs
+a buffer and returns it, and every program that wants the cwd without
+guessing a size uses it. The module's own doc comment states the wrong rule
+as if it were the specification: *"`EINVAL` -- `buf` is null or `size` is 0"*.
+
+**Why the existing tests all pass anyway, which is the interesting part.**
+Three separate green checks surround this and none of them can see it:
+
+| check | what it covers | why it misses |
+|---|---|---|
+| `[syscall/linux] getcwd(_, 0) -> ERANGE not EINVAL/EFAULT` | the **kernel syscall** | correct, and a different layer -- the bug is in the libc wrapper above it |
+| `[spawn] Spawn with initial cwd (valid + invalid): OK` | `SpawnOptions.cwd` | tests the kernel setting a cwd, not a program reading one |
+| `[spawn] REAL dash shell cwd ... pwd -P ... exit 0: OK` | a real ring-3 shell reading its cwd back | **dash passes a real buffer.** Only the NULL form is broken, so the shell that proves cwd works is the one that never takes the broken path |
+
+That last row is the one worth keeping: we have a passing ring-3 test for
+exactly this feature, and it passes because it exercises the other branch.
+A green test for "reading the cwd works" coexisting with "the shell cannot
+read the cwd" is not a contradiction, it is two call forms and one test.
+
+**The fix, which is lane B's** (`posix/**`): allocate when `buf` is NULL --
+`size` bytes if `size > 0`, otherwise a buffer sized to the path -- and keep
+EINVAL only for non-NULL `buf` with `size == 0`. Filed as
+`requests/a-b-getcwd-rejects-the-null-buffer-form-that-bash-uses.md`.
+
+**Not fixed here on purpose.** `posix/src/unistd.rs` is lane B's tree. The
+finding, the two-sided evidence and the corpus argument are the parts that
+were mine to produce.
+
+### [A] The operator's `LICENSE` has been uncommitted in the integration tree for two days, and the obvious way to resolve a merge there would have committed it under my message -- 2026-09-18
+**Status:** OPEN (needs the operator; the merge hazard is closed on my side)
+
+**In short:** the project's licence file exists on disk and is not saved
+into version control, so the published project still has no licence. It is
+in the one directory no lane is allowed to edit, which is also the directory
+I am told to use when publishing my work -- and the normal way to finish a
+publish there would have swept the operator's unsaved files in with mine,
+under my description of the change.
+
+**What is sitting in `E:\visual studio projects\os`:**
+
+| path | state | dated |
+|---|---|---|
+| `LICENSE` | untracked | 2026-09-16 15:18 — MIT, `Copyright (c) 2026 Inhahe (inhahe.com)`, 21 lines, complete |
+| `README.md` | modified | 2026-09-16 15:18 — adds a `## License` section pointing at it |
+| `open-questions-answers.txt` | untracked | 2026-09-07 — 32 lines answering questions across all three lanes |
+
+The answers file is **not** a missed batch: lane B found it, filed
+`requests/b-a-operator-answered-eleven-lane-a-questions-2026-09-07.md`, and
+nine of the eleven lane-A answers became `design-decisions.md` §914-§922,
+with a correction on 09-09 adding §924. It is listed here only because it
+shows how long a file can sit there -- eleven days -- and because I
+rediscovered it by accident while looking at something unrelated.
+
+**The hazard, which is the part that was mine to fix.** `os/CLAUDE.md` says
+never edit files in the integration tree; `roadmap.md` says merge your lane
+up to `main` *from* it. Both are right, and together they mean my publish
+route passes through a directory containing three files I did not write and
+must not touch. The obvious conflict resolution there is `git add -A` --
+which is exactly how `c4bbff648` committed three conflict markers, except
+this time it would have committed the operator's licence under a commit
+message about kernel work.
+
+Closed with `build/merge-to-main.sh`, which (a) hashes every uncommitted
+path in that tree *before* merging, (b) stages conflicted paths **by name**
+and refuses to automate a conflict at all, and (c) after merging proves each
+recorded file is byte-identical and still unstaged before it will push. The
+check is the point: it does not ask whether the paths still exist, it asks
+whether the bytes moved.
+
+`build/check-operator-drops.py` is the other half -- one `git status`
+against a tree no lane writes, so anything uncommitted there is the
+operator. It found `LICENSE` and the `README` change, which I had not
+noticed in two days of working beside them.
+
+**What needs the operator, and it is not a design question.** Whether to
+commit `LICENSE` + the `README` section is theirs: the work is complete, not
+half-finished, so the likeliest reading is that it was simply never
+committed. I am not committing another party's uncommitted work under my own
+authorship, and there is no option set to weigh, so this is a notice rather
+than an `open-questions.md` entry -- that file is 32 deep and
+`deferred-questions.md`'s header warns what padding it costs.
+
+Worth noting the consequence plainly: **until it is committed, SlateOS has
+no licence on `main`**, which is the only copy anyone else can see.
+
+### [A] The kernel now counts interrupt nesting twice, on two counters with different coverage, and I added the second one this session -- 2026-09-18
+**Status:** RESOLVED 2026-09-18, boot-verified on ebb683642 -- NOT by consolidating. The two counters are not duplicates (see the correction below) and both remain. What landed is the attribution fix: vectors 251/252/255 are now charged to IRQ time via `charged_to_irq`, arm 32 untouched, and dispatch_vector still works
+
+**In short:** the kernel tracks how deeply nested it is inside interrupt
+handlers. It now does that in two separate places, which disagree: one
+counts every kind of interrupt, the other counts two of five kinds. I added
+the one that counts everything, today, *because* the existing one counted
+two of five -- which is the same thing I criticised a filesystem module for
+this morning, done by me, in the same session.
+
+| counter | bumped at | coverage | read by |
+|---|---|---|---|
+| `cputime::irq_depth` (`cputime.rs:92`) | `apic.rs:989` (timer), `ioapic.rs:726` (device) | **2 of 5** dispatch arms | CPU-time accounting, and the nesting cap at `apic.rs:1006` |
+| `idt::HARDIRQ_DEPTH` (`idt.rs:513`) | `dispatch_vector` | **5 of 5** | `in_hardirq()`, for the lockdep context check |
+
+They describe the same physical fact -- hardirq nesting depth on this CPU.
+
+**How it happened, which is the only part that generalises.** dd-948 said a
+rule only an interrupt can break needs a check only an interrupt can trip,
+so the lockdep marker had to see *every* vector. `cputime`'s counter saw two
+of five. I sited a new counter at the one point every vector passes through
+rather than extending the existing one to the other three arms -- the
+expedient choice, and I did not record it as a choice at the time. That is
+`fs/immutable.rs`'s shape exactly: a second store for a capability that
+already had one, added because the first did not reach far enough.
+
+**The consequence that already existed, and is now fixable in the same
+change.** Vectors 251 (TLB shootdown), 252 (reschedule IPI) and 255
+(spurious) never bump `cputime::irq_depth`, so cycles spent in them are
+charged to whatever task they interrupted rather than to IRQ time. That was
+recorded earlier as an attribution gap worth fixing and not urgent. It is
+the *same* gap: the fix for the duplicate is the fix for the attribution.
+
+**The consolidation, costed rather than asserted.** Move the
+`enter_irq`/`exit_irq` bracket into `dispatch_vector`, drop the two existing
+call sites so nothing is counted twice, and have `in_hardirq()` read
+`cputime::irq_depth()`. One counter, 5-of-5 coverage, attribution closed.
+
+`enter_irq` was read before proposing this rather than assumed cheap: it is
+an `rdtsc`, a bounds-checked per-CPU lookup and four relaxed atomic
+operations, with no lock, no allocation and no fallible path -- a missing
+`CPU_TIME` slot returns early. `exit_irq` is the same shape with a
+defensive `depth == 0` guard. So the added cost on the three uncovered
+vectors is one `rdtsc` plus a few relaxed atomics per interrupt.
+
+**The tradeoff, which is why this is a decision and not a cleanup.** Those
+three vectors are the ones whose handlers are deliberately minimal --
+atomics, `invlpg`, EOI. Adding an `rdtsc` to the reschedule IPI and to
+*spurious* interrupts is a real cost on the hottest, least useful paths, and
+spurious interrupts are exactly the ones you get a storm of when something
+is wrong. Against that: two counters for one fact is a model that will drift
+the first time someone changes one of them, and the accounting is wrong
+today in a way nobody can see from `/proc`.
+
+**Not applied yet**, and deliberately not applied in a hurry: it touches
+`dispatch_vector`, which every interrupt in the system passes through, and
+the correct order of `enter_irq` relative to EOI and `softirq::process_pending`
+is the kind of thing that is obvious in review and wrong at runtime. It
+needs its own boot, not a ride on one already in flight.
+
+#### Corrected within the hour: consolidation is the WRONG fix, and the reason is a real one
+
+Reading the two counters properly instead of comparing their shapes turns
+this from "a duplicate to merge" into "two things that look alike". Both
+points came out of the code, not from reconsidering:
+
+**1. `enter_hardirq_for_test()` fabricates interrupt context on purpose.**
+It exists so lockdep's negative control can fire -- a check that has never
+fired is indistinguishable from one that cannot. If `in_hardirq()` read
+`cputime::irq_depth()`, that helper would enter `enter_irq`, which does
+`if prev_depth == 0 { irq_enter_tsc.store(now); irq_count.fetch_add(1) }`
+and charges a cycle delta on the matching exit. **A self-test would inject
+fake interrupts and fake IRQ cycles into `/proc`.** Merging the counters
+would corrupt the accounting with the lockdep control's own fixtures --
+dd-942's corpus problem, caused by the merge that was supposed to tidy up.
+
+**2. The two have different correctness directions.** A lock-context marker
+must be *conservative*: if unsure, say interrupt context, because a missed
+report is a missed deadlock. Cycle accounting must be *exact*: over-count
+and `/proc` lies. Those pull opposite ways, and one counter cannot serve
+both once they ever disagree.
+
+**And the merge had a live hazard I would have shipped.** The nesting cap at
+`apic.rs:1006` reads `irq_depth() > 1`. Moving `enter_irq` into
+`dispatch_vector` **without** removing `apic.rs:989` leaves depth at 2 for an
+ordinary, non-nested timer tick -- so the cap would treat *every* timer
+interrupt as nested and throttle it. That is not a subtle regression, and I
+only saw it while writing down the ordering.
+
+**Revised plan, which keeps both and makes the split deliberate:**
+
+| counter | becomes | change |
+|---|---|---|
+| `idt::HARDIRQ_DEPTH` | the **interrupt-context marker** -- conservative, spans softirq, includes the test helper | none; document why it is not the accounting counter |
+| `cputime::irq_depth` | **cycle accounting** only | extend the bracket to vectors 251/252/255 so attribution stops charging IRQ time to the interrupted task |
+
+So the attribution gap is still worth fixing and the duplicate is not a
+duplicate. What was genuinely wrong was that I added the second counter
+without writing down why a second one was needed -- which is what made it
+read as an accident an hour later, to me.
+
+**The lesson is the one from this morning, pointed at myself twice.** I
+compared the two counters by *shape* -- both per-CPU, both `AtomicU64`, both
+counting interrupt nesting -- and concluded duplicate. The distinguishing
+fact was in neither name nor type but in one caller and one doc sentence.
+Same as `secmod` and `authbroker`: identical caller profiles, opposite
+verdicts, and only line 1 separates them.
+
+### [A] I lost a two-hour boot by working through it, and the boot lock cannot see the other half of the problem -- 2026-09-18
+**Status:** OPEN (my half is a habit and is fixed; the shared-host half needs the other lanes)
+
+**In short:** a full test run takes about an hour and a half and has a
+two-hour cut-off. One run hit the cut-off with the kernel still compiling
+and was killed. The machine was doing three other heavy jobs at the time,
+two of which I started while the run was going, believing they were safe
+because they were not competing with the emulator specifically.
+
+**The measurement**, which is the only reason this is worth an entry:
+
+| phase | reference (2026-09-17) | this run | ratio |
+|---|---|---|---|
+| gates | 2701s | **5326s** | 1.97x |
+| kernel clippy (inside gates) | 264s (same day, earlier) | **346s** | 1.31x |
+| build | 1116s | killed at the bound | -- |
+| QEMU | 581s | never reached | -- |
+| **total** | 4417s | **7200s (timeout)** | -- |
+
+Same tree, same gates, roughly double.
+
+**Cause one, which is mine.** During the gate phase I ran a cmake
+cross-build (12 cores), a rootfs rebuild, a 517s `cargo clippy -p kernel`,
+`cargo fmt`, several WSL invocations and two `git push`es whose pre-push
+gates themselves run cargo. I had a rule -- *do not load the host during a
+boot* -- and I narrowed it to *during QEMU*, because that is where the
+timing assertions are. **The gates are about 60% of the run and every bit as
+CPU-bound.** The rule was right and I applied it to the wrong 40%.
+
+Worth being precise about the self-deception: earlier the same day I
+declined to start the cmake build *specifically* because a boot was
+running, and wrote that a concurrent heavy build was the likeliest cause of
+the 988ms sleep that killed the previous boot. I had the reasoning exactly
+right and then, once the boot moved past QEMU into a phase I had decided was
+safe, did the thing anyway.
+
+**Cause two, which is structural and not mine to fix alone.**
+`scripts/boot-test.sh` takes the boot lock around **QEMU**, so two lanes
+never emulate at once -- but nothing stops a lane *compiling* through
+another lane's boot. Lane C's full workspace run and my gates shared 12
+cores for most of an hour, and neither run could see the other. Confirmed
+rather than assumed: the four `cargo`/`rustc` processes alive when the boot
+died had started ten seconds earlier and were lane C's, not orphans of mine.
+
+**What was changed, and why it is not the mistake dd-952 warns about.** The
+budget went 7200s -> 10800s. dd-952 refused to widen the `sleep_ns` ceiling
+because that ceiling was the *only reader* of its signal, so widening it
+spent the entire detection budget of the test. This bound is different in
+kind: it exists to catch a **hang**, and a hang is unbounded, so 7200 and
+10800 catch it equally well while only one of them also kills healthy runs
+on a shared host. The cause I can actually fix is staying off the machine
+during a boot, and that is a habit rather than a flag.
+
+**Options for the shared-host half, none of them taken unilaterally**,
+because `boot-test.sh` is shared and a lock that makes one lane wait an hour
+for another is worse than the contention it prevents:
+
+| option | cost |
+|---|---|
+| leave it, size timeouts for contention | what is done now; slow runs stay mysterious |
+| advisory — boot-test prints "another lane is building" | cheap, explains a slow run instead of preventing it |
+| a real build lock | correct and expensive, and "your lane stops for an hour" is an operator-level policy call |
+
+Raised with lane C as a question rather than a proposal; their own rule
+about hooks -- *slow enough to route around is worse than none* -- applies
+here with much longer teeth.
+
+### [A] `freeze.rs`'s 1-second timing ceiling is below the host stall measured today, and the rule that was supposed to prevent that does not cover it -- 2026-09-18
+**Status:** FIXED 2026-09-18, boot-verified on ebb683642 (two-clock comparison replaced the 1s ceiling; the boot reached BOOT_OK with only the three baselined failures)
+
+**In short:** several start-up checks say "this took less than N". A rule
+already written in this tree says such a check is only safe if it would take
+a *many-times* slowdown to trip it. One check passes that rule and is still
+unsafe, because the machine does not slow down proportionally -- it stops
+dead for a moment, and a pause of about one second happened today.
+
+**How this was looked for at all.** Lane C's rule, sent the same evening:
+*a remedy applied where the failure was seen does not reach the places it
+was not.* This morning a 20ms sleep measured 988ms and killed a boot; I
+fixed `sched::test_sleep_ns` and stopped. That is the site where it was
+seen. The population at risk is every self-test assertion with a fixed
+ceiling on a measured duration, and I had not looked at it.
+
+**The population, enumerated.** Most `elapsed`-shaped assertions in the
+tree compare two timestamps for ordering (`a >= b`), which no amount of host
+stall can break. The ones with a **fixed ceiling** are few:
+
+| site | ceiling | expected | at risk? |
+|---|---|---|---|
+| `sched/mod.rs:10705` (`test_sleep_ns`) | 500ms | ~22ms | **was** -- fixed this morning with a retry (dd-952) |
+| `fs/freeze.rs:545` | **1s** | microseconds | **yes** -- see below |
+| `fs/sysdiag.rs:810` | 10s | milliseconds | no -- an order of magnitude above the observed stall |
+| `fs/credentials.rs:736`, `fs/perfmon.rs:532` | debounce / sample-count windows | -- | no -- bounded by a count or a window, not by wall time |
+
+**And the guidance for this already existed**, in `bench.rs:30-48`, written
+after an earlier incident where a ratio gate read 2.77x under load and 5.4x
+idle with no code change in between:
+
+> 1. If the property can be counted, count it. Before writing
+>    `assert!(elapsed < N)`, ask what the elapsed time stands in for.
+> 2. If it genuinely cannot be counted, the bound must only catch a
+>    catastrophe. The test to apply: can you say the regression it catches
+>    is *N times*, not *N percent*?
+
+I did not consult it before fixing `sleep_ns`. The fix happens to satisfy
+rule 2 -- 500ms against a 20ms request is 25x, which is a *times* not a
+*percent* -- but I arrived there by reasoning about retries rather than by
+reading the rule, and that is why I then failed to sweep the population.
+
+**The refinement, which is the part worth keeping.** `freeze.rs:545` asserts
+`frozen_duration_ns < 1_000_000_000` on a filesystem frozen microseconds
+earlier. The ratio is about **1000x**, so it passes rule 2 comfortably --
+and it is still unsafe, because **rule 2's test assumes the noise is
+proportional.** A slower machine stretches everything by a factor, and a
+ratio bound survives that by construction. A descheduled VM does not
+stretch: it *stops*, for an absolute number of milliseconds, and an absolute
+stall blows through any bound smaller than itself no matter how large the
+ratio is.
+
+So the rule needs a second clause, and today supplies the number for it:
+**a wall-clock ceiling must also exceed the largest stall this host has been
+observed to take -- 988ms, measured 2026-09-18.** `freeze.rs`'s 1-second
+ceiling exceeds it by 12ms. It has not failed yet; it is one slightly worse
+afternoon from failing, and it would fail as a *filesystem freeze bug*,
+which is a bad thing to spend an hour on.
+
+**The fix is rule 1, not a bigger number.** What that assertion is really
+checking is *we froze this a moment ago and the bookkeeping is not garbage*
+-- so the honest form compares against the `before` timestamp the test
+already captures (and currently discards with `let _ = before;`) rather than
+against a constant. That converts a wall-clock ceiling into a comparison
+between two clocks that stall together, which no host pause can break.
+
+Not applied yet: a boot is building, and `fs/freeze.rs` is in it.
+
+### [A] `listen()` fails with `InternalError` about one boot in twenty, reds the run, and was recorded nowhere -- 2026-09-18
+**Status:** OPEN (bounded retry landed and boot-verified on ebb683642; the round counter reported ZERO retries, which argues against late completion and points at the other three InternalError sites -- now distinguishable. Cause still not identified)
+
+**In short:** roughly one boot in twenty fails because opening a network
+listening socket returns an error, on a socket that was created and bound
+successfully a line earlier. It has been happening for at least a day. It
+was in no entry of `known-issues.md` or `todo.txt`, because a failure that
+happens one run in twenty is invisible to anyone reading the run in front
+of them.
+
+**The evidence**, from `20260918T022810Z-fb66a2a2a-rc1.txt`:
+
+```
+[netsock]   FAIL: head-of-line setup step listen failed: InternalError
+[spawn]   FAIL: net::socket head-of-line witness (InternalError) -- a listener's
+          accepted connections are serialising again
+WARNING: net::socket head-of-line self-test failed: InternalError
+WARNING: persistent userspace netstack (ring 3) startup failed: InternalError
+```
+
+**Read the order carefully, because I read it backwards first.** The
+`listen` is the *first* line, not the last: `listen()` failed, which failed
+the witness, which failed the netstack startup report. My first reading was
+that an environmental netstack blip had cascaded into the witness -- the
+opposite causation, and it would have sent me to the daemon instead of to
+the socket layer.
+
+`kernel/src/net/socket.rs` runs the sequence
+`create(2)` -> `bind_stream(srv, PORT)` -> `listen(srv, 2)`, each wrapped in
+a `step!` macro that names itself on failure. The first two succeeded. Only
+`listen` failed, and only in this one run.
+
+**Rate: 1 of 20 archived serial logs.** Measured, not estimated -- the other
+nineteen contain neither line.
+
+**It reds the boot**, which is correct and worth stating because it means
+this is already costing runs. `scripts/boot-test.sh:353` greps the serial
+log case-insensitively for `self-test failed` and `:8987` turns a hit into
+*"Boot test FAILED (marker reached but a self-test failed)"*. So the kernel
+reaches `BOOT_OK` and the harness fails the run anyway -- exactly the design
+recorded when that witness was wired, working as intended.
+
+**How it was found, which is the reusable part.** `build/scan-guest-output.py`
+was written this morning after bash's `getcwd` error turned up four lines
+from an `OK`. I ran it on the newest log, found that, and stopped -- the
+site where the failure was seen. Lane C's rule the same evening (*a remedy
+applied where the failure was seen does not reach the places it was not*)
+prompted running it over all twenty. Nineteen of them contain only the
+`getcwd` line; one contains this as well.
+
+A one-in-twenty failure is precisely the shape a per-run reader cannot see
+and a corpus can. It cost one command over logs that were already on disk.
+
+**Next step, not taken yet.** Establish what `listen()` can return
+`InternalError` for at all, and whether the port is still held from an
+earlier test in the same boot -- a plausible hypothesis given `PORT` is a
+constant and this witness runs after a good deal of other network activity,
+but a hypothesis and not a finding. The cause is unknown; only the rate and
+the failing call are established.
+
+#### Root-caused the same day: `submit_and_reap` polls the completion queue exactly once
+
+**The hypothesis above is wrong, and the code says so plainly.** A port
+still held returns `KernelError::AddrInUse` from `listen()`, which is a
+distinct arm -- so whatever happened, it was not port reuse. Following the
+`InternalError` instead of the guess:
+
+`net::socket::listen` delegates to `netstack_client::listen`, which is two
+statements: `attach_ring()?` and `submit_and_reap(&ring, &sqe)`. Three
+`InternalError` sites exist between them, and one is the mechanism:
+
+```rust
+if !ring.sq_push(sqe) { return Err(KernelError::ResourceExhausted); }
+self.submit_round()?;                  // the control round-trip
+self.session_open = true;
+let cqe = ring.cq_pop().ok_or(KernelError::InternalError)?;   // <-- here
+```
+
+**`cq_pop()` is called exactly once.** There is no retry, no bounded spin
+and no yield. If `submit_round()` returns before the daemon's completion is
+visible to this CPU, `listen` fails with `InternalError` -- and the function
+doc says what it assumes in as many words: *"run one control round-trip, and
+reap exactly one completion"*. A single poll against another process's
+producer is a race by construction, and a race that lands roughly one boot
+in twenty is exactly what a single poll with a usually-sufficient delay in
+front of it looks like.
+
+The other two `InternalError`s in the same function are consistency checks
+(`user_data` mismatch, a second unexpected completion), and `attach_ring`'s
+is a genuinely absent ring. Any of the three would be reported identically
+at the call site, which is worth noting on its own: **four distinct
+conditions arrive at the rung as one word.**
+
+**So both of my earlier readings were wrong, in different ways.** First I
+read the cluster's last line and concluded a netstack-startup blip had
+cascaded into the witness -- wrong direction. Then I corrected that to
+"`listen` is first, so `listen` is the root" -- right about the order and
+still wrong, because the root is a mechanism *inside* the first observable.
+
+**Which sharpens the causal-order rule built into
+`build/scan-guest-output.py` this morning.** "Read the first anomaly of a
+cluster before the rest" is correct and insufficient: the first anomaly is
+the first **observable**, and the root may be an unreported precondition or
+a single line inside that observable. The rule gets you to the right
+function; it does not get you to the right line, and stopping there is how
+I recorded a wrong hypothesis with a right-sounding provenance.
+
+#### Fix landed 2026-09-18, and this boot does NOT verify it
+
+The bounded poll is in (`netstack_client.rs`, 8 rounds, `TimedOut` on
+exhaustion) and the boot after it reached `BOOT_OK` with only the three
+baselined failures. That is **not** evidence the race is fixed, and the
+distinction is the whole point:
+
+| log | head-of-line result |
+|---|---|
+| after the fix | `NOT CHECKED` -- declines to A-Q15 |
+| 2026-09-18 21:24, **before** the fix | `NOT CHECKED` -- declines to A-Q15 |
+| 2026-09-18 03:49, before the fix | `NOT CHECKED` -- declines to A-Q15 |
+| 2026-09-18 02:28 | `FAIL: head-of-line setup step listen` |
+
+So declining to A-Q15 is the **normal** path and predates the change; the
+`listen` failure was the 1-in-20 anomaly. A single green boot is therefore
+consistent with "fixed" and with "did not happen to fire", and at a base
+rate of one in twenty it would take many boots to tell those apart.
+
+**The fix is claimed structurally, not empirically:** the control path now
+polls the way its eight neighbours in the same file do, for the reason their
+comments state. That is lane C's rule applied to myself -- they claimed their
+environment-race fix structurally after 2,843 tests passed both before and
+after it, and declined to read the pass as proof. A flake that reproduces one
+run in twenty is not disproved by one run.
+
+What *would* verify it: the `FAIL: head-of-line setup step listen` line not
+appearing across ~20 further boots, or an instrumented count of how many
+rounds `submit_and_reap` actually needs. The second is cheap and tells you
+something the first cannot -- if the answer is always 1, the retry is
+insurance; if it is sometimes 2, the race was real and is now absorbed.
+
+#### The count came back zero, which moves the hypothesis rather than closing it
+
+Instrumented and booted. `submit_and_reap` prints only when it needs more
+than one round, and on boot `ebb683642` it printed **nothing**.
+
+Verified that the zero means something before reading it as an answer, since
+a missing line is exactly what a build without the counter also produces:
+
+| check | result |
+|---|---|
+| counter commit is an ancestor of the booted commit | yes |
+| booted tree contains the code (`git show <commit>:file`) | yes, 2 matches |
+| the path was actually exercised | 20 `netsock`/`netstack-client` lines |
+
+**So one round sufficed every time it was called.** That is not the result I
+expected, and it argues against my own diagnosis. If the 1-in-20 `listen`
+failure were a completion arriving late, the margin would be thin and
+`rounds > 1` should appear *often* -- far more often than one boot in twenty,
+because a marginal timing is marginal on every call, not on one call in
+hundreds. Zero retries across a boot's worth of operations says the single
+poll is normally comfortable, which makes late visibility an unlikely
+explanation for a rare failure.
+
+**The more likely candidates are now the other three `InternalError` sites**,
+which the same change made distinguishable: an absent ring from
+`attach_ring`, a `user_data` mismatch, or an unexpected second completion.
+Before, all four arrived at the caller as one word; now exhaustion is
+`TimedOut` and the rest stay `InternalError`, so the next occurrence names
+its own category.
+
+**What this does not establish.** One boot with zero retries is also
+consistent with a real race at a low rate -- at 1-in-20 for the *failure*,
+the underlying near-miss could still be rarer than one boot's traffic. The
+count needs accumulating across boots, which it now does for free: every
+future run either prints the line or does not.
+
+**And the retry is worth keeping regardless of which cause wins.** It cost
+nothing measurable, it applies the convention the file states eight times,
+and if the race is real-but-rarer-than-observed it absorbs it silently. What
+it must not do is be recorded as the fix for a failure it may have nothing to
+do with -- which is what this section exists to prevent.
+
+**Sharpened: this is not a missing retry, it is an unfollowed convention
+stated eight times in the same file.** `netstack_client.rs` already
+contains eight bounded poll loops -- `for _ in 0..64`, `..32`, `..32`,
+`..16`, `..64`, `..64`, `..16`, `..16` -- and their comments give the
+reason in almost identical words:
+
+> *Poll for the reply. Each non-blocking recv **drives the daemon's RX pump
+> once**, so a bounded loop is enough...*
+>
+> *Poll for the looped-back datagram. Each non-blocking recv **drives the
+> daemon's UDP pump once**, so a bounded loop suffices...*
+>
+> *...to writable (**each poll pumps once**). Loopback normally completes
+> immediately.*
+
+So the file states the governing fact -- one poll drives the daemon's pump
+exactly once, therefore one poll may not be enough -- and applies it in
+eight **data**-path functions. The one **control**-path function that every
+other call in the module routes through, `submit_and_reap`, polls once.
+
+That is lane C's rule with the populations inverted: a remedy applied
+everywhere the failure was *seen* (the data paths, where a missing datagram
+is obvious and frequent) and absent from the place it was not (the control
+path, where it costs one boot in twenty and arrives as a bare
+`InternalError`). And *"Loopback normally completes immediately"* is the
+same sentence as the ratio argument: true about the common case, and the
+reason nobody noticed the uncommon one.
+
+**The fix, not applied.** Copy the neighbours: a bounded poll loop around
+`cq_pop()` with the same shape and rationale as the eight beside it, and a
+*distinguishable* error on exhaustion rather than sharing `InternalError`
+with three unrelated conditions. `TimedOut` (-6) and `WouldBlock` (-4) both
+already exist, so no new variant is needed. Not applied here because it is in the
+control path every `netstack_client` call uses, not just `listen`, so it
+wants its own boot rather than a ride on one already in flight; and because
+the consistency checks below it should get their own error values in the
+same change, which is a slightly larger edit than it first appears.
+
+### [A] Reading a large file panics the kernel, my cmake rung found it, and I had printed the number that predicted it -- 2026-09-18
+**Status:** FIXED 2026-09-18, boot-verified on ebb683642 (both read paths return OutOfMemory instead of aborting; the cmake rung took the skip path and the kernel did not panic, which is what the change was for)
+
+**In short:** asking the kernel to read a 22-megabyte file killed it, with
+2.7 gigabytes of memory free. The cause is that the allocator rounds a
+request up to the next power of two, so a 22.5 MB file asks for a 32 MB
+*unbroken* run of memory, and if the free memory is in smaller pieces there
+is no way to satisfy it. The read then aborted instead of returning an
+error, and in a kernel an abort is a panic.
+
+```
+[spawn] Running CMake 4.4.3 linked against OUR libc.a (ring 3) test...
+!!! KERNEL PANIC !!!
+memory allocation of 22526200 bytes failed
+  Memory: 5242880 KiB total, 2464576 KiB used, 2778304 KiB free
+  Heap: large=18713/18676, refills=192, failures=1
+  # 5: kernel::fs::vfs::Vfs::read_file_resolved+0x5a4
+```
+
+**The arithmetic, which is the actionable part.** `heap.rs:883`
+`large_order` rounds the frame count up to the next power of two for the
+buddy allocator. At 16 KiB frames:
+
+| file | bytes | frames | rounded to | contiguous demand |
+|---|---|---|---|---|
+| `pkgconf-slateos.elf` | 1,834,856 | 113 | 128 | 2 MiB |
+| `make-slateos.elf` | 2,395,104 | 147 | 256 | 4 MiB |
+| `bash-slateos.elf` | 4,339,648 | 265 | 512 | 8 MiB |
+| `python-slateos.elf` | 10,468,016 | 639 | 1024 | 16 MiB |
+| `python312.zip` | 20,498,464 | 1251 | **2048** | **32 MiB** |
+| `cmake-slateos.elf` | 22,526,200 | 1376 | **2048** | **32 MiB** |
+
+**So this is not a size cap, and that matters.** The Python zip is the same
+order and reads successfully on every boot. Whether a 2048-frame contiguous
+block exists depends on buddy fragmentation at that point in the boot, and
+the cmake rung runs later than the Python one -- after make, tcc, and the
+make-drives-tcc build. The failure is therefore **nondeterministic**, which
+is the worst kind of panic to introduce into a read path.
+
+**I had the number.** The rung prints
+`cmake: /mnt/bin/cmake is 22526200 bytes` and my own commit message quotes
+`22,526,200 bytes + 1748 module files`. I measured the size, printed it
+twice, and never asked whether the kernel could allocate it. Having a datum
+is not the same as having used it -- and it is the same failure as reading a
+declaration instead of a call: the information was in front of me and the
+question I asked of it was the wrong one.
+
+**Two fixes, and the general one is the important one.**
+
+1. `Vfs` read paths used `alloc::vec![0u8; out_len]`, which **aborts** on
+   allocation failure. Now `try_reserve_exact` with
+   `KernelError::OutOfMemory`. This is general: *any* caller reading a large
+   file could panic the kernel, and my rung merely found it. `try_reserve`
+   was already the established idiom -- 12 uses across `drm/card_fd`,
+   `mm/user`, `net/bridge`, `syscall/handlers` and `virtio/gpu` -- so this
+   applies a convention the tree had rather than inventing one.
+   **Both sites**, not just the one in the backtrace: the identical
+   expression appears twice, and fixing only the traced one would leave the
+   other for the next large file (lane C's rule).
+2. The cmake rung now treats `OutOfMemory` as an **environment fact** and
+   skips through `pathz_skip` so the lost coverage is counted, rather than
+   reddening the boot. That matches the existing split exactly -- absent
+   source skips, present-but-broken fails -- and a silent `Ok` here would
+   have been the Path-Z verdict problem recorded earlier today.
+
+**What is still unresolved.** The rung will now *skip* rather than run
+whenever the block is unavailable, so Part 61 may not actually exercise
+cmake on a given boot. Loading a 22.5 MB binary through a buddy allocator
+is the wrong mechanism for a file this size; mapping it rather than copying
+it is the real answer, and that is a larger change than a self-test should
+carry. Recorded rather than attempted.
+
+### [A] `test-checkers-honour-head.py` is 663s of a 875s suite phase, and the suite phase was never the timeout -- 2026-09-18
+**Status:** OPEN (measured; the 663s is a real per-boot cost, the timeout cause is elsewhere and still unattributed)
+
+**In short:** one of the tooling's own test suites takes eleven minutes and
+the other twenty-one take under forty seconds each. That is worth knowing on
+its own -- it runs on every boot -- but it does not explain the two boots
+that died at their time limit, because all the suites together are about
+fifteen minutes out of a three-hour phase.
+
+**Measured in situ** after adding per-suite timing to `boot-test.sh`'s
+`scripts/test-*.py` loop, which previously reported names and verdicts but
+no durations:
+
+| suite | seconds |
+|---|---|
+| `test-checkers-honour-head.py` | **663** |
+| `test-canary-load.py` | 36 |
+| `test-reclaim-space.py` | 30 |
+| `test-check-boot-skips.py` | 23 |
+| `test-build-usb-image.py` | 22 |
+| `test-boot-test.py` | 20 |
+| the other sixteen | 0-18 each |
+| **suite phase total** | **~875** |
+
+So one suite is 18x the next largest and about 76% of the phase. It is also
+honest work: 124 end-to-end cases, each building a synthetic repository and
+driving real push gates through it, and it passes.
+
+**What the number refutes is the reason I went looking.** Two boots died at
+their bound -- 7200s, then 10800s -- and my hypothesis was that this suite
+had started hanging. It had not (776s standalone, 663s here, RC=0 both
+times), and at ~875s the entire suite phase is 6% of the 10800s budget. The
+time went into the 79 `=== Checking ...` gates that run alongside them, and
+**those still report no durations**, so the cause remains unattributed.
+
+**And the run that produced these numbers is itself evidence against a
+permanent regression.** It reached 79 gates plus all 22 suites in 74
+minutes, where the 10800s run managed fewer in 180. Same tree, same gates.
+That points at contention during the failed run -- lane C had two full
+workspace runs inside it and I ran a cmake cross-build, a rootfs rebuild and
+two cargo-using pushes during an earlier one -- rather than at anything
+having become slow.
+
+#### Corrected the same day: the figures above came out of a truncated list
+
+The table above says 22 suites totalling ~875s with one at 663s. Measured
+again on the next run, reading **all** of them:
+
+| suite | seconds |
+|---|---|
+| `test-checkers-honour-head.py` | 573 |
+| `test-pre-push-fmt-gate.py` | **189** |
+| `test-pre-push-doclinks-gate.py` | **97** |
+| `test-pre-push-identity-gate.py` | **56** |
+| `test-canary-load.py` | 33 |
+| the other nineteen | 0-19 each |
+| **24 suites, total** | **1078s** |
+
+So it is 24 suites and 1078s, not 22 and ~875s, and the top four are 915s --
+**85% of the phase**. Three suites in the 56-189s band were missing from the
+first table entirely.
+
+**Why they were missing is the part worth keeping, because it is the error I
+recorded in `design-decisions.md` the same morning.** I read the timings with
+`head -20` over an output that is **alphabetically ordered**, and the three I
+missed are alphabetically late -- `test-pre-push-*`. Lane C's phrasing, from
+their `tail -40` that could not have shown a failure: *the filter kept the
+wrong end.* Mine kept the wrong end of my own instrument's output, hours
+after writing that sentence down.
+
+A truncation over a sorted list is not a sample. It is the first N of an
+ordering that has nothing to do with the quantity being measured, and it
+fails silently because twenty numbers look like a census.
+
+**The conclusion is unchanged, which is why the correction is worth making
+rather than burying:** 1078s is still 10% of the 10800s budget, so the suite
+phase was not the timeout and the 79 `=== Checking ...` gates remain the
+unattributed 80%. Being wrong by 200s does not move that, but publishing a
+figure taken off a truncated list would have made the next reader's
+arithmetic wrong for no reason.
+
+One further datum the full list gives that the truncated one could not:
+`test-checkers-honour-head.py` has now been measured at 776s standalone,
+663s in one boot and 573s in the next. It is variable by a third, which
+makes any single reading of it a poor basis for a threshold -- worth knowing
+before anyone sets one.
+
+**What is worth doing, and what is not.** Timing the 79 gates the way the
+suites are now timed is the obvious next step and is a larger edit: they are
+not a loop, they are individual functions. Not done yet, and possibly not
+worth doing -- if contention is the whole story, the instrumentation that
+matters is the build-contention notice already added, not per-gate
+stopwatches. One more uncontended run that completes would settle it, and
+that is cheaper than the edit.
+
+`scripts/test-checkers-honour-head.py` is not in lane A's write list, so the
+663s is recorded rather than optimised. If it is ever worth reducing, the
+shape to look at is that each of the 124 cases builds a repository from
+scratch; a shared fixture would trade isolation for time, which is a real
+tradeoff and not an obvious win.

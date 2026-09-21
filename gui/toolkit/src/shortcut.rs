@@ -82,6 +82,7 @@ impl Error for UnknownKey {}
 /// | `Ctrl+Shift+T` | one stroke, both modifiers |
 /// | `Left / Right`, `Up/Down` | two strokes — `/` separates alternatives |
 /// | `Arrows` | four strokes, one per arrow |
+/// | `WASD` | four strokes, the movement keys a game binds beside the arrows |
 /// | `Esc`, `PgUp`, `Return`, `Del` | the spellings apps actually use |
 /// | `?` | `Shift` and the slash key, which is what produces it |
 /// | `Ctrl+/` | one stroke — a `/` straight after `+` is a key, not a separator |
@@ -109,6 +110,23 @@ pub fn keystrokes(label: &str) -> Result<Vec<KeyEvent>, UnknownKey> {
         // movement hint prints it that way.
         if chord.eq_ignore_ascii_case("arrows") {
             for key in [Key::Left, Key::Right, Key::Up, Key::Down] {
+                strokes.push(stroke(key, Modifiers::NONE));
+            }
+            continue;
+        }
+        // `WASD` is the same abbreviation one step along: four keys under one
+        // word, and the word is what a game prints. `apps/asteroids`,
+        // `apps/game2048`, `apps/snake` and `apps/sokoban` all bind these
+        // beside the arrows. Without this they would have to print
+        // `W, A, S, D`, which is the list bending to the parser -- the same
+        // argument the range syntax below is written on.
+        //
+        // Order is W, A, S, D rather than the arrows' left-right-up-down: the
+        // word names the keys in the order the keys sit under the hand, and a
+        // reader comparing the label to the strokes should find them in the
+        // order the label wrote them.
+        if chord.eq_ignore_ascii_case("wasd") {
+            for key in [Key::W, Key::A, Key::S, Key::D] {
                 strokes.push(stroke(key, Modifiers::NONE));
             }
             continue;
@@ -873,6 +891,26 @@ mod tests {
             vec![Key::Left, Key::Right, Key::Up, Key::Down]
         );
         assert_eq!(keys("arrows").len(), 4);
+    }
+
+    #[test]
+    fn wasd_is_one_word_for_four_keys() {
+        assert_eq!(keys("WASD"), vec![Key::W, Key::A, Key::S, Key::D]);
+        assert_eq!(keys("wasd").len(), 4);
+        // The shape a game actually prints: both halves of one movement row.
+        assert_eq!(
+            keys("Arrows / WASD"),
+            vec![
+                Key::Left,
+                Key::Right,
+                Key::Up,
+                Key::Down,
+                Key::W,
+                Key::A,
+                Key::S,
+                Key::D
+            ]
+        );
     }
 
     #[test]

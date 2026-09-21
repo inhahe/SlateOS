@@ -2982,6 +2982,7 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_faulting_process()?;
     test_spawn_stack_growth()?;
     test_exec_process()?;
+    test_exec_process_failure_is_reported()?;
     test_seh_handler_exit()?;
     test_seh_handler_resume()?;
     test_process_kill()?;
@@ -33411,6 +33412,47 @@ fn test_spawn_stack_growth() -> KernelResult<()> {
     Ok(())
 }
 
+/// Test 6b (negative control): a native exec that FAILS must say so.
+///
+/// Exists to license reading silence. `sys_process_exec_with_frame` gained
+/// failure logging in `391232edb`, and Test 6 exercises only the success
+/// path -- on which the wrapper is deliberately silent. So no log anywhere
+/// demonstrated the probe fires, and a boot with no `[exec] NATIVE` line
+/// could equally mean "the syscall was never reached" or "the probe does
+/// not work". Those are different conclusions and one of them sent two
+/// investigations, five days apart, at the wrong door.
+///
+/// `elf_len = 0` is rejected by the handler's first check, so this is the
+/// cheapest deterministic failure available and needs no bad pointer.
+///
+/// Termination is asserted, not a particular exit code:
+/// `build_exec_test_elf` emits `int3` after the syscall because a
+/// successful exec never returns, so a failed one traps. How it dies is
+/// not the point; the line in the log is.
+fn test_exec_process_failure_is_reported() -> KernelResult<()> {
+    // A caller whose exec cannot succeed: zero-length image.
+    let caller_elf = elf::build_exec_test_elf(0x0000_0050_0000_0000, 0);
+    let options = SpawnOptions::new("spawn-test-exec-fail");
+    let result = spawn_process(&caller_elf, &options)?;
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+
+    let state = pcb::state(result.pid);
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: exec-failure control expected Zombie, got {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   native exec failure is reported (control for the \
+         [exec] NATIVE probe): OK"
+    );
+    Ok(())
+}
+
 /// Test 6: Exec replaces process image and continues executing.
 ///
 /// Flow:
@@ -33521,14 +33563,43 @@ fn test_exec_process() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
 
-    // Verify the process is now a zombie (exec succeeded, new code ran,
-    // SYS_EXIT was called).
+    // Verify the process is now a zombie.
+    //
+    // This comment used to read "(exec succeeded, new code ran, SYS_EXIT
+    // was called)", which Zombie does NOT establish. On 2026-09-21 the rung
+    // reported OK through six consecutive lines in which the exec failed:
+    //
+    //   [exec] NATIVE exec FAILED -> -101 (elf_len=136)
+    //   [exception] Killing task 96 - General Protection Fault (#GP)
+    //   [thread] Process 131 has no threads left - now zombie
+    //   [spawn]   Exec (replace process image): OK
+    //
+    // A successful exec ends with the target calling exit(0) -> zombie. A
+    // FAILED exec ends with the caller running off its own code into
+    // unmapped memory -> #GP -> also zombie. One assertion, two opposite
+    // outcomes, reported as success for as long as it has existed.
     let state = pcb::state(result.pid);
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
             "[spawn]   FAIL: after exec, expected Zombie, got {:?}",
             state
         );
+        // Clean up.
+        thread::on_thread_exit(result.task_id);
+        pcb::destroy(result.pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // The target ELF is `build_test_elf_public()`, whose whole body is
+    // SYS_EXIT(0), so the exit code separates the two outcomes exactly:
+    // Some(0) only if the new image actually ran.
+    let exec_code = pcb::exit_code(result.pid);
+    if exec_code != Some(0) {
+        serial_println!(
+            "[spawn]   FAIL: exec reached Zombie but exit code was {:?}, expected Some(0)",
+            exec_code
+        );
+        serial_println!("[spawn]          the process DIED instead of exec-ing");
         // Clean up.
         thread::on_thread_exit(result.task_id);
         pcb::destroy(result.pid);

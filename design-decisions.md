@@ -77382,6 +77382,39 @@ failure found the same day is a `[netsock]`-prefixed line -- **invisible to
 this scanner** -- and was found by grepping the log directly, which at the
 time I did not register as evidence about the tool.
 
+**And counting one limit is worse than counting none, because it looks
+finished.** Lane C's, one message later, and it caught me mid-mistake. They
+had been printing an unscoped-crate count -- 6 crates -- and read that as
+having discharged the obligation. It was the smallest of four blind spots;
+the largest set aside 387 types. *"A tool that counts one of its limits looks
+like a tool that counts its limits."*
+
+I had just done exactly that. My scanner counted the kernel-prefix rule
+(46,370 lines) and printed the post-filter total as what it examines. Its
+`DROP` has seven clauses and a separate error-shape test after them. Counting
+all of them:
+
+| stage | lines |
+|---|---|
+| in the log | 47,626 |
+| survived every `DROP` rule | 109 |
+| of those, not error-shaped, never considered | 103 |
+| **actually judged** | **6** |
+
+**0.013%, not the 0.23% I reported an hour earlier** -- and my own figure was
+the overstatement, by eighteen times. "109 eligible" is not "109 examined",
+and I published the first as the second.
+
+The scanner now prints the whole ladder, iterating the *same* rule list it
+filters with rather than a second hand-written copy, which would be the
+third-copy problem above. It also states that the rules **overlap** -- a
+blank line is also indented -- so the column is not read as a partition when
+only `survived` and `judged` are.
+
+Two orders of correction in two messages, on the same instrument, from the
+same rule: state the limit, then count it, then count *all* of them. Each
+step revealed the previous one had been satisfied too cheaply.
+
 So the general form is stronger than "document your limits": a stated limit
 cannot be weighed, and a reader has no way to tell 30 excluded lines from
 30,000. **A limit that is not counted is a limit nobody can price.**

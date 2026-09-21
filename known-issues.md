@@ -160487,7 +160487,7 @@ about a program that was working correctly, or nearly hid a real one. This
 entry lists them with the instance that caught each, because the fix is not
 "be careful" -- it is knowing the specific shapes.
 
-**It started at seven and is at twenty**, and the slug
+**It started at seven and is at twenty-one**, and the slug
 keeps the original number because renaming it would break every reference to
 it. 18 and 19 are the two that are not failure shapes at all -- 18 is the
 question that ends a run of them and 19 is about the cost of a grouping you
@@ -160799,6 +160799,36 @@ it belongs to the run of the thing you are diagnosing -- by line number against
 the subject's own first line, by pid, by anything. And for the inverse, which
 is the same rule from the other end: a probe's *silence* is evidence only once
 something you know fails has passed through that probe and been seen.
+
+**21. The assertion watched a quantity the action does not move** (lane C,
+2026-09-21, four times in two hours). Writing "this key must not act while the
+help card is up" tests, the negative half kept passing for the wrong reason,
+because the thing being watched never changed either way:
+
+| app | asserted | why it could not move |
+|---|---|---|
+| `apps/email` | `messages.len()` after `Delete` | `delete_message` *moves* to Trash and only removes a message already there |
+| `apps/alarmclock` | `alarms.len()` after `N` | `N` opens an editor; the alarm appears on confirm |
+| `apps/dbviewer` | the drawn **text** after `Tab` | focus is a highlight, not a word |
+| `apps/stickynotes` | the note body after a letter | `probe::press` carries no `text`, and this app inserts from the event's text, so nothing types either way |
+
+Each of those tests passed. Each would have passed just as well **on an app
+with the feature deleted**, which is the definition of testing nothing.
+
+**What caught all four was the same cheap addition: a control doing the thing
+with the modal down.** `assert_ne!` after dismissing the card, `assert!(editor
+.is_some())` once it is closed. Every one of the four was found by the control
+failing, not by the negative assertion -- the negative assertion is what was
+broken, and a broken negative assertion is silent by construction.
+
+**So the rule for any "X must not happen" test: assert that X *does* happen
+under the condition where it should.** Without that half you have not tested
+that X is prevented; you have tested that you cannot make X happen, which is
+also true of an app that cannot do X at all.
+
+The related failure, worth naming because it is the same error one level up:
+choosing the observable requires reading what the action *does*, not what its
+name suggests. `delete_message` sounds like it deletes. It files.
 
 ## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18) -- **CLOSED 2026-09-21**
 

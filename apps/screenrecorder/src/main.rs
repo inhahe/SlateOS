@@ -1718,11 +1718,43 @@ impl SettingsTab {
 // ============================================================================
 
 /// Top-level screen recorder application state.
+/// The keys this window answers, as a reader sees them.
+///
+/// The status bar named two of them -- "F9: Start/Stop | F10: Pause" -- and
+/// the capture modes, the frame rate, both audio toggles and both volume
+/// pairs were written down nowhere. It points at this list now, which is the
+/// point of a hint with room for three words.
+///
+/// The module's CANNOT_RECORD note still stands above all of it: none of
+/// these produces a recording, because nothing here can capture a frame.
+/// They do change what the window shows, which is why they are worth naming
+/// -- a key that visibly does something and is named nowhere is the defect
+/// this list exists to remove, whether or not the feature behind it is
+/// finished.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("F9", "Start or stop recording"),
+    ("F10", "Pause or resume"),
+    (
+        "1 / 2 / 3",
+        "Capture the whole screen, a window, or a region",
+    ),
+    ("Ctrl+F", "Step the frame rate: 15, 24, 30, 60"),
+    ("Ctrl+S", "System audio on or off"),
+    ("Ctrl+M", "Microphone on or off"),
+    ("Ctrl+Up / Ctrl+Down", "System volume"),
+    ("Shift+Up / Shift+Down", "Microphone volume"),
+    ("Tab", "Next view"),
+    ("Esc", "Stop a recording, or abandon a region drag"),
+];
+
 pub struct ScreenRecorderApp {
     /// Current recording state.
     pub recording_state: RecordingState,
     /// Current capture mode.
     pub capture_mode: CaptureMode,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     /// Selected FPS preset.
     pub fps_preset: FpsPreset,
     /// Audio capture settings.
@@ -1916,6 +1948,21 @@ impl ScreenRecorderApp {
 
     /// Handle a key press.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Before the match below, so raising and dismissing the card are the
+        // same decision. F9 starts a recording and Delete removes a clip from
+        // the history, and neither should happen from behind a list somebody
+        // is reading.
+        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         // The recording controls, which the module doc lists as "start / stop /
         // pause / resume with keyboard shortcuts" and which had none.
         match key.key {
@@ -2125,6 +2172,7 @@ impl ScreenRecorderApp {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             recording_state: RecordingState::Idle,
             capture_mode: CaptureMode::FullScreen,
+            show_help: false,
             fps_preset: FpsPreset::Fps30,
             audio: AudioSettings::default(),
             countdown: CountdownTimer::new(3),
@@ -2418,6 +2466,17 @@ impl ScreenRecorderApp {
                 max_width: Some(self.window_width - 20.0),
                 overflow: TextOverflow::Ellipsis,
             });
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
         }
 
         cmds
@@ -3760,7 +3819,7 @@ impl ScreenRecorderApp {
         cmds.push(RenderCommand::Text {
             x: self.window_width - 200.0,
             y: text_y,
-            text: "F9: Start/Stop | F10: Pause".to_string(),
+            text: "F9 Start/Stop | F10 Pause | F1 keys".to_string(),
             font_size: 11.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
@@ -4121,6 +4180,81 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Two states, and the second is not decoration. `Esc` is answered only
+    /// when there is something to abandon -- a drag, or a running recording --
+    /// and returns `Ignored` otherwise, which is correct: Escape with nothing
+    /// to cancel belongs to whatever is above this window. A one-state guard
+    /// reported that the card advertised a key nothing answered, and it was
+    /// right that the row was wrong: the first draft read "Back", which this
+    /// program does not do.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|recording| {
+                    let mut app = ScreenRecorderApp::new();
+                    if recording {
+                        app.begin_recording_fixture();
+                    }
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing records behind it.**
+    ///
+    /// The control is the last third. F9 behind the card must not start a
+    /// recording -- but asserting only that would pass on a build where F9
+    /// had stopped working altogether, so it is then pressed with the card
+    /// down and required to start one.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = ScreenRecorderApp::new();
+        assert!(
+            !drawn_text(&app)
+                .iter()
+                .any(|t| t.contains("F1 or ? closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = drawn_text(&app).join(" | ");
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        // `blocked_reason`, not `recording_state`. F9 cannot move the state
+        // in this program -- `start_recording` only records that there is no
+        // frame source -- so the field whose name matches the verb is the one
+        // the action never writes. Watching it made this control pass while
+        // F9 did nothing at all, which is the whole shape.
+        assert!(
+            app.blocked_reason.is_none(),
+            "control: something was blocked before a key was pressed"
+        );
+        app.handle_event(&press(Key::F9));
+        assert!(
+            app.blocked_reason.is_none(),
+            "F9 reached the recorder through the shortcut card"
+        );
+
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&press(Key::F9));
+        assert!(
+            app.blocked_reason.is_some(),
+            "control: F9 does nothing even with the card down"
+        );
     }
 
     fn press(k: Key) -> Event {

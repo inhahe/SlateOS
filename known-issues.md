@@ -160830,6 +160830,22 @@ The related failure, worth naming because it is the same error one level up:
 choosing the observable requires reading what the action *does*, not what its
 name suggests. `delete_message` sounds like it deletes. It files.
 
+**The worst instance of this shape is lane A's, and unlike the five above it
+shipped** (2026-09-21). A kernel boot-test rung asserted exactly one thing:
+that the process reached `Zombie`. A successful exec ends with the target
+calling `exit(0)` -- zombie. A failed exec ends with the caller taking a `#GP`
+-- **also zombie**. One assertion, two opposite outcomes, and it reported
+success for its entire existence, with a comment claiming "(exec succeeded, new
+code ran, `SYS_EXIT` was called)" -- a mechanism it never checked. Four lines
+above its OK, the same log said
+`[exec] NATIVE exec FAILED -> -101 (elf_len=136)`.
+
+That is the same defect as the five here, at the scale where it matters: the
+observable was real, the assertion was true, and the quantity it watched could
+not tell the two outcomes apart. A sixth app's help-card test passing wrongly
+costs a reader nothing; a boot rung passing wrongly cost six rounds at ~90
+minutes each, because it was the evidence that the exec path worked.
+
 ## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18) -- **CLOSED 2026-09-21**
 
 **In short:** 60 boolean fields across 25 apps are read by the program and

@@ -160479,7 +160479,7 @@ about a program that was working correctly, or nearly hid a real one. This
 entry lists them with the instance that caught each, because the fix is not
 "be careful" -- it is knowing the specific shapes.
 
-**It started at seven and is at sixteen**, all in the same day, and the slug
+**It started at seven and is at seventeen**, all in the same day, and the slug
 keeps the original number because renaming it would break every reference to
 it. The later seven are not more of the same: 8 and 12 are about *coverage* --
 which files a sweep read, which configuration a build compiled -- 11 and 13 are
@@ -160628,6 +160628,47 @@ The rule, and it costs nothing: **never read a status through a pipe.**
 Redirect to a file and echo `$?`, then read the file. Every verification in
 this lane's sweep does that; every *display* that pipes is followed by a
 separate redirected run when the status matters.
+
+**And its sibling, which is the more general half** (lane A, same day):
+*never let a status-bearing command be anything but the last thing in an
+invocation, and if it cannot be, capture `$?` into a variable immediately.*
+A pipe is only one way to lose a status -- a trailing `grep`, `tail` or
+`echo` does it just as thoroughly. Their instance is the one worth keeping:
+a backgrounded chain ended in a `grep`, the harness reported **exit 0** over
+a log containing `BOOT_RC=1`, and `chain.sh` carries a fifteen-line comment
+about that exact failure written by the same hand after seven false
+"succeeded" notifications. The fix was inside the script; the reintroduction
+was in the line that called it. That is what makes this a rule and not a
+lapse -- knowing the fault does not protect the next invocation.
+
+**17. The control tested the axis that was already working** (lane A,
+2026-09-21). Lane A measured `unsafe` blocks lacking a `// SAFETY:` comment
+at 318 of 2214, ran a control for a placement their scanner might miss --
+the comment written as the first line *inside* the block -- and it found 4.
+The number barely moved, so they recorded the instrument as sound. It was
+not: a SAFETY comment governing a group of reads, separated from the first
+`unsafe` by one *safe* statement, defeats a backward walk that stops at the
+first non-comment line. The real figure was 21 of 2210. **They were
+measuring "has a comment immediately above" and reporting it as "has a
+SAFETY comment".**
+
+The lesson is about the control and not the regex: **a passing control
+licenses only the failure it simulates, and the confidence it produces is
+general.** Theirs varied placement *after* the block; the fault was
+placement *before but separated*, an axis it never touched -- and a control
+that passes is far more persuasive than no control, so running it made them
+more confident and no more correct.
+
+Applied here within the hour. This lane's frozen-flag zero rested on one
+planted defect: a writer removed from an already-scoped struct in an
+already-covered crate. The 569 fields the survey *sets aside* are precisely
+the axes that control never varied. Three more were run: a frozen bool one
+level down in a singleton sub-struct (reported), a frozen fieldless enum
+(reported), and a frozen bool in a type the crate stores in a `Vec`
+(silent). That last one is the interesting case, because "correctly
+excluded" and "blind" are indistinguishable from a silence -- so the same
+type, with the same field, was changed to be held singly instead, and it
+became reported. Varying the axis is what separates the two readings.
 
 **Why this is filed rather than merely learned.** The three probes written
 today (frozen fields, displayed-but-unchangeable labels, admit-yet-claim) all

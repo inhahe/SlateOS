@@ -553,8 +553,12 @@ check_bench_coverage() {
 # tmpfs. If a skip ever fires, one of those three facts has changed and the
 # right outcome is to be told immediately, not to bank a green boot.
 #
-# Counted by one shared marker rather than four per-rung patterns, so a fifth
-# rung is covered by construction instead of by remembering to add it here.
+# Counted by one shared marker rather than per-rung patterns, and the EXPECTED
+# count is derived from the kernel source rather than written here, so adding a
+# rung is covered by construction. The first version of this comment claimed
+# that while the code said `-lt 4`: the skip half was construction-covered and
+# the count half was a literal that would have gone stale the moment a fifth
+# rung landed -- which it did, in acl.rs, within the hour.
 check_identity_rungs() {
     local file="$1"
     [ -f "$file" ] || return 0
@@ -563,9 +567,19 @@ check_identity_rungs() {
     # the count and drops the status.
     ran="$(grep -ac 'identity rung OK' "$file" 2>/dev/null || true)"
     skipped="$(grep -ac 'identity rung SKIPPED' "$file" 2>/dev/null || true)"
+    # How many rungs SHOULD report, counted from the source that emits them.
+    local expected
+    expected="$(grep -ro 'identity rung OK' "$PROJECT_ROOT/kernel/src" --include=*.rs 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "${expected:-0}" -eq 0 ]; then
+        echo "=== FILE-IDENTITY RUNGS GONE FROM THE SOURCE ==="
+        echo "  No 'identity rung OK' site exists in kernel/src, so the rungs"
+        echo "  that prove the FileId tables were removed or renamed. This gate"
+        echo "  would otherwise pass vacuously by expecting nothing."
+        return 1
+    fi
     if [ "${skipped:-0}" -gt 0 ]; then
-        echo "=== FILE-IDENTITY RUNG SKIPPED ($skipped of 4) ==="
-        grep -a 'identity rung SKIPPED' "$file" | head -4 | sed 's/^/  /'
+        echo "=== FILE-IDENTITY RUNG SKIPPED ($skipped, with $expected expected to run) ==="
+        grep -a 'identity rung SKIPPED' "$file" | head -8 | sed 's/^/  /'
         echo "  A skip here means /tmp cannot hard-link, or two names for one"
         echo "  file do not share an inode. Either falsifies the premise of the"
         echo "  FileId conversion (kernel/src/fs/{vfs,sealing,reclock,immutable}.rs)."
@@ -574,10 +588,10 @@ check_identity_rungs() {
     # Fewer than four means a rung did not reach its verdict at all -- an
     # early `?` on an unrelated error, or a self_test that stopped being
     # called. Neither prints FAIL, so nothing else would notice.
-    if [ "${ran:-0}" -lt 4 ]; then
-        echo "=== FILE-IDENTITY RUNGS INCOMPLETE ($ran of 4 reached a verdict) ==="
-        echo "  Expected one 'identity rung OK' from each of flock, sealing,"
-        echo "  record locks and immutable flags. A missing one means the rung"
+    if [ "${ran:-0}" -lt "$expected" ]; then
+        echo "=== FILE-IDENTITY RUNGS INCOMPLETE ($ran of $expected reached a verdict) ==="
+        echo "  Expected one 'identity rung OK' from each rung that defines it"
+        echo "  in kernel/src (currently $expected). A missing one means the rung"
         echo "  returned early or is no longer called from main.rs."
         return 1
     fi

@@ -166179,3 +166179,112 @@ The design above is complete enough that writing it is mechanical: three
 constants, one fd-to-name helper, three match arms, one of which
 (`BLKSECDISCARD`) must refuse. That is a better first task for a fresh session
 than a last one for a long session.
+
+### [A] Six fs metadata tables key on the path string, so metadata does not follow a hard-linked file -- and the ACL one is pre-positioned to become a permission bypass -- 2026-09-21
+**Status:** OPEN (5 of 8 converted: flock, sealing, record locks, immutable flags, ACLs. Remaining: `fcomment`, `queryable`, `tags`. `integrity` reclassified as correctly path-keyed; `history` undecided)
+
+**In short:** the kernel stores several kinds of per-file information -- ACLs,
+comments, tags, version history, integrity hashes -- in side tables looked up
+by the file's *name* rather than by the file itself. A file can have two names
+(a hard link). Under the second name, none of that information is found. For
+comments and tags that is a wrong answer; for ACLs it would be a way to walk
+past a permission rule, if ACLs could be set from a program. They cannot, yet.
+
+**How this was found, because the route matters.** I converted four tables
+(flock, sealing, record locks, immutable flags) to key on
+`FileId { fs_id, ino }` and wrote a boot gate for them. Only afterwards did I
+look at how many such tables exist. Four was the number I happened to be
+holding, not a measured population -- the same defect as dd-956, which I wrote
+two days ago specifically about measuring a population before building a gate
+for it. The tell was `immutable::rename_path`: a fixup that exists to drag a
+path key along behind a rename. A grep for it found **three** copies, in
+`immutable`, `fcomment` and `queryable`, each called only from its own
+self-tests. One fixup is a quirk; three identical ones are a class.
+
+**The measured population.** Every `BTreeMap<PathBuf, _>` under `kernel/src/fs`,
+classified by whether the data describes the *file* or the *name*:
+
+| module | keyed data | verdict |
+|---|---|---|
+| `acl` | POSIX ACLs | **should follow the inode** -- POSIX stores ACLs in the inode's xattrs, so path keying is a semantic deviation, not just a miss |
+| `fcomment` | a comment on the file | should follow the inode |
+| `history` | version history of the contents | **undecided** -- a real tradeoff, not a miss; see below |
+| `integrity` | a content hash baseline | **correctly path-keyed -- I had this wrong, see below** |
+| `queryable` | indexed attributes | should follow the inode |
+| `tags` | user tags | should follow the inode |
+| `dirsync`, `overlay`, `rundialog`, `undelete`, `usage` | comparisons between trees, overlay whiteouts, typed strings, records of deleted *names*, usage per directory | correctly name-keyed; an inode key would be wrong |
+| `memfs`, `path` | a filesystem's own directory structure; path utilities | name-keyed by definition |
+| `cap::file_tags` | capability-group tags | correctly **path**-keyed: `effective_tags` walks every ancestor, so a file's tags depend on where it lives. Inode keying would break inheritance |
+
+So the population is 8 tables that hold per-file data and should follow the
+inode, of which 5 are now converted (`acl` joined them today) and 3 are not,
+plus 8 that are right as they are and 1 undecided.
+
+**A correction, made before writing any code for it.** I first listed
+`integrity` as needing conversion. It does not, and converting it would have
+destroyed what it does. `verify_file` looks a baseline up by path, reads the
+content *currently at that path*, and compares. The threat it detects is a file
+being **replaced** -- and a replacement is a different inode. Key it by inode
+and `baseline.get(id)` misses, so a swapped `/etc/passwd` reports "no baseline"
+instead of `Modified`; worse, `VerifyStatus::Missing` becomes unreachable, since
+a file that no longer exists has no inode to look up. Path is not a weaker key
+here, it is the correct one. Tripwire and AIDE monitor paths for the same
+reason.
+
+The generalisation I had been using -- "per-file metadata should follow the
+file" -- was too coarse, and it took reading `verify_file` to see it. The
+sharper question is: **should this data survive the file at that path being
+replaced?** Yes means path (integrity monitoring). No means inode (an ACL, a
+comment, a tag -- none of which should transfer to a stranger's file that
+happens to land at the same name).
+
+`history` is left undecided on purpose. Version history could reasonably be
+either: keyed by inode a rename keeps its history, which is what Dropbox and
+macOS versions do; keyed by path you get the history of a location, which is
+what a user watching one config file may expect. That is a genuine tradeoff
+with a user-visible answer, so it is not mine to settle silently -- it wants an
+`open-questions.md` entry before any code moves.
+
+**A claim I nearly published, and the check that stopped it.** Having
+established that `acl::check_access` is called from `vfs::path_access_verdict`,
+which is called from `check_path_access`, which `handle.rs` calls on every open
+for Read/Write/Metadata, I was about to file this as a **live permission
+bypass**: set a restrictive ACL, hard-link the file elsewhere, open the link,
+and `acls.get(path)` returns `None`, which means *allow* ("No ACL, defer to
+traditional permissions"). Every link in that chain is real and I verified each
+one.
+
+It is still not a bypass, because of the link I had not checked: **there is no
+ACL syscall.** `set_acl` has exactly two callers outside its module -- `kshell`
+and one self-test -- and `grep` for `SYS_*ACL` or `setxattr` in
+`syscall/number.rs` returns nothing. `path_access_verdict` guards the ACL call
+with `if super::acl::count() != 0`, and in any boot where no human typed a
+kshell command, that count is 0 and `check_acl` is never reached. No program
+can create the precondition.
+
+This is the third time in this codebase I have mistaken *on the live code path*
+for *reachable by an attacker* -- `sealing` and `secpolicy` were the first two,
+where I published "can only ever be 0" about counters that kshell moves. The
+proxy is seductive because the call graph is genuine; what is missing is an
+actor who can enter it (dd-953).
+
+**Why it is still worth fixing, and fixing first.** The defect is
+*pre-positioned*. The day someone adds `SYS_ACL_SET` -- a normal, unremarkable
+roadmap item -- the bypass becomes live, and nothing in the tree would flag it,
+because the new syscall would look correct in isolation and the table it writes
+to has always been keyed this way. A latent hole that arms itself when an
+unrelated feature lands is worse than a loud one.
+
+**The fix** is the pattern already applied to the other four: derive
+`Option<FileId>` once, above the lock (holding a module global across a VFS call
+inverts filesystem-lock -> module-state and can wedge two CPUs -- 9 such sites
+were introduced and caught by `check-vfs-under-lock.py` earlier today), match on
+`(path, id)`, and fall back to the path when identity is unresolvable so a
+not-yet-created file still works. `immutable.rs`'s `flag_key` is the reference:
+one key-construction point, `FlagKey::Id | FlagKey::Path`. Each converted table
+also needs a rung that hard-links a real file, since the pre-existing rungs used
+synthetic paths that resolve to nothing and so passed identically before and
+after conversion.
+
+**Then delete the three `rename_path` fixups**, which identity keying makes
+unnecessary: an inode survives a rename, so there is nothing left to fix up.

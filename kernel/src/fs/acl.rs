@@ -202,12 +202,55 @@ struct AclInner {
     /// no entry, so the file whose ACL was displaced becomes unprotected,
     /// while the file that displaced it inherits restrictions nobody asked
     /// for.
-    acls: BTreeMap<PathBuf, Acl>,
+    /// Keyed by [`AclKey`], valued by the path as DATA plus the ACL.
+    ///
+    /// The path is kept so `list_paths` can still report names without the
+    /// key type reaching its signature.
+    acls: BTreeMap<AclKey, (PathBuf, Acl)>,
     /// Statistics counters.
     checks_performed: u64,
     denials: u64,
 }
 
+/// The key an ACL is stored under: the file's identity when it has one,
+/// otherwise its path.
+///
+/// POSIX keeps an ACL in the inode's extended attributes, which is why a
+/// hard link shares its file's ACL there. Keying on the path string made
+/// this table disagree with that: a second name for a protected file found
+/// no entry, and `check_access` treats no entry as *allow* ("defer to
+/// traditional permissions"), so the protection simply did not apply under
+/// the other name.
+///
+/// That was not exploitable when it was found -- there is no ACL syscall, so
+/// only a `kshell` command can put an entry in this table at all -- and the
+/// reason to fix it anyway is that it is pre-positioned: adding
+/// `SYS_ACL_SET` later would arm it, and the new syscall would look correct
+/// in isolation. See `known-issues.md` 2026-09-21.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum AclKey {
+    Id(crate::fs::vfs::FileId),
+    Path(PathBuf),
+}
+
+/// Derive the key for a path. **The only place an `AclKey` is constructed.**
+///
+/// MUST be called before taking the `ACLS` lock: `file_identity` calls into
+/// the VFS, and a module global held across that call inverts
+/// filesystem-lock -> module-state. Nine such sites were introduced and
+/// caught by `scripts/check-vfs-under-lock.py` on 2026-09-21; this ordering
+/// is what that gate enforces.
+///
+/// The path fallback is exact rather than approximate: every filesystem here
+/// that can give one file two names assigns nonzero inodes (ext4 and memfs
+/// leave `ino: 0` at 0 of 15 and 0 of 16 construction sites), so a file that
+/// resolves to no identity is one that cannot be hard-linked anyway.
+fn acl_key(path: &Path) -> AclKey {
+    match crate::fs::Vfs::file_identity(path) {
+        Ok(Some(id)) => AclKey::Id(id),
+        _ => AclKey::Path(path.to_path_buf()),
+    }
+}
 static ACLS: Mutex<AclInner> = Mutex::new(AclInner {
     acls: BTreeMap::new(),
     checks_performed: 0,
@@ -272,8 +315,10 @@ pub fn set_acl(path: impl AsRef<Path>, acl: Acl) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
 
+    // Above the lock. See `acl_key`.
+    let key = acl_key(path);
     let mut inner = ACLS.lock();
-    inner.acls.insert(path.to_path_buf(), acl);
+    inner.acls.insert(key, (path.to_path_buf(), acl));
     // Published under the lock so a concurrent `remove_acl` cannot interleave
     // its decrement between this insert and this store.
     ACL_COUNT.store(inner.acls.len(), Ordering::Relaxed);
@@ -284,15 +329,17 @@ pub fn set_acl(path: impl AsRef<Path>, acl: Acl) -> KernelResult<()> {
 ///
 /// Returns None if no ACL is set (file uses only traditional permissions).
 pub fn get_acl(path: impl AsRef<Path>) -> Option<Acl> {
-    ACLS.lock().acls.get(path.as_ref()).cloned()
+    let key = acl_key(path.as_ref());
+    ACLS.lock().acls.get(&key).map(|(_, acl)| acl.clone())
 }
 
 /// Remove the ACL from a file path.
 ///
 /// After removal, the file uses only traditional permissions.
 pub fn remove_acl(path: impl AsRef<Path>) -> bool {
+    let key = acl_key(path.as_ref());
     let mut inner = ACLS.lock();
-    let removed = inner.acls.remove(path.as_ref()).is_some();
+    let removed = inner.acls.remove(&key).is_some();
     ACL_COUNT.store(inner.acls.len(), Ordering::Relaxed);
     removed
 }
@@ -319,11 +366,13 @@ pub fn check_access(
     request: AccessRequest,
 ) -> KernelResult<()> {
     let path = path.as_ref();
+    // Above the lock: this is the site the lock-order gate exists for.
+    let key = acl_key(path);
     let mut inner = ACLS.lock();
     inner.checks_performed = inner.checks_performed.saturating_add(1);
 
-    let acl = match inner.acls.get(path) {
-        Some(acl) => acl,
+    let acl = match inner.acls.get(&key) {
+        Some((_, acl)) => acl,
         None => return Ok(()), // No ACL, defer to traditional permissions.
     };
 
@@ -397,13 +446,13 @@ pub fn check_access(
 /// List all paths that have ACLs set.
 #[allow(dead_code)]
 pub fn list_paths() -> Vec<PathBuf> {
-    ACLS.lock().acls.keys().cloned().collect()
+    ACLS.lock().acls.values().map(|(p, _)| p.clone()).collect()
 }
 
 /// Get statistics about the ACL subsystem.
 pub fn stats() -> AclStats {
     let inner = ACLS.lock();
-    let total_entries: usize = inner.acls.values().map(|a| a.entries.len()).sum();
+    let total_entries: usize = inner.acls.values().map(|(_, a)| a.entries.len()).sum();
     AclStats {
         files_with_acls: inner.acls.len(),
         total_entries,
@@ -931,6 +980,69 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[acl]   non-UTF-8 paths OK");
     }
 
-    serial_println!("[acl] Self-test passed (11 tests).");
+    // --- Test 12: an ACL follows the FILE, not the name ---
+    //
+    // The pre-existing rungs above use synthetic paths that do not exist, so
+    // `file_identity` returns NotFound, keying falls back to the path, and
+    // every one of them passes identically whether this table is keyed by
+    // identity or by name. They are therefore no evidence for the conversion.
+    // This rung creates a real file and gives it a second name.
+    {
+        const A: &[u8] = b"/tmp/acl-id-a";
+        const B: &[u8] = b"/tmp/acl-id-b";
+        let _ = crate::fs::Vfs::remove(Path::new(A));
+        let _ = crate::fs::Vfs::remove(Path::new(B));
+        crate::fs::Vfs::write_file(Path::new(A), b"x")?;
+
+        if crate::fs::Vfs::link(Path::new(A), Path::new(B)).is_err() {
+            serial_println!("[acl]   identity rung SKIPPED -- /tmp does not support link()");
+            let _ = crate::fs::Vfs::remove(Path::new(A));
+        } else {
+            let ida = crate::fs::Vfs::file_identity(Path::new(A))?;
+            let idb = crate::fs::Vfs::file_identity(Path::new(B))?;
+            if ida.is_none() || ida != idb {
+                serial_println!("[acl]   identity rung SKIPPED -- {:?} vs {:?}", ida, idb);
+                let _ = crate::fs::Vfs::remove(Path::new(A));
+                let _ = crate::fs::Vfs::remove(Path::new(B));
+            } else {
+                // 0o700: owner rwx, group and other nothing. Requester 1000
+                // is neither the owner (0) nor in its group, so it lands on
+                // the Other entry and must be refused.
+                set_acl(Path::new(A), from_mode(0o700))?;
+                let denied_via_a =
+                    check_access(Path::new(A), 1000, 1000, 0, 0, AccessRequest::READ).is_err();
+                let denied_via_b =
+                    check_access(Path::new(B), 1000, 1000, 0, 0, AccessRequest::READ).is_err();
+                let _ = remove_acl(Path::new(A));
+                let _ = crate::fs::Vfs::remove(Path::new(A));
+                let _ = crate::fs::Vfs::remove(Path::new(B));
+
+                // The CONTROL, checked first and separately. Without it a
+                // build where `check_access` refuses nothing at all would
+                // satisfy the real assertion below by accident, and the rung
+                // would report OK having demonstrated nothing (dd-954).
+                if !denied_via_a {
+                    serial_println!(
+                        "[acl]   ERROR: control failed -- a 0o700 ACL did not deny uid 1000"
+                    );
+                    serial_println!("[acl]          under the file's OWN name, so the");
+                    serial_println!("[acl]          identity assertion below proves nothing");
+                    return Err(KernelError::InternalError);
+                }
+                if !denied_via_b {
+                    serial_println!(
+                        "[acl]   FAIL: the ACL denied under /tmp/acl-id-a but ALLOWED under"
+                    );
+                    serial_println!("[acl]         /tmp/acl-id-b, a second name for the same");
+                    serial_println!("[acl]         inode -- a hard link walks past the ACL");
+                    return Err(KernelError::InternalError);
+                }
+                serial_println!(
+                    "[acl]   identity rung OK -- an ACL follows the file, not the name"
+                );
+            }
+        }
+    }
+    serial_println!("[acl] Self-test passed (12 tests).");
     Ok(())
 }

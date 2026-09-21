@@ -164604,6 +164604,55 @@ the harness comment beside them says: if `/bin/true` cannot exec, the pty
 and CPython rungs below are exercising the same broken path from further
 away. Fixing the exec should clear all three.
 
+#### The control that cleared the capability theory varied four axes at once
+
+Round 4 dropped the capability theory on a measured comparison:
+`ctest-keylayout`, holding `(File, READ)`, opened and read `/proc/keylayout`
+from ring 3 while this fixture, holding nothing, could not open
+`/mnt/bin/true`. `(File, READ | EXECUTE)` was then granted here and the
+rung still fails.
+
+Reading `run_one` in the fixture shows why that comparison proves less than
+it appears to. It `fork()`s, and **only the child** calls `execl`. The
+parent never touches `/mnt/bin/true` at all. So the two arms differ in four
+ways and share one:
+
+| | failing case | the control |
+|---|---|---|
+| process | `ctest-coreutils-runs` | `ctest-keylayout` |
+| file | `/mnt/bin/true` | `/proc/keylayout` |
+| filesystem | ext4, a mounted image | procfs, synthesised in kernel |
+| who reads it | a **forked child** | the parent itself |
+| capability | `(File, READ)` | `(File, READ)` |
+
+Only the last row is held constant, and it is the one the comparison was
+used to reason about. That is dd-954's asymmetry in a debugging session
+rather than a scan: **a control licenses only the axis it varies**, and
+this one varied four while being read as evidence about the fifth.
+
+It does not make the capability conclusion wrong. It makes it unsupported,
+which is a different and more useful thing to know after four rounds.
+
+**The hypothesis it suggests, stated so it can be killed cheaply:** a
+forked child may not be able to read an **ext4** file at all -- because of
+the fork, or because of ext4, or both -- and nothing in the four rounds so
+far distinguishes those from a capability problem.
+
+**The test that settles it is one I own.** A kernel self-test in
+`spawn.rs` that forks and has the child read a known ext4 file, with no
+exec anywhere in it, separates fork-vs-parent and ext4-vs-procfs in one
+boot. `posix/src/spawn.rs` and the fixture are lane B's; that self-test is
+not, so it can be written without a handoff.
+
+**What `load_elf` actually does in the child**, from reading
+`posix/src/spawn.rs` rather than assuming: `SYS_FS_STAT` on the path, then
+`mmap` of the file size (796 KB here), then open and read. Any of those
+three failing returns -1 with errno set and **never issues
+`SYS_PROCESS_EXEC`** -- which is exactly the silence round 5 observed.
+Worth noting separately: `execve`'s frame declares `[0u8; PATH_MAX]` plus
+two `[0u8; 128 * 1024]` packing buffers, so it needs ~260 KiB of stack on
+entry. That is a fifth candidate and it is not capability-shaped either.
+
 #### Round 5's discriminator answered, and it eliminates the whole exec theory
 
 `linux_exec_common` already wraps the exec path and prints

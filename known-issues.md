@@ -161808,15 +161808,27 @@ That is the same misreading as `apps/sokoban`, three times over.
 |---|---|
 | `rush`, `nonogram`, `battleship`, `reversi`, `checkers`, `dots` | **need nothing** -- every key they bind is named in a hint they draw |
 | `sokoban` | **needs nothing** -- verified earlier by reading `draw_footer` |
-| `compass` | advertise `1`..`9`, `0` -- they select a waypoint |
-| `klotski` | advertise `P` |
-| `snake` | advertise `1`, `2`, `3` -- the difficulty keys |
+| `compass` | **needs nothing** -- see the correction below |
+| `klotski` | advertise `P` -- **done** |
+| `snake` | advertise `1`, `2`, `3` -- the difficulty keys -- **done** |
 
-`apps/compass` is the one to be careful about, and it is why this was read
-rather than trusted: ten digit keys in an app with typed coordinate fields look
-exactly like text entry, which is the `apps/terminal` false positive. They are
-not. `Key::Num1 => 0` ... `Key::Num0 => 9` selects the waypoint at that index,
-which is a real shortcut and genuinely unadvertised.
+**`apps/compass` was wrong in this table for about an hour, and it is the
+fourth app off this queue that needed nothing.** Its `draw_help` already
+draws `"1-0: select waypoint"`, and re-checking with that understood leaves it
+with no unadvertised key at all. Two separate bugs in my own scan hid it: the
+hint pattern required the first token to look like a key *name*, so a row
+beginning with a digit was never recognised as a hint; and the range expander
+read `1-0` as `range(1, 1)`, which is empty -- `1-0` means 1 through 9 and then
+0, which no ascending expander gets right. The hint is correct and readable by
+a person; it is only machine-hostile, and `guitk::shortcut::keystrokes` would
+refuse it too, since a range there must ascend.
+
+**Every automated pass over this question has over-reported, in a different way
+each time** -- `sokoban` (footer the detector cannot see), `minesweeper` (guard
+under another name), `klotski` (literal `Num2` vs the range `1-7`), `videoplayer`
+(table of structs, not tuples), `compass` (digit-led row, descending range).
+Five mechanisms, five false alarms. The queue is worth having because it points
+at candidates, and **every candidate has to be read before it is edited.**
 
 **The working order.** The three above first -- each is one row in a hint line
 that already exists. Then the 56, largest first

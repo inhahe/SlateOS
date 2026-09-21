@@ -504,7 +504,7 @@ git -C "E:/visual studio projects/os" pull \
   only want a look: `git fetch origin && git log origin/main -- requests/`
   and `git show origin/main:requests/<file>.md`. Do this if nothing else.
 
-**Four hazards this rule exists to prevent — all of which actually happened,
+**Five hazards this rule exists to prevent — all of which actually happened,
 on the same day, to the same lane:**
 
 1. **A request sat unread for a day.**

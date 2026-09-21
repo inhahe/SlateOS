@@ -7969,8 +7969,13 @@ check_cfg_unix() {
 # regression is reported 94 seconds in rather than after a two-hour boot.
 check_kernel_docs() {
     # Raise this ONLY by lowering it. It is a ratchet, and the number is the
-    # count on the commit that introduced the gate, not a target.
-    local ceiling=296
+    # count at the last lowering, not a target.
+    #
+    # 296 -> 274 on 2026-09-21, same day the gate landed: 11 Type::member
+    # links qualified, 11 TaskState variants, and 9 smaller defects. Lowered
+    # because a ratchet nobody lowers is just a ceiling, and 22 links of
+    # slack is 22 new broken links that could land without the gate moving.
+    local ceiling=274
     local log start rc unresolved tags secs
 
     echo "=== Checking the kernel's intra-doc links (nothing else runs rustdoc) ==="

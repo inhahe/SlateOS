@@ -161939,6 +161939,21 @@ neither key -- written from a glance at a `toggle_option` call. The guard
 caught it on its first run, which is the pleasant case; nothing else would
 have.
 
+*Put the card check above the view dispatch, not beside the modifier handling.*
+`apps/contacts` claims `Escape`, `Enter`, `Tab` and `Backspace` in a `match`
+that runs before any modifier is looked at, so a card check placed where the
+`Ctrl` pair lives could raise the card and never close it -- a modal with no
+exit, which is the exact trap being fixed in `apps/editor` the same afternoon.
+`apps/ebook` dispatches to five views; the check goes above all five so the
+card works from each and closes from each.
+
+*`?` is not always free, and the reason is not always a text field.* dd-863
+says bind it where nothing needs to type one. `apps/ebook` needs no `?`
+typed -- and `/` opens its search through an arm that never looks at Shift, so
+`?` already opens a search. Binding the card to it would have shadowed a key
+the program answers, and no guard would have caught that, because the card
+really would have opened. Grep for a bare `Key::Slash` arm before deciding.
+
 *Check whether the app already has a better arrangement before adding a card.*
 `apps/passwordgen`'s option rows print their own keystrokes and parse the
 printed label to match them, guarded by two existing tests; `apps/videoplayer`

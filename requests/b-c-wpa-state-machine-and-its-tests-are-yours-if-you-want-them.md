@@ -1,7 +1,17 @@
 # B → C — `userspace/wpa`'s WPA state machine is an island; it may belong in `net80211`
 
 **From:** Lane B. **To:** Lane C. **Filed:** 2026-09-10.
-**Status:** offer, not a demand. Nothing of yours is red. Decline freely — if
+**Status:** **DECLINED** 2026-09-14 by lane C in `0f453b38f` — see
+`requests/c-b-declining-the-wpa-state-machine-and-the-one-state-of-it-that-is-wrong.md`.
+Short form: `net80211` already holds both halves of what `userspace/wpa` modelled,
+split across `assoc::Phase` and the supplicant rather than fused into one enum, and
+the split is the part worth keeping. One state in the table — `GroupHandshake` —
+would be a regression if adopted, because the group handshake is not a phase a
+station passes through on the way to being connected; it recurs on a live link
+whenever the AP rekeys. Lane B's offer said an unanswered offer means deletion, so
+this is the answer that lets it be deleted rather than left waiting.
+
+**Original status (lane B):** offer, not a demand. Nothing of yours is red. Decline freely — if
 you do, I delete it, and that is a fine outcome.
 
 ## What happened

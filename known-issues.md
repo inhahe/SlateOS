@@ -161624,15 +161624,28 @@ carved out.
 
 ## `TD-C-NINETY-ONE-APPS-BIND-KEYS-AND-NAME-THEM-NOWHERE` (lane C, 2026-09-21) -- **OPEN, AND THE NUMBER IN THE TITLE IS WRONG**
 
-> **Read this first (added 2026-09-21, hours after filing).** The title says
-> ninety-one and the real figure is **26 apps and 68 keys, of which about 38
-> are genuine**. The entry below is kept as filed because the way the number
-> came down is worth more than the number: six apps were opened off the queue
-> and five needed nothing, each invisible to the survey for a different reason,
-> and fixing the survey to see those shapes shrank the queue by two thirds. The
-> slug is left alone because it is what a triage grep keys on; the marker says
-> what the title does not. The live queue is the tail of
-> `python scripts/key-survey.py`.
+> **Read this first (added 2026-09-21; this note has itself been wrong once).**
+> The title says ninety-one. The figure has moved three times in one day and
+> the current one is **55 apps and 259 keys**. Do not trust any number written
+> here; run `python scripts/key-survey.py` and read its tail.
+>
+> | reading | count | what changed |
+> |---|---|---|
+> | as filed | 91 apps | apps with no `(&str, &str)` const -- a count of a *shape*, not of the gap |
+> | after teaching the survey ranges and group words | 26 apps, 68 keys | `1-7` names `Num2`; `Arrows/WASD` names eight keys |
+> | after fixing single-letter matching | **55 apps, 259 keys** | `"A" in "Add City"` had been counting as naming the `A` key |
+>
+> **The middle reading is the instructive one, because it was mine and I
+> announced it as a two-thirds reduction.** I had found the survey
+> over-reporting, fixed that, re-measured, and wrote the result down as the
+> truth. What I never checked was whether it *under*-reported as well -- and it
+> did, far more: the substring match on single letters was hiding about 190
+> keys while I was congratulating the tool on losing 23. Varying one axis
+> licenses conclusions about that axis and no other, which is shape 17 in the
+> catalogue below, applied to my own correction of the thing shape 17 is about.
+>
+> The entry body is kept as filed. The slug is left alone because it is what a
+> triage grep keys on.
 
 **In short:** most of the apps in this suite answer keyboard shortcuts and
 never tell you what they are. Of 127 apps that bind a letter, digit or

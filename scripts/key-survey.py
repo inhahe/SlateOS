@@ -228,6 +228,34 @@ def spelled_out(haystack: str) -> set[str]:
     return out
 
 
+# A one-character name has to stand alone to count as naming a key.
+#
+# WHY. `NAMES["A"]` is `("A",)` and the test was `"A" in haystack`, a plain
+# substring match -- so `apps/worldclock`'s button label "Add City" counted as
+# naming the `A` key, and "Grid" named `G`, and "Pin" named `P`. That app draws
+# no hint line and carries no key list: it names *none* of its eleven keys, and
+# the survey reported two.
+#
+# Measured over the whole tree the day this was fixed: the substring rule
+# reported 25 apps and 63 unnamed keys, and requiring a standalone token
+# reported 53 apps and 220. The substring rule was hiding about 157 keys, which
+# is two and a half times the gap it was reporting.
+#
+# Case-sensitive on purpose. Matching case-insensitively drops it to 173, and
+# the difference is almost entirely the English article: a lowercase standalone
+# `a` appears in ordinary prose everywhere, so `A` would read as named in any
+# app with a sentence in it. Key hints in this tree capitalise the key, which
+# is also how a person writes one.
+_STANDALONE = "(?<![A-Za-z0-9]){}(?![A-Za-z0-9])"
+
+
+def names_the_key(name: str, haystack: str) -> bool:
+    """Does `haystack` name a key called `name`?"""
+    if len(name) == 1 and name.isalnum():
+        return re.search(_STANDALONE.format(re.escape(name)), haystack) is not None
+    return name in haystack
+
+
 def crate_sources(crate: Path) -> list[Path]:
     return sorted(p for p in (crate / "src").rglob("*.rs"))
 
@@ -271,7 +299,8 @@ def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
     unnamed = sorted(
         k
         for k in matched
-        if k not in spelled and not any(n in haystack for n in NAMES.get(k, (k,)))
+        if k not in spelled
+        and not any(names_the_key(n, haystack) for n in NAMES.get(k, (k,)))
     )
     return len(matched), len(unnamed), unnamed, has_list
 
@@ -308,10 +337,28 @@ def _self_test() -> int:
         ("Arrows: move", {"Left", "Right", "Up", "Down"}, "one word, four keys"),
         ("Arrows/WASD: steer", {"Left", "W", "A", "S", "D"}, "eight keys in two words"),
         ("A-Z", {"A", "M", "Z"}, "a letter range"),
+
         ("the barrows of old", set(), "control: no word boundary, so no match"),
         ("press - to zoom out", set(), "control: a lone hyphen is the minus key"),
     ]
+    # `names_the_key` cases, kept beside the others because the two rules
+    # together decide every row of the report.
+    named: list[tuple[str, str, bool, str]] = [
+        ("A", "Add City", False, "a capital inside a word does not name a key"),
+        ("A", "A: analog", True, "a capital standing alone does"),
+        ("A", "press a to switch", False, "lowercase does not -- `a` is an article"),
+        ("G", "Grid view", False, "control: this is the exact pair that hid ten keys"),
+        ("F5", "F5: refresh", True, "a multi-character name is a substring match"),
+        ("Esc", "Esc: back", True, "ditto"),
+    ]
     bad = 0
+    for name, hay, want_hit, why in named:
+        got_hit = names_the_key(name, hay)
+        ok = got_hit == want_hit
+        print(f"  {'ok  ' if ok else 'FAIL'} {why}")
+        if not ok:
+            print(f"       names_the_key({name!r}, {hay!r}) -> {got_hit}")
+            bad += 1
     for text, want, why in cases:
         got = spelled_out(text)
         ok = want <= got if want else not got
@@ -322,7 +369,7 @@ def _self_test() -> int:
     if bad:
         print(f"self-test: {bad} failure(s)")
         return 1
-    print(f"self-test ok -- {len(cases)} case(s)")
+    print(f"self-test ok -- {len(cases) + len(named)} case(s)")
     return 0
 
 

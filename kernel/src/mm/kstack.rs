@@ -181,7 +181,7 @@ impl KstackAllocator {
 
 /// Information about an allocated kernel stack.
 ///
-/// Returned by [`alloc`], consumed by [`free`].  Stores everything needed
+/// Returned by [`fn@alloc`], consumed by [`free`].  Stores everything needed
 /// to unmap and release the stack and its guard page.
 #[derive(Debug, Clone, Copy)]
 pub struct KstackInfo {

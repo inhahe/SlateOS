@@ -708,7 +708,7 @@ impl VirtioGpuBackend {
 /// Both sides are discontiguous — a GEM buffer is a list of unrelated frames
 /// and so is the scanout — and the two frame boundaries do not line up, so the
 /// copy is split by the source's boundaries here and by the destination's
-/// inside [`ScanoutMem::write_at`]. Neither side is assumed to be flat, which
+/// inside [`crate::virtio::gpu::ScanoutMem::write_at`]. Neither side is assumed to be flat, which
 /// is the bug this function exists to make unrepresentable: the previous code
 /// handled at most *one* source boundary per row and treated the destination
 /// as a single 4 MiB buffer that does not exist.

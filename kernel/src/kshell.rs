@@ -49389,7 +49389,7 @@ enum Toggle {
 /// This is [`optional_num`]'s defect, in the shape that hides it best. Those
 /// arms were written as
 ///
-/// ```ignore
+/// ```text
 /// match parts.get(1).copied().unwrap_or("") {
 ///     "on" | "true" => { set(true); … }
 ///     "off" | "false" => { set(false); … }
@@ -100091,7 +100091,7 @@ fn cmd_groupmgr(args: &str) {
 
 /// Parse a group type, or `None` if the word names no type.
 ///
-/// Returns `Option` rather than falling back to [`GroupType::User`]. The
+/// Returns `Option` rather than falling back to [`crate::fs::groupmgr::GroupType::User`]. The
 /// fallback made every unrecognised word mean "user", which is not a neutral
 /// reading: `system` and `service` are the two that carry meaning, so a typo in
 /// either was silently answered with the least of the three. The caller decides

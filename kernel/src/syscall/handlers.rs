@@ -5187,7 +5187,7 @@ fn rlimit_target(arg0: u64) -> KernelResult<Option<pcb::ProcessId>> {
 /// Decide whether the current caller may raise a hard resource limit.
 ///
 /// This kernel's `CAP_SYS_RESOURCE` is a [`ResourceType::ResourceLimit`]
-/// capability held with [`Rights::WRITE`] — a capability that *already
+/// capability held with [`crate::cap::rights::Rights::WRITE`] — a capability that *already
 /// existed* for this purpose (it landed 2026-08-21) rather than a new
 /// `Rights` bit, because the authority being asserted is "may write
 /// resource limits" and that is exactly what the pair already spells.

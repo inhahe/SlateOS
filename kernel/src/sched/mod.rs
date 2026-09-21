@@ -4470,11 +4470,11 @@ pub fn migrate_tasks_from_cpu(cpu: usize) -> usize {
 
 /// Suspend a task (pause execution).
 ///
-/// Transitions the task from [`Ready`] to [`Suspended`], removing
-/// it from the run queue.  If the task is [`Running`] (the current
+/// Transitions the task from [`TaskState::Ready`] to [`TaskState::Suspended`], removing
+/// it from the run queue.  If the task is [`TaskState::Running`] (the current
 /// task), it is suspended and the scheduler picks another task.
-/// If the task is [`Blocked`], it transitions directly to
-/// [`Suspended`] — when the blocking event fires, the wake will
+/// If the task is [`TaskState::Blocked`], it transitions directly to
+/// [`TaskState::Suspended`] — when the blocking event fires, the wake will
 /// find it in Suspended state and leave it there.
 ///
 /// Returns `true` if the task was suspended, `false` if it was
@@ -4498,7 +4498,7 @@ pub fn suspend(task_id: TaskId) -> bool {
     true
 }
 
-/// Commit a task to the [`Suspended`] state **without** yielding, even when it
+/// Commit a task to the [`TaskState::Suspended`] state **without** yielding, even when it
 /// is the current task.
 ///
 /// This is the marking half of [`suspend`]. Splitting it out exists to close a
@@ -4570,7 +4570,7 @@ pub fn suspend_pending(task_id: TaskId) -> bool {
     mark_suspended(task_id)
 }
 
-/// Park the current task, but only if it is still [`Suspended`].
+/// Park the current task, but only if it is still [`TaskState::Suspended`].
 ///
 /// The second half of [`suspend_pending`]. If a `resume` landed in the window
 /// between the two calls, the task is Ready (and already enqueued) and this
@@ -4628,7 +4628,7 @@ pub fn park_if_suspended() -> bool {
 
 /// Resume a suspended task (unpause execution).
 ///
-/// Transitions the task from [`Suspended`] to [`Ready`] and places
+/// Transitions the task from [`TaskState::Suspended`] to [`TaskState::Ready`] and places
 /// it back in the run queue at its effective priority (which may
 /// include an interactive boost).
 ///
@@ -4660,7 +4660,7 @@ pub fn resume(task_id: TaskId) -> bool {
 
 /// Change a task's scheduling priority.
 ///
-/// If the task is in the run queue ([`Ready`] state), it is dequeued
+/// If the task is in the run queue ([`TaskState::Ready`] state), it is dequeued
 /// at the old priority and re-enqueued at the new priority.  For
 /// other states (Running, Blocked, Suspended), the new priority takes
 /// effect when the task next enters the run queue.
@@ -4778,7 +4778,7 @@ pub fn get_cpu_affinity(task_id: TaskId) -> Option<u64> {
 /// Kill a task remotely (force-terminate without running task code).
 ///
 /// Marks the task as [`Dead`](TaskState::Dead) and removes it from
-/// the run queue if it was [`Ready`].  Blocked and Suspended tasks
+/// the run queue if it was [`TaskState::Ready`].  Blocked and Suspended tasks
 /// are simply marked Dead (they won't be woken).
 ///
 /// Cannot kill the currently running task — use [`task_exit`] for

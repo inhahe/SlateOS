@@ -747,7 +747,7 @@ fn advance_offset(handle: u64, start: u64, delta: u64) {
 }
 
 /// Return the file offset at which the next byte written via
-/// [`write`] would land.
+/// [`fn@write`] would land.
 ///
 /// This is `file.size` for handles opened with [`OpenFlags::APPEND`]
 /// (POSIX rule: append-mode writes always go to EOF, ignoring the

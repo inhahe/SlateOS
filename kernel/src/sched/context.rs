@@ -237,7 +237,7 @@ unsafe extern "C" {
     ///   buffer containing a valid XSAVE/FXSAVE image.
     /// - `new.rsp` must point to a valid stack with a return address
     ///   at the top (either from a previous `switch_context` call or
-    ///   from [`Task::prepare_context`]).
+    ///   from [`crate::sched::task::Task::prepare_context`]).
     /// - Interrupts should be disabled around the call to prevent
     ///   preemption during the switch.
     pub fn switch_context(
@@ -250,7 +250,7 @@ unsafe extern "C" {
     /// Entry trampoline for newly created tasks.
     ///
     /// Not called directly — its address is placed on the new task's
-    /// stack by [`Task::prepare_context`].
+    /// stack by [`crate::sched::task::Task::prepare_context`].
     #[allow(dead_code)] // Referenced by assembly; address taken for stack setup.
     pub fn task_entry_trampoline();
 }

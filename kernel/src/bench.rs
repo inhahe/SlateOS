@@ -7637,7 +7637,7 @@ const READDIR_MOUNT_ENTRIES: usize = 8;
 /// [`bench_vfs_readdir_breakdown`]'s cost model predicts for a 21-entry listing
 /// and what listing `/` actually costs, on a boot where `/` and `/tmp` are
 /// *both* `fs/memfs.rs`, so it is not a filesystem-type difference. About a
-/// third of it is attributed by inspection: [`Vfs::finish_listing`] calls
+/// third of it is attributed by inspection: [`crate::fs::vfs::Vfs::finish_listing`] calls
 /// `submount_root_ino` once per mount point, which is a full stat
 /// (`vfs_stat_breakdown_resolved` = 1928 ns), and five of those is 9.6us.
 ///

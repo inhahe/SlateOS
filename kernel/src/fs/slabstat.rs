@@ -95,7 +95,7 @@ where
 /// Initialise an **empty** slab-cache table.
 ///
 /// Seeds NO cache rows and zero totals.  Real slab accounting is wired
-/// through [`create_cache`] plus [`alloc`]/[`free`]/[`reclaim`]; until those
+/// through [`create_cache`] plus [`fn@alloc`]/[`free`]/[`reclaim`]; until those
 /// are called the table is genuinely empty, so the `/proc/slabstat` file and
 /// the `slabstat` kshell command report zeros rather than fabricated numbers
 /// — the kernel's hard "never invent data in procfs" rule.
@@ -107,7 +107,7 @@ where
 /// statistics.  That demo data was removed; the self-test now builds its own
 /// fixtures explicitly via the real API (see [`self_test`]).  The kernel slab
 /// allocator is expected to call [`create_cache`] when a cache is created and
-/// [`alloc`]/[`free`] on each object operation.
+/// [`fn@alloc`]/[`free`] on each object operation.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() {

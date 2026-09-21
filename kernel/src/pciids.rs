@@ -23,7 +23,7 @@
 //!
 //! ## References
 //!
-//! - https://pci-ids.ucw.cz/ (canonical pci.ids database)
+//! - <https://pci-ids.ucw.cz/> (canonical pci.ids database)
 //! - PCI Local Bus Specification 3.0, Appendix D (class codes)
 //! - Linux `include/linux/pci_ids.h`
 

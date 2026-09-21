@@ -8369,6 +8369,21 @@ fn sys_process_exec_with_frame_inner(frame: &mut super::entry::SyscallFrame) -> 
     // also makes the allocation fallible: `Vec::from(slice)` would abort the
     // kernel on OOM, and an ELF image is exactly the kind of large allocation
     // that can fail.
+    // Split the two ways this can return InvalidAddress, because they have
+    // different fixes and the code alone cannot tell them apart: the range
+    // check (validate_user_read walking the caller's PML4) and the copy
+    // itself. On 2026-09-21 this returned -101 for a 136-byte buffer the
+    // caller had mapped PRESENT|USER into its own PML4, at a 16 KiB-aligned
+    // user address, with no page-table isolation to put CR3 elsewhere --
+    // so every structural explanation checkable by reading was exhausted.
+    if let Err(e) = crate::mm::user::validate_user_read(frame.arg0, elf_len) {
+        serial_println!(
+            "[exec] NATIVE exec: range check REJECTED ptr={:#x} len={} -> {:?}",
+            frame.arg0,
+            elf_len,
+            e
+        );
+    }
     let elf_copy = match crate::mm::user::read_user_vec(frame.arg0, elf_len, usize::MAX) {
         Ok(d) => d,
         Err(e) => return e.code() as i64,

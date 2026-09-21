@@ -252,6 +252,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Up / Down", "Move the selection"),
     ("V", "Verify the device after writing, or not"),
     ("C", "Compress the image being created, or not"),
+    ("H", "Which checksum to compute"),
     ("F1", "This list"),
 ];
 
@@ -369,6 +370,21 @@ pub enum HashAlgorithm {
 }
 
 impl HashAlgorithm {
+    /// Every algorithm, in the order the chips are drawn.
+    ///
+    /// The strip wrote its own array of three. One list, so a chip drawn is a
+    /// chip `H` can reach and an algorithm added here appears there.
+    pub const ALL: [HashAlgorithm; 3] = [Self::Sha256, Self::Sha1, Self::Md5];
+
+    /// The next algorithm along, wrapping.
+    #[must_use]
+    pub fn next(self) -> Self {
+        let at = Self::ALL.iter().position(|a| *a == self).unwrap_or(0);
+        let last = Self::ALL.len().saturating_sub(1);
+        let next = if at >= last { 0 } else { at.saturating_add(1) };
+        Self::ALL.get(next).copied().unwrap_or(Self::Sha256)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Md5 => "MD5",
@@ -2445,6 +2461,15 @@ impl DiskImagerApp {
                 self.write_options.verify_after_write = !self.write_options.verify_after_write;
                 return EventResult::Consumed;
             }
+            // Which checksum to compute. Three chips were drawn with the
+            // selected one highlighted and bold, and `hash_algorithm` was
+            // `Sha256` at construction with no writer -- so the other two
+            // could not be chosen, and a download published with an MD5 could
+            // not be checked against it by this program.
+            Key::H if !key.modifiers.ctrl => {
+                self.hash_algorithm = self.hash_algorithm.next();
+                return EventResult::Consumed;
+            }
             Key::C if !key.modifiers.ctrl => {
                 self.create_options.compress = !self.create_options.compress;
                 return EventResult::Consumed;
@@ -3788,11 +3813,7 @@ impl DiskImagerApp {
         });
         cy += 24.0;
 
-        let algorithms = [
-            HashAlgorithm::Sha256,
-            HashAlgorithm::Sha1,
-            HashAlgorithm::Md5,
-        ];
+        let algorithms = HashAlgorithm::ALL;
         let btn_gap = 8.0_f32;
         let alg_btn_w = 90.0_f32;
         for (idx, alg) in algorithms.iter().enumerate() {
@@ -6518,6 +6539,58 @@ mod tests {
     }
 
     /// A plain key press.
+    /// `H` picks which checksum to compute, and the strip shows which.
+    ///
+    /// Three chips were drawn with the selected one highlighted and bold, and
+    /// `hash_algorithm` was `Sha256` at construction with no writer in the
+    /// crate -- so `HashJob::open` was handed the same algorithm every time
+    /// and a download published with an MD5 could not be checked against it
+    /// by this program.
+    #[test]
+    fn h_picks_the_checksum_and_the_strip_follows() {
+        let mut app = DiskImagerApp::new();
+        app.active_tab = MainTab::Verify;
+
+        let mut seen = vec![app.hash_algorithm];
+        for _ in 1..HashAlgorithm::ALL.len() {
+            assert_eq!(
+                app.handle_event(&press(Key::H)),
+                EventResult::Consumed,
+                "H was ignored"
+            );
+            seen.push(app.hash_algorithm);
+        }
+        for alg in HashAlgorithm::ALL {
+            assert!(seen.contains(&alg), "cycling never reached {}", alg.name());
+        }
+        app.handle_event(&press(Key::H));
+        assert_eq!(
+            app.hash_algorithm, seen[0],
+            "the algorithms do not come back round"
+        );
+
+        // The chip strip draws the one in force, so the drawn text has to
+        // name it -- otherwise `H` changes a field and the window says the
+        // same thing either way.
+        app.handle_event(&press(Key::H));
+        let chosen = app.hash_algorithm;
+        let mut rt = RenderTree::new();
+        app.render(&mut rt);
+        let texts: Vec<String> = rt
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == chosen.name()),
+            "the strip does not name {}",
+            chosen.name()
+        );
+    }
+
     fn press(k: Key) -> Event {
         Event::Key(KeyEvent {
             key: k,

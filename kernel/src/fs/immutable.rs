@@ -182,13 +182,44 @@ pub fn parse_flag_name(name: &str) -> Option<FlagBits> {
 /// Maximum files tracked.
 const MAX_FILES: usize = 65536;
 
+/// How an entry is identified.
+///
+/// `Id` is the real key: the immutable flag protects a FILE, and a file
+/// with two names must be protected under both. `Path` is the fallback for
+/// filesystems reporting `ino == 0` (devfs, procfs, sysfs), which cannot
+/// have two names for one object -- so there a name IS the identity and the
+/// fallback is exact rather than approximate.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum FlagKey {
+    Id(crate::fs::vfs::FileId),
+    Path(PathBuf),
+}
+
+/// Derive the key for a path. **The only place a key is constructed.**
+///
+/// Every call site uses this. The compiler catches a wrong value type but
+/// not a key derived one way at `insert` and another at `remove` -- that
+/// would leak entries and silently drop protection, so the derivation has
+/// exactly one home.
+fn flag_key(path: &Path) -> FlagKey {
+    match crate::fs::Vfs::file_identity(path) {
+        Ok(Some(id)) => FlagKey::Id(id),
+        _ => FlagKey::Path(path.to_path_buf()),
+    }
+}
+
 struct FlagTable {
     /// Path → flags.
     /// Keyed by `PathBuf`, not `String`. This table decides whether a
     /// write, truncate, delete, or link is refused, so a key type that
     /// cannot hold a legal filename is a file whose protection silently
     /// does not apply. See `design-decisions.md` §261.
-    entries: BTreeMap<PathBuf, FlagBits>,
+    /// Keyed by [`FlagKey`], valued by the path as DATA plus the flags.
+    ///
+    /// The path is kept so `list_flagged` can report a name without the key
+    /// type appearing in its signature -- the two external callers
+    /// (`procfs`, `kshell`) are unaffected by this change.
+    entries: BTreeMap<FlagKey, (PathBuf, FlagBits)>,
 }
 
 impl FlagTable {
@@ -216,13 +247,14 @@ pub fn set_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()> {
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let mut table = TABLE.lock();
-    if let Some(existing) = table.entries.get_mut(path) {
-        *existing |= flags;
+    let key = flag_key(path);
+    if let Some(existing) = table.entries.get_mut(&key) {
+        existing.1 |= flags;
     } else {
         if table.entries.len() >= MAX_FILES {
             return Err(KernelError::ResourceExhausted);
         }
-        table.entries.insert(path.to_path_buf(), flags);
+        table.entries.insert(key, (path.to_path_buf(), flags));
     }
     Ok(())
 }
@@ -231,10 +263,11 @@ pub fn set_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()> {
 pub fn clear_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()> {
     let path = path.as_ref();
     let mut table = TABLE.lock();
-    if let Some(existing) = table.entries.get_mut(path) {
-        *existing &= !flags;
-        if *existing == 0 {
-            table.entries.remove(path);
+    let key = flag_key(path);
+    if let Some(existing) = table.entries.get_mut(&key) {
+        existing.1 &= !flags;
+        if existing.1 == 0 {
+            table.entries.remove(&key);
         }
         Ok(())
     } else {
@@ -250,14 +283,19 @@ pub fn replace_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()
     }
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
 
+    // `replace_flags` has no `get_mut`, so it did not pick up a key from the
+    // pattern the other two follow. Derived here through the same helper --
+    // a key built differently in one function is how half a table ends up
+    // under a different kind of key.
+    let key = flag_key(path);
     let mut table = TABLE.lock();
     if flags == 0 {
-        table.entries.remove(path);
+        table.entries.remove(&key);
     } else {
-        if !table.entries.contains_key(path) && table.entries.len() >= MAX_FILES {
+        if !table.entries.contains_key(&key) && table.entries.len() >= MAX_FILES {
             return Err(KernelError::ResourceExhausted);
         }
-        table.entries.insert(path.to_path_buf(), flags);
+        table.entries.insert(key, (path.to_path_buf(), flags));
     }
     Ok(())
 }
@@ -265,7 +303,10 @@ pub fn replace_flags(path: impl AsRef<Path>, flags: FlagBits) -> KernelResult<()
 /// Get flags for a file (0 if none set).
 pub fn get_flags(path: impl AsRef<Path>) -> FlagBits {
     let table = TABLE.lock();
-    table.entries.get(path.as_ref()).copied().unwrap_or(0)
+    table
+        .entries
+        .get(&flag_key(path.as_ref()))
+        .map_or(0, |(_, f)| *f)
 }
 
 /// Remove all flags for a file.
@@ -273,7 +314,7 @@ pub fn remove_flags(path: impl AsRef<Path>) -> KernelResult<()> {
     let mut table = TABLE.lock();
     table
         .entries
-        .remove(path.as_ref())
+        .remove(&flag_key(path.as_ref()))
         .ok_or(KernelError::NotFound)?;
     Ok(())
 }
@@ -345,29 +386,34 @@ pub fn check_link(path: impl AsRef<Path>) -> KernelResult<()> {
 
 /// Update flag table when a file is renamed.
 ///
-/// **NOTHING CALLS THIS, so flags do not survive a rename.** A `grep` for
-/// `immutable::rename_path` across `kernel/src` returns this definition and
-/// two calls from this module's own self-test. No VFS rename path invokes it.
+/// **Still uncalled, but it now matters far less than it did.**
 ///
-/// The consequence is not subtle: mark a file immutable, rename it, and the
-/// entry stays under the old name while the file answers to the new one, so
-/// the check that refuses a write finds nothing and permits it.
+/// This table was converted to key on [`FlagKey`] on 2026-09-21. For a row
+/// keyed by `Id`, a rename changes nothing that matters: the inode is the
+/// key, so the flags follow the file with no compensation. What goes stale
+/// is only the *display* path stored alongside them, which `list_flagged`
+/// reports.
 ///
-/// **Do not fix this by wiring it in.** The table is keyed by path, and this
-/// function is the compensation that keying requires. `flock`, `sealing` and
-/// `reclock` were converted to key on `FileId` on 2026-09-21, which makes the
-/// compensation unnecessary -- an inode survives a rename, so the entry
-/// follows the file. Wiring this in instead leaves a table that needs a
-/// correction for every operation that moves a name, and the next one (link,
-/// mount-move) needs another. See `known-issues.md` 2026-09-21.
+/// It is still needed for `Path`-keyed rows -- filesystems reporting
+/// `ino == 0`, i.e. devfs, procfs and sysfs -- where a name genuinely is the
+/// key. Renames are not a normal event on those, which is why the gap was
+/// survivable before the conversion and is close to theoretical after it.
 ///
-/// The self-test calls it directly, which is why it is green. That is the
-/// defect, not the evidence: the test exercises the one path production does
-/// not take.
+/// A `grep` for `immutable::rename_path` across `kernel/src` still returns
+/// only this definition and two calls from this module's own self-test. The
+/// test is green because it calls the missing link directly -- it exercises
+/// the one path production does not take. That was worth recording before
+/// the conversion, when it meant protection was silently lost on every
+/// rename; it is recorded here after, because a reader finding an uncalled
+/// function deserves to know whether that is a bug or a remnant.
+///
 pub fn rename_path(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) -> KernelResult<()> {
     let mut table = TABLE.lock();
-    if let Some(flags) = table.entries.remove(old_path.as_ref()) {
-        table.entries.insert(new_path.as_ref().to_path_buf(), flags);
+    if let Some((_, flags)) = table.entries.remove(&flag_key(old_path.as_ref())) {
+        table.entries.insert(
+            flag_key(new_path.as_ref()),
+            (new_path.as_ref().to_path_buf(), flags),
+        );
         Ok(())
     } else {
         // No flags on this file — nothing to do.
@@ -382,7 +428,11 @@ pub fn rename_path(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) -> Ke
 /// List all files with any flags set.
 pub fn list_flagged() -> Vec<(PathBuf, FlagBits)> {
     let table = TABLE.lock();
-    table.entries.iter().map(|(p, f)| (p.clone(), *f)).collect()
+    table
+        .entries
+        .values()
+        .map(|(p, f)| (p.clone(), *f))
+        .collect()
 }
 
 /// List files with a specific flag set.
@@ -391,8 +441,8 @@ pub fn list_with_flag(flag: FlagBits) -> Vec<PathBuf> {
     table
         .entries
         .iter()
-        .filter(|(_, f)| **f & flag != 0)
-        .map(|(p, _)| p.clone())
+        .filter(|(_, (_, f))| *f & flag != 0)
+        .map(|(_, (p, _))| p.clone())
         .collect()
 }
 

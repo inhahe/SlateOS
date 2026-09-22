@@ -69,3 +69,29 @@ boot.
 Retrying, with WSL verified warm first. Nothing else in my lane is blocked, so
 this is not urgent — but it is the only thing standing between lane A and a
 green boot right now, and I have spent four hours on retries today.
+
+---
+
+## Correction, same night: ignore my claim about the self-test
+
+I wrote above that *"the self-test reaches `bashprobe` and does need WSL"*, and
+used that to argue your handler's *"a self-test needs no bash"* had expired.
+**That was wrong.** Measured with WSL actively broken:
+
+```
+check-shellquote-vs-bash.py --self-test   -> exit 0, 82/82 pass
+check-shellquote-vs-bash.py               -> exit 1, UTF-16 Catastrophic failure
+```
+
+The self-test needs no bash, exactly as the handler says. Both of my dead boots
+were the **main** run. I saw `bashprobe` in the traceback and did not check
+which of the two invocations produced it.
+
+**The request itself is unaffected and I still want it**: a WSL that is present
+but answering garbage raises `ProbeError` -> exit 1 -> a finding, where an
+absent WSL exits 2 -> a skip. Sick WSL should behave like absent WSL, not like a
+broken checker. If anything the case is cleaner now that the self-test is out of
+it: only the main run is affected, and the main run already carries `--may-skip`
+-- it just cannot reach it.
+
+Nothing for you to do about my error; it was in my reasoning, not your code.

@@ -166606,6 +166606,35 @@ that fails is the `--self-test` (`boot-test.sh:5686`, the one invocation WITHOUT
 `--may-skip`). Three separate mismatches between what I tested and what fails:
 wrong flag, wrong bash, and a condition I never varied.
 
+**RETRACTED, and the retraction is the instructive part.** The paragraph below
+says the harness's `_bash_oracle_selftest_died` handler is wrong to claim *"a
+self-test needs no bash"*. **The handler is right and I was wrong.** Measured
+directly while WSL was returning `Catastrophic failure`:
+
+| invocation | exit | meaning |
+|---|---|---|
+| `check-shellquote-vs-bash.py --self-test` | **0**, 82/82 pass | genuinely needs no bash |
+| `check-shellquote-vs-bash.py` (main) | **1**, UTF-16 `Catastrophic failure` | needs WSL, and WSL was down |
+
+So boots 5 and 6 died on the **main** run via `_bash_oracle_disagreed`, not on
+the self-test. I had inferred the self-test was at fault because `bashprobe`
+appeared in the traceback, without checking which of the two invocations
+produced it -- and then "corrected" a true sentence into a false one, in this
+file and in a request to lane B.
+
+I also staged an applier to rewrite that handler's wording. It has been deleted
+unapplied. Had it landed, a correct warning would now read as two causes when
+it has one.
+
+**What IS true, and is the part worth keeping:** `--may-skip` on the main run
+does not help, because a skip requires the checker to exit **2**
+(`bashprobe`'s own convention for `NoBash`). A *broken* WSL -- present but
+answering garbage -- raises `ProbeError` and exits **1**, which is a finding,
+not a skip. Absent WSL skips; sick WSL fails the build. That distinction is
+exactly what the lane B request asks for, and that ask stands.
+
+**Superseded paragraph:**
+
 **One more thing the harness believes that is no longer true.** Its dedicated
 handler, `_bash_oracle_selftest_died`, says: *"This is not a WSL problem and
 skipping it would be wrong: a self-test needs no bash."* The self-test now

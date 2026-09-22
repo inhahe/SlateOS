@@ -38,6 +38,28 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BOOT = os.path.join(HERE, "boot-test.sh")
 FUNC = "check_identity_rungs"
 
+
+def _find_bash():
+    """The bash `boot-test.sh` runs under, not whatever Windows picks first.
+
+    `subprocess.run(["bash", ...])` does NOT honour PATH on Windows:
+    `CreateProcess` searches System32 before PATH, so a bare "bash" resolves to
+    \\`C:\\\\Windows\\\\System32\\\\bash.exe`\\ -- the WSL launcher -- even though
+    `shutil.which("bash")` reports Git bash.  This suite then failed whenever
+    WSL was unwell, printing `Catastrophic failure / Bash/Service/E_UNEXPECTED`
+    as 4 of 10 wrong cases, which looks exactly like the gate having broken.
+
+    The gate under test is a shell function inside a script MSYS bash runs, so
+    WSL is the wrong interpreter whatever its health.
+    """
+    for cand in (shutil.which("bash"), "/usr/bin/bash"):
+        if cand and os.path.exists(cand) and "System32" not in cand:
+            return cand
+    return "bash"
+
+
+BASH = _find_bash()
+
 OK_MARK = "identity rung OK"
 SKIP_MARK = "identity rung SKIPPED"
 OKL = "[vfs]   " + OK_MARK + " -- flock keys on identity, not name"
@@ -98,7 +120,7 @@ def main():
             else:
                 io.open(log, "w", encoding="utf-8", newline=NL).write(NL.join(serial) + NL)
 
-            r = subprocess.run(["bash", "drv.sh", "serial.log"], capture_output=True,
+            r = subprocess.run([BASH, "drv.sh", "serial.log"], capture_output=True,
                                text=True, cwd=root)
             # Separate a gate VERDICT from a harness that never ran the gate.
             # Without this the suite is unfalsifiable in one direction: if bash

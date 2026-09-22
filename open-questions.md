@@ -3306,6 +3306,54 @@ arrives the first time someone wires one up believing it already worked.
 secpolicy,sealing,reclock}.rs` and `vfs.rs`'s `flock_resolved`. Full
 measurement, one grep per row, in `known-issues.md` 2026-09-21.
 
+## A-Q22 — [A] If you rename a file, should it keep its version history? — Status: OPEN
+
+**In short:** the system keeps old versions of files, so you can go back to
+yesterday's copy. Every saved version has to be filed under something, and
+there are two choices: the file's *name*, or the file itself. They differ the
+moment you rename something. Under one choice, renaming `budget.txt` to
+`budget-2026.txt` carries all its old versions along. Under the other, the
+renamed file starts with a blank history and the old versions stay filed under
+the name nobody uses any more. Both are defensible and real products ship each
+one, so I would rather you picked than have me pick silently.
+
+**One term, glossed:** an *inode* is the filesystem's internal identity for a
+file — a number that stays the same when you rename it, and is different for
+any other file, even one later given the same name.
+
+| option | *What changes:* | argues for it |
+|---|---|---|
+| **A. File it under the inode** (history follows the file) | you rename a document and its history comes with it. If you delete a file and later create a new one with the same name, the new one starts empty rather than inheriting a stranger's history | this is what Dropbox, Google Drive and macOS Versions do. It matches how people think about "this document" |
+| **B. File it under the path** (history belongs to the location) | you rename a document and its history stays behind under the old name. A config file at `/etc/app.conf` keeps one continuous history even if the file there is replaced wholesale | this is what someone watching *one important file* usually wants — the history of that slot, including "it was swapped out" |
+
+**Why it is not obvious.** The two options are each correct for a different
+job. B is right for an audit trail — you want to know the thing at this
+location changed, and a replacement is the most interesting change there is.
+That is exactly why integrity monitoring here is filed under the path, and why
+changing *it* to the inode would have broken it. A is right for a document you
+are working on, where a rename is not an event at all.
+
+**My recommendation: A**, weakly. The subsystem is called "file version
+history" and sits next to comments and tags, which are all about a document
+rather than a slot; and B's audit-trail job is already served by
+`fs::integrity`, which does exactly that and is staying path-filed. But I hold
+this loosely — if you picture the feature as "show me what happened to this
+config file", B is the better answer and I would change it.
+
+**If this is never answered:** nothing breaks and nothing degrades. Today the
+history is filed under the path (option B) by default, simply because that is
+how it was first written, not because it was chosen. The cost of leaving it is
+that five sibling tables — permissions, locks, seals, immutable flags, and as
+of today ACLs — have just been moved to the inode, so `history` is now the odd
+one out. Someone tidying later may "fix" it to match its neighbours without
+realising that is a user-visible behaviour change rather than a consistency
+cleanup. Answering it turns a silent default into a decision either way.
+
+**Where it bites:** `kernel/src/fs/history.rs`. The conversion itself is small
+and mechanical (the pattern is in `kernel/src/fs/immutable.rs`); it is the
+*behaviour* that needs your call, not the work. Background in
+`design-decisions.md` §957.
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

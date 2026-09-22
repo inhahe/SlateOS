@@ -54,11 +54,6 @@ podcast	O
 podcast	Q
 podcast	S
 
-# whiteboard
-whiteboard	A
-whiteboard	G
-whiteboard	Y
-whiteboard	Z
 
 # colorpicker
 colorpicker	C

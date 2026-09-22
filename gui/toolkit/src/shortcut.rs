@@ -606,6 +606,41 @@ const FUNCTION_KEYS: [Key; 12] = [
     Key::F12,
 ];
 
+/// Which rows of a card are missing from what a window actually drew.
+///
+/// # Why this is not `contains`
+///
+/// The obvious check is to join every string a window drew and ask whether
+/// the haystack contains each row. For `Ctrl+Shift+K` that is fine. For a
+/// one-character key it is very nearly a tautology: `"N"` is inside `"Nudge
+/// the selection"`, so a card that had lost its `N` row entirely still
+/// passed. That happened in `apps/whiteboard`, in a test written by the same
+/// hand that had already fixed the identical defect in
+/// `scripts/key-survey.py` -- where `names_the_key` requires a standalone
+/// token for exactly this reason.
+///
+/// [`render_card`] draws each row's keys as their own `Text` command, so the
+/// honest question is whether some drawn string *equals* the keys, not
+/// whether some string contains them. Every app's card test asks it through
+/// here rather than spelling it out again and getting it wrong again.
+///
+/// Returns a description of each missing half, so a failure names the row.
+#[must_use]
+pub fn missing_rows(drawn: &[String], rows: &[(&str, &str)]) -> Vec<String> {
+    let mut missing = Vec::new();
+    for (keys, what) in rows {
+        if !drawn.iter().any(|t| t == keys) {
+            missing.push(format!("no row drew the keys {keys:?} (for {what:?})"));
+        }
+        if !drawn.iter().any(|t| t == what) {
+            missing.push(format!(
+                "no row drew the description {what:?} (for {keys:?})"
+            ));
+        }
+    }
+    missing
+}
+
 #[cfg(test)]
 mod tests {
     // A test module's job is to fail loudly the instant the code under test is
@@ -619,8 +654,57 @@ mod tests {
         clippy::arithmetic_side_effects
     )]
 
-    use super::{UnknownKey, keystrokes};
+    use super::{UnknownKey, keystrokes, missing_rows};
     use crate::event::Key;
+
+    /// **A one-character key is not found by `contains`.**
+    ///
+    /// The control is the first case: the card has lost its `N` row, and the
+    /// word "Nudge" in another row's description contains an `N`. A joined
+    /// haystack says the row is present. This says it is gone.
+    #[test]
+    fn a_missing_one_character_row_is_not_hidden_by_another_rows_words() {
+        let drawn = vec![
+            "Arrows".to_string(),
+            "Nudge the selection".to_string(),
+            "Esc".to_string(),
+            "Drop the selection".to_string(),
+        ];
+        let rows = [("N", "Note tool"), ("Esc", "Drop the selection")];
+        let missing = missing_rows(&drawn, &rows);
+        assert_eq!(
+            missing.len(),
+            2,
+            "the N row is absent in both halves: {missing:?}"
+        );
+        assert!(missing[0].contains("keys"), "{missing:?}");
+        assert!(missing[1].contains("description"), "{missing:?}");
+
+        // The control, stated as the thing that goes wrong: joined into one
+        // haystack, the absent `N` row is "found" inside the word "Nudge".
+        let joined = drawn.join(" | ");
+        assert!(
+            joined.contains('N'),
+            "control: the joined form finds an N that belongs to another row"
+        );
+        assert!(
+            !joined.contains("Note tool"),
+            "control: and the description really is absent"
+        );
+    }
+
+    /// **A card that drew every row reports nothing missing.**
+    #[test]
+    fn a_complete_card_has_no_missing_rows() {
+        let drawn = vec![
+            "N".to_string(),
+            "Note tool".to_string(),
+            "Ctrl+S".to_string(),
+            "Save".to_string(),
+        ];
+        let rows = [("N", "Note tool"), ("Ctrl+S", "Save")];
+        assert!(missing_rows(&drawn, &rows).is_empty());
+    }
 
     /// The keys a label names, with no modifiers involved.
     fn keys(label: &str) -> Vec<Key> {

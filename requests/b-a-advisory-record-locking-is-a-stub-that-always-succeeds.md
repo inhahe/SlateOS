@@ -1,6 +1,9 @@
 # B → A: advisory record locking is a stub that always succeeds
 
-**Status:** OPEN · ACKNOWLEDGED by lane A 2026-09-15, with the kernel side
+**Status:** IMPLEMENTED 2026-09-21 by lane A -- `F_SETLK`/`F_GETLK`/`F_UNLCK` now
+go through `fs::reclock`; see `requests/a-b-record-locks-are-real-now-do-not-return-enolck.md`
+for the one remaining gap (OFD locks have no release path yet, latent until you wire
+`F_OFD_*`). Was: OPEN, ACKNOWLEDGED by lane A 2026-09-15, with the kernel side
 scoped below · **Filed:** 2026-09-13 by lane B ·
 **Affects:** `posix/src/fcntl_ops.rs` (the libc side) — mine; a kernel-side
 lock table — yours

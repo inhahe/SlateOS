@@ -51,8 +51,6 @@ undelete	A
 undelete	D
 
 
-# charmap
-charmap	C
 
 
 # defrag
@@ -68,5 +66,3 @@ partmanager	Z
 # startupmanager
 startupmanager	Q
 
-# sysinfo
-sysinfo	C

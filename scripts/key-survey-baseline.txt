@@ -35,9 +35,6 @@
 
 
 
-# archivemanager
-archivemanager	A
-archivemanager	B
 
 # clipmanager
 clipmanager	O

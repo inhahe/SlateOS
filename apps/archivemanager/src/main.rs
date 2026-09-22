@@ -1324,6 +1324,25 @@ pub struct PendingChoice {
     pub dialog: FileDialog,
 }
 
+/// The keys this window answers, as a reader sees them.
+///
+/// The status bar named exactly one of them -- `View: Flat (Ctrl+L)` -- and
+/// that one only because the view it switches had answered `FlatList` since
+/// it was written with nothing able to ask it. The key is newer than the
+/// feature, and the rest of the keyboard was never written down at all.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Move through the entries"),
+    ("PageUp / PageDown", "Move a screenful"),
+    ("Home / End", "First or last entry"),
+    ("Enter", "Open the folder, or the entry"),
+    ("Space", "Select or deselect the entry under the cursor"),
+    ("Ctrl+A", "Select everything in the archive"),
+    ("Ctrl+B", "Show or hide the sidebar"),
+    ("Ctrl+L", "Flat list, or one folder at a time"),
+    ("Delete", "Delete the selected entries"),
+];
+
 /// The full application state.
 // `Debug` but not `Clone`, since the archive it holds owns an open file.
 #[derive(Debug)]
@@ -1341,6 +1360,8 @@ pub struct AppState {
     /// Drag-and-drop state.
     pub drag: DragState,
     /// Whether the sidebar (tree view) is visible.
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub sidebar_visible: bool,
     /// Sidebar width in pixels.
     pub sidebar_width: f32,
@@ -1393,6 +1414,7 @@ impl Default for AppState {
             view_mode: ViewMode::default(),
             progress: None,
             drag: DragState::default(),
+            show_help: false,
             sidebar_visible: true,
             sidebar_width: 220.0,
             window_width: 900.0,
@@ -2649,6 +2671,17 @@ pub fn build_frame(state: &AppState, width: f32, height: f32) -> Frame {
     // Drag overlay (on top of everything).
     render_drag_overlay(&state.drag, &state.palette, &mut frame, w, h);
 
+    if state.show_help {
+        guitk::shortcut::render_card(
+            &mut frame,
+            &state.palette,
+            (w, h),
+            0.0,
+            SHORTCUTS,
+            "F1 closes this",
+        );
+    }
+
     frame
 }
 
@@ -3331,6 +3364,23 @@ impl AppState {
             // A key *release* must not repeat the action of its press.
             return Action::None;
         }
+        // Above the dialog branch, which keeps the key: a card raised from
+        // the list and not dismissable from a dialog is a list with no way
+        // out, which is the failure this ordering has avoided in eight apps
+        // now.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return Action::Redraw;
+        }
+        if self.show_help {
+            // Modal. Delete removes entries and Ctrl+A selects the archive;
+            // neither should happen from behind a list.
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return Action::Redraw;
+        }
+
         // A dialog is modal, so it gets the key first and keeps it. Falling
         // through would let Delete remove rows from the list the user cannot
         // see, and Escape close the window instead of the dialog.
@@ -5143,6 +5193,84 @@ mod tests {
         guitk::probe::rect_matching(state, pred)
             .unwrap_or_else(|| panic!("no {what} was drawn"))
             .centre()
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Against a loaded archive, because an empty one answers none of the
+    /// keys that move through what is in it. `Action::None` is this app's
+    /// "nothing happened".
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [0_usize, 2].into_iter().any(|rows| {
+                    let mut state = loaded();
+                    for _ in 0..rows {
+                        state.handle_key(&guitk::probe::press(Key::Down), SIZE);
+                    }
+                    state.handle_key(&stroke, SIZE) != Action::None
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing selects behind it.**
+    ///
+    /// The control is the last third: Ctrl+A behind the card must not select
+    /// the archive, and must select it with the card down.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |state: &AppState| -> Vec<String> {
+            build_frame(state, SIZE.0, SIZE.1)
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut state = loaded();
+        assert!(
+            !drawn(&state).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        state.handle_key(&guitk::probe::press(Key::F1), SIZE);
+        let missing = guitk::shortcut::missing_rows(&drawn(&state), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let selected = state
+            .archive
+            .as_ref()
+            .map(|a| a.entries.iter().filter(|e| e.selected).count());
+        state.handle_key(&ctrl(Key::A), SIZE);
+        assert_eq!(
+            state
+                .archive
+                .as_ref()
+                .map(|a| a.entries.iter().filter(|e| e.selected).count()),
+            selected,
+            "Ctrl+A selected the archive through the shortcut card"
+        );
+
+        state.handle_key(&guitk::probe::press(Key::F1), SIZE);
+        state.handle_key(&ctrl(Key::A), SIZE);
+        assert_ne!(
+            state
+                .archive
+                .as_ref()
+                .map(|a| a.entries.iter().filter(|e| e.selected).count()),
+            selected,
+            "control: Ctrl+A does nothing even with the card down"
+        );
     }
 
     fn loaded() -> AppState {

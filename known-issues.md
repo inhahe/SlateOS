@@ -166359,7 +166359,8 @@ once, on one target, is a gate I have not shown to be stable, and dd-956 says
 measure the population before building the gate.
 
 ### [A] `F_SETLK` grants every exclusive record lock, and the reason it gives for that has expired -- 2026-09-21
-**Status:** OPEN (the fix is a wiring job; `fs::reclock` already exists, is tested, and has zero callers)
+**Status:** PARTLY FIXED 2026-09-21 -- POSIX locks now real and released on exit;
+**OFD locks have no release path** (see the addendum at the end of this entry)
 
 **In short:** a program can ask the kernel for exclusive use of part of a file
 -- the mechanism databases use to stop two copies of themselves writing the
@@ -166437,6 +166438,30 @@ when the hook lands, both are fixed in one place. `sched::block_current` exists
 | 4. owner mapping | POSIX -> pid; OFD -> `entry.raw_handle`. Separate owner spaces, or one process's POSIX and OFD locks would conflict with each other |
 | 5. `F_GETLK` | `reclock::query`, writing the holder's `l_type` and `l_pid` back |
 | 6. `F_UNLCK` | `reclock::unlock` |
+**Addendum, 2026-09-21 -- wired, and the gap I made doing it.** `F_SETLK`,
+`F_GETLK` and `F_UNLCK` now go through `reclock`. `F_GETLK` is a lookup rather
+than an unconditional `F_UNLCK` claim. POSIX locks are released on process exit
+at `pcb.rs:6406`, which a previous session had already wired.
+
+**OFD locks are not released by anything.** POSIX locks are owner-keyed by pid,
+so the exit path clears them. OFD locks belong to an *open file description*, so
+I key them by handle with bit 63 set -- and nothing clears that key. A holder
+that dies wedges the range until reboot, which is precisely the property lane B
+called "the part that makes them safe".
+
+Latent, not live: `F_OFD_SETLK` can only reach the kernel through
+`posix/src/fcntl_ops.rs`, which is still a stub, so no OFD lock can exist yet.
+It goes live the moment lane B wires it, which is why they were told the order
+rather than left to find it (`requests/a-b-record-locks-are-real-now-*`).
+
+**The fix, in the right place:** `fs::handle::close()` already releases advisory
+locks on the *final* close of an open file description --
+`funlock_resolved(p, handle)` at `handle.rs:660`, after the `OPEN_FILES` guard
+is dropped. An OFD record lock ends at exactly that moment and for exactly that
+reason, so the release belongs on the next line. The owner encoding should move
+into `reclock` as a `release_ofd(handle)` function first: the tag bit is
+currently a fact `linux.rs` knows and `handle.rs` would have to agree about by
+hand, and an owner space belongs to the module that owns it.
 **F_GETLK** needs the same treatment: it currently reports `F_UNLCK`
 unconditionally, which is a *claim about the world* rather than a lookup, and
 `reclock::query` is the lookup it should do.

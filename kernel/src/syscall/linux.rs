@@ -5481,6 +5481,13 @@ fn flock_range(
         let n = l_len.checked_neg().ok_or(errno::EINVAL)?;
         (s, n)
     } else {
+        // The END of the range must be representable too. The negative branch
+        // above gets this free from its own `checked_add`; this branch did not
+        // check at all, so `l_start = i64::MAX, l_len = 1` returned a range
+        // whose end does not exist -- a lock that looks one byte wide and is
+        // not. Found by hand-checking the self-test's own cases against this
+        // function before the boot reached them.
+        anchor.checked_add(l_len).ok_or(errno::EINVAL)?;
         (anchor, l_len)
     };
 

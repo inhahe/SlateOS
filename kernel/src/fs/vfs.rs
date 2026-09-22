@@ -9091,12 +9091,25 @@ fn test_flock_shares_one_entry_across_hard_links() -> KernelResult<()> {
     let _ = Vfs::remove(Path::new(B));
 
     Vfs::write_file(Path::new(A), b"x")?;
-    if Vfs::link(Path::new(A), Path::new(B)).is_err() {
-        // No hard-link support on this mount: the property cannot be tested
-        // here, and saying so beats reporting OK for a test that did nothing.
-        serial_println!("[vfs]   identity rung SKIPPED -- /tmp does not support link()");
-        let _ = Vfs::remove(Path::new(A));
-        return Ok(());
+    match crate::fs::selftest::classify(Vfs::link(Path::new(A), Path::new(B))) {
+        crate::fs::selftest::Setup::Ready => {}
+        // Only NotSupported/ReadOnlyFilesystem/NoSuchDevice reach here.
+        crate::fs::selftest::Setup::Unsupported(e) => {
+            serial_println!(
+                "[vfs]   identity rung SKIPPED -- link() unsupported here: {:?}",
+                e
+            );
+            let _ = Vfs::remove(Path::new(A));
+            return Ok(());
+        }
+        // The system was ASKED and REFUSED. Reporting that as 'no hard
+        // links here' would announce a cause never established.
+        crate::fs::selftest::Setup::Failed(e) => {
+            serial_println!("[vfs]   FAIL: link() refused with {:?}, which is not", e);
+            serial_println!("[vfs]         'this system cannot'");
+            let _ = Vfs::remove(Path::new(A));
+            return Err(e);
+        }
     }
 
     // Both names must resolve to the same identity, or the test below proves

@@ -375,10 +375,28 @@ fn test_seal_follows_the_file_not_the_name() -> KernelResult<()> {
     let _ = Vfs::remove(Path::new(A));
     let _ = Vfs::remove(Path::new(B));
     Vfs::write_file(Path::new(A), b"x")?;
-    if Vfs::link(Path::new(A), Path::new(B)).is_err() {
-        serial_println!("sealing::self_test: identity rung SKIPPED -- no link()");
-        let _ = Vfs::remove(Path::new(A));
-        return Ok(());
+    match crate::fs::selftest::classify(Vfs::link(Path::new(A), Path::new(B))) {
+        crate::fs::selftest::Setup::Ready => {}
+        // Only NotSupported/ReadOnlyFilesystem/NoSuchDevice reach here.
+        crate::fs::selftest::Setup::Unsupported(e) => {
+            serial_println!(
+                "sealing::self_test: identity rung SKIPPED -- link() unsupported here: {:?}",
+                e
+            );
+            let _ = Vfs::remove(Path::new(A));
+            return Ok(());
+        }
+        // The system was ASKED and REFUSED. Reporting that as 'no hard
+        // links here' would announce a cause never established.
+        crate::fs::selftest::Setup::Failed(e) => {
+            serial_println!(
+                "sealing::self_test: FAIL: link() refused with {:?}, which is not",
+                e
+            );
+            serial_println!("sealing::self_test:       'this system cannot'");
+            let _ = Vfs::remove(Path::new(A));
+            return Err(e);
+        }
     }
 
     // Verify the premise before asserting on it: if the two names do not

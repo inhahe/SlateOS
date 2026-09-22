@@ -609,6 +609,9 @@ pub fn format_acl(acl: &Acl, mask: Option<AclPerm>) -> Vec<String> {
 /// Self-test for the ACL subsystem.
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[acl] Running self-test...");
+    // Sections that skip record why, so the closing line cannot claim 12
+    // tests passed when one of them did not run.
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // --- Test 1: Minimal ACL from mode ---
     {
@@ -994,14 +997,32 @@ pub fn self_test() -> KernelResult<()> {
         let _ = crate::fs::Vfs::remove(Path::new(B));
         crate::fs::Vfs::write_file(Path::new(A), b"x")?;
 
-        if crate::fs::Vfs::link(Path::new(A), Path::new(B)).is_err() {
-            serial_println!("[acl]   identity rung SKIPPED -- /tmp does not support link()");
+        // Classified, not guessed. `.is_err()` would announce "no hard links
+        // here" for a link refused with PermissionDenied or ENOSPC -- a cause
+        // never established -- and return success.
+        let link_unsupported =
+            match crate::fs::selftest::classify(crate::fs::Vfs::link(Path::new(A), Path::new(B))) {
+                crate::fs::selftest::Setup::Ready => false,
+                crate::fs::selftest::Setup::Unsupported(_) => true,
+                crate::fs::selftest::Setup::Failed(e) => {
+                    serial_println!("[acl]   FAIL: link() refused with {:?}, which is not", e);
+                    serial_println!(
+                        "[acl]         'this system cannot' -- it was asked and said no"
+                    );
+                    let _ = crate::fs::Vfs::remove(Path::new(A));
+                    return Err(e);
+                }
+            };
+        if link_unsupported {
+            serial_println!("[acl]   identity rung SKIPPED -- link() unsupported on this mount");
+            skips.record("identity rung", "link() unsupported on /tmp");
             let _ = crate::fs::Vfs::remove(Path::new(A));
         } else {
             let ida = crate::fs::Vfs::file_identity(Path::new(A))?;
             let idb = crate::fs::Vfs::file_identity(Path::new(B))?;
             if ida.is_none() || ida != idb {
                 serial_println!("[acl]   identity rung SKIPPED -- {:?} vs {:?}", ida, idb);
+                skips.record("identity rung", "two names did not share an identity");
                 let _ = crate::fs::Vfs::remove(Path::new(A));
                 let _ = crate::fs::Vfs::remove(Path::new(B));
             } else {
@@ -1043,6 +1064,7 @@ pub fn self_test() -> KernelResult<()> {
             }
         }
     }
-    serial_println!("[acl] Self-test passed (12 tests).");
+    skips.report("acl");
+    serial_println!("[acl] Self-test passed (12 tests){}", skips.suffix());
     Ok(())
 }

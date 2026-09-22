@@ -507,10 +507,25 @@ fn test_flags_follow_the_file() -> crate::error::KernelResult<()> {
     let _ = Vfs::remove(Path::new(A));
     let _ = Vfs::remove(Path::new(B));
     Vfs::write_file(Path::new(A), b"x")?;
-    if Vfs::link(Path::new(A), Path::new(B)).is_err() {
-        crate::serial_println!("immutable: identity rung SKIPPED -- no link()");
-        let _ = Vfs::remove(Path::new(A));
-        return Ok(());
+    match crate::fs::selftest::classify(Vfs::link(Path::new(A), Path::new(B))) {
+        crate::fs::selftest::Setup::Ready => {}
+        // Only NotSupported/ReadOnlyFilesystem/NoSuchDevice reach here.
+        crate::fs::selftest::Setup::Unsupported(e) => {
+            crate::serial_println!(
+                "immutable: identity rung SKIPPED -- link() unsupported here: {:?}",
+                e
+            );
+            let _ = Vfs::remove(Path::new(A));
+            return Ok(());
+        }
+        // The system was ASKED and REFUSED. Reporting that as 'no hard
+        // links here' would announce a cause never established.
+        crate::fs::selftest::Setup::Failed(e) => {
+            crate::serial_println!("immutable: FAIL: link() refused with {:?}, which is not", e);
+            crate::serial_println!("immutable:       'this system cannot'");
+            let _ = Vfs::remove(Path::new(A));
+            return Err(e);
+        }
     }
     let (ida, idb) = (
         Vfs::file_identity(Path::new(A))?,

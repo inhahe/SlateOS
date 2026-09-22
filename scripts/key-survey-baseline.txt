@@ -29,12 +29,6 @@
 
 
 
-# podcast
-podcast	D
-podcast	M
-podcast	O
-podcast	Q
-podcast	S
 
 
 # colorpicker

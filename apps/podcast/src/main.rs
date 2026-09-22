@@ -954,6 +954,32 @@ pub enum SidebarSelection {
 // ============================================================================
 
 /// The main podcast manager application.
+/// The keys this window answers, as a reader sees them.
+///
+/// It named none of them. The only key word in any string this program drew
+/// was the "Space" in an episode title.
+///
+/// `S` and `Ctrl+S` are separate rows because they are separate things --
+/// playback speed and a file dialog -- and a single row covering both would
+/// be the kind of summary that reads fine and answers nothing.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("Space", "Play or pause"),
+    ("Enter", "Open the episode, or play it from the detail view"),
+    ("Up / Down", "Move through the episodes"),
+    ("Left / Right", "Seek, while something is playing"),
+    ("PageUp / PageDown", "Move a screenful"),
+    ("Tab", "Next panel"),
+    ("Esc", "Leave the episode detail view"),
+    ("S", "Playback speed"),
+    ("A", "Auto-play the next episode, on or off"),
+    ("Q", "Add the selected episode to the queue"),
+    ("D", "Download the selected episode"),
+    ("M", "Mark the selected episode played or unplayed"),
+    ("Ctrl+O", "Open a feed file"),
+    ("Ctrl+S", "Save the feed list"),
+];
+
 pub struct PodcastApp {
     /// The open or save picker. Holds the dialog, the saving flag and the
     /// routing that ten applications used to write out by hand.
@@ -971,6 +997,8 @@ pub struct PodcastApp {
     pub stats: ListeningStats,
 
     // Playback state
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub player_state: PlayerState,
     pub current_episode_id: Option<u64>,
     pub current_podcast_id: Option<u64>,
@@ -1023,6 +1051,7 @@ impl PodcastApp {
             download_queue: Vec::new(),
             history: Vec::new(),
             stats: ListeningStats::new(),
+            show_help: false,
             player_state: PlayerState::Stopped,
             current_episode_id: None,
             current_podcast_id: None,
@@ -2225,6 +2254,21 @@ impl PodcastApp {
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        // Above the Ctrl branch, which returns for every chord, and above the
+        // typed path, which claims every unmodified letter.
+        if event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return true;
+        }
+        if self.show_help {
+            // Modal. D starts a download and Space starts playing; neither
+            // should happen from behind a list somebody is reading.
+            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return true;
+        }
+
         // Before anything else: Space plays, and a guard arm placed after a
         // bare `Key::S` would never be reached.
         if event.modifiers.ctrl {
@@ -2514,6 +2558,17 @@ impl PodcastApp {
         // Now playing bar.
         if self.player_state != PlayerState::Stopped {
             self.render_now_playing(&mut cmds);
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.width, self.height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
         }
 
         // Last, so it is above everything.
@@ -6864,6 +6919,112 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// The letter rows are pressed with the character in `text`, because the
+    /// letter shortcuts read `typed()` and not the key code -- a synthetic
+    /// event with an empty string reaches none of them. The chords and the
+    /// named keys are pressed as keys, which is how they arrive.
+    ///
+    /// Three states, and all carry a *selected* episode. A fresh window has
+    /// none -- `selected_episode_id` starts `None` -- so Space, Q, D and M
+    /// all report nothing to do, correctly: there is no episode to play,
+    /// queue, download or mark. A guard run on an empty selection calls four
+    /// working keys broken. The second state plays, because Left and Right
+    /// seek and do nothing while stopped; the third opens the detail view,
+    /// because that is the only place Escape has anything to leave.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = (1..=5).any(|rows| {
+                    [0_u8, 1, 2].into_iter().any(|state| {
+                        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
+                        // Which episode is selected matters, not just that one
+                        // is. `Up` on the first row stops rather than wrapping,
+                        // and `D` refuses an episode already downloaded or
+                        // queued -- both correct, and both make a key look dead
+                        // if the guard only ever looks at one row.
+                        for _ in 0..rows {
+                            app.handle_event(&key(Key::Down));
+                        }
+                        if state == 1 {
+                            app.play_selected_episode();
+                        }
+                        if state == 2 {
+                            // The detail view, which is the only place `Esc` has
+                            // anything to leave. Everywhere else it correctly
+                            // reports nothing to do, the way `apps/screenrecorder`
+                            // does -- and the row here said "Back" until this test
+                            // asked what that meant.
+                            app.handle_event(&key(Key::Enter));
+                        }
+                        let mut event = Event::Key(stroke.clone());
+                        // A single letter arrives with the character it typed.
+                        if label.len() == 1 && label.chars().all(char::is_alphanumeric) {
+                            event = typed(
+                                stroke.key,
+                                label.chars().next().unwrap_or('?').to_ascii_lowercase(),
+                            );
+                        }
+                        app.handle_event(&event)
+                    })
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing plays behind it.**
+    ///
+    /// The control is the last third: Space behind the card must not start
+    /// playback, and must start it with the card down.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &PodcastApp| -> Vec<String> {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
+        assert!(
+            !drawn(&app)
+                .iter()
+                .any(|t| t.contains("F1 or ? closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_event(&key(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&drawn(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&key(Key::Down));
+        app.handle_event(&key(Key::F1));
+        let state = app.player_state;
+        app.handle_event(&key(Key::Space));
+        assert_eq!(
+            app.player_state, state,
+            "Space started playback through the shortcut card"
+        );
+
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&key(Key::Space));
+        assert_ne!(
+            app.player_state, state,
+            "control: Space does nothing even with the card down"
+        );
     }
 
     /// A letter key, carrying the text it typed.

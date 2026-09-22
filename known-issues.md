@@ -161078,6 +161078,57 @@ has somewhere to go. `Up` at the top of a list, `1` on the filter already
 chosen and `Esc` with nothing to cancel are all answered keys that correctly
 report `Ignored`.
 
+
+**25. The assertion was one-sided in the wrong direction** (lane C,
+2026-09-22). `apps/benchmark`'s `a_longer_piece_of_work_is_measured_as_longer`
+slept 5ms, slept 50ms, and asserted the second measured longer. It failed a
+`cargo test --workspace`: the **short** sleep was descheduled and measured
+1.4071349s against the long sleep's 0.0623854s.
+
+**The comment above it already knew the mechanism and still drew the wrong
+conclusion from it.** It read: "the bounds are loose because a sleep is a floor
+and a loaded machine can overshoot it by a lot". Every clause of that is
+correct. What it missed is that `long > short` **is not a loose bound** -- it
+is an upper bound on `short` wearing a disguise, and it fails the instant
+`short` overshoots past `long`. Load decides which of two separately timed
+intervals gets descheduled, so an ordering between them is a coin toss whose
+bias is the only thing the test measures.
+
+**The rule:** *load can only ever push a measurement up, so the only timing
+assertion load cannot break is one that bounds a measurement from below.* No
+upper bounds, and no comparisons between intervals timed separately. A
+descheduled thread does not run faster, so a floor is safe in a way a ceiling
+never is. `sleep` guarantees it sleeps *at least* the duration asked for,
+which makes "measured at least 50ms" both true on every host and false for
+every implementation the test exists to catch.
+
+**The "varies with input" half survives, asked differently.** The thing being
+falsified was a `seconds` that returns a constant. Two real measurements of
+different work are never bit-identical and a constant always is, so
+`(long - short).abs() > f64::EPSILON` asks the same question without caring
+which way round the two numbers land.
+
+**Where it generalises.** `gui/appearance/tests/resolve_cost.rs` had the same
+defect latent: it asserts *ceilings* on a per-call cost. Its module doc had
+also thought about load and chosen the other mitigation -- a bound twenty
+times the measured figure, on the reasoning that "a bound that only catches a
+catastrophe is the right bound when only catastrophes are possible". That is
+right about the bound and wrong to stop there: a wide bound makes host noise
+less likely to fail the test, not unable to. Lane A had already settled the
+missing half in design-decisions.md §952 -- **a measurement the host can
+distort needs a repeat, not a wider bound** -- so `per_call` now takes the best
+of three runs. The minimum is the sample least contaminated by the host, and a
+genuine regression raises every sample including the smallest, which makes the
+statistic one-sided in the same direction as the noise.
+
+**Three of these in one session, in three lanes**: lane B's
+`special_var_seconds_and_epoch` (`$SECONDS` read 1, expected 0), lane B's
+`a_pipelines_stages_begin_in_pipeline_order` (a 100ms handshake budget
+asserted as absolute), and this one. All three passed alone, in their own
+crate suite, and failed only under a workspace run. The shared cause is not
+timing as such but **asserting a guarantee the mechanism only offers when the
+host is idle** -- and the shared tell is that each test's own comment or doc
+already described the best-effort nature of what it was asserting.
 ## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18) -- **CLOSED 2026-09-21**
 
 **In short:** 60 boolean fields across 25 apps are read by the program and

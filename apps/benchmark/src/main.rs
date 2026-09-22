@@ -3535,19 +3535,52 @@ mod tests {
     /// `seconds` is the whole difference between a measurement and a constant,
     /// so it gets its own test rather than only being exercised through the
     /// benchmarks. Lane B's framing of the general probe: vary the input,
-    /// assert the output varies. Here the input is how long the closure takes,
-    /// and the bounds are loose because a sleep is a floor and a loaded
-    /// machine can overshoot it by a lot -- what would falsify this is a
-    /// `seconds` that reports the same number either way, which is exactly
-    /// what the old code did.
+    /// assert the output varies.
+    ///
+    /// **Every bound here is a floor, and that is the whole design of the
+    /// test.** It used to assert that 50ms of sleeping measured longer than
+    /// 5ms of sleeping, which is true on an idle machine and false on a busy
+    /// one: during a `cargo test --workspace` the *short* sleep was descheduled
+    /// and measured 1.4071349s against the long sleep's 0.0623854s. The
+    /// previous comment here said the bounds were "loose because a sleep is a
+    /// floor and a loaded machine can overshoot it by a lot" -- it had the
+    /// mechanism exactly right and still drew the wrong conclusion from it,
+    /// because an ordering between two intervals timed separately is not a
+    /// loose bound at all. It is an upper bound on one of them wearing a
+    /// disguise: `long > short` fails the moment `short` overshoots past
+    /// `long`, and load decides which of the two gets descheduled.
+    ///
+    /// So the rule this test now follows, which generalises past this file:
+    /// **load can only ever push a measurement up, so the only assertion load
+    /// cannot break is one that bounds a measurement from below.** No upper
+    /// bounds, and no comparisons between separately timed intervals.
+    ///
+    /// `sleep` guarantees it sleeps *at least* the duration asked for, so a
+    /// correct `seconds` cannot report less than that, however loaded the host
+    /// is. What still falsifies the thing under test: a `seconds` that reports
+    /// zero or a too-small number fails a floor, and a `seconds` that reports
+    /// the same number whatever it timed -- which is exactly what the code
+    /// this replaced did -- fails the last assertion, without either one
+    /// depending on which way round the two numbers land.
     #[test]
-    fn a_longer_piece_of_work_is_measured_as_longer() {
+    fn the_clock_is_attached_to_the_work() {
         let short = seconds(|| std::thread::sleep(std::time::Duration::from_millis(5)));
         let long = seconds(|| std::thread::sleep(std::time::Duration::from_millis(50)));
-        assert!(short >= 0.004, "5ms of work measured as {short}s");
         assert!(
-            long > short,
-            "50ms ({long}s) did not measure longer than 5ms ({short}s)"
+            short >= 0.005,
+            "5ms of sleeping measured as {short}s, under the floor `sleep` guarantees"
+        );
+        assert!(
+            long >= 0.050,
+            "50ms of sleeping measured as {long}s, under the floor `sleep` guarantees"
+        );
+        // Two real measurements of different work are never bit-identical; a
+        // constant always is. This is the "vary the input, assert the output
+        // varies" half, asked in the one way a loaded host cannot answer
+        // wrongly.
+        assert!(
+            (long - short).abs() > f64::EPSILON,
+            "50ms ({long}s) and 5ms ({short}s) measured identically, which is what a constant does"
         );
     }
 

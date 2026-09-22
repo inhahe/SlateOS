@@ -159,6 +159,44 @@ pub enum Tab {
 }
 
 impl Tab {
+    /// Which digit selects this tab.
+    ///
+    /// One table, read by the key handler and by the bar that draws the tabs.
+    /// Before this the digits lived in six `match` arms in `handle_key` and
+    /// the bar drew `label()` alone, so `4` and `5` opened Disk and Graphics
+    /// and the window said so nowhere. `key-survey.py` found those two; the
+    /// other four were invisible to it only because the characters `1`, `2`,
+    /// `3` and `6` turn up in benchmark results. All six were unnamed.
+    fn digit(self) -> u8 {
+        match self {
+            Self::Overview => 1,
+            Self::Cpu => 2,
+            Self::Memory => 3,
+            Self::Disk => 4,
+            Self::Graphics => 5,
+            Self::History => 6,
+        }
+    }
+
+    /// The tab this key opens, if any.
+    fn from_key(key: Key) -> Option<Self> {
+        let wanted = match key {
+            Key::Num1 => 1,
+            Key::Num2 => 2,
+            Key::Num3 => 3,
+            Key::Num4 => 4,
+            Key::Num5 => 5,
+            Key::Num6 => 6,
+            _ => return None,
+        };
+        Tab::all().iter().copied().find(|t| t.digit() == wanted)
+    }
+
+    /// What the tab bar shows: the digit that opens it, then its name.
+    fn caption(self) -> String {
+        format!("{} {}", self.digit(), self.label())
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
@@ -1626,9 +1664,30 @@ fn history_rows_top(content_top: f32, scroll: f32) -> f32 {
 // ============================================================================
 
 /// The benchmark application UI state.
+/// The keys this window answers, as a reader sees them.
+///
+/// Most of them were already named where they belong, which is why this list
+/// is short on news: `F5` is on the Run button and in four status messages,
+/// `Ctrl+E` is on the Export button, and the six digits are now in the tab
+/// captions. `Ctrl+Q` was the one with nowhere to be written -- it has no
+/// control of its own, and it ends a run.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("F5", "Run the benchmarks"),
+    ("Ctrl+E", "Export the results"),
+    ("Ctrl+Q", "Quit, losing anything not exported"),
+    ("1-6", "Go straight to a tab"),
+    ("Tab / Shift+Tab", "Next or previous tab"),
+    ("Up / Down", "Move through the history"),
+    ("Home / End", "First or last history entry"),
+    ("Esc", "Deselect the history entry"),
+];
+
 pub struct BenchmarkApp {
     /// The save picker, for the Export button.
     pub picker: FilePicker,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     /// What the last action did, shown in the status bar until the next run.
     ///
     /// The bar derived its whole text from `progress.phase`, so there was
@@ -1681,6 +1740,7 @@ impl BenchmarkApp {
             status_message: None,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             active_tab: Tab::Overview,
+            show_help: false,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
             hardware: HardwareInfo::default(),
@@ -1904,6 +1964,18 @@ impl BenchmarkApp {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal. F5 starts a run that takes over the window, and Ctrl+Q
+            // ends the program; neither should happen from behind a list.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         match key.key {
             Key::F5 => {
                 if !self.progress.phase.is_running() {
@@ -1924,28 +1996,13 @@ impl BenchmarkApp {
                 self.begin_export();
                 EventResult::Consumed
             }
-            Key::Num1 => {
-                self.active_tab = Tab::Overview;
-                EventResult::Consumed
-            }
-            Key::Num2 => {
-                self.active_tab = Tab::Cpu;
-                EventResult::Consumed
-            }
-            Key::Num3 => {
-                self.active_tab = Tab::Memory;
-                EventResult::Consumed
-            }
-            Key::Num4 => {
-                self.active_tab = Tab::Disk;
-                EventResult::Consumed
-            }
-            Key::Num5 => {
-                self.active_tab = Tab::Graphics;
-                EventResult::Consumed
-            }
-            Key::Num6 => {
-                self.active_tab = Tab::History;
+            // Through `Tab::from_key`, so the digit a key opens and the
+            // digit the bar prints are the same fact rather than two copies
+            // that agreed until somebody reordered the tabs.
+            k if Tab::from_key(k).is_some() => {
+                if let Some(tab) = Tab::from_key(k) {
+                    self.active_tab = tab;
+                }
                 EventResult::Consumed
             }
             Key::Escape => {
@@ -2190,6 +2247,18 @@ impl BenchmarkApp {
         self.render_status_bar(&mut frame, &layout);
         self.render_buttons(&mut frame, &layout);
 
+        if self.show_help {
+            let window = (frame.width, frame.height);
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                window,
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
+
         debug_assert!(
             frame.is_balanced(),
             "a clip or translation was pushed and not popped",
@@ -2274,7 +2343,7 @@ impl BenchmarkApp {
             frame.push(RenderCommand::Text {
                 x: slot.x + slot.w / 2.0 - 20.0,
                 y: slot.y + 10.0,
-                text: tab.label().into(),
+                text: tab.caption(),
                 font_size: 13.0,
                 color: if is_active {
                     self.palette.text
@@ -4761,6 +4830,91 @@ mod tests {
             y,
             kind: MouseEventKind::Press(MouseButton::Left),
         })
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// `Ctrl+Q` is checked against `on_event` rather than `handle_key`,
+    /// because quitting is decided one level up -- it returns
+    /// `Response::Exit` instead of an `EventResult`. A guard that only knew
+    /// about `handle_key` would have called the one row this card was written
+    /// for a lie.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut app = BenchmarkApp::new();
+                let event = Event::Key(stroke.clone());
+                let answered = matches!(app.on_event(&event), Response::Exit)
+                    || [false, true].into_iter().any(|with_history| {
+                        let mut app = BenchmarkApp::new();
+                        if with_history {
+                            app.active_tab = Tab::History;
+                        }
+                        app.handle_key(&stroke) == EventResult::Consumed
+                    });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The tab bar says which digit opens each tab, and the digit works.**
+    ///
+    /// Both halves from one table. The bar used to draw `label()` alone while
+    /// six `match` arms in `handle_key` held the digits, so `4` and `5` opened
+    /// Disk and Graphics and the window named them nowhere -- and a reordering
+    /// of the tabs would have moved one and not the other.
+    #[test]
+    fn the_tab_bar_names_the_digit_that_opens_each_tab() {
+        let app = BenchmarkApp::new();
+        let drawn: Vec<String> = app
+            .frame(1200.0, 800.0)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        for tab in Tab::all() {
+            assert!(
+                drawn.iter().any(|t| t == &tab.caption()),
+                "the bar never draws {:?}; it drew {drawn:?}",
+                tab.caption()
+            );
+        }
+
+        for tab in Tab::all() {
+            let key = match tab.digit() {
+                1 => Key::Num1,
+                2 => Key::Num2,
+                3 => Key::Num3,
+                4 => Key::Num4,
+                5 => Key::Num5,
+                _ => Key::Num6,
+            };
+            let mut app = BenchmarkApp::new();
+            assert_eq!(app.handle_key(&press_key(key)), EventResult::Consumed);
+            assert_eq!(
+                app.active_tab,
+                *tab,
+                "the bar offers {:?} and that digit opens something else",
+                tab.caption()
+            );
+        }
+    }
+
+    fn press_key(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
     }
 
     fn ctrl(key: Key) -> Event {

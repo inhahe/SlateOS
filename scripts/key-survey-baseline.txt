@@ -30,10 +30,6 @@ asteroids	A
 asteroids	D
 asteroids	W
 
-# benchmark
-benchmark	Num4
-benchmark	Num5
-benchmark	Q
 
 # colorpicker
 colorpicker	C

@@ -3267,10 +3267,53 @@ person typing, not the system running.
 | `capsettings` | may this user reach this path | kshell only |
 | `secpolicy` | allow/deny by policy | kshell only |
 | `sealing` | refuse writes to a sealed file | kshell only |
-| `reclock` | byte-range file locks | nothing acquires one |
-| `vfs::flock` | whole-file advisory locks | nothing takes one |
+| `reclock` | byte-range file locks | **no longer latent -- wired to `fcntl(F_SETLK/F_GETLK/F_UNLCK)` on 2026-09-21** |
+| `vfs::flock` | whole-file advisory locks | **this row was wrong -- see the correction below** |
 | `secureboot` | enrol keys, verify a boot image | `kshell` and `/proc` only — **no syscall at all** |
 
+**Two rows corrected on 2026-09-21, because a decision queue with stale rows
+is not decidable.**
+
+- **`reclock` is now reachable.** It was accurate when filed -- the table had
+  zero callers outside its own module. It is wired to `fcntl` as of today, and
+  the kernel's reason for granting every lock unconditionally turned out to be
+  a comment asserting an invariant nothing enforced. So this one is answered by
+  events rather than by the operator.
+
+- **`vfs::flock` was never latent, and I should not have written that it was.**
+  `nr::FLOCK => sys_flock(args)` is in the Linux dispatch table at
+  `syscall/linux.rs:3505`, `sys_flock` calls `Vfs::flock_resolved`, and
+  `posix/src/sys_file.rs` re-exports `flock()` for programs to call. Any
+  Linux-ABI process can take a whole-file advisory lock and always could. The
+  claim "nothing takes one" described the kernel's *internal* callers and was
+  then written into a column headed "reached from", which is a different
+  question -- the one that matters here is whether a *program* can reach it,
+  and it can.
+
+**What this does and does not change about the question.** It does not dissolve
+it: five modules (`authbroker`, `diskencrypt`, `capsettings`, `secpolicy`,
+`sealing`) plus `secureboot` are still reachable only by a human typing into
+kshell, and that is still the thing worth deciding. It does narrow it from
+seven to six, and it removes the two entries where the answer was "wire it"
+rather than "decide the policy".
+
+**More of the same shape, measured today.** The pattern is wider than security
+modules. Of the eight tables holding per-file metadata (see `known-issues.md`
+2026-09-21 and `design-decisions.md` §957), the syscall layer reaches almost
+none of them:
+
+| module | syscall-layer callers | kshell callers |
+|---|---|---|
+| `acl` | 0 | all of them |
+| `fcomment` | 0 | 10 of 13 |
+| `queryable` | 0 | 45 of 49 |
+| `tags` | 0 | 18 of 28 |
+
+So a user-visible feature set -- file comments, tags, indexed attributes,
+POSIX ACLs -- exists, is tested, and cannot be used by any program. That is the
+same question as the one above with a different blast radius: for `secpolicy`
+the consequence is that nothing is enforced, and for `tags` it is that a
+feature the design promises is unreachable. Worth answering together.
 **The eighth one is worse than latent, and it arrived after this was
 filed.** `userspace/sbctl` reports creating secure-boot keys and signing
 kernel images and does neither — `fs::write` appears nowhere in the crate.

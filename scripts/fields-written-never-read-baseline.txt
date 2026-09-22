@@ -434,6 +434,11 @@ net80211/src/supplicant.rs:mic_algo
 # no indicator, so the key did nothing and said nothing. The flag and the key
 # are deleted; regex searching stays wanted and needs `apps/regextester`'s
 # engine extracted first. Line removed from the list below.
-apps/camera/src/main.rs:fullscreen_preview
-apps/logviewer/src/main.rs:wrap_lines
-apps/videoplayer/src/main.rs:chapter_list_visible
+#
+# **And the other three are gone as well, 2026-09-22.** Each was a switch a
+# key flipped and nothing read, and each of those keys was on a shortcut card
+# -- `F` for camera's fullscreen preview, `L` for logviewer's line wrapping,
+# `C` for videoplayer's chapter list. Naming the keys is what made them
+# urgent: an unnamed working key is a discoverability defect, and a card row
+# for a key with no effect is a false claim on screen. All three do what
+# their rows say now, so all three lines are removed rather than annotated.

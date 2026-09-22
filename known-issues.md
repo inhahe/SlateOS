@@ -163099,7 +163099,32 @@ computed at construction and correctly never changed afterwards. The survey
 documents that false-positive mode; it is recorded here so the row is not
 re-investigated a third time.
 
-## `TD-C-THE-ARCHIVE-CREATION-OPTIONS-ARE-A-STRUCT-NOBODY-CALLS` (lane C, 2026-09-18)
+## `TD-C-THE-ARCHIVE-CREATION-OPTIONS-ARE-A-STRUCT-NOBODY-CALLS` (lane C, 2026-09-18) -- **CLOSED 2026-09-22, by deletion**
+
+> **Closed by removing the options, not by building the dialog.**
+> `CreateArchiveSettings`, `EncryptionSettings`, `SplitSettings`,
+> `CompressionLevel` and the whole `ArchiveOperation` enum are gone -- about
+> 180 lines of type, `Default`, validation and tests that no code path could
+> reach.
+>
+> **The prescription below is wrong in one clause and it is worth saying
+> which.** It asks for "a new-archive dialog offering only what the backend
+> can actually write -- today that is ZIP at the levels `CompressionLevel`
+> names". There are no such levels: `ziparchive::create` takes
+> `store_only: bool` and nothing else, so `Fast`, `Normal` and `Best` were
+> three names for one behaviour. The module doc in that same crate had said so
+> the day before -- "the backend has no compression-level parameter at all" --
+> and this entry, written afterwards, contradicted it. **Two documents about
+> one crate disagreed, and the older one was right.**
+>
+> What the backend can write is an empty ZIP at a path, which is exactly what
+> the create flow already does, so there was nothing for a dialog to offer.
+>
+> **And the absence was bigger than the entry found.** `ArchiveOperation` --
+> the enum holding the `Create { format, level }` variant -- appears exactly
+> once in the crate: its own declaration. The entry's own closing note says to
+> ask what *holds* a field before asking what writes it; following that one
+> step further than it did turned four dead types into five.
 
 **In short:** `apps/archivemanager` can make a new archive, and it always
 makes the same kind: an empty ZIP at normal compression, no password, not

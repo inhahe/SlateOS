@@ -16,12 +16,20 @@
 //! Four claims were removed from this list on 2026-09-17 because nothing
 //! backed them. `create_archive` calls `backend::create_empty`, which takes a
 //! path and no file list; the backend has no compression-level parameter at
-//! all; and there is no split handling anywhere. The `CompressionLevel`,
-//! `include_empty_dirs`, `store_full_paths`, `encrypt_filenames` and
-//! `is_split` fields that stood for them are set once and read nowhere --
-//! found by `scripts/never-read-probe.py`, which is worth pointing at
-//! documentation as well as at code: a field nobody reads is often a sentence
-//! in a feature list nobody can honour.
+//! all; and there is no split handling anywhere. The fields that stood for
+//! them were set once and read nowhere -- found by
+//! `scripts/never-read-probe.py`, which is worth pointing at documentation as
+//! well as at code: a field nobody reads is often a sentence in a feature
+//! list nobody can honour.
+//!
+//! **The types went too, on 2026-09-22.** Removing the sentences left
+//! `CreateArchiveSettings`, `EncryptionSettings`, `SplitSettings`,
+//! `CompressionLevel` and the whole `ArchiveOperation` enum standing -- a
+//! complete set of options, with `Default`, validation and tests, that no
+//! code path could reach. An option struct that outruns its backend is how a
+//! dialog with one working entry gets shipped, so they are gone until there
+//! is a writer behind them. `ziparchive::create` takes `store_only: bool`
+//! and no level at all, which is the measure of how far they had run ahead.
 //!
 //! Uses the guitk library for UI rendering.
 //!
@@ -143,47 +151,6 @@ impl ArchiveFormat {
 // Compression levels
 // ============================================================================
 
-/// Compression level presets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum CompressionLevel {
-    /// No compression, store only.
-    Store,
-    /// Fast compression with lower ratio.
-    Fast,
-    /// Balanced compression (default).
-    #[default]
-    Normal,
-    /// Maximum compression, slower.
-    Best,
-}
-
-impl CompressionLevel {
-    /// Display name.
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::Store => "Store (no compression)",
-            Self::Fast => "Fast",
-            Self::Normal => "Normal",
-            Self::Best => "Best (slowest)",
-        }
-    }
-
-    /// Numeric level (0-9 scale used by most compressors).
-    pub fn numeric_level(self) -> u8 {
-        match self {
-            Self::Store => 0,
-            Self::Fast => 3,
-            Self::Normal => 6,
-            Self::Best => 9,
-        }
-    }
-
-    /// All levels.
-    pub fn all() -> &'static [Self] {
-        &[Self::Store, Self::Fast, Self::Normal, Self::Best]
-    }
-}
-
 // ============================================================================
 // Encryption settings
 // ============================================================================
@@ -209,69 +176,9 @@ impl EncryptionMethod {
     }
 }
 
-/// Encryption settings for an archive.
-#[derive(Clone, Debug)]
-pub struct EncryptionSettings {
-    /// The password. Empty means no encryption.
-    pub password: String,
-    /// Encryption method.
-    pub method: EncryptionMethod,
-    /// Whether to encrypt file names (7z only).
-    pub encrypt_filenames: bool,
-}
-
-impl Default for EncryptionSettings {
-    fn default() -> Self {
-        Self {
-            password: String::new(),
-            method: EncryptionMethod::Aes256,
-            encrypt_filenames: false,
-        }
-    }
-}
-
-impl EncryptionSettings {
-    /// Whether encryption is actually enabled (password is non-empty).
-    pub fn is_enabled(&self) -> bool {
-        !self.password.is_empty()
-    }
-}
-
 // ============================================================================
 // Split archive settings
 // ============================================================================
-
-/// Settings for split/multi-volume archives.
-#[derive(Clone, Debug)]
-pub struct SplitSettings {
-    /// Whether splitting is enabled.
-    pub enabled: bool,
-    /// Volume size in bytes.
-    pub volume_size: u64,
-}
-
-impl Default for SplitSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            volume_size: 700 * 1024 * 1024, // 700 MiB (CD-ROM)
-        }
-    }
-}
-
-impl SplitSettings {
-    /// Common split size presets (label, size in bytes).
-    pub fn presets() -> &'static [(&'static str, u64)] {
-        &[
-            ("1.44 MB (Floppy)", 1_440 * 1024),
-            ("100 MB", 100 * 1024 * 1024),
-            ("700 MB (CD)", 700 * 1024 * 1024),
-            ("4.7 GB (DVD)", 4_700_000_000),
-            ("25 GB (Blu-ray)", 25_000_000_000),
-            ("Custom", 0),
-        ]
-    }
-}
 
 // ============================================================================
 // Archive entry (file/directory inside an archive)
@@ -643,35 +550,6 @@ pub fn build_directory_tree(entries: &[ArchiveEntry], archive_name: &str) -> Tre
 // ============================================================================
 // Operations / actions
 // ============================================================================
-
-/// An operation that can be performed on an archive.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ArchiveOperation {
-    /// Open an archive file.
-    Open(PathBuf),
-    /// Extract all files to a destination directory.
-    ExtractAll { destination: PathBuf },
-    /// Extract only selected files.
-    ExtractSelected {
-        entries: Vec<String>,
-        destination: PathBuf,
-    },
-    /// Create a new archive from a list of source files.
-    Create {
-        output: PathBuf,
-        sources: Vec<PathBuf>,
-        format: ArchiveFormat,
-        level: CompressionLevel,
-    },
-    /// Add files to an existing archive.
-    AddFiles { files: Vec<PathBuf> },
-    /// Remove entries from an archive.
-    RemoveEntries { paths: Vec<String> },
-    /// Test archive integrity.
-    TestArchive,
-    /// Close the current archive.
-    Close,
-}
 
 // ============================================================================
 // Progress tracking
@@ -1164,84 +1042,6 @@ impl ArchiveModel {
 // ============================================================================
 // Create archive settings
 // ============================================================================
-
-/// Settings for creating a new archive.
-#[derive(Clone, Debug)]
-pub struct CreateArchiveSettings {
-    /// Output path for the new archive.
-    pub output_path: PathBuf,
-    /// Archive format.
-    pub format: ArchiveFormat,
-    /// Compression level.
-    pub level: CompressionLevel,
-    /// Source files/directories to include.
-    pub sources: Vec<PathBuf>,
-    /// Encryption settings.
-    pub encryption: EncryptionSettings,
-    /// Split archive settings.
-    pub split: SplitSettings,
-    /// Archive comment.
-    pub comment: String,
-    /// Whether to include empty directories.
-    pub include_empty_dirs: bool,
-    /// Whether to store full paths or relative paths.
-    pub store_full_paths: bool,
-}
-
-impl Default for CreateArchiveSettings {
-    fn default() -> Self {
-        Self {
-            output_path: PathBuf::new(),
-            format: ArchiveFormat::Zip,
-            level: CompressionLevel::Normal,
-            sources: Vec::new(),
-            encryption: EncryptionSettings::default(),
-            split: SplitSettings::default(),
-            comment: String::new(),
-            include_empty_dirs: true,
-            store_full_paths: false,
-        }
-    }
-}
-
-impl CreateArchiveSettings {
-    /// Validate settings before creating. Returns a list of problems.
-    pub fn validate(&self) -> Vec<String> {
-        let mut problems = Vec::new();
-
-        if self.output_path.as_os_str().is_empty() {
-            problems.push("Output path is required".into());
-        }
-
-        if self.sources.is_empty() {
-            problems.push("No source files selected".into());
-        }
-
-        if self.encryption.is_enabled() && !self.format.supports_encryption() {
-            problems.push(format!(
-                "{} does not support encryption",
-                self.format.display_name()
-            ));
-        }
-
-        if self.split.enabled && !self.format.supports_split() {
-            problems.push(format!(
-                "{} does not support split archives",
-                self.format.display_name()
-            ));
-        }
-
-        if self.split.enabled && self.split.volume_size < 65536 {
-            problems.push("Volume size must be at least 64 KiB".into());
-        }
-
-        if self.encryption.is_enabled() && self.encryption.password.is_empty() {
-            problems.push("Password cannot be empty when encryption is enabled".into());
-        }
-
-        problems
-    }
-}
 
 // ============================================================================
 // Application state
@@ -3942,50 +3742,6 @@ mod tests {
         assert!(all.contains(&ArchiveFormat::SevenZip));
     }
 
-    // --- CompressionLevel tests ---
-
-    #[test]
-    fn test_compression_level_numeric() {
-        assert_eq!(CompressionLevel::Store.numeric_level(), 0);
-        assert_eq!(CompressionLevel::Fast.numeric_level(), 3);
-        assert_eq!(CompressionLevel::Normal.numeric_level(), 6);
-        assert_eq!(CompressionLevel::Best.numeric_level(), 9);
-    }
-
-    #[test]
-    fn test_compression_level_default() {
-        assert_eq!(CompressionLevel::default(), CompressionLevel::Normal);
-    }
-
-    #[test]
-    fn test_compression_level_all() {
-        let all = CompressionLevel::all();
-        assert_eq!(all.len(), 4);
-    }
-
-    #[test]
-    fn test_compression_level_display_name() {
-        assert!(CompressionLevel::Store.display_name().contains("Store"));
-        assert!(CompressionLevel::Best.display_name().contains("Best"));
-    }
-
-    // --- EncryptionSettings tests ---
-
-    #[test]
-    fn test_encryption_default_disabled() {
-        let enc = EncryptionSettings::default();
-        assert!(!enc.is_enabled());
-    }
-
-    #[test]
-    fn test_encryption_enabled_with_password() {
-        let enc = EncryptionSettings {
-            password: "secret".into(),
-            ..Default::default()
-        };
-        assert!(enc.is_enabled());
-    }
-
     #[test]
     fn test_encryption_method_display() {
         assert_eq!(EncryptionMethod::Aes256.display_name(), "AES-256");
@@ -3994,23 +3750,6 @@ mod tests {
                 .display_name()
                 .contains("legacy")
         );
-    }
-
-    // --- SplitSettings tests ---
-
-    #[test]
-    fn test_split_default_disabled() {
-        let split = SplitSettings::default();
-        assert!(!split.enabled);
-        assert_eq!(split.volume_size, 700 * 1024 * 1024);
-    }
-
-    #[test]
-    fn test_split_presets_nonempty() {
-        let presets = SplitSettings::presets();
-        assert!(!presets.is_empty());
-        // First preset should be floppy size.
-        assert_eq!(presets[0].1, 1_440 * 1024);
     }
 
     // --- ArchiveEntry tests ---
@@ -4864,78 +4603,6 @@ mod tests {
         let src_entries = m.entries_in_directory("src");
         assert_eq!(src_entries.len(), 1);
         assert_eq!(src_entries[0].name, "main.rs");
-    }
-
-    // --- CreateArchiveSettings tests ---
-
-    #[test]
-    fn test_create_settings_validate_empty() {
-        let s = CreateArchiveSettings::default();
-        let problems = s.validate();
-        assert!(problems.iter().any(|p| p.contains("Output path")));
-        assert!(problems.iter().any(|p| p.contains("No source")));
-    }
-
-    #[test]
-    fn test_create_settings_validate_ok() {
-        let s = CreateArchiveSettings {
-            output_path: PathBuf::from("out.zip"),
-            sources: vec![PathBuf::from("file.txt")],
-            ..Default::default()
-        };
-        let problems = s.validate();
-        assert!(
-            problems.is_empty(),
-            "expected no problems, got: {problems:?}"
-        );
-    }
-
-    #[test]
-    fn test_create_settings_validate_encryption_unsupported() {
-        let s = CreateArchiveSettings {
-            output_path: PathBuf::from("out.tar"),
-            format: ArchiveFormat::Tar,
-            sources: vec![PathBuf::from("file.txt")],
-            encryption: EncryptionSettings {
-                password: "secret".into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let problems = s.validate();
-        assert!(problems.iter().any(|p| p.contains("encryption")));
-    }
-
-    #[test]
-    fn test_create_settings_validate_split_unsupported() {
-        let s = CreateArchiveSettings {
-            output_path: PathBuf::from("out.tar.gz"),
-            format: ArchiveFormat::TarGz,
-            sources: vec![PathBuf::from("file.txt")],
-            split: SplitSettings {
-                enabled: true,
-                volume_size: 1_000_000,
-            },
-            ..Default::default()
-        };
-        let problems = s.validate();
-        assert!(problems.iter().any(|p| p.contains("split")));
-    }
-
-    #[test]
-    fn test_create_settings_validate_split_too_small() {
-        let s = CreateArchiveSettings {
-            output_path: PathBuf::from("out.zip"),
-            format: ArchiveFormat::Zip,
-            sources: vec![PathBuf::from("file.txt")],
-            split: SplitSettings {
-                enabled: true,
-                volume_size: 100, // too small
-            },
-            ..Default::default()
-        };
-        let problems = s.validate();
-        assert!(problems.iter().any(|p| p.contains("64 KiB")));
     }
 
     // --- AppState tests ---

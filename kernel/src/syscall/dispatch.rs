@@ -1138,11 +1138,32 @@ fn test_dispatch_brightness_gated() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    if r.value != i64::from(KernelError::PermissionDenied as i32) {
+    // Two refusals are correct here and a third class is the bug.
+    //
+    // This runs in KERNEL context, where there is no caller process, so the
+    // capability lookup cannot reach a permission decision and answers
+    // NoSuchProcess. A ring-3 caller lacking the right would get
+    // PermissionDenied. Both mean refused-without-granting, and the neighbouring
+    // rungs say the same of themselves -- `chroot (1068): OK -- a caller with no
+    // process is refused before the path is read`.
+    //
+    // What must NOT appear is an ARGUMENT error. `arg1: 50` is a valid
+    // brightness, chosen so that a missing gate shows up as success (caught
+    // above) and a mis-ORDERED gate shows up here: if argument validation ran
+    // first, a syscall that later grew stricter argument checks could start
+    // refusing for the wrong reason and this rung would still pass on a bare
+    // "it refused" test.
+    let expected_refusal = r.value == i64::from(KernelError::NoSuchProcess as i32)
+        || r.value == i64::from(KernelError::PermissionDenied as i32);
+    if !expected_refusal {
         serial_println!(
-            "[dispatch]   FAIL: SYS_BRIGHTNESS_SET refused with {}, expected PermissionDenied",
+            "[dispatch]   FAIL: SYS_BRIGHTNESS_SET refused with {}, expected NoSuchProcess",
             r.value
         );
+        serial_println!(
+            "[dispatch]          (kernel context) or PermissionDenied (ring 3). Any other"
+        );
+        serial_println!("[dispatch]          error means it validated arguments before the gate");
         return Err(KernelError::InternalError);
     }
 

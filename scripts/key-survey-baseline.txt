@@ -25,10 +25,6 @@
 
 
 
-# asteroids
-asteroids	A
-asteroids	D
-asteroids	W
 
 
 # colorpicker

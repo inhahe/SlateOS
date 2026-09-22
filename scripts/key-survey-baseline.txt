@@ -36,10 +36,6 @@ colorpicker	C
 colorpicker	E
 colorpicker	V
 
-# fileassoc
-fileassoc	E
-fileassoc	F
-fileassoc	Q
 
 # photomanager
 photomanager	F

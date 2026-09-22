@@ -1389,6 +1389,33 @@ impl Layout {
 }
 
 /// Full UI state for the file association manager.
+/// The keys this window answers, as a reader sees them.
+///
+/// None of them were named. Two write files -- `Ctrl+E` exports every
+/// association and `Ctrl+I` reads a set back in -- which is not a pair to
+/// find out about by pressing things.
+///
+/// **No `?` row.** `handle_key` sends any keystroke carrying text to the
+/// caret before it reads the named keys, so `?` types a question mark into
+/// whatever field has focus. Sixth app where `?` was not free.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Move through the file types"),
+    (
+        "Enter",
+        "Choose what opens this type, or confirm the dialog",
+    ),
+    (
+        "Esc",
+        "Back out of one thing: a dialog, then a search, then the selection",
+    ),
+    ("Tab", "Next field, while adding a file type"),
+    ("Ctrl+F", "Jump to the search box"),
+    ("Ctrl+E", "Export every association to a file"),
+    ("Ctrl+I", "Import associations from a file"),
+    ("Ctrl+Q", "Quit"),
+];
+
 pub struct FileAssocUI {
     /// The underlying association registry.
     pub registry: AssociationRegistry,
@@ -1397,6 +1424,8 @@ pub struct FileAssocUI {
     /// Current search query string.
     pub search_query: String,
     /// Whether typed text goes to the search box.
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub search_focused: bool,
     /// Index of the selected file type in the current filtered list.
     pub selected_index: Option<usize>,
@@ -1549,6 +1578,7 @@ impl FileAssocUI {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             selected_category: None,
             search_query: String::new(),
+            show_help: false,
             search_focused: false,
             selected_index: None,
             scroll_offset: 0.0,
@@ -2149,6 +2179,21 @@ impl FileAssocUI {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Above the typed-text branch, which claims every printable key. F1
+        // carries no text, so this does not take anything from the caret.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal. Ctrl+E writes a file and Enter picks what opens a type;
+            // neither should happen from behind a list.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         // Typed text goes wherever the caret is, and is checked before the
         // named keys so a key that produces text is not also read as a command.
         if !key.text.is_empty() && !key.modifiers.ctrl && !key.modifiers.alt {
@@ -2391,6 +2436,17 @@ impl FileAssocUI {
                 }
                 ActiveDialog::None => {}
             }
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (l.width, l.height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
         }
 
         frame
@@ -5234,6 +5290,87 @@ mod tests {
         // The three body panels tile the window without overlapping.
         assert_eq!(narrow.sidebar.right(), narrow.table.x);
         assert_eq!(narrow.table.right(), narrow.details.x);
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// `Ctrl+Q` is checked through `on_event`, not `handle_key`: quitting is
+    /// decided a level up and returns `Response::Exit` rather than an
+    /// `EventResult`. A guard that only knew `handle_key` would call the one
+    /// row nothing else covers a lie -- the same shape `apps/benchmark` had.
+    ///
+    /// Two states, because `Tab` belongs to the add-file-type dialog and
+    /// `Esc` needs something to back out of.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let quits = {
+                    let mut ui = FileAssocUI::new();
+                    matches!(ui.on_event(&Event::Key(stroke.clone())), Response::Exit)
+                };
+                let answered = quits
+                    || [false, true].into_iter().any(|in_dialog| {
+                        let mut ui = FileAssocUI::new();
+                        // Twice: `Up` on the first row stops rather than
+                        // wrapping, so one press leaves it with nowhere to
+                        // go. Third app in this queue with that shape, after
+                        // apps/notes and apps/podcast.
+                        ui.handle_event(&Event::Key(probe::press(Key::Down)));
+                        ui.handle_event(&Event::Key(probe::press(Key::Down)));
+                        if in_dialog {
+                            ui.open_add_file_type_dialog();
+                        }
+                        ui.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                    });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the last third: Ctrl+F behind the card must not focus
+    /// the search box, and must focus it with the card down.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |ui: &FileAssocUI| -> Vec<String> {
+            ui.render()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut ui = FileAssocUI::new();
+        assert!(
+            !drawn(&ui).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        ui.handle_event(&Event::Key(probe::press(Key::F1)));
+        let missing = guitk::shortcut::missing_rows(&drawn(&ui), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        ui.handle_event(&Event::Key(probe::ctrl(Key::F)));
+        assert!(
+            !ui.search_focused,
+            "Ctrl+F focused the search box through the shortcut card"
+        );
+
+        ui.handle_event(&Event::Key(probe::press(Key::F1)));
+        ui.handle_event(&Event::Key(probe::ctrl(Key::F)));
+        assert!(
+            ui.search_focused,
+            "control: Ctrl+F does nothing even with the card down"
+        );
     }
 
     #[test]

@@ -752,6 +752,29 @@ impl ToolbarAction {
 // ============================================================================
 
 /// Top-level state for the device manager application.
+/// The keys this window answers, as a reader sees them.
+///
+/// Four of them were spelled in no string this program draws, and two of
+/// those are not keys to find out about by trying: Ctrl+E writes a file and
+/// Delete uninstalls the selected device.
+///
+/// **No `?` row.** The search box takes every character, so `?` would cost a
+/// question mark in a search to buy a list `F1` already opens. Fourth app
+/// where `?` was not free.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Ctrl+F", "Jump to the search box"),
+    ("Ctrl+E", "Export the device list to a file"),
+    ("F5 / Ctrl+R", "Scan for hardware changes"),
+    (
+        "Arrows",
+        "Move through the tree; Left and Right close and open a branch",
+    ),
+    ("Enter / Space", "Open or close the selected category"),
+    ("Tab", "Next properties tab"),
+    ("Delete", "Uninstall the selected device"),
+];
+
 pub struct DeviceManagerState {
     /// The user's colours, handed over by the framework (§822).
     pub palette: Palette,
@@ -769,6 +792,8 @@ pub struct DeviceManagerState {
     pub active_tab: PropertiesTab,
     /// Search/filter query string.
     pub search_query: String,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     /// Whether the search bar is focused.
     pub search_focused: bool,
     /// Event history log.
@@ -847,6 +872,7 @@ impl DeviceManagerState {
             active_tab: PropertiesTab::General,
             search_query: String::new(),
             search_focused: false,
+            show_help: false,
             event_history: Vec::new(),
             resource_view,
             update_checks,
@@ -1711,6 +1737,17 @@ pub fn render(state: &DeviceManagerState) -> Vec<RenderCommand> {
     render_status_bar(state, &mut cmds);
     // Last, so nothing paints over it.
     render_cannot_see_hardware(state, &mut cmds);
+
+    if state.show_help {
+        guitk::shortcut::render_card(
+            &mut cmds,
+            &state.palette,
+            (state.width, state.height),
+            0.0,
+            SHORTCUTS,
+            "F1 closes this",
+        );
+    }
 
     cmds
 }
@@ -3174,6 +3211,22 @@ fn handle_key_event(state: &mut DeviceManagerState, key: &KeyEvent) -> EventResu
         return EventResult::Ignored;
     }
 
+    // Above the search box's branch, which takes the keyboard and returns.
+    // Placed after it, the card could be raised from the tree and then not
+    // dismissed while the search had focus.
+    if key.key == Key::F1 {
+        state.show_help = !state.show_help;
+        return EventResult::Consumed;
+    }
+    if state.show_help {
+        // Modal. Delete uninstalls the selected device, and doing that from
+        // behind a list somebody is reading is the reason nothing passes.
+        if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+            state.show_help = false;
+        }
+        return EventResult::Consumed;
+    }
+
     // Search bar text input
     if state.search_focused {
         match key.key {
@@ -3597,6 +3650,87 @@ mod tests {
     /// devices", which is a claim about the user's computer. And a device
     /// manager is exactly where somebody goes when hardware is not working,
     /// so that claim lands on the person least able to discount it.
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Two states, because `Esc` and `Enter` mean one thing in the search box
+    /// and another in the tree, and the search branch returns before the tree
+    /// is ever reached.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|searching| {
+                    let mut state = DeviceManagerState::new();
+                    state.search_focused = searching;
+                    handle_event(&mut state, &Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the last third: Ctrl+F behind the card must not focus
+    /// the search box, and must focus it with the card down. Asserting only
+    /// the first half would pass on a window where Ctrl+F had stopped
+    /// working altogether.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |state: &DeviceManagerState| -> String {
+            render(state)
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        let f1 = Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        let ctrl_f = Event::Key(KeyEvent {
+            key: Key::F,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        });
+
+        let mut state = DeviceManagerState::new();
+        assert!(
+            !drawn(&state).contains("F1 closes this"),
+            "the card is up before anybody asked for it"
+        );
+
+        handle_event(&mut state, &f1);
+        let shown = drawn(&state);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        handle_event(&mut state, &ctrl_f);
+        assert!(
+            !state.search_focused,
+            "Ctrl+F focused the search box through the shortcut card"
+        );
+
+        handle_event(&mut state, &f1);
+        handle_event(&mut state, &ctrl_f);
+        assert!(
+            state.search_focused,
+            "control: Ctrl+F does nothing even with the card down"
+        );
+    }
+
     #[test]
     fn the_window_says_it_cannot_see_the_hardware() {
         let state = DeviceManagerState::new();

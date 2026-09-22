@@ -22,11 +22,6 @@
 # yet". An entry in the wrong file is how a bug becomes a decision.
 
 
-# devicemanager
-devicemanager	E
-devicemanager	F
-devicemanager	F5
-devicemanager	R
 
 
 

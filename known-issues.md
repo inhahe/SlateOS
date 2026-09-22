@@ -166357,3 +166357,61 @@ Recommendation: the ratchet, because the number's only current use is to hide
 new warnings among old ones. Not implemented -- a gate on a number I measured
 once, on one target, is a gate I have not shown to be stable, and dd-956 says
 measure the population before building the gate.
+
+### [A] `F_SETLK` grants every exclusive record lock, and the reason it gives for that has expired -- 2026-09-21
+**Status:** OPEN (the fix is a wiring job; `fs::reclock` already exists, is tested, and has zero callers)
+
+**In short:** a program can ask the kernel for exclusive use of part of a file
+-- the mechanism databases use to stop two copies of themselves writing the
+same page. The kernel says yes to everyone. Two programs both asking for
+exclusive use of the same bytes are both told they have it.
+
+**This is not news; the interesting part is the justification.** Lane B filed
+it on 2026-09-13 (`requests/b-a-advisory-record-locking-is-a-stub-that-always-
+succeeds.md`) about their libc side. The kernel side carries a written reason
+for granting unconditionally, at `syscall/linux.rs:895`:
+
+> *In our kernel only one process can hold a Linux fd table at a time (no
+> cross-process visibility yet), so no other holder can conflict. `F_SETLK` /
+> `F_SETLKW` always grant; `F_GETLK` always reports `F_UNLCK`.*
+
+If that were true the behaviour would be correct -- there would be no second
+holder to conflict with. **It is not true.** `pcb::linux_fd_install_stdio` is
+documented as *"called exactly once, immediately after `set_abi_mode` flips the
+process to Linux ABI in `spawn_process` / `exec_process`"* -- that is once **per
+process**, and the assignment at `pcb.rs:6855` is unguarded. Nothing anywhere
+limits the number of processes holding one; the only mention of the invariant in
+the entire tree is the comment asserting it. So every Linux-ABI process has its
+own fd table, and two of them can hold the same exclusive lock.
+
+**What I have and have not shown.** I have shown the *justification* is false,
+by reading the assignment site and finding no guard. I have **not** shown a
+program is currently corrupted by it -- that needs two Linux processes actually
+contending for one range, and I have not demonstrated that happens today. The
+distinction matters and I have got it wrong three times in one day (`sealing`,
+`secpolicy`, and `acl`, where a genuine call path had no actor who could enter
+it). So: the reasoning is void, the mechanism is wrong, the exploitation is
+unmeasured. What makes it worth fixing regardless is that the comment names
+**sqlite WAL locking and Postgres backend startup** as things that "proceed
+without modification" -- those are precisely the callers for which proceeding
+is the failure, because they proceed into a second writer.
+
+**The fix is a wiring job, not a design job, and the part that should exist
+already does.** `kernel/src/fs/reclock.rs` is a complete POSIX record-lock
+table: byte ranges, owners, read/write lock types, conflict detection, `set` /
+`unlock` / `query` / `list`, its own self-test, and since today identity keying
+so a lock taken under one name is seen under a hard link. It has **zero callers
+outside its own module** -- I checked, because a module nothing calls is how
+this kind of gap usually looks. `fcntl_flock_apply` at `linux.rs:5391` is the
+function that should call it.
+
+Two things to get right when wiring it:
+
+| issue | detail |
+|---|---|
+| the owner identity | POSIX locks are owned by a *process*, OFD locks by an *open file description*. `fcntl_flock_apply` already knows which it is (`is_ofd`), and `reclock::set` takes an `owner: u64`, so both map cleanly -- but they must not share an owner space, or an OFD lock and a POSIX lock from one process would wrongly conflict |
+| `reclock` takes paths as `&str` | `set(path: &str, ...)`. Paths here are bytes and may legally contain any byte except `/` and NUL, so a `&str` API cannot express every lockable file (CLAUDE.md item 7). Unreachable today because nothing calls it; wiring it to a syscall is exactly what makes it reachable, so the signature should change to `impl AsRef<Path>` in the same change rather than after |
+
+**F_GETLK** needs the same treatment: it currently reports `F_UNLCK`
+unconditionally, which is a *claim about the world* rather than a lookup, and
+`reclock::query` is the lookup it should do.

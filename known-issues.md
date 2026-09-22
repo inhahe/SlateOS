@@ -166312,8 +166312,17 @@ correcting because it is what the next session would act on:
 | module | table(s) | difficulty |
 |---|---|---|
 | `queryable` | `path_index: BTreeMap<PathBuf, usize>` into `files: Vec<FileAttrs>` | **mechanical.** The index is a lookup; the records live in the Vec. Re-key the index and the rest follows |
-| `fcomment` | `comments: BTreeMap<PathBuf, String>` | **mechanical but widest** -- 18 sites, and `search`/`list`/`remove_under` filter by path *prefix*, so the path must stay as data (the `immutable.rs` pattern) |
+| `fcomment` | `comments: BTreeMap<PathBuf, String>` | **not mechanical -- measured 2026-09-22.** 18 table accesses, but **28 compiler-reported sites** once the value becomes a tuple, because the comment IS the value: every `get`/`get_mut`/iteration changes shape. `search`/`list`/`remove_under` filter by path *prefix*, so the path must stay as data, and `remove_under` must collect KEYS rather than paths |
 | `tags` | `by_path: BTreeMap<PathBuf, BTreeSet<String>>` **and** `by_tag: BTreeMap<String, BTreeSet<PathBuf>>` | **a design question, not a conversion.** Two indices over the same relation |
+
+**`queryable` is done (2026-09-22); `fcomment` was attempted and reverted.** The
+conversion compiled down to 28 sites of restructuring rather than a swap, and it
+was attempted at a point where no boot could verify it -- WSL is down on this
+host, which fails gate 50's main run. Reverted rather than landed blind: the
+table is reachable only from `kshell`, so the value of landing it unverified is
+low and the cost of debugging 28 unverified sites later is not. The measurement
+is the artifact; the next session starts with a correct estimate instead of my
+wrong one.
 
 **Why `tags` is different.** Re-key `by_path` by identity and `by_tag` still
 holds paths. Then one file with two names has *one* entry in `by_path` and

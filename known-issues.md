@@ -166548,7 +166548,7 @@ hand, and an owner space belongs to the module that owns it.
 unconditionally, which is a *claim about the world* rather than a lookup, and
 `reclock::query` is the lookup it should do.
 
-### [A] Four boots in one day, each killed by one of my own defects, three of which a local check would have caught in under five minutes -- 2026-09-21
+### [A] Five boots in one day, each killed by one of my own defects -- three a local check would have caught in under five minutes, and one caused BY running those checks during the boot -- 2026-09-21
 **Status:** OPEN as a workflow note. No code fix; the remedy is an order of operations.
 
 **In short:** a full boot test is ~2 hours and cannot be shortened -- there is no
@@ -166582,6 +166582,29 @@ exists precisely to stop a second list drifting from the first. Nor should the
 clippy gate move earlier in `boot-test.sh`: all three lanes boot through that
 file, and reordering shared machinery to compensate for a step one lane skipped
 is the band-aid `CLAUDE.md` warns about.
+
+**A fifth boot, and this one I killed directly.** Boot 5 died at gate 50 on
+`check-shellquote-vs-bash`: *"THE WORD PROBE IS BROKEN -- every result below
+would be a lie"*, on the line `$'a
+b'`. Re-run on a quiet machine: **0
+failures, exit 0.**
+
+I was running six gate scripts concurrently with the boot -- to verify a change
+I wanted to fold into it, in order to *save* a boot -- and the probe could not
+spawn `bash` under that load. So the rule from the table above needs its other
+half:
+
+> Run the cheap checks **before** a boot. Run **nothing** during one.
+
+The probe's message is worth knowing too, because it cost me the diagnosis
+before it cost me the boot. It reports a `None` result as *"bash itself
+rejected the line"* and says a framing failure would have raised `ProbeError`
+instead -- but a `bash` that cannot fork looks exactly like a `bash` that
+refused the syntax. I went to lane B's `$'\c'` request first, which was
+already DONE and had nothing to do with it. **A probe that cannot distinguish
+"the subject said no" from "the subject never ran" reports the wrong cause
+with full confidence** -- the same defect class as reading exit 0 as a warning
+count, one layer down in someone else's tool.
 
 **The one thing worth measuring next time.** Every one of the four was found by
 a gate that already existed. None was a gap in coverage -- they were gaps in

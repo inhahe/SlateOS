@@ -166412,6 +166412,31 @@ Two things to get right when wiring it:
 | the owner identity | POSIX locks are owned by a *process*, OFD locks by an *open file description*. `fcntl_flock_apply` already knows which it is (`is_ofd`), and `reclock::set` takes an `owner: u64`, so both map cleanly -- but they must not share an owner space, or an OFD lock and a POSIX lock from one process would wrongly conflict |
 | `reclock` takes paths as `&str` | `set(path: &str, ...)`. Paths here are bytes and may legally contain any byte except `/` and NUL, so a `&str` API cannot express every lockable file (CLAUDE.md item 7). Unreachable today because nothing calls it; wiring it to a syscall is exactly what makes it reachable, so the signature should change to `impl AsRef<Path>` in the same change rather than after |
 
+**`F_SETLKW` resolved by precedent, not by invention.** POSIX says `F_SETLKW`
+*blocks* until the lock is available, and nothing here can block on a lock
+table. That looked like a fork needing the operator until I read what `flock(2)`
+already does in this tree: `sys_flock` returns `EWOULDBLOCK` for every conflict,
+strips `LOCK_NB` without honouring it, and **says so in its own doc** -- *"real
+Linux blocks (sleeps) on a contended lock when `LOCK_NB` is absent. Our IPC
+layer doesn't yet expose a wait queue hook for the VFS lock table, so we return
+EWOULDBLOCK for every conflict."*
+
+So `F_SETLKW` should return `EAGAIN` on conflict, carry the same stated
+limitation, and name the same missing wait-queue hook. That is consistent with
+the neighbouring syscall rather than a second, differently-wrong answer -- and
+when the hook lands, both are fixed in one place. `sched::block_current` exists
+(`linux.rs:4581`), so the hook is the missing piece, not the primitive.
+
+**The implementation, in the order it has to happen:**
+
+| step | detail |
+|---|---|
+| 1. `reclock` path API | `&str` -> `impl AsRef<Path>` **before** it is reachable, not after |
+| 2. resolve `l_whence` | `SEEK_SET` is `l_start`; `SEEK_CUR` needs the descriptor's offset; `SEEK_END` needs the file size. The handler currently parses the range into `_l_start` / `_l_len` -- underscore-prefixed, deliberately discarded -- so this is where the stub actually lives |
+| 3. `l_len` edge cases | `0` means *to EOF*, and a **negative** length means the range *below* `l_start`. Both are legal POSIX and both are easy to get silently wrong on a data-integrity path |
+| 4. owner mapping | POSIX -> pid; OFD -> `entry.raw_handle`. Separate owner spaces, or one process's POSIX and OFD locks would conflict with each other |
+| 5. `F_GETLK` | `reclock::query`, writing the holder's `l_type` and `l_pid` back |
+| 6. `F_UNLCK` | `reclock::unlock` |
 **F_GETLK** needs the same treatment: it currently reports `F_UNLCK`
 unconditionally, which is a *claim about the world* rather than a lookup, and
 `reclock::query` is the lookup it should do.

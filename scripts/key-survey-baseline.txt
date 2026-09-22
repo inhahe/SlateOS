@@ -41,9 +41,6 @@
 
 
 
-# soundrecorder
-soundrecorder	M
-soundrecorder	S
 
 # speedtest
 speedtest	E

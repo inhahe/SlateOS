@@ -373,9 +373,28 @@ fn test_record_lock_follows_the_file() -> crate::error::KernelResult<()> {
         RecordLockType::Write,
     )?;
     let seen = list(core::str::from_utf8(B).unwrap_or(""));
+    // NEGATIVE CONTROL: an unrelated real file must report no locks. Without
+    // it, a matcher that matched anything would satisfy the assertion below
+    // while proving nothing about identity (dd-954).
+    const C: &[u8] = b"/tmp/reclock-id-c";
+    let _ = Vfs::remove(Path::new(C));
+    let unrelated = match Vfs::write_file(Path::new(C), b"x") {
+        Ok(()) => {
+            let l = list(core::str::from_utf8(C).unwrap_or(""));
+            let _ = Vfs::remove(Path::new(C));
+            l
+        }
+        Err(_) => Vec::new(),
+    };
     let _ = unlock(core::str::from_utf8(A).unwrap_or(""), 1, 0, 16);
     let _ = Vfs::remove(Path::new(B));
     let _ = Vfs::remove(Path::new(A));
+    if !unrelated.is_empty() {
+        crate::serial_println!(
+            "reclock: ERROR: control failed -- an UNRELATED file reports A's lock"
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
     if seen.is_empty() {
         crate::serial_println!("reclock: FAIL -- a lock set on one name is invisible on another");
         return Err(crate::error::KernelError::InternalError);

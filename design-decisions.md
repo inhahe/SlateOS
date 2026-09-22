@@ -77934,8 +77934,7 @@ something that would then have had to be maintained or deleted.
 
 ## 957. "Metadata belongs to the file" is too coarse to key a table by; ask whether the data should survive the file being replaced
 
-**Date:** 2026-09-21
-**Decided by:** Claude (autonomous)
+**Date:** 2026-09-21 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A
 
 **In short:** several kernel tables attach information to a file -- who may
 read it, a comment, a tag, a hash of its contents. Each has to be stored under

@@ -523,8 +523,26 @@ fn test_flags_follow_the_file() -> crate::error::KernelResult<()> {
         return Ok(());
     }
 
+    // A third file, NOT a link to A, for the negative control.
+    const C: &[u8] = b"/tmp/immutable-id-c";
+    let _ = Vfs::remove(Path::new(C));
+    Vfs::write_file(Path::new(C), b"x")?;
+
     set_flags(Path::new(A), FileFlags::IMMUTABLE)?;
     let seen = get_flags(Path::new(B));
+    let unrelated = get_flags(Path::new(C));
+    let _ = Vfs::remove(Path::new(C));
+
+    // NEGATIVE CONTROL, checked first: a key that collapses every path to
+    // one entry would report IMMUTABLE everywhere, passing the assertion
+    // below without identity keying existing (dd-954).
+    if unrelated & FileFlags::IMMUTABLE != 0 {
+        crate::serial_println!(
+            "immutable: ERROR: control failed -- an UNRELATED file reports A's flag"
+        );
+        let _ = remove_flags(Path::new(A));
+        return Err(crate::error::KernelError::InternalError);
+    }
     let _ = remove_flags(Path::new(A));
     let _ = Vfs::remove(Path::new(B));
     let _ = Vfs::remove(Path::new(A));

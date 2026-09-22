@@ -398,8 +398,25 @@ fn test_seal_follows_the_file_not_the_name() -> KernelResult<()> {
         return Ok(());
     }
 
+    // A third file, NOT a link to A, for the negative control.
+    const C: &[u8] = b"/tmp/seal-id-c";
+    let _ = Vfs::remove(Path::new(C));
+    Vfs::write_file(Path::new(C), b"x")?;
+
     add_seals(Path::new(A), SealFlags::WRITE)?;
     let seen = get_seals(Path::new(B));
+    let unrelated = get_seals(Path::new(C));
+    let _ = Vfs::remove(Path::new(C));
+
+    // NEGATIVE CONTROL, checked first: a matcher that matches anything
+    // would report A's seal on every file, and the assertion below would
+    // pass without identity keying existing at all (dd-954).
+    if unrelated.contains(SealFlags::WRITE) {
+        serial_println!(
+            "sealing::self_test: ERROR: control failed -- an UNRELATED file reports A's seal"
+        );
+        return Err(KernelError::InternalError);
+    }
     let _ = Vfs::remove(Path::new(B));
     let _ = Vfs::remove(Path::new(A));
 

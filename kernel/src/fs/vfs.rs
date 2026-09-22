@@ -9114,11 +9114,29 @@ fn test_flock_shares_one_entry_across_hard_links() -> KernelResult<()> {
         return Ok(());
     }
 
+    // A third file, NOT a link to A, for the negative control below.
+    const C: &[u8] = b"/tmp/flock-id-c";
+    let _ = Vfs::remove(Path::new(C));
+    Vfs::write_file(Path::new(C), b"x")?;
+
     Vfs::flock(Path::new(A), 1, LockType::Exclusive)?;
     let second = Vfs::flock(Path::new(B), 2, LockType::Exclusive);
+    let unrelated = Vfs::flock(Path::new(C), 3, LockType::Exclusive);
+    let _ = Vfs::funlock(Path::new(C), 3);
     let _ = Vfs::funlock(Path::new(A), 1);
+    let _ = Vfs::remove(Path::new(C));
     let _ = Vfs::remove(Path::new(B));
     let _ = Vfs::remove(Path::new(A));
+
+    // NEGATIVE CONTROL, checked first. An implementation in which every
+    // second flock fails -- or one whose entry matcher matches anything --
+    // refuses B for reasons having nothing to do with identity, and would
+    // pass the assertion below while proving nothing (dd-954).
+    if unrelated.is_err() {
+        serial_println!("[vfs]   ERROR: control failed -- flock refused an UNRELATED");
+        serial_println!("[vfs]          file, so refusing B is not evidence of identity");
+        return Err(KernelError::InternalError);
+    }
 
     if second.is_ok() {
         serial_println!("[vfs]   FAIL: flock on a second name for the same file succeeded --");

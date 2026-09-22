@@ -42,9 +42,6 @@
 
 
 
-# speedtest
-speedtest	E
-speedtest	Q
 
 # undelete
 undelete	A
@@ -57,8 +54,6 @@ undelete	D
 defrag	Q
 
 
-# netmanager
-netmanager	F5
 
 # partmanager
 partmanager	Z

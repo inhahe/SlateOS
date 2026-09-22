@@ -1170,9 +1170,24 @@ pub enum UiScreen {
     Results,
 }
 
+/// The keys this window answers, as a reader sees them.
+///
+/// `A` ticks every category for deletion and `D` unticks them. Neither was
+/// named, and the first is one keystroke from a confirmation dialog that
+/// removes files.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("A", "Tick every category"),
+    ("D", "Untick every category"),
+    ("Enter", "Clean what is ticked"),
+    ("Esc", "Back from the preview, or from the results"),
+];
+
 /// Complete UI state for the disk cleanup application.
 pub struct CleanupUI {
     /// Current screen / view.
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub screen: UiScreen,
     /// Per-category checkbox selection.
     pub selected: BTreeMap<CleanupCategory, bool>,
@@ -1230,6 +1245,7 @@ impl CleanupUI {
         }
 
         Self {
+            show_help: false,
             screen: UiScreen::CategoryList,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -1456,6 +1472,22 @@ impl CleanupUI {
 
     /// Keyboard shortcuts for the screen that is up.
     fn handle_key(&mut self, key: Key) -> EventResult {
+        // This handler is given a bare `Key` and no modifiers at all, so the
+        // card is raised on F1 alone -- there is no `?` to offer even if the
+        // window wanted one.
+        if key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal. A ticks every category and Enter opens the dialog that
+            // deletes them.
+            if matches!(key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         match (self.screen, key) {
             // Escape backs out of wherever you are, one level at a time. On the
             // category list there is nothing to back out of, so it is ignored
@@ -1606,6 +1638,17 @@ impl CleanupUI {
         // "confirming" was a state it could be in.
         if let Some(dialog) = self.confirm.as_mut() {
             dialog.render(&self.palette, width, height, &mut tree);
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
         }
 
         tree
@@ -3480,6 +3523,84 @@ mod tests {
     /// wiring* -- that a click at a coordinate reaches a method -- and a test of
     /// where a button is has no business owning a `remove_dir_all`. What
     /// deletion does is tested directly, against a `ScratchDir`, above.
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Against a completed scan, because `Enter` only cleans when there is
+    /// something ticked to clean and `A` only ticks categories that exist.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [0_u8, 1, 2].into_iter().any(|state| {
+                    let (mut ui, _index) = scanned(CleanupCategory::TempFiles, 4096);
+                    if state == 1 {
+                        ui.select_all();
+                    }
+                    if state == 2 {
+                        // The results screen, which is one of the two places
+                        // Escape has something to leave. My row said "Back"
+                        // and meant nothing; that word has now been the wrong
+                        // one five times in this queue.
+                        ui.screen = UiScreen::Results;
+                    }
+                    ui.handle_key(stroke.key) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing is ticked behind it.**
+    ///
+    /// The control is the last third: `A` behind the card must not tick every
+    /// category, and must tick them with the card down. Not `Enter` -- that
+    /// opens the dialog which deletes files, and a control should fail an
+    /// assertion rather than take a step towards doing that.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let (mut ui, _index) = scanned(CleanupCategory::TempFiles, 4096);
+        let drawn = |ui: &mut CleanupUI| -> Vec<String> {
+            ui.render(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        assert!(
+            !drawn(&mut ui).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        ui.handle_key(Key::F1);
+        let shown = drawn(&mut ui);
+        let missing = guitk::shortcut::missing_rows(&shown, SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let ticked = ui.selected_categories().len();
+        ui.handle_key(Key::A);
+        assert_eq!(
+            ui.selected_categories().len(),
+            ticked,
+            "A ticked every category through the shortcut card"
+        );
+
+        ui.handle_key(Key::F1);
+        ui.handle_key(Key::A);
+        assert_ne!(
+            ui.selected_categories().len(),
+            ticked,
+            "control: A does nothing even with the card down"
+        );
+    }
+
     fn scanned(cat: CleanupCategory, bytes: u64) -> (CleanupUI, usize) {
         let mut ui = CleanupUI::new();
         ui.scanner

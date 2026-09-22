@@ -38,13 +38,7 @@
 
 
 
-# diskcleanup
-diskcleanup	A
-diskcleanup	D
 
-# fontmanager
-fontmanager	F
-fontmanager	S
 
 
 # soundrecorder

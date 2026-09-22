@@ -166286,6 +166286,24 @@ also needs a rung that hard-links a real file, since the pre-existing rungs used
 synthetic paths that resolve to nothing and so passed identically before and
 after conversion.
 
+**A search-shaped mistake worth naming, found the same day.** Scoping the
+BLKDISCARD work I ran
+`grep -r 'fn discard' kernel/src/drivers kernel/src/block` and got nothing,
+and reported "no discard/TRIM/unmap support anywhere". **Neither directory
+exists.** `grep` over a non-existent path prints nothing and returns quietly,
+and I read that silence as a measurement. The truth is the opposite of what I
+published: `kernel/src/blkdev.rs` has had `supports_discard()` and `discard()`
+on the `BlockDevice` trait all along, and **1 of the 4 implementors
+(`RamBlockDevice`) overrides both**, so discard is genuinely available on one
+backend and the design that follows is not "refuse everything" but "ask the
+device".
+
+The tell is that an empty result and an empty *search space* are printed
+identically. Same family as reading exit 0 as a warning count, and as
+`tail -25` of an 18,060-line report: in each case the evidence could not have
+contained the finding, and nothing in the output said so. The cheap guard is to
+make the search prove its own scope -- `ls -d` the paths first, or grep for a
+term that MUST hit and check that it does.
 **Then delete the three `rename_path` fixups**, which identity keying makes
 unnecessary: an inode survives a rename, so there is nothing left to fix up.
 

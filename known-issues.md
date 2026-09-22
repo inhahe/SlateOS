@@ -166632,6 +166632,34 @@ half:
 
 > Run the cheap checks **before** a boot. Run **nothing** during one.
 
+**It also includes `git commit`, which I learned by killing boot 7 with the very
+commit that recorded the rule below.** Boot 7 started at 01:27. I committed at
+01:35 and again at 02:07. It died reporting *"2 tooling test suite(s) failed:
+test-boot-test.py, test-checkers-honour-head.py"* -- and those two are precisely
+the suites that reason about **git HEAD**:
+
+| suite | a rung it carries |
+|---|---|
+| `test-boot-test.py` | *"a **staged** source edit is dirty too (the diff is against HEAD, not the index)"* |
+| `test-checkers-honour-head.py` | HEAD-relative by name; 898 s, 36% of the suite |
+
+They build fixtures and compare the working tree against HEAD. Move HEAD
+underneath them and their expectations are measuring a tree that no longer
+exists. Both pass standalone -- I re-ran `test-boot-test.py` immediately after
+and got exit 0 -- which is the same misleading signal as gate 50: **the thing
+only fails when something else is happening, so reproducing it alone proves
+nothing.**
+
+So the rule is not "do not run heavy things during a boot". It is:
+
+> **During a boot, change nothing and run nothing.** Not source, not tracked
+> documents, not HEAD. A boot reads the tree it is testing for two hours, and
+> three separate gates check that tree against HEAD.
+
+The markdown edits felt safe because they are not compiled. Compilation was
+never the mechanism -- `git` was. I had even reasoned explicitly that "markdown
+edits are safe (not compiled)" and committed on that basis, twice.
+
 **And that includes `git push`, which is not obvious.** A push feels like a git
 operation, not a consumer of anything a boot needs. But `scripts/hooks/pre-push`
 mentions `wsl` **15 times**, so pushing while a boot is running puts two

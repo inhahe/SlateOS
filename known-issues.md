@@ -166304,6 +166304,32 @@ identically. Same family as reading exit 0 as a warning count, and as
 contained the finding, and nothing in the output said so. The cheap guard is to
 make the search prove its own scope -- `ls -d` the paths first, or grep for a
 term that MUST hit and check that it does.
+**The three remaining are NOT the same mechanical change, measured 2026-09-21.**
+This entry said "the fix is the pattern already applied to the other four".
+That is true of one of them and misleading about the other two, which is worth
+correcting because it is what the next session would act on:
+
+| module | table(s) | difficulty |
+|---|---|---|
+| `queryable` | `path_index: BTreeMap<PathBuf, usize>` into `files: Vec<FileAttrs>` | **mechanical.** The index is a lookup; the records live in the Vec. Re-key the index and the rest follows |
+| `fcomment` | `comments: BTreeMap<PathBuf, String>` | **mechanical but widest** -- 18 sites, and `search`/`list`/`remove_under` filter by path *prefix*, so the path must stay as data (the `immutable.rs` pattern) |
+| `tags` | `by_path: BTreeMap<PathBuf, BTreeSet<String>>` **and** `by_tag: BTreeMap<String, BTreeSet<PathBuf>>` | **a design question, not a conversion.** Two indices over the same relation |
+
+**Why `tags` is different.** Re-key `by_path` by identity and `by_tag` still
+holds paths. Then one file with two names has *one* entry in `by_path` and
+*two* in `by_tag`, so "which files carry tag X" and "which tags does this file
+carry" stop being inverses of each other. Three ways out, none free:
+
+| option | cost |
+|---|---|
+| key `by_tag` by `FileId` too, resolve to a path only for display | consistent, but "list files tagged X" must resolve N identities back to names, and a file deleted since tagging has no name to resolve to |
+| keep `by_tag` by path and accept the asymmetry | cheap, and it reintroduces exactly the bug being fixed on the reverse lookup |
+| store the path as data beside the id in both indices | the `immutable.rs` shape applied twice; duplicated paths must not drift apart |
+
+I have not picked one. It needs an entry of its own rather than being folded
+into a conversion that looks mechanical from the outside -- and the reason I
+know is that I was about to stage it as a 10-site edit, `tags` having the fewest
+call sites of the three. Fewest sites, most design.
 **Then delete the three `rename_path` fixups**, which identity keying makes
 unnecessary: an inode survives a rename, so there is nothing left to fix up.
 

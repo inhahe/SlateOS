@@ -261,6 +261,35 @@ impl Layout {
         }
     }
 
+    /// The same window with everything but the picture given up.
+    ///
+    /// `solve` already surrenders panes in order of what they are worth -- the
+    /// strip before the sidebar, the viewfinder never -- and this is the end
+    /// of that order, asked for rather than forced by a small window. The
+    /// toolbar and the status line stay: fullscreen here means "show me the
+    /// picture", not "hide the shutter button".
+    ///
+    /// Until 2026-09-22 `fullscreen_preview` was a field three lines long --
+    /// declared, initialised, and inverted by `F` -- that nothing read, so
+    /// the key changed a boolean and not one pixel. It is on the shortcut
+    /// card, which is what made it worth finding: a card row for a key with
+    /// no effect is a worse claim than an unnamed key.
+    #[must_use]
+    pub fn fullscreen(self) -> Self {
+        let viewfinder = Rect::new(
+            0.0,
+            self.viewfinder.y,
+            self.window.w,
+            self.strip.bottom().max(self.viewfinder.bottom()) - self.viewfinder.y,
+        );
+        Self {
+            viewfinder,
+            sidebar: Rect::new(self.window.w, self.viewfinder.y, 0.0, 0.0),
+            strip: Rect::new(0.0, viewfinder.bottom(), 0.0, 0.0),
+            ..self
+        }
+    }
+
     /// How many rows of `row` height fit in `r`, after `taken` has been used.
     pub fn rows_in(&self, r: Rect, taken: f32) -> usize {
         if self.row <= 0.0 {
@@ -1634,6 +1663,11 @@ impl CameraApp {
     /// actually in.
     pub fn frame(&self, w: f32, h: f32) -> Frame<Target> {
         let l = Layout::solve(w, h);
+        let l = if self.fullscreen_preview {
+            l.fullscreen()
+        } else {
+            l
+        };
         let mut f = Frame::new(w, h);
 
         fill(&mut f, l.window, self.palette.crust, CornerRadii::ZERO);
@@ -4372,6 +4406,63 @@ mod tests {
         assert_eq!(app.timer_mode, TimerMode::Off);
         app.cycle_timer();
         assert_eq!(app.timer_mode, TimerMode::ThreeSeconds);
+    }
+
+    /// **F gives the picture the whole window, and pressing it again gives it
+    /// back.**
+    ///
+    /// `fullscreen_preview` was three lines long -- declared, initialised,
+    /// and inverted by `F` -- and nothing read it, so the key changed a
+    /// boolean and not one pixel. It is a row on this window's shortcut card,
+    /// which is what made it worth finding: advertising a key with no effect
+    /// is a worse claim than leaving a working key unnamed.
+    ///
+    /// Checked at a window wide enough to *have* a sidebar and a strip: at a
+    /// small size `solve` has already given both up, so fullscreen and normal
+    /// agree there and a test at that size would pass on the old code.
+    #[test]
+    fn fullscreen_gives_the_picture_the_whole_window() {
+        let (w, h) = (1200.0, 800.0);
+        let normal = Layout::solve(w, h);
+        assert!(
+            !normal.sidebar.is_empty() && !normal.strip.is_empty(),
+            "control: this size has no sidebar or strip to give up, so the              comparison below would hold on any code at all"
+        );
+
+        let full = normal.fullscreen();
+        assert!(full.sidebar.is_empty(), "the sidebar survived fullscreen");
+        assert!(full.strip.is_empty(), "the strip survived fullscreen");
+        assert!(
+            full.viewfinder.w > normal.viewfinder.w,
+            "the picture is no wider: {} against {}",
+            full.viewfinder.w,
+            normal.viewfinder.w
+        );
+        assert!(
+            full.viewfinder.h >= normal.viewfinder.h,
+            "the picture got shorter"
+        );
+
+        // And the key really reaches it.
+        let mut app = CameraApp::new(w, h);
+        let before = app.frame(w, h).commands().len();
+        let mut typed_f = KeyEvent {
+            key: Key::F,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::from("f"),
+        };
+        app.handle_key(&typed_f);
+        assert!(app.fullscreen_preview, "F did not set the flag");
+        let after = app.frame(w, h).commands().len();
+        assert_ne!(
+            before, after,
+            "the window drew exactly the same thing with the preview full"
+        );
+
+        typed_f.text = String::from("f");
+        app.handle_key(&typed_f);
+        assert!(!app.fullscreen_preview, "F did not put it back");
     }
 
     /// The character a key produces, for the rows this window reads as text.

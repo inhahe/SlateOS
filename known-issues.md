@@ -161928,7 +161928,43 @@ searching on and gets literal matching, with the switch apparently accepted.
 `apps/editor`'s is the worst of the five because the find bar also draws no
 indicator, so both the setting and its failure are invisible.
 
-## `TD-C-NINETY-ONE-APPS-BIND-KEYS-AND-NAME-THEM-NOWHERE` (lane C, 2026-09-21) -- **OPEN, AND THE NUMBER IN THE TITLE IS WRONG**
+## `TD-C-NINETY-ONE-APPS-BIND-KEYS-AND-NAME-THEM-NOWHERE` (lane C, 2026-09-21) -- **CLOSED 2026-09-22**
+
+> **Closed.** `scripts/key-survey.py` reports 131 apps binding a letter, digit
+> or function key, 87 of them carrying a key list, and **no app answering a
+> key it names nowhere**. `scripts/key-survey-baseline.txt` is empty and the
+> survey exits 1 if it stops being so.
+>
+> **The title's number was never right and neither were the next three.** It
+> read 91 as filed, then 26 of 68, then 55 of 259, then 36 of 133. Every
+> revision was a flaw in the instrument rather than a change in the tree, and
+> there were five in all -- the last being that the survey could not see a key
+> dispatched from a *typed character*, which is how `apps/tmux` answered
+> seventeen of them. The note below, warning the reader to trust the tool over
+> the text, is the only thing in the original header that stayed true.
+>
+> **What the queue actually led to.** Six defects, none of which is about
+> naming:
+>
+> | app | what was wrong |
+> |---|---|
+> | `paint` | could not save or open a picture, and advertised both |
+> | `markdowneditor` | `Ctrl+O` was advertised in a field nothing reads and bound to nothing |
+> | `tmux` | `prefix z` set a status line saying "Pane zoom toggled" and did nothing |
+> | `camera` | a complete 25-row keyboard reference whose only caller was its own test |
+> | `fileassoc`, `diskcleanup` | a key one press from deleting files, named nowhere |
+>
+> **And seven rows I invented.** Writing a card from the key rather than from
+> the arm produced seven wrong descriptions -- `Esc` as "Back" four times,
+> `Space` as "select" in a program where it starts a slideshow, `Left/Right`
+> as "previous disk" where they resize a partition. Each was caught by the
+> guard, never by re-reading. The lesson is in the shape of the mistake: when
+> I write a row from the key, I write what that key means in *other* programs.
+>
+> **What is not done:** the gate is not registered in `scripts/boot-test.sh`,
+> which is lane A's file. Until it is, "the queue is empty" is a fact about
+> today rather than a property this tree keeps. The request is
+> `requests/c-a-a-gate-for-keys-an-app-answers-and-names-nowhere.md`.
 
 > **Read this first (added 2026-09-21; this note has itself been wrong once).**
 > The title says ninety-one. The figure has moved three times in one day and

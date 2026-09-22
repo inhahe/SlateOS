@@ -160056,7 +160056,24 @@ evidence of a defect -- it is the normal state of an app whose real source is
 not built yet, and the presence of an honest-empty path is what tells the two
 apart.
 
-## `TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE` (lane C, 2026-09-18)
+## `TD-C-SETTINGS-THE-PROGRAM-OBEYS-AND-NOTHING-CAN-CHANGE` (lane C, 2026-09-18) -- **CLOSED 2026-09-22**
+
+> **Closed: every setting listed below has a writer now.** The two the entry
+> left open were done without being recorded here -- `pdfviewer`'s `dark_mode`
+> (a reading-mode toggle, so a document can be shown in the colours it was
+> written in) and `calendar`'s `week_starts_monday` (`W`, which its shortcut
+> card already advertised). `scripts/frozen-flag-survey.py` reports nothing
+> outstanding in the app scan.
+>
+> **A note on how nearly I got this wrong.** I checked `calendar` with
+> `grep -n week_starts_monday | head -6`, read six lines that were all
+> declaration and reads, and concluded it was still frozen. The writer is on
+> line 2988 and there are fourteen matches: `head` cut the evidence three
+> lines before it. That is the same shape as running the wrong crate and
+> believing the green -- a measurement that was true about what it measured
+> and silent about what I asked. **A truncated search answers a different
+> question from the one typed**, and the tell is the same in both cases: a
+> suspiciously tidy result for something that should be messier.
 
 **In short:** A number of our apps have a setting that the code genuinely
 honours -- it gates a draw, or picks a sort, or decides what characters a

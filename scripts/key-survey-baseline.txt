@@ -46,10 +46,6 @@ photomanager	F
 photomanager	I
 photomanager	Num5
 
-# radio
-radio	F
-radio	S
-radio	T
 
 # archivemanager
 archivemanager	A

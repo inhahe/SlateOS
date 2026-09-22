@@ -1298,6 +1298,8 @@ fn format_duration_ms(ms: u64) -> String {
 /// The main camera application.
 #[derive(Debug, Clone)]
 pub struct CameraApp {
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub width: f32,
     pub height: f32,
 
@@ -1344,6 +1346,7 @@ impl CameraApp {
     pub fn new(width: f32, height: f32) -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            show_help: false,
             width,
             height,
             cameras: default_cameras(),
@@ -1653,6 +1656,18 @@ impl CameraApp {
         }
         if self.flash_remaining_ms > 0 {
             self.draw_flash(&mut f, &l);
+        }
+
+        if self.show_help {
+            let rows = Shortcuts::list();
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (w, h),
+                0.0,
+                &rows,
+                "F1 closes this",
+            );
         }
 
         f
@@ -2981,6 +2996,17 @@ impl CameraApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal. Space takes a photograph and Delete removes one.
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         let ctrl = key.modifiers.ctrl;
         if ctrl {
             let letter = key.text.chars().next().map(|c| c.to_ascii_lowercase());
@@ -3199,6 +3225,20 @@ impl CameraApp {
 pub struct Shortcuts;
 
 impl Shortcuts {
+    /// Every key this program answers, in the order the card draws them.
+    ///
+    /// **Until 2026-09-22 the only caller of this was its own test**, which
+    /// asserted the list had more than twenty rows and mentioned Space. So
+    /// camera carried a complete, maintained keyboard reference that no user
+    /// could ever see, and a test that passed on the size of a `Vec`.
+    ///
+    /// `key-survey.py` reported exactly one unnamed key here -- `B` -- and
+    /// that number was the blind spot rather than the finding: every other
+    /// key name appears in this list, and a scan over string literals cannot
+    /// tell a list that is drawn from one that is not. Its own docstring
+    /// says so. The list is drawn now, `B` is in it, and
+    /// `the_shortcut_list_reaches_the_window` is what makes the first of
+    /// those true rather than intended.
     pub fn list() -> Vec<(&'static str, &'static str)> {
         vec![
             ("Space", "Take Photo / Toggle Recording"),
@@ -3212,6 +3252,7 @@ impl Shortcuts {
             ("G", "Toggle Grid Overlay"),
             ("H", "Toggle Histogram"),
             ("S", "Toggle Sidebar"),
+            ("B", "Toggle Photo Strip"),
             ("F", "Toggle Fullscreen Preview"),
             ("+", "Zoom In"),
             ("-", "Zoom Out"),
@@ -4333,12 +4374,140 @@ mod tests {
         assert_eq!(app.timer_mode, TimerMode::ThreeSeconds);
     }
 
+    /// The character a key produces, for the rows this window reads as text.
+    fn typed_char_for(k: Key) -> Option<char> {
+        let letters = [
+            (Key::R, 'r'),
+            (Key::P, 'p'),
+            (Key::T, 't'),
+            (Key::M, 'm'),
+            (Key::G, 'g'),
+            (Key::H, 'h'),
+            (Key::S, 's'),
+            (Key::B, 'b'),
+            (Key::F, 'f'),
+            (Key::V, 'v'),
+        ];
+        if let Some((_, ch)) = letters.into_iter().find(|(want, _)| *want == k) {
+            return Some(ch);
+        }
+        let digits = [
+            (Key::Num0, '0'),
+            (Key::Num1, '1'),
+            (Key::Num2, '2'),
+            (Key::Num3, '3'),
+            (Key::Num4, '4'),
+            (Key::Num5, '5'),
+            (Key::Num6, '6'),
+            (Key::Num7, '7'),
+            (Key::Num8, '8'),
+        ];
+        if let Some((_, ch)) = digits.into_iter().find(|(want, _)| *want == k) {
+            return Some(ch);
+        }
+        match k {
+            Key::Equals => Some('+'),
+            Key::Minus => Some('-'),
+            _ => None,
+        }
+    }
+
+    /// **The shortcut list reaches the window, and every key on it works.**
+    ///
+    /// This replaces a test that asserted `Shortcuts::list()` had more than
+    /// twenty rows and mentioned Space. That was true, and the list was drawn
+    /// by nothing at all -- its only caller was that assertion. A test can
+    /// confirm a reference is well stocked and say nothing about whether a
+    /// user can read it, which is the difference this pair now covers.
     #[test]
-    fn test_shortcuts_list() {
-        let shortcuts = Shortcuts::list();
-        assert!(shortcuts.len() > 20);
-        assert!(shortcuts.iter().any(|(k, _)| *k == "Space"));
-        assert!(shortcuts.iter().any(|(_, a)| a.contains("Photo")));
+    fn every_advertised_key_does_something() {
+        let rows = Shortcuts::list();
+        assert!(rows.len() > 20, "the reference lost most of its rows");
+        for (label, what) in &rows {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [0_u8, 1, 2].into_iter().any(|state| {
+                    let mut app = CameraApp::new(800.0, 600.0);
+                    if state == 1 {
+                        app.toggle_recording();
+                    }
+                    if state == 2 {
+                        // A photograph in the gallery, which is the only
+                        // thing Delete has to delete.
+                        app.take_photo();
+                    }
+                    let mut event = stroke.clone();
+                    // The letter shortcuts read the typed character, so a
+                    // single-character row is pressed the way a keyboard
+                    // sends it.
+                    // The character comes from the *stroke*, not the label.
+                    // I wrote it from the label three times before this, and
+                    // a label is not a key: `Ctrl+H` has a modifier in front
+                    // of it, `+` is its own separator, and `1-8` is eight
+                    // strokes and matches none of them. This window reads its
+                    // letters from `text` on purpose, because a key code is a
+                    // position on a board and the letter under it depends on
+                    // the layout.
+                    if let Some(ch) = typed_char_for(stroke.key) {
+                        event.text = ch.to_string();
+                    }
+                    app.handle_key(&event) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card is drawn when it is asked for, and nothing acts behind it.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &CameraApp| -> Vec<String> {
+            app.frame(800.0, 600.0)
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let press = |k: Key| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        };
+
+        let mut app = CameraApp::new(800.0, 600.0);
+        assert!(
+            !drawn(&app).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_key(&press(Key::F1));
+        let shown = drawn(&app);
+        let rows = Shortcuts::list();
+        let missing = guitk::shortcut::missing_rows(&shown, &rows);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let grid = app.show_grid_overlay;
+        let mut typed = press(Key::G);
+        typed.text = String::from("g");
+        app.handle_key(&typed);
+        assert_eq!(
+            app.show_grid_overlay, grid,
+            "G toggled the grid through the shortcut card"
+        );
+
+        app.handle_key(&press(Key::F1));
+        app.handle_key(&typed);
+        assert_ne!(
+            app.show_grid_overlay, grid,
+            "control: G does nothing even with the card down"
+        );
     }
 
     #[test]

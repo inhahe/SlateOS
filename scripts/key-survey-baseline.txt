@@ -50,8 +50,6 @@ speedtest	Q
 undelete	A
 undelete	D
 
-# camera
-camera	B
 
 # charmap
 charmap	C

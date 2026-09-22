@@ -2121,6 +2121,16 @@ extern "C" fn kernel_main() -> ! {
     // fallocate(2) PUNCH_HOLE / ZERO_RANGE zeroing test — drives the
     // fallocate_zero_vfs / fallocate_zero_memfd path against /tmp files and a
     // kernel-created memfd (the syscall entry needs a per-process fd table).
+    // BLKDISCARD byte-range arithmetic — the only part of a data-destroying
+    // ioctl testable without a process and an fd, and the part where an error
+    // discards the wrong sectors rather than just failing. The layer below is
+    // covered by `blkdev::self_test_discard`.
+    selftest::dispatch_debug(
+        "blkdiscard range",
+        selftest::Severity::Diagnostic,
+        syscall::linux::self_test_blk_discard_range(),
+    );
+
     selftest::dispatch_debug(
         "fallocate range",
         selftest::Severity::Diagnostic,

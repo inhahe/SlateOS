@@ -303,6 +303,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/scan-unwired.py` | Find work that no path from an entry point reaches, but a test does. |
 | `scripts/scan-unwrap.py` | Find `.unwrap()` / `.expect(...)` in *production* kernel code. |
 | `scripts/sed-diff.sh` | Differential test: our sed against GNU sed. |
+| `scripts/selftest-boot-gate-identity.py` | Self-test for boot-test.sh's `check_identity_rungs` gate. |
 | `scripts/selftestflag.py` | One spelling rule for `--self-test`, because the alternative reported success. |
 | `scripts/seq-cases.py` | Generate the case file for ``scripts/seq-diff.sh``. |
 | `scripts/seq-diff.sh` | Differential test: our `seq` against GNU's. |
@@ -394,4 +395,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_384 scripts._
+_385 scripts._

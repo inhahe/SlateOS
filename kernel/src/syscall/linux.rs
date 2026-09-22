@@ -8937,6 +8937,22 @@ pub mod ioctl_cmd {
     pub const FIONCLEX: u32 = 0x5450;
     /// `FIOCLEX` — set the `FD_CLOEXEC` flag on `fd`.  Equivalent to
     /// `fcntl(fd, F_SETFD, FD_CLOEXEC)`.  Takes no argument.
+    /// `BLKDISCARD` -- tell the device the byte range `{ start, length }` no
+    /// longer holds useful data (TRIM/UNMAP). Argument is a pointer to
+    /// `[u64; 2]`. Destroys data, so the fd must be open for writing.
+    pub const BLKDISCARD: u32 = 0x1277;
+
+    /// `BLKSECDISCARD` -- as `BLKDISCARD`, but the device must guarantee the
+    /// data is UNRECOVERABLE. Always refused here: no `BlockDevice` method
+    /// promises that, and answering with an ordinary discard would be a
+    /// security claim nothing backs.
+    pub const BLKSECDISCARD: u32 = 0x127D;
+
+    /// `BLKZEROOUT` -- write zeros over the range. Refused: userspace does
+    /// this with ordinary writes already, and emulating it here would make the
+    /// ioctl claim device support that does not exist.
+    pub const BLKZEROOUT: u32 = 0x127F;
+
     pub const FIOCLEX: u32 = 0x5451;
     /// `FIONBIO` — toggle `O_NONBLOCK` on `fd`.  `arg` is a pointer
     /// to an `int`: non-zero sets `O_NONBLOCK`, zero clears it.
@@ -9196,6 +9212,221 @@ fn console_terminal_ioctl(
 /// with driver routing, this stub becomes a per-fd dispatch table
 /// that asks the driver "do you handle this request?" and only falls
 /// back to ENOTTY if nobody does.
+/// Convert a byte range to an LBA range, or say why it cannot be converted.
+///
+/// Split out from [`block_discard_ioctl`] because it is the only part of a
+/// data-destroying ioctl that can be tested without a process and a file
+/// descriptor -- and it is the part where a mistake destroys the WRONG
+/// sectors rather than merely failing. `blkdev::self_test_discard` already
+/// covers the layer below (discarded sectors read zero, neighbours untouched,
+/// out-of-range refused); this covers the arithmetic above it.
+///
+/// `Ok(None)` means a zero-length request: it asks for nothing and gets it.
+/// Returning an error there would make a caller looping over an empty extent
+/// report failure for a correct program.
+fn discard_range_to_lba(
+    start: u64,
+    len: u64,
+    sector_size: u32,
+    sector_count: u64,
+) -> Result<Option<(u64, u64)>, i32> {
+    if len == 0 {
+        return Ok(None);
+    }
+    let ss = u64::from(sector_size);
+    if ss == 0 {
+        return Err(errno::ENODEV);
+    }
+    // Alignment at both ends. The device frees whole sectors, so an unaligned
+    // request would discard more than was asked for.
+    if start % ss != 0 || len % ss != 0 {
+        return Err(errno::EINVAL);
+    }
+    // Checked throughout: `arithmetic_side_effects` is active in this crate,
+    // and an overflowing start+len is precisely how a range check is bypassed
+    // -- it wraps to a small end that compares as in-bounds.
+    let (Some(end), Some(capacity)) = (start.checked_add(len), sector_count.checked_mul(ss)) else {
+        return Err(errno::EINVAL);
+    };
+    if end > capacity {
+        return Err(errno::EINVAL);
+    }
+    Ok(Some((start / ss, len / ss)))
+}
+
+/// Exercise [`discard_range_to_lba`] over every outcome it can produce.
+///
+/// Runs on the bare-metal target, where `#[cfg(test)]` does not, so the
+/// arithmetic behind a data-destroying ioctl is checked on every boot.
+pub fn self_test_blk_discard_range() -> crate::error::KernelResult<()> {
+    crate::serial_println!("[blkdiscard] Running discard-range self-test...");
+
+    // 64 sectors of 512 B = 32 KiB.
+    const SS: u32 = 512;
+    const NS: u64 = 64;
+
+    // (start, len, expected)
+    let ok_cases: [(u64, u64, Option<(u64, u64)>); 4] = [
+        // Whole device.
+        (0, 32768, Some((0, 64))),
+        // One sector in the middle.
+        (1024, 512, Some((2, 1))),
+        // The last sector exactly -- the boundary an off-by-one would take.
+        (32256, 512, Some((63, 1))),
+        // Zero length is a no-op, not an error.
+        (0, 0, None),
+    ];
+    for (start, len, want) in ok_cases {
+        match discard_range_to_lba(start, len, SS, NS) {
+            Ok(got) if got == want => {}
+            other => {
+                crate::serial_println!(
+                    "[blkdiscard]   FAIL: ({}, {}) gave {:?}, wanted Ok({:?})",
+                    start,
+                    len,
+                    other,
+                    want
+                );
+                return Err(crate::error::KernelError::InternalError);
+            }
+        }
+    }
+
+    // (start, len, sector_size, expected errno, what it is)
+    let err_cases: [(u64, u64, u32, i32, &str); 6] = [
+        (1, 512, SS, errno::EINVAL, "unaligned start"),
+        (0, 513, SS, errno::EINVAL, "unaligned length"),
+        (0, 33280, SS, errno::EINVAL, "one sector past the end"),
+        (32768, 512, SS, errno::EINVAL, "starts at the end"),
+        // The overflow case: start+len wraps to 0, which would compare as
+        // in-bounds against any capacity if the addition were unchecked.
+        (
+            u64::MAX - 511,
+            512,
+            SS,
+            errno::EINVAL,
+            "start+len overflows u64",
+        ),
+        (0, 512, 0, errno::ENODEV, "zero sector size"),
+    ];
+    for (start, len, ss, want, what) in err_cases {
+        match discard_range_to_lba(start, len, ss, NS) {
+            Err(got) if got == want => {}
+            other => {
+                crate::serial_println!(
+                    "[blkdiscard]   FAIL: {} gave {:?}, wanted Err({})",
+                    what,
+                    other,
+                    want
+                );
+                return Err(crate::error::KernelError::InternalError);
+            }
+        }
+    }
+
+    crate::serial_println!("[blkdiscard] Self-test passed (10 cases).");
+    Ok(())
+}
+
+/// `BLKDISCARD`, `BLKSECDISCARD` and `BLKZEROOUT`.
+///
+/// All three take a pointer to `[u64; 2]` = `{ start_byte, length_bytes }`
+/// and return 0 or `-errno`.
+///
+/// Validation order follows Linux: the descriptor is checked before the
+/// argument, and the argument before the device is asked to do anything, so a
+/// caller with a bad fd never learns whether the range was valid, and a caller
+/// with a bad range never destroys a prefix of it.
+// `pid` is `u64`, not `ProcessId`: `ProcessId` is a type alias in `proc::pcb`
+// and is not in scope at this file's top level, while `caller_pid()` -- the
+// only caller's source for it -- already returns `Option<u64>`.
+fn block_discard_ioctl(pid: u64, fd: i32, request: u32, arg: u64) -> SyscallResult {
+    let Some(entry) = pcb::linux_fd_lookup(pid, fd) else {
+        return linux_err(errno::EBADF);
+    };
+
+    // This destroys data, so a read-only descriptor may not ask for it. Linux
+    // answers EBADF rather than EACCES: the complaint is about the
+    // descriptor's mode, not the file's permissions.
+    let acc = entry.status_flags & crate::proc::linux_fd::O_ACCMODE;
+    if acc != crate::proc::linux_fd::O_WRONLY && acc != crate::proc::linux_fd::O_RDWR {
+        return linux_err(errno::EBADF);
+    }
+
+    // Resolve the descriptor to a registered block device. Paths are bytes
+    // here and are never forced through UTF-8, so the prefix strip is a byte
+    // comparison; only the short device name is converted, and a name that is
+    // not UTF-8 cannot match a registered one anyway.
+    let path = entry_path_for_handle(entry.raw_handle);
+    let Some(rel) = path.as_path().as_bytes().strip_prefix(b"/dev/") else {
+        return linux_err(errno::ENOTTY);
+    };
+    let Ok(name) = core::str::from_utf8(rel) else {
+        return linux_err(errno::ENOTTY);
+    };
+    // Not a registered block device -> ENOTTY, what Linux says for an ioctl
+    // that does not apply to this kind of file. This is the case that used to
+    // be indistinguishable from "supported, but not on this device", which is
+    // the whole complaint in requests/b-a-blkdiscard-needs-blkdiscard-*.
+    let Some(info) = crate::blkdev::info(name) else {
+        return linux_err(errno::ENOTTY);
+    };
+
+    if arg == 0 {
+        return linux_err(errno::EFAULT);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(arg, 16) {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut range = [0u64; 2];
+    // SAFETY: `validate_user_read(arg, 16)` succeeded immediately above, and
+    // `range` is 16 bytes of kernel stack that outlives the copy.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_from_user(arg, range.as_mut_ptr().cast::<u8>(), 16) }
+    {
+        return linux_err(linux_errno_for(e));
+    }
+
+    // All the arithmetic lives in one tested function. See
+    // `self_test_blk_discard_range`.
+    let lba_range =
+        match discard_range_to_lba(range[0], range[1], info.sector_size, info.sector_count) {
+            Ok(r) => r,
+            Err(e) => return linux_err(e),
+        };
+    let Some((start_lba, count)) = lba_range else {
+        // Zero length: nothing asked, nothing done, success.
+        return SyscallResult::ok(0);
+    };
+
+    if info.read_only {
+        return linux_err(errno::EPERM);
+    }
+
+    match request {
+        // Refused even where the plain discard works. BLKSECDISCARD promises
+        // the data cannot be recovered and no `BlockDevice` method promises
+        // that, so answering it with an ordinary discard would be a security
+        // claim nothing backs. BLKZEROOUT is refused rather than emulated with
+        // writes because a write dirties the very blocks a discard frees --
+        // userspace already zeroes with ordinary writes, which is the honest
+        // place for it.
+        ioctl_cmd::BLKSECDISCARD | ioctl_cmd::BLKZEROOUT => linux_err(errno::EOPNOTSUPP),
+        ioctl_cmd::BLKDISCARD => {
+            if crate::blkdev::supports_discard(name) != Some(true) {
+                return linux_err(errno::EOPNOTSUPP);
+            }
+            match crate::blkdev::discard(name, start_lba, count) {
+                Some(Ok(())) => SyscallResult::ok(0),
+                Some(Err(e)) => linux_err(linux_errno_for(e)),
+                // The device was unregistered between `info` and here.
+                None => linux_err(errno::ENODEV),
+            }
+        }
+        _ => linux_err(errno::ENOTTY),
+    }
+}
+
 fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
@@ -9295,6 +9526,9 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
                 Ok(()) => SyscallResult::ok(0),
                 Err(e) => linux_err(linux_errno_for(e)),
             }
+        }
+        ioctl_cmd::BLKDISCARD | ioctl_cmd::BLKSECDISCARD | ioctl_cmd::BLKZEROOUT => {
+            block_discard_ioctl(pid, fd, request, args.arg2)
         }
         _ => {
             // Device-specific ioctls: route by handle kind.  An ALSA PCM

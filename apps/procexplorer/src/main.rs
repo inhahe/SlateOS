@@ -534,6 +534,21 @@ pub struct ContextMenu {
 // Application state
 // ============================================================================
 
+/// The keys this window answers, as a reader sees them.
+///
+/// `Delete` is why this card exists: it kills the selected process, with no
+/// dialog and nothing to undo it, and the window said so nowhere.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Move through the processes"),
+    ("PageUp / PageDown", "Move a screenful"),
+    ("Tab / Shift+Tab", "Next or previous tab"),
+    ("V", "Switch between the flat list and the tree"),
+    ("F5", "Refresh now"),
+    ("Ctrl+F", "Jump to the filter box"),
+    ("Delete", "Kill the selected process"),
+];
+
 /// Top-level state for the process explorer application.
 pub struct ProcessExplorerState {
     // -- Appearance ----------------------------------------------------------
@@ -584,6 +599,8 @@ pub struct ProcessExplorerState {
     /// Filter text (search box content).
     pub filter_text: String,
     /// Whether the search box is focused.
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub filter_focused: bool,
 
     // -- Context menu --------------------------------------------------------
@@ -659,6 +676,7 @@ impl ProcessExplorerState {
             scroll_offset: 0,
             wheel: wheel::Accumulator::default(),
             filter_text: String::new(),
+            show_help: false,
             filter_focused: false,
             context_menu: None,
             system_info,
@@ -1163,6 +1181,19 @@ impl ProcessExplorerState {
             return EventResult::Ignored;
         }
 
+        // Above the filter box, which takes every character and returns.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal, and Delete is the reason: it kills a process outright.
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         // If filter box is focused, route text input there.
         if self.filter_focused {
             return self.handle_filter_key(key);
@@ -1606,6 +1637,19 @@ impl ProcessExplorerState {
 
         // Context menu overlay (drawn on top of everything)
         self.render_context_menu(&mut tree);
+
+        if self.show_help {
+            #[allow(clippy::cast_precision_loss)]
+            let window = (self.window_width as f32, self.window_height as f32);
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                window,
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         tree
     }
@@ -3361,6 +3405,85 @@ mod tests {
     }
 
     // --- The row area's edges ---
+
+    fn key_of(k: Key, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }
+    }
+
+    fn loaded_explorer() -> ProcessExplorerState {
+        let mut state = ProcessExplorerState::new();
+        state.load_demo_data();
+        state.rebuild_visible_list();
+        state.selected_index = Some(0);
+        state
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut state = loaded_explorer();
+                assert_eq!(
+                    state.handle_key(&stroke),
+                    EventResult::Consumed,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing is killed behind it.**
+    ///
+    /// The control is the last third, and the key chosen for it is the point:
+    /// `Delete` kills the selected process, so a card that let it through
+    /// would end a process rather than fail an assertion. `F5` is used
+    /// instead -- the same reasoning as `apps/colorpicker`, where Escape
+    /// would have closed the program.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |state: &ProcessExplorerState| -> Vec<String> {
+            state
+                .render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut state = loaded_explorer();
+        assert!(
+            !drawn(&state).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        state.handle_key(&key_of(Key::F1, Modifiers::NONE));
+        let missing = guitk::shortcut::missing_rows(&drawn(&state), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        state.status_message = String::from("untouched");
+        state.handle_key(&key_of(Key::F5, Modifiers::NONE));
+        assert_eq!(
+            state.status_message, "untouched",
+            "F5 refreshed through the shortcut card"
+        );
+
+        state.handle_key(&key_of(Key::F1, Modifiers::NONE));
+        state.handle_key(&key_of(Key::F5, Modifiers::NONE));
+        assert_ne!(
+            state.status_message, "untouched",
+            "control: F5 does nothing even with the card down"
+        );
+    }
 
     fn press(app: &mut ProcessExplorerState, button: MouseButton, my: f32) {
         app.selected_index = None;

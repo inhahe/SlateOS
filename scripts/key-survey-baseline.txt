@@ -52,9 +52,6 @@ diskcleanup	D
 fontmanager	F
 fontmanager	S
 
-# procexplorer
-procexplorer	F5
-procexplorer	V
 
 # soundrecorder
 soundrecorder	M

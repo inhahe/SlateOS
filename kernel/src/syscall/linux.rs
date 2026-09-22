@@ -5499,8 +5499,13 @@ fn flock_range(
 pub fn self_test_flock_range() -> crate::error::KernelResult<()> {
     crate::serial_println!("[flock-range] Running range-resolution self-test...");
 
-    // (whence, l_start, l_len, cur, size, expected)
-    let ok_cases: [(i32, i64, i64, u64, u64, (u64, u64)); 7] = [
+    // One case: whence, l_start, l_len, the descriptor's offset, the file
+    // size, and the absolute range it must resolve to. Named because
+    // `clippy::type_complexity` is deny-level here, and because the field
+    // order IS the meaning of the table -- a reader should not have to count
+    // commas to find which `i64` is the length.
+    type Case = (i32, i64, i64, u64, u64, (u64, u64));
+    let ok_cases: [Case; 7] = [
         // SEEK_SET, plain forward range.
         (0, 100, 50, 999, 999, (100, 50)),
         // len 0 is to-EOF, preserved as 0 for RecordLock::end to read.
@@ -9438,7 +9443,7 @@ fn discard_range_to_lba(
     }
     // Alignment at both ends. The device frees whole sectors, so an unaligned
     // request would discard more than was asked for.
-    if start % ss != 0 || len % ss != 0 {
+    if !start.is_multiple_of(ss) || !len.is_multiple_of(ss) {
         return Err(errno::EINVAL);
     }
     // Checked throughout: `arithmetic_side_effects` is active in this crate,
@@ -9464,8 +9469,10 @@ pub fn self_test_blk_discard_range() -> crate::error::KernelResult<()> {
     const SS: u32 = 512;
     const NS: u64 = 64;
 
-    // (start, len, expected)
-    let ok_cases: [(u64, u64, Option<(u64, u64)>); 4] = [
+    // One case: start byte, length, and the LBA range it must produce
+    // (`None` = a zero-length request, which is a successful no-op).
+    type Case = (u64, u64, Option<(u64, u64)>);
+    let ok_cases: [Case; 4] = [
         // Whole device.
         (0, 32768, Some((0, 64))),
         // One sector in the middle.

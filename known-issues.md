@@ -166547,3 +166547,43 @@ hand, and an owner space belongs to the module that owns it.
 **F_GETLK** needs the same treatment: it currently reports `F_UNLCK`
 unconditionally, which is a *claim about the world* rather than a lookup, and
 `reclock::query` is the lookup it should do.
+
+### [A] Four boots in one day, each killed by one of my own defects, three of which a local check would have caught in under five minutes -- 2026-09-21
+**Status:** OPEN as a workflow note. No code fix; the remedy is an order of operations.
+
+**In short:** a full boot test is ~2 hours and cannot be shortened -- there is no
+flag to skip the gates or the 35-script test suite, by design. On 2026-09-21 I
+started five of them. Four died on a defect of mine, and each defect was
+cheaper to find than the boot was to run.
+
+| boot | killed by | what would have caught it | cost of that |
+|---|---|---|---|
+| 1 | `check-selftest-skips`: 6 findings, all mine -- rungs skipping on `.is_err()` of the code under test | `python scripts/check-selftest-skips.py` | ~40 s |
+| 2 | `script-index`: I added `selftest-boot-gate-identity.py` and never indexed it | `python scripts/gen-script-index.py` | instant, and it prints the fix |
+| 3 | clippy gate: 4 `clippy::all` errors in code written after my last clippy run | `cargo clippy -p kernel` | ~4 min |
+| 4 | a dispatch rung asserting `PermissionDenied` where kernel context can only answer `NoSuchProcess` | reading the two rungs either side of mine, which say so about themselves | ~1 min |
+
+**The order of operations that would have saved ~6 hours:**
+
+1. `cargo check`, then **`cargo clippy -p kernel`** -- not after the boot, and
+   not once per session. Boot 3 died because my earlier clippy runs were clean
+   and I carried that verdict onto code that did not exist when they ran.
+2. Run the check scripts **for the areas touched**. They are individually
+   runnable and most cost under a minute. A new script means
+   `gen-script-index.py`; a new self-test means `check-selftest-skips.py` and
+   `check-tested-but-uncalled.py`.
+3. For a new **self-test assertion**, read the neighbouring rungs first. Boot 4's
+   defect was an expectation that cannot hold in kernel context, and the rungs
+   immediately above it announce the correct pattern in their own output.
+
+**What is NOT the fix.** A wrapper script running "the cheap gates" before a
+boot would duplicate `boot-test.sh`'s gate list, and `check-gates-are-wired`
+exists precisely to stop a second list drifting from the first. Nor should the
+clippy gate move earlier in `boot-test.sh`: all three lanes boot through that
+file, and reordering shared machinery to compensate for a step one lane skipped
+is the band-aid `CLAUDE.md` warns about.
+
+**The one thing worth measuring next time.** Every one of the four was found by
+a gate that already existed. None was a gap in coverage -- they were gaps in
+*when I chose to run* the coverage. That is a scheduling defect, not a testing
+one, and it has the cheapest possible fix.

@@ -166330,6 +166330,18 @@ I have not picked one. It needs an entry of its own rather than being folded
 into a conversion that looks mechanical from the outside -- and the reason I
 know is that I was about to stage it as a 10-site edit, `tags` having the fewest
 call sites of the three. Fewest sites, most design.
+**Correction to the line below: the three `rename_path` fixups become
+CONDITIONAL, not dead.** An inode survives a rename, so identity keying makes
+them unnecessary *for files that have a stable inode*. The path fallback exists
+precisely for files that do not, and on those a rename still moves the key. So
+each one should keep its body and gain a doc line saying it is now reached only
+on the fallback path -- deleting them would silently drop metadata on any
+filesystem without stable inodes. (`queryable`'s is at line 820; converting it
+needs a key derived above the lock in 6 of its 8 index-touching functions --
+`set_attr`, `get_attr`, `remove_attr`, `list_attrs`, `clear_attrs`,
+`rename_path` -- while `stats` and `clear_all` only call `.len()`/`.clear()` and
+need none.)
+
 **Then delete the three `rename_path` fixups**, which identity keying makes
 unnecessary: an inode survives a rename, so there is nothing left to fix up.
 

@@ -31,10 +31,6 @@
 
 
 
-# colorpicker
-colorpicker	C
-colorpicker	E
-colorpicker	V
 
 
 

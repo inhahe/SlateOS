@@ -166583,6 +166583,42 @@ clippy gate move earlier in `boot-test.sh`: all three lanes boot through that
 file, and reordering shared machinery to compensate for a step one lane skipped
 is the band-aid `CLAUDE.md` warns about.
 
+**RETRACTION, written an hour later: boot 5 was not my concurrent load, and
+the paragraph below is wrong.** Boot 6 failed at the same gate with **nothing
+running alongside it**. The real cause, found by reading
+`scripts/bashprobe.py`:
+
+> `WSL = ["wsl", "-d", "Ubuntu", "--", "bash", "-s"]`
+
+The probe does not use the MSYS `bash` on PATH -- it drives **WSL** bash and
+feeds the script on stdin. "bash exited 0, stdout empty" is WSL answering with
+nothing, which happens when the distro is idling down or starting up, and
+`boot-test.sh` itself uses WSL elsewhere (the rootfs build). That fits the
+evidence my load theory did not: boots 1-4 cleared this gate, 5 and 6 died at
+it, and the *failing case differed* between them (`$'a
+b'` then `$'\$'`) --
+input-independent, which a real disagreement would not be.
+
+**Every test I ran to confirm the load theory could not have refuted it.** I ran
+the checker by hand and it passed, four times, and concluded "quiet machine, so
+it was load". But my hand-runs used MSYS bash for the *main* mode, and the gate
+that fails is the `--self-test` (`boot-test.sh:5686`, the one invocation WITHOUT
+`--may-skip`). Three separate mismatches between what I tested and what fails:
+wrong flag, wrong bash, and a condition I never varied.
+
+**One more thing the harness believes that is no longer true.** Its dedicated
+handler, `_bash_oracle_selftest_died`, says: *"This is not a WSL problem and
+skipping it would be wrong: a self-test needs no bash."* The self-test now
+reaches `bashprobe` and does need WSL, so the reasoning that makes this gate
+mandatory no longer holds -- a WSL hiccup is currently a hard stop on every
+boot this lane attempts.
+
+**WSL was healthy when checked** (3/3 direct calls, plus `bash -s` on stdin), so
+this is intermittent rather than broken, and a retry is a legitimate response
+while the real fix is decided.
+
+**Superseded paragraph, kept because the retraction is the point:**
+
 **A fifth boot, and this one I killed directly.** Boot 5 died at gate 50 on
 `check-shellquote-vs-bash`: *"THE WORD PROBE IS BROKEN -- every result below
 would be a lie"*, on the line `$'a

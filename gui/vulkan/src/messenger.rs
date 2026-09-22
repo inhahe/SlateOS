@@ -312,25 +312,40 @@ mod tests {
 
     /// The stub drivers below report through statics, so the tests that read
     /// them cannot run at the same time.
-    static ORDER: AtomicBool = AtomicBool::new(false);
+    ///
+    /// Spelled as a lock *on a static* rather than as an associated function,
+    /// because `scripts/raced-globals.py` looks for exactly that and was right
+    /// to: this was first written as `Order::lock()`, which serialised the
+    /// tests correctly and showed a reader nothing. A guard whose name does
+    /// not say what it guards is indistinguishable from an unused binding.
+    static STUB_LOCK: StubLock = StubLock::new();
 
-    struct Order;
+    /// A spin lock, because this crate is `no_std` and has no `Mutex`.
+    /// `entry.rs` carries its own for the same reason.
+    struct StubLock(AtomicBool);
 
-    impl Order {
-        fn lock() -> Self {
-            while ORDER
+    struct StubGuard(&'static StubLock);
+
+    impl StubLock {
+        const fn new() -> Self {
+            Self(AtomicBool::new(false))
+        }
+
+        fn lock(&'static self) -> StubGuard {
+            while self
+                .0
                 .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
                 .is_err()
             {
                 core::hint::spin_loop();
             }
-            Self
+            StubGuard(self)
         }
     }
 
-    impl Drop for Order {
+    impl Drop for StubGuard {
         fn drop(&mut self) {
-            ORDER.store(false, Ordering::Release);
+            self.0.0.store(false, Ordering::Release);
         }
     }
 
@@ -473,7 +488,7 @@ mod tests {
 
     #[test]
     fn every_driver_that_offers_the_command_gets_a_messenger() {
-        let _order = Order::lock();
+        let _order = STUB_LOCK.lock();
         reset();
         let registry = registry_of(&[gipa_with_messenger, gipa_with_messenger]);
         let instance = instance_over(2);
@@ -495,7 +510,7 @@ mod tests {
 
     #[test]
     fn a_driver_without_the_extension_is_not_a_failure() {
-        let _order = Order::lock();
+        let _order = STUB_LOCK.lock();
         reset();
         let registry = registry_of(&[gipa_with_messenger, gipa_without_messenger]);
         let instance = instance_over(2);
@@ -524,7 +539,7 @@ mod tests {
 
     #[test]
     fn a_driver_that_fails_unwinds_the_ones_already_built() {
-        let _order = Order::lock();
+        let _order = STUB_LOCK.lock();
         reset();
         // Driver 0 succeeds, driver 1 offers the command and fails it.
         let registry = registry_of(&[gipa_with_messenger, gipa_failing_messenger]);
@@ -559,7 +574,7 @@ mod tests {
 
     #[test]
     fn the_driver_is_given_its_own_instance_and_its_own_messenger() {
-        let _order = Order::lock();
+        let _order = STUB_LOCK.lock();
         reset();
         let registry = registry_of(&[gipa_with_messenger]);
         let instance = instance_over(1);
@@ -601,7 +616,7 @@ mod tests {
 
     #[test]
     fn no_driver_with_the_extension_means_no_entry_point() {
-        let _order = Order::lock();
+        let _order = STUB_LOCK.lock();
         reset();
         let none = registry_of(&[gipa_without_messenger, gipa_without_messenger]);
         let instance = instance_over(2);
@@ -619,7 +634,7 @@ mod tests {
 
     #[test]
     fn destroying_a_null_messenger_does_nothing() {
-        let _order = Order::lock();
+        let _order = STUB_LOCK.lock();
         reset();
         // SAFETY: zero is the documented null case.
         assert!(unsafe { from_handle(0) }.is_none());

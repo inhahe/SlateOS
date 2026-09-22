@@ -98,6 +98,14 @@ CRATES = (
     ("posix", "posix", ()),
     ("authlib", "userspace/authlib", ()),
     ("coreutils", "userspace/coreutils", ("--lib",)),
+    # The Vulkan loader's tests drive stub drivers that report through module
+    # statics -- how many messengers were created, which instance handle a
+    # driver was last given. A spin lock stops two of them running at once,
+    # which `raced-globals.py` is satisfied by and which is *not* what this
+    # gate asks: a lock does not stop one test reading what an earlier one
+    # left behind. Each test calls `reset()` first, so the claim being checked
+    # here is that it really does clear everything.
+    ("vkloader", "gui/vulkan", ()),
 )
 
 HOST_TARGET = "x86_64-pc-windows-gnu"

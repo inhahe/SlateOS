@@ -313,6 +313,33 @@ struct FileAttrs {
 }
 
 /// Global attribute store.
+/// The key an indexed-attribute record is filed under: the file's identity when
+/// it has one, otherwise its path.
+///
+/// Queryable attributes describe the FILE, so two names for one file must see
+/// one set of attributes; path keying gave a hard link its own empty record.
+/// `design-decisions.md` §957 gives the test: should this data survive the file
+/// at that path being REPLACED? For indexed attributes, no -- so identity is the
+/// right key. Contrast `fs::integrity`, whose baselines must stay path-keyed
+/// precisely because a replacement is the event they exist to detect.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum QueryKey {
+    Id(crate::fs::vfs::FileId),
+    Path(PathBuf),
+}
+
+/// Derive the key for a path. **The only place a `QueryKey` is constructed.**
+///
+/// MUST be called before taking the `STORE` lock. `file_identity` calls into the
+/// VFS, and a module global held across that call inverts
+/// filesystem-lock -> module-state -- nine such sites were introduced and caught
+/// by `scripts/check-vfs-under-lock.py` on 2026-09-21.
+fn query_key(path: &Path) -> QueryKey {
+    match crate::fs::Vfs::file_identity(path) {
+        Ok(Some(id)) => QueryKey::Id(id),
+        _ => QueryKey::Path(path.to_path_buf()),
+    }
+}
 struct AttrStore {
     /// Path → index in `files`.
     ///
@@ -320,7 +347,7 @@ struct AttrStore {
     /// filename may hold any byte but `/` and NUL, so a `String` key is
     /// narrower than the thing it keys and two distinct files could share
     /// one attribute set.
-    path_index: BTreeMap<PathBuf, usize>,
+    path_index: BTreeMap<QueryKey, usize>,
     /// All files with attributes.
     files: Vec<FileAttrs>,
     /// Free slots (indices of removed entries).
@@ -443,9 +470,11 @@ pub fn set_attr(path: impl AsRef<Path>, name: &str, value: AttrValue) -> KernelR
     validate_value(&value)?;
     SET_COUNT.fetch_add(1, Ordering::Relaxed);
 
+    // Derived above the lock; see `query_key`.
+    let key = query_key(path);
     let mut store = STORE.lock();
 
-    let idx = if let Some(&i) = store.path_index.get(path) {
+    let idx = if let Some(&i) = store.path_index.get(&key) {
         i
     } else {
         // New file entry.
@@ -466,7 +495,7 @@ pub fn set_attr(path: impl AsRef<Path>, name: &str, value: AttrValue) -> KernelR
             });
             i
         };
-        store.path_index.insert(path.to_path_buf(), idx);
+        store.path_index.insert(key, idx);
         idx
     };
 
@@ -511,8 +540,10 @@ pub fn set_attr(path: impl AsRef<Path>, name: &str, value: AttrValue) -> KernelR
 pub fn get_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<AttrValue> {
     let path = path.as_ref();
     GET_COUNT.fetch_add(1, Ordering::Relaxed);
+    // Derived above the lock; see `query_key`.
+    let key = query_key(path);
     let store = STORE.lock();
-    let idx = store.path_index.get(path).ok_or(KernelError::NotFound)?;
+    let idx = store.path_index.get(&key).ok_or(KernelError::NotFound)?;
     let file = &store.files[*idx];
     file.attrs.get(name).cloned().ok_or(KernelError::NotFound)
 }
@@ -520,8 +551,10 @@ pub fn get_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<AttrValue> {
 /// Remove an attribute from a file.
 pub fn remove_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<()> {
     let path = path.as_ref();
+    // Derived above the lock; see `query_key`.
+    let key = query_key(path);
     let mut store = STORE.lock();
-    let idx = store.path_index.get(path).ok_or(KernelError::NotFound)?;
+    let idx = store.path_index.get(&key).ok_or(KernelError::NotFound)?;
     let idx = *idx;
 
     let removed = store.files[idx].attrs.remove(name);
@@ -546,7 +579,7 @@ pub fn remove_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<()> {
 
     // If file has no more attributes, remove it entirely.
     if store.files[idx].attrs.is_empty() {
-        store.path_index.remove(path);
+        store.path_index.remove(&key);
         store.free_slots.push(idx);
     }
 
@@ -556,8 +589,10 @@ pub fn remove_attr(path: impl AsRef<Path>, name: &str) -> KernelResult<()> {
 /// List all attributes on a file.
 pub fn list_attrs(path: impl AsRef<Path>) -> KernelResult<Vec<(String, AttrValue)>> {
     let path = path.as_ref();
+    // Derived above the lock; see `query_key`.
+    let key = query_key(path);
     let store = STORE.lock();
-    let idx = store.path_index.get(path).ok_or(KernelError::NotFound)?;
+    let idx = store.path_index.get(&key).ok_or(KernelError::NotFound)?;
     let file = &store.files[*idx];
     Ok(file
         .attrs
@@ -569,8 +604,10 @@ pub fn list_attrs(path: impl AsRef<Path>) -> KernelResult<Vec<(String, AttrValue
 /// Remove all attributes from a file.
 pub fn clear_attrs(path: impl AsRef<Path>) -> KernelResult<usize> {
     let path = path.as_ref();
+    // Derived above the lock; see `query_key`.
+    let key = query_key(path);
     let mut store = STORE.lock();
-    let idx = store.path_index.get(path).ok_or(KernelError::NotFound)?;
+    let idx = store.path_index.get(&key).ok_or(KernelError::NotFound)?;
     let idx = *idx;
     let count = store.files[idx].attrs.len();
 
@@ -595,7 +632,7 @@ pub fn clear_attrs(path: impl AsRef<Path>) -> KernelResult<usize> {
     }
 
     store.files[idx].attrs.clear();
-    store.path_index.remove(path);
+    store.path_index.remove(&key);
     store.free_slots.push(idx);
     Ok(count)
 }
@@ -819,12 +856,14 @@ pub fn unique_values(attr_name: &str) -> Vec<AttrValue> {
 /// Update all attributes when a file is renamed/moved.
 pub fn rename_path(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) -> KernelResult<()> {
     let (old_path, new_path) = (old_path.as_ref(), new_path.as_ref());
+    // Derived above the lock; see `query_key`.
+    let (old_key, new_key) = (query_key(old_path), query_key(new_path));
     let mut store = STORE.lock();
     let idx = store
         .path_index
-        .remove(old_path)
+        .remove(&old_key)
         .ok_or(KernelError::NotFound)?;
-    store.path_index.insert(new_path.to_path_buf(), idx);
+    store.path_index.insert(new_key, idx);
     store.files[idx].path = new_path.to_path_buf();
 
     // Update all index entries.
@@ -961,6 +1000,12 @@ pub fn self_test() -> KernelResult<()> {
 
 fn self_test_inner() -> KernelResult<()> {
     use crate::serial_println;
+
+    // A section that skips records why, so the closing line cannot claim nine
+    // self-tests passed when eight ran. `check-selftest-skips` refuses a build
+    // over an unconditional success after a skip, and it is right to: the last
+    // line is the one a reader believes.
+    let mut skips = crate::fs::selftest::Skips::new();
 
     // Save and reset state.
     clear_all();
@@ -1138,6 +1183,79 @@ fn self_test_inner() -> KernelResult<()> {
     clear_all();
     reset_stats();
 
-    serial_println!("[queryable] all 8 self-tests passed");
+    // --- 9: attributes follow the FILE, not the name ---
+    //
+    // The eight rungs above use paths that do not exist, so `file_identity`
+    // returns NotFound, `query_key` falls back to the path, and every one of
+    // them passes identically whether this table is keyed by identity or by
+    // name. They are no evidence for the conversion. This one creates a real
+    // file and gives it a second name.
+    {
+        const A: &[u8] = b"/tmp/queryable-id-a";
+        const B: &[u8] = b"/tmp/queryable-id-b";
+        const C: &[u8] = b"/tmp/queryable-id-c";
+        for p in [A, B, C] {
+            let _ = crate::fs::Vfs::remove(Path::new(p));
+        }
+        crate::fs::Vfs::write_file(Path::new(A), b"x")?;
+
+        // Classified, not guessed: `.is_err()` would announce "no hard links
+        // here" for a link refused with PermissionDenied, a cause never
+        // established, and return success.
+        match crate::fs::selftest::classify(crate::fs::Vfs::link(Path::new(A), Path::new(B))) {
+            crate::fs::selftest::Setup::Ready => {
+                // A third real file, deliberately NOT a link, for the control.
+                crate::fs::Vfs::write_file(Path::new(C), b"x")?;
+                set_attr(Path::new(A), "rung", AttrValue::Int(42))?;
+                let via_b = get_attr(Path::new(B), "rung");
+                let via_c = get_attr(Path::new(C), "rung");
+                let _ = remove_attr(Path::new(A), "rung");
+                for p in [A, B, C] {
+                    let _ = crate::fs::Vfs::remove(Path::new(p));
+                }
+
+                // NEGATIVE CONTROL first: a key that collapsed every path to one
+                // entry would answer for C too, and the assertion below would
+                // pass without identity keying existing (dd-954).
+                if via_c.is_ok() {
+                    serial_println!(
+                        "[queryable]   ERROR: control failed -- an UNRELATED file reports A's attr"
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                if via_b.is_err() {
+                    serial_println!(
+                        "[queryable]   FAIL: attr set on /tmp/queryable-id-a is invisible under"
+                    );
+                    serial_println!(
+                        "[queryable]         /tmp/queryable-id-b, a second name for one inode"
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                serial_println!(
+                    "[queryable]   identity rung OK -- attributes follow the file, not the name"
+                );
+            }
+            crate::fs::selftest::Setup::Unsupported(e) => {
+                serial_println!(
+                    "[queryable]   identity rung SKIPPED -- link() unsupported here: {:?}",
+                    e
+                );
+                skips.record("identity rung", "link() unsupported on /tmp");
+                let _ = crate::fs::Vfs::remove(Path::new(A));
+            }
+            crate::fs::selftest::Setup::Failed(e) => {
+                serial_println!(
+                    "[queryable]   FAIL: link() refused with {:?}, which is not 'this",
+                    e
+                );
+                serial_println!("[queryable]         system cannot' -- it was asked and said no");
+                let _ = crate::fs::Vfs::remove(Path::new(A));
+                return Err(e);
+            }
+        }
+    }
+    skips.report("queryable");
+    serial_println!("[queryable] all 9 self-tests passed{}", skips.suffix());
     Ok(())
 }

@@ -143,6 +143,7 @@ pub mod entry;
 pub mod global;
 pub mod icd;
 pub mod instance;
+pub mod messenger;
 pub mod physical;
 pub mod registry;
 pub mod unknown;

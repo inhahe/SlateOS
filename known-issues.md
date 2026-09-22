@@ -121172,7 +121172,10 @@ expensive run in the project.
 **Physical-device half FIXED 2026-09-02** — design-decisions.md §803,
 `gui/vulkan/src/unknown.rs`. That is the WSI family and most other extension
 commands, and it is the half that was blocking real applications.
-**Instance-level half still OPEN**; see "What remains" at the bottom. The
+**Instance-level half PARTLY FIXED 2026-09-22** — `VK_EXT_debug_utils`'
+messenger pair is implemented (`gui/vulkan/src/messenger.rs`,
+design-decisions.md §867); the surface family is still open and is blocked on a
+prerequisite rather than a decision. See "What remains" at the bottom. The
 original report follows unchanged.
 
 **In short:** As of design-decisions.md §802 the Vulkan loader answers
@@ -121295,18 +121298,63 @@ Two limitations came with it and are deliberate, not oversights:
 
 ### What remains
 
-The **instance-level** half of the second bullet, unchanged. A command whose
-first argument is a `VkInstance` still cannot be forwarded, because the loader
-holds several driver instances behind one handle and must decide *per command*
-which of them answers — a policy, not a forwarding rule, and not something a
-trampoline can encode. `vkCreateDebugUtilsMessengerEXT`,
-`vkDestroySurfaceKHR` and the platform `vkCreate*SurfaceKHR` calls are in this
-group, so WSI is reachable but not yet complete.
+**The instance-level half is now partly closed.** `VK_EXT_debug_utils`' two
+commands — `vkCreateDebugUtilsMessengerEXT` and
+`vkDestroyDebugUtilsMessengerEXT` — are implemented in
+`gui/vulkan/src/messenger.rs` and answered from `get_instance_proc_addr`, with
+a fan-out policy recorded as design-decisions.md §867: every driver that offers
+the command gets a messenger, a driver that does not implement the extension is
+not a failure, and a driver that offers it and then fails unwinds the whole
+call. The loader answers **null** when no driver implements it, rather than
+handing back a pointer that could only fail — which is this entry's own defect,
+in the one direction it had not yet been fixed.
+
+**What is left is the surface family, and it is blocked on more than a policy.**
+The original text below said the remaining work needed a per-command fan-out
+policy and a generated trampoline per command. That is true and it is not the
+gate. Two things are:
+
+1. **There is no driver to fan out to.** `posix::dlfcn::dlopen` returns null on
+   SlateOS, so the registry takes drivers by registration rather than
+   discovery — and `vk_slateosRegisterDriver` has no caller anywhere in the
+   tree outside this crate's own tests. Every ICD that exists is a stub in
+   `#[cfg(test)]`. That was equally true when the physical-device half was
+   built, and it did not block that work, because a trampoline is
+   *driver-agnostic*: one mechanism forwards every signature, so it is correct
+   before any driver exists. A fan-out policy is not — it is a statement about
+   what one specific command means when several drivers could answer, and you
+   cannot write it for `vkCreateXlibSurfaceKHR` without deciding what a surface
+   *is* on this operating system.
+2. **There is no surface concept to decide about.** SlateOS has no X11 or
+   Win32; the display belongs to the compositor in `gui/`. So the platform
+   surface command this loader would implement is not one of the ones in
+   `vk.xml` — it is one we would be inventing, together with the driver-side
+   contract for it. That is a graphics-stack design task, not a loader task,
+   and it is downstream of the Mesa port the roadmap already has blocked.
+
+**The distinction worth keeping** is between the two reasons a command can be
+unforwardable. `vkCreateDebugUtilsMessengerEXT` was blocked on a *decision*,
+and a decision can be made at any time — which is why it is now done. The
+surface commands are blocked on a *prerequisite*, and no amount of deciding
+moves them. Reading the original text below, a reader would have started
+designing a policy table and discovered the emptiness only after building it.
 
 The Khronos loader generates one trampoline per command from `vk.xml`. Ours
-would need the same, and it is the point at which "declare no Vulkan
-structures" (§802) finally becomes untenable — a surface-creation command takes
-a structure the loader has to read to know which platform it is for.
+would need the same for the surface family, and it is the point at which
+"declare no Vulkan structures" (§802) finally becomes untenable — a
+surface-creation command takes a structure the loader has to read to know which
+platform it is for. Notably the messenger pair did **not** force that: its
+create-info pointer is passed to every driver untouched, so the loader never
+reads a field. That is a property of that command rather than a reprieve.
+
+#### The original text, unchanged
+
+A command whose first argument is a `VkInstance` still cannot be forwarded,
+because the loader holds several driver instances behind one handle and must
+decide *per command* which of them answers — a policy, not a forwarding rule,
+and not something a trampoline can encode. `vkCreateDebugUtilsMessengerEXT`,
+`vkDestroySurfaceKHR` and the platform `vkCreate*SurfaceKHR` calls are in this
+group, so WSI is reachable but not yet complete.
 
 ---
 
@@ -161669,7 +161717,24 @@ directions need the same question asked -- *what else was touching this
 tree?* -- and the answer here cost one re-run rather than an afternoon only
 because the `--extern` line was read before the manifest was opened.
 
-## `TD-C-A-HUNDRED-APPS-BIND-KEYS-NOBODY-CAN-FIND` (lane C, 2026-09-18)
+## `TD-C-A-HUNDRED-APPS-BIND-KEYS-NOBODY-CAN-FIND` (lane C, 2026-09-18) -- **CLOSED 2026-09-22**
+
+> **Closed as the programme it asked for, finished.** This entry filed the
+> work; `TD-C-NINETY-ONE-APPS-BIND-KEYS-AND-NAME-THEM-NOWHERE` measured it
+> and is where the outcome is recorded. Today `scripts/key-survey.py`
+> reports 131 apps binding a letter, digit or function key, 87 carrying a
+> key list, and no app answering a key it names nowhere; the baseline file
+> is empty and the survey exits 1 if that stops being true.
+>
+> **Its estimate was the one thing it got right.** "About fifteen minutes
+> per app and entirely mechanical" held for roughly thirty apps. What it
+> did not predict is that the mechanical work would surface six defects
+> that had nothing to do with keys -- `paint` could not save or open,
+> `markdowneditor`'s `Ctrl+O` was bound to nothing, `tmux` announced a pane
+> zoom it never performed, `camera` had a 25-row reference no code drew,
+> and `fileassoc` and `diskcleanup` each had a key one press from deleting
+> files. Naming a key forces someone to say what it does, and that
+> question had not been asked of these apps before.
 
 **In short:** Seven apps got a shortcut list today. A survey of the other 134
 says the same problem is everywhere: **126 apps bind at least one letter, digit
@@ -161893,7 +161958,35 @@ The 33-row list is now a `SHORTCUTS` const drawn by `render_card` behind `F1`.
 has somewhere to go, which is the `apps/spreadsheet` case design-decisions 863
 carved out.
 
-## `TD-C-FIVE-TOGGLES-THAT-READ-ONLY-THEMSELVES` (lane C, 2026-09-21) -- **OPEN**
+## `TD-C-FIVE-TOGGLES-THAT-READ-ONLY-THEMSELVES` (lane C, 2026-09-21) -- **CLOSED 2026-09-22**
+
+> **Closed. All five, by two different routes -- and the split is the point.**
+> Three of them wanted a reader and got one: `camera`'s `fullscreen_preview`
+> now picks a `Layout::fullscreen()` (main.rs:1666), `logviewer`'s
+> `wrap_lines` chooses wrapping over eliding in `message_lines`
+> (main.rs:1520), and `videoplayer`'s `chapter_list_visible` draws a real
+> chapter list over the tab bar (main.rs:3247). Two wanted **deletion**:
+> `editor`'s `use_regex` and `settings`'s `checking_for_updates` are gone,
+> each leaving a one-line tombstone where the field was (editor:1380,
+> settings:4437) so the next reader learns why rather than re-adding it.
+>
+> **"Give it a reader" was not the fix for all five, and assuming it would
+> be is the mistake this entry nearly made.** A toggle with no reader is a
+> claim the program cannot keep; the repair is to make the claim true *or*
+> to stop making it, and which one depends entirely on whether the feature
+> is wanted. Wiring `checking_for_updates` to something would have meant
+> inventing an update check; wiring `use_regex` would have meant writing a
+> regex engine into a text editor's find bar. Deleting a control is a fix,
+> not a retreat from one.
+>
+> **The fix to the checker described below was not made**, and that is
+> deliberate rather than forgotten: `x.f = !x.f` still reads as a use to
+> `scripts/check-fields-written-never-read.py`. Two of the five no longer
+> exist and three now have genuine readers, so the gate would report
+> nothing today either way -- it would be a change with no test that can
+> fail. It is worth doing the next time a self-toggling field appears,
+> which is the condition to act on, and the route that actually found
+> these (asking what a key *did*) works regardless.
 
 **In short:** five programs have a switch you can flip that nothing anywhere
 looks at. `apps/editor`'s `Ctrl+E` is the clearest: it turns "use regular

@@ -1780,6 +1780,34 @@ fn fit_within(w: u32, h: u32, max_w: f32, max_h: f32) -> (f32, f32) {
     (w * scale, h * scale)
 }
 
+/// The keys this window answers, as a reader sees them.
+///
+/// It named none of them, and the rating digits are the ones that matter:
+/// `0` through `5` set a photograph's stars, on every selected picture at
+/// once, with no dialog and no undo prompt.
+///
+/// **No `?` row.** This app has two tests called
+/// `typing_a_tag_changed_a_photographs_rating` and
+/// `typing_an_album_name_changed_a_photographs_rating`, both written after
+/// that really happened. Taking `?` for a card would put a seventh character
+/// back on the wrong side of the same branch. Seventh app where `?` was not
+/// free, and the first where the crate already carried the evidence.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Arrows", "Move through the pictures"),
+    ("Shift+Arrows", "Extend the selection"),
+    ("Home / End", "First or last picture"),
+    ("Enter", "Look at the selected picture on its own"),
+    ("Space", "Start the slideshow"),
+    ("0-5", "Set the rating, on everything selected"),
+    ("F", "Flag or unflag this picture"),
+    ("I", "Show or hide the information panel"),
+    ("S", "Change how the pictures are sorted"),
+    ("+ / -", "Thumbnail size"),
+    ("Delete", "Move the selection to the trash"),
+    ("Esc", "Back to the grid, from a single picture"),
+];
+
 pub struct PhotoApp {
     pub photos: Vec<Photo>,
     pub albums: Vec<Album>,
@@ -1799,6 +1827,8 @@ pub struct PhotoApp {
     /// pixel offset could only express positions the renderer then rounds
     /// away.
     pub grid_scroll: usize,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub show_info_panel: bool,
     pub slideshow: Option<SlideshowState>,
     pub export_options: ExportOptions,
@@ -1942,6 +1972,7 @@ impl PhotoApp {
             active_panel: ActivePanel::PhotoGrid,
             thumb_size_idx: 1,
             grid_scroll: 0,
+            show_help: false,
             show_info_panel: true,
             slideshow: None,
             export_options: ExportOptions::default(),
@@ -3532,6 +3563,22 @@ impl PhotoApp {
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        // Above the text-entry branch and the slideshow branch, both of which
+        // take the keyboard and return. F1 carries no text, so a tag being
+        // typed keeps every character it was given.
+        if event.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return true;
+        }
+        if self.show_help {
+            // Modal. Delete trashes the selection and a digit re-rates every
+            // picture in it; neither should happen from behind a list.
+            if matches!(event.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return true;
+        }
+
         if self.text_entry.is_some() {
             return self.handle_text_entry_key(event);
         }
@@ -3801,6 +3848,17 @@ impl PhotoApp {
         }
 
         cmds.extend(self.picker.render(&self.palette, width, height));
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         cmds
     }
@@ -7296,6 +7354,126 @@ mod tests {
     /// This was production code until 2026-09-15 and `main` called it, so the
     /// window opened on albums and photographs that were not on the machine.
     /// It is a perfectly good *fixture*; what was wrong was where it lived.
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Letters and digits are pressed with the text they typed, because
+    /// `handle_typed` reads the character and not the key code. Two
+    /// selections, because `Esc` clears one and correctly reports nothing to
+    /// do when there is none.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [0_u8, 1, 2].into_iter().any(|state| {
+                    let mut app = seeded_library();
+                    if state > 0 {
+                        app.handle_event(&key(Key::Right));
+                        app.handle_event(&key(Key::Right));
+                    }
+                    if state == 2 {
+                        // The single-picture view, which is the only place
+                        // Esc has anything to leave. My row said "Clear the
+                        // selection", which this app does not do -- third
+                        // invented row in this queue, after screenrecorder
+                        // and podcast, and all three said some form of
+                        // "back".
+                        app.handle_event(&key(Key::Enter));
+                    }
+                    let mut event = key(stroke.key);
+                    if let Event::Key(k) = &mut event {
+                        k.modifiers = stroke.modifiers;
+                    }
+                    if let Some(ch) = photo_typed_char(stroke.key, stroke.modifiers.shift) {
+                        event = typed(stroke.key, ch);
+                    }
+                    app.handle_event(&event)
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// The character a keystroke types, for the rows that reach
+    /// `handle_typed`. Taken from the stroke rather than the row label: a row
+    /// reads "+ / -" and splits into two, so the label is not the key.
+    fn photo_typed_char(k: Key, shift: bool) -> Option<char> {
+        let simple = [
+            (Key::F, 'f'),
+            (Key::I, 'i'),
+            (Key::S, 's'),
+            (Key::Num0, '0'),
+            (Key::Num1, '1'),
+            (Key::Num2, '2'),
+            (Key::Num3, '3'),
+            (Key::Num4, '4'),
+            (Key::Num5, '5'),
+            (Key::Minus, '-'),
+        ];
+        if let Some((_, ch)) = simple.into_iter().find(|(want, _)| *want == k) {
+            return Some(ch);
+        }
+        match k {
+            Key::Equals => Some(if shift { '+' } else { '=' }),
+            _ => None,
+        }
+    }
+
+    /// **The card reaches the window, and nothing re-rates behind it.**
+    ///
+    /// The control is the last third: `1` behind the card must not set a
+    /// rating, and must set one with the card down. That is the key worth
+    /// controlling here -- it writes to every selected picture at once.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &PhotoApp| -> Vec<String> {
+            app.render_commands(1200.0, 800.0)
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut app = seeded_library();
+        app.handle_event(&key(Key::Right));
+        assert!(
+            !drawn(&app).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_event(&key(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&drawn(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let before = app
+            .selected_photo
+            .and_then(|pid| app.find_photo(pid))
+            .map(|p| p.rating);
+        app.handle_event(&typed(Key::Num1, '1'));
+        assert_eq!(
+            app.selected_photo
+                .and_then(|pid| app.find_photo(pid))
+                .map(|p| p.rating),
+            before,
+            "a rating was set through the shortcut card"
+        );
+
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&typed(Key::Num1, '1'));
+        assert_ne!(
+            app.selected_photo
+                .and_then(|pid| app.find_photo(pid))
+                .map(|p| p.rating),
+            before,
+            "control: the rating key does nothing even with the card down"
+        );
+    }
+
     fn seeded_library() -> PhotoApp {
         let mut app = PhotoApp::new();
         let _album = app.create_album("Vacation 2025");

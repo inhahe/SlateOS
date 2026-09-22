@@ -37,10 +37,6 @@ colorpicker	E
 colorpicker	V
 
 
-# photomanager
-photomanager	F
-photomanager	I
-photomanager	Num5
 
 
 # archivemanager

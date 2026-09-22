@@ -109,11 +109,21 @@ pub fn keystrokes(label: &str) -> Result<Vec<KeyEvent>, UnknownKey> {
         }
         // "Arrows" is one word for four keys, and every app here that prints a
         // movement hint prints it that way.
-        if chord.eq_ignore_ascii_case("arrows") {
-            for key in [Key::Left, Key::Right, Key::Up, Key::Down] {
-                strokes.push(stroke(key, Modifiers::NONE));
+        //
+        // Through `split_modifiers`, so `Shift+Arrows` works: a word standing
+        // for several keys can carry a modifier for the same reason a range
+        // can -- `apps/photomanager` extends its selection with
+        // `Shift+Arrows` and spelling that as four rows would be the list
+        // bending to the parser. Without this the label was rejected outright
+        // rather than silently mis-parsed, which is the right failure and is
+        // how it was found.
+        if let Some((modifiers, word)) = split_modifiers(chord) {
+            if word.trim().eq_ignore_ascii_case("arrows") {
+                for key in [Key::Left, Key::Right, Key::Up, Key::Down] {
+                    strokes.push(stroke(key, modifiers));
+                }
+                continue;
             }
-            continue;
         }
         // `WASD` is the same abbreviation one step along: four keys under one
         // word, and the word is what a game prints. `apps/asteroids`,
@@ -126,11 +136,13 @@ pub fn keystrokes(label: &str) -> Result<Vec<KeyEvent>, UnknownKey> {
         // word names the keys in the order the keys sit under the hand, and a
         // reader comparing the label to the strokes should find them in the
         // order the label wrote them.
-        if chord.eq_ignore_ascii_case("wasd") {
-            for key in [Key::W, Key::A, Key::S, Key::D] {
-                strokes.push(stroke(key, Modifiers::NONE));
+        if let Some((modifiers, word)) = split_modifiers(chord) {
+            if word.trim().eq_ignore_ascii_case("wasd") {
+                for key in [Key::W, Key::A, Key::S, Key::D] {
+                    strokes.push(stroke(key, modifiers));
+                }
+                continue;
             }
-            continue;
         }
         // `0-9`, `A-F`, `1-8`: a run of keys written the way a person writes
         // one. Apps reach for this constantly -- a hex editor's digits, a
@@ -656,6 +668,32 @@ mod tests {
 
     use super::{UnknownKey, keystrokes, missing_rows};
     use crate::event::Key;
+    use crate::event::Modifiers;
+
+    /// **A word standing for several keys can carry a modifier.**
+    ///
+    /// `Shift+Arrows` extends a selection in `apps/photomanager`, and before
+    /// this the label was rejected -- correctly, and loudly, which is how it
+    /// was found rather than mis-parsed into something plausible.
+    #[test]
+    fn a_multi_key_word_can_carry_a_modifier() {
+        let plain = keystrokes("Arrows").expect("arrows");
+        assert_eq!(plain.len(), 4);
+        assert!(plain.iter().all(|s| s.modifiers == Modifiers::NONE));
+
+        let shifted = keystrokes("Shift+Arrows").expect("shift+arrows");
+        assert_eq!(shifted.len(), 4);
+        assert!(shifted.iter().all(|s| s.modifiers.shift));
+        assert_eq!(
+            shifted.iter().map(|s| s.key).collect::<Vec<_>>(),
+            plain.iter().map(|s| s.key).collect::<Vec<_>>(),
+            "the modifier changed which keys the word names"
+        );
+
+        let wasd = keystrokes("Ctrl+WASD").expect("ctrl+wasd");
+        assert_eq!(wasd.len(), 4);
+        assert!(wasd.iter().all(|s| s.modifiers.ctrl));
+    }
 
     /// **A one-character key is not found by `contains`.**
     ///

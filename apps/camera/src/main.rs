@@ -4426,7 +4426,7 @@ mod tests {
         let normal = Layout::solve(w, h);
         assert!(
             !normal.sidebar.is_empty() && !normal.strip.is_empty(),
-            "control: this size has no sidebar or strip to give up, so the              comparison below would hold on any code at all"
+            "control: this size has no sidebar or strip to give up, so the comparison below would hold on any code at all"
         );
 
         let full = normal.fullscreen();

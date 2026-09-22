@@ -6403,7 +6403,11 @@ fn destroy_process_resources(
     // table from flock because POSIX makes them separate lock spaces. Same
     // reason, same moment: a dead owner's write lock on a range would refuse
     // every live process that overlaps it, and nothing else clears one.
-    crate::fs::reclock::release_all(pid);
+    // Through `posix_owner`, not the bare pid: `reclock` owns the owner
+    // encoding, and a second place building the same value by hand is how
+    // the two silently stop matching. They agree today only because the
+    // mask clears a bit no real pid sets.
+    crate::fs::reclock::release_all(crate::fs::reclock::posix_owner(pid));
 
     // Close all IPC handles owned by this process.  In the normal exit
     // path these were already drained and closed at the zombie

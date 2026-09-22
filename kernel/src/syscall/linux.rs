@@ -5388,59 +5388,14 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// Apply a POSIX advisory record lock (`F_SETLK` / `F_SETLKW` /
-/// `F_GETLK`) or its OFD variant (`F_OFD_SETLK` / `F_OFD_SETLKW` /
-/// `F_OFD_GETLK`) to the file behind `entry`.
-///
-/// This kernel does not yet track per-file lock state, and a Linux
-/// fd table only ever has one process holding it (no cross-process
-/// sharing yet), so no holder can conflict with the caller.  The
-/// honest answer for "is there a conflict?" is "no":
-///
-///   * `F_SETLK` / `F_SETLKW`: validate the `struct flock`
-///     contents, then return 0 ("granted").  `F_SETLKW` is identical
-///     to `F_SETLK` because there is no contention to wait for.
-///     Releases (`l_type == F_UNLCK`) also return 0 — releasing a
-///     lock that was never installed is a no-op, matching Linux.
-///   * `F_GETLK` / `F_OFD_GETLK`: validate the `struct flock`,
-///     overwrite `l_type` with `F_UNLCK`, zero `l_pid`, and return
-///     0.  Linux's contract: "the lock that would prevent us from
-///     acquiring `l_type` at `[l_start, l_start + l_len)` is …" —
-///     `F_UNLCK` means "no conflict, you'd get the lock".
-///
-/// fd kind gate:
-///   * `HandleKind::File` — accepted (regular files are lockable).
-///   * `HandleKind::Console` / `HandleKind::Pipe` — Linux returns
-///     EBADF for advisory locks on pipes and character devices that
-///     don't implement `->lock`; mirror that.
-///
-/// Layout: `struct flock` on x86_64 is 32 bytes:
-///   off 0 : i16 l_type
-///   off 2 : i16 l_whence
-///   off 4 : 4 bytes padding (off_t is 8-byte aligned)
-///   off 8 : i64 l_start
-///   off 16: i64 l_len
-///   off 24: i32 l_pid
-///   off 28: 4 bytes trailing padding
-/// Tag bit separating OFD lock owners from POSIX lock owners.
-///
-/// POSIX record locks belong to a **process**; OFD locks belong to an **open
-/// file description**. `reclock` has one `owner: u64` space, so the two must be
-/// distinguishable inside it. If they shared it, a process holding a POSIX lock
-/// that then took an OFD lock through another descriptor would compare equal to
-/// itself on one side and unequal on the other, depending on which numeric
-/// value happened to collide -- and `conflicts_with` keys entirely on
-/// `self.owner != other.owner`. Neither a pid nor a raw handle uses bit 63.
-const OFD_OWNER_TAG: u64 = 1 << 63;
-
 /// Map a lock request onto `reclock`'s owner space.
 fn flock_owner(pid: u64, raw_handle: u64, is_ofd: bool) -> u64 {
+    // The encoding lives in `reclock`, which owns the owner space. This
+    // function only decides WHICH kind of owner the request has.
     if is_ofd {
-        raw_handle | OFD_OWNER_TAG
+        crate::fs::reclock::ofd_owner(raw_handle)
     } else {
-        // Masked rather than assumed: a pid with bit 63 set would otherwise
-        // impersonate an OFD owner.
-        pid & !OFD_OWNER_TAG
+        crate::fs::reclock::posix_owner(pid)
     }
 }
 
@@ -5564,6 +5519,42 @@ pub fn self_test_flock_range() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// Apply a POSIX advisory record lock (`F_SETLK` / `F_SETLKW` /
+/// `F_GETLK`) or its OFD variant (`F_OFD_SETLK` / `F_OFD_SETLKW` /
+/// `F_OFD_GETLK`) to the file behind `entry`.
+///
+/// This kernel does not yet track per-file lock state, and a Linux
+/// fd table only ever has one process holding it (no cross-process
+/// sharing yet), so no holder can conflict with the caller.  The
+/// honest answer for "is there a conflict?" is "no":
+///
+///   * `F_SETLK`: resolve the range, then ask `fs::reclock` to take it.
+///     A conflicting lock held by another owner answers `EAGAIN`.
+///   * `F_SETLKW`: the same. It SHOULD block and does not -- there is no
+///     wait-queue hook for a lock table, which is why `sys_flock` also
+///     returns `EWOULDBLOCK` for every conflict. One hook fixes both.
+///   * Releases (`l_type == F_UNLCK`) go to `reclock::unlock`, which
+///     treats releasing a lock that was never held as a no-op.
+///   * `F_GETLK` / `F_OFD_GETLK`: a LOOKUP, not a claim. Reports the
+///     conflicting holder's type, range and pid, or `F_UNLCK` when there
+///     is none. `l_pid` is -1 for an OFD holder, which has no pid.
+///     This previously wrote `F_UNLCK` unconditionally, which asserts
+///     something about the world rather than answering.
+///
+/// fd kind gate:
+///   * `HandleKind::File` — accepted (regular files are lockable).
+///   * `HandleKind::Console` / `HandleKind::Pipe` — Linux returns
+///     EBADF for advisory locks on pipes and character devices that
+///     don't implement `->lock`; mirror that.
+///
+/// Layout: `struct flock` on x86_64 is 32 bytes:
+///   off 0 : i16 l_type
+///   off 2 : i16 l_whence
+///   off 4 : 4 bytes padding (off_t is 8-byte aligned)
+///   off 8 : i64 l_start
+///   off 16: i64 l_len
+///   off 24: i32 l_pid
+///   off 28: 4 bytes trailing padding
 fn fcntl_flock_apply(
     pid: u64,
     flock_ptr: u64,
@@ -5692,7 +5683,7 @@ fn fcntl_flock_apply(
                 buf[0..2].copy_from_slice(&ty.to_le_bytes());
                 // POSIX: l_pid is -1 when the holder is an OFD lock, since
                 // an open file description has no pid to report.
-                let rep_pid = if holder.owner & OFD_OWNER_TAG != 0 {
+                let rep_pid = if crate::fs::reclock::owner_is_ofd(holder.owner) {
                     -1i32
                 } else {
                     i32::try_from(holder.owner).unwrap_or(-1)

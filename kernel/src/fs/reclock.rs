@@ -313,6 +313,52 @@ pub fn query(
 /// Called when a process exits. POSIX also drops a process's record locks when
 /// it closes ANY descriptor for the file, which is a famous wart and belongs in
 /// the close path rather than here.
+/// Tag bit distinguishing an OFD lock owner from a POSIX one.
+///
+/// This module owns the `owner: u64` space, so it owns the encoding. The bit
+/// started life as a constant in `syscall/linux.rs`, which would have meant
+/// `fs::handle` -- the module that has to RELEASE these locks -- agreeing about
+/// it by hand. An owner space with two authors is one that will eventually
+/// disagree, and the disagreement is silent: `conflicts_with` compares owners
+/// for equality, so a mismatched tag makes a lock invisible to its own holder.
+const OFD_OWNER_TAG: u64 = 1 << 63;
+
+/// The owner value for a lock held by an **open file description** (`F_OFD_*`).
+#[must_use]
+pub fn ofd_owner(handle: u64) -> u64 {
+    handle | OFD_OWNER_TAG
+}
+
+/// The owner value for a lock held by a **process** (plain `F_SETLK`).
+///
+/// Masked rather than passed through: a pid with bit 63 set would otherwise
+/// impersonate an open file description.
+#[must_use]
+pub fn posix_owner(pid: u64) -> u64 {
+    pid & !OFD_OWNER_TAG
+}
+
+/// Does this owner identify an open file description rather than a process?
+///
+/// Used to report `l_pid = -1` from `F_GETLK`, which is what POSIX requires
+/// when the holder is an OFD lock: an open file description has no pid.
+#[must_use]
+pub fn owner_is_ofd(owner: u64) -> bool {
+    owner & OFD_OWNER_TAG != 0
+}
+
+/// Release every record lock held by one open file description.
+///
+/// Called from [`crate::fs::handle::close`] on the **final** close of a
+/// description, which is exactly when an OFD lock ends -- that is the whole
+/// definition of an OFD lock, as against a POSIX one which ends when the
+/// process does. Without this a holder that dies wedges the range until
+/// reboot, which is the property that makes byte-range locking safe to rely
+/// on rather than merely present.
+pub fn release_ofd(handle: u64) {
+    release_all(ofd_owner(handle));
+}
+
 pub fn release_all(owner: u64) {
     let mut table = TABLE.lock();
     for entry in table.iter_mut() {

@@ -27,6 +27,39 @@
 
 
 
+
+# tmux
+tmux	C
+tmux	D
+tmux	F
+tmux	G
+tmux	J
+tmux	K
+tmux	N
+tmux	Num9
+tmux	O
+tmux	P
+tmux	Q
+tmux	S
+tmux	V
+tmux	W
+tmux	X
+tmux	Y
+tmux	Z
+
+# podcast
+podcast	D
+podcast	M
+podcast	O
+podcast	Q
+podcast	S
+
+# whiteboard
+whiteboard	A
+whiteboard	G
+whiteboard	Y
+whiteboard	Z
+
 # colorpicker
 colorpicker	C
 colorpicker	E
@@ -37,12 +70,15 @@ fileassoc	E
 fileassoc	F
 fileassoc	Q
 
+# photomanager
+photomanager	F
+photomanager	I
+photomanager	Num5
 
-# whiteboard
-whiteboard	A
-whiteboard	Y
-whiteboard	Z
-
+# radio
+radio	F
+radio	S
+radio	T
 
 # archivemanager
 archivemanager	A
@@ -64,10 +100,6 @@ diskcleanup	D
 fontmanager	F
 fontmanager	S
 
-# podcast
-podcast	O
-podcast	S
-
 # procexplorer
 procexplorer	F5
 procexplorer	V
@@ -83,6 +115,9 @@ speedtest	Q
 # undelete
 undelete	A
 undelete	D
+
+# camera
+camera	B
 
 # charmap
 charmap	C

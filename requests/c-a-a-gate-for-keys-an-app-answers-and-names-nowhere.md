@@ -73,8 +73,19 @@ them the scan reports 21 keys where the app answers 9.
    change could ever add a crate under `apps/`, the baseline is where it would
    show up, and the message tells the reader which file takes a line. Nothing
    in it reads outside `apps/`.
-2. **Runtime is about 2 seconds** on 141 crates — it is a regex pass over
-   sources with no build.
+2. **Runtime is about 2 minutes 25 seconds** on 141 crates — a regex pass
+   over sources, with no build. **This corrects the figure in the first
+   version of this request, which said two seconds.** I had not measured it;
+   I inferred it from "a regex pass with no build" and wrote the number down
+   as though I had. It is ~1.5% of a boot test, so the conclusion does not
+   change — but you would have been wiring in a gate on a number I made up,
+   and the difference between those two things is the whole reason to say so.
+
+   Most of that time is `rustlex.live_code` plus two `strip_noise` passes per
+   file, not the survey's own logic: the scan added since the first version of
+   this request costs about three seconds of it. If the runtime matters to
+   you, say so and I will make the lexer hand back both forms in one pass
+   rather than walking every file twice.
 
 ## What I am not asking for
 

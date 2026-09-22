@@ -143,6 +143,107 @@ PAYLOAD_RE = re.compile(r"(?<![A-Za-z0-9_])Key::(Char|Function)\s*\(([^)]*)\)(.*
 PAYLOAD_CHAR = re.compile(r"'([A-Za-z0-9])'")
 PAYLOAD_NUM = re.compile(r"(?<![A-Za-z0-9_])([0-9]{1,2})(?![0-9])")
 
+# Keys an app dispatches from a *typed character* rather than from a `Key`.
+#
+# `apps/whiteboard` answers `g` for the grid and `0` for zoom-to-fit inside
+# `handle_typed(&mut self, event: &KeyEvent)`, matching on the char that
+# `event.typed()` produced. `apps/tmux` answers eighteen that way, through
+# `process_prefix_key(&mut self, key: char)`. There is no `Key::` anywhere in
+# either arm, so this survey could not see one of them -- the fifth flaw it
+# has had, and the second in the direction that reads as clean.
+#
+# THE HARD PART IS TELLING A SHORTCUT FROM A PARSER. A match on `'B'` is just
+# as likely to be a unit suffix (`apps/backup`), a terminal escape
+# (`apps/terminal`) or a size abbreviation (`apps/pdfviewer`) as a key. A
+# plain scan for char-literal arms finds 136 across 20 crates and most are
+# noise.
+#
+# Two rules were tried and one thrown away. Matching function *names*
+# -- `handle_key`, `handle_typed`, `on_key` -- accepted whiteboard and paint
+# and missed tmux entirely, whose dispatcher is called `process_prefix_key`.
+# That is the same defect as searching for the identifier `SHORTCUTS`: a name
+# is a thing an author chooses. What survives is **reachability**: an arm
+# counts when the function holding it takes a `KeyEvent`, or takes a `char`
+# and is called by something that does. No list of names, and tmux is found
+# through a caller two hops away.
+CHAR_LIT = re.compile(r"'([A-Za-z0-9])'")
+FN_DECL = re.compile(
+    r"^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?"
+    r"(?:async[ \t]+)?fn[ \t]+([A-Za-z_]\w*)([^\n]*)",
+    re.MULTILINE,
+)
+CALLED = re.compile(r"(?<![A-Za-z0-9_])([a-z_]\w*)\s*\(")
+TAKES_CHAR = re.compile(r":\s*char(?![A-Za-z0-9_])")
+
+# Whether a char literal is a match arm is decided by walking a short window
+# after it rather than by a regex.
+#
+# The obvious pattern -- the literal, optional spaces, a starred group of
+# further alternatives each with its own optional spaces, then the arrow --
+# puts a variable-width gap inside a starred group and another outside it.
+# On the char literals that are *not* arms it backtracks through every way
+# of splitting the run, and this tree has thousands of those: every
+# `rest.find` of a quote character is one. It took this survey from two
+# seconds to five minutes fifty, and the runtime is what gave it away --
+# the report it produced looked entirely reasonable.
+_ARM_GAP = frozenset(" \t|'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+
+
+def _is_arm(code: str, after: int) -> bool:
+    """Does an arrow follow this char literal, with only alternatives between?"""
+    limit = min(len(code), after + 80)
+    i = after
+    while i < limit:
+        if code.startswith("=>", i):
+            return True
+        if code[i] not in _ARM_GAP:
+            return False
+        i += 1
+    return False
+
+
+def typed_keys(sources: list[str]) -> set[str]:
+    """Keys reached from a key handler and matched as a character literal."""
+    fns: list[tuple[str, str, str, int, int]] = []
+    for code in sources:
+        found = list(FN_DECL.finditer(code))
+        for i, m in enumerate(found):
+            stop = found[i + 1].start() if i + 1 < len(found) else len(code)
+            fns.append((m.group(1), m.group(0), code, m.start(), stop))
+
+    by_name: dict[str, list[int]] = {}
+    for i, (name, _sig, _c, _a, _b) in enumerate(fns):
+        by_name.setdefault(name, []).append(i)
+
+    calls = [set(CALLED.findall(code[a:b])) for _n, _s, code, a, b in fns]
+    charish = {
+        i for i, (_n, sig, _c, _a, _b) in enumerate(fns) if TAKES_CHAR.search(sig)
+    }
+
+    # Breadth-first from the functions that take a keystroke, through the
+    # call graph. The nested form -- for each candidate, scan every reached
+    # function body -- is quadratic in the number of functions, and
+    # `apps/paint` has hundreds of them.
+    reached = {
+        i for i, (_n, sig, _c, _a, _b) in enumerate(fns) if "KeyEvent" in sig
+    }
+    frontier = list(reached)
+    while frontier:
+        for callee in calls[frontier.pop()]:
+            for j in by_name.get(callee, ()):
+                if j in charish and j not in reached:
+                    reached.add(j)
+                    frontier.append(j)
+
+    out: set[str] = set()
+    for i in reached:
+        _name, _sig, code, a, b = fns[i]
+        for m in CHAR_LIT.finditer(code, a, b):
+            if _is_arm(code, m.end()):
+                ch = m.group(1)
+                out.add(ch.upper() if ch.isalpha() else f"Num{ch}")
+    return out
+
 # The variant names themselves are never keys -- the key is what they carry.
 PAYLOAD_VARIANTS = frozenset({"Char", "Function"})
 
@@ -329,6 +430,7 @@ def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
     matched: set[str] = set()
     literals: list[str] = []
     has_list = False
+    kept_sources: list[str] = []
 
     for path in files:
         try:
@@ -350,9 +452,14 @@ def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
         matched.update(KEY_RE.findall(code))
         # The payload scan needs the literals `code` has just blanked, so it
         # reads a second pass with comments stripped and literals kept.
-        matched.update(payload_keys(rustlex.strip_noise(live, keep_literals=True)))
+        kept = rustlex.strip_noise(live, keep_literals=True)
+        matched.update(payload_keys(kept))
+        # Collected rather than scanned per file: a key handler in one file
+        # can dispatch to a helper in another, and `typed_keys` walks calls.
+        kept_sources.append(kept)
         literals.extend(l for l in rustlex.string_literals(live) if is_label(l))
 
+    matched.update(typed_keys(kept_sources))
     matched -= PAYLOAD_VARIANTS
     matched -= IGNORE
     matched -= CONVENTIONAL
@@ -445,7 +552,66 @@ def _self_test() -> int:
         (r"\x1b[{};{}R", False, "the cursor report that made R look named"),
         ("Ctrl+R  Refresh", True, "a label that happens to name the same key"),
     ]
+    # `typed_keys` cases. Each is the shape of a real crate, because the whole
+    # difficulty is telling a shortcut from a parser and both are a match on a
+    # character. Built with chr(10) rather than escapes: these are fixtures of
+    # Rust source inside Python source, and every layer of quoting between here
+    # and the file has cost me an hour at least once today.
+    handler = chr(10).join([
+        "fn handle_key(&mut self, event: &KeyEvent) -> bool {",
+        "    self.handle_typed(event)",
+        "}",
+        "fn handle_typed(&mut self, event: &KeyEvent) -> bool {",
+        "    match ch {",
+        "        'g' | 'G' => self.grid(),",
+        "        '0' => self.fit(),",
+        "    }",
+        "}",
+    ])
+    two_hops = chr(10).join([
+        "fn handle_key(&mut self, key: &KeyEvent) -> EventResult {",
+        "    self.process_prefix_key(c)",
+        "}",
+        "fn process_prefix_key(&mut self, key: char) {",
+        "    match key {",
+        "        'n' => self.next_window(),",
+        "    }",
+        "}",
+    ])
+    parser = chr(10).join([
+        "fn unit_suffix(c: char) -> u64 {",
+        "    match c {",
+        "        'B' => 1,",
+        "        'K' => 1024,",
+        "    }",
+        "}",
+    ])
+    not_an_arm = chr(10).join([
+        "fn handle_key(&mut self, event: &KeyEvent) -> bool {",
+        "    let tick = name.starts_with('a');",
+        "    let end = rest.find(';');",
+        "    false",
+        "}",
+    ])
+    typed: list[tuple[list[str], set[str], str]] = [
+        ([handler], {"G", "Num0"}, "a char arm in a function taking a KeyEvent"),
+        ([two_hops], {"N"}, "reached through a caller, not by the handler name"),
+        ([parser], set(), "control: a unit parser takes a char and answers no key"),
+        ([not_an_arm], set(), "control: char literals that are not match arms"),
+        (
+            [two_hops.replace("handle_key", "on_key")],
+            {"N"},
+            "the rule is reachability, so renaming the handler changes nothing",
+        ),
+    ]
     bad = 0
+    for sources, want_typed, why in typed:
+        got_typed = typed_keys(sources)
+        ok = got_typed == want_typed
+        print(f"  {'ok  ' if ok else 'FAIL'} {why}")
+        if not ok:
+            print(f"       typed_keys -> {sorted(got_typed)}, wanted {sorted(want_typed)}")
+            bad += 1
     for text, want_label, why in labels:
         got_label = is_label(text)
         ok = got_label == want_label
@@ -478,7 +644,8 @@ def _self_test() -> int:
     if bad:
         print(f"self-test: {bad} failure(s)")
         return 1
-    print(f"self-test ok -- {len(cases) + len(named) + len(payloads) + len(labels)} case(s)")
+    total = len(cases) + len(named) + len(payloads) + len(labels) + len(typed)
+    print(f"self-test ok -- {total} case(s)")
     return 0
 
 

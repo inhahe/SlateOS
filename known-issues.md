@@ -160972,6 +160972,47 @@ presses one. Without those three the scan reports 21 keys where the app
 answers 9. A correction to an instrument needs its own controls, or it is just
 the next version to be retracted.
 
+**24. The type's documented meaning, in a program that has no such context**
+(lane C, 2026-09-21). `EventResult::Ignored` is documented in the toolkit as
+"Event was ignored (propagate to parent)". That is exactly right for a widget
+inside a tree. `apps/torrent`, `apps/notes` and `apps/mediaconvert` are not
+widgets -- they are top-level applications, and each one maps
+`EventResult::Ignored` to `Response::Idle`. **There is no parent.** In these
+programs the word means "nothing changed, do not redraw".
+
+I read the definition, believed it, and edited an app to match it: `torrent`'s
+`set_filter` returned `Ignored` when the chosen filter was already the current
+one, and I deleted that early return on the grounds that it "handed this
+window's own key upward". Nothing was handed anywhere. The change cost a
+redundant repaint of every row on a keypress that did nothing, and the commit
+message stating the reason was confidently wrong.
+
+**The rule, which is cheap and I did not apply it:** *when a value's meaning
+depends on who receives it, read the receiver, not the definition.* One grep
+for `EventResult::Ignored =>` across the three apps would have settled it in
+ten seconds, and it is the same grep I would have run without hesitation if
+the doc comment had said nothing at all. **A definition that answers the
+question stops you asking it** -- which is only safe when the definition
+covers your case.
+
+**What made it visible was not review.** It was writing the same guard for a
+second app: `notes` returned `Ignored` for `Up` on a list of five notes, I
+reached for the same edit, and this time the app had a test whose message
+said the quiet part -- "backspace on an empty query is not a redraw". I had
+had that file open for twenty minutes. The generalisation worth keeping is
+that **the second instance is where a wrong model becomes visible, so a fix
+applied once is a hypothesis and a fix applied twice is a test of it** -- and
+the moment to look hardest is when the second case feels like the first.
+
+**It also narrowed what the shortcut guards assert**, which is the useful
+half. `Consumed` does not mean "this window owns this key"; it means "this
+key did something just now". For a discoverability card that is the better
+question -- a key that changes nothing in any reachable state should not be
+advertised -- but it means the guard must be run from states where each key
+has somewhere to go. `Up` at the top of a list, `1` on the filter already
+chosen and `Esc` with nothing to cancel are all answered keys that correctly
+report `Ignored`.
+
 ## `TD-C-SIXTY-FLAGS-A-USER-CANNOT-REACH` (lane C, 2026-09-18) -- **CLOSED 2026-09-21**
 
 **In short:** 60 boolean fields across 25 apps are read by the program and

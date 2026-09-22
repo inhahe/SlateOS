@@ -820,14 +820,27 @@ impl DropdownId {
     /// rather than trust that whoever adds one also wires it.
     ///
     /// **Named `FIXED` and not `ALL`, because it is deliberately a subset.**
-    /// `NotifImportance` is absent: it is one dropdown *per program*, in a list
-    /// that may be empty, so there is no fixed value to walk. That reason was
+    /// `NotifImportance` is absent, and it is the only one: it is one dropdown
+    /// *per program*, in a list that may be empty, so there is no fixed value
+    /// to walk.
+    ///
+    /// **Five more used to be absent for no reason anybody had written down**
+    /// -- `RotationInterval`, `LoginBackground`, `UiFont`, `LockAfter` and
+    /// `MonoFont`. Each is drawn by a `dropdown_row`, opens, and has a value
+    /// handler, so each was working; none of them was covered by the sweep
+    /// below, which is the guarantee this list exists to give. They were found
+    /// by `scripts/check-variant-lists.py` once it began asking which variants
+    /// a list omits rather than how many it holds -- the old count-based check
+    /// could not see them, because ten of sixteen looks exactly like a subset
+    /// that means it. The rule the sweep already states applies to them as it
+    /// does to the wallpaper rows: a dropdown left out for being awkward to
+    /// reach is precisely the one worth checking. That reason was
     /// already written here while the constant was still called `ALL` -- which
     /// is the shape `scripts/check-variant-lists.py` exists to refuse, and did:
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 10] = [
+    pub const FIXED: [Self; 15] = [
         Self::QuietStart,
         Self::QuietEnd,
         Self::WallpaperFit,
@@ -838,6 +851,11 @@ impl DropdownId {
         Self::CursorSize,
         Self::NarratorVerbosity,
         Self::HighContrast,
+        Self::RotationInterval,
+        Self::LoginBackground,
+        Self::UiFont,
+        Self::LockAfter,
+        Self::MonoFont,
     ];
 }
 
@@ -8544,6 +8562,21 @@ mod tests {
         // exactly the one it should be checking.
         state.appearance.settings.wallpaper =
             Some(std::path::PathBuf::from("/pictures/example.png"));
+        // Likewise the Rotation section: its interval dropdown and shuffle
+        // switch appear only once a *folder* is chosen, because a rotation
+        // detail with nothing to rotate through is the same broken-looking
+        // control as the fit chooser above. `rotation_detail_rows_wait_for_a_folder`
+        // is where that is asserted from the other side.
+        state.appearance.settings.wallpaper_folder = Some(std::path::PathBuf::from("/pictures"));
+        // And the two font pickers, which are drawn only when the system has
+        // families to offer -- a chooser with nothing in it reads as broken,
+        // so the page says so in a note instead. A test enumerates no fonts,
+        // so without this the rows never exist and the sweep cannot see them.
+        // Fixtures rather than `load_font_families`, which would make the
+        // sweep's coverage depend on what happens to be installed on the
+        // machine running it.
+        state.font_families = vec!["Example Sans".to_owned(), "Example Serif".to_owned()];
+        state.mono_families = vec!["Example Mono".to_owned()];
         // Turning one switch on can reveal another, so repeat until the set
         // stops growing. Bounded because nothing here turns a switch back off.
         for _ in 0..8 {

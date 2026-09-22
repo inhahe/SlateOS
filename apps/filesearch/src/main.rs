@@ -738,12 +738,14 @@ impl SizeFilter {
     /// exist yet. A chip that cannot say *which* custom range it means would
     /// be a chip that does nothing.
     ///
-    /// `scripts/check-variant-lists.py` checks any list whose name claims
-    /// totality against its enum's variant count, and reported this one at
-    /// 7 of 8 the first time it ran after the strip was wired. The tree's
-    /// convention is the one it describes: name it `ALL` and it is checked,
-    /// name it anything else and the doc comment beside it says why it is
-    /// short. This is that doc comment.
+    /// `scripts/check-variant-lists.py` reported this one at 7 of 8 the first
+    /// time it ran after the strip was wired. It no longer decides what to
+    /// check by name -- every list of an enum's variants is checked now, and a
+    /// list that is deliberately short is recorded in
+    /// `scripts/variant-lists-partial.txt` with its reason, because a gate
+    /// whose population is chosen by name fails toward silence for every list
+    /// nobody thought to call `ALL`. This doc comment and that record say the
+    /// same thing in the two places somebody might look.
     pub const CHIPS: [SizeFilter; 7] = [
         Self::Any,
         Self::Empty,

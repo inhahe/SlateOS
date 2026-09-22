@@ -28,24 +28,6 @@
 
 
 
-# tmux
-tmux	C
-tmux	D
-tmux	F
-tmux	G
-tmux	J
-tmux	K
-tmux	N
-tmux	Num9
-tmux	O
-tmux	P
-tmux	Q
-tmux	S
-tmux	V
-tmux	W
-tmux	X
-tmux	Y
-tmux	Z
 
 # podcast
 podcast	D

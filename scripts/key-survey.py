@@ -402,6 +402,41 @@ def names_the_key(name: str, haystack: str) -> bool:
     return name in haystack
 
 
+# A whole string literal read as the keys column of a printed key list.
+#
+# Case-sensitivity for one-letter keys stays, and the reason recorded for it
+# -- that "a" is an English article -- turned out to be the smaller half. A
+# standalone lowercase letter is also every format placeholder (`{e}`,
+# `{d} days ago`), every unit (`{}h {}m`), every aperture (`f/{ap:.1}`) and
+# every doc fixture (`add(a: u32, b: u32)`). Accepting lowercase anywhere in
+# the haystack moved 26 keys off this queue and every one I sampled was one of
+# those.
+#
+# What is safe is much narrower: a *whole, short* literal that reads as a
+# column of key caps. `apps/tmux` prints `("c", "New window")` and
+# `("n / p", "Next or previous window")`, and its prefix answers 'c' and not
+# 'C', so the card is right to be lowercase and the survey was wrong to be
+# blind to it.
+LABEL_SPLIT = re.compile(r"\s*(?:/|,| or )\s*")
+
+
+def label_keys(literal: str) -> set[str]:
+    """Keys named by a literal that is itself a key-list label."""
+    text = literal.strip()
+    if not text or len(text) > 12:
+        return set()
+    parts = [p.strip() for p in LABEL_SPLIT.split(text) if p.strip()]
+    if not parts or len(parts) > 4:
+        return set()
+    out: set[str] = set()
+    for part in parts:
+        if len(part) != 1 or not part.isalnum():
+            # One non-cap part and this is prose, not a key column.
+            return set()
+        out.add(part.upper() if part.isalpha() else f"Num{part}")
+    return out
+
+
 # A string with an escape character in it is not a label a reader sees.
 #
 # `apps/terminal` writes the sequences it sends to the program inside as
@@ -428,6 +463,7 @@ def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
         return None
 
     matched: set[str] = set()
+    from_labels: set[str] = set()
     literals: list[str] = []
     has_list = False
     kept_sources: list[str] = []
@@ -444,6 +480,13 @@ def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
             body = live[m.end() : m.end() + 4000]
             if is_key_list(body):
                 has_list = True
+                # The keys column of a list this app really prints. Read here
+                # and nowhere else: a bare `"v"` anywhere in a crate is not a
+                # key cap -- `apps/procexplorer` has `"v".repeat(72)` in a
+                # wrapping fixture -- but the first column of a table whose
+                # rows parse as key labels is exactly that.
+                for column in ROW_KEY_RE.findall(body):
+                    from_labels |= label_keys(column)
                 break
         # Comments and literals blanked before the key scan: a key named in
         # a comment is the fourth way a search says nothing, and my own
@@ -472,6 +515,7 @@ def survey(crate: Path) -> tuple[int, int, list[str], bool] | None:
         k
         for k in matched
         if k not in spelled
+        and k not in from_labels
         and not any(names_the_key(n, haystack) for n in NAMES.get(k, (k,)))
     )
     return len(matched), len(unnamed), unnamed, has_list
@@ -519,6 +563,7 @@ def _self_test() -> int:
         ("A", "Add City", False, "a capital inside a word does not name a key"),
         ("A", "A: analog", True, "a capital standing alone does"),
         ("A", "press a to switch", False, "lowercase does not -- `a` is an article"),
+        ("C", "press c to close", False, "lowercase in prose still does not"),
         ("G", "Grid view", False, "control: this is the exact pair that hid ten keys"),
         ("F5", "F5: refresh", True, "a multi-character name is a substring match"),
         ("Esc", "Esc: back", True, "ditto"),
@@ -604,7 +649,26 @@ def _self_test() -> int:
             "the rule is reachability, so renaming the handler changes nothing",
         ),
     ]
+    # `label_keys` cases. The four controls are the shapes that made the
+    # looser rule wrong: a format placeholder, a unit, an aperture and a doc
+    # fixture. Every one of them contains a standalone lowercase letter, and
+    # accepting those moved 26 keys off this queue for no reason at all.
+    labels_read: list[tuple[str, set[str], str]] = [
+        ("c", {"C"}, "a whole literal that is one key cap"),
+        ("n / p", {"N", "P"}, "two caps in one column, as tmux prints them"),
+        ("{v:.0}", set(), "control: a format placeholder"),
+        ("{}h {}m", set(), "control: units"),
+        ("f/{ap:.1}", set(), "control: an aperture, which even has a slash"),
+        ("add(a: u32, b: u32)", set(), "control: a doc fixture"),
+    ]
     bad = 0
+    for text, want_read, why in labels_read:
+        got_read = label_keys(text)
+        ok = got_read == want_read
+        print(f"  {'ok  ' if ok else 'FAIL'} {why}")
+        if not ok:
+            print(f"       label_keys({text!r}) -> {sorted(got_read)}")
+            bad += 1
     for sources, want_typed, why in typed:
         got_typed = typed_keys(sources)
         ok = got_typed == want_typed
@@ -644,7 +708,7 @@ def _self_test() -> int:
     if bad:
         print(f"self-test: {bad} failure(s)")
         return 1
-    total = len(cases) + len(named) + len(payloads) + len(labels) + len(typed)
+    total = len(cases) + len(named) + len(payloads) + len(labels) + len(typed) + len(labels_read)
     print(f"self-test ok -- {total} case(s)")
     return 0
 

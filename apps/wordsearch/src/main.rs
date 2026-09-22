@@ -3661,7 +3661,7 @@ mod tests {
                 let drawn = text::measure(&line, l.font, FontWeightHint::Regular);
                 assert!(
                     drawn <= inner,
-                    "at {w}x{h} the footer line is {drawn} wide and the bar is                      {inner}: {line:?}"
+                    "at {w}x{h} the bar is {inner} wide and the line is {drawn}: {line:?}"
                 );
             }
         }

@@ -51,10 +51,6 @@ whiteboard	A
 whiteboard	Y
 whiteboard	Z
 
-# wordsearch
-wordsearch	Num1
-wordsearch	Num2
-wordsearch	Num3
 
 # archivemanager
 archivemanager	A

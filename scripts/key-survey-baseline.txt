@@ -36,9 +36,6 @@
 
 
 
-# clipmanager
-clipmanager	O
-clipmanager	S
 
 # diskanalyzer
 diskanalyzer	F5

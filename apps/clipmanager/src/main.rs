@@ -745,6 +745,24 @@ enum TemplateSaved {
 /// the cut is reported rather than read whole into a window.
 const MAX_HISTORY_BYTES: usize = 8 * 1024 * 1024;
 
+/// The keys this window answers, as a reader sees them.
+///
+/// `Ctrl+S` and `Ctrl+O` are, in this file's own words, "the two keys that
+/// let a snippet outlive the window" -- everything else here moves history
+/// between entries. A pair that reaches the filesystem, named nowhere.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Move through the entries"),
+    ("PageUp / PageDown", "Move a screenful"),
+    ("Home", "First entry"),
+    ("Left / Right", "Switch between history and templates"),
+    ("Enter", "Copy the entry back to the clipboard"),
+    ("Delete", "Delete the entry"),
+    ("Ctrl+S", "Save the history to a file"),
+    ("Ctrl+O", "Open a saved history"),
+    ("Esc", "Quit"),
+];
+
 struct AppState {
     /// The save/open picker.
     picker: FilePicker,
@@ -776,6 +794,8 @@ struct AppState {
     /// Currently selected template index.
     selected_template: Option<usize>,
     /// Which text box holds the keyboard, if any.
+    /// Whether the shortcut card is up.
+    show_help: bool,
     focus: Option<Field>,
     /// The line the toolbar writes: what the last button did, or why it
     /// refused. A button that silently does nothing is indistinguishable from
@@ -823,6 +843,7 @@ impl AppState {
             template_body_input: String::new(),
             template_vars: Vec::new(),
             selected_template: None,
+            show_help: false,
             focus: None,
             status: String::new(),
             window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
@@ -1266,6 +1287,17 @@ fn build_frame(state: &AppState, width: f32, height: f32) -> Frame {
 
     let stats_y = height - STATS_BAR_H - 2.0;
     render_stats_bar(&mut frame, state, MARGIN, stats_y, inner_w, STATS_BAR_H);
+
+    if state.show_help {
+        guitk::shortcut::render_card(
+            &mut frame,
+            &state.palette,
+            (width, height),
+            0.0,
+            SHORTCUTS,
+            "F1 closes this",
+        );
+    }
 
     frame
 }
@@ -2689,6 +2721,19 @@ impl AppState {
         if !key.pressed {
             return Action::None;
         }
+        // Above the field branch, which takes every character and returns.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return Action::Redraw;
+        }
+        if self.show_help {
+            // Modal, and Escape especially: on this window it quits.
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return Action::Redraw;
+        }
+
         if let Some(field) = self.focus {
             return self.handle_key_in_field(key, field);
         }
@@ -3194,6 +3239,77 @@ mod tests {
     /// The contents are distinguishable on sight so a failure message says
     /// which row was reached, and the timestamps ascend so "most recent first"
     /// is the reverse of the loop that built them.
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Against a history with entries in it: an empty one answers none of the
+    /// keys that move through what is in it. The selection starts on the
+    /// first entry, so it is stepped down before `Up` is asked for -- the
+    /// fourth app in this queue where an arrow at the end of its travel
+    /// correctly reports nothing to do.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut state = with_entries(6);
+                state.handle_key(&guitk::probe::press(Key::Down), SIZE);
+                state.handle_key(&guitk::probe::press(Key::Down), SIZE);
+                assert_ne!(
+                    state.handle_key(&stroke, SIZE),
+                    Action::None,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing deletes behind it.**
+    ///
+    /// The control is the last third, and `Delete` is the right key for it
+    /// here rather than the wrong one: it removes an entry from a list the
+    /// program holds in memory, which the test can restore by building
+    /// another fixture. That is not true of `apps/procexplorer`'s Delete,
+    /// which ends a process, so the two cards' controls differ deliberately.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |state: &AppState| -> Vec<String> {
+            build_frame(state, SIZE.0, SIZE.1)
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut state = with_entries(6);
+        assert!(
+            !drawn(&state).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        state.handle_key(&guitk::probe::press(Key::F1), SIZE);
+        let missing = guitk::shortcut::missing_rows(&drawn(&state), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let before = state.store.entries.len();
+        state.handle_key(&guitk::probe::press(Key::Delete), SIZE);
+        assert_eq!(
+            state.store.entries.len(),
+            before,
+            "Delete removed an entry through the shortcut card"
+        );
+
+        state.handle_key(&guitk::probe::press(Key::F1), SIZE);
+        state.handle_key(&guitk::probe::press(Key::Delete), SIZE);
+        assert_ne!(
+            state.store.entries.len(),
+            before,
+            "control: Delete does nothing even with the card down"
+        );
+    }
+
     fn with_entries(count: u64) -> AppState {
         let mut state = AppState::new();
         for i in 0..count {

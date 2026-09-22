@@ -36,9 +36,9 @@
 //!
 //! Locks are advisory: they do not prevent I/O. Cooperating programs check.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
+use super::path::{Path, PathBuf};
 use crate::sync::Mutex;
 
 /// The kind of a record lock. `F_UNLCK` is an operation, not a stored state,
@@ -101,7 +101,7 @@ impl RecordLock {
 struct PathEntry {
     /// Retained for `/proc` display and as the fallback key where the
     /// filesystem has no stable inode. No longer the primary key.
-    path: String,
+    path: PathBuf,
     /// Filesystem identity, when there is one. The real key: a record lock
     /// taken under one name must be seen under every other name for the
     /// same file, or two writers both believe they hold the range.
@@ -114,10 +114,10 @@ struct PathEntry {
 /// Identity wins when both sides have one; otherwise the path. One function
 /// rather than four inline comparisons -- there are four entry points here,
 /// and four hand-written comparisons is how one of them ends up different.
-fn path_entry_matches(e: &PathEntry, path: &str, id: Option<crate::fs::vfs::FileId>) -> bool {
+fn path_entry_matches(e: &PathEntry, path: &Path, id: Option<crate::fs::vfs::FileId>) -> bool {
     match (e.id, id) {
         (Some(a), Some(b)) => a == b,
-        _ => e.path == path,
+        _ => e.path.as_path() == path,
     }
 }
 
@@ -180,12 +180,13 @@ fn subtract(held: &RecordLock, start: u64, end: u64) -> Vec<RecordLock> {
 /// belongs in the caller, which can retry; this layer never sleeps because it
 /// holds the table lock.
 pub fn set(
-    path: &str,
+    path: impl AsRef<Path>,
     owner: u64,
     start: u64,
     len: u64,
     lock_type: RecordLockType,
 ) -> crate::error::KernelResult<()> {
+    let path = path.as_ref();
     let want = RecordLock {
         owner,
         start,
@@ -201,7 +202,7 @@ pub fn set(
                 return Err(crate::error::KernelError::OutOfMemory);
             }
             table.push(PathEntry {
-                path: String::from(path),
+                path: path.to_path_buf(),
                 id,
                 locks: Vec::new(),
             });
@@ -238,7 +239,13 @@ pub fn set(
 }
 
 /// Release `[start, len)` for one owner, splitting any lock the cut divides.
-pub fn unlock(path: &str, owner: u64, start: u64, len: u64) -> crate::error::KernelResult<()> {
+pub fn unlock(
+    path: impl AsRef<Path>,
+    owner: u64,
+    start: u64,
+    len: u64,
+) -> crate::error::KernelResult<()> {
+    let path = path.as_ref();
     let end = if len == 0 {
         u64::MAX
     } else {
@@ -278,12 +285,13 @@ pub fn unlock(path: &str, owner: u64, start: u64, len: u64) -> crate::error::Ker
 /// boolean answer would be the same shape as a stub that always says "free".
 #[must_use]
 pub fn query(
-    path: &str,
+    path: impl AsRef<Path>,
     owner: u64,
     start: u64,
     len: u64,
     lock_type: RecordLockType,
 ) -> Option<RecordLock> {
+    let path = path.as_ref();
     let want = RecordLock {
         owner,
         start,
@@ -315,7 +323,8 @@ pub fn release_all(owner: u64) {
 
 /// Locks currently held on a path, for tests and `/proc`.
 #[must_use]
-pub fn list(path: &str) -> Vec<RecordLock> {
+pub fn list(path: impl AsRef<Path>) -> Vec<RecordLock> {
+    let path = path.as_ref();
     // Its own resolution. This is the fourth entry point into the table and
     // the second time a missing one was caught by the compiler rather than by
     // my own assertions -- the checks verify text, not scope.
@@ -341,7 +350,6 @@ pub fn list(path: &str) -> Vec<RecordLock> {
 /// the 2026-09-21 conversion -- no evidence for it at all.
 /// Otherwise two writers each believe they hold the same byte range.
 fn test_record_lock_follows_the_file() -> crate::error::KernelResult<()> {
-    use super::path::Path;
     use crate::fs::Vfs;
     const A: &[u8] = b"/tmp/reclock-id-a";
     const B: &[u8] = b"/tmp/reclock-id-b";
@@ -380,14 +388,8 @@ fn test_record_lock_follows_the_file() -> crate::error::KernelResult<()> {
         return Ok(());
     }
 
-    set(
-        core::str::from_utf8(A).unwrap_or(""),
-        1,
-        0,
-        16,
-        RecordLockType::Write,
-    )?;
-    let seen = list(core::str::from_utf8(B).unwrap_or(""));
+    set(Path::new(A), 1, 0, 16, RecordLockType::Write)?;
+    let seen = list(Path::new(B));
     // NEGATIVE CONTROL: an unrelated real file must report no locks. Without
     // it, a matcher that matched anything would satisfy the assertion below
     // while proving nothing about identity (dd-954).
@@ -395,13 +397,13 @@ fn test_record_lock_follows_the_file() -> crate::error::KernelResult<()> {
     let _ = Vfs::remove(Path::new(C));
     let unrelated = match Vfs::write_file(Path::new(C), b"x") {
         Ok(()) => {
-            let l = list(core::str::from_utf8(C).unwrap_or(""));
+            let l = list(Path::new(C));
             let _ = Vfs::remove(Path::new(C));
             l
         }
         Err(_) => Vec::new(),
     };
-    let _ = unlock(core::str::from_utf8(A).unwrap_or(""), 1, 0, 16);
+    let _ = unlock(Path::new(A), 1, 0, 16);
     let _ = Vfs::remove(Path::new(B));
     let _ = Vfs::remove(Path::new(A));
     if !unrelated.is_empty() {

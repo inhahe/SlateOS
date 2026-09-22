@@ -5377,7 +5377,7 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
                 cmd,
                 fcntl_cmd::F_OFD_GETLK | fcntl_cmd::F_OFD_SETLK | fcntl_cmd::F_OFD_SETLKW,
             );
-            fcntl_flock_apply(arg, entry, is_getlk, is_ofd)
+            fcntl_flock_apply(pid, arg, entry, is_getlk, is_ofd)
         }
         // Linux `kernel/fcntl.c` returns -EINVAL (not -ENOSYS) for
         // unknown `cmd` values.  Match the reference behaviour so
@@ -5422,7 +5422,138 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
 ///   off 16: i64 l_len
 ///   off 24: i32 l_pid
 ///   off 28: 4 bytes trailing padding
+/// Tag bit separating OFD lock owners from POSIX lock owners.
+///
+/// POSIX record locks belong to a **process**; OFD locks belong to an **open
+/// file description**. `reclock` has one `owner: u64` space, so the two must be
+/// distinguishable inside it. If they shared it, a process holding a POSIX lock
+/// that then took an OFD lock through another descriptor would compare equal to
+/// itself on one side and unequal on the other, depending on which numeric
+/// value happened to collide -- and `conflicts_with` keys entirely on
+/// `self.owner != other.owner`. Neither a pid nor a raw handle uses bit 63.
+const OFD_OWNER_TAG: u64 = 1 << 63;
+
+/// Map a lock request onto `reclock`'s owner space.
+fn flock_owner(pid: u64, raw_handle: u64, is_ofd: bool) -> u64 {
+    if is_ofd {
+        raw_handle | OFD_OWNER_TAG
+    } else {
+        // Masked rather than assumed: a pid with bit 63 set would otherwise
+        // impersonate an OFD owner.
+        pid & !OFD_OWNER_TAG
+    }
+}
+
+/// Resolve a `struct flock`'s `(l_whence, l_start, l_len)` into an absolute
+/// half-open byte range.
+///
+/// Split out so it can be tested without a process, a descriptor or a file --
+/// and because two of its cases are easy to get silently wrong on a path that
+/// decides who may write to what:
+///
+/// * `l_len == 0` means **to end of file**, not an empty range. It is passed
+///   through as 0, which `RecordLock::end` already reads as `u64::MAX`.
+/// * a **negative** `l_len` describes the range *below* the anchor:
+///   `[l_start + l_len, l_start)`. Treating it as an empty or forward range
+///   locks bytes the caller never named, which is worse than refusing.
+fn flock_range(
+    whence: i32,
+    l_start: i64,
+    l_len: i64,
+    cur_offset: u64,
+    file_size: u64,
+) -> Result<(u64, u64), i32> {
+    const SEEK_SET: i32 = 0;
+    const SEEK_CUR: i32 = 1;
+    const SEEK_END: i32 = 2;
+
+    let base: i64 = match whence {
+        SEEK_SET => 0,
+        SEEK_CUR => i64::try_from(cur_offset).map_err(|_| errno::EINVAL)?,
+        SEEK_END => i64::try_from(file_size).map_err(|_| errno::EINVAL)?,
+        _ => return Err(errno::EINVAL),
+    };
+    let anchor = base.checked_add(l_start).ok_or(errno::EINVAL)?;
+
+    let (start, len) = if l_len < 0 {
+        // POSIX: the range is [anchor + l_len, anchor).
+        let s = anchor.checked_add(l_len).ok_or(errno::EINVAL)?;
+        let n = l_len.checked_neg().ok_or(errno::EINVAL)?;
+        (s, n)
+    } else {
+        (anchor, l_len)
+    };
+
+    // A range starting before byte zero is EINVAL, not a clamp: clamping would
+    // silently widen the lock.
+    if start < 0 {
+        return Err(errno::EINVAL);
+    }
+    let start_u = u64::try_from(start).map_err(|_| errno::EINVAL)?;
+    let len_u = u64::try_from(len).map_err(|_| errno::EINVAL)?;
+    Ok((start_u, len_u))
+}
+
+/// Exercise [`flock_range`] over the cases POSIX defines and the ones that
+/// would quietly lock the wrong bytes.
+pub fn self_test_flock_range() -> crate::error::KernelResult<()> {
+    crate::serial_println!("[flock-range] Running range-resolution self-test...");
+
+    // (whence, l_start, l_len, cur, size, expected)
+    let ok_cases: [(i32, i64, i64, u64, u64, (u64, u64)); 7] = [
+        // SEEK_SET, plain forward range.
+        (0, 100, 50, 999, 999, (100, 50)),
+        // len 0 is to-EOF, preserved as 0 for RecordLock::end to read.
+        (0, 100, 0, 999, 999, (100, 0)),
+        // SEEK_CUR uses the descriptor's offset as the base.
+        (1, 10, 5, 200, 999, (210, 5)),
+        // SEEK_END uses the file size.
+        (2, 0, 10, 0, 500, (500, 10)),
+        // SEEK_END with a negative start: the last 10 bytes.
+        (2, -10, 10, 0, 500, (490, 10)),
+        // A NEGATIVE length: the range BELOW the anchor.
+        (0, 100, -40, 0, 999, (60, 40)),
+        // Negative length against a SEEK_CUR base.
+        (1, 100, -100, 50, 999, (50, 100)),
+    ];
+    for (w, st, ln, cur, size, want) in ok_cases {
+        match flock_range(w, st, ln, cur, size) {
+            Ok(got) if got == want => {}
+            other => {
+                crate::serial_println!(
+                    "[flock-range]   FAIL: (whence {}, start {}, len {}) gave {:?}, wanted Ok({:?})",
+                    w,
+                    st,
+                    ln,
+                    other,
+                    want
+                );
+                return Err(crate::error::KernelError::InternalError);
+            }
+        }
+    }
+
+    // (whence, l_start, l_len, cur, size, what)
+    let err_cases: [(i32, i64, i64, u64, u64, &str); 5] = [
+        (7, 0, 1, 0, 0, "unknown whence"),
+        (0, -1, 1, 0, 0, "range starts before byte zero"),
+        (0, 10, -100, 0, 0, "negative length reaches below zero"),
+        (0, i64::MAX, 1, 0, 0, "anchor + len overflows i64"),
+        (1, i64::MAX, 1, 8, 0, "SEEK_CUR base + start overflows i64"),
+    ];
+    for (w, st, ln, cur, size, what) in err_cases {
+        if let Ok(got) = flock_range(w, st, ln, cur, size) {
+            crate::serial_println!("[flock-range]   FAIL: {} was accepted as {:?}", what, got);
+            return Err(crate::error::KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[flock-range] Self-test passed (12 cases).");
+    Ok(())
+}
+
 fn fcntl_flock_apply(
+    pid: u64,
     flock_ptr: u64,
     entry: crate::proc::linux_fd::FdEntry,
     is_getlk: bool,
@@ -5476,10 +5607,10 @@ fn fcntl_flock_apply(
     // per-range tracking).  Validate they're well-formed integers
     // (any bit pattern is legal at the ABI level — Linux clamps
     // pathological ranges later in conflict detection).
-    let _l_start = i64::from_le_bytes([
+    let l_start = i64::from_le_bytes([
         buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
     ]);
-    let _l_len = i64::from_le_bytes([
+    let l_len = i64::from_le_bytes([
         buf[16], buf[17], buf[18], buf[19], buf[20], buf[21], buf[22], buf[23],
     ]);
     let l_pid = i32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
@@ -5502,15 +5633,63 @@ fn fcntl_flock_apply(
     if is_ofd && l_pid != 0 {
         return linux_err(errno::EINVAL);
     }
+
+    // The range, resolved against the descriptor rather than assumed. The
+    // parse above used to drop `_l_start` / `_l_len` on the floor, which is
+    // where the always-grant stub actually lived.
+    let path = entry_path_for_handle(entry.raw_handle);
+    // `Current(0)` reads the offset without moving it: asking a question
+    // about a lock must not seek the caller's descriptor as a side effect.
+    let cur_offset =
+        crate::fs::handle::seek(entry.raw_handle, crate::fs::handle::SeekFrom::Current(0))
+            .unwrap_or(0);
+    let file_size = crate::fs::Vfs::metadata(path.as_path())
+        .map(|m| m.size)
+        .unwrap_or(0);
+    let (lock_start, lock_len) = match flock_range(l_whence, l_start, l_len, cur_offset, file_size)
+    {
+        Ok(r) => r,
+        Err(e) => return linux_err(e),
+    };
+    let owner = flock_owner(pid, entry.raw_handle, is_ofd);
+    let want_type = if l_type == fcntl_cmd::lease_type::F_RDLCK {
+        crate::fs::reclock::RecordLockType::Read
+    } else {
+        crate::fs::reclock::RecordLockType::Write
+    };
     if is_getlk {
         // Report "no conflict": overwrite l_type with F_UNLCK and
         // zero l_pid.  Other fields (l_whence / l_start / l_len) are
         // unchanged per Linux semantics — the kernel only writes
         // l_type and l_pid (and clears l_start/l_len on Linux but
         // many libcs don't rely on it; we preserve the input).
-        let unlck = fcntl_cmd::lease_type::F_UNLCK as i16;
-        buf[0..2].copy_from_slice(&unlck.to_le_bytes());
-        buf[24..28].copy_from_slice(&0i32.to_le_bytes());
+        // A LOOKUP, not a claim. This used to write F_UNLCK unconditionally,
+        // which is an assertion about the world rather than an answer.
+        match crate::fs::reclock::query(path.as_path(), owner, lock_start, lock_len, want_type) {
+            None => {
+                let unlck = fcntl_cmd::lease_type::F_UNLCK as i16;
+                buf[0..2].copy_from_slice(&unlck.to_le_bytes());
+                buf[24..28].copy_from_slice(&0i32.to_le_bytes());
+            }
+            Some(holder) => {
+                let ty = if holder.lock_type == crate::fs::reclock::RecordLockType::Read {
+                    fcntl_cmd::lease_type::F_RDLCK as i16
+                } else {
+                    fcntl_cmd::lease_type::F_WRLCK as i16
+                };
+                buf[0..2].copy_from_slice(&ty.to_le_bytes());
+                // POSIX: l_pid is -1 when the holder is an OFD lock, since
+                // an open file description has no pid to report.
+                let rep_pid = if holder.owner & OFD_OWNER_TAG != 0 {
+                    -1i32
+                } else {
+                    i32::try_from(holder.owner).unwrap_or(-1)
+                };
+                buf[24..28].copy_from_slice(&rep_pid.to_le_bytes());
+                buf[8..16].copy_from_slice(&(holder.start as i64).to_le_bytes());
+                buf[16..24].copy_from_slice(&(holder.len as i64).to_le_bytes());
+            }
+        }
         // SAFETY: validate_user_write confirmed [flock_ptr, +32) is
         // a writable user range.
         if let Err(e) =
@@ -5519,8 +5698,28 @@ fn fcntl_flock_apply(
             return linux_err(linux_errno_for(e));
         }
     }
-    // SETLK / SETLKW / GETLK / SETLK(F_UNLCK) all succeed: 0.
-    SyscallResult::ok(0)
+    // GETLK has already answered above.
+    if is_getlk {
+        return SyscallResult::ok(0);
+    }
+    if l_type == fcntl_cmd::lease_type::F_UNLCK {
+        return match crate::fs::reclock::unlock(path.as_path(), owner, lock_start, lock_len) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(e) => linux_err(linux_errno_for(e)),
+        };
+    }
+    match crate::fs::reclock::set(path.as_path(), owner, lock_start, lock_len, want_type) {
+        Ok(()) => SyscallResult::ok(0),
+        // F_SETLKW should BLOCK here. It cannot: there is no wait-queue hook
+        // for a lock table, which is the same reason `sys_flock` returns
+        // EWOULDBLOCK for every conflict regardless of LOCK_NB. Answering
+        // EAGAIN matches the neighbouring syscall instead of inventing a
+        // second, differently-wrong behaviour -- and when the hook lands both
+        // are fixed in one place. `sched::block_current` already exists, so
+        // the hook is the missing piece, not the primitive.
+        Err(crate::error::KernelError::WouldBlock) => linux_err(errno::EAGAIN),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `lseek(fd, offset, whence)` — only meaningful for `File` handles.
@@ -80974,6 +81173,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     #[inline(never)]
     fn self_test_fcntl_record_locks() -> crate::error::KernelResult<()> {
+        // A synthetic caller for these rungs. Every one of them drives a gate
+        // that answers before the owner is consulted (lockable kind, EFAULT,
+        // argument validation), so the pid is immaterial -- but it is named
+        // rather than a bare 0 repeated at eleven call sites.
+        const SELFTEST_PID: u64 = 0;
         use crate::serial_println;
         // Batch 113: fcntl(F_GETLK / F_SETLK / F_SETLKW) and OFD
         // variants — single-process advisory record locks.  No other
@@ -81032,23 +81236,36 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // per-file state in this kernel).
             let file_entry = FdEntry::file(0xDEAD_BEEF, oflags::O_RDWR);
             let console_entry = FdEntry::console(oflags::O_RDONLY);
+
             let pipe_entry = FdEntry::pipe(0, oflags::O_RDONLY);
 
             // Lockable-kind gate: Console / Pipe -> EBADF.
             let flock_zero = [0u8; 32];
-            let r = fcntl_flock_apply(flock_zero.as_ptr() as u64, console_entry, false, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock_zero.as_ptr() as u64,
+                console_entry,
+                false,
+                false,
+            );
             if r.value != -i64::from(errno::EBADF) {
                 serial_println!("[syscall/linux]   FAIL: F_SETLK on Console not EBADF");
                 return Err(KernelError::InternalError);
             }
-            let r = fcntl_flock_apply(flock_zero.as_ptr() as u64, pipe_entry, false, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock_zero.as_ptr() as u64,
+                pipe_entry,
+                false,
+                false,
+            );
             if r.value != -i64::from(errno::EBADF) {
                 serial_println!("[syscall/linux]   FAIL: F_SETLK on Pipe not EBADF");
                 return Err(KernelError::InternalError);
             }
 
             // NULL flock_ptr on a File kind -> EFAULT.
-            let r = fcntl_flock_apply(0, file_entry, false, false);
+            let r = fcntl_flock_apply(SELFTEST_PID, 0, file_entry, false, false);
             if r.value != -i64::from(errno::EFAULT) {
                 serial_println!("[syscall/linux]   FAIL: F_SETLK(NULL) not EFAULT");
                 return Err(KernelError::InternalError);
@@ -81062,7 +81279,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             flock[8..16].copy_from_slice(&0i64.to_le_bytes());
             flock[16..24].copy_from_slice(&100i64.to_le_bytes());
             flock[24..28].copy_from_slice(&0i32.to_le_bytes());
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, false, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                false,
+                false,
+            );
             if r.value != 0 {
                 serial_println!(
                     "[syscall/linux]   FAIL: F_SETLK F_WRLCK -> {} (expected 0)",
@@ -81074,7 +81297,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // Bogus l_type (3) -> EINVAL.
             let mut flock = [0u8; 32];
             flock[0..2].copy_from_slice(&3i16.to_le_bytes());
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, false, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                false,
+                false,
+            );
             if r.value != -i64::from(errno::EINVAL) {
                 serial_println!("[syscall/linux]   FAIL: F_SETLK bad l_type not EINVAL");
                 return Err(KernelError::InternalError);
@@ -81084,7 +81313,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             let mut flock = [0u8; 32];
             flock[0..2].copy_from_slice(&0i16.to_le_bytes());
             flock[2..4].copy_from_slice(&3i16.to_le_bytes());
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, false, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                false,
+                false,
+            );
             if r.value != -i64::from(errno::EINVAL) {
                 serial_println!("[syscall/linux]   FAIL: F_SETLK bad l_whence not EINVAL");
                 return Err(KernelError::InternalError);
@@ -81094,14 +81329,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             let mut flock = [0u8; 32];
             flock[0..2].copy_from_slice(&0i16.to_le_bytes());
             flock[24..28].copy_from_slice(&42i32.to_le_bytes());
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, false, true);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                false,
+                true,
+            );
             if r.value != -i64::from(errno::EINVAL) {
                 serial_println!("[syscall/linux]   FAIL: F_OFD_SETLK l_pid!=0 not EINVAL");
                 return Err(KernelError::InternalError);
             }
 
             // POSIX (non-OFD) ignores l_pid on input -> success.
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, false, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                false,
+                false,
+            );
             if r.value != 0 {
                 serial_println!("[syscall/linux]   FAIL: F_SETLK with l_pid!=0 (POSIX) not 0");
                 return Err(KernelError::InternalError);
@@ -81114,7 +81361,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             flock[8..16].copy_from_slice(&0i64.to_le_bytes());
             flock[16..24].copy_from_slice(&500i64.to_le_bytes());
             flock[24..28].copy_from_slice(&1234i32.to_le_bytes());
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, true, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                true,
+                false,
+            );
             if r.value != 0 {
                 serial_println!(
                     "[syscall/linux]   FAIL: F_GETLK -> {} (expected 0)",
@@ -81157,7 +81410,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // (no-op release matches Linux semantics).
             let mut flock = [0u8; 32];
             flock[0..2].copy_from_slice(&(fcntl_cmd::lease_type::F_UNLCK as i16).to_le_bytes());
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, false, false);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                false,
+                false,
+            );
             if r.value != 0 {
                 serial_println!(
                     "[syscall/linux]   FAIL: F_SETLK F_UNLCK -> {} (expected 0)",
@@ -81170,7 +81429,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // F_GETLK: writes back F_UNLCK.
             let mut flock = [0u8; 32];
             flock[0..2].copy_from_slice(&(fcntl_cmd::lease_type::F_RDLCK as i16).to_le_bytes());
-            let r = fcntl_flock_apply(flock.as_mut_ptr() as u64, file_entry, true, true);
+            let r = fcntl_flock_apply(
+                SELFTEST_PID,
+                flock.as_mut_ptr() as u64,
+                file_entry,
+                true,
+                true,
+            );
             if r.value != 0 {
                 serial_println!(
                     "[syscall/linux]   FAIL: F_OFD_GETLK -> {} (expected 0)",
@@ -81184,6 +81449,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
+        // Release what these rungs actually took. Before this change
+        // `F_SETLK` granted without recording anything, so there was nothing
+        // to clean up; now there is, and a self-test that leaves locks in a
+        // global table makes `/proc` report holders that do not exist -- the
+        // failure `reclock`'s own module doc warns about.
+        crate::fs::reclock::release_all(flock_owner(SELFTEST_PID, 0xDEAD_BEEF, false));
+        crate::fs::reclock::release_all(flock_owner(SELFTEST_PID, 0xDEAD_BEEF, true));
+
         Ok(())
     }
 

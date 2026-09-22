@@ -2125,6 +2125,16 @@ extern "C" fn kernel_main() -> ! {
     // ioctl testable without a process and an fd, and the part where an error
     // discards the wrong sectors rather than just failing. The layer below is
     // covered by `blkdev::self_test_discard`.
+    // fcntl record-lock range resolution -- SEEK_CUR/SEEK_END bases, and the
+    // two POSIX shapes that quietly lock the wrong bytes if mishandled:
+    // l_len == 0 meaning to-EOF, and a NEGATIVE l_len meaning the range below
+    // the anchor.
+    selftest::dispatch_debug(
+        "fcntl flock range",
+        selftest::Severity::Diagnostic,
+        syscall::linux::self_test_flock_range(),
+    );
+
     selftest::dispatch_debug(
         "blkdiscard range",
         selftest::Severity::Diagnostic,

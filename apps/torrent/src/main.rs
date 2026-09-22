@@ -2806,11 +2806,18 @@ impl TorrentApp {
     /// twice does nothing the second time, and saying so is how every other
     /// key in this app behaves.
     fn set_filter(&mut self, filter: TorrentFilter) -> EventResult {
-        // Consumed even when the filter does not change. `Ignored` means
-        // "propagate to parent", and 3 on a list already showing Seeding is
-        // still this window's key -- it has simply already done what it does.
-        // `EventResult` has no redraw distinction, so the early return this
-        // replaces bought nothing and gave a key away.
+        // `Ignored` when the filter does not change, and that is not a key
+        // being given away. I removed this early return on 2026-09-21 arguing
+        // that `Ignored` means "propagate to parent" and so handed 3 to
+        // whatever sits above this window. There is nothing above it:
+        // `handle_event` maps `Ignored` to `Response::Idle`, so in a
+        // top-level app the word means "nothing changed, do not redraw".
+        // Putting it back, because a redundant repaint of every row on a key
+        // that did nothing is a real if small cost, and the reason I took it
+        // out was simply wrong.
+        if self.filter == filter {
+            return EventResult::Ignored;
+        }
         self.filter = filter;
         EventResult::Consumed
     }
@@ -4660,18 +4667,28 @@ about anything -- it drew {} text command(s)",
     /// sidebar shows its own selection, but nothing else on screen mentions
     /// **Every key the card advertises is answered by this window.**
     ///
-    /// One state is enough here and that is worth saying, because three apps
-    /// in this tree need two: nothing in this window claims a key only while
-    /// a dialog is up. The picker is the one thing that would, and it takes
-    /// events before `handle_key` ever runs.
+    /// Two filter states, and the reason is the one that took longest to
+    /// see. `Consumed` here asks whether the key *did* something, not whether
+    /// the window owns it: `Ignored` in a top-level app means "nothing
+    /// changed, do not redraw" -- `handle_event` maps it to `Response::Idle`
+    /// and there is no parent to propagate to. So `1` on a list already
+    /// showing All is answered and reports `Ignored`, correctly. Running the
+    /// guard from two different filters gives every digit a state in which it
+    /// changes something.
     #[test]
     fn every_advertised_key_does_something() {
         for (label, what) in SHORTCUTS {
             for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
-                let mut app = TorrentApp::new();
-                assert_eq!(
-                    app.handle_event(&Event::Key(stroke.clone())),
-                    EventResult::Consumed,
+                let answered =
+                    [TorrentFilter::All, TorrentFilter::Error]
+                        .into_iter()
+                        .any(|start| {
+                            let mut app = TorrentApp::new();
+                            app.filter = start;
+                            app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                        });
+                assert!(
+                    answered,
                     "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
                     stroke.key
                 );

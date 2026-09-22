@@ -1417,6 +1417,34 @@ fn sanitise_filename(title: &str) -> String {
     }
 }
 
+/// The keys this window answers, as a reader sees them.
+///
+/// Three were spelled nowhere -- `B`, `V` and `Ctrl+F` -- and two of those
+/// change what the list contains rather than what it shows: `B` hides every
+/// note that is not a favourite, which looks exactly like losing them.
+///
+/// **No `?` row, and this one is not about typing.** `Key::Slash` here has no
+/// Shift check, so `?` already opens the search box. Binding it to this card
+/// would take a key the program answers and give it a second meaning --
+/// the same arm `apps/ebook` has, and the second time this exact shape has
+/// decided the question.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Tab", "Next panel"),
+    ("Up / Down", "Move through the notes"),
+    ("Enter", "Write in the selected note"),
+    ("Ctrl+N", "New note"),
+    ("Ctrl+Shift+N", "New notebook"),
+    ("Ctrl+F", "Search the notes"),
+    ("/", "Search, without the Ctrl"),
+    ("Ctrl+S", "Save to a file"),
+    ("S", "Change the sort order"),
+    ("P", "Pin the selected note"),
+    ("V", "Mark the selected note a favourite"),
+    ("B", "Show only favourites"),
+    ("Esc", "Clear the search and the tag filter"),
+];
+
 pub struct NotesApp {
     pub notebooks: Vec<Notebook>,
     pub notes: Vec<Note>,
@@ -1425,6 +1453,8 @@ pub struct NotesApp {
     pub search_query: String,
     pub active_tag_filter: Option<String>,
     pub sort_order: SortOrder,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub active_panel: ActivePanel,
     pub show_favorites_only: bool,
     /// Whether typing goes to the search box rather than to the shortcuts.
@@ -1475,6 +1505,7 @@ impl NotesApp {
             search_query: String::new(),
             active_tag_filter: None,
             sort_order: SortOrder::DateModified,
+            show_help: false,
             active_panel: ActivePanel::NoteList,
             show_favorites_only: false,
             text_entry: None,
@@ -2466,6 +2497,19 @@ impl NotesApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
+        // Above the text-entry branch, which takes the keyboard and returns.
+        // Placed after it, the card could be raised from the list and then
+        // not dismissed while a note was being written.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         if self.text_entry.is_some() {
             return self.handle_text_entry_key(key);
         }
@@ -2916,6 +2960,17 @@ impl NotesApp {
         }
 
         cmds.extend(self.picker.render(&self.palette, width, height));
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         cmds
     }
@@ -4249,6 +4304,103 @@ mod tests {
         let mut app = NotesApp::new();
         app.seed_sample_content();
         app
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Two states. `P` and `V` act on the selected note and report `Ignored`
+    /// with nothing selected; `Esc` is answered only when there is a search
+    /// or a tag filter to clear, and correctly propagates otherwise. An
+    /// empty-app guard would have called three rows broken and been wrong
+    /// about all three.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|moved| {
+                    // Both states carry notes, and one has the selection off
+                    // the top. Neither is arbitrary:
+                    //
+                    // An empty app answers none of the keys that move through
+                    // what is in it, so a state with no notes tests nothing
+                    // and reports a defect.
+                    //
+                    // `Up` on the first note returns `Ignored`, which in a
+                    // top-level app means "nothing to redraw" rather than
+                    // "not my key" -- `handle_event` maps it to
+                    // `Response::Idle` and there is no parent above it. So
+                    // `Consumed` here asks whether the key *did* something,
+                    // not whether the window owns it, and a key at the end of
+                    // its travel does nothing. That is why the second state
+                    // moves the selection first.
+                    let mut app = seeded();
+                    if moved {
+                        app.search_query = "a".to_string();
+                        app.handle_key(&key_of(Key::Down, Modifiers::NONE));
+                    }
+                    app.handle_key(&stroke) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the last third: `B` behind the card must not hide every
+    /// note that is not a favourite, and must do it with the card down.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &NotesApp| -> String {
+            app.render_commands(1200.0, 800.0)
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+
+        let mut app = seeded();
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE));
+        let shown = drawn(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let favourites_only = app.show_favorites_only;
+        app.handle_key(&key_of(Key::B, Modifiers::NONE));
+        assert_eq!(
+            app.show_favorites_only, favourites_only,
+            "B filtered the list through the shortcut card"
+        );
+
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE));
+        app.handle_key(&key_of(Key::B, Modifiers::NONE));
+        assert_ne!(
+            app.show_favorites_only, favourites_only,
+            "control: B does nothing even with the card down"
+        );
+    }
+
+    fn key_of(key: Key, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }
     }
 
     fn press(k: Key) -> Event {

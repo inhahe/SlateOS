@@ -45,10 +45,6 @@ fileassoc	E
 fileassoc	F
 fileassoc	Q
 
-# notes
-notes	B
-notes	F
-notes	V
 
 # whiteboard
 whiteboard	A

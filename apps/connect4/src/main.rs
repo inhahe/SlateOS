@@ -1017,7 +1017,11 @@ fn button(f: &mut Frame, r: Rect, target: Target, body: &str, size: f32, face: C
 const HELP_TITLE: &str = "Connect Four";
 
 const HELP_ROWS: [(&str, &str); 7] = [
-    ("Left / Right", "choose a column"),
+    // `A` and `D` are bound beside the arrows -- `Key::Left | Key::A` --
+    // and the sheet named only the arrows. Slashes rather than "or A / D":
+    // the label parser splits on `/` and `,`, so a row reading
+    // "Left / Right, or A / D" would hand it the piece "or A".
+    ("Left / Right / A / D", "choose a column"),
     ("Enter / Space", "drop a piece there"),
     ("1 - 7", "drop straight into that column"),
     ("U / Ctrl+Z", "take back your last move"),

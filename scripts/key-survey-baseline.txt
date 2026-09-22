@@ -37,9 +37,6 @@
 
 
 
-# diskanalyzer
-diskanalyzer	F5
-diskanalyzer	L
 
 # diskcleanup
 diskcleanup	A
@@ -68,14 +65,10 @@ camera	B
 # charmap
 charmap	C
 
-# connect4
-connect4	D
 
 # defrag
 defrag	Q
 
-# mandelbrot
-mandelbrot	Minus
 
 # netmanager
 netmanager	F5

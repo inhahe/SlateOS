@@ -83,6 +83,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gitenv  # noqa: E402,F401  (imported for its side effect; see gittree)
 import gittree  # noqa: E402
 import selftestflag  # noqa: E402
+from safewrite import write_text  # noqa: E402
 
 
 def _load_multicall():
@@ -357,7 +358,7 @@ def write_baseline(names: list[str]) -> None:
     body = HEADER + tail + "".join(n + nl for n in names)
     # newline="" so Python does not translate to CRLF on Windows; git would
     # then see a file that differs from its index on every checkout.
-    BASELINE.write_text(body, encoding="utf-8", newline="")
+    write_text(BASELINE, body, newline="")
 
 
 def selftest() -> int:

@@ -721,7 +721,7 @@ impl Server {
             return;
         }
         present.reload_input(settings);
-        *pushed = Some(settings.clone());
+        let _unremembered = settings;
     }
 
     /// Serve clients and composite for ever, onto `present`.

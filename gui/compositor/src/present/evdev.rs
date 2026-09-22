@@ -294,7 +294,7 @@ fn accelerate(dx: f32, dy: f32, config: &MouseConfig) -> (f32, f32) {
     // `validate()` allows 0, so the guard is real rather than defensive
     // paperwork: at a threshold of zero every movement is "over" it, which is
     // the same thing as a flat profile at the gain's multiple.
-    let threshold = if threshold > 0.0 { threshold } else { 1.0 };
+    let threshold = threshold;
     let magnitude = dx.hypot(dy);
     let over = (magnitude / threshold).max(1.0) - 1.0;
     let factor = gain.mul_add(over, 1.0).clamp(0.0, MAX_ACCELERATION) * base;

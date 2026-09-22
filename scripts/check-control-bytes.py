@@ -105,6 +105,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import gitenv  # noqa: E402,F401  (imported for its side effect; see gittree)
+from safewrite import write_text  # noqa: E402
 import gittree  # noqa: E402
 
 BASELINE = Path(__file__).resolve().parent / "control-bytes-baseline.txt"
@@ -435,7 +436,7 @@ def write_baseline(found: list[tuple[str, int, int, int]]) -> int:
     # `newline=""` so this is LF on every platform: the file is read back by
     # this same gate, and a fixture whose bytes depend on the host is the one
     # kind that cannot be trusted.
-    BASELINE.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="")
+    write_text(BASELINE, "\n".join(lines) + "\n", newline="")
     return len(keys)
 
 

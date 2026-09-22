@@ -154,6 +154,7 @@ STUB_DEP = "notimpl"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gittree  # noqa: E402
 import srcload  # noqa: E402
+from safewrite import write_text  # noqa: E402
 
 # Loaded from source rather than through `importlib`: a `SourceFileLoader`
 # consults `__pycache__`, whose staleness check is `(mtime, size)` at
@@ -962,7 +963,7 @@ def main() -> int:
             "",
         ]
         body += sorted(gated)
-        BASELINE.write_text("\n".join(body) + "\n", encoding="utf-8", newline="")
+        write_text(BASELINE, "\n".join(body) + "\n", newline="")
         print(f"wrote {_relpath(BASELINE)} with {len(gated)} entries")
         return 0
 

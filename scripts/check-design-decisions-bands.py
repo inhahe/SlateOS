@@ -115,6 +115,8 @@ import gitenv  # noqa: E402
 import gittree  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from safewrite import write_text  # noqa: E402
 PROJECT_ROOT = os.path.dirname(HERE)
 DEFAULT_DOC = os.path.join(PROJECT_ROOT, "design-decisions.md")
 DEFAULT_BASELINE = os.path.join(HERE, "design-decisions-baseline.json")
@@ -464,9 +466,7 @@ def write_baseline(path, headings, doc_rel):
         "grandfathered_duplicates": dups,
         "counts": {str(n): c for n, c in sorted(counts.items())},
     }
-    with open(path, "w", encoding="utf-8", newline="\n") as fh:
-        json.dump(payload, fh, indent=2)
-        fh.write("\n")
+    write_text(path, json.dumps(payload, indent=2) + "\n")
     return counts, dups
 
 

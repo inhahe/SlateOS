@@ -146,6 +146,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gittree  # noqa: E402
+from safewrite import write_text  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 # Written to the real disk; `--write-baseline` updates a file rather than
@@ -1439,7 +1440,7 @@ def main() -> int:
             "",
         ]
         body += sorted(keys)
-        BASELINE.write_text("\n".join(body) + "\n", encoding="utf-8", newline="")
+        write_text(BASELINE, "\n".join(body) + "\n", newline="")
         print(f"wrote {_relpath(BASELINE)} with {len(keys)} entries")
         return 0
 

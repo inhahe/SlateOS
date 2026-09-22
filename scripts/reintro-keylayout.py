@@ -63,6 +63,12 @@ import re
 import subprocess
 import sys
 
+# `safewrite` lives beside this file. The path is derived from `__file__`
+# rather than spelled "scripts", because a tool that rewrites source files
+# is the wrong place to discover it was not started from the repo root.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from safewrite import write_text  # noqa: E402
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TARGET = "x86_64-pc-windows-gnu"
 
@@ -687,9 +693,7 @@ def write_source(path, text, crlf):
     newline flip would make any accidental leftover invisible in `git diff`
     under `autocrlf=input`, which is exactly when you most want to see it.
     """
-    (ROOT / path).write_text(
-        text.replace("\n", "\r\n") if crlf else text, encoding="utf-8", newline=""
-    )
+    write_text(ROOT / path, text.replace("\n", "\r\n") if crlf else text, newline="")
 
 
 def run_tests(pkg):

@@ -121,6 +121,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import selftestflag  # noqa: E402
+from safewrite import write_text  # noqa: E402
 
 CASES_DIR = Path(__file__).resolve().parent / "dup-differential-cases"
 TARGET = "x86_64-pc-windows-gnu"
@@ -288,7 +289,7 @@ def selftest() -> int:
     with tempfile.TemporaryDirectory() as td:
         global CASES_DIR
         saved, CASES_DIR = CASES_DIR, Path(td)
-        (CASES_DIR / "empty.txt").write_text("# only a comment\n", encoding="utf-8", newline="")
+        write_text(CASES_DIR / "empty.txt", "# only a comment\n", newline="")
         try:
             read_cases("empty")
             failures.append("an empty case list must raise, not report agreement")

@@ -90,6 +90,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gitenv  # noqa: E402
 import gittree  # noqa: E402
 from rustlex import live_code  # noqa: E402
+from safewrite import write_text  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = Path(__file__).resolve().parent / "quote-names-baseline.txt"
@@ -1174,7 +1175,7 @@ def write_baseline(found: dict[str, list[tuple[int, str, str]]]) -> None:
     # newline="" stops Python translating "\n" to "\r\n" on Windows. Git
     # normalises it on commit either way, so without this the file on disk
     # differs from the file in the index and every checkout shows it dirty.
-    BASELINE.write_text("\n".join(body) + "\n", encoding="utf-8", newline="")
+    write_text(BASELINE, "\n".join(body) + "\n", newline="")
     total = sum(len(v) for v in found.values())
     print(f"wrote {BASELINE.name} with {len(found)} files, {total} sites")
 

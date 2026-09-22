@@ -21,43 +21,25 @@
 # file says "looked at, and not a defect". This one says "a defect, not fixed
 # yet". An entry in the wrong file is how a bug becomes a decision.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# undelete
-undelete	A
-undelete	D
-
-
-
-
-# defrag
-defrag	Q
-
-
-
-# partmanager
-partmanager	Z
-
-# startupmanager
-startupmanager	Q
+# EMPTY, 2026-09-22.
+#
+# It held 91 apps when this file's survey was first run by hand, and the
+# number was wrong three times before it was right: 26 of 68, then 55 of 259,
+# then 36 of 133, each revision a flaw in the instrument rather than a change
+# in the tree. The count reached zero after the fifth and last of those --
+# the survey could not see a key dispatched from a typed character, which is
+# how `apps/tmux` answered seventeen of them.
+#
+# The file stays because the check is not "was the queue ever emptied" but
+# "is it empty now". A key added tomorrow and named nowhere fails the gate
+# and lands here with a line of its own.
+#
+# What emptying it actually found, kept short because the commits have the
+# detail: apps/paint could not save or open a picture and advertised both;
+# apps/markdowneditor's Ctrl+O was bound to nothing; apps/tmux's prefix z
+# announced a zoom it did not perform; apps/camera carried a complete
+# twenty-five row keyboard reference that nothing drew; apps/fileassoc and
+# apps/diskcleanup each had a key one press from deleting files and named it
+# nowhere. Six defects that a list of unnamed keys led to, none of which is
+# about naming.
 

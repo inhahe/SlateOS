@@ -166632,6 +166632,15 @@ half:
 
 > Run the cheap checks **before** a boot. Run **nothing** during one.
 
+**And that includes `git push`, which is not obvious.** A push feels like a git
+operation, not a consumer of anything a boot needs. But `scripts/hooks/pre-push`
+mentions `wsl` **15 times**, so pushing while a boot is running puts two
+processes on the same WSL distro -- and an empty WSL answer is what surfaces as
+`ProbeError` at gate 50 and refuses the build. With 20 commits unpushed and a
+boot 85 gates in, the arithmetic still favours waiting: the commits are on disk
+and only a machine failure loses them, while a push that kills the boot costs two
+hours for certain.
+
 The probe's message is worth knowing too, because it cost me the diagnosis
 before it cost me the boot. It reports a `None` result as *"bash itself
 rejected the line"* and says a framing failure would have raised `ProbeError`

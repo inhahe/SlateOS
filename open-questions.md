@@ -3392,6 +3392,30 @@ one out. Someone tidying later may "fix" it to match its neighbours without
 realising that is a user-visible behaviour change rather than a consistency
 cleanup. Answering it turns a silent default into a decision either way.
 
+**The same question arrives for tags, with one extra wrinkle -- added
+2026-09-21.** File *tags* (`kernel/src/fs/tags.rs`) face the identical choice:
+does a tag belong to the file or to the name? Answer A (the file) and renaming
+a tagged photo keeps its tags; answer B (the name) and it loses them. Whatever
+you decide for history, the same answer almost certainly wants to apply here,
+so this is one decision rather than two.
+
+The wrinkle is that tags are stored **twice**, once each way round:
+
+| index | maps | answers |
+|---|---|---|
+| `by_path` | name -> its tags | "what is this file tagged?" |
+| `by_tag` | tag -> the names carrying it | "what is tagged *holiday*?" |
+
+Change only one of them and the two stop being mirrors: a file with two names
+would be one entry in the first and two in the second, so the answers to those
+two questions would disagree about the same file. *What changes:* searching for
+a tag would list one file twice, under both its names.
+
+That is a consequence of the choice, not a separate decision, and it is mine to
+implement once you pick -- I mention it only so the cost is visible: option A
+here means re-keying both indices, not one, and resolving identities back to
+names when displaying a search result.
+
 **Where it bites:** `kernel/src/fs/history.rs`. The conversion itself is small
 and mechanical (the pattern is in `kernel/src/fs/immutable.rs`); it is the
 *behaviour* that needs your call, not the work. Background in

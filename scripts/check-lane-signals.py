@@ -143,11 +143,22 @@ def clear_halt(d: Path) -> bool:
     return False
 
 
-def post_notice(d: Path, to: str, frm: str, text: str) -> Path:
+def post_notice(d: Path, to: str, frm: str | None, text: str) -> Path:
+    """Leave a notice for lane `to` (or `all`) from lane `frm`.
+
+    `frm` is None when the sender is not a lane -- the operator's integration
+    session, or a shell outside every lane worktree.  The sender goes into the
+    file NAME, so it has to be a legal path component everywhere: this used to
+    be passed as "?", which Windows refuses in a file name, so precisely the
+    sender least able to name itself could not leave a notice at all.
+    """
     d.mkdir(parents=True, exist_ok=True)
     stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    p = d / f"{NOTICE_PREFIX}{to.lower()}-{frm.lower()}-{stamp}.md"
-    p.write_bytes((f"from: lane {frm}\nto: {to}\nat: {_now()}\n\n{text}\n").encode("utf-8"))
+    known = bool(frm) and frm.isalnum()
+    tag = frm.lower() if known else "unknown"
+    who = f"lane {frm}" if known else "a session that is not a lane"
+    p = d / f"{NOTICE_PREFIX}{to.lower()}-{tag}-{stamp}.md"
+    p.write_bytes((f"from: {who}\nto: {to}\nat: {_now()}\n\n{text}\n").encode("utf-8"))
     return p
 
 
@@ -279,6 +290,15 @@ def _self_test() -> int:
             want = 2 if lane == "B" else 1
             check(f"lane {lane} sees the broadcast", len(got), want)
 
+        # A sender that is not a lane still gets a notice through, under a
+        # file name every host accepts -- "?" used to go into the name.
+        anon = post_notice(d, "all", None, "the lanes changed")
+        check("a non-lane sender can post", anon.is_file(), True)
+        check("and is named in a portable way", "-unknown-" in anon.name, True)
+        check("and says so in the notice",
+              "not a lane" in anon.read_text(encoding="utf-8"), True)
+        anon.unlink()
+
         # --- Notice expiry ---
         # A notice that just landed is fresh.
         fresh = list(d.glob(f"{NOTICE_PREFIX}*"))
@@ -367,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"check-lane-signals: --to {args.to!r} is not a lane; use one "
                   f"of {', '.join(sorted(valid))}", file=sys.stderr)
             return 2
-        p = post_notice(d, args.to, lane or "?", args.notice)
+        p = post_notice(d, args.to, lane, args.notice)
         print(f"notice left for {args.to}: {p}")
         return 0
 

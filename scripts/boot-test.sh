@@ -729,7 +729,7 @@ check_rootfs_freshness() {
 # $FASTPY_SLATEOS_SYSROOT first and otherwise falls back to a *sibling* `os`
 # checkout -- `<fastpy>/../os/toolchain/sysroot/lib`, which is the integration
 # worktree, never the lane worktree the build ran from.  Nothing in
-# ctest-fixtures.py sets that variable, so from os-lane-{a,b,c} the fallback is
+# ctest-fixtures.py sets that variable, so from any os-lane-* the fallback is
 # what fires and the fixtures link a libc.a from a different checkout than the
 # one every check in this script reasons about.  Observed 2026-08-31: all three
 # lanes sharing one 11-day-old copy.
@@ -823,7 +823,7 @@ check_sysroot_identity() {
         # missing or unidentifiable libc -- and that is not what happened.  Ours
         # is present and named on the next line (the early return above proves
         # it exists).  What failed is fastpy's *search*: its last candidate is a
-        # sibling checkout literally named `os`, so from `os-lane-{a,b,c}` it
+        # sibling checkout literally named `os`, so from any `os-lane-*` it
         # looks only at the integration worktree and never at the tree being
         # tested.  Misnaming a search defect as a missing file sends the reader
         # to rebuild a sysroot that is already there.

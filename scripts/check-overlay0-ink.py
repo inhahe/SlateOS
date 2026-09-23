@@ -55,8 +55,11 @@ from rustslice import production_end  # noqa: E402
 
 NL = chr(10)
 
-# Lane C's trees. The roles are `appearance`'s, and nothing outside these
-# directories draws with them.
+# Lane C's trees under three lanes. The roles are `appearance`'s, and nothing
+# outside these directories draws with them.
+# (Since the six-lane split of 2026-09-22 these directories are no longer one
+# lane's: gui/ is lanes C and F, apps/ lane E, the net crates, aes and hmac
+# lane A.  The population this scans is unchanged; only the label is history.)
 ROOTS = ("gui", "apps")
 
 # Being switched off, and nothing else. `is_empty`, `is_none`, `available`

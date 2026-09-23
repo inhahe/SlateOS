@@ -38,7 +38,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 NL = chr(10)
 
-# Lane B's trees. A crate outside these belongs to another lane, and a gate
+# (Since the six-lane split of 2026-09-22 these trees are lanes B and D --
+# userspace/ and init/ are B's; posix/, services/ and toolchain/ are D's.
+# The population is unchanged; a failure here now names one of two owners.)
+# Lane B's trees under three lanes. A crate outside these belongs to another lane, and a gate
 # scoped wider than its owner can fix blocks people who cannot act on it.
 #
 # `toolchain` IS one of them, and was missing here until 2026-09-13. This list

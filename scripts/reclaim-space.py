@@ -4,7 +4,7 @@
 Why this exists
 ---------------
 
-All three lanes build on one volume.  `scripts/boot-test.sh` refuses to start
+Every lane builds on one volume.  `scripts/boot-test.sh` refuses to start
 below a free-space floor (default 20 GiB) because on 2026-08-15 the volume hit
 zero bytes free and a half-written edit truncated a kernel source file to zero
 bytes.  That guard is a detector, not a remedy: when it fires, the only advice
@@ -30,7 +30,7 @@ Order of attack (cheapest and most clearly disposable first):
 
   1. this worktree's `build/` scratch older than --scratch-age-days,
   2. *scratch worktrees'* `target/` -- trees that are neither the integration
-     checkout nor one of the three lanes, so they are nobody's working tree,
+     checkout nor one of the lanes', so they are nobody's working tree,
   3. the integration checkout's `target/` (nobody develops there),
   4. *our own* `target/`  -- we pay for our own rebuild before anyone else's,
   5. every *lane's* `target/`  -- only with --allow-lane-targets.
@@ -46,7 +46,7 @@ Step 2 exists because "every other worktree" was previously one undifferentiated
 class behind --allow-lane-targets, which put a dead bisect checkout -- created
 for one afternoon's investigation and never revisited -- behind the same guard
 as a lane's live working tree.  Those are not the same risk.  `CLAUDE.md` names
-exactly four blessed trees (`os`, `os-lane-a/b/c`); a worktree on any other
+exactly seven blessed trees (`os`, `os-lane-a` .. `os-lane-f`); a worktree on any other
 branch, or on none, was made ad hoc for a scratch task, and its `target/` costs
 nobody a rebuild they were ever going to run.  Taking it at the defaults is what
 lets a lane that trips the floor stop paying for the privilege with its own cold
@@ -207,9 +207,11 @@ def worktrees(repo):
 
 
 # The branches that make a worktree somebody's.  `main` is the integration
-# checkout; `lane-a/b/c` are the three agents' working trees.  `CLAUDE.md`
-# ("Worktrees -- one checkout per lane") blesses exactly these four and no more,
-# so anything else is a scratch tree somebody made for one task.
+# checkout; `lane-a` .. `lane-f` are the six agents' working trees.  `CLAUDE.md`
+# ("Worktrees -- one checkout per lane") blesses exactly these seven and no more,
+# so anything else is a scratch tree somebody made for one task.  The pattern
+# takes any single letter, so the six-lane split needed no change here -- which
+# is the reason it was written as a pattern rather than a list.
 INTEGRATION_BRANCH = "main"
 LANE_BRANCH = re.compile(r"^lane-[a-z]$")
 
@@ -635,7 +637,7 @@ def main(argv=None):
     ap.add_argument(
         "--allow-lane-targets",
         action="store_true",
-        help="also consider the *other three lanes'* target/ dirs -- someone "
+        help="also consider the *other lanes'* target/ dirs -- someone "
         "else's working tree, and someone else's rebuild. Without it a run can "
         "only cost the integration checkout, this worktree, and worktrees that "
         "belong to no lane at all (a detached bisect/scratch checkout, which is "

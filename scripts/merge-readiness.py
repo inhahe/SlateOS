@@ -10,13 +10,13 @@ Why this exists
 ---------------
 
 `CLAUDE.md` says: fetch and merge `origin/main`, run the full suite, *then* merge
-up. The reason is that three lanes land work concurrently, so a suite run against
+up. The reason is that six lanes land work concurrently, so a suite run against
 your branch alone says nothing about the combination you are about to push.
 
 Obeying it literally on every merge is expensive, and the expense is what makes it
 get skipped. A boot test is ~25 minutes; `main` moves several times an hour. If
 every merge-up required a re-merge and a fresh boot test, each lane would spend its
-day re-testing because the other two keep landing work -- and a rule that costs
+day re-testing because the other five keep landing work -- and a rule that costs
 that much gets quietly dropped, which is how lane A came to push a combination
 nobody had tested on 2026-09-11 (`known-issues.md` →
 `TD-A-I-MERGED-TO-MAIN-HAVING-TESTED-ONLY-THE-PRE-MERGE-STATE`).
@@ -55,6 +55,7 @@ Exit codes: `0` always, except `2` for a usage or git error, and the
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import subprocess
 import json
 import pathlib
@@ -62,16 +63,37 @@ import sys
 import tempfile
 
 # What each lane's own suite speaks for. Deliberately the lane's *write* scope
-# from CLAUDE.md rather than "everything the build touches": the boot test
-# compiles the whole workspace, so an incoming commit anywhere can break the
-# build, but only a change inside your own scope can change the BEHAVIOUR your
-# suite asserted. Those two failures want different answers, so they are reported
-# separately below rather than merged into one verdict.
-LANE_SCOPE: dict[str, tuple[str, ...]] = {
-    "A": ("kernel/", "bench/", "toolchain/", "scripts/boot-test.sh"),
-    "B": ("posix/", "userspace/", "services/", "init/"),
-    "C": ("gui/", "apps/", "net", "pkg/"),
-}
+# rather than "everything the build touches": the boot test compiles the whole
+# workspace, so an incoming commit anywhere can break the build, but only a
+# change inside your own scope can change the BEHAVIOUR your suite asserted.
+# Those two failures want different answers, so they are reported separately
+# below rather than merged into one verdict.
+#
+# The scope is `which-lane.py`'s ownership table, imported rather than copied.
+# This file used to carry its own three-row copy, and by the six-lane split it
+# had drifted from the real one twice over (all of `toolchain/` under lane A,
+# where `toolchain/stubs/` was lane B's; a `pkg/` for lane C that has never
+# existed). Longest-prefix matching comes with it, so a carve-out such as
+# `gui/compositor/` (lane F inside lane C's `gui/`) is classified correctly.
+
+
+def _load_which_lane():
+    """`scripts/which-lane.py` as a module (by path: the name has a hyphen)."""
+    here = pathlib.Path(__file__).resolve().parent / "which-lane.py"
+    spec = importlib.util.spec_from_file_location("which_lane", here)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {here}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+WHICH_LANE = _load_which_lane()
+
+
+def lane_scope(lane: str) -> list[str]:
+    """The prefixes `lane` owns, for the report (carve-outs are in owner_of)."""
+    return [p for p, owner in WHICH_LANE.OWNERSHIP if owner == lane]
 
 # Paths that are nobody's subsystem but everybody's verdict: if an incoming commit
 # changes one of these, every lane's gate results were produced by different code
@@ -88,11 +110,12 @@ def classify(paths: list[str], lane: str) -> dict[str, list[str]]:
     this script agrees with my model of git, which is not the thing that can be
     wrong here.
     """
-    scope = LANE_SCOPE.get(lane, ())
     out: dict[str, list[str]] = {"mine": [], "machinery": [], "elsewhere": []}
     for p in paths:
         norm = p.replace("\\", "/")
-        if any(norm.startswith(s) for s in scope):
+        # An owned file beats the machinery rule: `scripts/boot-test.sh` is
+        # lane A's own, not everybody's, even though it lives in scripts/.
+        if WHICH_LANE.owner_of(norm) == lane:
             out["mine"].append(norm)
         elif any(norm.startswith(s) for s in SHARED_MACHINERY):
             out["machinery"].append(norm)
@@ -113,21 +136,15 @@ def git(*args: str) -> str:
 def current_lane() -> str:
     """Ask the project's own authority rather than re-deriving it.
 
-    `which-lane.py --letter` is the single source of truth for this mapping and it
-    exits 2 on an unknown lane. Re-implementing its CLAUDE_CONFIG_DIR logic here
-    would create a second copy to drift -- which is the failure this whole
-    directory of scripts keeps finding elsewhere.
+    `which-lane.py`'s detector is the single source of truth for which lane
+    this is, and it answers "unknown" rather than guessing. Re-implementing it
+    here would create a second copy to drift -- which is the failure this whole
+    directory of scripts keeps finding elsewhere. Run from a lane worktree, the
+    worktree itself identifies the lane; elsewhere, `SLATEOS_LANE` or
+    `ORCH2_AGENT_NAME` must say.
     """
-    res = subprocess.run(
-        [sys.executable, "scripts/which-lane.py", "--letter"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if res.returncode != 0:
-        return ""
-    return res.stdout.strip().upper()[:1]
+    letter, _how = WHICH_LANE.detect_lane()
+    return letter or ""
 
 
 BOOT_HISTORY = pathlib.Path(__file__).resolve().parent.parent / "bench" / "boot-history.jsonl"
@@ -209,7 +226,8 @@ def boot_coverage_lines() -> list[str]:
 def report() -> int:
     lane = current_lane()
     if not lane:
-        print("merge-readiness: cannot tell which lane this is; run which-lane.py", file=sys.stderr)
+        print("merge-readiness: cannot tell which lane this is; run it from your lane "
+              "worktree, or see `python scripts/which-lane.py`", file=sys.stderr)
         return 2
 
     try:
@@ -252,7 +270,7 @@ def report() -> int:
         print("  CLAUDE.md exists for, and the one time it actually costs something.")
     else:
         print(f"  No incoming file is in lane {lane}'s scope "
-              f"({', '.join(LANE_SCOPE.get(lane, ()))}).")
+              f"({', '.join(lane_scope(lane))}).")
         print("  A completed suite run still speaks for your subsystem: the code it")
         print("  asserted behaviour about is byte-identical after the merge.")
 
@@ -318,10 +336,49 @@ def self_test() -> int:
             {"mine": [], "machinery": [], "elsewhere": ["kernel/src/main.rs"]},
         ),
         (
-            "lane C: net and netproto both match the bare `net` prefix",
-            "C",
+            "lane A owns net/ and netproto/ since the six-lane split",
+            "A",
             ["net/tcp.rs", "netproto/src/lib.rs"],
             {"mine": ["net/tcp.rs", "netproto/src/lib.rs"], "machinery": [], "elsewhere": []},
+        ),
+        (
+            "and lane C, which owned them before, no longer does",
+            "C",
+            ["net/tcp.rs", "netproto/src/lib.rs"],
+            {"mine": [], "machinery": [], "elsewhere": ["net/tcp.rs", "netproto/src/lib.rs"]},
+        ),
+        (
+            "lane F: gui/compositor is carved out of lane C's gui/",
+            "F",
+            ["gui/compositor/src/lib.rs", "gui/toolkit/src/lib.rs"],
+            {"mine": ["gui/compositor/src/lib.rs"], "machinery": [],
+             "elsewhere": ["gui/toolkit/src/lib.rs"]},
+        ),
+        (
+            "lane C: the rest of gui/ is still lane C's, the carve-out is not",
+            "C",
+            ["gui/compositor/src/lib.rs", "gui/toolkit/src/lib.rs"],
+            {"mine": ["gui/toolkit/src/lib.rs"], "machinery": [],
+             "elsewhere": ["gui/compositor/src/lib.rs"]},
+        ),
+        (
+            "lane D: services/ is D's except services/netstack, which is A's",
+            "D",
+            ["services/init/src/main.rs", "services/netstack/src/main.rs"],
+            {"mine": ["services/init/src/main.rs"], "machinery": [],
+             "elsewhere": ["services/netstack/src/main.rs"]},
+        ),
+        (
+            "create-ext4-rootfs.sh is lane D's own, and beats the scripts/ rule",
+            "D",
+            ["scripts/create-ext4-rootfs.sh"],
+            {"mine": ["scripts/create-ext4-rootfs.sh"], "machinery": [], "elsewhere": []},
+        ),
+        (
+            "lane E: apps/ is in scope",
+            "E",
+            ["apps/chess/src/main.rs"],
+            {"mine": ["apps/chess/src/main.rs"], "machinery": [], "elsewhere": []},
         ),
         (
             "kernel/src/net is lane A's, NOT lane C's -- the prefix is anchored",

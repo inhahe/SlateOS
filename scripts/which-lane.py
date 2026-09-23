@@ -12,17 +12,21 @@ because every copy that existed under the three-lane split drifted.
 WHAT IDENTIFIES A LANE
 ----------------------
 The operator starts each session under an agent name, "Lane A" .. "Lane F"
-(orchestrator2's `--agent-name`; `ListAgents` shows it on its first line:
-"This session is Lane-D [...]").  That name is the identity.  Nothing carries
-it into a subprocess automatically -- orchestrator2 does not export it -- so the
-lane is accepted from four places:
+(orchestrator2's `--agent-name Lane-D`, or `/rename Lane D` in an open
+session; `ListAgents` shows it on its first line: "This session is Lane-D
+[...]").  That name is the identity.  Spell it with a hyphen when it is given
+with `--agent-name`: orchestrator2's agent registry refuses a space, and a
+session it refuses is outside the registry -- it receives no halts.  Nothing
+carries the name into a subprocess automatically -- orchestrator2 does not
+export it -- so the lane is accepted from four places:
 
   1. `--agent-name NAME` or `--lane X` on the command line: the agent passes the
      name `ListAgents` showed it;
   2. `SLATEOS_LANE` in the environment (a letter, or a name like `Lane D`);
-  3. `ORCH2_AGENT_NAME` in the environment -- orchestrator2's own fallback for
-     `--agent-name`.  A launcher that sets it (instead of passing the flag) makes
-     the name visible to every subprocess, this script included;
+  3. `ORCH2_AGENT_NAME` in the environment, if anything has put it there.
+     orchestrator2 does not: the variable is its fallback for `--agent-name` on
+     the *launch*, which consumes it, so an agent's own processes do not see it
+     (a session opened in a hub that was already running never did);
   4. the worktree this copy of the script lives in: `os-lane-d/scripts/` answers
      D, provided that worktree really has `lane-d` checked out.
 

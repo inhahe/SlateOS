@@ -65,7 +65,7 @@ prints it and ignores it. What it reads instead, and requires to agree:
 |---|---|---|
 | `--agent-name` / `--lane` | `--agent-name Lane-D` | what you pass it, from `ListAgents` |
 | `SLATEOS_LANE` | `D` | if a launcher sets it |
-| `ORCH2_AGENT_NAME` | `Lane-D` | orchestrator2's env fallback for `--agent-name`; a non-lane name is ignored |
+| `ORCH2_AGENT_NAME` | `Lane-D` | orchestrator2's fallback for `--agent-name`, consumed by the launch that reads it, so normally absent from an agent's own environment; a non-lane name is ignored |
 | the worktree the script lives in | `os-lane-d` with `lane-d` checked out | the directory name *and* the branch in its `.git` must agree |
 
 Any two that disagree make the answer UNKNOWN — deliberately not "the

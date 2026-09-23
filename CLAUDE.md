@@ -17,63 +17,81 @@ Read the relevant design files before implementing any subsystem. Do not guess a
   notes are in `build-env.md`. They are needed only when a build actually
   fails for want of them.
 
-## Three Sessions — Find Out Which One You Are, First
+## Six Sessions — Find Out Which One You Are, First
 
-This repo is worked by **three Claude sessions simultaneously**, one per
+This repo is worked by **six Claude sessions simultaneously**, two per
 Claude account. Each owns a disjoint lane of the tree and must not write
 outside it: two sessions editing the same file, with one silently
 clobbering the other on its next write, is the most expensive failure
 mode in this arrangement.
 
+**Your lane is your agent name.** The operator starts each session as
+`Lane A` … `Lane F`, and `ListAgents` prints the name on its first line
+("This session is Lane-D …" — the agent registry cannot hold a space, so it
+may read `Lane-D`). Your Claude account no longer tells you anything: two
+lanes share each one, so `CLAUDE_CONFIG_DIR` is not evidence of your lane.
+
 **Before you touch a file, run:**
 
 ```bash
-python scripts/which-lane.py
+python scripts/which-lane.py --agent-name "<your agent name>"
 ```
 
-It reports your lane from `CLAUDE_CONFIG_DIR` (set per account), along
-with your branch and the globs you may and may not write:
+It confirms your lane and prints your worktree, your branch and the paths
+you may write. Run from inside your own worktree it needs no argument — the
+worktree identifies the lane — and it refuses if the name, the worktree and
+the branch checked out in it disagree. `--owner <path>` answers "whose file
+is this?"; `--table` prints the whole map.
 
-| `CLAUDE_CONFIG_DIR` | Lane | Scope | Branch |
+| Agent name | Lane | Scope | Worktree / branch |
 |---|---|---|---|
-| `~/.claude` (or unset) | **A** | kernel & core — `kernel/**`, `bench/**`, the boot test | `lane-a` |
-| `~/.claude-account-b` | **B** | POSIX & userland — `posix/**`, `userspace/**`, `services/**`, `init/**` | `lane-b` |
-| `~/.claude-account-c` | **C** | graphics, apps & net — `gui/**`, `apps/**`, `net*/**`, `pkg/**` | `lane-c` |
+| `Lane A` | **A** | kernel, core & networking — `kernel/**`, `bench/**`, the boot test, `net*/**`, `aes/**`, `hmac/**`, `services/netstack/**` | `os-lane-a` / `lane-a` |
+| `Lane B` | **B** | userland — `userspace/**`, `init/**` | `os-lane-b` / `lane-b` |
+| `Lane C` | **C** | desktop & toolkit — `gui/**` except lane F's crates | `os-lane-c` / `lane-c` |
+| `Lane D` | **D** | POSIX, libc & toolchain — `posix/**`, `services/**` (not `netstack`), the sysroot, the rootfs recipe | `os-lane-d` / `lane-d` |
+| `Lane E` | **E** | applications — `apps/**` | `os-lane-e` / `lane-e` |
+| `Lane F` | **F** | graphics stack — `gui/compositor`, `gui/window`, `gui/remote`, `gui/font`, `gui/imagecodec`, `gui/vulkan` | `os-lane-f` / `lane-f` |
+
+The exact globs are in `scripts/which-lane.py`, which every script that
+needs ownership reads; where two overlap, the longer path wins. This table
+replaced the three-lane one on 2026-09-22; the old version is kept in
+`backups/three-lanes/` (under a name that is never loaded as instructions).
 
 If it exits 2 (`lane: UNKNOWN`), **stop and ask the operator** — do not
 guess a lane.
 
-**The full rules live in `roadmap.md` → "Three-Agent Parallel
-Execution"**: the ownership map, the `requests/` dropbox for cross-lane
-changes, the append-only conventions for the shared documents
+**The full rules live in `roadmap.md` → "Six-Agent Parallel Execution"**:
+the ownership map and why it is cut where it is, the `requests/` dropbox for
+cross-lane changes, the per-lane conventions for the shared documents
 (`known-issues.md`, `design-decisions.md`, `open-questions.md`,
-`todo.txt`), the per-lane `design-decisions.md` numbering split, the
-automatic lock that serialises QEMU, and the per-lane
+`todo.txt`), the per-lane `design-decisions.md` numbering bands, the
+automatic lock that serialises QEMU, the joint tasks, and the per-lane
 backlogs. Read that section before picking a task.
 
 Work only roadmap items tagged with your own lane letter. When you need a
-change in another lane's tree, file `requests/<from>-<to>-<slug>.md` and
-pick up something else rather than making the change yourself.
+change in another lane's tree, file `requests/<from>-<to>-<slug>.md` (for
+several addressees, `a-bc-<slug>.md`) and pick up something else rather than
+making the change yourself.
 
 **`requests/` is for technical exchange, not for saying "stop".** A request
 lives on a branch, so the lane it is addressed to cannot see it until they
 fetch and merge — which makes it useless for anything time-sensitive. When you
 need every lane quiescent (a shared-file repair, a migration, anything that
-cannot be done while three agents are writing), **raise a halt** rather than
+cannot be done while six agents are writing), **raise a halt** rather than
 filing a request or asking the operator to relay it:
 
     python scripts/check-lane-signals.py --raise-halt "why"
     python scripts/check-lane-signals.py --clear-halt      # when it has passed
 
 It is stored in the git *common* directory, which every worktree shares, so it
-is visible to all three lanes immediately with no merge and no push. The boot
+is visible to all six lanes immediately with no merge and no push. The boot
 test checks it as its first gate and refuses to start while it is in force —
 which is the point, since a run is two to three hours and a halt is only worth
 anything if it is seen before one begins. Lift it explicitly when done; nothing
 expires it.
 
-**Fetch and merge `origin/main` at the start of every task, and merge your
-lane up to `main` at the end of every green one.** Every shared document —
+**Fetch and merge `origin/main` at the start of every task, and publish your
+lane to `main` at the end of every green one.** Every shared document —
 `roadmap.md`, `known-issues.md`, `design-decisions.md`, `open-questions.md`,
 `todo.txt`, and the whole `requests/` dropbox — exists *once per branch*.
 They are files, not a shared mailbox: a request another lane filed for you is
@@ -98,7 +116,8 @@ Two corollaries:
 
 If the project ever drops back to a single session, restore
 `roadmap.single-agent.md` over `roadmap.md` and this section reverts to
-"edit any file freely."
+"edit any file freely." To go back to three sessions, follow
+`backups/three-lanes/README.md`.
 
 The **zone names** used elsewhere in this project (kernel-core, gui-toolkit,
 drivers, and so on) map to directories in `subsystem-map.md`. That is a
@@ -108,13 +127,24 @@ ownership boundary.
 ### Worktrees — one checkout per lane
 
 **Work in your lane's own directory, not in `E:\visual studio projects\os`.**
+A session may be *started* in `os` — the operator's launcher does that — and
+reach its worktree by absolute path; what matters is where it edits and
+where it commits.
 
 | Lane | Directory | Branch |
 |---|---|---|
 | **A** | `E:\visual studio projects\os-lane-a` | `lane-a` |
 | **B** | `E:\visual studio projects\os-lane-b` | `lane-b` |
 | **C** | `E:\visual studio projects\os-lane-c` | `lane-c` |
-| — | `E:\visual studio projects\os` | `main` — integration/merge tree only |
+| **D** | `E:\visual studio projects\os-lane-d` | `lane-d` |
+| **E** | `E:\visual studio projects\os-lane-e` | `lane-e` |
+| **F** | `E:\visual studio projects\os-lane-f` | `lane-f` |
+| — | `E:\visual studio projects\os` | `main` — a read-only window onto the trunk |
+
+A lane worktree that has never been provisioned cannot boot-test: run
+`bash scripts/bootstrap-worktree.sh` in it first (it fetches `limine/`, copies
+`rootfs.ext4` and builds the service binaries the kernel embeds), and read
+`roadmap.md` rule 6 before trusting a green boot from it.
 
 Migrated from `D:` to `E:` on 2026-09-06. **The `D:` copy still exists as a
 fallback and still has working git**, so a command built from a remembered
@@ -123,7 +153,7 @@ on `D:`, stop: your session was copied and its transcript predates the move.
 A halt is armed there saying so.
 
 A branch does **not** isolate a working directory: a repository has one
-checkout per worktree, so three agents sharing `os` and each "working on
+checkout per worktree, so several agents sharing `os` and each "working on
 their own branch" all share one `HEAD`. When one runs `git checkout`, it
 moves everyone's HEAD and drags the others' uncommitted edits onto the
 switched-to branch. That is not hypothetical — it already happened here and
@@ -138,17 +168,23 @@ another agent may have uncommitted work there. See `roadmap.md` Step 0.5.
 
 ### Branch Strategy
 
-Each lane works on its own branch — `lane-a`, `lane-b`, `lane-c`, each in
-its own worktree above — and merges to `main` when the work compiles and
-passes tests. Before merging:
+Each lane works on its own branch — `lane-a` … `lane-f`, each in its own
+worktree above — and publishes to `main` when the work compiles and passes
+tests. Before publishing:
 
 - `git fetch origin && git merge origin/main` (**merge**, not rebase — your
   lane branch is published, and rebasing it would force a force-push)
 - Run the full test suite
-- Only then merge up
+- Only then publish, with a fast-forward push of the commit you tested:
+  `git push origin <tested-sha>:main`. This is `design-decisions.md` §538,
+  the operator's answer to C-Q3. If `main` moved in the meantime, git
+  refuses — merge `origin/main` again, re-test, retry. Do not merge inside
+  the shared `os` checkout: two lanes merging there at once edit the same
+  working tree, and with six lanes publishing it is the busiest shared state
+  on the machine.
 
 Because the boot test builds the whole workspace, a broken lane blocks the
-other two. Never merge a red tree to `main` "to unblock myself."
+other five. Never merge a red tree to `main` "to unblock myself."
 
 ### CLAUDE.md
 
@@ -380,7 +416,7 @@ The human operator is often away from the computer or asleep. Do not stop and wa
     - **Keep it to what a decision needs.** Detail that only matters *after* the answer belongs in `known-issues.md` or the request file, not in the question. Prefer a short table to a paragraph, and a concrete example to an abstraction. Never make the operator read a survey to reach a choice.
     - **The same `**In short:**` opener applies to `design-decisions.md` entries** — one plain-language paragraph before the rationale, so a decision can be re-read a year later without reconstructing the context.
   - **Not every deferred question belongs in the queue.** If a question cannot be answered *usefully* yet — it needs evidence that does not exist, or a prerequisite that is not built — it is not a decision waiting on the operator; it is a decision waiting on the project. Put it in **`deferred-questions.md`** instead, with an explicit trigger for when to promote it back into `open-questions.md`. Keep `open-questions.md` to things the operator can actually decide today; a queue padded with not-yet-answerable items trains the reader to skim it.
-- **Push often, on your own volition.** You do not need to ask. Run `git push` after every completed task, or at minimum after every few meaningful commits. If you've done good work and the machine loses power, that work should not be lost. Never let a long stretch of unpushed commits accumulate. With three lanes live, push **your own lane branch** (`git push origin lane-<x>`); push `main` only after a merge that built and passed a boot test. **Never force-push** anything — a force-push to a shared branch destroys the other two lanes' work. If a push is rejected as non-fast-forward, `git fetch origin && git merge origin/<branch>` and push again; never resolve it with `--force` and never rebase a branch you have already pushed.
+- **Push often, on your own volition.** You do not need to ask. Run `git push` after every completed task, or at minimum after every few meaningful commits. If you've done good work and the machine loses power, that work should not be lost. Never let a long stretch of unpushed commits accumulate. With six lanes live, push **your own lane branch** (`git push origin lane-<x>`); publish to `main` only a commit that built and passed a boot test, by fast-forward push (`git push origin <tested-sha>:main`, design-decisions §538). **Never force-push** anything — a force-push to a shared branch destroys the other lanes' work. If a push is rejected as non-fast-forward, `git fetch origin && git merge origin/<branch>` and push again; never resolve it with `--force` and never rebase a branch you have already pushed.
 - **If you're genuinely stuck** — a design contradiction, a hardware issue, a question that truly requires human judgment — document exactly what you need in `todo.txt`, commit and push your progress so far, then stop. But the bar for "genuinely stuck" is high. Most obstacles have answers in the design files or can be resolved with a reasonable default.
 - **Default behavior: schedule a 60-second heartbeat wakeup every turn.** Unless work is genuinely blocked on a human decision, at the end of every turn call `ScheduleWakeup` with `delaySeconds=60` (prompt `<<autonomous-loop-dynamic>>` for autonomous roadmap work) so the autonomous loop keeps ticking and forward progress continues. This is the standing default — you do not need the operator to ask for it; re-establish the heartbeat automatically whenever it is not already running. The only exception is when work is genuinely blocked on a human decision — then schedule no wakeup and let the loop end (see the state-(3) rule above). On this project roadmap work almost always exists, so 60s should be the norm; do not back off to longer idle intervals.
 
@@ -454,10 +490,12 @@ were not used to derive the active rate.)
 8. If you created a new crate or module, add a `//!` module doc explaining what it does and how it fits into the architecture.
 9. Commit with a clear message. One logical change per commit.
 10. **`git push`** your branch. Do not leave completed work only in the local repo.
-11. **Merge your lane up into `main` and push `main`** (from the `os`
-    integration worktree). Work that lives only on your lane branch is
-    invisible to the other two lanes — including any `requests/` you filed
-    for them, which is the whole point of having filed them.
+11. **Publish your lane to `main`**: from your own worktree, after merging
+    `origin/main` and re-testing, `git push origin <tested-sha>:main` (a
+    fast-forward push — design-decisions §538; see "Branch Strategy"). Work
+    that lives only on your lane branch is invisible to the other lanes —
+    including any `requests/` you filed for them, which is the whole point of
+    having filed them.
 
 ---
 

@@ -39,8 +39,11 @@ request, because an issue you fixed but cannot mark stays open forever in the
 one file whose job is knowing what is open. Everything *else* about another
 lane's entry still needs a request. This file is lane-partitioned, not
 append-only: inside your own entries you may edit, restructure and archive
-freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
-`design-decisions.md` §437 for why.
+freely. See `roadmap.md` → "Six-Agent Parallel Execution" rule 3, and
+`design-decisions.md` §437 for why. With six lanes the letter in a new
+entry's heading is one of A–F; an entry written before 2026-09-22 keeps the
+letter of the lane that filed it, and whoever owns its code *now*
+(`python scripts/which-lane.py --owner <path>`) is who fixes it.
 
 ---
 
@@ -147458,7 +147461,7 @@ The manifest deliberately omits the 13 names the promoted fastpy commands own
 `design-decisions.md` **§108 part 1**: fastpy stays *"additive only… No Rust
 coreutil is touched, shadowed or retired"*, and *"a silent swap is a
 user-visible policy change and is not Claude's to make."* Which implementation a
-stock install should prefer is `deferred-questions.md` **D-Q1**, whose trigger
+stock install should prefer is `deferred-questions.md` **DQ1**, whose trigger
 — a fastpy utility with a parity suite and a performance bar — has not been
 met, so it stays deferred and this change does not touch it. The manifest and
 the collision guard are two independent things that would both have to be wrong

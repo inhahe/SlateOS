@@ -664,6 +664,116 @@ def test_a_first_ever_band_says_the_position_is_the_writers(mod):
                "yours" in row[0])
 
 
+def _six_lane_table(d_region, extra_rows=()):
+    return "\n".join([
+        "## Numbering and file order",
+        "",
+        "| Band | Owner | Status | Region |",
+        "|---|---|---|---|",
+        f"| {SECT}200{ENDASH}{SECT}299 | **lane A** | closed {EMDASH} full | mid |",
+        f"| {SECT}600{ENDASH}{SECT}699 | **lane A** | **open** | interleaved |",
+        f"| {SECT}1100{ENDASH}{SECT}1199 | **lane D** | **open** | {d_region} |",
+        *extra_rows,
+        "",
+    ])
+
+
+def test_an_empty_band_is_anchored_where_its_row_says(mod):
+    """A lane with no entries at all takes the position its band row declares.
+
+    The six-lane split (2026-09-22) created three lanes with no history, so the
+    inferred anchor -- the tail of the lane's previous band -- did not exist for
+    any of them, and "the position is yours" would have sent all three to end of
+    file, which is where another lane already appends.
+    """
+    # Note the region text avoids the words "open" and "closed": the status
+    # parser reads them anywhere in the row, and a row that says both is an
+    # error -- which is worth remembering when writing the real rows.
+    table = _six_lane_table(f"immediately after {SECT}201, in a finished region")
+    lines = doc(section(201, "A"), section(601, "A"), table=table)
+    errors, _, info = run(mod, lines, {201: 1, 601: 1})
+    check_true("no errors", not errors)
+    row = [r for r in info if r.startswith("1100-1199")]
+    check_true("the empty lane-D band is reported", len(row) == 1)
+    check_true("with its first number", "first entry is 1100" in row[0])
+    head_201 = next(i for i, l in enumerate(lines, 1) if l.startswith("## 201."))
+    end_201 = next(i for i, l in enumerate(lines, 1)
+                   if i > head_201 and l.startswith("## ")) - 1
+    check_true("and the line its row names -- the END of section 201",
+               f"insert after line {end_201} " in row[0])
+    check_true("not 201's heading", f"insert after line {head_201} " not in row[0])
+    check_true("and says where the anchor came from", "band's row" in row[0])
+
+
+def test_a_declared_anchor_that_does_not_exist_is_an_error(mod):
+    """An anchor naming a missing section would leave the band nowhere to go."""
+    table = _six_lane_table(f"immediately after {SECT}999")
+    lines = doc(section(601, "A"), table=table)
+    errors, _, _ = run(mod, lines, {601: 1})
+    check_true("reported as an error",
+               any("1100-1199" in e and "does not exist" in e for e in errors))
+
+
+def test_prose_that_merely_says_after_is_not_an_anchor(mod):
+    """`after C's 500s` has no section sign, so it names nothing."""
+    table = _six_lane_table("after the history, somewhere")
+    lines = doc(section(601, "A"), table=table)
+    errors, _, info = run(mod, lines, {601: 1})
+    check_true("no error", not errors)
+    row = [r for r in info if r.startswith("1100-1199")]
+    check_true("falls back to 'the position is yours'",
+               len(row) == 1 and "yours" in row[0])
+
+
+def test_lanes_d_to_f_are_real_lanes(mod):
+    """The band table and the **Lane:** field both accept D, E and F."""
+    table = _six_lane_table(
+        f"immediately after {SECT}201",
+        extra_rows=(
+            f"| {SECT}1200{ENDASH}{SECT}1299 | **lane E** | **open** | "
+            f"immediately after {SECT}601 |",
+            f"| {SECT}1300{ENDASH}{SECT}1399 | **lane F** | **open** | "
+            f"immediately after {SECT}201 |",
+        ))
+    bands, band_errors = mod.parse_bands(table.split("\n"))
+    check_true("the table parses", not band_errors)
+    check_true("lanes D, E and F own their bands",
+               sorted(b.lane for b in bands if b.is_open) == ["A", "D", "E", "F"])
+    good = doc(section(201, "A"), section(601, "A"), section(1300, "F"),
+               table=table)
+    errors, _, _ = run(mod, good, {201: 1, 601: 1})
+    check_true("a lane-F entry in lane F's band passes", not errors)
+    bad = doc(section(201, "A"), section(601, "A"), section(1300, "C"),
+              table=table)
+    errors, _, _ = run(mod, bad, {201: 1, 601: 1})
+    check_true("a lane-C field in lane F's band is rejected",
+               any("1300" in e and "lane F's band" in e for e in errors))
+
+
+def test_a_declared_anchor_beats_the_inferred_one(mod):
+    """The header is the authority on the bands, so its row wins.
+
+    Lane C has an earlier band here, so an anchor could be inferred from its
+    tail -- but the row says otherwise, and the row is what a reader checks.
+    """
+    table = "\n".join([
+        "## Numbering and file order",
+        "",
+        "| Band | Owner | Status | Region |",
+        "|---|---|---|---|",
+        f"| {SECT}500{ENDASH}{SECT}599 | **lane C** | closed {EMDASH} at 579 | mid |",
+        f"| {SECT}600{ENDASH}{SECT}699 | **lane A** | **open** | interleaved |",
+        f"| {SECT}800{ENDASH}{SECT}899 | **lane C** | **open** | "
+        f"immediately after {SECT}601 |",
+        "",
+    ])
+    lines = doc(section(579, "C"), section(601, "A"), table=table)
+    _, _, info = run(mod, lines, {579: 1, 601: 1})
+    row = [r for r in info if r.startswith("800-899")]
+    check_true("the row's section is used", len(row) == 1 and "section 601" in row[0])
+    check_true("not the inferred one", "section 579" not in row[0])
+
+
 # --------------------------------------------------------------------------
 # Occupancy
 # --------------------------------------------------------------------------

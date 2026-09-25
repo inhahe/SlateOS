@@ -17,7 +17,7 @@
 # scanned roots. If a number rises in a commit that also edits code,
 # the code is what raised it.
 #
-# It has happened three times.
+# It has happened four times.
 #
 #   2026-08-23  Calls rustfmt had wrapped onto two lines were invisible.
 #               71 sites.
@@ -31,11 +31,61 @@
 #               because efibootmgr was given three diagnostics of one
 #               shape in one commit and this gate refused one of them.
 #               507 sites, and the ledger had been at ZERO.
+#   2026-09-25  ... and it still only half did. The joiner that
+#               reassembles a wrapped call kept its own list of
+#               macros, `eprintln!` and `println!`, so the widening
+#               above reached only the `format!` calls short enough
+#               to stay on one line. Found because numfmt had four
+#               messages of one shape and the gate refused the one
+#               that fitted. 94 sites, and the ledger had been at
+#               ZERO again.
 #
-# That last line is the one to read twice. This file said the tree was
-# clean the day before, and the tree was not clean; it was unexamined in
-# a macro nobody had thought to look in. An empty ratchet is a claim
-# about the detector as much as about the code.
+# Those two ZEROs are the lines to read twice. Both times this file said
+# the tree was clean the day before, and the tree was not clean; it was
+# unexamined -- first in a macro nobody had thought to look in, then in
+# the half of that macro rustfmt had wrapped. An empty ratchet is a
+# claim about the detector as much as about the code.
 #
-# 0 sites across 0 files.
+# 94 sites across 41 files.
 
+init/servicebus/src/main.rs:1
+userspace/ar/src/main.rs:1
+userspace/at/src/main.rs:4
+userspace/capsh/src/main.rs:1
+userspace/chroot/src/main.rs:3
+userspace/coreutils/src/bin/cal.rs:1
+userspace/coreutils/src/bin/csplit.rs:1
+userspace/coreutils/src/bin/df.rs:1
+userspace/coreutils/src/bin/find.rs:9
+userspace/coreutils/src/bin/free.rs:3
+userspace/coreutils/src/bin/sort/keydef.rs:3
+userspace/coreutils/src/bin/tar.rs:1
+userspace/coreutils/src/tabstops.rs:1
+userspace/cpio/src/main.rs:2
+userspace/crontab/src/main.rs:1
+userspace/curl/src/main.rs:4
+userspace/dbus/src/main.rs:5
+userspace/dig/src/main.rs:2
+userspace/fsck/src/main.rs:1
+userspace/ftp/src/main.rs:1
+userspace/ftpd/src/main.rs:6
+userspace/inetd/src/main.rs:1
+userspace/install/src/main.rs:1
+userspace/iptables/src/main.rs:4
+userspace/jq/src/main.rs:1
+userspace/lsmod/src/main.rs:2
+userspace/mkfs/src/main.rs:1
+userspace/mount/src/main.rs:1
+userspace/nftables/src/main.rs:1
+userspace/ping/src/main.rs:1
+userspace/pkg/src/main.rs:1
+userspace/polkit/src/main.rs:2
+userspace/rsync/src/main.rs:5
+userspace/sftp/src/main.rs:2
+userspace/ssh/src/lib.rs:1
+userspace/sudo/src/main.rs:4
+userspace/traceroute/src/main.rs:1
+userspace/useradd/src/main.rs:4
+userspace/wget/src/main.rs:1
+userspace/whois/src/main.rs:1
+userspace/zip/src/main.rs:7

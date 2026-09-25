@@ -909,7 +909,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
 
 /// Which way up the picture is shown: its EXIF orientation, read as Chrome
 /// reads it -- from the first `APP1` segment before the scan whose payload
-/// starts `Exif ` and is longer than that and its pad byte (see
+/// starts `Exif\0` and is longer than that and its pad byte (see
 /// [`crate::orientation`]). As stored if there is none, or none that counts.
 #[must_use]
 pub fn orientation(bytes: &[u8]) -> Orientation {
@@ -944,7 +944,7 @@ fn exif(bytes: &[u8]) -> Option<&[u8]> {
         let length = usize::from(read_u16(bytes, at).ok()?);
         let payload = bytes.get(at.checked_add(2)?..at.checked_add(length)?)?;
         at = at.checked_add(length)?;
-        if marker == 0xE1 && payload.len() > 6 && payload.starts_with(b"Exif ") {
+        if marker == 0xE1 && payload.len() > 6 && payload.starts_with(b"Exif\0") {
             return payload.get(6..);
         }
     }

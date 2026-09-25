@@ -11203,7 +11203,7 @@ reports it the way up it is shown.
 `gui/imagecodec/src/orientation.rs`: the `Orientation` values and the eight
 ways of turning pixels, and a port of Skia's `SkExif::Parse` for the
 orientation tag. `jpeg::orientation` finds it the way Blink's JPEG decoder
-does (the first `APP1` segment before the scan that starts `Exif `);
+does (the first `APP1` segment before the scan that starts `Exif\0`);
 `png::orientation` the way Skia's Rust PNG codec does (the first `eXIf`
 chunk before the image data, one with a bad CRC passed over). Both decoders
 apply it in `decode`, `decode_scaled` and `dimensions`.

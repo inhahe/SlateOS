@@ -9,5 +9,13 @@ appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 
+# What it converts: WAV through `wavpcm`, pictures decoded by `imagecodec`
+# (lane F's, which owns decoding pictures). Sources are read through a cap and
+# outputs written atomically through `safeio`, so a crash mid-write leaves no
+# half a file.
+wavpcm = { path = "../wavpcm" }
+imagecodec = { path = "../../gui/imagecodec" }
+safeio = { path = "../safeio" }
+
 [lints]
 workspace = true

@@ -159980,6 +159980,40 @@ pieces' (a piece shared by a skipped file and a wanted one is still fetched);
 peer. 103 tests; `apps/torrent/mutate.py` has 25 rows. The transfer itself is
 its own entry below. Fifteen examined; six to go.
 
+**`apps/mediaconvert`, 2026-09-25 -- a converter that could not be given a
+file or start a job.** Nothing added a source -- `add_source` had no caller
+outside the tests -- and `start_next_job` refused every job, so the queue could
+only ever hold a plan for files it had never seen; the notice saying so was
+drawn at the top of the window, under the toolbar that painted over it.
+Nothing answered the pointer. Of the settings drawn, only the profile and the
+quality preset could be changed: the sample rate, channels, sample format,
+picture size and naming rule were drawn and fixed, and every output was bound
+for `/home/converted`, a folder nothing makes, with no way to choose another.
+A `{date}` in a naming pattern was always `20260518`. And nothing in the tree
+decodes MP3, FLAC, AAC, Vorbis, Opus or any video, or encodes PNG, JPEG, GIF
+or WebP. Now: files are added with Ctrl+O and folders with Ctrl+Shift+O, and
+each is read for what it is (its size; a WAV's length and format; a picture's
+dimensions); jobs run one at a time on a worker thread, with a progress bar
+that moves and a cancel that stops before anything is written; every setting
+is walked with Up and Down and changed with Left and Right or a press; outputs
+go beside their sources or to a folder chosen in the dialog (`B`, `O`); a job
+is chosen by the arrows or a press, and Delete acts on that one; and nothing
+is written over -- a name on disk, the source's own, or one another job has
+planned gets " (2)", and a file that takes the name while the job waits is
+left alone (`safeio::write_new_atomically`, new: the finished file is linked
+into place, so the check and the claim are one operation). It converts WAV
+to WAV at any rate, channel count and sample format (`apps/wavpcm`, new: every
+PCM and float WAV read, windowed-sinc resampling, the standard channel mixes,
+TPDF dither) and PNG or JPEG to BMP, at their own size or fitted inside one.
+Every other profile is listed as "Not available", saying which half --
+decoder or encoder -- is missing, and is refused before it is queued. On the
+way: with a file chosen, the source list could not be scrolled, because every
+frame scrolled it back to the choice. 89 tests, 14 in `wavpcm` and six new in
+`safeio`; `apps/mediaconvert/mutate.py` has 28 rows, `apps/wavpcm/mutate.py`
+12 and `apps/safeio/mutate.py` 6. The music player and the sound recorder
+read and write WAV with their own code; moving them onto `wavpcm` is part of
+examining the recorder, next. Sixteen examined; five to go.
+
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 
 **In short:** a `cargo test --workspace` failed with exactly one failing test,
@@ -165776,3 +165810,20 @@ the host today and on SlateOS once lane D's sockets carry it.
 
 The window wakes on a tick today; with a connection thread per peer it wants
 `requests/e-f-wake-an-application-for-its-own-descriptor.md` to stop polling.
+
+### [E] The screenshot tool's first save can replace a file that took its name a moment earlier -- 2026-09-25
+**Status:** OPEN -- `apps/screenshot/src/main.rs` (`unused_save_path`,
+`write_bmp`). Small, and unreachable in the shipped binary until the
+compositor offers a framebuffer read (`CANNOT_CAPTURE`).
+
+**In short:** a new screenshot picks a file name nothing holds, then writes it
+with `safeio::write_atomically`, which replaces whatever is at the name. A file
+another program creates between the check and the write is replaced -- a
+window of microseconds here, where the media converter's was minutes (it
+plans a queue of names). After 10,000 taken names it falls back to the plain
+name on purpose, which overwrites.
+
+**The proper fix:** try the names in order with `safeio::write_new_atomically`
+(2026-09-25), which refuses a name in use atomically, until one is claimed --
+and never fall back to replacing. Saving a capture again over its own file
+keeps `write_atomically`, which is right for that.

@@ -1760,7 +1760,10 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
+ "imagecodec",
  "oswindow",
+ "safeio",
+ "wavpcm",
 ]
 
 [[package]]

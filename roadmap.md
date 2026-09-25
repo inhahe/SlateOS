@@ -1857,8 +1857,12 @@ word; text inside them that says "lane C" is history.
   `torrent` (2026-09-25 — every control; a notice that can be read, a list
   that scrolls, magnet links, search, labels, and file priorities that reach
   the picker; the transfer itself is `known-issues.md` → `[E] The torrent
-  client transfers nothing`).
-  **Next:** mediaconvert, soundrecorder — then the rest. (`reminders` was
+  client transfers nothing`), `mediaconvert` (2026-09-25 — every control;
+  files and folders added, jobs on a worker thread that can be cancelled,
+  every setting changeable, outputs that never replace a file, and real
+  conversions: WAV to WAV and PNG or JPEG to BMP, through the new
+  `apps/wavpcm`).
+  **Next:** soundrecorder (onto `wavpcm`), email — then the rest. (`reminders` was
   examined 2026-09-18: keyboard-driven by design, its two gaps fixed.)
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
@@ -7741,7 +7745,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Notes & Wiki (apps/notes: plain text/markdown/checklist/table note types, notebook organization with nesting, full-text search, 8 templates, export to text/md/html, favorites/pinning, word count/reading time, multi-panel UI that answers a click on all four panels -- a version restores, a note selects, right-click offers tag/delete/move, a notebook renames or deletes, a tag filters; wiki-style `[[...]]` linking is syntax only, `resolve_links` having no caller; 111 tests)
 - [x] Presentation/Slides (apps/slides: slide elements with text boxes/shapes/images, 6 slide layouts, 3 themes, slide sorter view, transitions, speaker notes, undo/redo, HTML export, multi-panel UI, 65 tests)
 - [x] Photo Manager (apps/photomanager: EXIF metadata parsing with 20+ tags, smart albums as a model only (no way to create one), thumbnail grid/single/timeline/slideshow views, re-import detection by path and size (NOT by image content), multi-panel UI, the selected photograph decoded and drawn through `imagecodec`, grid thumbnails through the `thumbs` crate, a library saved to `photolibrary.txt` and read back at start, a search box that filters as you type, albums made from the sidebar and filled from a right-click menu, tags and colour labels applied to a multi-selection taken with Shift and an arrow, paths held as bytes, 177 tests)
-- [x] Media Converter (apps/mediaconvert: batch format conversion for audio/video/image, 9 audio + 7 video + 8 image formats, codec selection, quality presets, conversion profiles, batch queue with progress, output naming templates, history, multi-panel UI, 46 tests)
+- [x] Media Converter (apps/mediaconvert: batch format conversion for audio/video/image, 9 audio + 7 video + 8 image formats, codec selection, quality presets, conversion profiles, batch queue with progress, output naming templates, history, multi-panel UI, 46 tests) — *until 2026-09-25 it converted nothing: no file could be added and no job could start. It converts WAV to WAV and PNG or JPEG to BMP now; the other formats are modelled and refused for want of codecs -- see `known-issues.md` → the mediaconvert paragraph of `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`*
 - [x] Diagram Editor (apps/diagram: 10 node types, connection types with arrows, snap-to-grid, alignment tools, grouping, layers, zoom/pan, 7 templates, SVG/JSON export, undo/redo, multi-select, auto-layout, multi-panel UI, 84 tests)
 - [x] Password Generator (apps/passwordgen: configurable password/passphrase/PIN/pronounceable generation, strength analysis with entropy and crack time estimation, pattern detection, breach check, policy compliance, bulk generation, multi-panel UI, 40 tests)
 - [x] Database Viewer (apps/dbviewer: SQL parser/executor for SELECT/INSERT/UPDATE/DELETE/CREATE/DROP, in-memory table storage with constraints, paginated data browser, column sorting, syntax-highlighted query editor, query history, CSV/JSON/SQL export, CSV import, WHERE clause builder, aggregate functions, schema diagram, multi-tab databases, multi-panel UI, 174 tests)

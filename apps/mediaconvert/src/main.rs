@@ -1,31 +1,27 @@
 //! `Slate OS` Media Converter
 //!
-//! A batch media format conversion tool with:
-//! - Audio format support: WAV, MP3, FLAC, AAC, OGG, WMA, AIFF, ALAC, Opus
-//! - Video format support: MP4, MKV, AVI, `WebM`, MOV, WMV, FLV
-//! - Image format support: JPEG, PNG, BMP, GIF, TIFF, WebP, HEIC, ICO, SVG
-//! - Codec selection for video (H.264, H.265, VP9, AV1) and audio (AAC, MP3, Opus, FLAC)
-//! - Quality/bitrate presets: low, medium, high, lossless
-//! - Batch conversion queue with progress tracking
-//! - Preset profiles (Web optimized, Archive, Mobile, etc.)
-//! - Audio-specific: sample rate, channels, bit depth adjustment
-//! - Video-specific: resolution scaling, framerate, aspect ratio, crop
-//! - Image-specific: resize, quality, strip metadata
-//! - Output naming templates (original, suffix, prefix, custom pattern)
-//! - Conversion history log
-//! - Multi-panel UI: source list, settings panel, queue
+//! A batch media converter: a list of sources, the settings of one output
+//! profile, and a queue that converts one file at a time on a worker thread.
 //!
-//! Uses the guitk library for UI rendering.
+//! **What it converts** (`engine`): WAV to WAV at any sample rate, channel
+//! count and sample format, and PNG or JPEG to BMP at their own size or fitted
+//! inside one. Every other pairing is refused before it is queued, and says
+//! which side -- a decoder or an encoder -- this build lacks. Until 2026-09-25
+//! it converted nothing: no file could be added, and no job could start.
 //!
-//! **This program cannot read or convert media files, and the window says so.**
-//! It has no filesystem access, so no source has been opened and no output can
-//! be written. The queue is the dangerous part, and it is labelled:
-//! *"Nothing will ever reach Completed here -- do not delete an original on the
-//! strength of this queue."* A conversion queue is acted on -- somebody clears
-//! the originals once it says done -- so a queue that cannot finish must never
-//! look as though it did.
+//! **What its model describes is wider**, and is the shape the converter grows
+//! into as codecs arrive: audio (WAV, MP3, FLAC, AAC, OGG, WMA, AIFF, ALAC,
+//! Opus), video (MP4, MKV, AVI, `WebM`, MOV, WMV, FLV, in H.264, H.265, VP9 or
+//! AV1) and pictures (JPEG, PNG, BMP, GIF, TIFF, WebP, HEIC, ICO, SVG), with
+//! quality presets, preset profiles, naming rules and a history of what
+//! finished. The profiles this build cannot carry out are listed all the same,
+//! marked "Not available" with the reason, so that what is missing is visible
+//! rather than absent.
 //!
-//! The list above is what the layouts draw when something supplies a model.
+//! **Nothing is written over.** An output whose name is already on disk, or
+//! already planned by another job in the queue, or is the source itself, gets
+//! " (2)", " (3)" and so on; and the bytes go to a temporary file renamed into
+//! place, so a cancelled or failed job leaves nothing behind.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
@@ -47,13 +43,21 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
-use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::dialog::{FileDialog, FilePicker, Picked};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
 use guitk::render::RenderTree;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+mod engine;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -63,35 +67,16 @@ use std::time::Duration;
 // Layout constants
 // ============================================================================
 
-/// What the window says instead of a queue that runs.
+/// What this build can convert, above the settings that say how.
 ///
-/// Three lines. The third is the one with a cost attached: a conversion
-/// reported Completed is the point at which somebody deletes the original.
-/// That is the same shape as `apps/podcast`'s Downloaded mark and
-/// `apps/screenrecorder`'s history entry -- a durable claim that a file now
-/// exists somewhere, acted on later, when the thing it replaced is gone.
-const CANNOT_CONVERT_LINES: [&str; 3] = [
-    "This program cannot read or convert media files.",
-    "It has no filesystem access, so no source has been opened and no output can be written.",
-    "Nothing will ever reach Completed here -- do not delete an original on the strength of this queue.",
+/// It said "This program cannot read or convert media files", which was true
+/// -- and was drawn at the top of the window, under the toolbar that painted
+/// over it.
+const CAN_CONVERT_LINES: [&str; 3] = [
+    "Converts WAV to WAV, and PNG or JPEG to BMP.",
+    "Anything else needs a decoder or an encoder this",
+    "build lacks, and is refused before it is queued.",
 ];
-
-/// What the settings panel says above the controls it draws.
-///
-/// `CANNOT_CONVERT_LINES` covers the queue. This covers the panel, which was
-/// the half those three lines did not reach: a person who reads "nothing will
-/// ever reach Completed" has been told the QUEUE does not run, and may still
-/// reasonably believe the quality and codec they picked are what would be used
-/// if it did.
-///
-/// **They are not used by anything at all.** `find-echoed-settings.py` found
-/// six fields here whose only readers are the labels below -- `quality`,
-/// `strip_metadata`, `preserve_aspect`, `video_codec`, `audio_codec`,
-/// `two_pass`. The panel reads the value in order to draw the value. So the
-/// one thing setting it does is confirm itself, which is the most persuasive
-/// form of a false claim a program can make, because the evidence is the
-/// program's own output at the moment the operator is checking.
-const SETTINGS_NOT_APPLIED: &str = "Not applied: nothing reads these except this panel.";
 
 const SIDEBAR_WIDTH: f32 = 300.0;
 const SETTINGS_PANEL_WIDTH: f32 = 280.0;
@@ -99,6 +84,8 @@ const TOOLBAR_HEIGHT: f32 = 40.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 const ITEM_HEIGHT: f32 = 32.0;
 const CORNER_RADIUS: f32 = 4.0;
+/// A queue row's height.
+const QUEUE_ROW_H: f32 = 46.0;
 
 // ============================================================================
 // Unique ID generation
@@ -907,9 +894,84 @@ impl ConversionProfile {
         }
     }
 
-    /// All built-in profiles.
+    /// A WAV profile.
+    fn wav(name: &str, description: &str, sample_rate: u32, channels: u8, bit_depth: u8) -> Self {
+        Self {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            output_format: OutputFormat::Audio(AudioFormat::Wav),
+            quality_preset: QualityPreset::High,
+            audio_settings: AudioSettings {
+                codec: AudioCodec::AacLc,
+                bitrate_kbps: 0,
+                sample_rate,
+                channels,
+                bit_depth,
+            },
+            video_settings: VideoSettings::default(),
+            image_settings: ImageSettings::default(),
+        }
+    }
+
+    /// A BMP profile.
+    fn bmp(name: &str, description: &str, max_width: Option<u32>, max_height: Option<u32>) -> Self {
+        Self {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            output_format: OutputFormat::Image(ImageFormat::Bmp),
+            quality_preset: QualityPreset::High,
+            audio_settings: AudioSettings::default(),
+            video_settings: VideoSettings::default(),
+            image_settings: ImageSettings {
+                max_width,
+                max_height,
+                ..ImageSettings::default()
+            },
+        }
+    }
+
+    /// Whether this build can make what the profile makes, and if not, why.
+    ///
+    /// # Errors
+    ///
+    /// The encoder or decoder this build lacks.
+    pub fn availability(&self) -> Result<(), String> {
+        // Against a source of the one kind that could feed it, so the answer
+        // is about the output side alone.
+        let probe = match &self.output_format {
+            OutputFormat::Audio(_) => "probe.wav",
+            OutputFormat::Image(_) => "probe.png",
+            OutputFormat::Video(_) => "probe.mkv",
+        };
+        engine::recipe(
+            OsStr::new(probe),
+            &self.output_format,
+            &self.audio_settings,
+            &self.image_settings,
+        )
+        .map(|_| ())
+    }
+
+    /// All built-in profiles: those this build can carry out first, then the
+    /// rest, which say what they are missing.
     pub fn builtin_profiles() -> Vec<Self> {
         vec![
+            Self::wav("WAV, CD quality", "44.1 kHz, stereo, 16-bit", 44_100, 2, 16),
+            Self::wav("WAV, studio", "48 kHz, stereo, 24-bit", 48_000, 2, 24),
+            Self::wav(
+                "WAV, speech",
+                "16 kHz, mono, 16-bit: small, for voices",
+                16_000,
+                1,
+                16,
+            ),
+            Self::bmp("BMP picture", "The picture at its own size", None, None),
+            Self::bmp(
+                "BMP, screen size",
+                "Fitted inside 1920x1080",
+                Some(1920),
+                Some(1080),
+            ),
             Self::web_optimized_video(),
             Self::archive_video(),
             Self::mobile_video(),
@@ -951,8 +1013,45 @@ impl OutputNaming {
                 .replace("{name}", stem)
                 .replace("{ext}", new_ext)
                 .replace("{index}", &index.to_string())
-                .replace("{date}", "20260518"),
+                .replace("{date}", &today_yyyymmdd()),
         }
+    }
+
+    /// As [`Self::apply`], for a file name that may not be text: the stem is
+    /// kept byte for byte.
+    #[must_use]
+    pub fn apply_os(&self, original: &OsStr, new_ext: &str, index: usize) -> OsString {
+        let stem = Path::new(original).file_stem().unwrap_or(original);
+        let mut out = OsString::new();
+        match self {
+            Self::KeepOriginal => out.push(stem),
+            Self::Suffix(suf) => {
+                out.push(stem);
+                out.push(suf);
+            }
+            Self::Prefix(pre) => {
+                out.push(pre);
+                out.push(stem);
+            }
+            Self::Pattern(pat) => {
+                let filled = pat
+                    .replace("{ext}", new_ext)
+                    .replace("{index}", &index.to_string())
+                    .replace("{date}", &today_yyyymmdd());
+                let mut parts = filled.split("{name}");
+                if let Some(first) = parts.next() {
+                    out.push(first);
+                }
+                for part in parts {
+                    out.push(stem);
+                    out.push(part);
+                }
+                return out;
+            }
+        }
+        out.push(".");
+        out.push(new_ext);
+        out
     }
 
     pub fn label(&self) -> &str {
@@ -973,7 +1072,8 @@ impl OutputNaming {
 #[derive(Clone, Debug)]
 pub struct SourceFile {
     pub id: u64,
-    pub path: String,
+    /// Where it is -- a path, not text: a file name may hold any byte.
+    pub path: PathBuf,
     pub file_name: String,
     pub file_size: u64,
     pub category: MediaCategory,
@@ -985,7 +1085,7 @@ impl SourceFile {
     pub fn new(id: u64, path: &str, name: &str, size: u64, category: MediaCategory) -> Self {
         Self {
             id,
-            path: path.to_owned(),
+            path: PathBuf::from(path),
             file_name: name.to_owned(),
             file_size: size,
             category,
@@ -1002,6 +1102,56 @@ impl SourceFile {
     pub fn with_format(mut self, fmt: &str) -> Self {
         self.source_format = fmt.to_owned();
         self
+    }
+
+    /// The file at `path`, as it really is: its size from the file system,
+    /// and for a WAV its length and format, for a picture its size in pixels,
+    /// read from the file's own header.
+    ///
+    /// # Errors
+    ///
+    /// When it cannot be read, or its name says it is not media.
+    pub fn from_file(id: u64, path: &Path) -> Result<Self, String> {
+        let name = path.file_name().unwrap_or(path.as_os_str());
+        let category = MediaConvertApp::detect_category_os(name)
+            .ok_or_else(|| format!("{} is not a media file by its name", path.display()))?;
+        let meta = std::fs::metadata(path)
+            .map_err(|err| format!("could not read {}: {err}", path.display()))?;
+        let mut source = Self {
+            id,
+            path: path.to_path_buf(),
+            file_name: Path::new(name).display().to_string(),
+            file_size: meta.len(),
+            category,
+            duration_secs: None,
+            source_format: String::new(),
+        };
+        // The first part of the file is enough for a header: a WAV's chunks
+        // before its samples, a picture's dimensions.
+        if let Ok(head) = safeio::read_capped(path, 1 << 20) {
+            let ext = Path::new(name)
+                .extension()
+                .and_then(OsStr::to_str)
+                .map(str::to_ascii_lowercase)
+                .unwrap_or_default();
+            if ext == "wav" {
+                match wavpcm::parse_header(&head.bytes) {
+                    Ok(info) => {
+                        source.duration_secs = Some(info.seconds());
+                        source.source_format = format!(
+                            "WAV {} Hz {}ch {}",
+                            info.sample_rate,
+                            info.channels,
+                            info.format.label()
+                        );
+                    }
+                    Err(err) => source.source_format = format!("WAV ({err})"),
+                }
+            } else if let Ok((w, h)) = imagecodec::dimensions(&head.bytes) {
+                source.source_format = format!("{w}x{h}");
+            }
+        }
+        Ok(source)
     }
 
     /// Human-readable file size.
@@ -1077,7 +1227,11 @@ pub struct ConversionJob {
     pub source: SourceFile,
     pub output_format: OutputFormat,
     pub output_name: String,
-    pub output_path: String,
+    pub output_path: PathBuf,
+    /// What the job does, fixed when it was queued.
+    pub recipe: engine::Recipe,
+    /// Asked to stop, and not yet stopped.
+    pub stopping: bool,
     pub status: JobStatus,
     pub progress: f32,
     pub estimated_size: Option<u64>,
@@ -1093,15 +1247,17 @@ impl ConversionJob {
         source: SourceFile,
         output_format: OutputFormat,
         output_name: String,
-        output_dir: &str,
+        output_path: PathBuf,
+        recipe: engine::Recipe,
     ) -> Self {
-        let output_path = format!("{output_dir}/{output_name}");
         Self {
             id,
             source,
             output_format,
             output_name,
             output_path,
+            recipe,
+            stopping: false,
             status: JobStatus::Queued,
             progress: 0.0,
             estimated_size: None,
@@ -1148,6 +1304,7 @@ impl ConversionJob {
 
     pub fn cancel(&mut self) {
         self.status = JobStatus::Cancelled;
+        self.stopping = false;
     }
 
     /// Format conversion direction.
@@ -1170,8 +1327,8 @@ impl ConversionJob {
 
 #[derive(Clone, Debug)]
 pub struct HistoryEntry {
-    pub source_path: String,
-    pub output_path: String,
+    pub source_path: PathBuf,
+    pub output_path: PathBuf,
     pub conversion_type: String,
     pub source_size: u64,
     pub output_size: u64,
@@ -1210,44 +1367,146 @@ pub enum ActivePanel {
 // Main application
 // ============================================================================
 
-/// How often the queue takes a step.
-///
-/// The conversion is simulated -- there is no encoder behind this -- so this is
-/// the pace of the progress bar and not of any work.
+/// How often the window looks at a running job: its progress bar's pace.
 const JOB_STEP: Duration = Duration::from_millis(120);
 
-/// How much of a job one [`JOB_STEP`] gets through.
-///
-/// Four percent, so a job takes twenty-five steps: about three seconds, which
-/// is long enough to watch the bar move and short enough that a batch of six
-/// finishes while you are still looking at it.
-const JOB_STEP_PERCENT: f32 = 4.0;
+/// Today as `YYYYMMDD`, for an output name's `{date}`. It was always
+/// `20260518`.
+fn today_yyyymmdd() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let days = i32::try_from(secs / 86_400).unwrap_or(0);
+    let (y, m, d) = guitk::date::Date::from_days_since_epoch(days).ymd();
+    format!("{y:04}{m:02}{d:02}")
+}
 
-/// The media converter application.
 /// The keys this window answers, as a reader sees them.
 ///
-/// It named none of them. Every verb here -- queue everything, cancel what
-/// has not started, sweep up what finished, pick a profile, pick a quality --
-/// arrived with the keys that reach it, and no string in the crate spelled
-/// one.
-///
-/// CANNOT_CONVERT and SETTINGS_NOT_APPLIED still stand over the panel: no
-/// file is converted and nothing outside this window reads a setting. The
-/// keys are worth naming anyway, because they visibly move what the window
-/// shows, and a control that moves and is named nowhere is a separate defect
-/// from a control that moves nothing.
+/// Every row is checked by `every_advertised_key_does_something`.
 const SHORTCUTS: &[(&str, &str)] = &[
     ("F1 / ?", "This list"),
+    ("Ctrl+O", "Add files"),
+    ("Ctrl+Shift+O", "Add every media file in a folder"),
     ("Tab", "Next panel: sources, settings, queue"),
-    ("Up / Down", "Move through the sources"),
+    ("Up / Down", "Move through sources, settings or queue"),
+    ("Left / Right", "Change the chosen setting"),
+    ("O", "Choose the folder outputs go to"),
+    ("B", "Write each output beside its source"),
     ("Enter", "Queue the selected source"),
-    ("Ctrl+Enter", "Queue every source and start"),
-    ("Ctrl+C", "Cancel everything not yet started"),
+    ("Ctrl+Enter", "Queue every source the profile can convert"),
+    ("Ctrl+C", "Cancel everything waiting"),
     ("Ctrl+L", "Clear the jobs that finished"),
-    ("Delete", "Drop a source, or cancel a queued job"),
-    ("Left / Right", "Change the profile, in the settings panel"),
+    ("Delete", "Drop a source, or cancel or clear a job"),
     ("1-4", "Quality: low, medium, high, lossless"),
 ];
+
+/// What a file picker is up for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerFor {
+    Files,
+    Folder,
+    OutputFolder,
+}
+
+/// A row of the settings panel, which Up and Down walk and Left and Right
+/// change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingRow {
+    Profile,
+    Quality,
+    SampleRate,
+    Channels,
+    SampleFormat,
+    MaxWidth,
+    MaxHeight,
+    Naming,
+}
+
+/// Sample rates a WAV can be converted to.
+const SAMPLE_RATES: [u32; 9] = [
+    8_000, 11_025, 16_000, 22_050, 32_000, 44_100, 48_000, 88_200, 96_000,
+];
+
+/// Bit depths a WAV can be written at: 32 is float.
+const BIT_DEPTHS: [u8; 4] = [8, 16, 24, 32];
+
+/// The largest widths and heights a picture can be fitted inside; `None` is
+/// its own size.
+const MAX_WIDTHS: [Option<u32>; 5] = [None, Some(640), Some(1280), Some(1920), Some(3840)];
+const MAX_HEIGHTS: [Option<u32>; 5] = [None, Some(480), Some(720), Some(1080), Some(2160)];
+
+/// The naming rules the Naming row steps through.
+fn naming_rules() -> [OutputNaming; 3] {
+    [
+        OutputNaming::KeepOriginal,
+        OutputNaming::Suffix(String::from("-converted")),
+        OutputNaming::Prefix(String::from("converted-")),
+    ]
+}
+
+/// Everything in the window a pointer can press, as the renderer records it.
+///
+/// Nothing answered the pointer: the profile and quality boxes, the Convert
+/// All button and every row were drawn as controls and were pictures of them
+/// (`known-issues.md` -> `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    AddFiles,
+    AddFolder,
+    ConvertAll,
+    CancelWaiting,
+    ClearFinished,
+    Help,
+    Panel(ActivePanel),
+    SourceList,
+    SourceRow(u64),
+    RemoveSource(u64),
+    /// A settings row: a press chooses it.
+    Setting(SettingRow),
+    /// The arrows either side of a settings row's value.
+    StepBack(SettingRow),
+    StepForward(SettingRow),
+    ChooseOutput,
+    OutputBeside,
+    QueueList,
+    /// A job's row: a press chooses it.
+    QueueRow(u64),
+    CancelJob(u64),
+    HelpCard,
+}
+
+/// The rows the settings panel shows for the profile chosen.
+fn setting_rows(output: Option<&OutputFormat>) -> Vec<SettingRow> {
+    let mut rows = vec![SettingRow::Profile, SettingRow::Quality];
+    match output {
+        Some(OutputFormat::Audio(AudioFormat::Wav)) => {
+            rows.extend([
+                SettingRow::SampleRate,
+                SettingRow::Channels,
+                SettingRow::SampleFormat,
+            ]);
+        }
+        Some(OutputFormat::Image(ImageFormat::Bmp)) => {
+            rows.extend([SettingRow::MaxWidth, SettingRow::MaxHeight]);
+        }
+        _ => {}
+    }
+    rows.push(SettingRow::Naming);
+    rows
+}
+
+/// The scroll that shows row `at` in a pane of `rows` rows, moving `scroll`
+/// as little as it can.
+fn scrolled_to(scroll: usize, at: usize, rows: usize) -> usize {
+    if at < scroll {
+        at
+    } else if at >= scroll.saturating_add(rows) {
+        at.saturating_add(1).saturating_sub(rows)
+    } else {
+        scroll
+    }
+}
 
 pub struct MediaConvertApp {
     pub sources: Vec<SourceFile>,
@@ -1255,9 +1514,14 @@ pub struct MediaConvertApp {
     pub history: Vec<HistoryEntry>,
     pub profiles: Vec<ConversionProfile>,
     pub selected_source: Option<u64>,
+    /// The job the keys are on, by id: a finished job leaving the list takes
+    /// its selection with it rather than handing it to a neighbour.
+    pub selected_job: Option<u64>,
     pub selected_profile_idx: usize,
     pub output_naming: OutputNaming,
-    pub output_dir: String,
+    /// Where outputs go: `None` is beside each source. It was
+    /// `/home/converted`, a folder nobody had made.
+    pub output_dir: Option<PathBuf>,
     pub quality_preset: QualityPreset,
     pub active_panel: ActivePanel,
     /// Whether the shortcut card is up.
@@ -1265,11 +1529,23 @@ pub struct MediaConvertApp {
     pub audio_settings: AudioSettings,
     pub video_settings: VideoSettings,
     pub image_settings: ImageSettings,
-    /// Why the last Start did nothing.
+    /// What the last action said: why a file was refused, where a job went.
     pub status_line: String,
-    pub show_queue: bool,
     pub window_width: f32,
     pub window_height: f32,
+    /// The settings row the keys are on.
+    pub setting_row: SettingRow,
+    /// The job running, on its thread.
+    worker: Option<engine::Worker>,
+    /// The file and folder picker, and what it is up for.
+    pub picker: FilePicker,
+    pub picker_for: PickerFor,
+    /// How far the source list and the queue are scrolled, in rows.
+    pub source_scroll: usize,
+    pub queue_scroll: usize,
+    hover: Option<Target>,
+    last_hits: Vec<(Target, Rect)>,
+    wheel: wheel::Accumulator,
     id_gen: IdGen,
     timestamp: u64,
     /// The user's colours, replaced whenever the theme changes.
@@ -1288,16 +1564,19 @@ impl Default for MediaConvertApp {
 
 impl MediaConvertApp {
     pub fn new() -> Self {
-        Self {
+        let profiles = ConversionProfile::builtin_profiles();
+        let first = profiles.first().cloned();
+        let mut app = Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             sources: Vec::new(),
             jobs: Vec::new(),
             history: Vec::new(),
-            profiles: ConversionProfile::builtin_profiles(),
+            profiles,
             selected_source: None,
+            selected_job: None,
             selected_profile_idx: 0,
             output_naming: OutputNaming::KeepOriginal,
-            output_dir: "/home/converted".to_owned(),
+            output_dir: None,
             quality_preset: QualityPreset::Medium,
             active_panel: ActivePanel::SourceList,
             show_help: false,
@@ -1305,12 +1584,24 @@ impl MediaConvertApp {
             video_settings: VideoSettings::default(),
             image_settings: ImageSettings::default(),
             status_line: String::new(),
-            show_queue: true,
             window_width: 1280.0,
             window_height: 800.0,
+            setting_row: SettingRow::Profile,
+            worker: None,
+            picker: FilePicker::default(),
+            picker_for: PickerFor::Files,
+            source_scroll: 0,
+            queue_scroll: 0,
+            hover: None,
+            last_hits: Vec::new(),
+            wheel: wheel::Accumulator::default(),
             id_gen: IdGen::new(1),
             timestamp: 1000,
+        };
+        if first.is_some() {
+            app.select_profile(0);
         }
+        app
     }
 
     fn tick(&mut self) -> u64 {
@@ -1354,6 +1645,48 @@ impl MediaConvertApp {
         id
     }
 
+    /// Add the file at `path`, read for what it really is: its size, and for
+    /// a WAV its length and format, for a picture its size in pixels.
+    ///
+    /// Nothing could add a file at all: the list said "Drop files here" and
+    /// nothing took a drop, a pick or a path.
+    ///
+    /// # Errors
+    ///
+    /// Why the file was not added: it cannot be read, or it is already in the
+    /// list, or it is not media by its name.
+    pub fn add_file(&mut self, path: &Path) -> Result<u64, String> {
+        if self.sources.iter().any(|s| s.path == path) {
+            return Err(format!("{} is already in the list", path.display()));
+        }
+        let id = self.id_gen.next_id();
+        let source = SourceFile::from_file(id, path)?;
+        self.sources.push(source);
+        self.selected_source = Some(id);
+        Ok(id)
+    }
+
+    /// Add every media file directly in `folder`, by name order; answers how
+    /// many were added.
+    pub fn add_folder(&mut self, folder: &Path) -> Result<usize, String> {
+        let entries = std::fs::read_dir(folder)
+            .map_err(|err| format!("could not read {}: {err}", folder.display()))?;
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            // `add_file` refuses what is not media by its name.
+            .filter(|p| p.is_file())
+            .collect();
+        paths.sort();
+        let mut added = 0_usize;
+        for path in paths {
+            if self.add_file(&path).is_ok() {
+                added = added.saturating_add(1);
+            }
+        }
+        Ok(added)
+    }
+
     /// Remove a source.
     pub fn remove_source(&mut self, id: u64) -> bool {
         let len = self.sources.len();
@@ -1390,6 +1723,12 @@ impl MediaConvertApp {
         }
     }
 
+    /// As [`Self::detect_category`], for a name that may not be text.
+    pub fn detect_category_os(name: &OsStr) -> Option<MediaCategory> {
+        let ext = Path::new(name).extension()?.to_str()?;
+        Self::detect_category(&format!("x.{ext}"))
+    }
+
     // -----------------------------------------------------------------------
     // Profile management
     // -----------------------------------------------------------------------
@@ -1405,6 +1744,11 @@ impl MediaConvertApp {
                 self.video_settings = p.video_settings;
                 self.image_settings = p.image_settings;
             }
+            // The rows below the profile are the profile's: a row the new
+            // one does not have is not where the keys can stay.
+            if !setting_rows(self.output_format().as_ref()).contains(&self.setting_row) {
+                self.setting_row = SettingRow::Profile;
+            }
         }
     }
 
@@ -1416,56 +1760,94 @@ impl MediaConvertApp {
         self.image_settings = ImageSettings::from_preset(preset);
     }
 
-    // -----------------------------------------------------------------------
-    // Job queue
-    // -----------------------------------------------------------------------
-
-    // ====================================================================
-    // Input
-    //
-    // This program had none, and twenty-two functions had no caller outside
-    // the tests -- the whole queue among them: `queue_all`, `queue_source`,
-    // `start_next_job`, `complete_job`, `fail_job`, `cancel_job`,
-    // `cancel_all_queued`, `clear_finished_jobs`, `remove_source`,
-    // `clear_sources`, `select_profile`, `set_quality_preset`.
-    // ====================================================================
-
-    /// The files the window opens on.
-    ///
-    /// In a method rather than in `main` because a test cannot call `main`, and
-    /// a converter that opens on an empty file list looks broken rather than
-    /// idle. One of each category, so every panel has something to show.
-    /// A few media files, for tests.
-    ///
-    /// `#[cfg(test)]` since 2026-09-15. `main` called it, so the window opened
-    /// on `/music/song.flac` at 50 MB and `/videos/clip.mkv` at 1.5 GB --
-    /// paths with sizes and durations, none of which had been read. A filename
-    /// is a claim that a file exists.
-    #[cfg(test)]
-    pub fn seed_sample_sources(&mut self) {
-        self.add_source_with_duration(
-            "/music/song.flac",
-            "song.flac",
-            50_000_000,
-            MediaCategory::Audio,
-            243.5,
-            "FLAC",
-        );
-        self.add_source_with_duration(
-            "/videos/clip.mkv",
-            "clip.mkv",
-            1_500_000_000,
-            MediaCategory::Video,
-            3600.0,
-            "MKV/H.264",
-        );
-        self.add_source(
-            "/pictures/photo.png",
-            "photo.png",
-            8_000_000,
-            MediaCategory::Image,
-        );
+    /// The output format of the chosen profile.
+    fn output_format(&self) -> Option<OutputFormat> {
+        self.profiles
+            .get(self.selected_profile_idx)
+            .map(|p| p.output_format.clone())
     }
+
+    /// Step the value of settings row `row`: forward, or back.
+    fn step_setting(&mut self, row: SettingRow, forward: bool) {
+        fn step<T: PartialEq + Copy>(list: &[T], now: T, forward: bool) -> T {
+            let at = list.iter().position(|v| *v == now).unwrap_or(0);
+            let len = list.len().max(1);
+            let next = if forward {
+                at.saturating_add(1).checked_rem(len).unwrap_or(0)
+            } else {
+                at.checked_sub(1).unwrap_or(len.saturating_sub(1))
+            };
+            list.get(next).copied().unwrap_or(now)
+        }
+        match row {
+            SettingRow::Profile => {
+                let count = self.profiles.len().max(1);
+                let next = if forward {
+                    self.selected_profile_idx
+                        .saturating_add(1)
+                        .checked_rem(count)
+                        .unwrap_or(0)
+                } else {
+                    self.selected_profile_idx
+                        .checked_sub(1)
+                        .unwrap_or(count.saturating_sub(1))
+                };
+                self.select_profile(next);
+            }
+            SettingRow::Quality => {
+                let presets = [
+                    QualityPreset::Low,
+                    QualityPreset::Medium,
+                    QualityPreset::High,
+                    QualityPreset::Lossless,
+                ];
+                let next = step(&presets, self.quality_preset, forward);
+                self.set_quality_preset(next);
+            }
+            SettingRow::SampleRate => {
+                self.audio_settings.sample_rate =
+                    step(&SAMPLE_RATES, self.audio_settings.sample_rate, forward);
+            }
+            SettingRow::Channels => {
+                self.audio_settings.channels = if self.audio_settings.channels == 1 {
+                    2
+                } else {
+                    1
+                };
+            }
+            SettingRow::SampleFormat => {
+                self.audio_settings.bit_depth =
+                    step(&BIT_DEPTHS, self.audio_settings.bit_depth, forward);
+            }
+            SettingRow::MaxWidth => {
+                self.image_settings.max_width =
+                    step(&MAX_WIDTHS, self.image_settings.max_width, forward);
+            }
+            SettingRow::MaxHeight => {
+                self.image_settings.max_height =
+                    step(&MAX_HEIGHTS, self.image_settings.max_height, forward);
+            }
+            SettingRow::Naming => {
+                let rules = naming_rules();
+                let at = rules
+                    .iter()
+                    .position(|r| *r == self.output_naming)
+                    .unwrap_or(0);
+                let next = if forward {
+                    at.saturating_add(1).checked_rem(rules.len()).unwrap_or(0)
+                } else {
+                    at.checked_sub(1).unwrap_or(rules.len().saturating_sub(1))
+                };
+                if let Some(rule) = rules.get(next) {
+                    self.output_naming = rule.clone();
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Events
+    // -----------------------------------------------------------------------
 
     /// Whether the queue has anything left to do.
     fn has_work(&self) -> bool {
@@ -1476,8 +1858,36 @@ impl MediaConvertApp {
 
     /// Handle one event from the window.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The picker takes input first while it is up -- and a tick falls
+        // through it, so a running conversion is not stalled by an open
+        // dialog.
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
+        {
+            Picked::Chose(path) => {
+                self.picked(&path);
+                return EventResult::Consumed;
+            }
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
         match event {
-            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Key(key) if key.pressed => {
+                let before = (self.selected_source, self.selected_job);
+                let walked = matches!(key.key, Key::Up | Key::Down);
+                let result = self.handle_key(key);
+                // An arrow that moved nothing -- at the end of a list the
+                // wheel scrolled away -- still brings the chosen row back.
+                self.follow_selection(
+                    self.selected_source != before.0
+                        || (walked && self.active_panel == ActivePanel::SourceList),
+                    self.selected_job != before.1
+                        || (walked && self.active_panel == ActivePanel::Queue),
+                );
+                result
+            }
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Resize { width, height } => {
                 #[allow(
                     clippy::cast_precision_loss,
@@ -1494,42 +1904,75 @@ impl MediaConvertApp {
         }
     }
 
-    /// One step of the queue.
+    /// What the picker chose, done with.
+    fn picked(&mut self, path: &Path) {
+        match self.picker_for {
+            PickerFor::Files => {
+                self.status_line = match self.add_file(path) {
+                    Ok(_) => format!("Added {}", path.display()),
+                    Err(why) => why,
+                };
+            }
+            PickerFor::Folder => {
+                self.status_line = match self.add_folder(path) {
+                    Ok(0) => format!("No media files in {}", path.display()),
+                    Ok(n) => format!("Added {n} file(s) from {}", path.display()),
+                    Err(why) => why,
+                };
+            }
+            PickerFor::OutputFolder => {
+                self.output_dir = Some(path.to_path_buf());
+                self.status_line = format!("Outputs go to {}", path.display());
+            }
+        }
+    }
+
+    fn open_picker(&mut self, what: PickerFor) {
+        self.picker_for = what;
+        match what {
+            PickerFor::Files => self.picker.open_to_read(),
+            PickerFor::Folder | PickerFor::OutputFolder => self.picker.put_up(
+                FileDialog::select_folder().with_initial_path(FilePicker::default_start()),
+                false,
+            ),
+        }
+    }
+
+    /// One step of the queue: the running job's progress, its result when it
+    /// has one, and the next job when it is done.
     ///
-    /// Runs one job at a time, which is what a converter on one machine does:
-    /// four conversions at a quarter speed each finish no sooner and make the
-    /// progress bars useless. When the running one finishes, the next starts on
-    /// the same tick, so the queue does not stall for a frame between jobs.
+    /// One job at a time, which is what a converter on one machine does: four
+    /// conversions at a quarter speed each finish no sooner and make the
+    /// progress bars useless.
     fn handle_tick(&mut self) -> EventResult {
-        if !self.has_work() {
-            return EventResult::Ignored;
+        let Some(worker) = self.worker.as_mut() else {
+            return if self.start_next_job() {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
+        };
+        let id = worker.job_id;
+        let progress = worker.progress();
+        let result = worker.poll();
+        if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) {
+            job.progress = (progress * 100.0).clamp(0.0, 100.0);
         }
-
-        // Every job is offered the step and `advance` refuses the ones that are
-        // not running, rather than this filtering first and `advance` checking
-        // again. Two statements of one rule is one statement that is never the
-        // reason: with the filter here, deleting the guard in `advance` changed
-        // nothing observable, which a mutation duly reported.
-        let finished = self
-            .jobs
-            .iter_mut()
-            .find_map(|job| job.advance(JOB_STEP_PERCENT).then_some(job.id));
-
-        if let Some(id) = finished {
-            // The size the profile predicted. `estimated_size` is what the
-            // program already computes for the queue panel, so a finished job
-            // reports the figure the user was shown rather than a new one.
-            let estimated = self
-                .jobs
-                .iter()
-                .find(|j| j.id == id)
-                .and_then(|j| j.estimated_size)
-                .unwrap_or(0);
-            self.complete_job(id, estimated);
-        }
-
-        // Nothing running: take the next one off the queue.
-        if !self.jobs.iter().any(|j| j.status == JobStatus::Running) {
+        if let Some(result) = result {
+            self.worker = None;
+            match result {
+                Ok(bytes) => {
+                    self.complete_job(id, bytes);
+                }
+                Err(why) if why == "cancelled" => {
+                    if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) {
+                        job.cancel();
+                    }
+                }
+                Err(why) => {
+                    self.fail_job(id, &why);
+                }
+            }
             self.start_next_job();
         }
         EventResult::Consumed
@@ -1551,16 +1994,22 @@ impl MediaConvertApp {
         }
         if key.modifiers.ctrl {
             return match key.key {
-                // Queue everything and start. `queue_all` had six tests and no
-                // caller, so the button this program is named for did nothing.
+                Key::O => {
+                    self.open_picker(if key.modifiers.shift {
+                        PickerFor::Folder
+                    } else {
+                        PickerFor::Files
+                    });
+                    EventResult::Consumed
+                }
+                // Queue everything and start.
                 Key::Enter => {
                     self.queue_all();
                     self.start_next_job();
                     self.active_panel = ActivePanel::Queue;
                     EventResult::Consumed
                 }
-                // Abandon what has not started. A queue with no cancel is a
-                // queue you have to wait out.
+                // Abandon what has not started.
                 Key::C => {
                     self.cancel_all_queued();
                     EventResult::Consumed
@@ -1575,24 +2024,48 @@ impl MediaConvertApp {
         }
 
         match key.key {
-            // The three panels. `ActivePanel` had three variants and nothing
-            // that moved between them.
             Key::Tab => {
                 self.active_panel = match self.active_panel {
                     ActivePanel::SourceList => ActivePanel::Settings,
                     ActivePanel::Settings => ActivePanel::Queue,
                     ActivePanel::Queue => ActivePanel::SourceList,
                 };
-                self.show_queue = self.active_panel == ActivePanel::Queue;
                 EventResult::Consumed
             }
             Key::Up | Key::Down if self.active_panel == ActivePanel::SourceList => {
                 self.move_source_selection(if key.key == Key::Down { 1 } else { -1 });
                 EventResult::Consumed
             }
+            Key::Up | Key::Down if self.active_panel == ActivePanel::Queue => {
+                self.move_job_selection(if key.key == Key::Down { 1 } else { -1 });
+                EventResult::Consumed
+            }
+            // Where outputs go, which the panel's two buttons also set.
+            Key::O => {
+                self.open_picker(PickerFor::OutputFolder);
+                EventResult::Consumed
+            }
+            Key::B => {
+                self.output_beside();
+                EventResult::Consumed
+            }
+            // The settings rows.
+            Key::Up | Key::Down if self.active_panel == ActivePanel::Settings => {
+                let rows = setting_rows(self.output_format().as_ref());
+                let at = rows
+                    .iter()
+                    .position(|r| *r == self.setting_row)
+                    .unwrap_or(0);
+                let next = if key.key == Key::Down {
+                    at.saturating_add(1).min(rows.len().saturating_sub(1))
+                } else {
+                    at.saturating_sub(1)
+                };
+                self.setting_row = rows.get(next).copied().unwrap_or(SettingRow::Profile);
+                EventResult::Consumed
+            }
             // Queue just the selected file.
             Key::Enter if self.active_panel == ActivePanel::SourceList => {
-                // By id, which is what the selection holds and what these take.
                 if let Some(id) = self.selected_source {
                     self.queue_source(id);
                     self.start_next_job();
@@ -1601,8 +2074,7 @@ impl MediaConvertApp {
             }
             Key::Delete => match self.active_panel {
                 // Take a file off the list, or the whole list with nothing
-                // selected. `remove_source` and `clear_sources` had a test each
-                // and no caller.
+                // selected.
                 ActivePanel::SourceList => {
                     if let Some(id) = self.selected_source {
                         self.remove_source(id);
@@ -1612,35 +2084,41 @@ impl MediaConvertApp {
                     }
                     EventResult::Consumed
                 }
+                // The chosen job: cancelled if it is still to run, taken off
+                // the list if it has finished. With none chosen, the first
+                // that can be cancelled -- or, with none left, every
+                // finished one.
                 ActivePanel::Queue => {
-                    if let Some(id) = self.first_cancellable_job() {
-                        self.cancel_job(id);
-                    } else {
-                        self.clear_finished_jobs();
+                    let chosen = self
+                        .selected_job
+                        .and_then(|id| self.jobs.iter().find(|j| j.id == id))
+                        .map(|j| (j.id, j.status));
+                    match chosen {
+                        Some((id, JobStatus::Queued | JobStatus::Running)) => {
+                            self.cancel_job(id);
+                        }
+                        Some((id, _)) => {
+                            self.jobs.retain(|j| j.id != id);
+                            self.selected_job = None;
+                        }
+                        None => {
+                            if let Some(id) = self.first_cancellable_job() {
+                                self.cancel_job(id);
+                            } else {
+                                self.clear_finished_jobs();
+                            }
+                        }
                     }
                     EventResult::Consumed
                 }
                 ActivePanel::Settings => EventResult::Ignored,
             },
-            // The conversion profiles, which `select_profile` exists to choose
-            // between and which nothing chose.
+            // The chosen setting's value.
             Key::Left | Key::Right if self.active_panel == ActivePanel::Settings => {
-                let count = self.profiles.len();
-                let delta: isize = if key.key == Key::Right { 1 } else { -1 };
-                if let Some(next) = (self.selected_profile_idx as isize)
-                    .saturating_add(delta)
-                    .rem_euclid(count.max(1) as isize)
-                    .try_into()
-                    .ok()
-                    .filter(|i: &usize| *i < count)
-                {
-                    self.select_profile(next);
-                }
+                self.step_setting(self.setting_row, key.key == Key::Right);
                 EventResult::Consumed
             }
-            // Quality, low to lossless. `set_quality_preset` also refuses a
-            // preset the format cannot do -- `supports_quality`, three tests,
-            // no caller.
+            // Quality, low to lossless.
             Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 => {
                 let preset = match key.key {
                     Key::Num1 => QualityPreset::Low,
@@ -1665,7 +2143,7 @@ impl MediaConvertApp {
     fn first_cancellable_job(&self) -> Option<u64> {
         self.jobs
             .iter()
-            .find(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
+            .find(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running) && !j.stopping)
             .map(|j| j.id)
     }
 
@@ -1688,83 +2166,141 @@ impl MediaConvertApp {
         self.selected_source = self.sources.get(next.unsigned_abs()).map(|s| s.id);
     }
 
-    /// Queue all sources for conversion with current settings.
-    pub fn queue_all(&mut self) -> usize {
-        let sources: Vec<SourceFile> = self.sources.clone();
-        let output_format = self
-            .profiles
-            .get(self.selected_profile_idx)
-            .map_or(OutputFormat::Audio(AudioFormat::Mp3), |p| {
-                p.output_format.clone()
-            });
-
-        let mut count = 0usize;
-        for (idx, src) in sources.iter().enumerate() {
-            let out_name = self
-                .output_naming
-                .apply(&src.file_name, output_format.extension(), idx);
-            let id = self.id_gen.next_id();
-            self.jobs.push(ConversionJob::new(
-                id,
-                src.clone(),
-                output_format.clone(),
-                out_name,
-                &self.output_dir,
-            ));
-            count = count.saturating_add(1);
-        }
-        count
+    /// Where the chosen job sits in the queue.
+    fn selected_job_index(&self) -> Option<usize> {
+        let id = self.selected_job?;
+        self.jobs.iter().position(|j| j.id == id)
     }
 
-    /// Queue a single source.
+    /// Move the job selection by `delta` rows, stopping at the ends.
+    fn move_job_selection(&mut self, delta: isize) {
+        if self.jobs.is_empty() {
+            self.selected_job = None;
+            return;
+        }
+        let last = (self.jobs.len() as isize).saturating_sub(1);
+        let next = match self.selected_job_index() {
+            Some(index) => (index as isize).saturating_add(delta).clamp(0, last),
+            None if delta < 0 => last,
+            None => 0,
+        };
+        self.selected_job = self.jobs.get(next.unsigned_abs()).map(|j| j.id);
+    }
+
+    /// Send outputs beside their sources again.
+    fn output_beside(&mut self) {
+        self.output_dir = None;
+        self.status_line = String::from("Outputs go beside each source");
+    }
+
+    /// How to convert `source` with the chosen profile and settings, or why
+    /// it cannot be.
+    fn recipe_for(&self, source: &SourceFile) -> Result<engine::Recipe, String> {
+        let output = self
+            .output_format()
+            .ok_or_else(|| String::from("no profile is chosen"))?;
+        let name = source
+            .path
+            .file_name()
+            .unwrap_or_else(|| source.path.as_os_str());
+        engine::recipe(name, &output, &self.audio_settings, &self.image_settings)
+    }
+
+    /// Queue all sources for conversion with current settings; answers how
+    /// many were queued. Each one the profile cannot convert is left out, and
+    /// the status line says how many and why the first was.
+    pub fn queue_all(&mut self) -> usize {
+        let ids: Vec<u64> = self.sources.iter().map(|s| s.id).collect();
+        let mut queued = 0_usize;
+        let mut refused = 0_usize;
+        let mut first_reason = None;
+        for id in ids {
+            if self.queue_source(id).is_some() {
+                queued = queued.saturating_add(1);
+            } else {
+                refused = refused.saturating_add(1);
+                if first_reason.is_none() {
+                    first_reason = Some(self.status_line.clone());
+                }
+            }
+        }
+        self.status_line = match (queued, refused) {
+            (_, 0) => format!("Queued {queued} file(s)"),
+            (0, _) => first_reason.unwrap_or_default(),
+            _ => format!(
+                "Queued {queued}; left out {refused}: {}",
+                first_reason.unwrap_or_default()
+            ),
+        };
+        queued
+    }
+
+    /// Queue a single source, if the chosen profile can convert it; if not,
+    /// the status line says why and nothing is queued.
     pub fn queue_source(&mut self, source_id: u64) -> Option<u64> {
         let src = self.find_source(source_id)?.clone();
-        let output_format = self
-            .profiles
-            .get(self.selected_profile_idx)
-            .map_or(OutputFormat::Audio(AudioFormat::Mp3), |p| {
-                p.output_format.clone()
-            });
-        let out_name =
-            self.output_naming
-                .apply(&src.file_name, output_format.extension(), self.jobs.len());
+        let recipe = match self.recipe_for(&src) {
+            Ok(recipe) => recipe,
+            Err(why) => {
+                self.status_line = format!("{}: {why}", src.file_name);
+                return None;
+            }
+        };
+        let output_format = self.output_format()?;
+        let stem = src.path.file_name().unwrap_or_else(|| src.path.as_os_str());
+        let name = self
+            .output_naming
+            .apply_os(stem, output_format.extension(), self.jobs.len());
+        // Nothing is written over: not the source, not a file already there,
+        // and not another job's output.
+        let planned: Vec<PathBuf> = self
+            .jobs
+            .iter()
+            .filter(|j| !matches!(j.status, JobStatus::Failed | JobStatus::Cancelled))
+            .map(|j| j.output_path.clone())
+            .collect();
+        let output_path = engine::output_path(&src.path, self.output_dir.as_deref(), &name, &|p| {
+            p.exists() || planned.iter().any(|q| q == p)
+        });
         let id = self.id_gen.next_id();
+        let output_name = output_path
+            .file_name()
+            .map_or_else(String::new, |n| Path::new(n).display().to_string());
         self.jobs.push(ConversionJob::new(
             id,
             src,
             output_format,
-            out_name,
-            &self.output_dir,
+            output_name,
+            output_path,
+            recipe,
         ));
         Some(id)
     }
 
-    /// Start the next queued job (simulated).
-    /// Report that no job can be started.
-    ///
-    /// It used to move the next queued job to `Running`, after which the app's
-    /// tick advanced it and called `complete_job` with an estimated output
-    /// size -- so a queue drained itself to `Completed`, with byte counts, and
-    /// no file was read or written at any point.
-    ///
-    /// The queue itself is real and stays: it is a plan, and a plan is an
-    /// honest thing for this program to hold. What it cannot do is carry the
-    /// plan out. Refusing at the start rather than during is the same choice
-    /// as `soundrecorder` and `screenrecorder`: by the time a running job
-    /// reports trouble, somebody may have acted on the ones before it.
+    /// Start the next queued job on a thread of its own, unless one is
+    /// running; answers whether one started.
     pub fn start_next_job(&mut self) -> bool {
-        if self.jobs.iter().any(|j| j.status == JobStatus::Queued) {
-            self.status_line =
-                String::from("Cannot convert: nothing here can read a source or write an output");
+        if self.worker.is_some() {
+            return false;
         }
-        false
+        let ts = self.tick();
+        let Some(job) = self.jobs.iter_mut().find(|j| j.status == JobStatus::Queued) else {
+            return false;
+        };
+        job.start(ts);
+        self.worker = Some(engine::Worker::start(
+            job.id,
+            job.recipe.clone(),
+            job.source.path.clone(),
+            job.output_path.clone(),
+        ));
+        // The status line keeps what queueing said -- which files were left
+        // out and why; the queue shows the job running.
+        true
     }
 
-    /// Start the next queued job, the way the button used to.
-    ///
-    /// `#[cfg(test)]`. The job state machine, the progress accounting and the
-    /// queue ordering are real and worth testing; what is not is a conversion
-    /// that produces no file.
+    /// Start the next queued job with no thread behind it, for the tests of
+    /// the queue's bookkeeping.
     #[cfg(test)]
     pub fn start_next_job_fixture(&mut self) -> bool {
         let ts = self.tick();
@@ -1776,7 +2312,7 @@ impl MediaConvertApp {
         }
     }
 
-    /// Complete a running job (simulated).
+    /// Complete a running job, and record it.
     pub fn complete_job(&mut self, job_id: u64, output_size: u64) -> bool {
         let ts = self.tick();
         if let Some(job) = self
@@ -1785,7 +2321,6 @@ impl MediaConvertApp {
             .find(|j| j.id == job_id && j.status == JobStatus::Running)
         {
             job.complete(ts, output_size);
-            // Add to history
             self.history.push(HistoryEntry {
                 source_path: job.source.path.clone(),
                 output_path: job.output_path.clone(),
@@ -1796,6 +2331,7 @@ impl MediaConvertApp {
                 duration_secs: 0.0,
                 success: true,
             });
+            self.status_line = format!("Wrote {}", job.output_path.display());
             true
         } else {
             false
@@ -1811,14 +2347,25 @@ impl MediaConvertApp {
             .find(|j| j.id == job_id && j.status == JobStatus::Running)
         {
             job.fail(ts, error);
+            self.status_line = format!("{} failed: {error}", job.source.file_name);
             true
         } else {
             false
         }
     }
 
-    /// Cancel a queued or running job.
+    /// Cancel a queued or running job. A running one is asked to stop, and
+    /// stops before it writes anything; it shows as stopping until it has.
     pub fn cancel_job(&mut self, job_id: u64) -> bool {
+        if let Some(worker) = &self.worker
+            && worker.job_id == job_id
+        {
+            worker.cancel();
+            if let Some(job) = self.jobs.iter_mut().find(|j| j.id == job_id) {
+                job.stopping = true;
+            }
+            return true;
+        }
         if let Some(job) = self.jobs.iter_mut().find(|j| {
             j.id == job_id && (j.status == JobStatus::Queued || j.status == JobStatus::Running)
         }) {
@@ -1854,34 +2401,14 @@ impl MediaConvertApp {
     // -----------------------------------------------------------------------
 
     pub fn queue_stats(&self) -> QueueStats {
-        let queued = self
-            .jobs
-            .iter()
-            .filter(|j| j.status == JobStatus::Queued)
-            .count();
-        let running = self
-            .jobs
-            .iter()
-            .filter(|j| j.status == JobStatus::Running)
-            .count();
-        let completed = self
-            .jobs
-            .iter()
-            .filter(|j| j.status == JobStatus::Completed)
-            .count();
-        let failed = self
-            .jobs
-            .iter()
-            .filter(|j| j.status == JobStatus::Failed)
-            .count();
+        let count = |status: JobStatus| self.jobs.iter().filter(|j| j.status == status).count();
         let total_source: u64 = self.jobs.iter().map(|j| j.source.file_size).sum();
         let total_output: u64 = self.jobs.iter().filter_map(|j| j.actual_size).sum();
-
         QueueStats {
-            queued,
-            running,
-            completed,
-            failed,
+            queued: count(JobStatus::Queued),
+            running: count(JobStatus::Running),
+            completed: count(JobStatus::Completed),
+            failed: count(JobStatus::Failed),
             total_jobs: self.jobs.len(),
             total_source_size: total_source,
             total_output_size: total_output,
@@ -1908,18 +2435,20 @@ impl MediaConvertApp {
     // Rendering
     // -----------------------------------------------------------------------
 
-    /// Draw the whole window.
+    /// For the tests: the window draws `frame`, whose boxes it keeps.
     ///
     /// Not `render`: [`App::render`] is the one the window calls, and this one
     /// takes the same two arguments -- so at equal arity an inherent method
-    /// wins method lookup outright and the trait's is never called. That is the
-    /// silent version of this failure, and it is why the rename is not
-    /// cosmetic.
+    /// wins method lookup outright and the trait's is never called.
+    #[cfg(test)]
     pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+        self.frame(width, height).into_tree().commands
+    }
 
-        // Background
-        cmds.push(RenderCommand::FillRect {
+    /// Draw the window, recording every control where it is drawn.
+    pub fn frame(&self, width: f32, height: f32) -> Frame<Target> {
+        let mut f = Frame::new(width, height);
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width,
@@ -1927,85 +2456,121 @@ impl MediaConvertApp {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
-
-        // After the background, or it would be painted over.
-        for (i, line) in CANNOT_CONVERT_LINES.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: 8.0,
-                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                y: 1.0 + i as f32 * 12.0,
-                text: (*line).to_string(),
-                color: if i == 0 {
-                    self.palette.ink(self.palette.yellow)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: if i == 0 { 11.0 } else { 9.0 },
-                font_weight: if i == 0 {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(width - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-        if !self.status_line.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: 8.0,
-                y: 38.0,
-                text: self.status_line.clone(),
-                color: self.palette.ink(self.palette.peach),
-                font_size: 10.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
-        self.render_toolbar(&mut cmds, width);
-        self.render_status_bar(&mut cmds, width, height);
+        self.render_toolbar(&mut f, width);
+        self.render_status_bar(&mut f, width, height);
 
         let content_y = TOOLBAR_HEIGHT;
-        let content_h = height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT;
-
-        // Source list (left)
-        self.render_source_list(&mut cmds, content_y, content_h);
-
-        // Settings panel (middle)
-        let settings_x = SIDEBAR_WIDTH;
+        let content_h = (height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT).max(0.0);
+        f.clip(Rect::new(0.0, content_y, SIDEBAR_WIDTH, content_h));
+        self.render_source_list(&mut f, content_y, content_h);
+        f.unclip();
+        f.clip(Rect::new(
+            SIDEBAR_WIDTH,
+            content_y,
+            SETTINGS_PANEL_WIDTH,
+            content_h,
+        ));
         self.render_settings_panel(
-            &mut cmds,
-            settings_x,
+            &mut f,
+            SIDEBAR_WIDTH,
             content_y,
             SETTINGS_PANEL_WIDTH,
             content_h,
         );
-
-        // Queue (right)
+        f.unclip();
+        // The queue, always: it vanished whenever another panel had the keys.
         let queue_x = SIDEBAR_WIDTH + SETTINGS_PANEL_WIDTH;
-        let queue_w = width - queue_x;
-        if self.show_queue {
-            self.render_queue_panel(&mut cmds, queue_x, content_y, queue_w, content_h);
-        }
+        let queue_w = (width - queue_x).max(0.0);
+        f.clip(Rect::new(queue_x, content_y, queue_w, content_h));
+        self.render_queue_panel(&mut f, queue_x, content_y, queue_w, content_h);
+        f.unclip();
 
         if self.show_help {
             guitk::shortcut::render_card(
-                &mut cmds,
+                &mut f,
                 &self.palette,
                 (width, height),
                 0.0,
                 SHORTCUTS,
                 "F1 or ? closes this",
             );
+            f.hit(Target::HelpCard, Rect::new(0.0, 0.0, width, height));
         }
-
-        cmds
+        f.extend(self.picker.render(&self.palette, width, height));
+        f
     }
 
-    fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>, width: f32) {
+    /// A button, lit while the pointer is on it; one with nothing to do is
+    /// drawn dim and records no box.
+    fn button(
+        &self,
+        f: &mut Frame<Target>,
+        rect: Rect,
+        label: &str,
+        target: Target,
+        enabled: bool,
+    ) {
+        let lit = enabled && self.hover == Some(target);
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: if lit {
+                self.palette.surface2
+            } else {
+                self.palette.surface1
+            },
+            corner_radii: CornerRadii::all(CORNER_RADIUS),
+        });
+        f.push(RenderCommand::Text {
+            x: rect.x + 8.0,
+            y: rect.y + (rect.h - 11.0) / 2.0,
+            text: label.to_owned(),
+            color: if enabled {
+                self.palette.text
+            } else {
+                self.palette.overlay0
+            },
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((rect.w - 12.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if enabled {
+            f.hit(target, rect);
+        }
+    }
+
+    fn heading(&self, f: &mut Frame<Target>, x: f32, y: f32, text: String, width: f32) {
+        f.push(RenderCommand::Text {
+            x,
+            y,
+            text,
+            color: self.palette.subtext0,
+            font_size: 10.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(width.max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    fn note(&self, f: &mut Frame<Target>, x: f32, y: f32, text: String, width: f32) {
+        f.push(RenderCommand::Text {
+            x,
+            y,
+            text,
+            color: self.palette.subtext0,
+            font_size: 10.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width.max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    fn render_toolbar(&self, f: &mut Frame<Target>, width: f32) {
         self.palette.push_surface(
-            cmds,
+            f,
             0.0,
             0.0,
             width,
@@ -2013,73 +2578,41 @@ impl MediaConvertApp {
             0.0,
             Surface::Strip(Edge::Bottom),
         );
-
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 12.0,
             y: 12.0,
             text: "Media Converter".to_owned(),
             color: self.palette.ink(self.palette.blue),
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
-            max_width: Some(160.0),
+            max_width: Some(150.0),
             overflow: TextOverflow::Ellipsis,
         });
-
-        // Profile selector
-        let profile_name = self
-            .profiles
-            .get(self.selected_profile_idx)
-            .map_or("None", |p| &p.name);
-        self.palette
-            .push_surface(cmds, 180.0, 8.0, 200.0, 24.0, CORNER_RADIUS, Surface::Card);
-        cmds.push(RenderCommand::Text {
-            x: 188.0,
-            y: 14.0,
-            text: format!("Profile: {profile_name}"),
-            color: self.palette.text,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(190.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Quality preset
-        let qual_label = format!("Quality: {}", self.quality_preset.label());
-        self.palette
-            .push_surface(cmds, 392.0, 8.0, 120.0, 24.0, CORNER_RADIUS, Surface::Card);
-        cmds.push(RenderCommand::Text {
-            x: 400.0,
-            y: 14.0,
-            text: qual_label,
-            color: self.palette.text,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(110.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Convert button
-        let convert_x = width - 120.0;
-        cmds.push(RenderCommand::FillRect {
-            x: convert_x,
-            y: 8.0,
-            width: 100.0,
-            height: 24.0,
-            color: self.palette.green,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
-        cmds.push(RenderCommand::Text {
-            x: convert_x + 16.0,
-            y: 14.0,
-            text: "Convert All".to_owned(),
-            color: self.palette.crust,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(80.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        cmds.push(RenderCommand::Line {
+        let stats = self.queue_stats();
+        let finished = self
+            .jobs
+            .iter()
+            .any(|j| !matches!(j.status, JobStatus::Queued | JobStatus::Running));
+        let mut bx = 170.0;
+        for (label, target, enabled) in [
+            ("Add files\u{2026}", Target::AddFiles, true),
+            ("Add folder\u{2026}", Target::AddFolder, true),
+            ("Convert all", Target::ConvertAll, !self.sources.is_empty()),
+            ("Cancel waiting", Target::CancelWaiting, stats.queued > 0),
+            ("Clear finished", Target::ClearFinished, finished),
+        ] {
+            let bw = text::padded_width(label, 10.0, 11.0, FontWeightHint::Regular);
+            self.button(f, Rect::new(bx, 8.0, bw, 24.0), label, target, enabled);
+            bx += bw + 6.0;
+        }
+        self.button(
+            f,
+            Rect::new(width - 12.0 - 80.0, 8.0, 80.0, 24.0),
+            "Keys (F1)",
+            Target::Help,
+            true,
+        );
+        f.push(RenderCommand::Line {
             x1: 0.0,
             y1: TOOLBAR_HEIGHT,
             x2: width,
@@ -2089,10 +2622,10 @@ impl MediaConvertApp {
         });
     }
 
-    fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>, width: f32, height: f32) {
+    fn render_status_bar(&self, f: &mut Frame<Target>, width: f32, height: f32) {
         let bar_y = height - STATUS_BAR_HEIGHT;
         self.palette.push_surface(
-            cmds,
+            f,
             0.0,
             bar_y,
             width,
@@ -2100,9 +2633,8 @@ impl MediaConvertApp {
             0.0,
             Surface::Strip(Edge::Top),
         );
-
         let stats = self.queue_stats();
-        let status = format!(
+        let mut status = format!(
             "{} sources  |  {} queued  |  {} running  |  {} completed  |  {} failed",
             self.sources.len(),
             stats.queued,
@@ -2110,20 +2642,89 @@ impl MediaConvertApp {
             stats.completed,
             stats.failed,
         );
-        cmds.push(RenderCommand::Text {
+        if !self.status_line.is_empty() {
+            status.push_str("  |  ");
+            status.push_str(&self.status_line);
+        }
+        f.push(RenderCommand::Text {
             x: 12.0,
             y: bar_y + 6.0,
             text: status,
             color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(width - 24.0),
+            max_width: Some((width - 24.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
     }
 
-    fn render_source_list(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
-        cmds.push(RenderCommand::FillRect {
+    /// The source rows' pane, and how many whole rows it holds.
+    fn source_pane(&self) -> (Rect, usize) {
+        let top = TOOLBAR_HEIGHT + 32.0;
+        let bottom = self.window_height - STATUS_BAR_HEIGHT;
+        let pane = Rect::new(0.0, top, SIDEBAR_WIDTH, (bottom - top).max(0.0));
+        (pane, ((pane.h / ITEM_HEIGHT).floor().max(1.0)) as usize)
+    }
+
+    /// The queue rows' pane, and how many whole rows it holds.
+    fn queue_pane(&self) -> (Rect, usize) {
+        let x = SIDEBAR_WIDTH + SETTINGS_PANEL_WIDTH;
+        let top = TOOLBAR_HEIGHT + 32.0;
+        let bottom = self.window_height - STATUS_BAR_HEIGHT;
+        let pane = Rect::new(
+            x,
+            top,
+            (self.window_width - x).max(0.0),
+            (bottom - top).max(0.0),
+        );
+        (pane, ((pane.h / QUEUE_ROW_H).floor().max(1.0)) as usize)
+    }
+
+    /// Scroll the lists whose selection the keys just moved, so that it is on
+    /// screen -- and only those. Following the selection on every frame, as
+    /// this once did, pinned a list to its chosen row: the wheel scrolled it
+    /// away and the next frame scrolled it straight back.
+    fn follow_selection(&mut self, source_moved: bool, job_moved: bool) {
+        if source_moved && let Some(at) = self.selected_source_index() {
+            let (_, rows) = self.source_pane();
+            self.source_scroll = scrolled_to(self.source_scroll, at, rows);
+        }
+        if job_moved && let Some(at) = self.selected_job_index() {
+            let (_, rows) = self.queue_pane();
+            self.queue_scroll = scrolled_to(self.queue_scroll, at, rows);
+        }
+        self.clamp_scrolls();
+    }
+
+    /// Keep each list's scroll inside the list: never past its end, which a
+    /// shorter list or a taller window would otherwise leave it.
+    fn clamp_scrolls(&mut self) {
+        let (_, rows) = self.source_pane();
+        self.source_scroll = self
+            .source_scroll
+            .min(self.sources.len().saturating_sub(rows));
+        let (_, rows) = self.queue_pane();
+        self.queue_scroll = self.queue_scroll.min(self.jobs.len().saturating_sub(rows));
+    }
+
+    /// The border that says which panel has the keys.
+    fn panel_focus(&self, f: &mut Frame<Target>, panel: ActivePanel, rect: Rect) {
+        f.hit(Target::Panel(panel), rect);
+        if self.active_panel == panel {
+            f.push(RenderCommand::StrokeRect {
+                x: rect.x + 1.0,
+                y: rect.y + 1.0,
+                width: (rect.w - 2.0).max(0.0),
+                height: (rect.h - 2.0).max(0.0),
+                color: self.palette.blue,
+                line_width: 1.0,
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+    }
+
+    fn render_source_list(&self, f: &mut Frame<Target>, y: f32, height: f32) {
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y,
             width: SIDEBAR_WIDTH,
@@ -2131,66 +2732,84 @@ impl MediaConvertApp {
             color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
+        self.panel_focus(
+            f,
+            ActivePanel::SourceList,
+            Rect::new(0.0, y, SIDEBAR_WIDTH, height),
+        );
+        self.heading(
+            f,
+            12.0,
+            y + 10.0,
+            format!("SOURCE FILES ({})", self.sources.len()),
+            SIDEBAR_WIDTH - 24.0,
+        );
 
-        cmds.push(RenderCommand::Line {
-            x1: SIDEBAR_WIDTH,
-            y1: y,
-            x2: SIDEBAR_WIDTH,
-            y2: y + height,
-            color: self.palette.surface0,
-            width: 1.0,
-        });
-
-        // Header
-        cmds.push(RenderCommand::Text {
-            x: 12.0,
-            y: y + 10.0,
-            text: format!("SOURCE FILES ({})", self.sources.len()),
-            color: self.palette.subtext0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(SIDEBAR_WIDTH - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let mut cy = y + 32.0;
-        for src in &self.sources {
-            if cy > y + height {
-                break;
+        let (pane, rows) = self.source_pane();
+        f.hit(Target::SourceList, pane);
+        if self.sources.is_empty() {
+            for (i, line) in [
+                "No files yet.",
+                "Add files\u{2026} (Ctrl+O), or a whole",
+                "folder (Ctrl+Shift+O).",
+                "",
+                "WAV becomes WAV; PNG and JPEG",
+                "become BMP. Nothing else can",
+                "be converted in this build.",
+            ]
+            .iter()
+            .enumerate()
+            {
+                self.note(
+                    f,
+                    16.0,
+                    pane.y + 12.0 + i as f32 * 14.0,
+                    (*line).to_owned(),
+                    SIDEBAR_WIDTH - 32.0,
+                );
             }
-
+        }
+        for (shown, src) in self
+            .sources
+            .iter()
+            .skip(self.source_scroll)
+            .take(rows.saturating_add(1))
+            .enumerate()
+        {
+            let cy = pane.y + shown as f32 * ITEM_HEIGHT;
+            let row = Rect::new(4.0, cy, SIDEBAR_WIDTH - 8.0, ITEM_HEIGHT);
+            let target = Target::SourceRow(src.id);
             let is_selected = self.selected_source == Some(src.id);
-            if is_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: 4.0,
-                    y: cy,
-                    width: SIDEBAR_WIDTH - 8.0,
-                    height: ITEM_HEIGHT,
-                    color: self.palette.surface0,
+            if is_selected || self.hover == Some(target) {
+                f.push(RenderCommand::FillRect {
+                    x: row.x,
+                    y: row.y,
+                    width: row.w,
+                    height: row.h,
+                    color: if is_selected {
+                        self.palette.surface0
+                    } else {
+                        self.palette.crust
+                    },
                     corner_radii: CornerRadii::all(CORNER_RADIUS),
                 });
             }
-
-            let cat_color = match src.category {
-                MediaCategory::Audio => self.palette.teal,
-                MediaCategory::Video => self.palette.mauve,
-                MediaCategory::Image => self.palette.peach,
-            };
-
-            // Category dot
-            cmds.push(RenderCommand::FillRect {
+            f.hit(target, row);
+            f.push(RenderCommand::FillRect {
                 x: 12.0,
                 y: cy + 11.0,
                 width: 8.0,
                 height: 8.0,
-                color: cat_color,
+                color: match src.category {
+                    MediaCategory::Audio => self.palette.teal,
+                    MediaCategory::Video => self.palette.mauve,
+                    MediaCategory::Image => self.palette.peach,
+                },
                 corner_radii: CornerRadii::all(4.0),
             });
-
-            // File name
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: 26.0,
-                y: cy + 6.0,
+                y: cy + 5.0,
                 text: src.file_name.clone(),
                 color: if is_selected {
                     self.palette.text
@@ -2203,53 +2822,107 @@ impl MediaConvertApp {
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(SIDEBAR_WIDTH - 60.0),
+                max_width: Some(SIDEBAR_WIDTH - 64.0),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            // Size + duration
-            let info = if let Some(dur) = src.duration_secs {
-                format!("{} | {}", src.human_size(), format_duration(dur))
-            } else {
-                src.human_size()
-            };
-            cmds.push(RenderCommand::Text {
+            let mut info = src.human_size();
+            if let Some(dur) = src.duration_secs {
+                info.push_str(&format!(" | {}", format_duration(dur)));
+            }
+            if !src.source_format.is_empty() {
+                info.push_str(&format!(" | {}", src.source_format));
+            }
+            f.push(RenderCommand::Text {
                 x: 26.0,
-                y: cy + 20.0,
+                y: cy + 19.0,
                 text: info,
                 color: self.palette.subtext0,
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(SIDEBAR_WIDTH - 60.0),
+                max_width: Some(SIDEBAR_WIDTH - 64.0),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            cy += ITEM_HEIGHT;
+            // Off the list -- the file itself is not touched.
+            self.button(
+                f,
+                Rect::new(SIDEBAR_WIDTH - 32.0, cy + 6.0, 22.0, 20.0),
+                "\u{00D7}",
+                Target::RemoveSource(src.id),
+                true,
+            );
         }
+    }
 
-        if self.sources.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: SIDEBAR_WIDTH / 2.0 - 50.0,
-                y: y + height / 2.0,
-                text: "Drop files here".to_owned(),
-                color: self.palette.subtext0,
-                font_size: 13.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+    /// A settings row: its label, and its value between arrows.
+    fn render_setting(
+        &self,
+        f: &mut Frame<Target>,
+        row: SettingRow,
+        x: f32,
+        y: f32,
+        w: f32,
+        label: &str,
+        value: String,
+    ) {
+        let chosen = self.active_panel == ActivePanel::Settings && self.setting_row == row;
+        let rect = Rect::new(x - 4.0, y - 2.0, w + 8.0, 44.0);
+        if chosen {
+            f.push(RenderCommand::FillRect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.w,
+                height: rect.h,
+                color: self.palette.surface0,
+                corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
         }
+        f.hit(Target::Setting(row), rect);
+        self.heading(f, x, y, label.to_owned(), w);
+        let box_y = y + 14.0;
+        self.button(
+            f,
+            Rect::new(x, box_y, 24.0, 24.0),
+            "\u{25C0}",
+            Target::StepBack(row),
+            true,
+        );
+        self.button(
+            f,
+            Rect::new(x + w - 24.0, box_y, 24.0, 24.0),
+            "\u{25B6}",
+            Target::StepForward(row),
+            true,
+        );
+        self.palette.push_surface(
+            f,
+            x + 28.0,
+            box_y,
+            (w - 56.0).max(0.0),
+            24.0,
+            CORNER_RADIUS,
+            Surface::Card,
+        );
+        f.push(RenderCommand::Text {
+            x: x + 36.0,
+            y: box_y + 6.0,
+            text: value,
+            color: self.palette.text,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((w - 72.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
     }
 
     fn render_settings_panel(
         &self,
-        cmds: &mut Vec<RenderCommand>,
+        f: &mut Frame<Target>,
         x: f32,
         y: f32,
         width: f32,
         height: f32,
     ) {
-        cmds.push(RenderCommand::FillRect {
+        f.push(RenderCommand::FillRect {
             x,
             y,
             width,
@@ -2257,8 +2930,7 @@ impl MediaConvertApp {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
-
-        cmds.push(RenderCommand::Line {
+        f.push(RenderCommand::Line {
             x1: x + width,
             y1: y,
             x2: x + width,
@@ -2266,293 +2938,191 @@ impl MediaConvertApp {
             color: self.palette.surface0,
             width: 1.0,
         });
+        self.panel_focus(f, ActivePanel::Settings, Rect::new(x, y, width, height));
 
         let lx = x + 12.0;
         let max_w = width - 24.0;
-        let mut cy = y + 12.0;
+        let mut cy = y + 10.0;
+        // What this build can do, above everything it can be told to do.
+        for (i, line) in CAN_CONVERT_LINES.iter().enumerate() {
+            f.push(RenderCommand::Text {
+                x: lx,
+                y: cy,
+                text: (*line).to_owned(),
+                color: if i == 0 {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: 10.0,
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(max_w),
+                overflow: TextOverflow::Ellipsis,
+            });
+            cy += 13.0;
+        }
+        cy += 8.0;
 
-        // Above every control, not beside one of them: the claim is about all
-        // of them, and a note attached to the first would read as being about
-        // the first.
-        cmds.push(RenderCommand::Text {
-            x: lx,
-            y: cy,
-            text: SETTINGS_NOT_APPLIED.to_owned(),
-            color: self.palette.subtext0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(max_w),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 22.0;
-
-        // Output format
-        cmds.push(RenderCommand::Text {
-            x: lx,
-            y: cy,
-            text: "OUTPUT FORMAT".to_owned(),
-            color: self.palette.subtext0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(max_w),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 18.0;
-
-        let fmt_label = self
-            .profiles
-            .get(self.selected_profile_idx)
-            .map_or("N/A".to_owned(), |p| p.output_format.label());
-        self.palette
-            .push_surface(cmds, lx, cy, max_w, 24.0, CORNER_RADIUS, Surface::Card);
-        cmds.push(RenderCommand::Text {
-            x: lx + 8.0,
-            y: cy + 6.0,
-            text: fmt_label,
-            color: self.palette.text,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(max_w - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 36.0;
-
-        // Settings summary based on profile category
-        let profile_category = self
-            .profiles
-            .get(self.selected_profile_idx)
-            .map(|p| p.output_format.category());
-
-        match profile_category {
-            Some(MediaCategory::Audio) => {
-                cmds.push(RenderCommand::Text {
-                    x: lx,
-                    y: cy,
-                    text: "AUDIO SETTINGS".to_owned(),
-                    color: self.palette.subtext0,
-                    font_size: 10.0,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(max_w),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cy += 18.0;
-
-                let settings_lines = [
-                    format!("Codec: {}", self.audio_settings.codec.label()),
-                    format!("Bitrate: {} kbps", self.audio_settings.bitrate_kbps),
-                    format!("Sample Rate: {} Hz", self.audio_settings.sample_rate),
-                    format!("Channels: {}", self.audio_settings.channels),
-                    format!("Bit Depth: {}", self.audio_settings.bit_depth),
-                ];
-                for line in &settings_lines {
-                    cmds.push(RenderCommand::Text {
-                        x: lx + 4.0,
-                        y: cy,
-                        text: line.clone(),
-                        color: self.palette.text,
-                        font_size: 11.0,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(max_w - 8.0),
-                        overflow: TextOverflow::Ellipsis,
-                    });
-                    cy += 16.0;
-                }
-            }
-            Some(MediaCategory::Video) => {
-                cmds.push(RenderCommand::Text {
-                    x: lx,
-                    y: cy,
-                    text: "VIDEO SETTINGS".to_owned(),
-                    color: self.palette.subtext0,
-                    font_size: 10.0,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(max_w),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cy += 18.0;
-
-                let settings_lines = [
-                    format!("Video: {}", self.video_settings.video_codec.label()),
-                    format!("Audio: {}", self.video_settings.audio_codec.label()),
-                    self.video_settings
-                        .resolution
-                        .as_ref()
-                        .map_or("Resolution: Original".to_owned(), |r| {
-                            format!("Resolution: {}", r.label())
-                        }),
-                    self.video_settings
-                        .framerate
-                        .map_or("Framerate: Original".to_owned(), |f| {
-                            format!("Framerate: {f:.0} fps")
-                        }),
-                    format!(
-                        "Video Bitrate: {} kbps",
-                        self.video_settings.video_bitrate_kbps
-                    ),
-                    format!(
-                        "Two-pass: {}",
-                        if self.video_settings.two_pass {
-                            "Yes"
-                        } else {
-                            "No"
-                        }
-                    ),
-                ];
-                for line in &settings_lines {
-                    cmds.push(RenderCommand::Text {
-                        x: lx + 4.0,
-                        y: cy,
-                        text: line.clone(),
-                        color: self.palette.text,
-                        font_size: 11.0,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(max_w - 8.0),
-                        overflow: TextOverflow::Ellipsis,
-                    });
-                    cy += 16.0;
-                }
-            }
-            Some(MediaCategory::Image) => {
-                cmds.push(RenderCommand::Text {
-                    x: lx,
-                    y: cy,
-                    text: "IMAGE SETTINGS".to_owned(),
-                    color: self.palette.subtext0,
-                    font_size: 10.0,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(max_w),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cy += 18.0;
-
-                let settings_lines = [
-                    format!("Quality: {}%", self.image_settings.quality),
+        let profile = self.profiles.get(self.selected_profile_idx);
+        let output = profile.map(|p| p.output_format.clone());
+        for row in setting_rows(output.as_ref()) {
+            let (label, value) = match row {
+                SettingRow::Profile => (
+                    "PROFILE",
+                    profile.map_or_else(String::new, |p| p.name.clone()),
+                ),
+                SettingRow::Quality => ("QUALITY (1-4)", self.quality_preset.label().to_owned()),
+                SettingRow::SampleRate => (
+                    "SAMPLE RATE",
+                    format!("{} Hz", self.audio_settings.sample_rate),
+                ),
+                SettingRow::Channels => (
+                    "CHANNELS",
+                    String::from(if self.audio_settings.channels == 1 {
+                        "Mono"
+                    } else {
+                        "Stereo"
+                    }),
+                ),
+                SettingRow::SampleFormat => (
+                    "SAMPLES",
+                    match self.audio_settings.bit_depth {
+                        32 => String::from("32-bit float"),
+                        bits => format!("{bits}-bit"),
+                    },
+                ),
+                SettingRow::MaxWidth => (
+                    "LARGEST WIDTH",
                     self.image_settings
                         .max_width
-                        .map_or("Max Width: None".to_owned(), |w| format!("Max Width: {w}")),
-                    format!(
-                        "Strip Metadata: {}",
-                        if self.image_settings.strip_metadata {
-                            "Yes"
-                        } else {
-                            "No"
-                        }
-                    ),
-                    format!(
-                        "Preserve Aspect: {}",
-                        if self.image_settings.preserve_aspect {
-                            "Yes"
-                        } else {
-                            "No"
-                        }
-                    ),
-                ];
-                for line in &settings_lines {
-                    cmds.push(RenderCommand::Text {
-                        x: lx + 4.0,
-                        y: cy,
-                        text: line.clone(),
-                        color: self.palette.text,
-                        font_size: 11.0,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(max_w - 8.0),
-                        overflow: TextOverflow::Ellipsis,
-                    });
-                    cy += 16.0;
+                        .map_or_else(|| String::from("Its own"), |w| format!("{w} px")),
+                ),
+                SettingRow::MaxHeight => (
+                    "LARGEST HEIGHT",
+                    self.image_settings
+                        .max_height
+                        .map_or_else(|| String::from("Its own"), |h| format!("{h} px")),
+                ),
+                SettingRow::Naming => (
+                    "OUTPUT NAME",
+                    match &self.output_naming {
+                        OutputNaming::KeepOriginal => String::from("Same name"),
+                        OutputNaming::Suffix(s) => format!("Name{s}"),
+                        OutputNaming::Prefix(p) => format!("{p}Name"),
+                        OutputNaming::Pattern(p) => p.clone(),
+                    },
+                ),
+            };
+            self.render_setting(f, row, lx, cy, max_w, label, value);
+            cy += 48.0;
+            if row == SettingRow::Profile {
+                // What the profile makes, or why this build cannot.
+                if let Some(profile) = profile {
+                    match profile.availability() {
+                        Ok(()) => self.note(f, lx, cy - 2.0, profile.description.clone(), max_w),
+                        Err(why) => f.push(RenderCommand::Text {
+                            x: lx,
+                            y: cy - 2.0,
+                            text: format!("Not available: {why}"),
+                            color: self.palette.ink(self.palette.red),
+                            font_size: 10.0,
+                            font_weight: FontWeightHint::Bold,
+                            max_width: Some(max_w),
+                            overflow: TextOverflow::Ellipsis,
+                        }),
+                    }
                 }
-            }
-            None => {
-                cmds.push(RenderCommand::Text {
-                    x: lx,
-                    y: cy,
-                    text: "Select a profile".to_owned(),
-                    color: self.palette.subtext0,
-                    font_size: 12.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(max_w),
-                    overflow: TextOverflow::Ellipsis,
-                });
+                cy += 16.0;
             }
         }
 
-        // Output naming
-        cy += 20.0;
-        cmds.push(RenderCommand::Text {
-            x: lx,
-            y: cy,
-            text: "OUTPUT NAMING".to_owned(),
-            color: self.palette.subtext0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(max_w),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 18.0;
-        cmds.push(RenderCommand::Text {
-            x: lx + 4.0,
-            y: cy,
-            text: format!("Mode: {}", self.output_naming.label()),
-            color: self.palette.text,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(max_w - 8.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // Where outputs go.
+        self.heading(f, lx, cy, String::from("OUTPUT FOLDER"), max_w);
+        cy += 14.0;
+        self.note(
+            f,
+            lx,
+            cy,
+            self.output_dir.as_ref().map_or_else(
+                || String::from("Beside each source"),
+                |d| d.display().to_string(),
+            ),
+            max_w,
+        );
         cy += 16.0;
-        cmds.push(RenderCommand::Text {
-            x: lx + 4.0,
-            y: cy,
-            text: format!("Dir: {}", self.output_dir),
-            color: self.palette.subtext0,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(max_w - 8.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        let half = (max_w - 6.0) / 2.0;
+        self.button(
+            f,
+            Rect::new(lx, cy, half, 24.0),
+            "Choose\u{2026}",
+            Target::ChooseOutput,
+            true,
+        );
+        self.button(
+            f,
+            Rect::new(lx + half + 6.0, cy, half, 24.0),
+            "Beside sources",
+            Target::OutputBeside,
+            self.output_dir.is_some(),
+        );
     }
 
-    fn render_queue_panel(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    ) {
+    fn render_queue_panel(&self, f: &mut Frame<Target>, x: f32, y: f32, width: f32, height: f32) {
         self.palette
-            .push_surface(cmds, x, y, width, height, 0.0, Surface::Card);
-
+            .push_surface(f, x, y, width, height, 0.0, Surface::Card);
+        self.panel_focus(f, ActivePanel::Queue, Rect::new(x, y, width, height));
         let stats = self.queue_stats();
-        cmds.push(RenderCommand::Text {
-            x: x + 12.0,
-            y: y + 10.0,
-            text: format!("CONVERSION QUEUE ({})", stats.total_jobs),
-            color: self.palette.subtext0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(width - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let mut cy = y + 32.0;
-        for job in &self.jobs {
-            if cy > y + height {
-                break;
-            }
-
-            // Job row
+        self.heading(
+            f,
+            x + 12.0,
+            y + 10.0,
+            format!("CONVERSION QUEUE ({})", stats.total_jobs),
+            width - 24.0,
+        );
+        let (pane, rows) = self.queue_pane();
+        f.hit(Target::QueueList, pane);
+        if self.jobs.is_empty() {
+            self.note(
+                f,
+                x + 16.0,
+                pane.y + 12.0,
+                String::from("Nothing queued. Enter queues the chosen file; Convert all, every file the profile can convert."),
+                width - 32.0,
+            );
+        }
+        for (shown, job) in self
+            .jobs
+            .iter()
+            .skip(self.queue_scroll)
+            .take(rows.saturating_add(1))
+            .enumerate()
+        {
+            let cy = pane.y + shown as f32 * QUEUE_ROW_H;
+            let chosen = self.selected_job == Some(job.id);
             self.palette.push_surface(
-                cmds,
+                f,
                 x + 4.0,
                 cy,
                 width - 8.0,
-                ITEM_HEIGHT + 8.0,
+                QUEUE_ROW_H - 4.0,
                 CORNER_RADIUS,
-                Surface::Card,
+                if chosen {
+                    Surface::Selected
+                } else {
+                    Surface::Card
+                },
             );
-
-            // Status indicator
-            cmds.push(RenderCommand::FillRect {
+            // Under the row's Cancel button, which is pushed after it and so
+            // takes the press over its own rectangle.
+            f.hit(
+                Target::QueueRow(job.id),
+                Rect::new(x + 4.0, cy, width - 8.0, QUEUE_ROW_H - 4.0),
+            );
+            f.push(RenderCommand::FillRect {
                 x: x + 10.0,
                 y: cy + 12.0,
                 width: 8.0,
@@ -2560,49 +3130,62 @@ impl MediaConvertApp {
                 color: job.status.color(&self.palette),
                 corner_radii: CornerRadii::all(4.0),
             });
-
-            // Filename
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: x + 24.0,
-                y: cy + 6.0,
-                text: job.source.file_name.clone(),
+                y: cy + 5.0,
+                text: format!("{}  \u{2192}  {}", job.source.file_name, job.output_name),
                 color: self.palette.text,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(width - 100.0),
+                max_width: Some((width - 170.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            // Conversion type
-            cmds.push(RenderCommand::Text {
+            let detail = match (&job.status, &job.error_message) {
+                (JobStatus::Failed, Some(why)) => why.clone(),
+                _ => job.recipe.describe(),
+            };
+            f.push(RenderCommand::Text {
                 x: x + 24.0,
                 y: cy + 20.0,
-                text: job.conversion_label(),
-                color: self.palette.subtext0,
+                text: detail,
+                color: if job.status == JobStatus::Failed {
+                    self.palette.ink(self.palette.red)
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(width - 100.0),
+                max_width: Some((width - 170.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            // Status label
-            cmds.push(RenderCommand::Text {
-                x: x + width - 80.0,
+            f.push(RenderCommand::Text {
+                x: x + width - 140.0,
                 y: cy + 6.0,
-                text: job.status.label().to_owned(),
+                text: if job.stopping {
+                    String::from("Stopping")
+                } else {
+                    job.status.label().to_owned()
+                },
                 color: self.palette.ink(job.status.color(&self.palette)),
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(70.0),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            // Progress bar (if running)
+            if matches!(job.status, JobStatus::Queued | JobStatus::Running) && !job.stopping {
+                self.button(
+                    f,
+                    Rect::new(x + width - 66.0, cy + 6.0, 56.0, 22.0),
+                    "Cancel",
+                    Target::CancelJob(job.id),
+                    true,
+                );
+            }
             if job.status == JobStatus::Running {
                 let bar_x = x + 24.0;
-                let bar_w = width - 110.0;
-                let bar_y = cy + 32.0;
-                cmds.push(RenderCommand::FillRect {
+                let bar_w = (width - 170.0).max(0.0);
+                let bar_y = cy + 34.0;
+                f.push(RenderCommand::FillRect {
                     x: bar_x,
                     y: bar_y,
                     width: bar_w,
@@ -2610,32 +3193,171 @@ impl MediaConvertApp {
                     color: self.palette.surface1,
                     corner_radii: CornerRadii::all(2.0),
                 });
-                let fill_w = bar_w * (job.progress / 100.0);
-                cmds.push(RenderCommand::FillRect {
+                f.push(RenderCommand::FillRect {
                     x: bar_x,
                     y: bar_y,
-                    width: fill_w,
+                    width: bar_w * (job.progress / 100.0).clamp(0.0, 1.0),
                     height: 4.0,
                     color: self.palette.blue,
                     corner_radii: CornerRadii::all(2.0),
                 });
             }
-
-            cy += ITEM_HEIGHT + 12.0;
         }
+    }
 
-        if self.jobs.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: x + width / 2.0 - 60.0,
-                y: y + height / 2.0,
-                text: "No jobs in queue".to_owned(),
-                color: self.palette.subtext0,
-                font_size: 13.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+    // -----------------------------------------------------------------------
+    // The pointer
+    // -----------------------------------------------------------------------
+
+    /// What is under `(x, y)` in the frame last shown.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self
+                .frame(self.window_width, self.window_height)
+                .hit_test(x, y);
         }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                let Some(target) = self
+                    .frame(self.window_width, self.window_height)
+                    .hit_test(event.x, event.y)
+                else {
+                    return EventResult::Ignored;
+                };
+                let result = self.press(target);
+                self.clamp_scrolls();
+                result
+            }
+            MouseEventKind::Move => {
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return EventResult::Ignored;
+                }
+                self.hover = over;
+                EventResult::Consumed
+            }
+            MouseEventKind::Leave => {
+                if self.hover.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            MouseEventKind::Scroll { dy, .. } => self.wheel_at(event.x, event.y, dy),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// A left press on `target`.
+    fn press(&mut self, target: Target) -> EventResult {
+        match target {
+            Target::HelpCard => self.show_help = false,
+            Target::Help => self.show_help = true,
+            Target::AddFiles => self.open_picker(PickerFor::Files),
+            Target::AddFolder => self.open_picker(PickerFor::Folder),
+            Target::ConvertAll => {
+                self.queue_all();
+                self.start_next_job();
+                self.active_panel = ActivePanel::Queue;
+            }
+            Target::CancelWaiting => {
+                self.cancel_all_queued();
+            }
+            Target::ClearFinished => {
+                self.clear_finished_jobs();
+            }
+            Target::Panel(panel) => {
+                if self.active_panel == panel {
+                    return EventResult::Ignored;
+                }
+                self.active_panel = panel;
+            }
+            // A press chooses a file; a second press queues it.
+            Target::SourceRow(id) => {
+                self.active_panel = ActivePanel::SourceList;
+                if self.selected_source == Some(id) {
+                    self.queue_source(id);
+                    self.start_next_job();
+                } else {
+                    self.selected_source = Some(id);
+                }
+            }
+            Target::RemoveSource(id) => {
+                self.remove_source(id);
+            }
+            Target::Setting(row) => {
+                self.active_panel = ActivePanel::Settings;
+                self.setting_row = row;
+            }
+            Target::StepBack(row) | Target::StepForward(row) => {
+                self.active_panel = ActivePanel::Settings;
+                self.setting_row = row;
+                self.step_setting(row, matches!(target, Target::StepForward(_)));
+            }
+            Target::ChooseOutput => self.open_picker(PickerFor::OutputFolder),
+            Target::OutputBeside => self.output_beside(),
+            Target::QueueRow(id) => {
+                if self.active_panel == ActivePanel::Queue && self.selected_job == Some(id) {
+                    return EventResult::Ignored;
+                }
+                self.active_panel = ActivePanel::Queue;
+                self.selected_job = Some(id);
+            }
+            Target::CancelJob(id) => {
+                self.cancel_job(id);
+            }
+            // A press in a list's empty space gives it the keys.
+            Target::SourceList | Target::QueueList => {
+                let panel = if target == Target::SourceList {
+                    ActivePanel::SourceList
+                } else {
+                    ActivePanel::Queue
+                };
+                if self.active_panel == panel {
+                    return EventResult::Ignored;
+                }
+                self.active_panel = panel;
+            }
+        }
+        EventResult::Consumed
+    }
+
+    /// The wheel over the source list or the queue.
+    fn wheel_at(&mut self, x: f32, y: f32, dy: f32) -> EventResult {
+        let sources = match self.target_at(x, y) {
+            Some(Target::SourceList | Target::SourceRow(_) | Target::RemoveSource(_)) => true,
+            Some(Target::QueueList | Target::QueueRow(_) | Target::CancelJob(_)) => false,
+            _ => return EventResult::Ignored,
+        };
+        let rows = self.wheel.rows(dy);
+        let (now, count, visible) = if sources {
+            (self.source_scroll, self.sources.len(), self.source_pane().1)
+        } else {
+            (self.queue_scroll, self.jobs.len(), self.queue_pane().1)
+        };
+        let next = if rows < 0 {
+            now.saturating_sub(rows.unsigned_abs())
+        } else {
+            now.saturating_add(rows.unsigned_abs())
+        }
+        .min(count.saturating_sub(visible));
+        if next == now {
+            return EventResult::Ignored;
+        }
+        if sources {
+            self.source_scroll = next;
+        } else {
+            self.queue_scroll = next;
+        }
+        EventResult::Consumed
     }
 }
 
@@ -2668,25 +3390,16 @@ impl App for MediaConvertApp {
 
     fn title(&self) -> String {
         // What the queue is doing, because a batch conversion is something you
-        // start and then look away from. The harness re-reads this as the
-        // program runs.
-        let running = self
+        // start and then look away from.
+        let left = self
             .jobs
             .iter()
-            .filter(|j| j.status == JobStatus::Running)
+            .filter(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
             .count();
-        let queued = self
-            .jobs
-            .iter()
-            .filter(|j| j.status == JobStatus::Queued)
-            .count();
-        if running == 0 && queued == 0 {
+        if left == 0 {
             return "Media Converter".to_string();
         }
-        format!(
-            "Converting - {} left - Media Converter",
-            running.saturating_add(queued)
-        )
+        format!("Converting - {left} left - Media Converter")
     }
 
     fn initial_size(&self) -> (u32, u32) {
@@ -2700,10 +3413,10 @@ impl App for MediaConvertApp {
         }
     }
 
-    /// A clock only while there is a job to run.
+    /// A clock only while a job is running or waiting to.
     ///
-    /// The queue is the only thing in this program that moves on its own; a
-    /// window showing a list of files to convert has nothing to redraw.
+    /// It asked for one whenever anything was queued, and nothing could run,
+    /// so a queued file woke the machine eight times a second for good.
     fn tick_interval(&self) -> Option<Duration> {
         self.has_work().then_some(JOB_STEP)
     }
@@ -2719,21 +3432,17 @@ impl App for MediaConvertApp {
     }
 
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
-        // Recorded as well as passed on, because the hit tests and the panel
-        // widths are derived from these two numbers and `render_commands` is
-        // not the only reader.
         self.window_width = width;
         self.window_height = height;
-        RenderTree {
-            commands: self.render_commands(width, height),
-        }
+        self.clamp_scrolls();
+        let frame = self.frame(width, height);
+        self.last_hits = frame.hits().to_vec();
+        frame.into_tree()
     }
 }
 
 fn main() -> ExitCode {
-    // Opens empty. It used to call `seed_sample_sources`.
-    let mut app = MediaConvertApp::new();
-    app::launch("mediaconvert", &mut app)
+    app::launch("mediaconvert", &mut MediaConvertApp::new())
 }
 
 // ============================================================================
@@ -2750,51 +3459,29 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
-    /// A fresh window holds no sources and says why.
+    /// A fresh window holds no sources, and says what it can do and how to
+    /// begin.
     ///
-    /// `main` called `seed_sample_sources`, so the window opened on
-    /// `/music/song.flac` at 50 MB and `/videos/clip.mkv` at 1.5 GB -- paths
-    /// with sizes and durations, none of which had been read. A filename is a
-    /// claim that a file exists.
+    /// It opened on `/music/song.flac` at 50 MB and `/videos/clip.mkv` at
+    /// 1.5 GB -- paths with sizes and durations, none of which had been read --
+    /// and then on a notice, painted over by the toolbar, that it could not
+    /// convert anything.
     #[test]
-    fn a_fresh_window_holds_no_sources_and_says_why() {
+    fn a_fresh_window_holds_no_sources_and_says_what_it_can_do() {
         let app = MediaConvertApp::new();
         assert!(app.sources.is_empty(), "sources appeared from nowhere");
         assert!(app.jobs.is_empty(), "a queue appeared from nowhere");
         assert!(app.history.is_empty(), "conversions appeared from nowhere");
-
-        let texts: Vec<String> = app
-            .render_commands(1200.0, 800.0)
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-        for line in CANNOT_CONVERT_LINES {
+        let drawn = texts(&app);
+        for line in CAN_CONVERT_LINES {
             assert!(
-                texts.iter().any(|t| t == line),
+                drawn.iter().any(|t| t == line),
                 "the window never said {line:?}"
             );
         }
-        // This used to assert over `CANNOT_CONVERT_LINES` itself, which is a
-        // test of a const array wearing the clothes of a test of the window:
-        // it passes with the renderer drawing nothing at all. The subject has
-        // to be what was drawn.
-        assert!(
-            texts
-                .iter()
-                .any(|t| t.contains("do not delete an original")),
-            "the window never warned against acting on a queue that cannot run",
-        );
+        assert!(drawn.iter().any(|t| t == "No files yet."));
+        assert_eq!(app.tick_interval(), None, "an empty window keeps a clock");
     }
-
-    // ------------------------------------------------------------------
-    // Wiring
-    //
-    // This program had no input handling, and twenty-two functions had no
-    // caller outside the tests -- the whole queue among them.
-    // ------------------------------------------------------------------
 
     fn key_ev(key: Key, ctrl: bool) -> Event {
         let mut modifiers = guitk::event::Modifiers::NONE;
@@ -2807,14 +3494,8 @@ mod tests {
         })
     }
 
-    /// **Every key the card advertises is answered by this window.**
-    ///
-    /// Across all three panels, because half these keys are claimed by one
-    /// panel and ignored by the others: `Up` moves the source list and does
-    /// nothing in settings, `Left` picks a profile and does nothing in the
-    /// queue, `Delete` drops a source or cancels a job and is `Ignored` in
-    /// settings. A single-panel guard would have reported whichever half it
-    /// started in and been right about nothing.
+    /// **Every key the card advertises is answered by this window**, in one
+    /// panel or another.
     #[test]
     fn every_advertised_key_does_something() {
         let panels = [
@@ -2831,51 +3512,33 @@ mod tests {
                 });
                 assert!(
                     answered,
-                    "the card advertises {label:?} for {what:?}, and no panel answers {:?}",
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
                     stroke.key
                 );
             }
         }
     }
 
-    /// **The card reaches the window, and nothing acts behind it.**
-    ///
-    /// The control is the last third: Tab behind the card must not change
-    /// panel, and the same key with the card down must. Asserting only the
-    /// first half would pass on a window that had lost Tab entirely.
     #[test]
     fn the_shortcut_list_reaches_the_window() {
-        let drawn = |app: &MediaConvertApp| -> String {
-            app.render_commands(1200.0, 800.0)
-                .iter()
-                .filter_map(|c| match c {
-                    RenderCommand::Text { text, .. } => Some(text.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(" | ")
-        };
-
+        let drawn = |app: &MediaConvertApp| -> String { texts(app).join(" | ") };
         let mut app = MediaConvertApp::new();
         assert!(
             !drawn(&app).contains("F1 or ? closes this"),
             "the card is up before anybody asked for it"
         );
-
         app.handle_event(&press(Key::F1));
         let shown = drawn(&app);
         for (keys, what) in SHORTCUTS {
             assert!(shown.contains(keys), "{keys:?} never reached the window");
             assert!(shown.contains(what), "{what:?} never reached the window");
         }
-
         let panel = app.active_panel;
         app.handle_event(&press(Key::Tab));
         assert_eq!(
             app.active_panel, panel,
             "Tab changed panel through the shortcut card"
         );
-
         app.handle_event(&press(Key::F1));
         app.handle_event(&press(Key::Tab));
         assert_ne!(
@@ -2892,174 +3555,290 @@ mod tests {
         Event::Tick { elapsed_ms: 120 }
     }
 
+    fn texts(app: &MediaConvertApp) -> Vec<String> {
+        app.render_commands(app.window_width, app.window_height)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One source of each kind, named but not on disk: for the bookkeeping,
+    /// which reads no file.
     fn seeded() -> MediaConvertApp {
         let mut app = MediaConvertApp::new();
-        app.seed_sample_sources();
+        app.add_source_with_duration(
+            "/music/song.wav",
+            "song.wav",
+            50_000_000,
+            MediaCategory::Audio,
+            243.5,
+            "WAV",
+        );
+        app.add_source_with_duration(
+            "/videos/clip.mkv",
+            "clip.mkv",
+            1_500_000_000,
+            MediaCategory::Video,
+            3600.0,
+            "MKV",
+        );
+        app.add_source(
+            "/pictures/photo.png",
+            "photo.png",
+            8_000_000,
+            MediaCategory::Image,
+        );
         app
     }
 
-    /// A test cannot call `main`, so the files the window opens on live in a
-    /// method -- and a converter that opens on an empty list looks broken.
-    #[test]
-    fn the_window_opens_with_files_to_convert() {
-        let app = seeded();
-        assert_eq!(app.sources.len(), 3);
-        assert!(
-            app.sources
-                .iter()
-                .any(|s| s.category == MediaCategory::Audio)
-        );
-        assert!(
-            app.sources
-                .iter()
-                .any(|s| s.category == MediaCategory::Video)
-        );
-        assert!(
-            app.sources
-                .iter()
-                .any(|s| s.category == MediaCategory::Image)
-        );
+    /// Three WAVs, named but not on disk.
+    fn three_wavs() -> MediaConvertApp {
+        let mut app = MediaConvertApp::new();
+        for name in ["a.wav", "b.wav", "c.wav"] {
+            app.add_source(&format!("/music/{name}"), name, 1000, MediaCategory::Audio);
+        }
+        app
     }
 
-    /// `queue_all` had six tests and no caller: the button this program is
-    /// named for did nothing.
-    /// Queue everything and start the first job, the way Ctrl+Enter used to.
-    ///
-    /// Ctrl+Enter still queues -- a queue is a plan, and a plan is an honest
-    /// thing for this program to hold -- but `start_next_job` refuses since
-    /// 2026-09-15, because carrying the plan out means reading a source and
-    /// writing an output, and this crate can do neither.
-    ///
-    /// The job state machine, the progress accounting, the cancel path and the
-    /// queue ordering are all real, and this is how they stay tested.
-    fn start_queue(app: &mut MediaConvertApp) {
-        app.queue_all();
-        app.start_next_job_fixture();
-        app.active_panel = ActivePanel::Queue;
+    /// A directory for one test, removed when it ends.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("mediaconvert-app-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        /// A WAV of `seconds` of a tone, written here.
+        fn wav(&self, name: &str, rate: u32, channels: u16, seconds: f32) -> PathBuf {
+            let frames = (rate as f32 * seconds) as usize;
+            let mut samples = Vec::with_capacity(frames.saturating_mul(usize::from(channels)));
+            for i in 0..frames {
+                let v = 0.4 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / rate as f32).sin();
+                for _ in 0..channels {
+                    samples.push(v);
+                }
+            }
+            let bytes = wavpcm::encode(
+                &wavpcm::Audio {
+                    sample_rate: rate,
+                    channels,
+                    samples,
+                },
+                wavpcm::SampleFormat::I16,
+                1,
+            )
+            .unwrap();
+            let path = self.0.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        }
     }
 
-    /// Tick until the queue is empty, starting each job as the tick used to.
-    ///
-    /// `handle_tick` called `start_next_job` when nothing was running, which
-    /// is how a queue drained itself. That call refuses now, so the fixture
-    /// takes the job over: the *ordering* -- one at a time, next one up when
-    /// the last finishes -- is real queue behaviour and still worth pinning.
-    fn drain_queue(app: &mut MediaConvertApp) {
-        for _ in 0..200 {
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            // Best effort: a leftover temp directory is harmless.
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Tick until nothing is queued or running, the way the window's clock
+    /// does, with a real pause between ticks for the worker thread.
+    fn run_queue(app: &mut MediaConvertApp) -> Vec<f32> {
+        let mut seen = Vec::new();
+        for _ in 0..20_000 {
+            app.handle_event(&tick());
+            if let Some(job) = app.jobs.iter().find(|j| j.status == JobStatus::Running) {
+                seen.push(job.progress);
+            }
             if !app
                 .jobs
                 .iter()
                 .any(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
             {
-                return;
+                return seen;
             }
-            app.handle_event(&tick());
-            if !app.jobs.iter().any(|j| j.status == JobStatus::Running) {
-                app.start_next_job_fixture();
-            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        panic!("the queue never finished");
+    }
+
+    fn profile(app: &MediaConvertApp, name: &str) -> usize {
+        app.profiles
+            .iter()
+            .position(|p| p.name == name)
+            .unwrap_or_else(|| panic!("no profile {name:?}"))
+    }
+
+    /// **A WAV is converted, end to end**: a real file in, a real file out,
+    /// at the rate, channels and format asked for, the source untouched.
+    #[test]
+    fn a_wav_becomes_the_wav_the_profile_names() {
+        let dir = Scratch::new("end-to-end");
+        let source = dir.wav("voice.wav", 44_100, 2, 0.25);
+        let before = std::fs::read(&source).unwrap();
+        let mut app = MediaConvertApp::new();
+        app.add_file(&source).unwrap();
+        app.select_profile(profile(&app, "WAV, speech"));
+        probe::click(&mut app, Target::ConvertAll);
+        assert!(
+            app.tick_interval().is_some(),
+            "a running job keeps no clock"
+        );
+        run_queue(&mut app);
+        let job = &app.jobs[0];
+        assert_eq!(job.status, JobStatus::Completed, "{:?}", job.error_message);
+        assert_eq!(
+            job.output_path,
+            dir.0.join("voice (2).wav"),
+            "the source was not avoided"
+        );
+        let out = std::fs::read(&job.output_path).unwrap();
+        let info = wavpcm::parse_header(&out).unwrap();
+        assert_eq!((info.sample_rate, info.channels), (16_000, 1));
+        assert_eq!(job.actual_size, Some(out.len() as u64));
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            before,
+            "the source was written over"
+        );
+        assert_eq!(app.history.len(), 1);
+        assert_eq!(app.tick_interval(), None, "a finished queue keeps a clock");
     }
 
     #[test]
-    fn ctrl_enter_queues_everything_and_then_says_it_cannot_run_it() {
-        // Was `..._and_the_queue_runs_itself`, which drove 200 ticks and
-        // asserted all three jobs reached Completed with entries in the
-        // history. They did, and nothing was read or written at any point.
-        let mut app = seeded();
-        assert_eq!(app.tick_interval(), None, "an idle queue needs no clock");
-
-        app.handle_event(&key_ev(Key::Enter, true));
-        assert_eq!(app.jobs.len(), 3, "every source should be queued");
-        assert_eq!(app.active_panel, ActivePanel::Queue);
-
-        // Queued, and going no further. A conversion reported Completed is the
-        // point at which somebody deletes the original, so the refusal belongs
-        // at the start rather than partway through a batch.
-        assert!(
-            app.jobs.iter().all(|j| j.status == JobStatus::Queued),
-            "a job started with nothing to read",
+    fn a_picture_becomes_a_bmp_in_the_folder_chosen() {
+        let dir = Scratch::new("picture");
+        let source = dir.0.join("photo.png");
+        std::fs::write(
+            &source,
+            imagecodec::testing::png_rgba(8, 4, |x, y| [x as u8, y as u8, 7, 255]),
+        )
+        .unwrap();
+        let out_dir = dir.0.join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let mut app = MediaConvertApp::new();
+        app.add_file(&source).unwrap();
+        assert_eq!(
+            app.sources[0].source_format, "8x4",
+            "the picture's size was not read"
         );
+        app.select_profile(profile(&app, "BMP picture"));
+        app.picker_for = PickerFor::OutputFolder;
+        app.picked(&out_dir);
+        assert_eq!(app.output_dir.as_deref(), Some(out_dir.as_path()));
+        app.handle_event(&key_ev(Key::Enter, true));
+        run_queue(&mut app);
+        let job = &app.jobs[0];
+        assert_eq!(job.status, JobStatus::Completed, "{:?}", job.error_message);
+        assert_eq!(job.output_path, out_dir.join("photo.bmp"));
+        assert_eq!(&std::fs::read(&job.output_path).unwrap()[..2], b"BM");
+    }
+
+    /// Everything the profile cannot convert is refused before it is queued,
+    /// and the reason is on screen.
+    #[test]
+    fn what_cannot_be_converted_is_never_queued() {
+        let mut app = seeded();
+        assert_eq!(
+            app.profiles[app.selected_profile_idx].name,
+            "WAV, CD quality"
+        );
+        app.handle_event(&key_ev(Key::Enter, true));
+        let queued: Vec<&str> = app
+            .jobs
+            .iter()
+            .map(|j| j.source.file_name.as_str())
+            .collect();
+        assert_eq!(queued, ["song.wav"]);
         assert!(
-            app.status_line.contains("Cannot convert"),
-            "the queue stalled and nothing said why: {}",
+            app.status_line.contains("left out 2"),
+            "{}",
             app.status_line
         );
-
-        // And ticking changes nothing, however long it goes on.
-        for _ in 0..200 {
-            app.handle_event(&tick());
-        }
+        assert!(texts(&app).iter().any(|t| t.contains("left out 2")));
+        // A video profile says why, and queues nothing.
+        let video = app
+            .profiles
+            .iter()
+            .position(|p| p.availability().is_err())
+            .unwrap();
+        app.select_profile(video);
         assert!(
-            app.jobs.iter().all(|j| j.status == JobStatus::Queued),
-            "the queue drained itself",
+            texts(&app).iter().any(|t| t.starts_with("Not available: ")),
+            "an unavailable profile did not say so"
         );
-        assert!(app.history.is_empty(), "a conversion was recorded");
+        let before = app.jobs.len();
+        app.queue_all();
+        assert_eq!(app.jobs.len(), before);
     }
 
-    /// The progress bar the queue panel draws was empty or full and never
-    /// anything else: `progress` was set at creation and at completion, with
-    /// nothing in between.
+    /// The job that runs moves its bar, forwards only, and ends full.
     #[test]
     fn a_running_job_moves_its_progress_bar() {
-        let mut app = seeded();
-        start_queue(&mut app);
-
-        let mut seen = Vec::new();
-        for _ in 0..10 {
-            app.handle_event(&tick());
-            if let Some(job) = app.jobs.iter().find(|j| j.status == JobStatus::Running) {
-                seen.push(job.progress);
-            }
-        }
-        assert!(seen.len() > 2, "the first job should still be running");
+        let dir = Scratch::new("progress");
+        let source = dir.wav("long.wav", 48_000, 2, 6.0);
+        let mut app = MediaConvertApp::new();
+        app.add_file(&source).unwrap();
+        app.select_profile(profile(&app, "WAV, speech"));
+        app.handle_event(&key_ev(Key::Enter, true));
+        let seen = run_queue(&mut app);
         assert!(
-            seen.windows(2).all(|w| w[1] > w[0]),
-            "the bar should only ever move forwards: {seen:?}"
+            seen.windows(2).all(|w| w[1] >= w[0]),
+            "the bar went backwards: {seen:?}"
         );
         assert!(
             seen.iter().any(|p| *p > 0.0 && *p < 100.0),
-            "there was never a frame with the bar part-way across: {seen:?}"
+            "there was never a frame with the bar part-way across"
         );
-    }
-
-    /// A cancelled job's bar stops where it was. Without the status guard in
-    /// `advance` the bar keeps filling after the job has been called off, and
-    /// then reports a cancelled conversion as complete.
-    #[test]
-    fn a_cancelled_job_stops_moving() {
-        let mut app = seeded();
-        start_queue(&mut app);
-        for _ in 0..3 {
-            app.handle_event(&tick());
-        }
-        let (id, at) = app
-            .jobs
-            .iter()
-            .find(|j| j.status == JobStatus::Running)
-            .map(|j| (j.id, j.progress))
-            .expect("a job is running");
-        assert!(at > 0.0 && at < 100.0, "it should be part-way: {at}");
-
-        app.cancel_job(id);
-        for _ in 0..20 {
-            app.handle_event(&tick());
-        }
-        let job = app.jobs.iter().find(|j| j.id == id).expect("still listed");
-        assert_eq!(job.status, JobStatus::Cancelled);
         assert!(
-            (job.progress - at).abs() < f32::EPSILON,
-            "a cancelled job kept converting: {at} -> {}",
-            job.progress
+            (app.jobs[0].progress - 100.0).abs() < f32::EPSILON,
+            "{}",
+            app.jobs[0].progress
         );
     }
 
-    /// One job at a time: four at a quarter speed each finish no sooner and
-    /// make the bars useless.
+    /// A cancelled job stops before it writes anything.
+    #[test]
+    fn a_cancelled_job_writes_nothing() {
+        let dir = Scratch::new("cancel");
+        let source = dir.wav("long.wav", 48_000, 2, 6.0);
+        let mut app = MediaConvertApp::new();
+        app.add_file(&source).unwrap();
+        app.select_profile(profile(&app, "WAV, speech"));
+        app.handle_event(&key_ev(Key::Enter, true));
+        let id = app.jobs[0].id;
+        probe::click(&mut app, Target::CancelJob(id));
+        assert!(
+            app.jobs[0].stopping,
+            "a running job did not say it is stopping"
+        );
+        run_queue(&mut app);
+        assert_eq!(app.jobs[0].status, JobStatus::Cancelled);
+        assert!(
+            !app.jobs[0].output_path.exists(),
+            "a cancelled job left a file"
+        );
+        assert!(app.history.is_empty());
+    }
+
+    /// One job at a time, and the next one starts when the last finishes.
     #[test]
     fn only_one_job_runs_at_a_time() {
-        let mut app = seeded();
+        let dir = Scratch::new("one-at-a-time");
+        let mut app = MediaConvertApp::new();
+        for name in ["a.wav", "b.wav", "c.wav"] {
+            app.add_file(&dir.wav(name, 22_050, 1, 0.1)).unwrap();
+        }
+        app.select_profile(profile(&app, "WAV, CD quality"));
         app.handle_event(&key_ev(Key::Enter, true));
-        for _ in 0..60 {
+        for _ in 0..20_000 {
             let running = app
                 .jobs
                 .iter()
@@ -3067,12 +3846,85 @@ mod tests {
                 .count();
             assert!(running <= 1, "{running} jobs were running at once");
             app.handle_event(&tick());
+            if app.jobs.iter().all(|j| j.status == JobStatus::Completed) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        assert!(app.jobs.iter().all(|j| j.status == JobStatus::Completed));
+        let outputs: std::collections::BTreeSet<&PathBuf> =
+            app.jobs.iter().map(|j| &j.output_path).collect();
+        assert_eq!(outputs.len(), 3, "two jobs were given one output");
+    }
+
+    /// Two files of one name, from two folders, into one: two outputs, not
+    /// one written over by the other.
+    #[test]
+    fn two_files_of_one_name_get_two_outputs() {
+        let mut app = MediaConvertApp::new();
+        app.add_source("/x/song.wav", "song.wav", 1, MediaCategory::Audio);
+        app.add_source("/y/song.wav", "song.wav", 1, MediaCategory::Audio);
+        app.output_dir = Some(PathBuf::from("/out"));
+        app.queue_all();
+        let outputs: Vec<&Path> = app.jobs.iter().map(|j| j.output_path.as_path()).collect();
+        assert_eq!(
+            outputs,
+            [Path::new("/out/song.wav"), Path::new("/out/song (2).wav")]
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_what_its_name_says_fails_and_says_why() {
+        let dir = Scratch::new("liar");
+        let fake = dir.0.join("fake.wav");
+        std::fs::write(&fake, b"RIFF not really").unwrap();
+        let mut app = MediaConvertApp::new();
+        app.add_file(&fake).unwrap();
+        app.handle_event(&key_ev(Key::Enter, true));
+        run_queue(&mut app);
+        let job = &app.jobs[0];
+        assert_eq!(job.status, JobStatus::Failed);
+        assert!(
+            texts(&app)
+                .iter()
+                .any(|t| Some(t) == job.error_message.as_ref()),
+            "the reason is not on screen"
+        );
+    }
+
+    #[test]
+    fn a_file_is_added_as_it_really_is() {
+        let dir = Scratch::new("add");
+        let wav = dir.wav("tone.wav", 8000, 1, 2.0);
+        let mut app = MediaConvertApp::new();
+        let id = app.add_file(&wav).unwrap();
+        let src = app.find_source(id).unwrap();
+        assert_eq!(src.file_size, std::fs::metadata(&wav).unwrap().len());
+        assert!((src.duration_secs.unwrap() - 2.0).abs() < 1e-6);
+        assert_eq!(src.source_format, "WAV 8000 Hz 1ch 16-bit");
+        assert!(app.add_file(&wav).is_err(), "the same file was added twice");
+        assert!(app.add_file(&dir.0.join("missing.wav")).is_err());
+        std::fs::write(dir.0.join("notes.txt"), b"hi").unwrap();
+        assert!(
+            app.add_file(&dir.0.join("notes.txt")).is_err(),
+            "a text file was taken for media"
+        );
+        std::fs::write(
+            dir.0.join("b.png"),
+            imagecodec::testing::png_rgba(2, 2, |_, _| [0, 0, 0, 255]),
+        )
+        .unwrap();
+        let mut folder = MediaConvertApp::new();
+        assert_eq!(
+            folder.add_folder(&dir.0),
+            Ok(2),
+            "the folder's media files were not both added"
+        );
     }
 
     #[test]
     fn enter_queues_only_the_selected_file() {
-        let mut app = seeded();
+        let mut app = three_wavs();
         app.handle_event(&press(Key::Down));
         assert!(app.selected_source.is_some());
         app.handle_event(&press(Key::Enter));
@@ -3082,39 +3934,42 @@ mod tests {
     /// A queue with no cancel is a queue you have to wait out.
     #[test]
     fn ctrl_c_abandons_what_has_not_started() {
-        let mut app = seeded();
-        start_queue(&mut app);
+        let mut app = three_wavs();
+        app.queue_all();
+        app.start_next_job_fixture();
         app.handle_event(&key_ev(Key::C, true));
+        let count = |s: JobStatus| app.jobs.iter().filter(|j| j.status == s).count();
         assert_eq!(
-            app.jobs
-                .iter()
-                .filter(|j| j.status == JobStatus::Queued)
-                .count(),
+            count(JobStatus::Queued),
             0,
             "nothing should be left waiting"
         );
         assert_eq!(
-            app.jobs
-                .iter()
-                .filter(|j| j.status == JobStatus::Running)
-                .count(),
+            count(JobStatus::Running),
             1,
             "the one already running is not abandoned"
         );
+        assert_eq!(count(JobStatus::Cancelled), 2);
     }
 
     #[test]
     fn ctrl_l_sweeps_up_the_finished_jobs() {
-        let mut app = seeded();
-        start_queue(&mut app);
-        drain_queue(&mut app);
-        assert!(!app.jobs.is_empty());
+        let mut app = three_wavs();
+        app.queue_all();
+        for _ in 0..3 {
+            app.start_next_job_fixture();
+            let id = app
+                .jobs
+                .iter()
+                .find(|j| j.status == JobStatus::Running)
+                .unwrap()
+                .id;
+            app.complete_job(id, 10);
+        }
         app.handle_event(&key_ev(Key::L, true));
         assert!(app.jobs.is_empty(), "the finished jobs should have gone");
         assert_eq!(app.history.len(), 3, "but the history keeps them");
     }
-
-    // -- the source list --
 
     #[test]
     fn the_arrows_walk_the_file_list_and_stop_at_the_ends() {
@@ -3122,17 +3977,14 @@ mod tests {
         app.handle_event(&press(Key::Down));
         let first = app.selected_source;
         assert_eq!(first, app.sources.first().map(|s| s.id));
-
         app.handle_event(&press(Key::Up));
         assert_eq!(app.selected_source, first, "stopping, not wrapping");
-
         for _ in 0..10 {
             app.handle_event(&press(Key::Down));
         }
         assert_eq!(app.selected_source, app.sources.last().map(|s| s.id));
     }
 
-    /// `remove_source` and `clear_sources` had a test each and no caller.
     #[test]
     fn delete_removes_the_selected_file_or_all_of_them() {
         let mut app = seeded();
@@ -3140,22 +3992,15 @@ mod tests {
         app.handle_event(&press(Key::Down));
         app.handle_event(&press(Key::Delete));
         assert_eq!(app.sources.len(), total - 1);
-
-        // Nothing selected now, so Delete clears the list.
         app.handle_event(&press(Key::Delete));
         assert!(app.sources.is_empty());
     }
 
-    // -- settings --
-
-    /// `select_profile` exists to choose between the profiles and nothing
-    /// chose.
     #[test]
     fn the_arrows_cycle_the_conversion_profile() {
         let mut app = seeded();
         app.active_panel = ActivePanel::Settings;
         assert!(app.profiles.len() > 1);
-
         let mut seen = vec![app.selected_profile_idx];
         for _ in 0..app.profiles.len() {
             app.handle_event(&press(Key::Right));
@@ -3170,12 +4015,44 @@ mod tests {
             app.profiles.len(),
             "and visit each: {seen:?}"
         );
-
         app.handle_event(&press(Key::Left));
         assert_ne!(
             app.selected_profile_idx, seen[0],
             "Left should go the other way"
         );
+    }
+
+    /// Up and Down walk the settings; Left and Right change the one chosen.
+    #[test]
+    fn the_settings_are_walked_and_changed_by_the_keys() {
+        let mut app = MediaConvertApp::new();
+        app.active_panel = ActivePanel::Settings;
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Down));
+        assert_eq!(app.setting_row, SettingRow::SampleRate);
+        let rate = app.audio_settings.sample_rate;
+        app.handle_event(&press(Key::Right));
+        assert!(app.audio_settings.sample_rate > rate);
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Right));
+        assert_eq!(app.audio_settings.channels, 1);
+        for _ in 0..10 {
+            app.handle_event(&press(Key::Down));
+        }
+        assert_eq!(
+            app.setting_row,
+            SettingRow::Naming,
+            "Down ran past the last row"
+        );
+        app.handle_event(&press(Key::Right));
+        assert_eq!(
+            app.output_naming,
+            OutputNaming::Suffix(String::from("-converted"))
+        );
+        // A profile without a row the keys are on moves them to the top.
+        app.setting_row = SettingRow::SampleRate;
+        app.select_profile(profile(&app, "BMP picture"));
+        assert_eq!(app.setting_row, SettingRow::Profile);
     }
 
     #[test]
@@ -3186,8 +4063,6 @@ mod tests {
         app.handle_event(&press(Key::Num4));
         assert_eq!(app.quality_preset, QualityPreset::Lossless);
     }
-
-    // -- panels and the window --
 
     #[test]
     fn tab_moves_through_the_three_panels() {
@@ -3205,10 +4080,16 @@ mod tests {
         ] {
             assert!(seen.contains(&panel), "{panel:?} was skipped: {seen:?}");
         }
-        assert!(
-            !app.show_queue || app.active_panel == ActivePanel::Queue,
-            "the queue flag should follow the panel"
-        );
+    }
+
+    /// The queue stays on screen whichever panel has the keys: it vanished
+    /// when Tab moved off it.
+    #[test]
+    fn the_queue_is_drawn_whichever_panel_has_the_keys() {
+        let mut app = three_wavs();
+        app.queue_all();
+        app.active_panel = ActivePanel::Settings;
+        assert!(probe::rect_of(&app, Target::CancelJob(app.jobs[0].id)).is_some());
     }
 
     #[test]
@@ -3221,15 +4102,286 @@ mod tests {
 
     #[test]
     fn the_title_says_how_much_is_left() {
-        let mut app = seeded();
+        let mut app = three_wavs();
         assert_eq!(app.title(), "Media Converter");
-
-        start_queue(&mut app);
+        app.queue_all();
         let title = app.title();
         assert!(title.contains("3 left"), "got {title:?}");
-
-        drain_queue(&mut app);
+        for _ in 0..3 {
+            app.start_next_job_fixture();
+            let id = app
+                .jobs
+                .iter()
+                .find(|j| j.status == JobStatus::Running)
+                .unwrap()
+                .id;
+            app.complete_job(id, 1);
+        }
         assert_eq!(app.title(), "Media Converter", "and back when it is done");
+    }
+
+    // ── The pointer ─────────────────────────────────────────────────
+
+    use guitk::probe::{self, Probe};
+
+    impl Probe for MediaConvertApp {
+        type Target = Target;
+        type Outcome = EventResult;
+        const SIZE: (f32, f32) = (1280.0, 800.0);
+
+        fn draw(&self, _size: (f32, f32)) -> Frame<Target> {
+            self.frame(self.window_width, self.window_height)
+        }
+
+        fn click_at(
+            &mut self,
+            x: f32,
+            y: f32,
+            button: MouseButton,
+            _size: (f32, f32),
+        ) -> EventResult {
+            self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> EventResult {
+            self.handle_event(&Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, _size: (f32, f32)) -> Option<EventResult> {
+            Some(self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })))
+        }
+    }
+
+    #[test]
+    fn every_control_answers_the_pointer() {
+        let mut app = three_wavs();
+        probe::click(&mut app, Target::AddFiles);
+        assert!(app.picker.is_open() && app.picker_for == PickerFor::Files);
+        app.picker.close();
+        probe::click(&mut app, Target::AddFolder);
+        assert_eq!(app.picker_for, PickerFor::Folder);
+        app.picker.close();
+        probe::click(&mut app, Target::ChooseOutput);
+        assert_eq!(app.picker_for, PickerFor::OutputFolder);
+        app.picker.close();
+        assert!(
+            probe::rect_of(&app, Target::OutputBeside).is_none(),
+            "Beside sources is offered when outputs already go there"
+        );
+        app.output_dir = Some(PathBuf::from("/out"));
+        probe::click(&mut app, Target::OutputBeside);
+        assert_eq!(app.output_dir, None);
+        let id = app.sources[1].id;
+        probe::click(&mut app, Target::SourceRow(id));
+        assert_eq!(app.selected_source, Some(id));
+        probe::click(&mut app, Target::QueueList);
+        assert_eq!(app.active_panel, ActivePanel::Queue);
+        probe::click(&mut app, Target::Panel(ActivePanel::SourceList));
+        assert_eq!(
+            app.active_panel,
+            ActivePanel::SourceList,
+            "a press on the panel's heading"
+        );
+        probe::click(&mut app, Target::StepForward(SettingRow::Profile));
+        assert_eq!(app.selected_profile_idx, 1);
+        assert_eq!(app.active_panel, ActivePanel::Settings);
+        probe::click(&mut app, Target::StepBack(SettingRow::Profile));
+        assert_eq!(app.selected_profile_idx, 0);
+        probe::click(&mut app, Target::Setting(SettingRow::Quality));
+        assert_eq!(app.setting_row, SettingRow::Quality);
+        probe::click(&mut app, Target::RemoveSource(id));
+        assert!(app.find_source(id).is_none());
+        app.queue_all();
+        probe::click(&mut app, Target::CancelWaiting);
+        assert!(app.jobs.iter().all(|j| j.status == JobStatus::Cancelled));
+        probe::click(&mut app, Target::ClearFinished);
+        assert!(app.jobs.is_empty());
+        probe::click(&mut app, Target::Help);
+        assert!(app.show_help);
+        probe::click(&mut app, Target::HelpCard);
+        assert!(!app.show_help);
+    }
+
+    /// A second press on a chosen file queues it.
+    #[test]
+    fn a_second_press_on_a_file_queues_it() {
+        let mut app = three_wavs();
+        let id = app.sources[0].id;
+        probe::click(&mut app, Target::SourceRow(id));
+        assert!(app.jobs.is_empty());
+        probe::click(&mut app, Target::SourceRow(id));
+        assert_eq!(app.jobs.len(), 1);
+    }
+
+    #[test]
+    fn the_lists_scroll() {
+        let mut app = MediaConvertApp::new();
+        for i in 0..60 {
+            app.add_source(
+                &format!("/m/{i}.wav"),
+                &format!("{i}.wav"),
+                1,
+                MediaCategory::Audio,
+            );
+        }
+        let (_, rows) = app.source_pane();
+        assert!(rows < 60);
+        assert_eq!(
+            probe::scroll_at_point(&mut app, Target::SourceList, -3.0),
+            EventResult::Consumed
+        );
+        assert!(app.source_scroll > 0);
+        for _ in 0..40 {
+            probe::scroll_at_point(&mut app, Target::SourceList, -3.0);
+        }
+        assert_eq!(app.source_scroll, 60 - rows);
+        app.queue_all();
+        let (_, queue_rows) = app.queue_pane();
+        for _ in 0..40 {
+            probe::scroll_at_point(&mut app, Target::QueueList, -3.0);
+        }
+        assert_eq!(app.queue_scroll, 60 - queue_rows);
+        // The chosen file follows the keys onto the screen.
+        app.active_panel = ActivePanel::SourceList;
+        app.selected_source = app.sources.first().map(|s| s.id);
+        app.handle_event(&press(Key::Down));
+        assert!(app.source_scroll <= 1);
+    }
+
+    /// The wheel can leave the chosen row behind, and a frame does not undo
+    /// it; the arrows bring the row back.
+    ///
+    /// Every frame scrolled each list back to its chosen row, so with a file
+    /// chosen the source list could not be scrolled at all.
+    #[test]
+    fn the_wheel_can_leave_the_chosen_row_behind() {
+        let mut app = MediaConvertApp::new();
+        for i in 0..60 {
+            app.add_source(
+                &format!("/m/{i}.wav"),
+                &format!("{i}.wav"),
+                1,
+                MediaCategory::Audio,
+            );
+        }
+        app.active_panel = ActivePanel::SourceList;
+        app.handle_event(&press(Key::Down));
+        assert_eq!(app.selected_source, app.sources.first().map(|s| s.id));
+        for _ in 0..10 {
+            probe::scroll_at_point(&mut app, Target::SourceList, -3.0);
+        }
+        let scrolled = app.source_scroll;
+        assert!(scrolled > 1);
+        app.render(app.window_width, app.window_height);
+        assert_eq!(
+            app.source_scroll, scrolled,
+            "a frame scrolled back to the chosen row"
+        );
+        app.handle_event(&press(Key::Num2));
+        assert_eq!(
+            app.source_scroll, scrolled,
+            "a key that chose nothing scrolled back"
+        );
+        app.handle_event(&press(Key::Down));
+        assert!(
+            app.source_scroll <= 1,
+            "the arrow brings the chosen row back"
+        );
+        // At the end of the list an arrow moves nothing, and still brings the
+        // chosen row back.
+        app.selected_source = app.sources.last().map(|s| s.id);
+        for _ in 0..40 {
+            probe::scroll_at_point(&mut app, Target::SourceList, 3.0);
+        }
+        assert_eq!(app.source_scroll, 0);
+        app.handle_event(&press(Key::Down));
+        assert_eq!(app.selected_source, app.sources.last().map(|s| s.id));
+        let (_, rows) = app.source_pane();
+        assert_eq!(app.source_scroll, 60 - rows);
+    }
+
+    /// A job is chosen by the arrows or a press, and Delete acts on that one:
+    /// cancelled while it waits, taken off the list once it has finished.
+    ///
+    /// Delete cancelled the first job that could be cancelled, whichever was
+    /// meant, and nothing chose a job at all.
+    #[test]
+    fn a_job_is_chosen_and_delete_acts_on_it() {
+        let mut app = three_wavs();
+        app.queue_all();
+        let ids: Vec<u64> = app.jobs.iter().map(|j| j.id).collect();
+        assert_eq!(ids.len(), 3);
+        app.active_panel = ActivePanel::Queue;
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Down));
+        assert_eq!(app.selected_job, Some(ids[1]));
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(app.jobs[1].status, JobStatus::Cancelled, "the chosen job");
+        assert_eq!(app.jobs[0].status, JobStatus::Queued, "not the first");
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(app.jobs.len(), 2, "a finished job, chosen, leaves the list");
+        assert!(app.jobs.iter().all(|j| j.id != ids[1]));
+        assert_eq!(app.selected_job, None);
+        // A press chooses a row, and gives the queue the keys.
+        app.active_panel = ActivePanel::SourceList;
+        probe::click(&mut app, Target::QueueRow(ids[2]));
+        assert_eq!(app.selected_job, Some(ids[2]));
+        assert_eq!(app.active_panel, ActivePanel::Queue);
+        // The row's own Cancel button still takes its press.
+        probe::click(&mut app, Target::CancelJob(ids[2]));
+        let third = app.jobs.iter().find(|j| j.id == ids[2]).unwrap();
+        assert_eq!(third.status, JobStatus::Cancelled);
+    }
+
+    /// Where outputs go is chosen by key as well as by the panel's buttons,
+    /// which were the only route.
+    #[test]
+    fn where_outputs_go_is_chosen_by_key_too() {
+        let mut app = MediaConvertApp::new();
+        app.handle_event(&press(Key::O));
+        assert!(app.picker.is_open());
+        assert_eq!(app.picker_for, PickerFor::OutputFolder);
+        app.picker.close();
+        app.output_dir = Some(PathBuf::from("/out"));
+        app.handle_event(&press(Key::B));
+        assert_eq!(app.output_dir, None);
+        assert_eq!(app.status_line, "Outputs go beside each source");
+    }
+
+    #[test]
+    fn the_list_of_keys_is_modal_to_the_pointer() {
+        let mut app = three_wavs();
+        let id = app.sources[0].id;
+        let row = probe::rect_of(&app, Target::SourceRow(id)).unwrap();
+        app.show_help = true;
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: row.x + 4.0,
+            y: row.y + 4.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(!app.show_help);
+        assert_eq!(app.selected_source, None, "the press went through the list");
+    }
+
+    #[test]
+    fn a_pattern_name_takes_todays_date_and_keeps_the_stem() {
+        let naming = OutputNaming::Pattern(String::from("{name}-{date}-{name}"));
+        let out = naming.apply_os(OsStr::new("take.wav"), "wav", 0);
+        let today = today_yyyymmdd();
+        assert_eq!(out, OsString::from(format!("take-{today}-take")));
+        assert_ne!(today, "20260518", "the date is the old constant");
+        assert_eq!(
+            OutputNaming::Suffix(String::from("-x")).apply_os(OsStr::new("a.b.png"), "bmp", 0),
+            OsString::from("a.b-x.bmp")
+        );
     }
 
     // --- Format detection ---
@@ -3426,7 +4578,11 @@ mod tests {
             src,
             OutputFormat::Audio(AudioFormat::Mp3),
             "test.mp3".to_owned(),
-            "/out",
+            PathBuf::from("/out/x"),
+            engine::Recipe::Bmp {
+                max_width: None,
+                max_height: None,
+            },
         );
         assert_eq!(job.status, JobStatus::Queued);
 
@@ -3447,7 +4603,11 @@ mod tests {
             src,
             OutputFormat::Video(VideoFormat::Mp4),
             "test.mp4".to_owned(),
-            "/out",
+            PathBuf::from("/out/x"),
+            engine::Recipe::Bmp {
+                max_width: None,
+                max_height: None,
+            },
         );
         job.start(100);
         job.fail(200, "Codec not supported");
@@ -3463,7 +4623,11 @@ mod tests {
             src,
             OutputFormat::Audio(AudioFormat::Ogg),
             "test.ogg".to_owned(),
-            "/out",
+            PathBuf::from("/out/x"),
+            engine::Recipe::Bmp {
+                max_width: None,
+                max_height: None,
+            },
         );
         job.cancel();
         assert_eq!(job.status, JobStatus::Cancelled);
@@ -3478,7 +4642,11 @@ mod tests {
             src,
             OutputFormat::Audio(AudioFormat::Mp3),
             "test.mp3".to_owned(),
-            "/out",
+            PathBuf::from("/out/x"),
+            engine::Recipe::Bmp {
+                max_width: None,
+                max_height: None,
+            },
         );
         assert_eq!(job.conversion_label(), "FLAC -> MP3");
     }
@@ -3488,8 +4656,8 @@ mod tests {
     #[test]
     fn test_history_compression_ratio() {
         let entry = HistoryEntry {
-            source_path: "/a".to_owned(),
-            output_path: "/b".to_owned(),
+            source_path: PathBuf::from("/a"),
+            output_path: PathBuf::from("/b"),
             conversion_type: "test".to_owned(),
             source_size: 1000,
             output_size: 250,
@@ -3531,29 +4699,34 @@ mod tests {
     #[test]
     fn test_app_queue_all() {
         let mut app = MediaConvertApp::new();
-        app.add_source("/a", "song.flac", 1000, MediaCategory::Audio);
-        app.add_source("/b", "clip.avi", 2000, MediaCategory::Video);
+        app.add_source("/a/song.wav", "song.wav", 1000, MediaCategory::Audio);
+        app.add_source("/b/clip.avi", "clip.avi", 2000, MediaCategory::Video);
         let queued = app.queue_all();
-        assert_eq!(queued, 2);
-        assert_eq!(app.jobs.len(), 2);
+        assert_eq!(queued, 1, "the video was queued for a WAV profile");
+        assert_eq!(app.jobs.len(), 1);
     }
 
     #[test]
     fn test_app_queue_single() {
         let mut app = MediaConvertApp::new();
-        let id = app.add_source("/a", "song.flac", 1000, MediaCategory::Audio);
+        let id = app.add_source("/a/song.wav", "song.wav", 1000, MediaCategory::Audio);
         let job_id = app.queue_source(id);
         assert!(job_id.is_some());
         assert_eq!(app.jobs.len(), 1);
+        let flac = app.add_source("/a/song.flac", "song.flac", 1000, MediaCategory::Audio);
+        assert!(
+            app.queue_source(flac).is_none(),
+            "a FLAC was queued with no FLAC decoder"
+        );
+        assert!(app.status_line.contains("song.flac"), "{}", app.status_line);
     }
 
     #[test]
     fn test_app_start_and_complete() {
         let mut app = MediaConvertApp::new();
-        app.add_source("/a", "test.wav", 10000, MediaCategory::Audio);
+        app.add_source("/a/test.wav", "test.wav", 10000, MediaCategory::Audio);
         app.queue_all();
         assert!(app.start_next_job_fixture());
-
         let Some(job_id) = app.jobs.first().map(|j| j.id) else {
             panic!("expected at least one job");
         };
@@ -3564,10 +4737,9 @@ mod tests {
     #[test]
     fn test_app_fail_job() {
         let mut app = MediaConvertApp::new();
-        app.add_source("/a", "test.wav", 10000, MediaCategory::Audio);
+        app.add_source("/a/test.wav", "test.wav", 10000, MediaCategory::Audio);
         app.queue_all();
         app.start_next_job_fixture();
-
         let Some(job_id) = app.jobs.first().map(|j| j.id) else {
             panic!("expected at least one job");
         };
@@ -3576,10 +4748,7 @@ mod tests {
 
     #[test]
     fn test_app_cancel_all_queued() {
-        let mut app = MediaConvertApp::new();
-        app.add_source("/a", "a", 100, MediaCategory::Audio);
-        app.add_source("/b", "b", 200, MediaCategory::Audio);
-        app.add_source("/c", "c", 300, MediaCategory::Audio);
+        let mut app = three_wavs();
         app.queue_all();
         let cancelled = app.cancel_all_queued();
         assert_eq!(cancelled, 3);
@@ -3588,14 +4757,13 @@ mod tests {
     #[test]
     fn test_app_clear_finished() {
         let mut app = MediaConvertApp::new();
-        app.add_source("/a", "a", 100, MediaCategory::Audio);
+        app.add_source("/a/a.wav", "a.wav", 100, MediaCategory::Audio);
         app.queue_all();
         app.start_next_job_fixture();
         let Some(job_id) = app.jobs.first().map(|j| j.id) else {
             panic!("expected at least one job");
         };
         app.complete_job(job_id, 50);
-
         let cleared = app.clear_finished_jobs();
         assert_eq!(cleared, 1);
         assert!(app.jobs.is_empty());
@@ -3618,11 +4786,10 @@ mod tests {
     #[test]
     fn test_app_queue_stats() {
         let mut app = MediaConvertApp::new();
-        app.add_source("/a", "a", 100, MediaCategory::Audio);
-        app.add_source("/b", "b", 200, MediaCategory::Video);
+        app.add_source("/a/a.wav", "a.wav", 100, MediaCategory::Audio);
+        app.add_source("/b/b.wav", "b.wav", 200, MediaCategory::Audio);
         app.queue_all();
         app.start_next_job_fixture();
-
         let stats = app.queue_stats();
         assert_eq!(stats.total_jobs, 2);
         assert_eq!(stats.running, 1);
@@ -3633,8 +4800,8 @@ mod tests {
     fn test_app_history_stats() {
         let mut app = MediaConvertApp::new();
         app.history.push(HistoryEntry {
-            source_path: "/a".to_owned(),
-            output_path: "/b".to_owned(),
+            source_path: PathBuf::from("/a"),
+            output_path: PathBuf::from("/b"),
             conversion_type: "test".to_owned(),
             source_size: 1000,
             output_size: 500,
@@ -3648,48 +4815,36 @@ mod tests {
         assert_eq!(stats.total_space_saved, 500);
     }
 
-    /// The settings panel says the settings are not applied.
-    ///
-    /// `CANNOT_CONVERT_LINES` tells the reader the QUEUE will not run. That
-    /// leaves the panel, and a person who has read those three lines may still
-    /// reasonably believe the quality and codec they picked are the ones that
-    /// would be used if it did. They are not used by anything: the six fields
-    /// behind these labels are read by the labels and by nothing else, so the
-    /// one thing setting them does is confirm itself.
-    ///
-    /// Found by `scripts/find-echoed-settings.py`. The control below is what
-    /// keeps this from passing against a panel that draws nothing at all --
-    /// which is how the sibling assertion in
-    /// `the_window_says_it_cannot_convert_anything` used to pass, by testing
-    /// the const array rather than the window.
+    /// The settings panel shows the settings the chosen profile uses, and
+    /// for a profile this build cannot carry out, why.
     #[test]
-    fn the_settings_panel_says_the_settings_are_not_applied() {
+    fn the_settings_panel_shows_what_applies_and_what_cannot_be_done() {
         let mut app = MediaConvertApp::new();
-        app.add_source("/a", "clip.mkv", 5000, MediaCategory::Video);
-        let texts: Vec<String> = app
-            .render_commands(1280.0, 800.0)
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-
+        let drawn = texts(&app);
+        for label in ["SAMPLE RATE", "CHANNELS", "SAMPLES"] {
+            assert!(
+                drawn.iter().any(|t| t == label),
+                "{label} is not drawn for a WAV profile"
+            );
+        }
+        app.select_profile(profile(&app, "BMP picture"));
+        let drawn = texts(&app);
+        assert!(drawn.iter().any(|t| t == "LARGEST WIDTH"));
         assert!(
-            texts.iter().any(|t| t.contains("Video:")),
-            "control: the panel must be drawing a setting for this to be about \
-anything -- it drew {} text command(s)",
-            texts.len()
+            !drawn.iter().any(|t| t == "SAMPLE RATE"),
+            "a WAV setting drawn for a picture"
         );
-        // Against the WORDS, not against the constant. `t == SETTINGS_NOT_APPLIED`
-        // passes with the constant rewritten to "Settings", which is the same
-        // shape as asserting over the const array two tests up: the subject
-        // has to be what a reader would see.
+        let video = app
+            .profiles
+            .iter()
+            .position(|p| p.name == "Web Optimized (Video)")
+            .unwrap();
+        app.select_profile(video);
         assert!(
-            texts
+            texts(&app)
                 .iter()
-                .any(|t| t.contains("Not applied") && t.contains("nothing reads these")),
-            "the panel drew settings and did not say they are not applied"
+                .any(|t| t.starts_with("Not available: ") && t.contains("video")),
+            "a video profile did not say it cannot be carried out"
         );
     }
 
@@ -3704,7 +4859,23 @@ anything -- it drew {} text command(s)",
     #[test]
     fn test_profiles_exist() {
         let profiles = ConversionProfile::builtin_profiles();
-        assert_eq!(profiles.len(), 6);
+        assert_eq!(profiles.len(), 11);
+        let available: Vec<&str> = profiles
+            .iter()
+            .filter(|p| p.availability().is_ok())
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(
+            available,
+            [
+                "WAV, CD quality",
+                "WAV, studio",
+                "WAV, speech",
+                "BMP picture",
+                "BMP, screen size"
+            ],
+            "the profiles this build can carry out are not the first ones"
+        );
     }
 
     #[test]

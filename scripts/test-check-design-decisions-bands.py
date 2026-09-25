@@ -809,7 +809,13 @@ def test_the_real_document_passes_its_own_gate(mod):
     baseline = mod.load_baseline(REAL_BASELINE)
     found, _, info = mod.check(lines, baseline)
     check("the real design-decisions.md passes", found, [])
-    check_true("all three open bands report an insertion point", len(info) == 3)
+    # Counted from the band table rather than written down: this said "three"
+    # until the lanes became six, and from then on it failed every lane's boot
+    # test, which runs this suite before it will build.
+    bands, _ = mod.parse_bands(lines)
+    open_bands = [b for b in bands if b.is_open]
+    check_true("the real document has open bands at all", len(open_bands) > 0)
+    check("every open band reports an insertion point", len(info), len(open_bands))
 
 
 def test_the_real_document_still_uses_both_heading_styles(mod):

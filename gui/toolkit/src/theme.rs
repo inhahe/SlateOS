@@ -125,8 +125,9 @@ static TRANSFER_EVALUATIONS: core::sync::atomic::AtomicU64 = core::sync::atomic:
 /// How many times the sRGB transfer function has been evaluated so far.
 ///
 /// Expected to reach 256 -- one per possible channel value, when
-/// [`channel_table`] is first built -- and never to move again. See
-/// [`TRANSFER_EVALUATIONS`] for why this is public and always compiled.
+/// `channel_table` is first built -- and never to move again. See
+/// `TRANSFER_EVALUATIONS` in this module's source for why this is public and
+/// always compiled; both are private, so neither can be linked from here.
 ///
 /// The count is cumulative and process-wide, so a caller comparing before and
 /// after some operation should take a difference rather than an absolute.

@@ -395,7 +395,8 @@ thread_local! {
 /// How many palettes this thread has resolved so far.
 ///
 /// Cumulative, so a caller asking "did that operation resolve one?" takes a
-/// difference rather than an absolute. See [`PALETTE_RESOLUTIONS`].
+/// difference rather than an absolute. See `PALETTE_RESOLUTIONS` in this
+/// module's source, which is private and so cannot be linked from here.
 #[must_use]
 pub fn palette_resolutions() -> u64 {
     PALETTE_RESOLUTIONS.with(core::cell::Cell::get)
@@ -825,7 +826,8 @@ impl Palette {
     /// render loop it sat in is still a render loop, and the next colour rule
     /// added here is free only by luck.
     ///
-    /// [`PALETTE_RESOLUTIONS`] counts the calls so that structure can be
+    /// `PALETTE_RESOLUTIONS` (private; read through [`palette_resolutions`])
+    /// counts the calls so that structure can be
     /// asserted rather than hoped for;
     /// `compositor::tests::the_palette_is_resolved_when_it_changes_not_per_frame`
     /// is the assertion.

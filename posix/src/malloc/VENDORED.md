@@ -52,11 +52,16 @@ upstream's `src/dlmalloc.rs` at the version above.
 3. **`usable_size`** added — C dlmalloc's `dlmalloc_usable_size`, for
    `malloc_usable_size`.
 
-4. **Debug self-checks disabled.** Upstream enables its `check_*` consistency
-   walks with `cfg!(all(feature = "debug", debug_assertions))`. `posix` has no
-   such feature (and `unexpected_cfgs` would flag the name), so the condition
-   reads `cfg!(any())` — always false — in all eleven places. The plain
-   `debug_assert!`s are untouched and run in test builds.
+4. **Consistency checks: the heavy walks off, the assertions on in tests.**
+   Upstream gates both its `check_*` heap walks and its own `debug_assert!` /
+   `debug_assert_eq!` macros (which shadow the standard ones) on
+   `cfg!(all(feature = "debug", debug_assertions))`. `posix` has no such
+   feature, and `unexpected_cfgs` would flag the name. So the nine `check_*`
+   walks read `cfg!(any())` — always false — because `check_malloc_state`
+   visits every chunk of the heap on every call, and on the host that heap is
+   shared by the whole test suite. The two macros read `cfg!(test)`: upstream's
+   cheap pointer and size assertions run in this crate's unit tests, where a
+   broken invariant should fail the test at the point it breaks.
 
 5. **`use crate::Allocator` → `use super::Allocator`**, since the trait lives in
    `../malloc.rs`.

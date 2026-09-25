@@ -38,7 +38,7 @@ SECTIONS
     } :load
 
     /*
-     * The SlateOS ABI note (design-decisions.md §33; SLATEOS_ABI_NOTE in
+     * The SlateOS ABI note (design-decisions.md §33; the `global_asm!` in
      * src/main.rs): in the loaded image, and in a PT_NOTE of its own, which is
      * where the kernel looks. It must come before /DISCARD/, which would
      * otherwise take it with the rest of `.note*`.

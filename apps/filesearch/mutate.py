@@ -152,6 +152,41 @@ MUTATIONS = [
         "        let _ = unix_now();",
         ["now_is_read_from_the_clock"],
     ),
+    # -- content search -------------------------------------------------------
+    (
+        "content searches run on the window's thread",
+        "        if self.criteria.mode == SearchMode::Content && !self.criteria.query.is_empty() {",
+        "        if false && self.criteria.mode == SearchMode::Content && !self.criteria.query.is_empty() {",
+        ["content_mode_searches_contents_not_names"],
+    ),
+    (
+        "a search in progress outlives a change of mode",
+        "        // Whatever was being searched for, it is not what is being asked now.\n"
+        "        self.content = None;\n",
+        "",
+        ["leaving_content_mode_stops_its_search"],
+    ),
+    (
+        "a file over the limit is read anyway",
+        "    if size > limit {",
+        "    if false && size > limit {",
+        ["a_file_too_large_to_read_is_counted_not_hidden"],
+    ),
+    (
+        "text is compared without folding its case",
+        "        return Ok(text.to_lowercase().contains(&query.to_lowercase()));",
+        "        return Ok(text.contains(query));",
+        [
+            "content_folding_is_textual_for_text_and_exact_for_bytes",
+            "content_mode_searches_contents_not_names",
+        ],
+    ),
+    (
+        "the window never takes in what the worker finds",
+        "        self.content\n            .as_ref()\n            .map(|_| Duration::from_millis(CONTENT_POLL_MS))",
+        "        None",
+        ["the_clock_runs_only_while_contents_are_read"],
+    ),
     (
         "the folder button is drawn and records no hit box",
         "        self.draw_button(f, folder, FOLDER_BUTTON_LABEL, Target::ChooseFolder);",

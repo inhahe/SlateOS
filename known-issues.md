@@ -159676,7 +159676,8 @@ window) are listed and run again on a press. Copy Path and Properties were
 removed rather than wired: the first needs an application-reachable clipboard
 that can carry a path (the explorer's clipboard entry), and the second was the
 preview pane itself. Also fixed: "now" was the constant `1_779_000_000`, so the
-date filters and every "3 hours ago" were measured from one day in May 2026.
+date filters and every "3 hours ago" were measured from one day in May 2026,
+and the Content mode matched names (its own [E] entry, fixed the same day).
 Four examined; sixteen to go.
 
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
@@ -165224,8 +165225,8 @@ bar's own double-click, and they carry over. Until then, double-click in the
 markdown editor's source pane (select a word) is tested by delivering the event
 directly and does nothing in a real window.
 
-### [E] The file search's Content mode matches names, not contents -- 2026-09-25
-**Status:** OPEN -- lane E's, next in `apps/filesearch`
+### [E] The file search's Content mode matches names, not contents -- 2026-09-25 -- **FIXED 2026-09-25**
+**Status:** FIXED 2026-09-25 -- the mode reads the files, on a worker thread; see the end of this entry
 
 **In short:** the file search offers four ways to match a query -- name, glob,
 regex, content -- and the fourth is not what it says. Choosing "Content" and
@@ -165243,3 +165244,14 @@ matches back while the window keeps drawing -- and cancelled when the query
 changes, because content search is too slow to run to completion on every
 keystroke the way a name match can. Until then the mode's label should not
 promise what it does not do.
+
+**Fixed as described, the same day.** `ContentSearch` reads the candidates the
+other filters leave (files only) on a worker thread and streams matches back;
+the window takes them in on a 50 ms clock that runs only while the worker does
+(it cannot wake the window: `requests/e-f-wake-an-application-for-its-own-descriptor.md`),
+sorted into the table as they arrive. A new query, a changed filter or a change
+of mode drops the search, which stops the worker at its next file. Files over
+16 MiB are skipped and the skip is counted in the status line. Without match
+case, a UTF-8 file is lower-cased as text (`ÉCOLE` finds `école`) and any other
+file has only its ASCII letters folded -- never a lossy decode. Seven tests and
+five mutations in `apps/filesearch/mutate.py`.

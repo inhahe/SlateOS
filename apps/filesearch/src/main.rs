@@ -4,8 +4,8 @@
 //! - Real-time search with instant results as you type
 //! - Glob pattern matching (wildcards: *, ?, [a-z])
 //! - Regex pattern matching
-//! - File content search (grep-like) -- **not yet**: the Content mode still
-//!   matches names; see `known-issues.md`, the [E] entry on it
+//! - File content search (grep-like): the Content mode reads the files, on a
+//!   worker thread, and results arrive while it reads
 //! - Search filters (by extension, size, date, type)
 //! - File index for instant filename search
 //! - Recent searches (the ones something was opened from) and saved searches,
@@ -918,9 +918,52 @@ impl SearchCriteria {
         }
     }
 
-    /// Check if an entry matches all criteria
+    /// Check if an entry matches all criteria.
+    ///
+    /// Content mode reads the file to answer, synchronously. That is correct
+    /// and too slow to run over an index on every keystroke, which is why
+    /// [`FileSearchApp::execute_search`] hands content searches to a worker
+    /// and asks only [`passes_filters`](Self::passes_filters) here.
     #[must_use]
     pub fn matches(&self, entry: &IndexEntry) -> bool {
+        if !self.passes_filters(entry) {
+            return false;
+        }
+        if self.query.is_empty() {
+            return true;
+        }
+        match self.mode {
+            SearchMode::Substring => {
+                if self.case_sensitive {
+                    entry.name.contains(&self.query)
+                } else {
+                    entry.name_lower.contains(&self.query.to_lowercase())
+                }
+            }
+            SearchMode::Glob => {
+                if self.case_sensitive {
+                    glob_match(&self.query, &entry.name)
+                } else {
+                    glob_match(&self.query.to_lowercase(), &entry.name_lower)
+                }
+            }
+            SearchMode::Regex => regex_match(&self.query, &entry.name),
+            SearchMode::Content => {
+                !entry.is_directory
+                    && file_contains(
+                        std::path::Path::new(&entry.path),
+                        &self.query,
+                        self.case_sensitive,
+                        MAX_CONTENT_BYTES,
+                    ) == Ok(true)
+            }
+        }
+    }
+
+    /// Every criterion but the query: hidden files, folders, kind, extension,
+    /// size, date and path.
+    #[must_use]
+    pub fn passes_filters(&self, entry: &IndexEntry) -> bool {
         // Hidden file filter
         if !self.include_hidden && entry.is_hidden {
             return false;
@@ -964,34 +1007,148 @@ impl SearchCriteria {
         {
             return false;
         }
+        true
+    }
+}
 
-        // Query match
-        if self.query.is_empty() {
-            return true;
-        }
+// ─── Content Search ──────────────────────────────────────────────────
 
-        match self.mode {
-            SearchMode::Substring => {
-                if self.case_sensitive {
-                    entry.name.contains(&self.query)
-                } else {
-                    entry.name_lower.contains(&self.query.to_lowercase())
+/// The largest file a content search reads. Bigger ones are skipped and
+/// counted, and the count is shown: a search that silently did not look
+/// inside a file must not read as one that looked and found nothing.
+pub const MAX_CONTENT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Why a file's contents were not searched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentSkip {
+    /// Larger than the limit.
+    TooLarge,
+    /// Could not be read.
+    Unreadable,
+}
+
+/// Whether the file at `path` contains `query`.
+///
+/// Case-sensitive, it compares bytes. Otherwise a file that is UTF-8 text is
+/// lower-cased as text, so `ÉCOLE` matches `école`; a file that is not is
+/// compared with ASCII letters folded and every other byte exact -- it has no
+/// characters to fold, and decoding it lossily would compare against
+/// replacement characters that are not in the file.
+///
+/// # Errors
+///
+/// [`ContentSkip`] when the file was not searched: too large, or unreadable.
+pub fn file_contains(
+    path: &std::path::Path,
+    query: &str,
+    case_sensitive: bool,
+    limit: u64,
+) -> Result<bool, ContentSkip> {
+    let size = std::fs::metadata(path)
+        .map_err(|_| ContentSkip::Unreadable)?
+        .len();
+    if size > limit {
+        return Err(ContentSkip::TooLarge);
+    }
+    let bytes = std::fs::read(path).map_err(|_| ContentSkip::Unreadable)?;
+    let needle = query.as_bytes();
+    if needle.is_empty() {
+        return Ok(true);
+    }
+    if case_sensitive {
+        return Ok(bytes.windows(needle.len()).any(|w| w == needle));
+    }
+    if let Ok(text) = std::str::from_utf8(&bytes) {
+        return Ok(text.to_lowercase().contains(&query.to_lowercase()));
+    }
+    Ok(bytes
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle)))
+}
+
+/// What the content worker reports, one message at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentNews {
+    /// This index entry's file contains the query.
+    Found(usize),
+    /// One more file has been read.
+    Read,
+    /// One more file could not be read, or was too large to.
+    Skipped,
+    /// Every candidate has been looked at.
+    Done,
+}
+
+/// A content search running on a worker thread.
+///
+/// Reading every file under a folder is too slow to do on the window's
+/// thread on every keystroke, so the worker reads while the window keeps
+/// drawing, and matches arrive as it finds them. Dropping this -- a new
+/// query, a changed filter, the window closing -- stops the worker at its
+/// next file: a search for what nobody is asking about any more is work for
+/// nothing.
+struct ContentSearch {
+    /// Set to stop the worker.
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// What the worker has found and read.
+    news: std::sync::mpsc::Receiver<ContentNews>,
+    /// How many files it has to read.
+    total: usize,
+    /// How many it has read so far.
+    read: usize,
+    /// How many it could not search.
+    skipped: usize,
+}
+
+impl ContentSearch {
+    /// Start searching `candidates` -- `(index entry, path)` -- for `query`.
+    fn start(
+        candidates: Vec<(usize, String)>,
+        query: &str,
+        case_sensitive: bool,
+        limit: u64,
+    ) -> Self {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, news) = std::sync::mpsc::channel();
+        let total = candidates.len();
+        let stop = std::sync::Arc::clone(&cancel);
+        let query = query.to_string();
+        std::thread::spawn(move || {
+            for (index, path) in candidates {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                let told =
+                    match file_contains(std::path::Path::new(&path), &query, case_sensitive, limit)
+                    {
+                        Ok(true) => tx
+                            .send(ContentNews::Found(index))
+                            .and_then(|()| tx.send(ContentNews::Read)),
+                        Ok(false) => tx.send(ContentNews::Read),
+                        Err(_) => tx.send(ContentNews::Skipped),
+                    };
+                // The window has stopped listening: nobody wants the rest.
+                if told.is_err() {
+                    return;
                 }
             }
-            SearchMode::Glob => {
-                if self.case_sensitive {
-                    glob_match(&self.query, &entry.name)
-                } else {
-                    glob_match(&self.query.to_lowercase(), &entry.name_lower)
-                }
-            }
-            SearchMode::Regex => regex_match(&self.query, &entry.name),
-            SearchMode::Content => {
-                // Content search would need actual file reading
-                // For now, match against name as fallback
-                entry.name_lower.contains(&self.query.to_lowercase())
-            }
+            // As above: a closed channel means the answer has no reader.
+            let _ = tx.send(ContentNews::Done);
+        });
+        Self {
+            cancel,
+            news,
+            total,
+            read: 0,
+            skipped: 0,
         }
+    }
+}
+
+impl Drop for ContentSearch {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -1368,6 +1525,11 @@ pub struct FileSearchApp {
     /// How a program is started on a path. A field so the tests can see what
     /// would have been started without starting anything.
     launch: fn(&str, &std::path::Path) -> std::io::Result<()>,
+    /// The content search in progress, if one is.
+    content: Option<ContentSearch>,
+    /// The largest file a content search reads; [`MAX_CONTENT_BYTES`] but for
+    /// the tests that need a small one.
+    content_limit: u64,
 }
 
 impl Default for FileSearchApp {
@@ -1406,11 +1568,19 @@ impl FileSearchApp {
             results_wheel: wheel::Accumulator::default(),
             unreadable_saved: Vec::new(),
             launch: spawn_program,
+            content: None,
+            content_limit: MAX_CONTENT_BYTES,
         }
     }
 
     /// Execute a search with current criteria
     pub fn execute_search(&mut self) {
+        // Whatever was being searched for, it is not what is being asked now.
+        self.content = None;
+        if self.criteria.mode == SearchMode::Content && !self.criteria.query.is_empty() {
+            self.start_content_search();
+            return;
+        }
         self.is_searching = true;
         let start = std::time::Instant::now();
 
@@ -1446,6 +1616,95 @@ impl FileSearchApp {
         // A new answer starts at its top.
         self.selected_result = None;
         self.results_scroll = 0;
+    }
+
+    /// Start reading the files the filters leave for the query.
+    ///
+    /// Folders are not candidates: a folder has no contents to search, and
+    /// listing one because a file inside it matched would be a different kind
+    /// of answer.
+    fn start_content_search(&mut self) {
+        let candidates: Vec<(usize, String)> = self
+            .index
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !e.is_directory && self.criteria.passes_filters(e))
+            .map(|(i, e)| (i, e.path.clone()))
+            .collect();
+        let total = candidates.len();
+        self.results.clear();
+        self.selected_result = None;
+        self.results_scroll = 0;
+        self.content = Some(ContentSearch::start(
+            candidates,
+            &self.criteria.query,
+            self.criteria.case_sensitive,
+            self.content_limit,
+        ));
+        self.status_message = format!("Searching the contents of {total} files...");
+    }
+
+    /// Take in whatever the content worker has found since last asked.
+    /// Returns whether anything changed on screen.
+    pub fn pump_content_search(&mut self) -> bool {
+        let Some(search) = self.content.as_mut() else {
+            return false;
+        };
+        let mut found = Vec::new();
+        let mut finished = false;
+        let mut changed = false;
+        loop {
+            match search.news.try_recv() {
+                Ok(ContentNews::Found(index)) => found.push(index),
+                Ok(ContentNews::Read) => search.read = search.read.saturating_add(1),
+                Ok(ContentNews::Skipped) => search.skipped = search.skipped.saturating_add(1),
+                // A worker that is gone without saying it finished was
+                // cancelled or died; either way nothing more is coming.
+                Ok(ContentNews::Done) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    finished = true;
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            }
+            changed = true;
+        }
+        let (read, skipped, total) = (search.read, search.skipped, search.total);
+        if !found.is_empty() {
+            // Sorted in, not appended: the table is in the order its heading
+            // says, and the selection stays on the file it was on.
+            let selected = self
+                .selected_result
+                .and_then(|i| self.results.get(i).copied());
+            self.results.extend(found);
+            self.sort_results();
+            self.selected_result = selected.and_then(|e| self.results.iter().position(|&r| r == e));
+        }
+        let count = self.results.len();
+        let skipped_note = if skipped == 0 {
+            String::new()
+        } else {
+            format!(" -- {skipped} not searched: too large or unreadable")
+        };
+        if finished {
+            self.content = None;
+            self.status_message =
+                format!("{count} files contain it, of {total} searched{skipped_note}");
+            return true;
+        }
+        if changed {
+            let seen = read.saturating_add(skipped);
+            self.status_message = format!(
+                "Searching the contents of {total} files... {seen} so far, {count} found{skipped_note}"
+            );
+        }
+        changed
+    }
+
+    /// Whether a content search is still reading.
+    #[must_use]
+    pub fn is_searching_contents(&self) -> bool {
+        self.content.is_some()
     }
 
     /// Sort results according to current sort settings
@@ -3177,21 +3436,32 @@ impl App for FileSearchApp {
         (WINDOW_WIDTH, WINDOW_HEIGHT)
     }
 
-    /// No clock.
+    /// A clock only while a content search is reading, to take in what it
+    /// finds.
     ///
-    /// The index is a fixed sample built at startup; nothing watches a
-    /// filesystem, so there is nothing for a tick to notice. When a real
-    /// indexer exists — `userspace/indexer` and `apps/indexer` are both about
-    /// this — a tick would re-run the query against a changed index, and that
-    /// is when this returns an interval. See known-issues.md ->
-    /// TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES.
+    /// Nothing else here changes on its own: nothing watches the filesystem,
+    /// so an index is a snapshot until the next folder is chosen. When a real
+    /// indexer exists -- `userspace/indexer` and `apps/indexer` are both about
+    /// this -- a tick would re-run the query against a changed index. See
+    /// known-issues.md -> TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES.
+    /// (Polling, because the worker cannot wake the window: see
+    /// `requests/e-f-wake-an-application-for-its-own-descriptor.md`.)
     fn tick_interval(&self) -> Option<Duration> {
-        None
+        self.content
+            .as_ref()
+            .map(|_| Duration::from_millis(CONTENT_POLL_MS))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
             return Response::Exit;
+        }
+        if let Event::Tick { .. } = event {
+            return if self.pump_content_search() {
+                Response::Redraw
+            } else {
+                Response::Idle
+            };
         }
         match self.handle_event(event) {
             EventResult::Consumed => Response::Redraw,
@@ -3234,6 +3504,11 @@ fn window_height() -> f32 {
 
 const WINDOW_WIDTH: u32 = 1280;
 const WINDOW_HEIGHT: u32 = 800;
+
+/// How often, while a content search is reading, the window takes in what it
+/// has found: often enough that results appear as they are found, rarely
+/// enough that the worker is doing the work and not the window.
+const CONTENT_POLL_MS: u64 = 50;
 
 fn main() -> ExitCode {
     // Starts empty. It used to call `populate_sample_index`, under a comment
@@ -5468,5 +5743,228 @@ mod tests {
             Some(FileCategory::Code),
             "the press went through"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Content search
+    // ------------------------------------------------------------------
+
+    /// A scratch folder of files with known contents, removed on drop.
+    struct Contents {
+        dir: std::path::PathBuf,
+    }
+
+    impl Contents {
+        fn new(tag: &str, files: &[(&str, &[u8])]) -> Self {
+            let dir = std::env::temp_dir().join(format!("fs-content-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir); // a leftover from a killed run
+            std::fs::create_dir_all(&dir).unwrap();
+            for (name, bytes) in files {
+                std::fs::write(dir.join(name), bytes).unwrap();
+            }
+            Self { dir }
+        }
+    }
+
+    impl Drop for Contents {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir); // best effort; temp dir
+        }
+    }
+
+    /// Run the worker to the end, as the window's clock would.
+    fn finish_content_search(app: &mut FileSearchApp) {
+        let started = std::time::Instant::now();
+        while app.is_searching_contents() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "the content search never finished"
+            );
+            app.pump_content_search();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn result_names(app: &FileSearchApp) -> Vec<String> {
+        let mut names: Vec<String> = app
+            .results
+            .iter()
+            .map(|&i| app.index.entries[i].name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn content_app(files: &Contents) -> FileSearchApp {
+        let mut app = FileSearchApp::new();
+        app.index_directory(&files.dir);
+        app.criteria.mode = SearchMode::Content;
+        app
+    }
+
+    /// **Content mode finds files by what is in them.** It matched names --
+    /// "Content search would need actual file reading. For now, match against
+    /// name as fallback" -- so a phrase in a document was reported as in none.
+    #[test]
+    fn content_mode_searches_contents_not_names() {
+        let files = Contents::new(
+            "basic",
+            &[
+                ("letter.txt", b"Dear Sam, hello from the coast."),
+                ("hello.txt", b"nothing to see"),
+                ("notes.md", b"HELLO in capitals"),
+            ],
+        );
+        let mut app = content_app(&files);
+        app.criteria.query = "hello".to_string();
+        app.execute_search();
+        assert!(
+            app.is_searching_contents(),
+            "the search did not go to the worker"
+        );
+        finish_content_search(&mut app);
+        assert_eq!(result_names(&app), vec!["letter.txt", "notes.md"]);
+        assert!(
+            app.status_message.contains("2 files contain it"),
+            "{}",
+            app.status_message
+        );
+    }
+
+    #[test]
+    fn match_case_holds_in_content_mode() {
+        let files = Contents::new("case", &[("a.txt", b"hello"), ("b.txt", b"HELLO")]);
+        let mut app = content_app(&files);
+        app.criteria.case_sensitive = true;
+        app.criteria.query = "hello".to_string();
+        app.execute_search();
+        finish_content_search(&mut app);
+        assert_eq!(result_names(&app), vec!["a.txt"]);
+    }
+
+    /// A UTF-8 file is folded as text; a file that is not is folded only in
+    /// its ASCII letters, and never decoded lossily.
+    #[test]
+    fn content_folding_is_textual_for_text_and_exact_for_bytes() {
+        let files = Contents::new(
+            "fold",
+            &[
+                ("french.txt", "ÉCOLE PRIMAIRE".as_bytes()),
+                ("binary.bin", b"\xff\xfeSECRET\x00"),
+            ],
+        );
+        let mut app = content_app(&files);
+        app.criteria.query = "école".to_string();
+        app.execute_search();
+        finish_content_search(&mut app);
+        assert_eq!(result_names(&app), vec!["french.txt"]);
+
+        app.criteria.query = "secret".to_string();
+        app.execute_search();
+        finish_content_search(&mut app);
+        assert_eq!(result_names(&app), vec!["binary.bin"]);
+    }
+
+    /// **A new query stops the old search.** Its matches must not arrive into
+    /// the new one's results.
+    #[test]
+    fn a_new_query_replaces_the_search_in_progress() {
+        let many: Vec<(String, Vec<u8>)> = (0..200)
+            .map(|i| (format!("f{i:03}.txt"), b"alpha".to_vec()))
+            .collect();
+        let refs: Vec<(&str, &[u8])> = many
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_slice()))
+            .collect();
+        let mut with_beta = refs.clone();
+        with_beta.push(("only.txt", b"beta"));
+        let files = Contents::new("cancel", &with_beta);
+        let mut app = content_app(&files);
+        app.criteria.query = "alpha".to_string();
+        app.execute_search();
+        app.criteria.query = "beta".to_string();
+        app.execute_search();
+        finish_content_search(&mut app);
+        assert_eq!(
+            result_names(&app),
+            vec!["only.txt"],
+            "the first search's matches leaked in"
+        );
+    }
+
+    /// Leaving content mode stops its search: the worker's matches must not
+    /// arrive into a name search's results.
+    #[test]
+    fn leaving_content_mode_stops_its_search() {
+        let files = Contents::new(
+            "leave",
+            &[("inside.txt", b"target"), ("target.txt", b"nothing")],
+        );
+        let mut app = content_app(&files);
+        app.criteria.query = "target".to_string();
+        app.execute_search();
+        app.criteria.mode = SearchMode::Substring;
+        app.execute_search();
+        assert!(!app.is_searching_contents());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        app.pump_content_search();
+        assert_eq!(result_names(&app), vec!["target.txt"]);
+    }
+
+    /// A file over the limit is skipped, and the skip is said.
+    #[test]
+    fn a_file_too_large_to_read_is_counted_not_hidden() {
+        let files = Contents::new(
+            "large",
+            &[("small.txt", b"needle"), ("large.txt", b"needle but long")],
+        );
+        let mut app = content_app(&files);
+        app.content_limit = 8;
+        app.criteria.query = "needle".to_string();
+        app.execute_search();
+        finish_content_search(&mut app);
+        assert_eq!(result_names(&app), vec!["small.txt"]);
+        assert!(
+            app.status_message.contains("1 not searched"),
+            "{}",
+            app.status_message
+        );
+    }
+
+    /// The clock runs while the worker reads, and stops when it is done: a
+    /// window that ticks with nothing to take in holds the machine awake.
+    #[test]
+    fn the_clock_runs_only_while_contents_are_read() {
+        let files = Contents::new("clock", &[("a.txt", b"x")]);
+        let mut app = content_app(&files);
+        assert!(app.tick_interval().is_none());
+        app.criteria.query = "x".to_string();
+        app.execute_search();
+        assert!(app.tick_interval().is_some());
+        finish_content_search(&mut app);
+        assert!(
+            app.tick_interval().is_none(),
+            "the clock outlived the search"
+        );
+    }
+
+    /// Folders are not candidates, and the other filters still apply.
+    #[test]
+    fn content_mode_keeps_the_other_filters() {
+        let files = Contents::new(
+            "filters",
+            &[
+                ("a.txt", b"word"),
+                ("b.md", b"word"),
+                (".hidden.txt", b"word"),
+            ],
+        );
+        std::fs::create_dir_all(files.dir.join("word")).unwrap();
+        let mut app = content_app(&files);
+        app.criteria.query = "word".to_string();
+        app.criteria.extension_filter = Some("txt".to_string());
+        app.execute_search();
+        finish_content_search(&mut app);
+        assert_eq!(result_names(&app), vec!["a.txt"]);
     }
 }

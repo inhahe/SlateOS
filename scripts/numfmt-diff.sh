@@ -127,6 +127,14 @@ run_case 1234567890123456789
 run_case 1.23456789012345678
 run_case --format=%.20f 1
 run_case --to=si --format=%.3f 1234567 999999
+# The two "too large to be printed" refusals that need a value no one could
+# type: past LDBL_DIG digits unscaled, and past 999Q -- reachable only by
+# scaling up, since a number that long is refused as it is read.
+run_case 12345678901234567890
+run_case --invalid=warn 12345678901234567890 5
+run_case --from=si 1000Q
+run_case --from=si --to=si 1000Q
+run_case --from=si --to=si --invalid=ignore 999Q 1000Q
 
 # --- --from: scales, suffixes, units -------------------------------------------------
 for scale in auto si iec iec-i; do

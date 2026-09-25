@@ -59,6 +59,25 @@ const MAX_UNSCALED_DIGITS: u64 = 18;
 /// 999Q: the largest value with a suffix to write it with.
 const MAX_ACCEPTABLE_DIGITS: u64 = 33;
 
+/// A rendered number between ASCII apostrophes, the way upstream's messages
+/// print one: `value too large to be printed: '1.23457e+19'`.
+///
+/// Upstream writes these as `'%Lg'` in the format string rather than through
+/// `quote()`, and this port prints the same bytes, because what stands between
+/// the apostrophes is `printf`'s rendering of a `long double` -- digits, a
+/// sign, a point, an exponent, `inf` or `nan` -- which can hold neither a
+/// newline nor a quote to break out of the message with. They are added here
+/// instead of around a placeholder in each format string so that that shape,
+/// which `scripts/quote-names.py` refuses, keeps meaning "a name somebody
+/// quoted by hand".
+fn apostrophes(number: &str) -> String {
+    let mut out = String::with_capacity(number.len().saturating_add(2));
+    out.push('\'');
+    out.push_str(number);
+    out.push('\'');
+    out
+}
+
 /// The suffix letters, from K (1) to Q (10).
 const SUFFIXES: &[u8] = b"KMGTPEZYRQ";
 
@@ -915,8 +934,8 @@ impl Run<'_> {
         };
         let failed = |v: ExtF80| {
             format!(
-                "failed to prepare value '{}' for printing",
-                render(&Spec::fixed(6), v)
+                "failed to prepare value {} for printing",
+                apostrophes(&render(&Spec::fixed(6), v))
             )
         };
         let to = self.s.scale_to;
@@ -987,18 +1006,19 @@ impl Run<'_> {
                 > MAX_UNSCALED_DIGITS
         {
             let message = if precision_used > 0 {
-                format!(
-                    "value/precision too large to be printed: '{g}/{precision_used}' (consider using --to)"
-                )
+                let shown = apostrophes(&format!("{g}/{precision_used}"));
+                format!("value/precision too large to be printed: {shown} (consider using --to)")
             } else {
-                format!("value too large to be printed: '{g}' (consider using --to)")
+                let shown = apostrophes(&g);
+                format!("value too large to be printed: {shown} (consider using --to)")
             };
             self.conversion_error(message)?;
             return Ok(Ok(false));
         }
         if x > MAX_ACCEPTABLE_DIGITS.saturating_sub(1) {
+            let shown = apostrophes(&g);
             self.conversion_error(format!(
-                "value too large to be printed: '{g}' (cannot handle values > 999Q)"
+                "value too large to be printed: {shown} (cannot handle values > 999Q)"
             ))?;
             return Ok(Ok(false));
         }
@@ -1277,7 +1297,9 @@ mod tests {
         }
     }
 
-    fn convert(args: &[&str], input: &str) -> (String, Vec<String>, Option<&'static str>) {
+    /// Output, diagnostics, and how the line ended early if it did: `abort`
+    /// for `--invalid=abort`, or the message of a fatal error.
+    fn convert(args: &[&str], input: &str) -> (String, Vec<String>, Option<String>) {
         let s = settings(args);
         let mut fmt = Format::default();
         let mut padding = s.padding;
@@ -1299,8 +1321,8 @@ mod tests {
             diags: Vec::new(),
         };
         let aborted = match r.process_line(input.as_bytes(), true) {
-            Err(Abort) => Some("abort"),
-            Ok(Err(_)) => Some("failed"),
+            Err(Abort) => Some("abort".to_string()),
+            Ok(Err(message)) => Some(message),
             Ok(Ok(_)) => None,
         };
         (String::from_utf8(r.out).unwrap(), r.diags, aborted)
@@ -1329,7 +1351,7 @@ mod tests {
     #[test]
     fn invalid_numbers_abort_by_default() {
         let (out, diags, aborted) = convert(&[], "5.");
-        assert_eq!((out.as_str(), aborted), ("", Some("abort")));
+        assert_eq!((out.as_str(), aborted.as_deref()), ("", Some("abort")));
         assert_eq!(diags, vec!["invalid number: ‘5.’"]);
         let (_, diags, _) = convert(&[], "5..");
         assert_eq!(diags, vec!["invalid suffix in input: ‘5..’"]);
@@ -1343,11 +1365,43 @@ mod tests {
     #[test]
     fn warn_prints_the_field_as_it_was() {
         let (out, diags, aborted) = convert(&["--invalid=warn"], "x");
-        assert_eq!((out.as_str(), aborted), ("x\n", None));
+        assert_eq!((out.as_str(), aborted.as_deref()), ("x\n", None));
         assert_eq!(diags, vec!["invalid number: ‘x’"]);
         let (out, diags, _) = convert(&["--invalid=ignore"], "x");
         assert_eq!(out, "x\n");
         assert!(diags.is_empty());
+    }
+
+    /// Upstream's four messages that show a number between ASCII apostrophes,
+    /// exactly -- not `quote()`'s curly quotes, which is what a hand-written
+    /// `'{}'` is usually a bug for.
+    #[test]
+    fn numbers_in_messages_are_between_ascii_apostrophes() {
+        let (_, diags, aborted) = convert(&[], "12345678901234567890");
+        assert_eq!(aborted.as_deref(), Some("abort"));
+        assert_eq!(
+            diags,
+            vec!["value too large to be printed: '1.23457e+19' (consider using --to)"]
+        );
+        let (_, diags, _) = convert(&["--format=%.20f"], "1");
+        assert_eq!(
+            diags,
+            vec!["value/precision too large to be printed: '1/20' (consider using --to)"]
+        );
+        // Past 999Q only by scaling: a number *read* that long is refused
+        // before it is printed, as "value too large to be converted". And only
+        // with --to, or the check above ("consider using --to") speaks first.
+        let (_, diags, _) = convert(&["--from=si", "--to=si"], "1000Q");
+        assert_eq!(
+            diags,
+            vec!["value too large to be printed: '1e+33' (cannot handle values > 999Q)"]
+        );
+        let (out, _, aborted) = convert(&["--format=%0200f"], "1");
+        assert_eq!(out, "");
+        assert_eq!(
+            aborted.as_deref(),
+            Some("failed to prepare value '1.000000' for printing")
+        );
     }
 
     #[test]

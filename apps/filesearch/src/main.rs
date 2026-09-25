@@ -5474,6 +5474,12 @@ mod tests {
         );
         assert!(!probe::is_visible(&app, Target::Result(app.results[0])));
 
+        // A new search starts at the top of its own answer, not wherever the
+        // last one had been scrolled to.
+        app.execute_search();
+        assert_eq!(app.results_scroll, 0, "a new search kept the old scroll");
+        assert!(probe::is_visible(&app, Target::Result(app.results[0])));
+
         // Page Down moves a page, and lands on the end rather than refusing.
         let mut app2 = many_results();
         probe::key(&mut app2, &probe::press(Key::Down));

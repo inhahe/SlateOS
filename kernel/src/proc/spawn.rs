@@ -1082,26 +1082,25 @@ pub(crate) struct UserEntryInfo {
 ///
 /// - [`KernelError::InvalidExecutable`] if the ELF binary is invalid.
 /// - [`KernelError::OutOfMemory`] if any allocation fails.
-/// # Size ceiling
+/// # Size
 ///
-/// **`elf_data` must be one contiguous slice, so no executable larger than
-/// 16 MiB can be started.** The slice normally comes from
-/// [`crate::fs::Vfs::read_file`], whose `Vec` goes to the kernel heap;
-/// `heap.rs`'s `large_order` rounds the frame count up to a power of two,
-/// and `frame.rs`'s `alloc_inner` refuses any order above
-/// [`crate::mm::frame::BUDDY_MAX_ORDER`] (10) *before* it examines a free
-/// list. 2^10 frames x 16 KiB = 16 MiB.
+/// `elf_data` is one contiguous slice, normally the `Vec` that
+/// [`crate::fs::Vfs::read_file`] filled from the kernel heap. That used to
+/// cap executables at 16 MiB: the heap served large requests from the
+/// buddy allocator, whose biggest block is 2^[`BUDDY_MAX_ORDER`] frames x
+/// 16 KiB = 16 MiB, and refused anything larger whatever memory was free
+/// (`cmake-slateos.elf`, 22,526,200 bytes, was the first port to meet it).
 ///
-/// The refusal is therefore deterministic and unrelated to free memory: the
-/// boot that found it had 2.7 GB free. Because the sizes double, an
-/// executable of 8 MiB + 1 byte already demands the whole maximum block.
+/// The heap now maps any request above that block from vmalloc
+/// (`mm::heap::KernelHeap::alloc_virtual`) — contiguous in virtual memory
+/// only, which is all a slice needs — so the limit is free memory and the
+/// 1 GiB vmalloc region (`mm::kvspace::VMALLOC`), with room for the two
+/// copies a growing `Vec` briefly holds. The whole file is still held in
+/// the kernel while its segments are copied out, so starting a program
+/// costs its size in kernel memory for the duration; reading segments
+/// straight from the file would avoid that (design-decisions.md §959).
 ///
-/// The number itself was always documented, on `BUDDY_MAX_ORDER`. What was
-/// missing was this sentence -- nothing connected the allocator's largest
-/// block to the largest program that can run, and the two sit in different
-/// files with no reference between them. `cmake-slateos.elf` at 22,526,200
-/// bytes is the first port to cross it; see `open-questions.md` A-Q19 for
-/// whether to lift it.
+/// [`BUDDY_MAX_ORDER`]: crate::mm::frame::BUDDY_MAX_ORDER
 pub fn spawn_process(elf_data: &[u8], options: &SpawnOptions<'_>) -> KernelResult<SpawnResult> {
     spawn_process_inner(elf_data, options, None, &[], CapInherit::All)
 }
@@ -35094,22 +35093,19 @@ pub fn self_test_linux_slateos_cmake() -> KernelResult<()> {
         }
         // An OutOfMemory here is an ENVIRONMENT fact, not a cmake defect,
         // and the split matches `pathz_fixtures_missing`'s: absent source
-        // skips, present-but-broken fails. But it is a PERMANENT fact, not
-        // a transient one. This binary is 22.5 MB, `large_order` rounds it
-        // to order 11, and `frame.rs` `alloc_inner` refuses any order above
-        // MAX_ORDER = 10 before it examines a single free list. The ceiling
-        // on one kernel allocation is 2^10 frames x 16 KiB = 16 MiB, so this
-        // skip fires on EVERY boot until either that rises or
-        // `spawn_process` stops needing the whole ELF as one slice.
+        // skips, present-but-broken fails.
         //
-        // An earlier version of this comment blamed fragmentation and cited
-        // python312.zip at 20.5 MB as loading fine at the same order. That
-        // zip is never read into kernel memory -- it is existence-checked
-        // here and then read by CPython itself from ring 3 -- so it was
-        // never evidence about the allocator at all.
+        // Until 2026-09-25 it was also a PERMANENT fact and fired on every
+        // boot: this binary is 22.5 MB, which rounds to buddy order 11, and
+        // the heap served large requests only from the buddy allocator,
+        // whose largest block is order 10 = 16 MiB. The heap now maps such
+        // requests from vmalloc (design-decisions.md §959), so what is left
+        // is genuine exhaustion -- no 22.5 MB of free frames, or no room in
+        // the 1 GiB vmalloc region -- and the skip says so rather than
+        // naming a ceiling that no longer exists.
         //
-        // So this skips rather than reds the boot, and it skips through
-        // `pathz_skip` so the lost coverage is COUNTED. A rung that
+        // It skips rather than reds the boot, and it skips through
+        // `pathz_skip_unusable` so the lost coverage is COUNTED. A rung that
         // silently returned Ok here would be the Path-Z verdict problem
         // recorded on 2026-09-18: "complete -- 0 rungs skipped" over a rung
         // that quietly did nothing.
@@ -35117,10 +35113,9 @@ pub fn self_test_linux_slateos_cmake() -> KernelResult<()> {
             pathz_skip_unusable(
                 format_args!("{RUNG}"),
                 CMAKE,
-                "22.5 MB exceeds the 16 MiB ceiling on any single kernel \
-                 allocation -- rounded to order 11, and frame.rs MAX_ORDER \
-                 is 10, so alloc_inner refuses it before consulting the \
-                 free lists. Deterministic, not fragmentation",
+                "reading the 22.5 MB binary ran out of kernel memory -- \
+                 not enough free frames, or no room left in the vmalloc \
+                 region that serves heap allocations over 16 MiB",
             );
             return Ok(());
         }

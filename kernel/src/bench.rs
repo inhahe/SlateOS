@@ -5943,10 +5943,11 @@ fn bench_page_fault() -> KernelResult<()> {
 
     let pml4 = page_table::cr3_to_pml4(page_table::read_cr3());
 
-    // Pick a kernel-space virtual address range that's not in use.
-    // Use a high address in the kernel reserved range.
-    // Must be 16 KiB aligned for map_frame.
-    let bench_virt_base: u64 = 0xFFFF_CB00_0000_0000;
+    // A kernel-space range reserved for this benchmark (kvspace::BENCH),
+    // 16 KiB aligned for map_frame. It has to be a registered region: the
+    // kernel half's top-level page-table entries are all created at boot and
+    // then frozen, so an unregistered address would be refused.
+    let bench_virt_base: u64 = crate::mm::kvspace::BENCH.start;
     let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
 
     // Measure only the demand-fault path: alloc_zeroed + map + local TLB flush.

@@ -8322,6 +8322,15 @@ extern "C" fn kernel_main() -> ! {
         mm::vmalloc::self_test(),
     );
 
+    // Step 22e¾+: kernel heap allocations above the buddy maximum (16 MiB),
+    // which the heap maps from vmalloc. Here rather than with the early heap
+    // self-test because it needs page_table::init and a working vmalloc.
+    selftest::dispatch_debug(
+        "HeapVirtual",
+        selftest::Severity::Integrity,
+        mm::heap::virtual_alloc_self_test(),
+    );
+
     // Step 22e⅞: Reverse mapping (rmap) self-test.
     // Verifies add/remove/lookup of physical frame → virtual address mappings.
     selftest::dispatch_debug("Rmap", selftest::Severity::Integrity, mm::rmap::self_test());
@@ -9167,10 +9176,18 @@ extern "C" fn kernel_main() -> ! {
             {
                 let pml4 = mm::page_table::active_pml4_phys();
 
+                // page_table::init already set NX on the direct map's top-level
+                // entries, before any address space copied them; this is now
+                // the check that it did, and 0 is the expected count.
                 let hhdm_hardened = mm::protect::harden_hhdm_nx(pml4);
                 serial_println!(
-                    "[protect] HHDM NX hardened: {} PML4 entries updated",
-                    hhdm_hardened
+                    "[protect] HHDM NX hardened: {} PML4 entries updated{}",
+                    hhdm_hardened,
+                    if hhdm_hardened == 0 {
+                        " (all already set by page_table::init)"
+                    } else {
+                        " -- page_table::init missed these, so address spaces created before now lack it"
+                    }
                 );
 
                 let (sections_hardened, section_errors) = mm::protect::harden_kernel_sections(pml4);

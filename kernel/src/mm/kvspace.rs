@@ -24,9 +24,11 @@
 //!     HHDM (from bootloader)   Physical memory direct-map
 //!     0xFFFF_C100_0000_0000    Kernel stacks (per-task, with guard pages)
 //!     0xFFFF_C200_0000_0000    Huge pages (2 MiB mappings)
-//!     0xFFFF_C300_0000_0000    vmalloc (128 MiB, discontiguous allocations)
+//!     0xFFFF_C300_0000_0000    vmalloc (1 GiB, discontiguous allocations)
+//!     0xFFFF_C800_0000_0000    Memory-protection self-test area
 //!     0xFFFF_C900_0000_0000    Page table self-test area
 //!     0xFFFF_CA00_0000_0000    Demand paging test area
+//!     0xFFFF_CB00_0000_0000    Page-fault benchmark area
 //!     0xFFFF_D000_0000_0000    KASAN shadow (16 TiB, 1:8 over all kernel VA)
 //!     0xFFFF_FF00_0000_0000    Kernel text/data (Limine loads here)
 //! ```
@@ -89,10 +91,24 @@ pub const HUGEPAGE: Region = Region {
 };
 
 /// vmalloc region (virtually-contiguous, physically-discontiguous).
+///
+/// Sized for the kernel heap's allocations above the buddy allocator's
+/// 16 MiB maximum block, which land here (`mm::heap`): chiefly whole
+/// executables read in for `spawn_process`, which must hold two copies at
+/// once while a growing `Vec` reallocates. Virtual space costs nothing until
+/// mapped; the bookkeeping is one bit per 16 KiB frame, 8 KiB for 1 GiB.
 pub const VMALLOC: Region = Region {
     name: "vmalloc",
     start: 0xFFFF_C300_0000_0000,
-    size: 128 * 1024 * 1024, // 128 MiB
+    size: 1024 * 1024 * 1024, // 1 GiB
+};
+
+/// Memory-protection self-test area (`mm::protect`'s mprotect test maps one
+/// frame here).
+pub const PROTECT_TEST: Region = Region {
+    name: "protect_test",
+    start: 0xFFFF_C800_0000_0000,
+    size: 16 * 1024 * 1024, // 16 MiB
 };
 
 /// Page table self-test area (temporary mappings during tests).
@@ -106,6 +122,14 @@ pub const PT_SELFTEST: Region = Region {
 pub const FAULT_TEST: Region = Region {
     name: "fault_test",
     start: 0xFFFF_CA00_0000_0000,
+    size: 16 * 1024 * 1024, // 16 MiB
+};
+
+/// Page-fault benchmark area (`bench::bench_page_fault` maps one fresh frame
+/// per iteration here, about 3.4 MiB in all).
+pub const BENCH: Region = Region {
+    name: "bench",
+    start: 0xFFFF_CB00_0000_0000,
     size: 16 * 1024 * 1024, // 16 MiB
 };
 
@@ -206,10 +230,98 @@ const ALL_REGIONS: &[Region] = &[
     KSTACK,
     HUGEPAGE,
     VMALLOC,
+    PROTECT_TEST,
     PT_SELFTEST,
     FAULT_TEST,
+    BENCH,
     KASAN_SHADOW,
 ];
+
+/// The regions mapped at run time through `mm::page_table`'s ordinary
+/// mapping functions — every region in [`ALL_REGIONS`] except the KASAN
+/// shadow, whose top-level entries `mm::kasan::early_init` writes itself.
+///
+/// `page_table::init` creates the top-level (PML4) entry for each of these
+/// in the kernel's page tables at boot, before any process address space
+/// exists, and then freezes the kernel half's top level. That is what makes
+/// a mapping in one of these regions visible in every address space: new
+/// address spaces copy the kernel's top-level entries by value, so an entry
+/// created later would be missing from every address space that already
+/// existed. **A new region that is mapped at run time must be added here**,
+/// or its first mapping is refused (with a serial line saying so); the
+/// build-time check below refuses a region that is in neither list.
+pub const PAGE_TABLE_MAPPED: &[Region] = &[
+    KSTACK,
+    HUGEPAGE,
+    VMALLOC,
+    PROTECT_TEST,
+    PT_SELFTEST,
+    FAULT_TEST,
+    BENCH,
+];
+
+/// Whether `a` and `b` describe the same range. (Names are not compared:
+/// the overlap check below already makes the range unique to one region.)
+const fn same_region(a: &Region, b: &Region) -> bool {
+    a.start == b.start && a.size == b.size
+}
+
+/// Whether every region is either in [`PAGE_TABLE_MAPPED`] or is the
+/// KASAN shadow (whose top level `kasan::early_init` owns), and every
+/// [`PAGE_TABLE_MAPPED`] entry is a registered region.
+// `i += 1` and `j += 1` walk indices bounded by the two slices' lengths,
+// which a const fn cannot express with an iterator.
+#[allow(clippy::arithmetic_side_effects)]
+const fn top_level_owners_complete() -> bool {
+    let mut i = 0;
+    while i < ALL_REGIONS.len() {
+        #[allow(clippy::indexing_slicing)]
+        let region = &ALL_REGIONS[i];
+        let mut found = same_region(region, &KASAN_SHADOW);
+        let mut j = 0;
+        while j < PAGE_TABLE_MAPPED.len() {
+            #[allow(clippy::indexing_slicing)]
+            let mapped = &PAGE_TABLE_MAPPED[j];
+            if same_region(region, mapped) {
+                found = true;
+            }
+            j += 1;
+        }
+        if !found {
+            return false;
+        }
+        i += 1;
+    }
+    let mut j = 0;
+    while j < PAGE_TABLE_MAPPED.len() {
+        #[allow(clippy::indexing_slicing)]
+        let mapped = &PAGE_TABLE_MAPPED[j];
+        let mut registered = false;
+        let mut i = 0;
+        while i < ALL_REGIONS.len() {
+            #[allow(clippy::indexing_slicing)]
+            let region = &ALL_REGIONS[i];
+            if same_region(region, mapped) {
+                registered = true;
+            }
+            i += 1;
+        }
+        if !registered || same_region(mapped, &KASAN_SHADOW) {
+            return false;
+        }
+        j += 1;
+    }
+    true
+}
+
+// Every kernel region needs an owner for its top-level page-table entries —
+// `page_table::init` (listed in PAGE_TABLE_MAPPED) or `kasan::early_init`
+// (the shadow). A region with neither would have its first mapping refused
+// at run time; this makes that a build failure instead.
+const _: () = assert!(
+    top_level_owners_complete(),
+    "a kernel region is in neither PAGE_TABLE_MAPPED nor the KASAN shadow"
+);
 
 // ---------------------------------------------------------------------------
 // Overlap check — enforced at build time

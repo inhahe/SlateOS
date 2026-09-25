@@ -241,6 +241,13 @@ pub fn alloc() -> KernelResult<KstackInfo> {
     if INITIALIZED.get().is_none() {
         return Err(KernelError::NotSupported);
     }
+    // Mapped through the kernel's own PML4, not the loaded one. The tables
+    // reached are the same (the region's top-level entry is created at boot
+    // and shared by every address space), but a mapping made through a
+    // process's PML4 is charged to that process's resident-set size — and
+    // this used to be a raw CR3 read, PCID bits and all, passed where a
+    // table address belongs; harmless only while every CR3 carries PCID 0.
+    let pml4 = page_table::kernel_pml4_phys()?;
 
     // Step 1: Claim a slot.
     let slot = {
@@ -292,7 +299,6 @@ pub fn alloc() -> KernelResult<KstackInfo> {
     let stack_phys = phys_frame.addr();
 
     // Step 5: Map the stack frames into the kernel page table.
-    let pml4 = page_table::read_cr3();
     let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
 
     // Map each frame at its corresponding virtual address.
@@ -358,7 +364,8 @@ pub fn alloc() -> KernelResult<KstackInfo> {
 /// Caller must guarantee no CPU is currently using this stack (i.e., it
 /// is not the current RSP on any processor).
 pub unsafe fn free(info: KstackInfo) -> KernelResult<()> {
-    let pml4 = page_table::read_cr3();
+    // The same PML4 `alloc` mapped through (see there).
+    let pml4 = page_table::kernel_pml4_phys()?;
 
     // Unmap the stack frames.
     for i in 0..STACK_FRAMES {

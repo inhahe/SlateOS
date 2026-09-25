@@ -3031,57 +3031,6 @@ anyone else's.
 
 
 
-## A-Q19 — [A] No program larger than 16 MiB can be started, and `gcc` will be larger than 16 MiB. Lift the limit, or design around it? — Status: OPEN
-
-**In short:** the kernel loads a program by reading the whole file into one
-unbroken block of memory, and the largest unbroken block it can ever hand
-out is 16 megabytes. So a program bigger than that cannot be started at
-all — not slowly, not sometimes, never. CMake is 22 megabytes and is
-already blocked. GCC, which the roadmap wants, is bigger still. The choice
-is whether to raise the ceiling, change how programs are loaded, or accept
-that large programs are out of scope.
-
-**Glossary, because two terms below are unavoidable.** A *buddy allocator*
-(the thing that hands out memory in blocks whose sizes double: 1, 2, 4, 8…)
-can only give out a block of one of those doubling sizes, so a 22 MB
-request becomes a 32 MB one. *Contiguous* means one unbroken run of memory,
-as opposed to the same total spread over several pieces.
-
-**Why it is a hard stop and not bad luck.** `frame.rs`'s `alloc_inner`
-begins `if order > MAX_ORDER { return Err(InvalidArgument) }`, and
-`MAX_ORDER` is 10 — 2^10 blocks of 16 KiB, i.e. 16 MiB. The request is
-refused before any free memory is examined, so it fails identically on an
-idle machine. The boot where this was found had 2.7 GB free.
-
-One consequence worth seeing: because sizes double, a program of 8 MiB plus
-one byte already demands the entire largest block. The comfortable range is
-under 8 MiB.
-
-| option | *What changes:* | cost |
-|---|---|---|
-| **A. Raise `MAX_ORDER` to 11 or 12** | programs up to 32 or 64 MiB start; nothing else visibly differs | a change to the core page allocator every allocation passes through. The free-list array and every search over it grow, and the machine must keep a 32 MiB unbroken run available on a 5 GiB box |
-| **B. Stop requiring one unbroken block** | any size of program starts; memory use goes *down*, since the file need not be held twice | the honest fix and the expensive one. `spawn_process` takes the ELF as a single slice and there are 69 uses of it, with `ElfFile::parse` indexing into it throughout. Every process start goes through this path |
-| **C. Accept the limit** | nothing changes; large ports are declared out of scope and the limit is documented | free. It writes off `gcc`, and `cmake` stays permanently skipped |
-
-**Recommendation: B, but not today.** It is the only option that removes the
-class rather than moving it, and it makes memory use better rather than
-worse — the current design holds the whole file in the kernel *and* copies
-its segments into the new address space. But it is a rewrite of the loader,
-and a rewrite of the loader wants to be its own piece of work with its own
-boot, not a side effect of a blocked self-test. A is a smaller change that
-buys one doubling and leaves the same wall two ports later.
-
-**If this is never answered:** nothing breaks and nothing gets worse. The
-one self-test that needs it skips, and says why, on every boot. The cost is
-silent: the next person to port something large meets a kernel allocation
-abort with no obvious cause, which is exactly how this was found — the
-failure does not name the limit, it just dies.
-
-**Where it bites:** `kernel/src/proc/spawn.rs` (`spawn_process`),
-`kernel/src/mm/frame.rs` (`MAX_ORDER`, `alloc_inner`),
-`kernel/src/mm/heap.rs` (`large_order`). Full measurement and three
-retracted claims of mine in `known-issues.md`, 2026-09-21.
-
 ## A-Q20 — [A] A lane may only publish work after a green test run, and lane A's has been red for 945 commits. What should a blocked lane do? — Status: OPEN
 
 **In short:** the three sessions hand work to each other by putting files in

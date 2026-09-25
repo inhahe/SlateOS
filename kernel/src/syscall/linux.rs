@@ -32353,11 +32353,6 @@ fn epoll_wait_core(
 
     #[allow(clippy::cast_sign_loss)]
     let max = maxevents as usize;
-    // Output buffer: up to `maxevents` packed 12-byte epoll_event records.
-    let mut out = match crate::mm::user::alloc_zeroed_vec(max.saturating_mul(12)) {
-        Ok(v) => v,
-        Err(e) => return linux_err(linux_errno_for(e)),
-    };
 
     // The caller's deadline is absolute from here, so the rebuild loop below
     // cannot extend the wait by restarting it: each pass gets only what is left.
@@ -32378,6 +32373,21 @@ fn epoll_wait_core(
             return SyscallResult::ok(0);
         };
         let interest = crate::ipc::epoll::interest_list(ep_handle).unwrap_or_default();
+
+        // Output buffer: packed 12-byte epoll_event records, one per ready
+        // fd — so no more than the interest set holds, however large
+        // `maxevents` is. Sized by `maxevents` alone, it let one call commit
+        // up to EP_MAX_EVENTS * 12 bytes of zeroed kernel memory for as long
+        // as it waited: harmless-looking while the kernel refused any single
+        // allocation over 16 MiB, but kernel heap allocations above that are
+        // now mapped from vmalloc (design-decisions.md §959), so it reached
+        // 1 GiB. Allocated per pass, and a pass only repeats when the
+        // interest set changed.
+        let cap = max.min(interest.len());
+        let mut out = match crate::mm::user::alloc_zeroed_vec(cap.saturating_mul(12)) {
+            Ok(v) => v,
+            Err(e) => return linux_err(linux_errno_for(e)),
+        };
 
         // Resolve the interest set to the waiter sets it can be parked on, plus
         // the instance's own interest-set-change notification so an epoll_ctl
@@ -32411,7 +32421,7 @@ fn epoll_wait_core(
             }
             count = 0;
             for &(fd, events, data) in &interest {
-                if count >= max {
+                if count >= cap {
                     break;
                 }
                 // A registered fd that has since been closed is simply not
@@ -32432,7 +32442,7 @@ fn epoll_wait_core(
                 // events field (u32): zero-extend the 16-bit revents.
                 let ev_bytes = u32::from(revents).to_ne_bytes();
                 let data_bytes = data.to_ne_bytes();
-                // `get_mut` on the whole 12-byte record: `count < max` is
+                // `get_mut` on the whole 12-byte record: `count < cap` is
                 // guaranteed by the break above, so this cannot miss, and a
                 // bounds-checked write is the honest answer if it ever could.
                 let Some(record) = out_buf.get_mut(off..off.saturating_add(12)) else {

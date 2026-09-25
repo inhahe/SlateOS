@@ -43,6 +43,58 @@
 //! Based on `x86_64`'s standard split between PML4 entries 0–255 (user)
 //! and 256–511 (kernel).  Kernel page table entries are shared across
 //! all address spaces to ensure consistent kernel mappings.
+//!
+//! ## The kernel half's top level is fixed at boot
+//!
+//! Sharing works one level down, not at the PML4 itself. [`alloc_pml4`]
+//! copies the kernel's 256 top-level entries **by value** into every new
+//! address space; everything below them (PDPT, PD, PT) is then reached by
+//! pointer and so is genuinely shared. The consequence is that a kernel-half
+//! mapping made *under an existing* top-level entry appears in every address
+//! space at once, while one that has to *create* a top-level entry appears
+//! only in the PML4 it was made through — and in no address space that
+//! already existed. Nothing faults when that happens. The mapping works in
+//! the process that made it and is absent everywhere else, so the failure
+//! surfaces later, as a kernel page fault in some unrelated context.
+//!
+//! So the top level is settled once, in [`init`], and never extended:
+//!
+//! 1. Every top-level slot any kernel mapper can reach is created then, in
+//!    the kernel's own PML4 — the direct map up to the CPU's physical
+//!    address width, and each region in
+//!    [`kvspace::PAGE_TABLE_MAPPED`](super::kvspace::PAGE_TABLE_MAPPED)
+//!    (kernel stacks, vmalloc, huge pages, the test windows). The KASAN
+//!    shadow slots are written earlier still, by `kasan::early_init`, for
+//!    the same reason.
+//!    The direct map's entries are marked no-execute at the same moment
+//!    (nothing runs from it), which used to happen at boot step 22e2 —
+//!    after the ring-3 self-tests had already copied them executable.
+//! 2. After that the kernel half is *frozen*: a mapping that would need a new
+//!    kernel top-level entry is refused with [`KernelError::InvalidAddress`]
+//!    and a serial line naming the address, instead of quietly creating an
+//!    entry only one address space can see. Changing an existing top-level
+//!    entry has the same problem — the change reaches only the PML4 it was
+//!    made in — so nothing does that after `init` either.
+//! 3. [`alloc_pml4`] copies the kernel half from the kernel's PML4, not from
+//!    whichever PML4 happens to be loaded.
+//!
+//! Kernel-half mappers should also map *through* the kernel PML4
+//! ([`kernel_pml4_phys`]) rather than the active one: the tables reached are
+//! the same, but a mapping made through a process PML4 is charged to that
+//! process's resident-set size by `mm::accounting` — memory the process
+//! neither owns nor can free.
+//!
+//! ## Concurrent table creation
+//!
+//! Two CPUs mapping neighbouring kernel addresses can both find the same
+//! intermediate entry empty. Each would allocate a table and store it, and
+//! the second store would silently discard the first table *and the mapping
+//! already made in it*. [`walk_or_create`] therefore publishes a new table
+//! with a compare-and-swap: the loser frees its unused page and walks into
+//! the winner's. Every entry access in this module is an atomic load or store
+//! (Acquire/Release), which is what makes that compare-and-swap meaningful —
+//! and it matches what the hardware walker, which reads these tables
+//! concurrently with us, requires anyway.
 
 // KASAN debug profile: this module is exempt from compiler instrumentation.
 // The shadow mapper allocates and edits page tables through this module,
@@ -55,6 +107,7 @@ use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
 use crate::serial_println;
 use core::ptr;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::{Mutex, Once};
 
 // ---------------------------------------------------------------------------
@@ -63,6 +116,10 @@ use spin::{Mutex, Once};
 
 /// Number of entries in each page table level (PML4, PDPT, PD, PT).
 const ENTRIES_PER_TABLE: usize = 512;
+
+/// First PML4 slot of the kernel half (slots 256–511 map
+/// `0xFFFF_8000_0000_0000` upwards).
+const FIRST_KERNEL_SLOT: usize = ENTRIES_PER_TABLE / 2;
 
 /// Size of a single hardware page (`x86_64` base page size).
 ///
@@ -113,6 +170,34 @@ static HHDM_OFFSET: Once<u64> = Once::new();
 /// Returns `None` before [`init`] is called.
 pub fn hhdm() -> Option<u64> {
     HHDM_OFFSET.get().copied()
+}
+
+/// Physical address of the kernel's own PML4: the one loaded when [`init`]
+/// ran, which kernel threads run on and every process PML4's kernel half is
+/// copied from. Zero until [`init`].
+static KERNEL_PML4_PHYS: AtomicU64 = AtomicU64::new(0);
+
+/// Set by [`init`] once every kernel top-level slot has been created. From
+/// then on a mapping that would need a *new* kernel-half PML4 entry is
+/// refused — see "The kernel half's top level is fixed at boot" in the
+/// module docs for why such an entry could never be shared.
+static KERNEL_TOP_LEVEL_FROZEN: AtomicBool = AtomicBool::new(false);
+
+/// The kernel's own PML4 (see [`KERNEL_PML4_PHYS`]).
+///
+/// Map kernel-half addresses through this rather than through
+/// [`active_pml4_phys`]: the tables reached are the same, but a mapping
+/// made through a process PML4 is charged to that process's resident-set
+/// size.
+///
+/// # Errors
+///
+/// [`KernelError::NotSupported`] before [`init`] has run.
+pub fn kernel_pml4_phys() -> KernelResult<u64> {
+    match KERNEL_PML4_PHYS.load(Ordering::Acquire) {
+        0 => Err(KernelError::NotSupported),
+        pml4 => Ok(pml4),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -670,7 +755,41 @@ pub fn pt_pool_free_count() -> usize {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// The entry at `index` of the table at `table_phys`, as an atomic.
+///
+/// Every access to a page-table entry in this module goes through here.
+/// The hardware walker reads these tables concurrently with the kernel, and
+/// kernel-half tables are written by whichever CPU maps next, so a plain
+/// `ptr::read`/`ptr::write` would be a data race in Rust's memory model
+/// and leave the compiler free to tear, merge or drop an entry store. An
+/// aligned atomic load or store on `x86_64` is an ordinary `mov`, so this
+/// costs nothing at run time.
+///
+/// # Safety
+///
+/// - `table_phys` must be the physical address of a valid 4 KiB page
+///   table (512 entries), mapped by the HHDM at `hhdm`.
+/// - `index` must be < [`ENTRIES_PER_TABLE`] (512).
+#[inline]
+#[allow(clippy::arithmetic_side_effects)]
+unsafe fn entry_atomic<'a>(table_phys: u64, index: usize, hhdm: u64) -> &'a AtomicU64 {
+    debug_assert!(index < ENTRIES_PER_TABLE);
+    let table_virt = (table_phys + hhdm) as *mut u64;
+    // SAFETY: the caller guarantees the table is valid and HHDM-mapped and
+    // `index < 512`, so the pointer stays inside the 4 KiB table. Tables are
+    // 4 KiB aligned and entries are 8 bytes, so the pointer meets
+    // `AtomicU64`'s 8-byte alignment. Page-table pages are never freed while
+    // they are reachable from a table (the contract of `free_pt_page`), so
+    // the reference cannot outlive the memory for any caller that holds it
+    // only across its own walk.
+    unsafe { AtomicU64::from_ptr(table_virt.add(index)) }
+}
+
 /// Read a page table entry.
+///
+/// An Acquire load (see [`entry_atomic`]): a table another CPU has just
+/// published with [`walk_or_create`] is seen fully zeroed when it is
+/// walked into.
 ///
 /// # Safety
 ///
@@ -679,29 +798,26 @@ pub fn pt_pool_free_count() -> usize {
 /// - `index` must be < [`ENTRIES_PER_TABLE`] (512).
 /// - `hhdm` must be the correct HHDM offset.
 #[inline]
-#[allow(clippy::arithmetic_side_effects)]
 pub unsafe fn read_entry(table_phys: u64, index: usize, hhdm: u64) -> PageTableEntry {
-    let table_virt = (table_phys + hhdm) as *const PageTableEntry;
-    // SAFETY: Caller guarantees table_phys is valid, index < 512,
-    // and the HHDM maps this physical page.  PageTableEntry is 8 bytes
-    // and the table is 4 KiB aligned, so alignment is satisfied.
-    unsafe { ptr::read(table_virt.add(index)) }
+    // SAFETY: the caller's guarantees are exactly `entry_atomic`'s.
+    PageTableEntry(unsafe { entry_atomic(table_phys, index, hhdm) }.load(Ordering::Acquire))
 }
 
 /// Write a page table entry.
+///
+/// A Release store (see [`entry_atomic`]). This makes the store itself
+/// well-defined; it does not arbitrate between two writers, so a caller
+/// that could race another writer for the same entry must still hold a lock
+/// or use a compare-and-swap, as [`walk_or_create`] does.
 ///
 /// # Safety
 ///
 /// Same as [`read_entry`], plus the caller must have exclusive access
 /// to this entry (either via a lock or single-threaded boot context).
 #[inline]
-#[allow(clippy::arithmetic_side_effects)]
 pub(crate) unsafe fn write_entry(table_phys: u64, index: usize, entry: PageTableEntry, hhdm: u64) {
-    let table_virt = (table_phys + hhdm) as *mut PageTableEntry;
-    // SAFETY: Caller guarantees validity and exclusive access.
-    unsafe {
-        ptr::write(table_virt.add(index), entry);
-    }
+    // SAFETY: the caller's guarantees are exactly `entry_atomic`'s.
+    unsafe { entry_atomic(table_phys, index, hhdm) }.store(entry.0, Ordering::Release);
 }
 
 /// Walk one level of the page table hierarchy.
@@ -712,11 +828,17 @@ pub(crate) unsafe fn write_entry(table_phys: u64, index: usize, entry: PageTable
 /// installs it with `PRESENT | WRITABLE` (plus `USER_ACCESSIBLE` if
 /// `user` is true).
 ///
+/// Safe against a concurrent walker creating the same table: the new
+/// table is published with a compare-and-swap, and the loser of a race
+/// adopts the winner's table (see [`install_table`]).
+///
+/// This does not police the kernel half's top level; walks that start at a
+/// PML4 go through [`walk_or_create_pml4`], which does.
+///
 /// # Safety
 ///
 /// - `table_phys` must be a valid page table.
 /// - `index` must be < 512.
-#[allow(clippy::arithmetic_side_effects)]
 pub(crate) unsafe fn walk_or_create(
     table_phys: u64,
     index: usize,
@@ -748,16 +870,115 @@ pub(crate) unsafe fn walk_or_create(
             flags |= PageFlags::USER_ACCESSIBLE;
         }
 
-        let new_entry = PageTableEntry::new(new_page, flags);
-        // SAFETY: table_phys is valid, index < 512.
+        // SAFETY: table_phys is valid and index < 512 (caller); `entry` is
+        // the value just read from that slot; `new_page` is a fresh, zeroed
+        // pool page that nothing references yet.
         unsafe {
-            write_entry(table_phys, index, new_entry, hhdm);
+            install_table(
+                table_phys,
+                index,
+                entry,
+                PageTableEntry::new(new_page, flags),
+                hhdm,
+            )
         }
-
-        Ok(new_page)
     } else {
         Err(KernelError::InvalidAddress)
     }
+}
+
+/// Publish `fresh` — an entry naming a newly allocated, zeroed table page —
+/// in slot `index` of `table_phys`, provided the slot still holds
+/// `observed`.
+///
+/// Returns the physical address of the table the slot names afterwards:
+/// `fresh`'s own page if the swap succeeded, or the table another CPU
+/// published first, in which case `fresh`'s page — never visible to anyone —
+/// goes back to the pool.
+///
+/// # Errors
+///
+/// [`KernelError::InvalidAddress`] if the slot was changed to something that
+/// is not a table: a huge page, or a non-present value. `fresh`'s page is
+/// freed in that case too.
+///
+/// # Safety
+///
+/// - `table_phys` must be a valid page table and `index` < 512.
+/// - `fresh.phys_addr()` must be a page from [`alloc_pt_page`] that no
+///   table entry references.
+unsafe fn install_table(
+    table_phys: u64,
+    index: usize,
+    observed: PageTableEntry,
+    fresh: PageTableEntry,
+    hhdm: u64,
+) -> KernelResult<u64> {
+    // SAFETY: the caller guarantees the table and index.
+    let slot = unsafe { entry_atomic(table_phys, index, hhdm) };
+    // AcqRel on success: Release publishes the page's zeroed contents
+    // before the entry that makes them reachable; Acquire (both arms)
+    // makes the winner's table contents visible before we walk into it.
+    match slot.compare_exchange(observed.0, fresh.0, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => Ok(fresh.phys_addr()),
+        Err(current) => {
+            // SAFETY: the swap failed, so `fresh` was never stored anywhere;
+            // its page is still exclusively ours.
+            unsafe { free_pt_page(fresh.phys_addr()) };
+            let current = PageTableEntry(current);
+            if current.is_present() && !current.is_huge() {
+                Ok(current.phys_addr())
+            } else {
+                Err(KernelError::InvalidAddress)
+            }
+        }
+    }
+}
+
+/// [`walk_or_create`] for the top level, refusing to add a kernel-half
+/// PML4 entry once the kernel half is frozen.
+///
+/// Every walk that begins at a PML4 and may create tables goes through
+/// here. For a user address, or for a kernel address whose top-level entry
+/// already exists, it is exactly [`walk_or_create`]. For a kernel address
+/// whose entry is missing after [`init`] it refuses: an entry created now
+/// would exist only in `pml4_phys`, and in no other address space — see the
+/// module docs.
+///
+/// # Errors
+///
+/// As [`walk_or_create`], plus [`KernelError::InvalidAddress`] for the
+/// refusal, which also prints one serial line naming the address and slot:
+/// it means a kernel region is missing from the set [`init`] creates.
+///
+/// # Safety
+///
+/// `pml4_phys` must be a valid PML4.
+pub(crate) unsafe fn walk_or_create_pml4(
+    pml4_phys: u64,
+    virt: VirtAddr,
+    create: bool,
+    user: bool,
+    hhdm: u64,
+) -> KernelResult<u64> {
+    let index = virt.pml4_index();
+    if create && virt.is_kernel() && KERNEL_TOP_LEVEL_FROZEN.load(Ordering::Acquire) {
+        // SAFETY: pml4_phys is valid (caller) and index < 512 (VirtAddr).
+        let entry = unsafe { read_entry(pml4_phys, index, hhdm) };
+        if !entry.is_present() {
+            serial_println!(
+                "[pt] REFUSED: mapping {} needs kernel PML4 slot {}, which does not exist. \
+                 The kernel half's top level is fixed at boot, so an entry made now would be \
+                 missing from every other address space. Add the region to \
+                 kvspace::PAGE_TABLE_MAPPED.",
+                virt,
+                index
+            );
+            return Err(KernelError::InvalidAddress);
+        }
+    }
+    // SAFETY: pml4_phys is valid (caller) and index < 512 (VirtAddr).
+    unsafe { walk_or_create(pml4_phys, index, create, user, hhdm) }
 }
 
 // ---------------------------------------------------------------------------
@@ -768,7 +989,11 @@ pub(crate) unsafe fn walk_or_create(
 ///
 /// Must be called after the frame allocator is initialized and before
 /// any page table operations (except [`read_cr3`] and [`cr3_to_pml4`]
-/// which are pure hardware reads).
+/// which are pure hardware reads), and before the first [`alloc_pml4`].
+///
+/// Records the kernel PML4, creates every kernel top-level slot any mapper
+/// can reach, and then freezes the kernel half's top level — see "The
+/// kernel half's top level is fixed at boot" in the module docs.
 pub fn init(hhdm_offset: u64) {
     HHDM_OFFSET.call_once(|| hhdm_offset);
     PT_PAGE_POOL.lock().hhdm_offset = hhdm_offset;
@@ -776,10 +1001,175 @@ pub fn init(hhdm_offset: u64) {
     // Record the kernel PML4 in the accounting module so that
     // kernel-space mappings are excluded from per-process RSS tracking.
     let kernel_pml4 = cr3_to_pml4(read_cr3());
+    KERNEL_PML4_PHYS.store(kernel_pml4, Ordering::Release);
     super::accounting::set_kernel_pml4(kernel_pml4);
 
     serial_println!("[mm] Page table subsystem initialized");
     serial_println!("[mm]   Active PML4: {:#x}", kernel_pml4);
+
+    let phys_bits = crate::cpu::physical_address_bits();
+    match preallocate_kernel_top_level(kernel_pml4, hhdm_offset, phys_bits) {
+        Ok(p) => serial_println!(
+            "[mm]   Kernel top level: {} slot(s) created, {} already present \
+             (direct map for {}-bit physical addresses, plus {} kernel region(s)); now frozen",
+            p.created,
+            p.present,
+            phys_bits,
+            super::kvspace::PAGE_TABLE_MAPPED.len()
+        ),
+        // Out of memory this early is not survivable in practice, but freezing
+        // anyway is still right: a later mapping into a slot that could not be
+        // created is refused by name instead of being made unshared.
+        Err(e) => serial_println!(
+            "[mm]   ERROR: could not create the kernel top level ({:?}); mappings \
+             that need a missing slot will be refused",
+            e
+        ),
+    }
+    let marked = mark_direct_map_no_execute(kernel_pml4, hhdm_offset, phys_bits);
+    serial_println!(
+        "[mm]   Direct map: {} top-level entr{} marked no-execute before any address space copies them",
+        marked,
+        if marked == 1 { "y" } else { "ies" }
+    );
+    KERNEL_TOP_LEVEL_FROZEN.store(true, Ordering::Release);
+}
+
+/// Set NX on every direct-map top-level entry of `pml4_phys` that lacks it,
+/// returning how many were changed.
+///
+/// Nothing executes from the direct map (it is how the kernel reaches
+/// physical memory as data), and the bootloader leaves it executable.
+/// `mm::protect::harden_hhdm_nx` used to fix that at boot step 22e2 — by
+/// which point the ring-3 self-tests had already created address spaces
+/// with copies of the unhardened entries, and any that stayed alive kept an
+/// executable direct map. Doing it here, before the kernel half is frozen
+/// and before any copy exists, makes every address space inherit it.
+///
+/// Requires `IA32_EFER.NXE`, which the bootloader sets (see
+/// [`PageFlags::NO_EXECUTE`]); without it bit 63 is reserved.
+fn mark_direct_map_no_execute(pml4_phys: u64, hhdm_offset: u64, phys_bits: u8) -> usize {
+    let mut marked = 0usize;
+    let Some(&(first, last)) = kernel_top_level_ranges(hhdm_offset, phys_bits).first() else {
+        return 0;
+    };
+    for index in first..=last {
+        // SAFETY: pml4_phys is the live kernel PML4 and index < 512.
+        let entry = unsafe { read_entry(pml4_phys, index, hhdm_offset) };
+        if !entry.is_present() || entry.flags().contains(PageFlags::NO_EXECUTE) {
+            continue;
+        }
+        let hardened = PageTableEntry::from_raw(entry.raw() | PageFlags::NO_EXECUTE.bits());
+        // SAFETY: as above. Only the NX bit changes on an existing entry; no
+        // process PML4 exists yet to hold a stale copy.
+        unsafe { write_entry(pml4_phys, index, hardened, hhdm_offset) };
+        marked = marked.saturating_add(1);
+    }
+    if marked > 0 {
+        // The entries are live in the loaded PML4, so drop the translations
+        // cached before the change. Only this CPU is running this early, so
+        // a local CR3 reload is the whole flush. (It spares global entries;
+        // a stale one could only grant execution of a page nothing
+        // executes, and is gone at its next eviction.)
+        // SAFETY: reloading the value CR3 already holds.
+        unsafe { write_cr3(read_cr3()) };
+    }
+    marked
+}
+
+/// What [`preallocate_kernel_top_level`] found and did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TopLevelPrealloc {
+    /// Slots that were empty and now hold a fresh, empty PDPT.
+    created: usize,
+    /// Slots that already held a table (the bootloader's direct map and
+    /// kernel image, KASAN's shadow, or an earlier call).
+    present: usize,
+}
+
+/// The kernel top-level slots [`init`] must create, as an inclusive range of
+/// PML4 indices per entry: the direct map up to the CPU's physical address
+/// width, then every region in
+/// [`kvspace::PAGE_TABLE_MAPPED`](super::kvspace::PAGE_TABLE_MAPPED).
+///
+/// The direct map is included because MMIO is mapped into it on demand, at
+/// `phys + hhdm` (`virtio::modern::map_bar_region`, `acpi`): a device BAR
+/// above the RAM the bootloader mapped lands in a slot nobody created. The
+/// range is clamped to end below the first fixed kernel region, so a very
+/// wide physical address space cannot run the direct map into the regions
+/// above it.
+#[allow(clippy::arithmetic_side_effects)]
+fn kernel_top_level_ranges(hhdm_offset: u64, phys_bits: u8) -> [(usize, usize); TOP_LEVEL_RANGES] {
+    use super::kvspace;
+    let index = |addr: u64| VirtAddr::new(addr).pml4_index();
+
+    // `phys_bits` comes from CPUID and is at most 52 on any x86_64 part, so
+    // the shift cannot overflow; clamp anyway rather than trust it.
+    let span = 1u64 << u32::from(phys_bits.clamp(32, 52));
+    // `.max(..)` keeps at least the slot the direct map starts in, whatever
+    // the clamp against KSTACK did; the end is exclusive, hence the `- 1`
+    // below, which cannot underflow because the end is above the offset.
+    let direct_map_end = hhdm_offset
+        .saturating_add(span)
+        .min(kvspace::KSTACK.start)
+        .max(hhdm_offset.saturating_add(1));
+
+    let mut ranges = [(0usize, 0usize); TOP_LEVEL_RANGES];
+    let mut slots = ranges.iter_mut();
+    if let Some(first) = slots.next() {
+        *first = (index(hhdm_offset), index(direct_map_end - 1));
+    }
+    // kvspace refuses to build with an empty region, so `end() - 1` is the
+    // region's last byte and cannot underflow.
+    for (slot, region) in slots.zip(kvspace::PAGE_TABLE_MAPPED) {
+        *slot = (index(region.start), index(region.end() - 1));
+    }
+    ranges
+}
+
+/// Entries in [`kernel_top_level_ranges`]: the direct map, then one per
+/// [`kvspace::PAGE_TABLE_MAPPED`](super::kvspace::PAGE_TABLE_MAPPED) region.
+const TOP_LEVEL_RANGES: usize = 1 + super::kvspace::PAGE_TABLE_MAPPED.len();
+
+/// Create an empty PDPT in every kernel top-level slot of `pml4_phys` named
+/// by [`kernel_top_level_ranges`] that does not have one yet.
+///
+/// Runs before the kernel half is frozen, on the kernel PML4, while no
+/// process PML4 exists — so every slot created here is inherited by every
+/// address space that will ever exist.
+///
+/// # Errors
+///
+/// [`KernelError::OutOfMemory`] if a PDPT page cannot be allocated. Slots
+/// created before the failure stay created.
+fn preallocate_kernel_top_level(
+    pml4_phys: u64,
+    hhdm_offset: u64,
+    phys_bits: u8,
+) -> KernelResult<TopLevelPrealloc> {
+    let mut result = TopLevelPrealloc {
+        created: 0,
+        present: 0,
+    };
+    for (first, last) in kernel_top_level_ranges(hhdm_offset, phys_bits) {
+        for index in first..=last {
+            // Only the kernel half; a range that somehow reached below slot
+            // 256 would be a kvspace bug, and must not touch user slots.
+            if index < FIRST_KERNEL_SLOT {
+                return Err(KernelError::InternalError);
+            }
+            // SAFETY: pml4_phys is the live kernel PML4 and index < 512.
+            let before = unsafe { read_entry(pml4_phys, index, hhdm_offset) };
+            if before.is_present() {
+                result.present = result.present.saturating_add(1);
+                continue;
+            }
+            // SAFETY: as above; user = false because this is the kernel half.
+            unsafe { walk_or_create(pml4_phys, index, true, false, hhdm_offset)? };
+            result.created = result.created.saturating_add(1);
+        }
+    }
+    Ok(result)
 }
 
 /// Translate a virtual address to a physical address.
@@ -925,7 +1315,7 @@ pub unsafe fn map_4k_if_absent(
     // SAFETY: pml4_phys is valid (caller guarantee).  Each subsequent
     // call uses a table returned by walk_or_create, which guarantees a
     // valid, present page table at the returned physical address.
-    let pdpt = unsafe { walk_or_create(pml4_phys, virt.pml4_index(), true, user, hhdm)? };
+    let pdpt = unsafe { walk_or_create_pml4(pml4_phys, virt, true, user, hhdm)? };
     // SAFETY: pdpt returned by walk_or_create above.
     let pd = unsafe { walk_or_create(pdpt, virt.pdpt_index(), true, user, hhdm)? };
     // SAFETY: pd returned by walk_or_create above.
@@ -1047,7 +1437,7 @@ pub unsafe fn map_frame_subpages(
     // Walk PML4 → PDPT → PD → PT, creating intermediate tables as needed.
     // SAFETY: pml4_phys is valid (caller guarantee).  Each subsequent
     // level uses a table returned by walk_or_create, guaranteed valid.
-    let pdpt = unsafe { walk_or_create(pml4_phys, virt.pml4_index(), true, user, hhdm)? };
+    let pdpt = unsafe { walk_or_create_pml4(pml4_phys, virt, true, user, hhdm)? };
     // SAFETY: pdpt returned by walk_or_create above.
     let pd = unsafe { walk_or_create(pdpt, virt.pdpt_index(), true, user, hhdm)? };
     // SAFETY: pd returned by walk_or_create above.
@@ -1640,41 +2030,38 @@ pub unsafe fn write_cr3(pml4_phys: u64) {
 /// The new PML4 is initialized as follows:
 /// - Entries 0–255 (userspace half): zeroed — the process starts with
 ///   no userspace mappings.
-/// - Entries 256–511 (kernel half): copied from the current (kernel)
-///   PML4 — the kernel is mapped identically in every address space.
+/// - Entries 256–511 (kernel half): copied from the kernel's own PML4
+///   ([`kernel_pml4_phys`]) — the kernel is mapped identically in every
+///   address space. Copied from the kernel's PML4 rather than the loaded
+///   one so that a fork run on a process's page tables inherits nothing
+///   but the kernel's; since [`init`] fixes the kernel half's top level
+///   the two are identical, and this keeps them so by construction.
 ///
 /// Returns the physical address of the new PML4 (4 KiB aligned).
 ///
 /// # Errors
 ///
 /// - [`KernelError::OutOfMemory`] if page allocation fails.
+/// - [`KernelError::NotSupported`] before [`init`].
 pub fn alloc_pml4() -> KernelResult<u64> {
     let hhdm = hhdm().ok_or(KernelError::NotSupported)?;
+    let kernel_pml4 = kernel_pml4_phys()?;
 
     // Allocate a fresh 4 KiB page for the PML4.
     let new_pml4_phys = PT_PAGE_POOL.lock().alloc()?;
 
-    // Copy kernel-half PML4 entries (256–511) from the current page table.
-    let kernel_pml4 = cr3_to_pml4(read_cr3());
-    let src_virt = (kernel_pml4 + hhdm) as *const u64;
-    let dst_virt = (new_pml4_phys + hhdm) as *mut u64;
-
-    // SAFETY:
-    // - kernel_pml4 is the active PML4 (valid, mapped via HHDM).
-    // - new_pml4_phys is freshly allocated and zeroed (pool zeroes on alloc).
-    // - Entries 256–511 are the kernel half; copying them shares the
-    //   kernel's PDPT/PD/PT structures (read-only sharing at the PML4
-    //   level — we never modify kernel page table entries through the
-    //   process PML4).
-    // - Each entry is 8 bytes, 256 entries = 2048 bytes.
-    unsafe {
-        // Userspace entries 0–255 are already zeroed by alloc().
-        // Copy kernel entries 256–511.
-        core::ptr::copy_nonoverlapping(
-            src_virt.add(256), // Entry 256 in source
-            dst_virt.add(256), // Entry 256 in dest
-            256,               // 256 entries
-        );
+    // Userspace entries 0–255 are already zeroed by alloc(). Copy the
+    // kernel half, sharing the kernel's PDPTs and everything below them
+    // by pointer — which is why those tables are shared at all.
+    for index in FIRST_KERNEL_SLOT..ENTRIES_PER_TABLE {
+        // SAFETY: kernel_pml4 is the kernel's PML4 (recorded by init) and
+        // new_pml4_phys a fresh pool page, both valid HHDM-mapped tables;
+        // index < 512. Nobody else can see the new PML4 yet, and the
+        // kernel half of the source is frozen, so neither access races.
+        unsafe {
+            let entry = read_entry(kernel_pml4, index, hhdm);
+            write_entry(new_pml4_phys, index, entry, hhdm);
+        }
     }
 
     // Register the new address space for per-process memory accounting.
@@ -2118,8 +2505,263 @@ pub fn self_test() -> KernelResult<()> {
     // -- Tests 3-5: Map, change flags, unmap -----------------------------------
     test_map_unmap(pml4_phys, test_frame, hhdm)?;
 
+    // -- Tests 6-8: the shared kernel half ---------------------------------------
+    test_kernel_top_level(hhdm)?;
+    serial_println!(
+        "[pt]   Kernel top level created at boot and inherited by new address spaces: OK"
+    );
+    test_frozen_top_level_refuses(hhdm)?;
+    serial_println!("[pt]   A mapping needing a new kernel top-level entry is refused: OK");
+    test_install_table_race(hhdm)?;
+    serial_println!("[pt]   Table creation that loses a race adopts the winner's table: OK");
+
     serial_println!("[pt] Page table self-test PASSED");
     Ok(())
+}
+
+/// Report a page-table self-test failure and turn it into an error.
+fn pt_fail(what: core::fmt::Arguments<'_>) -> KernelError {
+    serial_println!("[pt]   FAIL: {}", what);
+    KernelError::InternalError
+}
+
+/// Every slot [`init`] was meant to create exists in the kernel PML4, and a
+/// new address space inherits the kernel half exactly.
+fn test_kernel_top_level(hhdm: u64) -> KernelResult<()> {
+    let kernel = kernel_pml4_phys()?;
+    // The self-test runs on the boot thread, which runs on the kernel PML4.
+    if kernel != active_pml4_phys() {
+        return Err(pt_fail(format_args!(
+            "recorded kernel PML4 {:#x} is not the one loaded at boot ({:#x})",
+            kernel,
+            active_pml4_phys()
+        )));
+    }
+    let phys_bits = crate::cpu::physical_address_bits();
+    if !(32..=52).contains(&phys_bits) {
+        return Err(pt_fail(format_args!(
+            "CPU reports a {}-bit physical address width; x86_64 allows 32 to 52",
+            phys_bits
+        )));
+    }
+    for (n, (first, last)) in kernel_top_level_ranges(hhdm, phys_bits)
+        .into_iter()
+        .enumerate()
+    {
+        for index in first..=last {
+            // SAFETY: kernel is the live kernel PML4 and index < 512.
+            let entry = unsafe { read_entry(kernel, index, hhdm) };
+            if !entry.is_present() {
+                return Err(pt_fail(format_args!(
+                    "kernel PML4 slot {} (in {}..={}) was not created at boot",
+                    index, first, last
+                )));
+            }
+            // Range 0 is the direct map, which init marks no-execute before
+            // any address space copies it.
+            if n == 0 && !entry.flags().contains(PageFlags::NO_EXECUTE) {
+                return Err(pt_fail(format_args!(
+                    "direct-map PML4 slot {} is still executable after init",
+                    index
+                )));
+            }
+        }
+    }
+
+    let copy = alloc_pml4()?;
+    let mismatch = (FIRST_KERNEL_SLOT..ENTRIES_PER_TABLE).find(|&index| {
+        // SAFETY: both are valid PML4s and index < 512.
+        let (k, c) = unsafe {
+            (
+                read_entry(kernel, index, hhdm),
+                read_entry(copy, index, hhdm),
+            )
+        };
+        k.raw() != c.raw()
+    });
+    let user_mapped = (0..FIRST_KERNEL_SLOT).find(|&index| {
+        // SAFETY: copy is a valid PML4 and index < 512.
+        unsafe { read_entry(copy, index, hhdm) }.raw() != 0
+    });
+    // SAFETY: copy came from alloc_pml4, was never loaded and maps nothing.
+    unsafe { free_pml4(copy) };
+    if let Some(index) = mismatch {
+        return Err(pt_fail(format_args!(
+            "a new address space's kernel slot {} differs from the kernel's",
+            index
+        )));
+    }
+    if let Some(index) = user_mapped {
+        return Err(pt_fail(format_args!(
+            "a new address space starts with user slot {} populated",
+            index
+        )));
+    }
+    Ok(())
+}
+
+/// Once the kernel half is frozen, a mapping whose kernel top-level entry is
+/// missing is refused, and the missing entry stays missing.
+#[allow(clippy::arithmetic_side_effects)] // A slot index shifted into an address.
+fn test_frozen_top_level_refuses(hhdm: u64) -> KernelResult<()> {
+    let kernel = kernel_pml4_phys()?;
+    if !KERNEL_TOP_LEVEL_FROZEN.load(Ordering::Acquire) {
+        return Err(pt_fail(format_args!(
+            "the kernel half is not frozen after init"
+        )));
+    }
+    // Any slot nothing created will do; the kernel half has 256 and boot
+    // fills a few dozen at most.
+    let Some(index) = (FIRST_KERNEL_SLOT..ENTRIES_PER_TABLE).find(|&index| {
+        // SAFETY: kernel is the live kernel PML4 and index < 512.
+        !unsafe { read_entry(kernel, index, hhdm) }.is_present()
+    }) else {
+        return Err(pt_fail(format_args!(
+            "every kernel top-level slot is populated"
+        )));
+    };
+    // Sign-extended: bits 63..48 copy bit 47, which is set in the kernel half.
+    #[allow(clippy::cast_possible_truncation)] // index < 512.
+    let virt = VirtAddr::new(0xFFFF_0000_0000_0000 | ((index as u64) << 39));
+
+    let frame = frame::alloc_frame()?;
+    serial_println!("[pt]   (the REFUSED line below is this test provoking the refusal)");
+    // SAFETY: kernel is valid; the address is in an unused kernel slot and
+    // the frame is ours. If the guard were broken this would map it, which
+    // the checks below report (and undo).
+    let result = unsafe {
+        map_frame(
+            kernel,
+            virt,
+            frame,
+            PageFlags::PRESENT | PageFlags::WRITABLE,
+        )
+    };
+    // SAFETY: kernel is valid and index < 512.
+    let still_absent = !unsafe { read_entry(kernel, index, hhdm) }.is_present();
+    if result.is_ok() {
+        // The guard failed and the frame is mapped: undo it before the frame
+        // goes back. Ignoring the result: it was mapped a moment ago, and the
+        // failure is reported below either way.
+        // SAFETY: we just mapped it through `kernel`.
+        let _ = unsafe { unmap_frame(kernel, virt) };
+        // SAFETY: invalidating a translation is always sound.
+        unsafe { flush_frame(virt) };
+    }
+    // SAFETY: the frame is ours and (now) unmapped.
+    unsafe { frame::free_frame(frame)? };
+    match result {
+        Err(KernelError::InvalidAddress) if still_absent => Ok(()),
+        other => Err(pt_fail(format_args!(
+            "mapping {} into missing kernel slot {} gave {:?} and left the slot {}",
+            virt,
+            index,
+            other.map(|()| "mapped"),
+            if still_absent { "absent" } else { "CREATED" }
+        ))),
+    }
+}
+
+/// [`install_table`] against a slot another CPU filled first: it must hand
+/// back the winner's table and return its own page to the pool, and must
+/// refuse to walk into a huge page that won the race.
+fn test_install_table_race(hhdm: u64) -> KernelResult<()> {
+    let table = alloc_pt_page()?;
+    let flags = PageFlags::PRESENT | PageFlags::WRITABLE;
+    let result = (|| -> KernelResult<()> {
+        // Uncontended: the slot still holds what was observed.
+        let fresh = alloc_pt_page()?;
+        // SAFETY: table is a valid (scratch) table; fresh is an unreferenced
+        // pool page.
+        let got = unsafe {
+            install_table(
+                table,
+                9,
+                PageTableEntry::EMPTY,
+                PageTableEntry::new(fresh, flags),
+                hhdm,
+            )
+        };
+        if got != Ok(fresh) {
+            return Err(pt_fail(format_args!(
+                "uncontended install returned {:?}, want {:#x}",
+                got, fresh
+            )));
+        }
+
+        // Lost race: someone published `winner` after we observed EMPTY.
+        let winner = alloc_pt_page()?;
+        // SAFETY: table is ours; slot 7 is unused.
+        unsafe { write_entry(table, 7, PageTableEntry::new(winner, flags), hhdm) };
+        let loser = alloc_pt_page()?;
+        let pool_before = pt_pool_free_count();
+        // SAFETY: as above; loser is an unreferenced pool page.
+        let got = unsafe {
+            install_table(
+                table,
+                7,
+                PageTableEntry::EMPTY,
+                PageTableEntry::new(loser, flags),
+                hhdm,
+            )
+        };
+        let pool_after = pt_pool_free_count();
+        // SAFETY: table is valid, index < 512.
+        let slot = unsafe { read_entry(table, 7, hhdm) };
+        if got != Ok(winner) || slot.phys_addr() != winner {
+            return Err(pt_fail(format_args!(
+                "losing install returned {:?} and left {:#x}; want the winner {:#x}",
+                got,
+                slot.phys_addr(),
+                winner
+            )));
+        }
+        if pool_after != pool_before.saturating_add(1) {
+            return Err(pt_fail(format_args!(
+                "the losing page was not returned to the pool ({} free before, {} after)",
+                pool_before, pool_after
+            )));
+        }
+
+        // Lost to a huge page: nothing to walk into.
+        // SAFETY: table is ours; slot 11 is unused.
+        unsafe {
+            write_entry(
+                table,
+                11,
+                PageTableEntry::new(0x20_0000, flags | PageFlags::HUGE_PAGE),
+                hhdm,
+            )
+        };
+        let loser = alloc_pt_page()?;
+        // SAFETY: as above.
+        let got = unsafe {
+            install_table(
+                table,
+                11,
+                PageTableEntry::EMPTY,
+                PageTableEntry::new(loser, flags),
+                hhdm,
+            )
+        };
+        if got != Err(KernelError::InvalidAddress) {
+            return Err(pt_fail(format_args!(
+                "losing to a huge page returned {:?}",
+                got
+            )));
+        }
+
+        // SAFETY: fresh and winner are referenced only by the scratch table,
+        // which is freed right after and was never part of a live hierarchy.
+        unsafe {
+            free_pt_page(fresh);
+            free_pt_page(winner);
+        }
+        Ok(())
+    })();
+    // SAFETY: the scratch table was never linked into any hierarchy.
+    unsafe { free_pt_page(table) };
+    result
 }
 
 /// Test 1: Verify `VirtAddr` index decomposition on a known value.

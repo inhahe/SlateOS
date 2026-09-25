@@ -440,10 +440,19 @@ pub fn audit_kernel_wx(pml4_phys: u64) -> WxAuditResult {
 /// per PML4 entry covers 512 GiB of address space.  This eliminates
 /// thousands of apparent W^X violations from the audit.
 ///
+/// **Normally a no-op now: `page_table::init` sets these bits itself**, before
+/// the kernel half is frozen and before any process PML4 copies the entries.
+/// Done here, at boot step 22e2, the change reached only `pml4_phys`: every
+/// address space created earlier (the ring-3 self-tests run long before this
+/// step) kept its own executable copy of the direct map. This remains as the
+/// check that says so — it skips entries that already carry NX and counts
+/// only the ones it had to change, so a non-zero return means `init` missed
+/// one.
+///
 /// Must be called after the page table subsystem is initialized.
 /// Flushes the TLB on all CPUs after modifying the PML4 entries.
 ///
-/// Returns the number of PML4 entries hardened.
+/// Returns the number of PML4 entries it had to harden.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn harden_hhdm_nx(pml4_phys: u64) -> usize {
     let hhdm = match page_table::hhdm() {
@@ -460,7 +469,7 @@ pub fn harden_hhdm_nx(pml4_phys: u64) -> usize {
     for pml4_idx in hhdm_pml4_start..hhdm_pml4_end {
         // SAFETY: pml4_phys is the active page table, index is valid.
         let pml4e = unsafe { page_table::read_entry(pml4_phys, pml4_idx, hhdm) };
-        if !pml4e.is_present() {
+        if !pml4e.is_present() || pml4e.flags().contains(PageFlags::NO_EXECUTE) {
             continue;
         }
 
@@ -736,7 +745,10 @@ pub fn self_test() -> KernelResult<()> {
 
         // Allocate and map a test frame.
         let test_frame = frame::alloc_frame()?;
-        let test_virt = VirtAddr::new(0xFFFF_C800_0000_0000); // Test VA
+        // A registered window: its top-level page-table entry is created at
+        // boot (kvspace::PAGE_TABLE_MAPPED), and a mapping outside every
+        // registered region would be refused once the kernel half is frozen.
+        let test_virt = VirtAddr::new(crate::mm::kvspace::PROTECT_TEST.start);
 
         let initial_flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
 

@@ -138,9 +138,11 @@ mod tests {
 
     #[test]
     fn test_umask_returns_previous() {
+        // Serialised with every other test that moves the process-wide mask.
+        let _g = crate::file::lock_umask_for_test();
         // umask should return the previous mask.
         let old = umask(0o022);
-        let _restore = umask(old);
+        assert_eq!(umask(old), 0o022);
     }
 
     #[test]

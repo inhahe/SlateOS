@@ -4667,21 +4667,142 @@ static mut UMASK_VALUE: ModeT = 0o022;
 
 /// Set file mode creation mask.
 ///
-/// Stores the new mask and returns the previous one.  While the kernel
-/// doesn't enforce permissions yet, this gives correct POSIX semantics
-/// for programs that query or chain umask values.
+/// Stores the new mask and returns the previous one. The mask this libc
+/// applies to `open`, `mkdir` and friends is its own copy, `UMASK_VALUE`; the
+/// kernel keeps the process's record of it too (design-decisions.md §960), so
+/// that it survives `exec` and reaches a spawned child, and this keeps that
+/// record current. Start-up reads it back ([`init_umask_from_record`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn umask(cmask: ModeT) -> ModeT {
+    // Only the low 9 bits (rwxrwxrwx) are meaningful for the mask.
+    let mask = cmask & 0o777;
     // SAFETY: `UMASK_VALUE` is touched only through raw pointers, never through
     // a reference, so no `&mut` to a `static mut` is formed. Serialising the
     // read-then-write against other threads is the caller's obligation — see
     // the note on `UMASK_VALUE`.
     let previous = unsafe { core::ptr::addr_of!(UMASK_VALUE).read() };
-    // Only the low 9 bits (rwxrwxrwx) are meaningful for the mask.
     unsafe {
-        core::ptr::addr_of_mut!(UMASK_VALUE).write(cmask & 0o777);
+        core::ptr::addr_of_mut!(UMASK_VALUE).write(mask);
     }
+    umask_record::set(mask);
     previous
+}
+
+/// Take the file-creation mask this process was given.
+///
+/// Called once from `__libc_start_main`, before constructors and `main`. The
+/// kernel keeps each process's mask (design-decisions.md §960): inherited by
+/// `fork`, kept by `exec`, given to a spawned child. A kernel without the
+/// record leaves the POSIX default, 022, which is what every process started
+/// with before it existed.
+pub(crate) fn init_umask_from_record() {
+    if let Some(mask) = umask_record::query() {
+        // SAFETY: as in `umask`: a raw-pointer write, before `main` and before
+        // any thread but this one exists.
+        unsafe {
+            core::ptr::addr_of_mut!(UMASK_VALUE).write(mask & 0o777);
+        }
+    }
+}
+
+/// The kernel's record of this process's file-creation mask
+/// (`SYS_PROCESS_UMASK`, design-decisions.md §960).
+///
+/// `UMASK_VALUE` stays what this libc applies; the record is what outlives it.
+mod umask_record {
+    use super::ModeT;
+
+    #[cfg(not(target_os = "none"))]
+    pub(super) use host::{query, set};
+
+    /// Record `mask`, already reduced to `0..=0o777`.
+    ///
+    /// Nothing is reported, because `umask()` has no error to report it with:
+    /// POSIX says it always succeeds. The kernel refuses only a mask above
+    /// `0o777`, which this cannot pass, and a caller with no process, which a
+    /// running program is not; a kernel without the record answers "no such
+    /// syscall", and then the mask lives in this libc alone, as it always had.
+    #[cfg(target_os = "none")]
+    pub(super) fn set(mask: ModeT) {
+        // Discarded deliberately -- see above for why no answer changes what
+        // `umask()` must do.
+        let _ = crate::syscall::syscall1(crate::syscall::SYS_PROCESS_UMASK, u64::from(mask));
+    }
+
+    /// The recorded mask, or `None` from a kernel without the record.
+    #[cfg(target_os = "none")]
+    pub(super) fn query() -> Option<ModeT> {
+        let ret = crate::syscall::syscall1(
+            crate::syscall::SYS_PROCESS_UMASK,
+            crate::syscall::UMASK_QUERY,
+        );
+        // Negative is "no such syscall" (or no process, which cannot be us);
+        // a value above 0o777 would be a kernel bug, and is not taken.
+        u32::try_from(ret).ok().filter(|&m| m <= 0o777)
+    }
+
+    /// Host builds have no kernel: the record is one process-wide value, as
+    /// `UMASK_VALUE` is, which the tests that touch it already serialise on
+    /// `UMASK_TEST_LOCK`. `u32::MAX` models a kernel without the record.
+    #[cfg(not(target_os = "none"))]
+    pub(crate) mod host {
+        use super::ModeT;
+        use core::sync::atomic::{AtomicU32, Ordering};
+
+        /// The modelled record: 022 until set, or `ABSENT`.
+        static RECORD: AtomicU32 = AtomicU32::new(0o022);
+        const ABSENT: u32 = u32::MAX;
+
+        pub(in crate::file) fn set(mask: ModeT) {
+            // A kernel without the record ignores the call; so does the model.
+            let _ = RECORD.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |r| {
+                (r != ABSENT).then_some(mask)
+            });
+        }
+
+        pub(in crate::file) fn query() -> Option<ModeT> {
+            let r = RECORD.load(Ordering::SeqCst);
+            (r != ABSENT).then_some(r)
+        }
+
+        /// The record as the kernel would report it.
+        #[cfg(test)]
+        pub(crate) fn recorded() -> Option<ModeT> {
+            query()
+        }
+
+        /// Plant `mask` as a parent's record would be; `None` models a kernel
+        /// without one.
+        #[cfg(test)]
+        pub(crate) fn preset(mask: Option<ModeT>) {
+            RECORD.store(mask.unwrap_or(ABSENT), Ordering::SeqCst);
+        }
+    }
+}
+
+/// Serialises every test that sets the process umask.
+///
+/// There is one `UMASK_VALUE` for the process -- and, on the host, one modelled
+/// kernel record of it -- and `libtest` runs tests on several threads at once.
+/// Each test that sets the mask is a "reset to a known value, then assert on
+/// what the next call gives back" sequence, and that sequence is only
+/// meaningful if nothing else moves the mask in between -- so the *whole test
+/// body*, not each call, is the unit that has to be atomic. Held from the first
+/// statement for that reason.
+///
+/// Crate-visible because not every such test is in this file: `sys_stat.rs`
+/// has one, which ran unserialised until 2026-09-25. Poison is recovered so
+/// that one genuine failure reports once instead of poisoning its siblings.
+#[cfg(test)]
+static UMASK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take [`UMASK_TEST_LOCK`] for the rest of a test.
+#[cfg(test)]
+#[must_use = "the guard serialises the process-wide umask; bind it to `_g`"]
+pub(crate) fn lock_umask_for_test() -> std::sync::MutexGuard<'static, ()> {
+    UMASK_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Get the current umask value without modifying it.
@@ -8358,27 +8479,7 @@ mod tests {
         assert_eq!(lchown(b"/link\0".as_ptr(), 0, 0), 0);
     }
 
-    /// Serialises every test that sets the process umask.
-    ///
-    /// There is one `UMASK_VALUE` for the process and `libtest` runs these
-    /// three tests on three threads at once. Each one is a "reset to a known
-    /// value, then assert on what the next call gives back" sequence, and that
-    /// sequence is only meaningful if nothing else moves the mask in between —
-    /// so the *whole test body*, not each call, is the unit that has to be
-    /// atomic. Held from the first statement for that reason.
-    ///
-    /// This has not been observed to fail, unlike the `strtok` and `HTAB`
-    /// races in this crate; it is the same defect found by reading rather than
-    /// by a flake, and is fixed the same way. Poison is recovered so that one
-    /// genuine failure reports once instead of poisoning its two siblings.
-    static UMASK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[must_use = "the guard serialises the process-wide umask; bind it to `_g`"]
-    fn lock_umask_for_test() -> std::sync::MutexGuard<'static, ()> {
-        UMASK_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+    use super::lock_umask_for_test;
 
     #[test]
     fn test_umask_returns_previous() {
@@ -8403,6 +8504,55 @@ mod tests {
         assert_eq!(prev, 0o022);
         let val = umask(0o022); // Read back what was stored.
         assert_eq!(val, 0o777);
+    }
+
+    /// `umask` keeps the kernel's record current, so the mask survives `exec`
+    /// and reaches a spawned child (design-decisions.md §960).
+    #[test]
+    fn umask_records_the_mask_it_sets() {
+        let _g = lock_umask_for_test();
+        umask_record::host::preset(Some(0o022));
+        umask(0o022);
+        assert_eq!(umask(0o077), 0o022);
+        assert_eq!(umask_record::host::recorded(), Some(0o077));
+        // Only the low nine bits reach the record, as they reach UMASK_VALUE.
+        umask(0o70027);
+        assert_eq!(umask_record::host::recorded(), Some(0o027));
+        umask(0o022);
+    }
+
+    /// A kernel from before the record: `umask` behaves as it always did.
+    #[test]
+    fn umask_without_a_kernel_record_still_works() {
+        let _g = lock_umask_for_test();
+        umask(0o022);
+        umask_record::host::preset(None);
+        assert_eq!(umask(0o077), 0o022);
+        assert_eq!(get_umask(), 0o077);
+        assert_eq!(umask_record::host::recorded(), None, "nothing to record in");
+        umask_record::host::preset(Some(0o022));
+        umask(0o022);
+    }
+
+    /// Start-up: a program begins with the mask its parent recorded.
+    #[test]
+    fn start_up_takes_the_recorded_mask() {
+        let _g = lock_umask_for_test();
+        umask(0o022);
+        umask_record::host::preset(Some(0o077));
+        init_umask_from_record();
+        assert_eq!(get_umask(), 0o077);
+        umask(0o022);
+    }
+
+    #[test]
+    fn start_up_without_a_kernel_record_keeps_the_default() {
+        let _g = lock_umask_for_test();
+        umask(0o022);
+        umask_record::host::preset(None);
+        init_umask_from_record();
+        assert_eq!(get_umask(), 0o022);
+        umask_record::host::preset(Some(0o022));
     }
 
     #[test]

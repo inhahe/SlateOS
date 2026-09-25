@@ -291,6 +291,52 @@ pub const SYS_TTY_READ: u64 = 543;
 pub const SYS_TTY_FLUSH: u64 = 1076;
 
 // ---------------------------------------------------------------------------
+// The process's working-directory and file-creation-mask record (1077-1079)
+// ---------------------------------------------------------------------------
+
+/// Record the calling process's working directory: `arg0` the path, `arg1`
+/// its length (no NUL). Returns 0.
+///
+/// The path must already be canonical -- absolute, no `.`, `..` or empty
+/// component, no trailing `/` but the root's, no NUL, at most
+/// [`CWD_RECORD_MAX`] bytes -- and anything else is refused, never rewritten:
+/// `chdir` has resolved and `stat`ed the directory, and a rewritten path would
+/// be one it never checked.
+///
+/// A record, not a lookup base (design-decisions.md §960): no native call
+/// resolves a path against it, and every relative path this libc hands the
+/// kernel is still made absolute here first. It exists so the directory
+/// survives what this libc's own copy cannot -- `exec`, which replaces the
+/// memory holding it, and spawn, which starts a child in its parent's -- and it
+/// is what `/proc/<pid>/cwd` shows.
+///
+/// New on 2026-09-25 (lane A, answering
+/// `requests/d-a-cwd-and-umask-do-not-survive-exec.md`). A kernel without it
+/// answers "no such syscall", and this libc then keeps the directory to itself,
+/// as it always had.
+pub const SYS_PROCESS_SET_CWD: u64 = 1077;
+
+/// Copy the calling process's recorded working directory out: `arg0` the
+/// buffer, `arg1` its capacity. Returns the length written, without a NUL, or
+/// `BufferTooSmall` with nothing written -- a truncated directory is a
+/// different directory. Start-up reads it once, so a program begins where its
+/// parent was rather than at `/`.
+pub const SYS_PROCESS_GET_CWD: u64 = 1078;
+
+/// Set (`0..=0o777`) or query ([`UMASK_QUERY`]) the calling process's
+/// file-creation mask; returns the previous mask. The same record the Linux
+/// shim's `umask` uses: inherited by `fork`, kept by `exec`, given to a
+/// spawned child. A value above `0o777` is refused, not truncated.
+pub const SYS_PROCESS_UMASK: u64 = 1079;
+
+/// [`SYS_PROCESS_UMASK`]'s argument meaning "report the mask, change nothing".
+pub const UMASK_QUERY: u64 = u64::MAX;
+
+/// The longest working directory [`SYS_PROCESS_SET_CWD`] records: the
+/// kernel's `pcb::CWD_MAX_LEN`, `PATH_MAX` less its terminator.
+pub const CWD_RECORD_MAX: usize = 4095;
+
+// ---------------------------------------------------------------------------
 // Pseudo-terminals (544–556)
 // ---------------------------------------------------------------------------
 //

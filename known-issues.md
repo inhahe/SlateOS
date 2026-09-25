@@ -164996,10 +164996,36 @@ name, they read identically at the call site, and only one of them answers
 in `scripts/key-survey.py`, written to fix this exact defect in the survey --
 by the same hand that then wrote it into thirty-eight tests.
 
-### [D] TD-D-CWD-AND-UMASK-DO-NOT-SURVIVE-EXEC-OR-SPAWN — 2026-09-24 — OPEN
+### [D] TD-D-CWD-AND-UMASK-DO-NOT-SURVIVE-EXEC-OR-SPAWN — 2026-09-24 — FIXED (libc half 2026-09-25; takes effect with lane A's kernel half)
 
-**Status:** OPEN — the libc half is lane D's and is written up; it waits on a
-kernel half filed as `requests/d-a-cwd-and-umask-do-not-survive-exec.md`.
+**Status:** FIXED in both halves, which reach `main` separately. Lane A's kernel
+half is `ff5f98db8` on `lane-a` (design-decisions.md §960): native syscalls
+1077-1079 and spawn inheritance. Lane D's libc half landed on `lane-d` on
+2026-09-25:
+- `chdir` (and `fchdir`, which goes through it) records the directory with
+  `SYS_PROCESS_SET_CWD` *before* updating this libc's copy, so a refusal leaves
+  the two agreeing.
+- `umask` keeps `SYS_PROCESS_UMASK` current.
+- `crt.rs` start-up reads both back (`init_cwd_from_record`,
+  `init_umask_from_record`) before constructors and `main`.
+- `posix_spawn`'s `addchdir_np` actions are applied in order. Each is resolved
+  against where the previous ones left the child and checked to be a directory,
+  and relative `open` actions after one follow it. The result goes to the kernel
+  in `SpawnEx2Args::cwd_ptr`/`cwd_len`, through 559.
+
+On a kernel without the record, all of this falls back to the old behaviour:
+the calls answer "no such syscall", which is treated as "keep it in libc", and
+`posix_spawn` then hands the kernel no directory (`kernel_keeps_cwd`). That is
+the reason for the note at the end of this entry. Host tests cover every path
+through a modelled kernel (`cwd_record::host`, `umask_record::host`,
+`host_dirs`). No ring-3 rung exercises it yet.
+
+**Still missing, smaller:** `posix_spawn_file_actions_addfchdir_np` (glibc
+2.29+) does not exist, so a program that uses it fails to link, loudly.
+`addchdir_np`/`addopen` paths are capped at 255 bytes (`ACTION_PATH_MAX`) where
+glibc allows `PATH_MAX`.
+
+*(The entry as filed follows.)*
 
 **In short:** every program a SlateOS-native program starts begins in `/`,
 with the default file-creation mask (`umask`, the permission bits a new file
@@ -165036,6 +165062,12 @@ and reading them at start-up. Why that does not reopen `design-decisions.md`
 instead of being ignored. Oils uses it for every command, so refusing it would
 turn "runs in the wrong directory" into "runs nothing", and the fix for both is
 the same kernel half.
+
+The same reasoning shaped the fix. A kernel from before the record refuses
+the new spawn fields rather than ignoring them, so sending them to such a
+kernel would turn every Oils command into a failed spawn. `posix_spawn`
+therefore sends a directory only once `kernel_keeps_cwd()` has seen the record
+answer.
 
 ### [D] TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES — 2026-09-24 — OPEN
 

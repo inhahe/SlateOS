@@ -311,67 +311,418 @@ pub unsafe fn resolve_path(path: *const u8, out: &mut [u8; PATH_MAX]) -> Option<
 
     // SAFETY: Caller guarantees `path` is a valid C string.
     let path_len = unsafe { crate::string::strlen(path) };
-    if path_len == 0 {
+    // SAFETY: `strlen` guarantees `path` is readable for `path_len` bytes.
+    let path = unsafe { core::slice::from_raw_parts(path, path_len) };
+
+    // SAFETY: the CWD invariant -- the first `*cwd_len_ptr()` bytes of
+    // `cwd_buf_ptr()` are the path -- and `min` keeps the slice inside the
+    // buffer even if the invariant were broken.
+    let cwd = unsafe {
+        let cwd_len = (*cwd_len_ptr()).min(PATH_MAX);
+        core::slice::from_raw_parts(cwd_buf_ptr().cast::<u8>(), cwd_len)
+    };
+    resolve_path_against(cwd, path, out)
+}
+
+/// Resolve `path` against the directory `base`, as [`resolve_path`] resolves
+/// it against the working directory: an absolute `path` is normalized as it
+/// stands, a relative one is appended to `base` first.
+///
+/// `base` must be absolute -- a normalized directory such as the working
+/// directory. `posix_spawn`'s `chdir` actions resolve through this against the
+/// directory the child is going to be in, which is not the parent's.
+///
+/// Returns `None` when `path` is empty, `base` is not absolute, or the result
+/// exceeds [`PATH_MAX`].
+pub(crate) fn resolve_path_against(
+    base: &[u8],
+    path: &[u8],
+    out: &mut [u8; PATH_MAX],
+) -> Option<usize> {
+    if path.is_empty() {
         return None;
     }
+    if path.first() == Some(&b'/') {
+        return normalize_path(path, out);
+    }
 
-    // SAFETY: `strlen` guarantees `path` is readable for `path_len` bytes.
-    let first = unsafe { *path };
-
-    if first == b'/' {
-        // Absolute path — normalize directly.
-        let slice = unsafe { core::slice::from_raw_parts(path, path_len) };
-        normalize_path(slice, out)
+    // Relative: `base`, then a separator unless `base` already ends in one,
+    // then `path`, all within PATH_MAX.
+    let sep: &[u8] = if base.last() == Some(&b'/') {
+        b""
     } else {
-        // Relative path — prepend CWD, then normalize.
-        let mut combined = [0u8; PATH_MAX];
+        b"/"
+    };
+    let total = base.len().checked_add(sep.len())?.checked_add(path.len())?;
+    let mut combined = [0u8; PATH_MAX];
+    let joined = combined.get_mut(..total)?;
+    let (head, rest) = joined.split_at_mut_checked(base.len())?;
+    head.copy_from_slice(base);
+    let (mid, tail) = rest.split_at_mut_checked(sep.len())?;
+    mid.copy_from_slice(sep);
+    tail.copy_from_slice(path);
+    normalize_path(combined.get(..total)?, out)
+}
 
-        // SAFETY: Single-threaded per-process access to CWD state.
-        let cwd_len = unsafe { *cwd_len_ptr() };
-        if cwd_len >= PATH_MAX {
-            return None;
+/// Is `path` a directory name in the form the working directory is kept in --
+/// absolute, with no `.`, `..` or empty component, no trailing `/` but the
+/// root's, and no NUL?
+///
+/// That is exactly what [`normalize_path`] produces, so the test is that
+/// normalizing changes nothing. It is also the kernel's `pcb::is_canonical_path`
+/// (bar the length bound, [`CWD_RECORD_MAX`], which callers check), and it is
+/// how a record read back from the kernel is checked before it is trusted.
+fn is_canonical_dir_path(path: &[u8]) -> bool {
+    if path.contains(&0) {
+        return false;
+    }
+    let mut normalized = [0u8; PATH_MAX];
+    normalize_path(path, &mut normalized).and_then(|n| normalized.get(..n)) == Some(path)
+}
+
+/// The longest working directory this libc keeps: the kernel record's bound,
+/// which is `PATH_MAX` less the terminator `getcwd` must also fit.
+pub(crate) const CWD_RECORD_MAX: usize = crate::syscall::CWD_RECORD_MAX;
+
+/// The kernel's record of this process's working directory
+/// (`SYS_PROCESS_SET_CWD` / `SYS_PROCESS_GET_CWD`, design-decisions.md §960).
+///
+/// This libc's own copy (`cwd_buf_ptr`) is still what every relative path is
+/// resolved against. The record exists so the directory outlives that copy:
+/// across `exec`, which replaces the memory it is in, and into a spawned child,
+/// which the kernel starts from its parent's record. [`adopt_cwd`] writes the
+/// record *before* this libc's copy, so a refusal leaves both where they were;
+/// [`init_cwd_from_record`] reads it at start-up.
+///
+/// A kernel older than the record answers "no such syscall". That is not an
+/// error here: it is the kernel this libc ran on until 2026-09-25, and the
+/// directory then lives only in this libc, as it always had.
+mod cwd_record {
+    #[cfg(not(target_os = "none"))]
+    pub(super) use host::{get, set};
+
+    /// Record `path`, which the caller has already made canonical.
+    #[cfg(target_os = "none")]
+    pub(super) fn set(path: &[u8]) -> Result<(), i32> {
+        let ret = crate::syscall::syscall2(
+            crate::syscall::SYS_PROCESS_SET_CWD,
+            path.as_ptr() as u64,
+            path.len() as u64,
+        );
+        if ret >= 0 {
+            return Ok(());
         }
-        // SAFETY: cwd_buf_ptr() is valid for PATH_MAX bytes; cwd_len <= PATH_MAX.
-        let cwd = unsafe { core::slice::from_raw_parts(cwd_buf_ptr().cast::<u8>(), cwd_len) };
-
-        // Copy CWD into the combined buffer.
-        let mut pos: usize = 0;
-        for idx in 0..cwd_len {
-            if let (Some(&b), Some(slot)) = (cwd.get(idx), combined.get_mut(pos)) {
-                *slot = b;
-                pos = pos.wrapping_add(1);
-            }
-        }
-
-        // Append separator unless CWD already ends with '/'.
-        let last_is_slash = pos > 0 && combined.get(pos.wrapping_sub(1)) == Some(&b'/');
-        if !last_is_slash {
-            if pos >= PATH_MAX {
-                return None;
-            }
-            if let Some(slot) = combined.get_mut(pos) {
-                *slot = b'/';
-            }
-            pos = pos.wrapping_add(1);
-        }
-
-        // Append the relative path.
-        let rel = unsafe { core::slice::from_raw_parts(path, path_len) };
-        for idx in 0..path_len {
-            if pos >= PATH_MAX {
-                return None;
-            }
-            if let (Some(&b), Some(slot)) = (rel.get(idx), combined.get_mut(pos)) {
-                *slot = b;
-                pos = pos.wrapping_add(1);
-            }
-        }
-
-        match combined.get(..pos) {
-            Some(slice) => normalize_path(slice, out),
-            None => None,
+        match crate::errno::errno_for(ret) {
+            crate::errno::ENOSYS => Ok(()),
+            e => Err(e),
         }
     }
+
+    /// Copy the record into `out`, returning its length. `ENOSYS` from a
+    /// kernel without it.
+    #[cfg(target_os = "none")]
+    pub(super) fn get(out: &mut [u8]) -> Result<usize, i32> {
+        let ret = crate::syscall::syscall2(
+            crate::syscall::SYS_PROCESS_GET_CWD,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+        );
+        if ret < 0 {
+            return Err(crate::errno::errno_for(ret));
+        }
+        // The kernel wrote `ret` bytes into a buffer of `out.len()`; a larger
+        // count would be a kernel bug, and is not taken on trust.
+        match usize::try_from(ret) {
+            Ok(n) if n <= out.len() => Ok(n),
+            _ => Err(crate::errno::EIO),
+        }
+    }
+
+    /// Host builds have no kernel, so the record is modelled per thread -- the
+    /// working directory it shadows is per-thread there too
+    /// (`process_global!`) -- with the kernel's rules: canonical paths only,
+    /// `/` until something is recorded, and a switch for a kernel that has no
+    /// record at all.
+    #[cfg(not(target_os = "none"))]
+    pub(crate) mod host {
+        extern crate std;
+        use core::cell::{Cell, RefCell};
+        use std::vec::Vec;
+
+        std::thread_local! {
+            /// What was last recorded on this thread; `None` is the kernel's
+            /// default, `/`.
+            static RECORD: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+            /// Models a kernel older than the record.
+            static ABSENT: Cell<bool> = const { Cell::new(false) };
+            /// Non-zero: the errno the next `set` is refused with.
+            static REFUSE: Cell<i32> = const { Cell::new(0) };
+        }
+
+        pub(in crate::unistd) fn set(path: &[u8]) -> Result<(), i32> {
+            if ABSENT.get() {
+                return Ok(());
+            }
+            let refusal = REFUSE.replace(0);
+            if refusal != 0 {
+                return Err(refusal);
+            }
+            if path.len() > super::super::CWD_RECORD_MAX
+                || !super::super::is_canonical_dir_path(path)
+            {
+                return Err(crate::errno::EINVAL);
+            }
+            RECORD.with(|r| *r.borrow_mut() = Some(path.to_vec()));
+            Ok(())
+        }
+
+        pub(in crate::unistd) fn get(out: &mut [u8]) -> Result<usize, i32> {
+            if ABSENT.get() {
+                return Err(crate::errno::ENOSYS);
+            }
+            RECORD.with(|r| {
+                let r = r.borrow();
+                let path: &[u8] = r.as_deref().unwrap_or(b"/");
+                let dst = out.get_mut(..path.len()).ok_or(crate::errno::ERANGE)?;
+                dst.copy_from_slice(path);
+                Ok(path.len())
+            })
+        }
+
+        /// This thread's record as the kernel would report it.
+        #[cfg(test)]
+        pub(crate) fn recorded() -> Vec<u8> {
+            RECORD.with(|r| r.borrow().clone().unwrap_or_else(|| b"/".to_vec()))
+        }
+
+        /// Put `path` in the record without a `chdir`, as a parent's would be.
+        /// Not validated: a test may plant what a broken kernel might report.
+        #[cfg(test)]
+        pub(crate) fn preset(path: &[u8]) {
+            RECORD.with(|r| *r.borrow_mut() = Some(path.to_vec()));
+        }
+
+        /// Model a kernel without the record (`true`) or with it (`false`).
+        #[cfg(test)]
+        pub(crate) fn set_absent(absent: bool) {
+            ABSENT.set(absent);
+        }
+
+        /// Refuse the next `set` with `errno`, as a kernel might.
+        #[cfg(test)]
+        pub(crate) fn refuse_next(errno: i32) {
+            REFUSE.set(errno);
+        }
+
+        /// Back to a kernel with the record, holding `/` and refusing nothing.
+        #[cfg(test)]
+        pub(crate) fn reset() {
+            RECORD.with(|r| *r.borrow_mut() = None);
+            ABSENT.set(false);
+            REFUSE.set(0);
+        }
+    }
+}
+
+/// Is `path` (already resolved and normalized) an existing directory?
+///
+/// `SYS_FS_STAT` on the target, which writes the kernel's `FsStatResult`
+/// rather than a `struct stat`. Host builds have no kernel to ask and answer
+/// from [`host_dirs`], a per-thread list of directories a test declares.
+pub(crate) fn check_directory(path: &[u8]) -> Result<(), i32> {
+    #[cfg(target_os = "none")]
+    {
+        let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
+        let ret = syscall3(
+            SYS_FS_STAT,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            raw.as_mut_ptr() as u64,
+        );
+        if ret < 0 {
+            return Err(errno::errno_for(ret));
+        }
+        let mut sb = crate::stat::Stat::zeroed();
+        crate::stat::fill_from_fsstat(&mut sb, &raw);
+        if sb.is_dir() {
+            Ok(())
+        } else {
+            Err(errno::ENOTDIR)
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_dirs::check(path)
+    }
+}
+
+/// Host-build model of which directories exist, for [`check_directory`]: `/`,
+/// plus whatever a test declares on its own thread. Anything else is `ENOENT`.
+#[cfg(not(target_os = "none"))]
+pub(crate) mod host_dirs {
+    extern crate std;
+    use core::cell::RefCell;
+    use std::vec::Vec;
+
+    std::thread_local! {
+        static DIRS: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn check(path: &[u8]) -> Result<(), i32> {
+        let known = path == b"/" || DIRS.with(|d| d.borrow().iter().any(|p| p == path));
+        if known {
+            Ok(())
+        } else {
+            Err(crate::errno::ENOENT)
+        }
+    }
+
+    /// Declare `path` an existing directory on this thread.
+    #[cfg(test)]
+    pub(crate) fn add(path: &[u8]) {
+        DIRS.with(|d| d.borrow_mut().push(path.to_vec()));
+    }
+
+    /// Forget every declared directory on this thread.
+    #[cfg(test)]
+    pub(crate) fn clear() {
+        DIRS.with(|d| d.borrow_mut().clear());
+    }
+}
+
+/// Make `path` the working directory: the kernel's record first, then this
+/// libc's copy, so a refusal leaves the two agreeing on the old one.
+///
+/// `path` is [`normalize_path`] output for a directory the caller has already
+/// checked. `ENAMETOOLONG` if it is longer than [`CWD_RECORD_MAX`] -- which is
+/// also the most `getcwd` can return with its terminator in a `PATH_MAX`
+/// buffer -- and otherwise whatever the kernel refuses it with.
+fn adopt_cwd(path: &[u8]) -> Result<(), i32> {
+    if path.len() > CWD_RECORD_MAX {
+        return Err(errno::ENAMETOOLONG);
+    }
+    cwd_record::set(path)?;
+    store_cwd(path);
+    Ok(())
+}
+
+/// Overwrite this libc's copy of the working directory with `path`.
+///
+/// `path` must be canonical and at most [`CWD_RECORD_MAX`] bytes; both callers
+/// have checked.
+fn store_cwd(path: &[u8]) {
+    // SAFETY: the accessors return this process's own storage (this thread's,
+    // on the host). `path` fits the PATH_MAX buffer, which is what the `get_mut`
+    // re-checks rather than assumes, and the length is written after the bytes
+    // so the invariant on `cwd_buf_ptr` holds whenever the two agree.
+    unsafe {
+        let buf = &mut *cwd_buf_ptr();
+        if let Some(dst) = buf.get_mut(..path.len()) {
+            dst.copy_from_slice(path);
+            *cwd_len_ptr() = path.len();
+        }
+    }
+}
+
+/// Start in the directory this process was given.
+///
+/// Called once from `__libc_start_main`, before constructors and `main`. The
+/// kernel keeps each process's working directory (design-decisions.md §960)
+/// and starts a spawned child in its parent's, and an `exec`'d image in the one
+/// its predecessor was in; this is where that reaches this libc's copy. A
+/// kernel without the record, or a record that is not a canonical directory
+/// name, leaves the process at `/`, which is where every process started
+/// before the record existed.
+pub(crate) fn init_cwd_from_record() {
+    let mut buf = [0u8; PATH_MAX];
+    let Ok(len) = cwd_record::get(&mut buf) else {
+        return;
+    };
+    let Some(path) = buf.get(..len) else {
+        return;
+    };
+    // The kernel records only canonical paths, so this is a consistency check,
+    // not a parser: this libc's copy must never hold a name `resolve_path` would
+    // mis-join, whatever a kernel reports.
+    if path.len() <= CWD_RECORD_MAX && is_canonical_dir_path(path) {
+        store_cwd(path);
+    }
+}
+
+/// Does the kernel keep a working-directory record (design-decisions.md §960)?
+///
+/// Asked once and remembered on the target, where the answer is the kernel's
+/// and cannot change while a process runs: a one-byte `SYS_PROCESS_GET_CWD`,
+/// which a kernel with the record answers with the path or `ERANGE`, and a
+/// kernel from before it with "no such syscall".
+///
+/// Only `posix_spawn` needs to know. It hands a `chdir` action's directory to
+/// the kernel in fields an older kernel does not have, and that kernel refuses
+/// the whole spawn rather than ignore them -- which would stop every program
+/// that sets a child's directory, Rust's `Command::current_dir` among them,
+/// from starting anything at all (known-issues.md
+/// `TD-D-CWD-AND-UMASK-DO-NOT-SURVIVE-EXEC-OR-SPAWN`). On such a kernel the
+/// child starts in its parent's directory instead, as every child did before
+/// the record existed.
+pub(crate) fn kernel_keeps_cwd() -> bool {
+    #[cfg(target_os = "none")]
+    {
+        use core::sync::atomic::{AtomicU8, Ordering};
+        /// 0 = not yet asked, 1 = yes, 2 = no.
+        static ANSWER: AtomicU8 = AtomicU8::new(0);
+        match ANSWER.load(Ordering::Relaxed) {
+            1 => true,
+            2 => false,
+            _ => {
+                let yes = !matches!(cwd_record::get(&mut [0u8; 1]), Err(errno::ENOSYS));
+                ANSWER.store(if yes { 1 } else { 2 }, Ordering::Relaxed);
+                yes
+            }
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        // Not cached: the host's modelled kernel is per thread, and a test may
+        // model either kind.
+        !matches!(cwd_record::get(&mut [0u8; 1]), Err(errno::ENOSYS))
+    }
+}
+
+/// Model, on this test thread, a kernel without the working-directory record
+/// (`true`) or with it (`false`). For other modules' tests.
+#[cfg(test)]
+pub(crate) fn model_kernel_without_cwd_record(absent: bool) {
+    cwd_record::host::set_absent(absent);
+}
+
+/// Copy this libc's working directory into `out`, returning its length (no
+/// terminator is written).
+pub(crate) fn current_cwd(out: &mut [u8; PATH_MAX]) -> usize {
+    // SAFETY: the CWD invariant, as in `resolve_path`; `min` keeps the slice
+    // inside the buffer even if it were broken.
+    let cwd = unsafe {
+        let cwd_len = (*cwd_len_ptr()).min(PATH_MAX);
+        core::slice::from_raw_parts(cwd_buf_ptr().cast::<u8>(), cwd_len)
+    };
+    match out.get_mut(..cwd.len()) {
+        Some(dst) => {
+            dst.copy_from_slice(cwd);
+            cwd.len()
+        }
+        None => 0,
+    }
+}
+
+/// Point this test thread's working directory at `path`, with no `chdir` and
+/// no record: the state a process is in when its libc's copy is all there is.
+/// For other modules' tests; this module's own use `set_test_cwd`.
+#[cfg(test)]
+pub(crate) fn set_cwd_for_test(path: &[u8]) {
+    assert!(
+        path.len() <= CWD_RECORD_MAX && is_canonical_dir_path(path),
+        "{path:?}"
+    );
+    store_cwd(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -462,8 +813,10 @@ pub extern "C" fn getcwd(buf: *mut u8, size: SizeT) -> *mut u8 {
 /// Change the current working directory.
 ///
 /// Resolves `path` against the current CWD (if relative), verifies
-/// that the target exists and is a directory, then stores the
-/// normalized absolute path as the new CWD.
+/// that the target exists and is a directory, then makes the
+/// normalized absolute path the new CWD -- in the kernel's record of it
+/// first (design-decisions.md §960), so that the directory survives
+/// `exec` and reaches a spawned child, and then in this libc's copy.
 ///
 /// Returns 0 on success, -1 on error with errno set.
 ///
@@ -472,7 +825,10 @@ pub extern "C" fn getcwd(buf: *mut u8, size: SizeT) -> *mut u8 {
 /// - `EFAULT` — `path` is null.
 /// - `ENOENT` — `path` is empty or does not exist.
 /// - `ENOTDIR` — resolved path exists but is not a directory.
-/// - `ENAMETOOLONG` — resolved path exceeds `PATH_MAX`.
+/// - `ENAMETOOLONG` — resolved path is longer than `PATH_MAX - 1`, the most
+///   `getcwd` can hand back with its terminator.
+/// - Whatever the kernel refuses the record with; the directory is then
+///   unchanged.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn chdir(path: *const u8) -> i32 {
     if path.is_null() {
@@ -494,40 +850,25 @@ pub extern "C" fn chdir(path: *const u8) -> i32 {
         return -1;
     };
 
-    // Verify the target exists and is a directory.  SYS_FS_STAT writes a
-    // 16-byte FsStatResult, not a struct stat, so translate it.
-    let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
-    let ret = syscall3(
-        SYS_FS_STAT,
-        resolved.as_ptr() as u64,
-        resolved_len as u64,
-        raw.as_mut_ptr() as u64,
-    );
-
-    if ret < 0 {
-        return errno::translate(ret) as i32;
-    }
-
-    let mut sb = crate::stat::Stat::zeroed();
-    crate::stat::fill_from_fsstat(&mut sb, &raw);
-    if !sb.is_dir() {
-        errno::set_errno(errno::ENOTDIR);
-        return -1;
-    }
-
-    // Store as the new CWD.
-    // SAFETY: Single-threaded per-process access.
-    unsafe {
-        let buf = &mut *cwd_buf_ptr();
-        for i in 0..resolved_len {
-            if let (Some(dst), Some(&src)) = (buf.get_mut(i), resolved.get(i)) {
-                *dst = src;
-            }
+    // Too long to keep is refused before the lookup, as a name too long to
+    // look up would be.
+    let target = match resolved.get(..resolved_len) {
+        Some(t) if t.len() <= CWD_RECORD_MAX => t,
+        _ => {
+            errno::set_errno(errno::ENAMETOOLONG);
+            return -1;
         }
-        *cwd_len_ptr() = resolved_len;
-    }
+    };
 
-    0
+    // The target must exist and be a directory, and then it becomes the
+    // working directory -- the kernel's record first, this libc's copy after.
+    match check_directory(target).and_then(|()| adopt_cwd(target)) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
 }
 
 /// Change working directory by file descriptor.
@@ -9089,6 +9430,211 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(chdir(b"\0".as_ptr()), -1);
         assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
+    // ------------------------------------------------------------------
+    // The working-directory record (design-decisions.md §960)
+    // ------------------------------------------------------------------
+
+    /// This thread's working directory as `getcwd` reports it.
+    fn cwd_now() -> std::vec::Vec<u8> {
+        let mut buf = [0u8; PATH_MAX];
+        let got = getcwd(buf.as_mut_ptr(), PATH_MAX);
+        assert!(
+            !got.is_null(),
+            "getcwd failed: errno {}",
+            errno::get_errno()
+        );
+        // SAFETY: getcwd wrote a NUL-terminated path into `buf`.
+        let len = unsafe { crate::string::strlen(buf.as_ptr()) };
+        buf[..len].to_vec()
+    }
+
+    /// Every piece of state these tests touch, set rather than assumed: the
+    /// harness may run them on one thread in any order.
+    fn fresh_cwd_state(cwd: &[u8]) {
+        cwd_record::host::reset();
+        host_dirs::clear();
+        set_test_cwd(cwd);
+    }
+
+    fn resolved(base: &[u8], path: &[u8]) -> Option<std::vec::Vec<u8>> {
+        let mut out = [0u8; PATH_MAX];
+        resolve_path_against(base, path, &mut out).map(|n| out[..n].to_vec())
+    }
+
+    #[test]
+    fn resolve_against_joins_and_normalizes_a_relative_path() {
+        assert_eq!(resolved(b"/srv", b"data"), Some(b"/srv/data".to_vec()));
+        assert_eq!(resolved(b"/", b"data"), Some(b"/data".to_vec()));
+        assert_eq!(resolved(b"/srv/a", b"../b/./c"), Some(b"/srv/b/c".to_vec()));
+        assert_eq!(resolved(b"/srv", b".."), Some(b"/".to_vec()));
+    }
+
+    #[test]
+    fn resolve_against_ignores_the_base_for_an_absolute_path() {
+        assert_eq!(resolved(b"/srv", b"/etc//x/"), Some(b"/etc/x".to_vec()));
+    }
+
+    #[test]
+    fn resolve_against_refuses_what_resolve_path_refuses() {
+        assert_eq!(resolved(b"/srv", b""), None, "empty path");
+        assert_eq!(resolved(b"srv", b"data"), None, "relative base");
+        let long = std::vec![b'a'; PATH_MAX];
+        assert_eq!(resolved(b"/", &long), None, "longer than PATH_MAX");
+    }
+
+    /// `resolve_path` is now `resolve_path_against` the working directory; it
+    /// must answer as it did.
+    #[test]
+    fn resolve_path_still_resolves_against_the_working_directory() {
+        set_test_cwd(b"/home/user");
+        let mut out = [0u8; PATH_MAX];
+        // SAFETY: NUL-terminated literal.
+        let n = unsafe { resolve_path(b"notes/../todo.txt\0".as_ptr(), &mut out) };
+        assert_eq!(n.map(|n| &out[..n]), Some(&b"/home/user/todo.txt"[..]));
+        // SAFETY: as above.
+        assert_eq!(unsafe { resolve_path(b"\0".as_ptr(), &mut out) }, None);
+        assert_eq!(unsafe { resolve_path(core::ptr::null(), &mut out) }, None);
+    }
+
+    #[test]
+    fn canonical_dir_paths_are_exactly_what_normalize_produces() {
+        for good in [&b"/"[..], b"/a", b"/a/b", b"/a b/\xff"] {
+            assert!(is_canonical_dir_path(good), "{good:?}");
+        }
+        for bad in [
+            &b""[..],
+            b"a",
+            b"/a/",
+            b"//a",
+            b"/a//b",
+            b"/a/./b",
+            b"/a/../b",
+            b"/.",
+            b"/a\0b",
+        ] {
+            assert!(!is_canonical_dir_path(bad), "{bad:?}");
+        }
+    }
+
+    /// The point of the record: `chdir` tells the kernel, so the directory
+    /// outlives this libc's copy of it.
+    #[test]
+    fn chdir_records_the_directory_it_moves_to() {
+        fresh_cwd_state(b"/");
+        host_dirs::add(b"/tmp/work");
+        assert_eq!(chdir(b"/tmp/work\0".as_ptr()), 0);
+        assert_eq!(cwd_now(), b"/tmp/work");
+        assert_eq!(cwd_record::host::recorded(), b"/tmp/work");
+    }
+
+    /// A relative `chdir` records the resolved, absolute directory -- the
+    /// kernel refuses anything else.
+    #[test]
+    fn a_relative_chdir_records_the_absolute_directory() {
+        fresh_cwd_state(b"/tmp");
+        host_dirs::add(b"/tmp/a");
+        assert_eq!(chdir(b"./a/\0".as_ptr()), 0);
+        assert_eq!(cwd_now(), b"/tmp/a");
+        assert_eq!(cwd_record::host::recorded(), b"/tmp/a");
+    }
+
+    #[test]
+    fn chdir_to_a_missing_directory_changes_nothing() {
+        fresh_cwd_state(b"/tmp");
+        errno::set_errno(0);
+        assert_eq!(chdir(b"/no/such/dir\0".as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+        assert_eq!(cwd_now(), b"/tmp");
+        assert_eq!(cwd_record::host::recorded(), b"/", "nothing recorded");
+    }
+
+    /// The record is written first, so a refusal leaves both the record and
+    /// this libc's copy where they were -- the two never disagree.
+    #[test]
+    fn a_refused_record_leaves_the_directory_unchanged() {
+        fresh_cwd_state(b"/tmp");
+        host_dirs::add(b"/srv");
+        cwd_record::host::refuse_next(errno::EIO);
+        errno::set_errno(0);
+        assert_eq!(chdir(b"/srv\0".as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::EIO);
+        assert_eq!(cwd_now(), b"/tmp");
+    }
+
+    /// A kernel from before the record: `chdir` works as it always did, with
+    /// the directory kept in this libc alone.
+    #[test]
+    fn chdir_without_a_kernel_record_still_changes_directory() {
+        fresh_cwd_state(b"/");
+        cwd_record::host::set_absent(true);
+        host_dirs::add(b"/srv");
+        assert_eq!(chdir(b"/srv\0".as_ptr()), 0);
+        assert_eq!(cwd_now(), b"/srv");
+    }
+
+    /// `PATH_MAX` bytes and no room for `getcwd`'s terminator: refused before
+    /// the lookup, as the kernel would refuse to record it.
+    #[test]
+    fn chdir_refuses_a_directory_getcwd_could_not_return() {
+        fresh_cwd_state(b"/");
+        let mut long = std::vec![b'/'];
+        long.extend(std::iter::repeat_n(b'a', PATH_MAX - 1));
+        assert_eq!(long.len(), PATH_MAX);
+        host_dirs::add(&long);
+        long.push(0);
+        errno::set_errno(0);
+        assert_eq!(chdir(long.as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::ENAMETOOLONG);
+        assert_eq!(cwd_now(), b"/");
+    }
+
+    /// Start-up: a program begins in the directory its parent recorded.
+    #[test]
+    fn start_up_takes_the_recorded_directory() {
+        fresh_cwd_state(b"/");
+        cwd_record::host::preset(b"/home/user/src");
+        init_cwd_from_record();
+        assert_eq!(cwd_now(), b"/home/user/src");
+    }
+
+    #[test]
+    fn start_up_without_a_kernel_record_stays_at_root() {
+        fresh_cwd_state(b"/");
+        cwd_record::host::set_absent(true);
+        init_cwd_from_record();
+        assert_eq!(cwd_now(), b"/");
+    }
+
+    /// A record that is not a canonical directory name is not trusted: this
+    /// libc's copy is what every relative path is joined to.
+    #[test]
+    fn start_up_ignores_a_record_that_is_not_canonical() {
+        for bad in [&b"/a/../b"[..], b"relative", b"/trailing/", b"/nul\0inside"] {
+            fresh_cwd_state(b"/");
+            cwd_record::host::preset(bad);
+            init_cwd_from_record();
+            assert_eq!(cwd_now(), b"/", "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn start_up_ignores_a_record_too_long_to_return() {
+        fresh_cwd_state(b"/");
+        let mut long = std::vec![b'/'];
+        long.extend(std::iter::repeat_n(b'a', PATH_MAX - 1));
+        cwd_record::host::preset(&long);
+        init_cwd_from_record();
+        assert_eq!(cwd_now(), b"/");
+    }
+
+    #[test]
+    fn current_cwd_copies_the_working_directory() {
+        set_test_cwd(b"/var/log");
+        let mut out = [0u8; PATH_MAX];
+        let n = current_cwd(&mut out);
+        assert_eq!(&out[..n], b"/var/log");
     }
 
     // ------------------------------------------------------------------

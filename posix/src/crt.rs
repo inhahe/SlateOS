@@ -915,6 +915,12 @@ pub unsafe extern "C" fn __libc_start_main(
     // Until this runs the kernel applies signal default actions itself.
     crate::signal::init_signals();
 
+    // The working directory and file-creation mask this process was given --
+    // its parent's, carried across spawn and exec by the kernel -- before a
+    // constructor or `main` can ask for either (design-decisions.md §960).
+    crate::unistd::init_cwd_from_record();
+    crate::file::init_umask_from_record();
+
     // Ask the kernel which capabilities this process actually holds and
     // project them onto Linux's capability words, so `capget()` reports the
     // truth rather than libc's optimistic all-bits-set default

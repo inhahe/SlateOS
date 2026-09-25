@@ -117,7 +117,7 @@ pub struct SpawnExArgs {
 ///
 /// [`SpawnExArgs`] plus a leading `struct_size` and a capability policy.
 /// Layout must match the kernel's `SpawnEx2Args` (`kernel/src/proc/spawn.rs`)
-/// exactly: C ABI, sixteen `u64`s, 128 bytes.
+/// exactly: C ABI, eighteen `u64`s, 144 bytes.
 ///
 /// # Why the size field
 ///
@@ -175,6 +175,21 @@ pub struct SpawnEx2Args {
     pub cap_ptr: u64,
     /// Number of entries at `cap_ptr`.
     pub cap_count: u64,
+    /// The directory the child starts in, for `posix_spawn_file_actions_addchdir_np`:
+    /// a pointer to the path bytes, no NUL. Read only when `cwd_len != 0`.
+    ///
+    /// Zero length -- which is also what a kernel reads for a caller whose
+    /// `struct_size` stops before these two fields -- means the child starts
+    /// in its parent's directory, as POSIX requires of `posix_spawn`
+    /// (design-decisions.md §960). Otherwise the path must be canonical: this
+    /// libc applies the `chdir` actions in order, against the directory each
+    /// leaves the child in, and checks the result is a directory before it
+    /// gets here. A kernel older than these fields reads them as a non-zero
+    /// tail and refuses the spawn, rather than starting the child somewhere
+    /// its caller did not ask for.
+    pub cwd_ptr: u64,
+    /// Length of the path at `cwd_ptr`, at most [`crate::syscall::CWD_RECORD_MAX`].
+    pub cwd_len: u64,
 }
 
 /// A mismatch here is an ABI break that would show up as the kernel reading a
@@ -183,7 +198,7 @@ pub struct SpawnEx2Args {
 /// the size, which is exactly the thing a `const` assertion can guarantee and
 /// a test can only observe on a run somebody makes.
 const _: () = {
-    assert!(size_of::<SpawnEx2Args>() == 128);
+    assert!(size_of::<SpawnEx2Args>() == 144);
     assert!(align_of::<SpawnEx2Args>() == 8);
     // The prefix through `envc` must be layout-identical to `SpawnExArgs`, or
     // "version 1 plus a size field" is not what we are sending.
@@ -270,6 +285,8 @@ pub fn spawn_ex2_args(caps: Option<&[CapEntryInfo]>) -> SpawnEx2Args {
         cap_mode,
         cap_ptr,
         cap_count,
+        cwd_ptr: 0,
+        cwd_len: 0,
     }
 }
 
@@ -804,8 +821,13 @@ pub extern "C" fn posix_spawn_file_actions_addopen(
 /// child process, the working directory will be changed to `path`
 /// before executing the program.
 ///
-/// Since our kernel handles CWD at the process level, this stores the
-/// path and the spawn implementation will set the child's CWD.
+/// The child is a new process rather than a forked copy of this one, so the
+/// action is carried out here, in order with the others: `path` is resolved
+/// against the directory the earlier actions left the child in, must be a
+/// directory, and becomes where later relative `open` actions are resolved.
+/// The kernel is then told to start the child there (`SpawnEx2Args::cwd_ptr`).
+/// A spawn whose `chdir` fails, fails -- `ENOENT`, `ENOTDIR` and the rest, as
+/// `chdir` itself would.
 ///
 /// Returns 0 on success, or a POSIX error code.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -1505,6 +1527,84 @@ fn child_slot(fd: Fd) -> Result<usize, i32> {
         .ok_or(errno::EBADF)
 }
 
+/// The directory a spawned child will start in, as its `chdir` actions leave
+/// it.
+///
+/// Starts as the parent's working directory. Each `addchdir_np` action moves
+/// it, resolved against where the actions before it left it -- which is how
+/// the child would see a relative path -- and checked to be a directory; an
+/// `open` action after one resolves a relative path against it too, since in
+/// the child that is where the file would be opened.
+struct ChildCwd {
+    path: [u8; crate::unistd::PATH_MAX],
+    len: usize,
+    /// Whether any `chdir` action ran. Only then is the kernel given a
+    /// directory; otherwise the child inherits its parent's record.
+    moved: bool,
+}
+
+impl ChildCwd {
+    fn of_parent() -> Self {
+        let mut path = [0u8; crate::unistd::PATH_MAX];
+        let len = crate::unistd::current_cwd(&mut path);
+        Self {
+            path,
+            len,
+            moved: false,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.path.get(..self.len).unwrap_or(b"/")
+    }
+
+    /// `chdir(dir)`, as the child would do it.
+    fn change_to(&mut self, dir: &[u8]) -> Result<(), i32> {
+        if dir.is_empty() {
+            return Err(errno::ENOENT);
+        }
+        let mut next = [0u8; crate::unistd::PATH_MAX];
+        let n = crate::unistd::resolve_path_against(self.as_bytes(), dir, &mut next)
+            .ok_or(errno::ENAMETOOLONG)?;
+        let resolved = next
+            .get(..n)
+            .filter(|p| p.len() <= crate::unistd::CWD_RECORD_MAX)
+            .ok_or(errno::ENAMETOOLONG)?;
+        crate::unistd::check_directory(resolved)?;
+        self.path = next;
+        self.len = n;
+        self.moved = true;
+        Ok(())
+    }
+
+    /// `path` as an `open` in the child would find it, NUL-terminated in
+    /// `out`: resolved against the child's directory once a `chdir` has moved
+    /// it, and passed through as it stands before that -- when the child's
+    /// directory and ours are the same one.
+    fn open_path<'a>(
+        &self,
+        path: &'a [u8; ACTION_PATH_MAX],
+        path_len: usize,
+        out: &'a mut [u8; crate::unistd::PATH_MAX],
+    ) -> Result<&'a [u8], i32> {
+        let given = path.get(..path_len).ok_or(errno::ENAMETOOLONG)?;
+        if !self.moved || given.first() == Some(&b'/') {
+            // `path` is NUL-padded past `path_len` (the add functions refuse a
+            // length of ACTION_PATH_MAX or more), so it is already a C string.
+            return path.get(..=path_len).ok_or(errno::ENAMETOOLONG);
+        }
+        let mut resolved = [0u8; crate::unistd::PATH_MAX];
+        let n = crate::unistd::resolve_path_against(self.as_bytes(), given, &mut resolved)
+            .ok_or(errno::ENAMETOOLONG)?;
+        // `n` bytes and a terminator must fit, as they must for any path.
+        let dst = out.get_mut(..=n).ok_or(errno::ENAMETOOLONG)?;
+        let (body, nul) = dst.split_at_mut_checked(n).ok_or(errno::ENAMETOOLONG)?;
+        body.copy_from_slice(resolved.get(..n).ok_or(errno::ENAMETOOLONG)?);
+        nul.fill(0);
+        Ok(dst)
+    }
+}
+
 /// Apply `acts` to the child's table in order, as the child would.
 ///
 /// Every failure is reported, which is what POSIX requires of `posix_spawn`
@@ -1514,12 +1614,13 @@ fn child_slot(fd: Fd) -> Result<usize, i32> {
 /// reached the child anyway), and turned a `dup2` from a closed descriptor
 /// into a silent close of the target.
 ///
-/// `chdir` actions (tag 4) are still not applied: the child's working
-/// directory lives in its own libc, and nothing yet carries one across a spawn
-/// — `known-issues.md` → `TD-D-CWD-AND-UMASK-DO-NOT-SURVIVE-EXEC-OR-SPAWN`,
-/// which also says why refusing them would be worse than ignoring them today.
+/// `chdir` actions (tag 4) move `cwd`, and later relative `open`s follow it.
+/// They were ignored until the kernel could start a child in a directory
+/// (design-decisions.md §960): the directory lived only in the child's own
+/// libc, which a spawn starts from nothing.
 fn apply_file_actions(
     child: &mut ChildFds,
+    cwd: &mut ChildCwd,
     acts: &PosixSpawnFileActionsT,
     opened: &mut OpenedHandles,
 ) -> Result<(), i32> {
@@ -1558,7 +1659,9 @@ fn apply_file_actions(
                 if slot.path_len == 0 {
                     return Err(errno::ENOENT);
                 }
-                let fd = crate::file::open(slot.path.as_ptr(), slot.oflag, slot.mode);
+                let mut in_child = [0u8; crate::unistd::PATH_MAX];
+                let open_path = cwd.open_path(&slot.path, slot.path_len, &mut in_child)?;
+                let fd = crate::file::open(open_path.as_ptr(), slot.oflag, slot.mode);
                 if fd < 0 {
                     return Err(errno::get_errno());
                 }
@@ -1572,7 +1675,10 @@ fn apply_file_actions(
                     Some((kind_to_handle_type(entry.kind), entry.handle))
                 };
             }
-            4 => {} // chdir: see the note above.
+            4 => {
+                // chdir: see `ChildCwd::change_to`.
+                cwd.change_to(slot.path.get(..slot.path_len).unwrap_or(&[]))?;
+            }
             5 => {
                 // closefrom(lowfd): every descriptor from lowfd up.
                 let low = usize::try_from(slot.fd).map_err(|_| errno::EBADF)?;
@@ -1608,8 +1714,17 @@ fn flatten_fd_map(child: &ChildFds, out: &mut [FdMapEntry; MAX_FD_MAP]) -> usize
     count
 }
 
-/// Build the fd map a spawned child starts with: the parent's inheritable
-/// descriptors with `file_actions` applied, in order.
+/// What a spawned child starts with, once `file_actions` have been applied.
+struct ChildPlan {
+    /// How many entries of the fd map were written.
+    fd_count: usize,
+    /// The directory it starts in.
+    cwd: ChildCwd,
+}
+
+/// Plan a spawned child's start: the parent's inheritable descriptors and
+/// working directory, with `file_actions` applied to them in order. The fd
+/// map is written to `out`.
 ///
 /// `open` actions leave parent descriptors in `opened`, which closes them when
 /// dropped — after the spawn syscall, since the kernel copies their handles.
@@ -1617,18 +1732,44 @@ fn flatten_fd_map(child: &ChildFds, out: &mut [FdMapEntry; MAX_FD_MAP]) -> usize
 /// # Errors
 ///
 /// The first file action that fails, as its errno.
+fn plan_child(
+    file_actions: *const PosixSpawnFileActionsT,
+    out: &mut [FdMapEntry; MAX_FD_MAP],
+    opened: &mut OpenedHandles,
+) -> Result<ChildPlan, i32> {
+    let mut child = inheritable_fds();
+    let mut cwd = ChildCwd::of_parent();
+    if !file_actions.is_null() {
+        // SAFETY: non-null, and the caller's contract is that it was
+        // initialised by `posix_spawn_file_actions_init`.
+        apply_file_actions(&mut child, &mut cwd, unsafe { &*file_actions }, opened)?;
+    }
+    Ok(ChildPlan {
+        fd_count: flatten_fd_map(&child, out),
+        cwd,
+    })
+}
+
+/// The directory to hand the kernel for the child, if any.
+///
+/// Only a `chdir` action gives one; without one the kernel starts the child in
+/// its parent's directory, which is what POSIX asks for. And only a kernel that
+/// keeps the record (design-decisions.md §960) is given one: an older kernel
+/// refuses the spawn outright over fields it does not know, so there the child
+/// starts in its parent's directory, as every spawned child did before -- see
+/// [`crate::unistd::kernel_keeps_cwd`] for why that beats refusing.
+fn child_start_dir(plan: &ChildPlan) -> Option<&[u8]> {
+    (plan.cwd.moved && crate::unistd::kernel_keeps_cwd()).then(|| plan.cwd.as_bytes())
+}
+
+/// [`plan_child`]'s fd map alone, for the tests that are about nothing else.
+#[cfg(test)]
 fn build_fd_map(
     file_actions: *const PosixSpawnFileActionsT,
     out: &mut [FdMapEntry; MAX_FD_MAP],
     opened: &mut OpenedHandles,
 ) -> Result<usize, i32> {
-    let mut child = inheritable_fds();
-    if !file_actions.is_null() {
-        // SAFETY: non-null, and the caller's contract is that it was
-        // initialised by `posix_spawn_file_actions_init`.
-        apply_file_actions(&mut child, unsafe { &*file_actions }, opened)?;
-    }
-    Ok(flatten_fd_map(&child, out))
+    plan_child(file_actions, out, opened).map(|plan| plan.fd_count)
 }
 
 // ---------------------------------------------------------------------------
@@ -1768,7 +1909,8 @@ pub unsafe extern "C" fn slateos_spawn_caps(
 /// `caps` of `None` selects [`SYS_PROCESS_SPAWN_EX`] (517) — not 559 with
 /// `cap_mode == 0`. Both mean "inherit everything", but routing the untouched
 /// path through the untouched syscall means adding this feature cannot regress
-/// `posix_spawn`, which every existing caller uses.
+/// `posix_spawn`, which every existing caller uses. The one exception is a
+/// `chdir` file action, which needs version 2's directory field.
 ///
 /// # Safety
 ///
@@ -1799,6 +1941,57 @@ unsafe fn spawn_impl(
     let argv_packed = argv_buf.get(..argv_len).unwrap_or(&[]);
     // SAFETY: forwarded from this function's own contract.
     unsafe { spawn_loaded(pid, path, &image, argv_packed, file_actions, envp, caps) }
+}
+
+/// The spawn syscall a request needs, with its argument struct.
+enum SpawnRequest {
+    /// [`SYS_PROCESS_SPAWN_EX`] (517): inherit every capability, start in the
+    /// parent's directory.
+    V1(SpawnExArgs),
+    /// [`SYS_PROCESS_SPAWN_EX2`] (559): a capability subset, a starting
+    /// directory, or both.
+    V2(SpawnEx2Args),
+}
+
+/// Choose the syscall for a spawn whose version-1 fields are `v1`.
+///
+/// The untouched case -- no capability subset, no `chdir` action -- goes to
+/// 517, not to 559 with `cap_mode == 0`. Both mean "inherit everything", but
+/// sending it down the untouched syscall means neither feature can regress the
+/// path every existing caller uses. Anything else needs version 2, the only
+/// one with fields for a policy or a directory.
+///
+/// A pure function of its arguments so that the choice, and the copying of
+/// every field into the struct it picks, can be tested on a host where no
+/// spawn can reach the kernel.
+fn spawn_request(
+    v1: SpawnExArgs,
+    caps: Option<&[CapEntryInfo]>,
+    child_cwd: Option<&[u8]>,
+) -> SpawnRequest {
+    if caps.is_none() && child_cwd.is_none() {
+        return SpawnRequest::V1(v1);
+    }
+    // `spawn_ex2_args` fills `struct_size` and the capability policy; writing
+    // either by hand at a call site is how they go stale.
+    let mut args = spawn_ex2_args(caps);
+    args.elf_ptr = v1.elf_ptr;
+    args.elf_len = v1.elf_len;
+    args.name_ptr = v1.name_ptr;
+    args.name_len = v1.name_len;
+    args.fd_map_ptr = v1.fd_map_ptr;
+    args.fd_map_count = v1.fd_map_count;
+    args.argv_ptr = v1.argv_ptr;
+    args.argv_len = v1.argv_len;
+    args.argc = v1.argc;
+    args.envp_ptr = v1.envp_ptr;
+    args.envp_len = v1.envp_len;
+    args.envc = v1.envc;
+    if let Some(dir) = child_cwd {
+        args.cwd_ptr = dir.as_ptr() as u64;
+        args.cwd_len = dir.len() as u64;
+    }
+    SpawnRequest::V2(args)
 }
 
 /// Spawn an already-loaded program: apply the file actions, pack the
@@ -1854,17 +2047,20 @@ unsafe fn spawn_loaded(
         handle: 0,
     }; MAX_FD_MAP];
     let mut opened = OpenedHandles::new();
-    let fd_map_count = match build_fd_map(file_actions, &mut fd_map, &mut opened) {
-        Ok(count) => count,
+    let plan = match plan_child(file_actions, &mut fd_map, &mut opened) {
+        Ok(plan) => plan,
         Err(err) => {
             errno::set_errno(err);
             return err;
         }
     };
+    let fd_map_count = plan.fd_count;
+    let child_cwd = child_start_dir(&plan);
 
     // The fields both syscalls share. Computed once and copied into whichever
     // struct we send, so the two paths cannot disagree about what is being
-    // spawned -- only about who the child is allowed to be.
+    // spawned -- only about who the child is allowed to be, and where it
+    // starts.
     let elf_ptr = image.ptr as u64;
     let elf_len = image.len as u64;
     let name_ptr = resolved.as_ptr() as u64;
@@ -1885,45 +2081,24 @@ unsafe fn spawn_loaded(
         0
     };
 
-    // `None` goes to 517, not to 559 with `cap_mode == 0`. Both mean "inherit
-    // everything", but sending the untouched case down the untouched syscall
-    // means this feature cannot regress the path every existing caller uses.
-    let ret = match caps {
-        None => {
-            let spawn_args = SpawnExArgs {
-                elf_ptr,
-                elf_len,
-                name_ptr,
-                name_len,
-                fd_map_ptr,
-                fd_map_count: fd_map_count as u64,
-                argv_ptr,
-                argv_len: argv_packed_len as u64,
-                argc: argc as u64,
-                envp_ptr,
-                envp_len: envp_packed_len as u64,
-                envc: envc as u64,
-            };
-            syscall1(SYS_PROCESS_SPAWN_EX, (&raw const spawn_args) as u64)
-        }
-        Some(list) => {
-            // `spawn_ex2_args` fills `struct_size` and the capability policy;
-            // writing either by hand at a call site is how they go stale.
-            let mut spawn_args = spawn_ex2_args(Some(list));
-            spawn_args.elf_ptr = elf_ptr;
-            spawn_args.elf_len = elf_len;
-            spawn_args.name_ptr = name_ptr;
-            spawn_args.name_len = name_len;
-            spawn_args.fd_map_ptr = fd_map_ptr;
-            spawn_args.fd_map_count = fd_map_count as u64;
-            spawn_args.argv_ptr = argv_ptr;
-            spawn_args.argv_len = argv_packed_len as u64;
-            spawn_args.argc = argc as u64;
-            spawn_args.envp_ptr = envp_ptr;
-            spawn_args.envp_len = envp_packed_len as u64;
-            spawn_args.envc = envc as u64;
-            syscall1(SYS_PROCESS_SPAWN_EX2, (&raw const spawn_args) as u64)
-        }
+    let v1 = SpawnExArgs {
+        elf_ptr,
+        elf_len,
+        name_ptr,
+        name_len,
+        fd_map_ptr,
+        fd_map_count: fd_map_count as u64,
+        argv_ptr,
+        argv_len: argv_packed_len as u64,
+        argc: argc as u64,
+        envp_ptr,
+        envp_len: envp_packed_len as u64,
+        envc: envc as u64,
+    };
+    // Each struct lives in its arm until the syscall that reads it returns.
+    let ret = match spawn_request(v1, caps, child_cwd) {
+        SpawnRequest::V1(args) => syscall1(SYS_PROCESS_SPAWN_EX, (&raw const args) as u64),
+        SpawnRequest::V2(args) => syscall1(SYS_PROCESS_SPAWN_EX2, (&raw const args) as u64),
     };
 
     // The parent's copies of any descriptors opened for `open` actions: the
@@ -4706,7 +4881,7 @@ mod tests {
         }
     }
 
-    /// 128 bytes of sixteen `u64`s, no padding.
+    /// 144 bytes of eighteen `u64`s, no padding.
     ///
     /// The `const` block beside the declaration already fails the build on a
     /// size change; this states the *field* offsets, which a reordering could
@@ -4714,9 +4889,9 @@ mod tests {
     /// would hand the kernel a count where it expects a pointer — an
     /// `InvalidAddress` at best and a read of unrelated memory at worst.
     #[test]
-    fn ex2_layout_is_sixteen_u64s() {
+    fn ex2_layout_is_eighteen_u64s() {
         use core::mem::{align_of, size_of};
-        assert_eq!(size_of::<SpawnEx2Args>(), 128);
+        assert_eq!(size_of::<SpawnEx2Args>(), 144);
         assert_eq!(align_of::<SpawnEx2Args>(), 8);
         let a = zero_ex2();
         for (i, off) in [
@@ -4736,6 +4911,8 @@ mod tests {
             offset_of_field!(SpawnEx2Args, a, cap_mode),
             offset_of_field!(SpawnEx2Args, a, cap_ptr),
             offset_of_field!(SpawnEx2Args, a, cap_count),
+            offset_of_field!(SpawnEx2Args, a, cwd_ptr),
+            offset_of_field!(SpawnEx2Args, a, cwd_len),
         ]
         .into_iter()
         .enumerate()
@@ -4807,6 +4984,8 @@ mod tests {
         assert_eq!(a.cap_mode, 0);
         assert_eq!(a.cap_ptr, 0);
         assert_eq!(a.cap_count, 0);
+        // No directory: the child starts in its parent's.
+        assert_eq!((a.cwd_ptr, a.cwd_len), (0, 0));
         // Every version-1 field left for the caller.
         assert_eq!(
             (
@@ -5118,6 +5297,202 @@ mod tests {
         let _ = crate::fdtable::close_fd(6);
         posix_spawn_file_actions_destroy(&raw mut acts);
         assert_eq!(found.map(|e| e.handle), Some(606));
+    }
+
+    // -- chdir actions (design-decisions.md §960) --
+
+    /// The parent's directory and a clean host model of the filesystem's
+    /// directories: set rather than assumed, since tests may share a thread.
+    fn fresh_spawn_cwd(parent: &[u8]) {
+        crate::unistd::host_dirs::clear();
+        crate::unistd::model_kernel_without_cwd_record(false);
+        crate::unistd::set_cwd_for_test(parent);
+    }
+
+    /// Plan a child whose file actions are `chdir`s to `dirs`, in order.
+    fn plan_chdirs(dirs: &[&[u8]]) -> Result<ChildPlan, i32> {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        for dir in dirs {
+            let mut z = dir.to_vec();
+            z.push(0);
+            assert_eq!(
+                posix_spawn_file_actions_addchdir_np(&raw mut acts, z.as_ptr()),
+                0
+            );
+        }
+        let mut out = empty_map();
+        let mut opened = OpenedHandles::new();
+        let plan = plan_child(&raw const acts, &mut out, &mut opened);
+        posix_spawn_file_actions_destroy(&raw mut acts);
+        plan
+    }
+
+    #[test]
+    fn no_chdir_action_leaves_the_child_where_its_parent_is() {
+        fresh_spawn_cwd(b"/home");
+        let plan = plan_chdirs(&[]).expect("nothing can fail");
+        assert!(!plan.cwd.moved, "the kernel should be told nothing");
+        assert_eq!(plan.cwd.as_bytes(), b"/home");
+    }
+
+    /// A relative `chdir` is resolved against the parent's directory, as the
+    /// child -- which starts there -- would resolve it.
+    #[test]
+    fn a_chdir_action_moves_the_child() {
+        fresh_spawn_cwd(b"/home");
+        crate::unistd::host_dirs::add(b"/home/proj");
+        let plan = plan_chdirs(&[b"proj"]).expect("/home/proj exists");
+        assert!(plan.cwd.moved);
+        assert_eq!(plan.cwd.as_bytes(), b"/home/proj");
+    }
+
+    /// The directory goes to the kernel only when there was a `chdir`, and
+    /// only when the kernel keeps the record; an older one would refuse the
+    /// spawn over fields it does not know.
+    #[test]
+    fn the_kernel_is_given_a_directory_only_when_it_can_take_one() {
+        fresh_spawn_cwd(b"/home");
+        crate::unistd::host_dirs::add(b"/home/proj");
+
+        crate::unistd::model_kernel_without_cwd_record(false);
+        let plain = plan_chdirs(&[]).expect("nothing can fail");
+        assert_eq!(child_start_dir(&plain), None, "no chdir: inherit");
+        let moved = plan_chdirs(&[b"proj"]).expect("/home/proj exists");
+        assert_eq!(child_start_dir(&moved), Some(&b"/home/proj"[..]));
+
+        crate::unistd::model_kernel_without_cwd_record(true);
+        assert_eq!(
+            child_start_dir(&moved),
+            None,
+            "an older kernel is not asked"
+        );
+        crate::unistd::model_kernel_without_cwd_record(false);
+    }
+
+    /// Each `chdir` starts from where the one before it left the child.
+    #[test]
+    fn chdir_actions_apply_in_order() {
+        fresh_spawn_cwd(b"/");
+        crate::unistd::host_dirs::add(b"/srv");
+        crate::unistd::host_dirs::add(b"/srv/data");
+        let plan = plan_chdirs(&[b"/srv", b"data"]).expect("both exist");
+        assert_eq!(plan.cwd.as_bytes(), b"/srv/data");
+    }
+
+    /// POSIX: a file action that fails, fails the spawn -- with the error
+    /// `chdir` itself would give.
+    #[test]
+    fn a_chdir_to_a_missing_directory_fails_the_spawn() {
+        fresh_spawn_cwd(b"/");
+        assert_eq!(plan_chdirs(&[b"/no/such"]).err(), Some(errno::ENOENT));
+        assert_eq!(plan_chdirs(&[b""]).err(), Some(errno::ENOENT));
+    }
+
+    /// After a `chdir`, a relative `open` names a file in the child's
+    /// directory, not in ours; before one, the path passes through as given.
+    #[test]
+    fn an_open_after_a_chdir_is_resolved_in_the_childs_directory() {
+        fresh_spawn_cwd(b"/home");
+        crate::unistd::host_dirs::add(b"/srv");
+        let mut slot_path = [0u8; ACTION_PATH_MAX];
+        slot_path[..7].copy_from_slice(b"log.txt");
+        let mut out = [0u8; crate::unistd::PATH_MAX];
+
+        let mut cwd = ChildCwd::of_parent();
+        assert_eq!(
+            cwd.open_path(&slot_path, 7, &mut out),
+            Ok(&b"log.txt\0"[..]),
+            "no chdir yet: the child is where we are"
+        );
+
+        cwd.change_to(b"/srv").expect("/srv exists");
+        let mut out = [0u8; crate::unistd::PATH_MAX];
+        assert_eq!(
+            cwd.open_path(&slot_path, 7, &mut out),
+            Ok(&b"/srv/log.txt\0"[..])
+        );
+
+        let mut abs = [0u8; ACTION_PATH_MAX];
+        abs[..8].copy_from_slice(b"/etc/foo");
+        let mut out = [0u8; crate::unistd::PATH_MAX];
+        assert_eq!(
+            cwd.open_path(&abs, 8, &mut out),
+            Ok(&b"/etc/foo\0"[..]),
+            "absolute"
+        );
+    }
+
+    fn v1_probe() -> SpawnExArgs {
+        SpawnExArgs {
+            elf_ptr: 1,
+            elf_len: 2,
+            name_ptr: 3,
+            name_len: 4,
+            fd_map_ptr: 5,
+            fd_map_count: 6,
+            argv_ptr: 7,
+            argv_len: 8,
+            argc: 9,
+            envp_ptr: 10,
+            envp_len: 11,
+            envc: 12,
+        }
+    }
+
+    fn assert_v1_fields_copied(a: &SpawnEx2Args) {
+        assert_eq!(
+            [
+                a.elf_ptr,
+                a.elf_len,
+                a.name_ptr,
+                a.name_len,
+                a.fd_map_ptr,
+                a.fd_map_count,
+                a.argv_ptr,
+                a.argv_len,
+                a.argc,
+                a.envp_ptr,
+                a.envp_len,
+                a.envc
+            ],
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        );
+        assert_eq!(a.struct_size as usize, size_of::<SpawnEx2Args>());
+    }
+
+    /// The untouched case stays on 517, which every existing caller uses.
+    #[test]
+    fn a_plain_spawn_stays_on_version_1() {
+        assert!(matches!(
+            spawn_request(v1_probe(), None, None),
+            SpawnRequest::V1(_)
+        ));
+    }
+
+    /// A directory needs version 2, with every capability inherited as
+    /// before and the directory in the two new fields.
+    #[test]
+    fn a_chdir_action_goes_to_version_2_with_its_directory() {
+        let dir = b"/srv/data";
+        let SpawnRequest::V2(a) = spawn_request(v1_probe(), None, Some(dir)) else {
+            panic!("a directory cannot travel in version 1");
+        };
+        assert_v1_fields_copied(&a);
+        assert_eq!(a.cap_mode, SPAWN_CAP_MODE_INHERIT_ALL);
+        assert_eq!((a.cwd_ptr, a.cwd_len), (dir.as_ptr() as u64, 9));
+    }
+
+    /// A capability subset alone leaves the directory fields zero: the child
+    /// starts where its parent is.
+    #[test]
+    fn a_capability_subset_alone_sends_no_directory() {
+        let SpawnRequest::V2(a) = spawn_request(v1_probe(), Some(&[]), None) else {
+            panic!("a subset needs version 2");
+        };
+        assert_v1_fields_copied(&a);
+        assert_eq!(a.cap_mode, SPAWN_CAP_MODE_SUBSET);
+        assert_eq!((a.cwd_ptr, a.cwd_len), (0, 0));
     }
 
     /// An `open` action that fails fails the spawn with the open's errno. It

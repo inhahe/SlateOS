@@ -765,13 +765,16 @@ fn name_max(dir: &Path) -> usize {
     // `name_max -= !errno`, written out over the three outcomes. The
     // subtraction applies to a successful read as well as to the
     // indeterminate one; see the doc comment.
-    match pathconf(&crate::quote::os_bytes(dir.as_os_str()), NameLimit::Component) {
+    match pathconf(
+        &crate::quote::os_bytes(dir.as_os_str()),
+        NameLimit::Component,
+    ) {
         // A limit, read with `errno` still zero, loses upstream's byte. A limit
         // of zero becomes -1, which the three-way conditional reads as "no
         // limit" -- unreachable in practice, and kept for exactness.
-        Ok(Some(n)) => n
-            .checked_sub(1)
-            .map_or(usize::MAX, |limit| usize::try_from(limit).unwrap_or(usize::MAX)),
+        Ok(Some(n)) => n.checked_sub(1).map_or(usize::MAX, |limit| {
+            usize::try_from(limit).unwrap_or(usize::MAX)
+        }),
         // -1 with `errno` zero: the subtraction makes it -2, below -1, so the
         // conservative floor.
         Ok(None) => NAME_MAX_MINIMUM,

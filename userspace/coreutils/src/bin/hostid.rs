@@ -67,7 +67,9 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
         }
     }
     match operands.first() {
-        Some(extra) => Err(HOSTID.usage_referring(format!("extra operand {}", quote(&os_bytes(extra))))),
+        Some(extra) => {
+            Err(HOSTID.usage_referring(format!("extra operand {}", quote(&os_bytes(extra)))))
+        }
         None => Ok(Request::Print),
     }
 }

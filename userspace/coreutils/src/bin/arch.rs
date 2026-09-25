@@ -86,7 +86,9 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
         }
     }
     match first_operand {
-        Some(extra) => Err(ARCH.usage_referring(format!("extra operand {}", quote(&os_bytes(&extra))))),
+        Some(extra) => {
+            Err(ARCH.usage_referring(format!("extra operand {}", quote(&os_bytes(&extra)))))
+        }
         None => Ok(Request::Print),
     }
 }
@@ -162,10 +164,18 @@ mod tests {
         assert_eq!(parse_args(&argv(&["x", "--help"])).unwrap(), Request::Help);
         // ...and an unknown option past it is reported instead of the operand.
         let e = parse_args(&argv(&["x", "--nope"])).unwrap_err();
-        assert!(e.message().starts_with("unrecognized option '--nope'"), "{}", e.message());
+        assert!(
+            e.message().starts_with("unrecognized option '--nope'"),
+            "{}",
+            e.message()
+        );
         // The first operand is the one named.
         let e = parse_args(&argv(&["--", "a", "b"])).unwrap_err();
-        assert!(e.message().starts_with("extra operand ‘a’"), "{}", e.message());
+        assert!(
+            e.message().starts_with("extra operand ‘a’"),
+            "{}",
+            e.message()
+        );
     }
 
     #[test]

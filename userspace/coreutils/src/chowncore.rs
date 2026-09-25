@@ -622,7 +622,9 @@ mod walk {
                         .map(|meta| restricted_chown(path, meta, uid, gid, self.required))
                     {
                         Some(Restricted::Done) => Ok(()),
-                        Some(Restricted::ByName) | None => chown_path(path, uid, gid, true).map_err(Some),
+                        Some(Restricted::ByName) | None => {
+                            chown_path(path, uid, gid, true).map_err(Some)
+                        }
                         Some(Restricted::Failed(e)) => Err(Some(e)),
                         Some(Restricted::Excluded) => {
                             // RC_inode_changed and RC_excluded: not changed,
@@ -651,7 +653,11 @@ mod walk {
                         } else {
                             "changing group of"
                         };
-                        self.warn(&format!("{what} {}: {}", quoteaf_os(path), strerror(&error)));
+                        self.warn(&format!(
+                            "{what} {}: {}",
+                            quoteaf_os(path),
+                            strerror(&error)
+                        ));
                     }
                 }
             }
@@ -894,13 +900,19 @@ mod tests {
                 walk_policy(true, traverse, Dereference::Referent),
                 Ok((traverse, true))
             );
-            assert_eq!(walk_policy(true, traverse, Dereference::Link), Ok((traverse, false)));
+            assert_eq!(
+                walk_policy(true, traverse, Dereference::Link),
+                Ok((traverse, false))
+            );
         }
     }
 
     #[test]
     fn user_group_str_joins_what_is_there() {
-        assert_eq!(user_group_str(Some(b"a"), Some(b"b")), Some(b"a:b".to_vec()));
+        assert_eq!(
+            user_group_str(Some(b"a"), Some(b"b")),
+            Some(b"a:b".to_vec())
+        );
         assert_eq!(user_group_str(Some(b"a"), None), Some(b"a".to_vec()));
         assert_eq!(user_group_str(None, Some(b"b")), Some(b"b".to_vec()));
         assert_eq!(user_group_str(Some(b""), Some(b"b")), Some(b":b".to_vec()));
@@ -911,11 +923,25 @@ mod tests {
     fn a_group_only_change_says_group() {
         let f = OsStr::new("f");
         assert_eq!(
-            describe_change(f, ChangeStatus::Succeeded, Some(b"u"), Some(b"old"), None, Some(b"new")),
+            describe_change(
+                f,
+                ChangeStatus::Succeeded,
+                Some(b"u"),
+                Some(b"old"),
+                None,
+                Some(b"new")
+            ),
             "changed group of 'f' from old to new"
         );
         assert_eq!(
-            describe_change(f, ChangeStatus::NoChangeRequested, Some(b"u"), Some(b"g"), None, Some(b"g")),
+            describe_change(
+                f,
+                ChangeStatus::NoChangeRequested,
+                Some(b"u"),
+                Some(b"g"),
+                None,
+                Some(b"g")
+            ),
             "group of 'f' retained as g"
         );
         assert_eq!(
@@ -923,7 +949,14 @@ mod tests {
             "failed to change group of 'f' to g"
         );
         assert_eq!(
-            describe_change(f, ChangeStatus::NoChangeRequested, Some(b"u"), Some(b"g"), None, None),
+            describe_change(
+                f,
+                ChangeStatus::NoChangeRequested,
+                Some(b"u"),
+                Some(b"g"),
+                None,
+                None
+            ),
             "ownership of 'f' retained"
         );
     }

@@ -434,7 +434,10 @@ mod tests {
         let s = run(&["-R", "g", "f"]);
         assert_eq!((s.traverse, s.affect_referent), (Traverse::Physical, false));
         let s = run(&["-RH", "g", "f"]);
-        assert_eq!((s.traverse, s.affect_referent), (Traverse::CommandLine, true));
+        assert_eq!(
+            (s.traverse, s.affect_referent),
+            (Traverse::CommandLine, true)
+        );
         let s = run(&["-RLh", "g", "f"]);
         assert_eq!((s.traverse, s.affect_referent), (Traverse::Logical, false));
         // The last of -H/-L/-P wins.

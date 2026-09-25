@@ -263,7 +263,11 @@ fn validate(file: &[u8], checks: Checks, sys: &impl System, diags: &mut Vec<Stri
         let maxsize = if checks.basic {
             Some(POSIX_PATH_MAX)
         } else {
-            let dir = if file.first() == Some(&b'/') { "/" } else { "." };
+            let dir = if file.first() == Some(&b'/') {
+                "/"
+            } else {
+                "."
+            };
             match sys.pathconf(dir.as_bytes(), NameLimit::Path) {
                 Ok(limit) => limit,
                 Err(e) => {
@@ -292,8 +296,7 @@ fn validate(file: &[u8], checks: Checks, sys: &impl System, diags: &mut Vec<Stri
     // `pathconf(_PC_NAME_MAX)` is avoided when every component is short
     // enough for any filesystem; `-p` checks them all below regardless.
     let check_component_lengths = checks.basic
-        || (!file_exists
-            && components(file).any(|(_, c)| NAME_MAX_MINIMUM < length_of(c)));
+        || (!file_exists && components(file).any(|(_, c)| NAME_MAX_MINIMUM < length_of(c)));
 
     if check_component_lengths {
         // The limit for the current component. It starts at the minimum for
@@ -620,7 +623,10 @@ mod tests {
         assert!(run(b"nodir/aaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb", NONE, &sys).0);
         let (ok, diags) = run(b"nodir/aaaaaaaaaaaaaaaaa", NONE, &sys);
         assert!(!ok);
-        assert!(diags[0].starts_with("limit 16 exceeded by length 17"), "{diags:?}");
+        assert!(
+            diags[0].starts_with("limit 16 exceeded by length 17"),
+            "{diags:?}"
+        );
     }
 
     #[test]

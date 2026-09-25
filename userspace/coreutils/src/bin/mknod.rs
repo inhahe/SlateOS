@@ -86,7 +86,10 @@ enum Request {
 enum Node {
     Fifo,
     /// `S_IFBLK` or `S_IFCHR`, and the packed device number.
-    Device { kind: u32, dev: u64 },
+    Device {
+        kind: u32,
+        dev: u64,
+    },
 }
 
 fn help_text() -> String {
@@ -126,9 +129,9 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
         match item? {
             Opt::Short(b'm', value) | Opt::Long("mode", value) => mode = value,
             Opt::Short(b'Z', _) => {
-                return Err(MKNOD.usage_referring(
-                    "option -Z is not implemented by this mknod".to_string(),
-                ));
+                return Err(
+                    MKNOD.usage_referring("option -Z is not implemented by this mknod".to_string())
+                );
             }
             Opt::Long("context", _) => {
                 return Err(MKNOD.usage_referring(
@@ -199,7 +202,11 @@ fn read_operands(operands: &[OsString]) -> Result<(OsString, Node), Refusal> {
     let fifo_typed = operands
         .get(1)
         .is_some_and(|t| os_bytes(t).first() == Some(&b'p'));
-    let expected = if operands.is_empty() || fifo_typed { 2 } else { 4 };
+    let expected = if operands.is_empty() || fifo_typed {
+        2
+    } else {
+        4
+    };
     if operands.len() < expected {
         let message = match operands.last() {
             None => "missing operand".to_string(),
@@ -214,7 +221,10 @@ fn read_operands(operands: &[OsString]) -> Result<(OsString, Node), Refusal> {
         });
     }
     if operands.len() > expected {
-        let extra = operands.get(expected).map(|x| os_bytes(x).into_owned()).unwrap_or_default();
+        let extra = operands
+            .get(expected)
+            .map(|x| os_bytes(x).into_owned())
+            .unwrap_or_default();
         let explanation = (expected == 2 && operands.len() == 4)
             .then_some("Fifos do not have major and minor device numbers.");
         return Err(Refusal {
@@ -252,14 +262,20 @@ fn read_operands(operands: &[OsString]) -> Result<(OsString, Node), Refusal> {
     };
     let Some(major) = device_number(major_text) else {
         return Err(Refusal {
-            message: format!("invalid major device number {}", quote(&os_bytes(major_text))),
+            message: format!(
+                "invalid major device number {}",
+                quote(&os_bytes(major_text))
+            ),
             explanation: None,
             referral: false,
         });
     };
     let Some(minor) = device_number(minor_text) else {
         return Err(Refusal {
-            message: format!("invalid minor device number {}", quote(&os_bytes(minor_text))),
+            message: format!(
+                "invalid minor device number {}",
+                quote(&os_bytes(minor_text))
+            ),
             explanation: None,
             referral: false,
         });
@@ -269,7 +285,8 @@ fn read_operands(operands: &[OsString]) -> Result<(OsString, Node), Refusal> {
         // `NODEV`. Upstream prints the two operands bare, unquoted. Both have
         // just parsed as numbers, so they are ASCII -- white space, a sign,
         // digits, `x` -- and byte-for-char is exact rather than a decode.
-        let bare = |text: &OsStr| -> String { os_bytes(text).iter().map(|&b| char::from(b)).collect() };
+        let bare =
+            |text: &OsStr| -> String { os_bytes(text).iter().map(|&b| char::from(b)).collect() };
         return Err(Refusal {
             message: format!("invalid device {} {}", bare(major_text), bare(minor_text)),
             explanation: None,
@@ -375,7 +392,9 @@ mod imp {
             // SAFETY (both): the pointer is a NUL-terminated path that outlives
             // the call, which reads it without keeping it.
             Node::Fifo => with_c_path(&name, |p| unsafe { mkfifo(p, mode) }),
-            Node::Device { kind, dev } => with_c_path(&name, |p| unsafe { mknod(p, mode | kind, dev) }),
+            Node::Device { kind, dev } => {
+                with_c_path(&name, |p| unsafe { mknod(p, mode | kind, dev) })
+            }
         };
         if let Err(e) = made {
             diag!("mknod: {}: {}", quotef_os(&name), strerror(&e));
@@ -424,14 +443,26 @@ mod tests {
 
     #[test]
     fn a_fifo_takes_two_operands() {
-        assert_eq!(read_operands(&argv(&["q", "p"])), Ok(("q".into(), Node::Fifo)));
+        assert_eq!(
+            read_operands(&argv(&["q", "p"])),
+            Ok(("q".into(), Node::Fifo))
+        );
         // Only the first character counts.
-        assert_eq!(read_operands(&argv(&["q", "pipe"])), Ok(("q".into(), Node::Fifo)));
+        assert_eq!(
+            read_operands(&argv(&["q", "pipe"])),
+            Ok(("q".into(), Node::Fifo))
+        );
         let e = read_operands(&argv(&["q", "p", "1", "2"])).unwrap_err();
         assert_eq!(e.message, "extra operand ‘1’");
-        assert_eq!(e.explanation, Some("Fifos do not have major and minor device numbers."));
+        assert_eq!(
+            e.explanation,
+            Some("Fifos do not have major and minor device numbers.")
+        );
         let e = read_operands(&argv(&["q", "p", "1"])).unwrap_err();
-        assert_eq!((e.message.as_str(), e.explanation), ("extra operand ‘1’", None));
+        assert_eq!(
+            (e.message.as_str(), e.explanation),
+            ("extra operand ‘1’", None)
+        );
     }
 
     #[test]
@@ -456,9 +487,15 @@ mod tests {
         ));
         let e = read_operands(&argv(&["d", "b"])).unwrap_err();
         assert_eq!(e.message, "missing operand after ‘b’");
-        assert_eq!(e.explanation, Some("Special files require major and minor device numbers."));
+        assert_eq!(
+            e.explanation,
+            Some("Special files require major and minor device numbers.")
+        );
         let e = read_operands(&argv(&["d", "b", "1"])).unwrap_err();
-        assert_eq!((e.message.as_str(), e.explanation), ("missing operand after ‘1’", None));
+        assert_eq!(
+            (e.message.as_str(), e.explanation),
+            ("missing operand after ‘1’", None)
+        );
     }
 
     #[test]
@@ -468,7 +505,10 @@ mod tests {
         let e = read_operands(&argv(&["d"])).unwrap_err();
         assert_eq!(e.message, "missing operand after ‘d’");
         let e = read_operands(&argv(&["d", "x", "1", "2"])).unwrap_err();
-        assert_eq!((e.message.as_str(), e.referral), ("invalid device type ‘x’", true));
+        assert_eq!(
+            (e.message.as_str(), e.referral),
+            ("invalid device type ‘x’", true)
+        );
     }
 
     #[test]
@@ -480,7 +520,10 @@ mod tests {
         assert_eq!(device_number(OsStr::new("1k")), None);
         assert_eq!(device_number(OsStr::new("-1")), None);
         let e = read_operands(&argv(&["d", "b", "x", "1"])).unwrap_err();
-        assert_eq!((e.message.as_str(), e.referral), ("invalid major device number ‘x’", false));
+        assert_eq!(
+            (e.message.as_str(), e.referral),
+            ("invalid major device number ‘x’", false)
+        );
         let e = read_operands(&argv(&["d", "b", "1", "x"])).unwrap_err();
         assert_eq!(e.message, "invalid minor device number ‘x’");
     }

@@ -316,7 +316,10 @@ mod tests {
         let records = [record(USER_PROCESS, b" a b  ", 1)];
         assert_eq!(user_line(&records, everyone), b" a b\n");
         // A name of spaces alone trims to nothing, and is still a session.
-        let records = [record(USER_PROCESS, b"  ", 1), record(USER_PROCESS, b"b", 2)];
+        let records = [
+            record(USER_PROCESS, b"  ", 1),
+            record(USER_PROCESS, b"b", 2),
+        ];
         assert_eq!(user_line(&records, everyone), b" b\n");
     }
 

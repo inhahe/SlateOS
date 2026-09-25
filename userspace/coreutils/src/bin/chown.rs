@@ -368,7 +368,9 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(unix)]
 mod imp {
-    use super::{CHOWN, Request, Settings, Source, help_text, parse_args, parse_user_spec, resolve_spec};
+    use super::{
+        CHOWN, Request, Settings, Source, help_text, parse_args, parse_user_spec, resolve_spec,
+    };
     use coreutils::chowncore::{Ids, Options, chown_files};
     use coreutils::diag;
     use coreutils::errmsg::strerror;
@@ -706,13 +708,19 @@ mod tests {
     #[test]
     fn parse_traverse_flags() {
         let a = run(&["-R", "-H", "1000", "d"]);
-        assert_eq!((a.traverse, a.affect_referent), (Traverse::CommandLine, true));
+        assert_eq!(
+            (a.traverse, a.affect_referent),
+            (Traverse::CommandLine, true)
+        );
         let a = run(&["-R", "-L", "1000", "d"]);
         assert_eq!((a.traverse, a.affect_referent), (Traverse::Logical, true));
         let a = run(&["-R", "-L", "-h", "1000", "d"]);
         assert_eq!((a.traverse, a.affect_referent), (Traverse::Logical, false));
         // The last of -H/-L/-P wins.
-        assert_eq!(run(&["-R", "-L", "-P", "1000", "d"]).traverse, Traverse::Physical);
+        assert_eq!(
+            run(&["-R", "-L", "-P", "1000", "d"]).traverse,
+            Traverse::Physical
+        );
         // Without -R nothing is walked, whatever was asked.
         assert_eq!(run(&["-L", "1000", "d"]).traverse, Traverse::Physical);
     }

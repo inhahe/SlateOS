@@ -142,9 +142,10 @@ fn parse_args(args: &[OsString]) -> Result<Request, Refusal> {
         }
     }
     if let Some(extra) = first_operand {
-        return Err(Refusal::Usage(
-            NPROC.usage_referring(format!("extra operand {}", quote(&os_bytes(&extra)))),
-        ));
+        return Err(Refusal::Usage(NPROC.usage_referring(format!(
+            "extra operand {}",
+            quote(&os_bytes(&extra))
+        ))));
     }
     Ok(Request::Count { query, ignore })
 }
@@ -177,18 +178,25 @@ fn parse_omp_threads(value: Option<&[u8]>) -> u64 {
     let Some(value) = value else {
         return 0;
     };
-    let start = value.iter().position(|&b| !is_c_space(b)).unwrap_or(value.len());
+    let start = value
+        .iter()
+        .position(|&b| !is_c_space(b))
+        .unwrap_or(value.len());
     let rest = value.get(start..).unwrap_or_default();
     let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
     if digits == 0 {
         return 0;
     }
-    let number = rest.get(..digits).unwrap_or_default().iter().fold(0u64, |n, &d| {
-        let digit = u64::from(char::from(d).to_digit(10).unwrap_or(0));
-        n.checked_mul(10)
-            .and_then(|n| n.checked_add(digit))
-            .unwrap_or(u64::MAX)
-    });
+    let number = rest
+        .get(..digits)
+        .unwrap_or_default()
+        .iter()
+        .fold(0u64, |n, &d| {
+            let digit = u64::from(char::from(d).to_digit(10).unwrap_or(0));
+            n.checked_mul(10)
+                .and_then(|n| n.checked_add(digit))
+                .unwrap_or(u64::MAX)
+        });
     let tail = rest.get(digits..).unwrap_or_default();
     match tail.iter().find(|&&b| !is_c_space(b)) {
         // Nothing but white space after the number, or the end of the first
@@ -259,7 +267,9 @@ fn after_ignoring(count: u64, ignore: u64) -> u64 {
 
 #[cfg(unix)]
 mod imp {
-    use super::{Cpus, NPROC, Refusal, Request, after_ignoring, help_text, num_processors, parse_args};
+    use super::{
+        Cpus, NPROC, Refusal, Request, after_ignoring, help_text, num_processors, parse_args,
+    };
     use coreutils::diag;
     use coreutils::quote::os_bytes;
     use coreutils::stdfd::{self, Stream};
@@ -395,7 +405,12 @@ mod tests {
     }
 
     fn count(query: Query, threads: Option<&str>, limit: Option<&str>, cpus: &Fake) -> u64 {
-        num_processors(query, threads.map(str::as_bytes), limit.map(str::as_bytes), cpus)
+        num_processors(
+            query,
+            threads.map(str::as_bytes),
+            limit.map(str::as_bytes),
+            cpus,
+        )
     }
 
     #[test]
@@ -435,11 +450,23 @@ mod tests {
 
     #[test]
     fn openmp_overrides_the_plain_answer_but_not_all() {
-        assert_eq!(count(Query::CurrentOverridable, Some("7"), None, &PINNED), 7);
-        assert_eq!(count(Query::CurrentOverridable, Some("7"), Some("3"), &PINNED), 3);
+        assert_eq!(
+            count(Query::CurrentOverridable, Some("7"), None, &PINNED),
+            7
+        );
+        assert_eq!(
+            count(Query::CurrentOverridable, Some("7"), Some("3"), &PINNED),
+            3
+        );
         // The limit alone caps the system's answer.
-        assert_eq!(count(Query::CurrentOverridable, None, Some("2"), &PINNED), 2);
-        assert_eq!(count(Query::CurrentOverridable, None, Some("9"), &PINNED), 4);
+        assert_eq!(
+            count(Query::CurrentOverridable, None, Some("2"), &PINNED),
+            2
+        );
+        assert_eq!(
+            count(Query::CurrentOverridable, None, Some("9"), &PINNED),
+            4
+        );
         // --all ignores both.
         assert_eq!(count(Query::All, Some("7"), Some("3"), &PINNED), 16);
     }
@@ -461,8 +488,14 @@ mod tests {
         assert_eq!(p("99999999999999999999999"), u64::MAX);
         assert_eq!(parse_omp_threads(None), 0);
         // A zero or invalid count means "not set".
-        assert_eq!(count(Query::CurrentOverridable, Some("0"), None, &PINNED), 4);
-        assert_eq!(count(Query::CurrentOverridable, Some("x"), Some("0"), &PINNED), 4);
+        assert_eq!(
+            count(Query::CurrentOverridable, Some("0"), None, &PINNED),
+            4
+        );
+        assert_eq!(
+            count(Query::CurrentOverridable, Some("x"), Some("0"), &PINNED),
+            4
+        );
     }
 
     #[test]

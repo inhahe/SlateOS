@@ -1236,22 +1236,49 @@ impl IconSize {
 // Cursor settings
 // ============================================================================
 
-/// Cursor size preset.
+/// How big the mouse pointer is: one of six sizes, in logical pixels (the
+/// compositor scales them for the display the pointer is on).
+///
+/// **The one pointer-size setting on the system** (`design-decisions.md`
+/// §872). There were three -- this, `inputsettings`' `mouse.cursor_size`
+/// (16-128 px, in `input.yaml`) and the Settings application's own enum,
+/// which it never saved -- and nothing read any of them, because nothing drew
+/// a pointer. This one survived because the compositor already reads
+/// `appearance.yaml` for every other visual setting and reloads it live
+/// (`ReloadAppearance`). The two steps past 48 px are where `inputsettings`'
+/// larger range went: a pointer someone with low vision can find.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorSize {
     Small,
     Normal,
     Large,
     ExtraLarge,
+    /// 64 px.
+    Huge,
+    /// 96 px -- four times the normal pointer, and the largest.
+    Giant,
 }
 
 impl CursorSize {
+    /// Every size, smallest first. See [`ThemeMode::ALL`]: a front end that
+    /// listed the sizes itself is how two lists of them come to disagree.
+    pub const ALL: &'static [Self] = &[
+        Self::Small,
+        Self::Normal,
+        Self::Large,
+        Self::ExtraLarge,
+        Self::Huge,
+        Self::Giant,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Small => "Small (16px)",
             Self::Normal => "Normal (24px)",
             Self::Large => "Large (32px)",
             Self::ExtraLarge => "Extra Large (48px)",
+            Self::Huge => "Huge (64px)",
+            Self::Giant => "Giant (96px)",
         }
     }
 
@@ -1261,6 +1288,8 @@ impl CursorSize {
             Self::Normal => 24,
             Self::Large => 32,
             Self::ExtraLarge => 48,
+            Self::Huge => 64,
+            Self::Giant => 96,
         }
     }
 }
@@ -1277,6 +1306,9 @@ pub enum CursorScheme {
 }
 
 impl CursorScheme {
+    /// Every scheme, the default first. See [`ThemeMode::ALL`].
+    pub const ALL: &'static [Self] = &[Self::Default, Self::Inverted, Self::AccentColored];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Default => "Default",
@@ -1938,6 +1970,8 @@ yaml_enum!(CursorSize {
     Normal => "normal",
     Large => "large",
     ExtraLarge => "extra-large",
+    Huge => "huge",
+    Giant => "giant",
 });
 yaml_enum!(CursorScheme {
     Default => "default",
@@ -2619,6 +2653,55 @@ mod tests {
         assert_eq!(CursorSize::Small.pixels(), 16);
         assert_eq!(CursorSize::Normal.pixels(), 24);
         assert_eq!(CursorSize::Large.pixels(), 32);
+        assert_eq!(CursorSize::ExtraLarge.pixels(), 48);
+        assert_eq!(CursorSize::Huge.pixels(), 64);
+        assert_eq!(CursorSize::Giant.pixels(), 96);
+    }
+
+    /// `CursorSize::ALL` is every size, smallest first -- the match fails to
+    /// compile when a size is added, which is the prompt to add it here too.
+    #[test]
+    fn every_cursor_size_is_in_all_smallest_first() {
+        for size in CursorSize::ALL {
+            match size {
+                CursorSize::Small
+                | CursorSize::Normal
+                | CursorSize::Large
+                | CursorSize::ExtraLarge
+                | CursorSize::Huge
+                | CursorSize::Giant => {}
+            }
+        }
+        assert_eq!(CursorSize::ALL.len(), 6);
+        assert!(
+            CursorSize::ALL
+                .windows(2)
+                .all(|pair| pair[0].pixels() < pair[1].pixels()),
+            "not smallest first"
+        );
+        // The largest step keeps what `inputsettings`' range was for: a
+        // pointer four times the normal one.
+        assert_eq!(CursorSize::Giant.pixels(), CursorSize::Normal.pixels() * 4);
+    }
+
+    /// Every size and every scheme survives `appearance.yaml`.
+    #[test]
+    fn every_cursor_size_and_scheme_round_trips() {
+        for size in CursorSize::ALL {
+            for scheme in CursorScheme::ALL {
+                let settings = AppearanceSettings {
+                    cursor_size: *size,
+                    cursor_scheme: *scheme,
+                    ..AppearanceSettings::default()
+                };
+                let mut doc = Document::new();
+                settings.write_into(&mut doc);
+                let reread = AppearanceSettings::read_from(&Document::parse(&doc.to_text()));
+                assert_eq!(reread.cursor_size, *size);
+                assert_eq!(reread.cursor_scheme, *scheme);
+            }
+        }
+        assert_eq!(CursorScheme::ALL.len(), 3);
     }
 
     #[test]

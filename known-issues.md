@@ -23742,8 +23742,15 @@ wire; expect blocked more often than not.**
 
 ## TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER
 
-**Status:** OPEN for the two cursor rows only (blocked on C-Q18: nothing draws
-a pointer). `icon_size` is FIXED 2026-09-24: the correction below -- "blocked
+**Status:** OPEN for the two cursor rows only, and no longer blocked on lane C.
+**2026-09-25:** the cursor-size models are one (`design-decisions.md` §872):
+`appearance`'s `cursor_size` and `cursor_scheme` survive, `inputsettings`'
+copy is gone, and the Settings application's own enum is lane E's to point at
+the survivor. Lane F's compositor draws a pointer now (on `lane-f` as of this
+date), so what remains is lane F reading the setting in
+`pointer_preferences` and lane E's control writing it --
+`requests/c-ef-the-pointer-size-is-appearances-cursors-size.md`. The rows
+close when both land. `icon_size` is FIXED 2026-09-24: the correction below -- "blocked
 on C-Q17" because the icon layer was never constructed -- stopped being true
 on 2026-09-14 when the shell began constructing and drawing it, and nobody
 came back to this row. The layer now takes the size from `set_appearance`,
@@ -23830,6 +23837,15 @@ which was not clear from the table above and is the sort of thing that gets a
 reader to spend an afternoon before noticing.
 
 ### The cursor-size tangle
+
+**Collapsed 2026-09-25 to one model** -- `appearance`'s -- which gained 64 and
+96 px sizes so nothing `inputsettings`' 16-128 range allowed was lost
+(`design-decisions.md` §872). The two `gui/desktop` rows below were deleted
+earlier (`9dde7ab85`, `9ddb46bae`); `inputsettings`' field went with §872 (its
+next save removes the `cursor.size` key it used to write); the Settings
+application's own `CursorSize` (`apps/settings/src/main.rs`, never saved --
+not in the table below, which predates it) is lane E's to replace. The table
+is the state as found:
 
 One user-facing setting, four independent models, no reader:
 

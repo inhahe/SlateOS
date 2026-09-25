@@ -46,6 +46,35 @@ WHY NOT A `--self-test` FLAG IN `cp-diff.sh`
 new top-level flag is a change to a script all three lanes depend on, for a
 check that needs none of its machinery. The entry above is about exactly this
 kind of risk. A separate file touches nothing.
+
+WHICH BASH, AND WHICH TOOLS
+===========================
+
+The probe runs under `proctree.find_unix_shell()` -- Git's bash here, the
+system bash on Linux -- and puts that shell's own `/usr/bin` first on `PATH`.
+
+Until 2026-09-25 it ran `subprocess.run(['bash', ...])`, and on Windows that
+is **WSL's** bash: `CreateProcess` searches `System32` before `PATH`, and
+`C:\\Windows\\System32\\bash.exe` is the WSL launcher (`known-issues.md` ->
+"`subprocess.run(["bash", ...])` gets WSL's bash, not Git's"). So every run of
+this gate started a Linux VM, and when the VM did not start in time -- WSL
+answered `HCS_E_CONNECTION_TIMEOUT` under a loaded lane-E boot test -- the
+self-test said the gate "fails its own cases" and the boot test refused to
+build a tree nothing was wrong with. The comments below that blamed MSYS for
+two faults were written from inside that VM; both faults are WSL's, and the
+2026-09-25 notes beside them say what was measured.
+
+What the probe grades does not depend on which of the two it is: whether the
+function's per-file hash line survives a `$(...)` capture. Both run bash 5 with
+GNU `find`, `sort`, `sha256sum` and `cut`. But only one of them is always
+there, and it is the one `boot-test.sh` itself runs under.
+
+`/usr/bin` goes first because a bash started from a native Windows parent
+inherits that parent's `PATH`, and from PowerShell that finds
+`C:\\Windows\\System32\\find.exe` and `sort.exe` -- a string search and a line
+sorter that take none of these options -- and no `sha256sum` at all. Measured:
+Git's bash with `PATH=C:\\Windows\\System32` answers `command -v find` with
+`/c/Windows/System32/find`. The shell's own tools are the ones it ships with.
 """
 
 import contextlib
@@ -56,8 +85,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import proctree  # noqa: E402  (needs the path above)
+
 ROOT = Path(__file__).resolve().parent.parent
 HARNESS = ROOT / "scripts" / "cp-diff.sh"
+
+# Exit codes, as `scripts/run-checker.sh` reads them: 0 clean, 1 a finding,
+# 2 no verdict (the build stops), 3 "I could not run, and here is why" (the
+# gate is listed as skipped, never as passed). A skip here used to return 0,
+# which is the behaviour exit 3 was defined to replace.
+NO_VERDICT = 2
+SKIPPED = 3
 
 
 @contextlib.contextmanager
@@ -65,9 +104,11 @@ def scratch():
     """A scratch tree UNDER THE REPO, removed afterwards.
 
     Not `tempfile.TemporaryDirectory()`: that yields `C:/Users/...`, which
-    MSYS bash cannot resolve, and the failure was quiet enough to have
-    produced a confident wrong verdict once already. `build/` is
-    gitignored.
+    the bash this ran under could not resolve, and the failure was quiet
+    enough to have produced a confident wrong verdict once already. `build/`
+    is gitignored. (That bash was WSL's, not MSYS's -- see WHICH BASH above.
+    Git's bash opens `C:/Users/...` fine; the repo-relative path is kept
+    because it works under every bash, which a drive-letter path does not.)
     """
     tmp = ROOT / "build" / "cp-diff-nul-probe"
     shutil.rmtree(tmp, ignore_errors=True)
@@ -87,17 +128,21 @@ def extract_contents(text):
     return m.group(0) if m else None
 
 
-def run_probe(func_src, tmp):
-    """Return the probe's stdout for three trees.
+def run_probe(func_src, tmp, bash):
+    """Return the probe's (stdout, stderr) for three trees, run under `bash`.
 
     `a` and `c` are byte-identical. `b` differs from `a` ONLY in how many NUL
     bytes its single file holds — same length otherwise is not required, only
     that no non-NUL byte differs, because that is the case the capture used to
     erase.
 
+    `bash` is an absolute path from `proctree.find_unix_shell()`, never the
+    bare word: see WHICH BASH at the top of this file.
+
     # The scratch tree lives under the repo, not in `%TEMP%`
 
-    MSYS `bash` cannot resolve a `C:/Users/...` path. The first version of this
+    The bash this ran under could not resolve a `C:/Users/...` path (it was
+    WSL's; the note below said MSYS). The first version of this
     gate used `tempfile.TemporaryDirectory()`, so `. '<winpath>/fn.sh'` failed
     with "No such file or directory", `contents` was never defined, both
     captures came back EMPTY — and empty equals empty, so the gate reported
@@ -136,17 +181,29 @@ def run_probe(func_src, tmp):
 
     # A SCRIPT FILE, not `bash -c`.
     #
-    # Under this Git Bash a function defined by `bash -c` is NOT visible
-    # inside a command substitution -- MSYS emulates fork by re-execing, and
-    # the definition does not survive. `A=$(contents ...)` failed with
+    # Under the bash this ran under, a function defined by `bash -c` was NOT
+    # visible inside a command substitution: `A=$(contents ...)` failed with
     # `contents: command not found` while `declare -F contents` in the same
     # script reported it defined. Run from a file, the function survives.
+    #
+    # This said MSYS, and blamed its fork emulation. Measured 2026-09-25 with
+    # `f() { echo hi; }; declare -F f && A=$(f)` as a `-c` string: WSL's
+    # launcher prints DEFINED, then `/bin/bash: line 1: f: command not found`;
+    # Git's bash prints DEFINED and `A=[hi]`. It was WSL. The script file stays,
+    # because it is right under both.
     #
     # The command substitution cannot be dropped to work around it: the
     # capture is the thing that eats NUL bytes, so a probe reading the
     # function on a pipe would not reproduce the defect at all.
+    #
+    # `NOSHA` before anything else: without `sha256sum` the real function
+    # prints an empty hash for every file, catches nothing, and would be
+    # reported as broken. `cp-diff.sh` declares `DIFF_NEED=sha256sum` and
+    # skips without it, so there is nothing here to grade either.
     probe = tmp / 'probe.sh'
     script = (
+        'PATH=/usr/bin:$PATH\n'
+        'command -v sha256sum >/dev/null 2>&1 || {{ echo NOSHA; exit 4; }}\n'
         '. ./{rel}/contents_fn.sh || exit 3\n'
         'declare -F contents >/dev/null || exit 3\n'
         'echo DEFINED\n'
@@ -160,14 +217,29 @@ def run_probe(func_src, tmp):
     with io.open(probe, 'w', encoding='utf-8', newline='') as fh:
         fh.write(script)
 
-    out = subprocess.run(
-        ['bash', './' + rel + '/probe.sh'],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        cwd=str(ROOT),
-    )
-    return out.stdout
+    try:
+        out = subprocess.run(
+            [bash, './' + rel + '/probe.sh'],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=str(ROOT),
+        )
+    except subprocess.TimeoutExpired:
+        # No markers, so the caller reports "could not run" -- which is what
+        # this is, and not a finding.
+        return "", "no answer in 120 s"
+    return out.stdout, out.stderr
+
+
+def no_sha(stdout):
+    """Did the probe find no `sha256sum` in its shell?"""
+    return "NOSHA" in stdout
+
+
+def tail(text, lines=6):
+    """The last few lines of a probe's stderr, for a cannot-run report."""
+    return "\n".join(text.strip().splitlines()[-lines:]) or "(nothing on stderr)"
 
 
 def ran_at_all(stdout):
@@ -205,12 +277,32 @@ def selftest():
         print("FAIL could not extract contents() from cp-diff.sh")
         return 1
 
+    bash = proctree.find_unix_shell()
+    if bash is None:
+        print(
+            "SKIPPED no Unix shell to run contents() under (Git Bash, MSYS2, "
+            "or bash on a Unix host; SLATE_BASH names one elsewhere)"
+        )
+        return SKIPPED
+
     with scratch() as tmp:
-        out = run_probe(real, tmp / "real")
+        out, err = run_probe(real, tmp / "real", bash)
+        if no_sha(out):
+            print(
+                "SKIPPED no sha256sum in %s's /usr/bin -- cp-diff.sh skips "
+                "without it, so there is nothing to grade" % bash
+            )
+            return SKIPPED
         if not ran_at_all(out):
-            print("FAIL the probe could not run contents() at all: %r" % out)
+            # Exit 2, not 1: this is the gate failing to run, and the build
+            # stops on it as "no verdict" rather than calling the tree broken.
+            # It returned 1 while printing the sentence below.
+            print("NO VERDICT the probe could not run contents() under %s" % bash)
+            print("     stdout: %r" % out)
+            print("     stderr: %s" % tail(err))
             print("     A gate that cannot run must say so, not report a finding.")
-            return 1
+            return NO_VERDICT
+        print("     (probe shell: %s)" % bash)
         catches, same = verdict(out)
         bad += 0 if catches else 1
         bad += 0 if same else 1
@@ -223,10 +315,11 @@ def selftest():
         without = "\n".join(
             l for l in real.split("\n") if "sha256sum" not in l and "printf 'sha" not in l
         )
-        out_bad = run_probe(without, tmp / "sabotaged")
+        out_bad, err_bad = run_probe(without, tmp / "sabotaged", bash)
         if not ran_at_all(out_bad):
-            print("FAIL the sabotaged probe could not run either: %r" % out_bad)
-            return 1
+            print("NO VERDICT the sabotaged probe could not run: %r" % out_bad)
+            print("     stderr: %s" % tail(err_bad))
+            return NO_VERDICT
         catches_bad, same_bad = verdict(out_bad)
         ok = (not catches_bad) and same_bad
         bad += 0 if ok else 1
@@ -253,17 +346,17 @@ def main(argv=None):
 
     if not HARNESS.is_file():
         print("check-cp-diff-sees-nul: no scripts/cp-diff.sh here", file=sys.stderr)
-        return 2
-    if shutil.which("bash") is None:
-        print("check-cp-diff-sees-nul: no bash; skipped", file=sys.stderr)
-        return 0
-    if shutil.which("sha256sum") is None:
-        # The harness itself declares DIFF_NEED=sha256sum and skips without it,
-        # so this gate has nothing to grade either. Reported rather than passed
-        # silently: a skip that reads like a pass is what this whole entry is
-        # about.
-        print("check-cp-diff-sees-nul: no sha256sum; nothing to grade, skipped")
-        return 0
+        return NO_VERDICT
+    # Both skips below returned 0 until 2026-09-25, which `run-checker.sh`
+    # counts as a pass: a skip that reads like a pass is what this whole entry
+    # is about. Exit 3 lists the gate as skipped, with this line as the reason.
+    bash = proctree.find_unix_shell()
+    if bash is None:
+        print(
+            "check-cp-diff-sees-nul: SKIPPED -- no Unix shell to run "
+            "contents() under (Git Bash, MSYS2, or bash on a Unix host)"
+        )
+        return SKIPPED
 
     real = extract_contents(HARNESS.read_text(encoding="utf-8", errors="replace"))
     if real is None:
@@ -272,20 +365,29 @@ def main(argv=None):
             "it was renamed or restructured, and this gate is now grading nothing",
             file=sys.stderr,
         )
-        return 2
+        return NO_VERDICT
 
     with scratch() as tmp:
-        out = run_probe(real, tmp / "live")
+        out, err = run_probe(real, tmp / "live", bash)
+        if no_sha(out):
+            # The harness declares DIFF_NEED=sha256sum and skips without it,
+            # so this gate has nothing to grade either.
+            print(
+                "check-cp-diff-sees-nul: SKIPPED -- no sha256sum in %s's "
+                "/usr/bin; cp-diff.sh skips without it, so there is nothing "
+                "to grade" % bash
+            )
+            return SKIPPED
         if not ran_at_all(out):
             print(
                 "check-cp-diff-sees-nul: CANNOT GRADE -- the probe never "
-                "executed `contents()` (markers: %r). Reporting that rather "
-                "than a verdict: a check that could not run is not a check "
-                "that passed, and it is certainly not one that found "
-                "something." % out,
+                "executed `contents()` under %s (markers: %r; stderr: %s). "
+                "Reporting that rather than a verdict: a check that could not "
+                "run is not a check that passed, and it is certainly not one "
+                "that found something." % (bash, out, tail(err)),
                 file=sys.stderr,
             )
-            return 2
+            return NO_VERDICT
         catches, same = verdict(out)
 
     if not catches:

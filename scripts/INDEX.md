@@ -339,6 +339,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-build-usb-image.py` | Regression tests for `scripts/build-usb-image.py`. |
 | `scripts/test-canary-load.py` | Tests for `canary-load.py` -- the P22 stimulus, not the model. |
 | `scripts/test-check-boot-skips.py` | Regression tests for the never-running-self-test gate. |
+| `scripts/test-check-cp-diff-sees-nul.py` | Regression tests for `scripts/check-cp-diff-sees-nul.py`. |
 | `scripts/test-check-design-decisions-bands.py` | Regression tests for `scripts/check-design-decisions-bands.py`. |
 | `scripts/test-check-gated-selftests.py` | Regression tests for the never-ran-gated-self-test gate. |
 | `scripts/test-check-requests-not-deleted.py` | Regression tests for `scripts/check-requests-not-deleted.py`. |
@@ -394,4 +395,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_384 scripts._
+_385 scripts._

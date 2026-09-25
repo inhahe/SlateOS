@@ -177,6 +177,8 @@ mod imp {
         // redeclares a runtime symbol differently from the runtime is one
         // mismatch away from a miscompile.
         fn write(fd: i32, buf: *const core::ffi::c_void, count: usize) -> isize;
+        // The same, and for the same reason, as `write` above.
+        fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
     }
 
     const F_GETFD: i32 = 1;
@@ -266,6 +268,24 @@ mod imp {
         }
         Ok(())
     }
+
+    pub fn read_fd(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            // SAFETY: `buf` is a live, writable slice, and `read` stores at
+            // most `buf.len()` bytes from its start.
+            let n = unsafe { read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+            if n < 0 {
+                let e = io::Error::last_os_error();
+                // A signal that arrived mid-read is not a read failure.
+                if e.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e);
+            }
+            // Non-negative, so it fits; the fallback cannot be reached.
+            return Ok(usize::try_from(n).unwrap_or(0));
+        }
+    }
 }
 
 // ------------------------------------------------------------ elsewhere ----
@@ -307,6 +327,16 @@ mod imp {
         match fd {
             1 => io::stdout().write_all(bytes),
             2 => io::stderr().write_all(bytes),
+            _ => Err(io::Error::from(io::ErrorKind::Unsupported)),
+        }
+    }
+
+    /// The runtime's `Stdin`, for the reason [`write_all`] uses its `Stdout`.
+    pub fn read_fd(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
+        use std::io::Read;
+
+        match fd {
+            0 => io::stdin().read(buf),
             _ => Err(io::Error::from(io::ErrorKind::Unsupported)),
         }
     }
@@ -418,6 +448,23 @@ pub fn probe(fd: i32) -> io::Result<()> {
 /// that returns zero on a non-empty buffer.
 pub fn write_all(fd: i32, bytes: &[u8]) -> io::Result<()> {
     imp::write_all(fd, bytes)
+}
+
+/// Read once from `fd` into `buf`, reporting a failure honestly: [`write_all`]'s
+/// counterpart on the input side.
+///
+/// `read(2)`, retrying only `EINTR`. `std::io::stdin().read` passes its result
+/// through the same `handle_ebadf` the output side does, so a closed descriptor
+/// 0 reads as an empty file -- `pr - <&-` would print nothing and exit 0 where
+/// GNU says `Bad file descriptor`. This reports the `EBADF`, which after
+/// [`restore`] is the truth. It buffers nothing: a caller reading a byte at a
+/// time wants its own buffer in front of it.
+///
+/// # Errors
+///
+/// Whatever `read(2)` reports.
+pub fn read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
+    imp::read_fd(fd, buf)
 }
 
 /// Whether a diagnostic failed to reach descriptor 2 — `ferror (stderr)`,

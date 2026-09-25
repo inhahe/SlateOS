@@ -70,6 +70,8 @@ use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::human::{Opts, human_readable};
+// Shared with `pr`, which centres its page header by the same measure.
+use coreutils::mbswidth::mbswidth;
 #[cfg(unix)]
 use coreutils::quote::os_from_bytes;
 use coreutils::quote::{os_bytes, quote, quoteaf, quotef};
@@ -1303,48 +1305,6 @@ fn replace_invalid_chars(cell: &[u8]) -> Vec<u8> {
         }
     }
     out
-}
-
-/// gnulib's `mbswidth (cell, 0)`: how many terminal columns a cell occupies.
-///
-/// Not `cell.len()` and not `chars().count()`. With flags of zero, gnulib
-/// counts a non-printable character as **1** rather than rejecting the string,
-/// and counts an undecodable byte as 1 as well; a wide character counts 2 and
-/// a combining mark counts 0. Getting this wrong misaligns every column to the
-/// right of the offending cell, and only for the users whose mount points are
-/// not ASCII.
-fn mbswidth(cell: &[u8]) -> usize {
-    let mut width = 0usize;
-    let mut rest = cell;
-    while let Some(mb) = next_mb(rest) {
-        match mb {
-            Mb::Char(c, n) => {
-                // `wcwidth` answers -1 for a non-printable character, which
-                // gnulib's flags-of-zero path turns into 1 — except for a
-                // control character, which it counts as 0.
-                width = width.saturating_add(char_width(c).unwrap_or(usize::from(!c.is_control())));
-                let Some(tail) = rest.get(n..) else {
-                    break;
-                };
-                rest = tail;
-            }
-            Mb::Invalid => {
-                width = width.saturating_add(1);
-                rest = rest.get(1..).unwrap_or_default();
-            }
-            Mb::Incomplete => {
-                width = width.saturating_add(1);
-                break;
-            }
-        }
-    }
-    width
-}
-
-/// [`charwidth::char_width`], named locally so the call sites read like
-/// `wcwidth`.
-fn char_width(c: char) -> Option<usize> {
-    charwidth::char_width(c)
 }
 
 /// gnulib's `ambsalign`, for the one shape of call `df` makes.
@@ -3302,16 +3262,6 @@ mod tests {
         // Three bad bytes, three question marks — not one per character.
         assert_eq!(replace_invalid_chars(b"a\xff\xfe\xfdb"), b"a???b");
         assert_eq!(replace_invalid_chars("aé".as_bytes()), "aé".as_bytes());
-    }
-
-    #[test]
-    fn width_is_measured_in_columns() {
-        assert_eq!(mbswidth(b"abc"), 3);
-        // A wide character is two columns, and a combining mark is none.
-        assert_eq!(mbswidth("\u{4e00}".as_bytes()), 2);
-        assert_eq!(mbswidth("e\u{301}".as_bytes()), 1);
-        // An undecodable byte still occupies the terminal.
-        assert_eq!(mbswidth(b"a\xffb"), 3);
     }
 
     #[test]

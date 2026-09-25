@@ -758,6 +758,26 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Whether glibc's `getopt_long` would have **stopped** by now: every word
+    /// from here on is an operand however it looks — after a `--`, or, in a
+    /// `+` table, from the first operand on.
+    ///
+    /// Only `pr` asks. Upstream parses in glibc's return-in-order mode (its
+    /// option string leads with `-`), which hands each operand to the option
+    /// loop as it is met, and that loop reads a `+FIRST_PAGE` there. Once
+    /// `getopt` stops, the words left over are collected as file names without
+    /// that test, so `pr -- +3` prints a file called `+3`. Yielding operands in
+    /// order, as [`Program::parse`] always does, is return-in-order mode; this
+    /// is the one piece of it an iterator of items cannot carry.
+    ///
+    /// Like [`Parser::current_word`], it needs the parser bound rather than
+    /// consumed by a `for` loop, and is meaningful between one `next` and the
+    /// next.
+    #[must_use]
+    pub fn stopped(&self) -> bool {
+        self.only_operands
+    }
+
     /// The next word of argv, consumed as some option's value.
     fn next_word(&mut self) -> Option<OsString> {
         let word = self.argv.get(self.at)?.clone();
@@ -1215,7 +1235,7 @@ mod tests {
         let forged = SORT.unrecognized_option(b"--fo\nsort: /etc/shadow: Permission denied");
         assert_eq!(
             without_referral(&forged),
-            r#"unrecognized option '--fo\nsort: /etc/shadow: Permission denied'"#
+            r"unrecognized option '--fo\nsort: /etc/shadow: Permission denied'"
         );
         // One line, which is the whole point: glibc's would be two.
         assert_eq!(without_referral(&forged).lines().count(), 1);

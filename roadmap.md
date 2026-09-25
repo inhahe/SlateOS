@@ -4096,11 +4096,14 @@ _Port ext4 first. Don't write a custom filesystem._
     `shred` (with gnulib's `randint`/`randread` as `coreutils::randint`, so `--random-source=FILE` shreds a
     file into the very bytes GNU's does); `pinky` (utmp through `utmpfile`, users through `pwdb`, its date
     format chosen by `coreutils::locale`'s `hard_locale`, which `ls` and `cmp` now share; checked in a private
-    namespace against fixture utmp, passwd and home directories);
+    namespace against fixture utmp, passwd and home directories); `pr` (upstream's globals one struct and its
+    functions methods under their own names, so `pr.c` can be read beside it; header widths through the
+    `coreutils::mbswidth` it now shares with `df`, and a closed standard input read as `EBADF` through the new
+    `stdfd::read`);
     and `nproc`,
     re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
     names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
-    **Still missing:** `pr`, `ptx`. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
+    **Still missing:** `ptx`. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
     `LD_PRELOAD` into a dynamically linked program). `[` is `test` under another name and needs only the image alias. None
     ships until lane D lists it: `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.
 - [x] Port rsync (replaces robocopy need) — Rust implementation: recursive, archive mode, checksums, delete, exclude/include, dry-run, progress, stats

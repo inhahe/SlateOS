@@ -252,6 +252,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/pinky-diff.sh` | pinky-diff.sh — compare our `pinky` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/pkgconf-spike/run.sh` | Cross-compile upstream pkgconf and link it against SlateOS's own libc.a. |
 | `scripts/positional-model-limits.py` | Where the positional contamination model can and cannot see, derived from its code. |
+| `scripts/pr-diff.sh` | pr-diff.sh — compare our `pr` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/pre-boot.py` | Run everything `boot-test.sh` checks before it builds, without building anything. |
 | `scripts/printable-audit.py` | Compare our printability rule against glibc's `iswprint` under `C.UTF-8`. |
 | `scripts/printenv-diff.sh` | printenv-diff.sh — compare our `printenv` against the real GNU one, inside WSL. |
@@ -414,4 +415,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_404 scripts._
+_405 scripts._

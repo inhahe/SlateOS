@@ -6,16 +6,16 @@
 
 ## In short
 
-The `coreutils` crate now builds twenty-nine programs it did not build when
+The `coreutils` crate now builds thirty programs it did not build when
 the manifest was written: `sha1sum`, `printenv`, `link`, `unlink`, `sync`,
 `truncate`, `groups`, `arch`, `pathchk`, `users`, `nproc`, `chgrp`, `mknod`,
 `hostid`, `dircolors`, `numfmt`, `sum`, `base32`, `basenc`, `factor`,
 `sha224sum`, `sha384sum`, `sha512sum`, `b2sum`, `cksum`, `dir`, `vdir`,
-`shred` and `pinky`. Each is a port of
+`shred`, `pinky` and `pr`. Each is a port of
 GNU coreutils 9.4 and is checked against a build of 9.4 (a script runs both on
 the same inputs and compares their output, errors and exit status). A binary
 the manifest does not name does not go on the image, so today all
-twenty-nine are built and then left out. Please add them.
+thirty are built and then left out. Please add them.
 
 ## Why they belong by the manifest's own rule
 
@@ -26,13 +26,13 @@ bin list. The only coreutils names it leaves out on purpose are:
 - `sort`, for the same reason;
 - `sh`, because `/bin/sh` is dash.
 
-These twenty-nine are none of those. They are missing only because they did not
+These thirty are none of those. They are missing only because they did not
 exist when the list was generated. Nothing else stages these names:
 `create-ext4-rootfs.sh`'s `PROMOTED` map has none of them. So listing them
 takes no name away from anything.
 
 **Size.** At the manifest's own average of about 813 KiB per static binary,
-twenty-nine come to roughly 23 MiB. The header records 59 MiB used of a 96 MiB
+thirty come to roughly 24 MiB. The header records 59 MiB used of a 96 MiB
 budget.
 
 ## The programs
@@ -68,6 +68,7 @@ budget.
 | `vdir` | `ls -l -b`: the long listing, the same way | `scripts/ls-diff.sh` |
 | `shred` | overwrite a file (and optionally remove it) so its contents are harder to recover | `scripts/shred-diff.sh` |
 | `pinky` | who is logged in, with real names, idle times and where from; or what is known about named users | `scripts/pinky-diff.sh` |
+| `pr` | paginate or columnate text for printing: headers, page numbers, columns, merged files (POSIX) | `scripts/pr-diff.sh` |
 
 **One alias as well: `[ = test`.** Our `test` already behaves as `[` when it
 is started under that name: it then insists on the closing `]`. But nothing
@@ -89,8 +90,7 @@ crates was on the image, so no name moves from one program to another there.
 
 ## This list may grow before you read it
 
-I am porting the rest of the programs GNU 9.4 has and we do not (`pr` and
-`ptx`). Each one that lands before
+I am porting the rest of the programs GNU 9.4 has and we do not (`ptx`). Each one that lands before
 this request reaches `main` will be added to the table above, not filed as a
 separate request. Whatever the table says when you read it is the whole ask.
 

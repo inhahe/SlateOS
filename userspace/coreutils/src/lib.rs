@@ -471,6 +471,8 @@
 //!   gnulib's `hard_locale`, for `ls`, `cmp` and `pinky`. Two private copies
 //!   had disagreed about whether `LC_ALL=` is set.
 //! - [`ls`] — `ls`, `dir` and `vdir`: `ls.c` built three times.
+//! - [`mbswidth`] — gnulib's `mbswidth`, the columns a string occupies, for
+//!   `df`'s column widths and `pr`'s centred page header.
 //! - [`randint`] — gnulib's `randread` and `randint`, for `shred`.
 //! - [`remove`] — what `rm` and `mv` must agree on about deleting a tree.
 //! - [`setfields`] — the `cut`-style LIST of fields, for `cut` and `numfmt
@@ -503,6 +505,7 @@ pub mod hardlink;
 pub mod human;
 pub mod locale;
 pub mod ls;
+pub mod mbswidth;
 pub mod overwrite;
 pub mod pathname;
 pub mod randint;

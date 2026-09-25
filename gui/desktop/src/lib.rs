@@ -1454,6 +1454,14 @@ pub struct DesktopShell {
     /// the taskbar clock" — and until this field existed, none of them reached
     /// one. See `current_clock_string`.
     pub datetime: datetime_settings::DateTimeSettings,
+    /// The zone this machine is in -- what the clock shows when
+    /// [`datetime`](Self::datetime) names none.
+    ///
+    /// UTC until [`load_datetime`](Self::load_datetime) reads the real one,
+    /// and deliberately not read in [`new`](Self::new): `new` is what the unit
+    /// tests build, and a shell that read the host's `TZ` and `/etc/localtime`
+    /// there would give every clock test a different answer on every machine.
+    system_zone: Tz,
     /// The calendar popup the tray clock opens.
     ///
     /// `calendar.rs` used to be reachable only through `mod calendar;`: it had
@@ -1921,6 +1929,7 @@ impl DesktopShell {
             notif: notifsettings::NotifFile::new(),
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
+            system_zone: Tz::utc(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
             notifications: notif_pane::NotificationPane::new(),
             focus: focus_assist::FocusAssistManager::new(),
@@ -6508,17 +6517,36 @@ impl DesktopShell {
     // Utilities
     // ======================================================================
 
-    /// The zone the taskbar clock reads in.
+    /// The zone the taskbar clock reads in: the one the user chose, or the
+    /// machine's own.
     ///
-    /// UTC when the configured zone is not in the table — which is honest
-    /// rather than convenient: a zone we cannot resolve is not a licence to
-    /// invent an offset, and `datetime_settings` already refuses to read a
-    /// zoneinfo *name* for the same reason (there is no tzdata on disk yet;
-    /// `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`).
+    /// The machine's also when the chosen one is not in the table -- a file
+    /// edited by hand -- which is honest rather than convenient: a zone we
+    /// cannot resolve is not a licence to invent an offset, and the machine's
+    /// zone is the one `date` would show.
     fn local_zone(&self) -> Tz {
-        self.datetime
-            .current_timezone()
-            .map_or_else(Tz::utc, |tz| tz.rule)
+        self.datetime.rule(self.system_zone)
+    }
+
+    /// Read how the user wants the time told (`datetime.yaml`) and the zone
+    /// the machine is in.
+    ///
+    /// Both at once, because the second is what the first falls back to. Not
+    /// in [`new`](Self::new), for the reason on
+    /// [`system_zone`](Self::system_zone); the session calls this when it
+    /// starts. See `design-decisions.md` §875.
+    pub fn load_datetime(&mut self) {
+        self.datetime = datetimesettings::DateTimeFile::load().settings;
+        self.system_zone = datetimesettings::system_zone();
+    }
+
+    /// Adopt the machine's zone as `zone` -- what [`load_datetime`] reads,
+    /// for a test that needs a zone of its own choosing rather than the
+    /// host's.
+    ///
+    /// [`load_datetime`]: Self::load_datetime
+    pub fn set_system_zone(&mut self, zone: Tz) {
+        self.system_zone = zone;
     }
 
     /// How far into the local day a UTC instant is, in seconds.
@@ -7701,12 +7729,7 @@ impl DesktopShell {
             // A zone the table cannot resolve is dropped rather than shown at
             // UTC under its own label, which would be a wrong clock presented
             // as a right one. `local_zone` refuses the same way.
-            let Some(info) = self
-                .datetime
-                .available_timezones
-                .iter()
-                .find(|tz| tz.tz_id == extra.tz_id)
-            else {
+            let Some(info) = datetime_settings::zone(&extra.tz_id) else {
                 continue;
             };
             clock.extra_timezones.push(calendar::TimezoneEntry {
@@ -12039,20 +12062,20 @@ mod window_manager_tests {
     fn the_taskbar_clock_reads_in_the_configured_zone_not_utc() {
         let mut shell = time_only_shell();
 
-        assert!(shell.datetime.set_timezone("UTC"));
+        assert!(shell.datetime.set_zone(Some("UTC")));
         assert_eq!(shell.clock_string_at(INSTANT), "16:30");
 
         // The shipped *default* is New York, which is the whole point: out of
         // the box the corner of the screen used to read 16:30 in a zone where
         // it was half past noon.
-        assert!(shell.datetime.set_timezone("America/New_York"));
+        assert!(shell.datetime.set_zone(Some("America/New_York")));
         assert_eq!(
             shell.clock_string_at(INSTANT),
             "12:30",
             "August is EDT, UTC-4 — a fixed-offset entry would have said 11:30"
         );
 
-        assert!(shell.datetime.set_timezone("Asia/Tokyo"));
+        assert!(shell.datetime.set_zone(Some("Asia/Tokyo")));
         assert_eq!(
             shell.clock_string_at(INSTANT),
             "01:30",
@@ -12060,20 +12083,25 @@ mod window_manager_tests {
         );
     }
 
+    /// With no zone chosen, the clock is in the machine's own zone -- the one
+    /// `date` shows. Until 2026-09-25 the default was New York for everyone,
+    /// and this test asserted only that it was not UTC; what it guards now is
+    /// that the zone applied is the machine's (design-decisions §875).
     #[test]
-    fn the_default_shell_does_not_show_utc() {
-        // Nothing here sets a zone: this is the desktop as it first boots.
-        let shell = shell();
-        assert!(
-            !shell.clock_string_at(INSTANT).ends_with("16:30"),
-            "a fresh desktop must apply its own default zone, not fall to UTC"
-        );
+    fn the_default_shell_shows_the_machines_zone() {
+        // Nothing here chooses a zone: this is the desktop as it first boots,
+        // on a machine whose zone is Tokyo's.
+        let mut shell = DesktopShell::new(1920, 1080);
+        assert_eq!(shell.datetime.zone, None, "nothing chose a zone");
+        shell.set_system_zone(tzrules::Tz::parse(b"JST-9").expect("a POSIX rule"));
+        let reading = shell.clock_string_at(INSTANT);
+        assert!(reading.ends_with("01:30"), "{reading}");
     }
 
     #[test]
     fn the_show_seconds_setting_reaches_the_taskbar_clock() {
         let mut shell = time_only_shell();
-        assert!(shell.datetime.set_timezone("Atlantic/Reykjavik"));
+        assert!(shell.datetime.set_zone(Some("Atlantic/Reykjavik")));
 
         assert_eq!(shell.clock_string_at(INSTANT), "16:30");
         shell.datetime.show_seconds = true;
@@ -12090,7 +12118,7 @@ mod window_manager_tests {
     #[test]
     fn the_date_and_weekday_switches_reach_the_taskbar_clock() {
         let mut shell = shell();
-        assert!(shell.datetime.set_timezone("UTC"));
+        assert!(shell.datetime.set_zone(Some("UTC")));
 
         // Shipped defaults: both on.
         assert!(shell.datetime.show_day_of_week && shell.datetime.show_date);
@@ -12118,22 +12146,29 @@ mod window_manager_tests {
     fn the_taskbar_date_crosses_midnight_with_the_zone() {
         let mut shell = shell();
 
-        assert!(shell.datetime.set_timezone("UTC"));
+        assert!(shell.datetime.set_zone(Some("UTC")));
         assert_eq!(shell.clock_string_at(INSTANT), "Tue Aug 18 16:30");
 
         // UTC+9: half past one the *next* morning.
-        assert!(shell.datetime.set_timezone("Asia/Tokyo"));
+        assert!(shell.datetime.set_zone(Some("Asia/Tokyo")));
         assert_eq!(shell.clock_string_at(INSTANT), "Wed Aug 19 01:30");
     }
 
+    /// A zone the table does not have reads as the machine's own -- the zone
+    /// `date` would show -- not as an offset invented for a name nothing here
+    /// knows.
     #[test]
-    fn an_unresolvable_zone_falls_back_to_utc_rather_than_inventing_an_offset() {
+    fn an_unresolvable_zone_falls_back_to_the_machines_rather_than_inventing_an_offset() {
         let mut shell = time_only_shell();
-        // `set_timezone` validates, so reach past it — this is the state a
+        // `set_zone` validates, so reach past it — this is the state a
         // configuration file naming a zone we do not ship would produce.
-        shell.datetime.timezone = "Mars/Olympus_Mons".to_string();
-        assert!(shell.datetime.current_timezone().is_none());
+        shell.datetime.zone = Some("Mars/Olympus_Mons".to_string());
+        assert!(shell.datetime.current_zone().is_none());
+        // The machine's zone is UTC until the session reads the real one…
         assert_eq!(shell.clock_string_at(INSTANT), "16:30");
+        // … and the clock follows it when it is something else.
+        shell.set_system_zone(tzrules::Tz::parse(b"JST-9").expect("a POSIX rule"));
+        assert_eq!(shell.clock_string_at(INSTANT), "01:30");
     }
 
     /// A clock the tray has no room for is a setting that did not arrive.
@@ -12146,7 +12181,7 @@ mod window_manager_tests {
     #[test]
     fn every_reading_fits_the_slot_the_tray_reserves_for_it() {
         let mut shell = shell();
-        assert!(shell.datetime.set_timezone("UTC"));
+        assert!(shell.datetime.set_zone(Some("UTC")));
 
         for (dow, date, secs) in [
             (false, false, false),
@@ -12216,7 +12251,7 @@ mod window_manager_tests {
         // the same instant and zone, so a re-introduced private copy fails
         // here rather than in a screenshot.
         let mut shell = shell();
-        assert!(shell.datetime.set_timezone("Europe/London"));
+        assert!(shell.datetime.set_zone(Some("Europe/London")));
         let zone = shell.local_zone();
         // Built here from the settings rather than taken from `shell.clock()`,
         // so this also checks that `clock()` carries every switch across: a
@@ -16248,7 +16283,7 @@ mod quiet_hours_wiring_tests {
     fn shell() -> DesktopShell {
         let mut shell = DesktopShell::new(1920, 1080);
         assert!(
-            shell.datetime.set_timezone("UTC"),
+            shell.datetime.set_zone(Some("UTC")),
             "UTC is not in the shipped zone table"
         );
         shell

@@ -521,6 +521,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "datetimesettings"
+version = "0.1.0"
+dependencies = [
+ "pathcodec",
+ "settingsfile",
+ "tzrules",
+ "yamldoc",
+]
+
+[[package]]
 name = "daywindow"
 version = "0.1.0"
 
@@ -571,6 +581,7 @@ dependencies = [
  "appearance",
  "associations",
  "authlib",
+ "datetimesettings",
  "daywindow",
  "globmatch",
  "guiremote",

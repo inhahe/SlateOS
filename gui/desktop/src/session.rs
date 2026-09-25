@@ -1715,6 +1715,9 @@ impl<T: Transport> ShellSession<T> {
     /// to fix, and it would be a shame to leave a second door into it.
     pub fn load_appearance(&mut self) {
         self.shell.load_appearance();
+        // And how the time is told, on the widget layout's argument below: it
+        // is the same question, and a second door is a door somebody forgets.
+        self.shell.load_datetime();
         self.sync_theme_problem();
         self.sync_wallpaper();
         self.sync_login_background();

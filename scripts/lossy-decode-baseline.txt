@@ -40,5 +40,4 @@ apps/worldclock/src/main.rs:VALUE:1
 gui/compositor/src/present/drm/sys.rs:VALUE:1
 gui/compositor/src/present/evdev.rs:VALUE:1
 gui/compositor/src/present/evdev/sys.rs:VALUE:1
-gui/desktop/src/datetime_settings.rs:VALUE:1
 gui/toolkit/src/svg.rs:VALUE:1

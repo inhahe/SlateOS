@@ -1,0 +1,32 @@
+[package]
+name = "datetimesettings"
+version = "0.1.0"
+edition = "2024"
+description = "How the desktop tells the time -- its zone, the taskbar clock, the world clocks -- shared by the shell and the Settings application"
+
+[dependencies]
+# Format-preserving YAML. A settings file a user has commented has to come
+# back with the comments intact. See yamldoc/src/lib.rs.
+yamldoc = { path = "../../yamldoc" }
+
+# Where the file lives and how it is replaced atomically. The same choice
+# `notifsettings` made and for the same reason: nothing here has a colour in
+# it, so depending on `appearance` would drag the widget toolkit into a crate
+# that never names a `Color`.
+settingsfile = { path = "../settingsfile" }
+
+# The zone engine the libc, `osh` and the taskbar clock all read time through,
+# and `tz_source`, the one statement of how `TZ` names a zone -- so the clock
+# and `date` agree.
+tzrules = { path = "../../tzrules" }
+
+# Bytes to a path: a zoneinfo name is bytes, as every name on this system is.
+pathcodec = { path = "../pathcodec" }
+
+[dev-dependencies]
+# `settingsfile::testing` for the test that saves through a scratch
+# configuration directory instead of the developer's own.
+settingsfile = { path = "../settingsfile", features = ["testing"] }
+
+[lints]
+workspace = true

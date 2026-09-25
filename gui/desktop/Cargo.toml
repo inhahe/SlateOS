@@ -84,6 +84,11 @@ oswindow = { path = "../window" }
 # tzrules/src/lib.rs's "Why this is a crate and not a module".
 tzrules = { path = "../../tzrules" }
 
+# How the desktop tells the time -- the clock's zone, the taskbar clock's
+# switches, the world clocks -- shared with the Settings application, which
+# edits what the shell obeys. See gui/datetimesettings/src/lib.rs.
+datetimesettings = { path = "../datetimesettings" }
+
 # Format-preserving YAML, for settings that are written back to disk.
 # design.txt requires configuration to be "processed with a library that
 # preserves comments and formatting": a user who annotates their config file

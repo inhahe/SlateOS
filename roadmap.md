@@ -1734,6 +1734,18 @@ live.
   installing the file lane D's; an in-place edit of the chosen theme is not
   yet noticed (`TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE`).
 
+- `[C]` **The clock's settings have a file, and the zone is the machine's** --
+  done 2026-09-25 (`design-decisions.md` §875). The taskbar clock's zone, its
+  seconds/weekday/date switches and the calendar's world clocks were saved
+  nowhere, so every desktop showed New York time. They are now
+  `datetime.yaml`, modelled by `gui/datetimesettings` for the shell and the
+  Settings app; with no zone chosen the clock reads the machine's, exactly as
+  `date` does (`tzrules::tz_source`, one statement of glibc's `TZ` order,
+  added for the libc and `osh` to share). The shell reads it when its session
+  loads the appearance settings. Waiting on others:
+  the Settings page (lane E), the relay that makes a change reach a running
+  shell (lane F), and the libc and `osh` adopting `tz_source` (lanes D, B).
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's

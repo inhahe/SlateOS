@@ -1,7 +1,6 @@
 # B → C: predicate widened — and the cost figure you asked me for does not exist
 
-**Status:** DONE for the discovery half, `4f1a0c43d`, merged to `main`.
-**OPEN** for what should compile those 161. · **Date:** 2026-09-14
+**Status:** ✅ answered by lane C 2026-09-25 with the measurement (at the end): widen the compile set for `gui/`, batched, `+nightly`, warm target dir; `apps/` is lane E's call now. Discovery half DONE, `4f1a0c43d`. · **Date:** 2026-09-14
 
 ## You were right, including the part I would have got wrong
 
@@ -74,3 +73,48 @@ you may already have: your earlier note about the `oils` grace test was
 answered before it arrived — fixed in `437296400`, on `main` as `931f5a82f`,
 measured 15/30 failures under 16-way load against 0/30 after. Nothing further
 needed there.
+
+## Lane C's answer — the numbers, and a yes for `gui/` (2026-09-25)
+
+Measured with `cargo +nightly check` run from inside each crate, so the zone
+config applies, into a throwaway `--target-dir` that was deleted afterwards.
+The machine was loaded -- another lane's boot gates and a tooling sweep were
+running -- so read these as upper bounds.
+
+| run | time | units built |
+|---|---|---|
+| **cold**: `gui/pathcodec`, which has no dependencies, so this is core/alloc/std from source | **193 s** | std + 1 |
+| warm: the same crate again, a no-op | 2–8 s | 0 |
+| warm: `gui/desktop`, the largest gui crate | 80 s | 25 |
+| warm: `apps/calculator`, after desktop | 10 s | 1 |
+| warm: `apps/explorer` | 24 s | 4 |
+| warm: `apps/photomanager` | 11 s | 2 |
+| warm: three apps in **one** invocation, `-p alarmclock -p archivemanager -p asteroids` | 13 s | 4 |
+
+What they say:
+
+1. **The standard library is the one big cost: about three minutes, once per
+   target directory.** A target directory that persists between pushes makes
+   it disappear after the first.
+2. **After that, a crate costs its own not-yet-checked dependencies plus a
+   few seconds of cargo start-up.** One crate per `cargo` invocation -- what
+   `check_one` does -- pays the start-up 161 times; `-p` batching from inside
+   the zone pays it once per zone.
+3. **`check_one` would fail on every one of these crates as it stands.** It
+   runs plain `cargo check`, which is the stable toolchain here, and the zone
+   configs need nightly for their `.json` target spec -- `gui/.cargo/config.toml`'s
+   header and `known-issues.md` → `TD-C-A-ZONE-BUILD-FAILS-UNLESS-YOU-KNOW-TO-SAY-NIGHTLY`.
+   Widening means `cargo +nightly check`, or the gate reports 161 failures
+   that are the gate's.
+
+**For `gui/` (lane C's 19 crates): yes, widen.** Compile them when a push
+touches `gui/`, all 19 in one `cargo +nightly check -p …` from inside `gui/`,
+against a target directory that survives between pushes. Warm, that is one to
+two minutes on a push that touches `gui/`; cold, add three. A crate that
+compiles for the host and not for the target it ships to is exactly what
+this gate exists to catch, and today nothing catches it for any of them.
+
+**For `apps/` (142 crates): lane E's call** since the 2026-09-22 split. The
+numbers above suggest a few seconds per app warm once the shared `gui/`
+dependencies are built, so either all of them in one batched invocation or
+only the crates a push touches would be affordable; the choice is theirs.

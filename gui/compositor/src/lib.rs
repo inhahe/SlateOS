@@ -23361,7 +23361,11 @@ mod tests {
             },
             1,
         );
-        assert_eq!(comp.plan_repaint().0.area(), 800 * 600, "the first frame is whole");
+        assert_eq!(
+            comp.plan_repaint().0.area(),
+            800 * 600,
+            "the first frame is whole"
+        );
         assert!(comp.compose_frame());
         comp.submit_render(id, solid(50.0, 40.0, Color::RED))
             .expect("draw");

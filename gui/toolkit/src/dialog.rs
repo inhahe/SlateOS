@@ -249,9 +249,9 @@ pub struct FileDialog {
     ///
     /// Clicking a file in Save mode means "overwrite this one", and the file
     /// clicked may have a name that is not UTF-8. Round-tripping that through
-    /// `filename_input` would replace the undecodable bytes with U+FFFD and
-    /// quietly save to a *different*, newly created file instead of the one the
-    /// user pointed at. So the bytes are kept beside the text, and dropped the
+    /// `filename_input` would turn the undecodable bytes into their rendering
+    /// (octal escapes spelled out as characters) and quietly save to a
+    /// *different*, newly created file instead of the one the user pointed at. So the bytes are kept beside the text, and dropped the
     /// moment a keystroke makes the text no longer describe them.
     filename_exact: Option<OsString>,
     filters: Vec<FileFilter>,
@@ -488,7 +488,7 @@ impl FileDialog {
 
     /// Put `name` in the field and remember its exact bytes.
     fn fill_filename(&mut self, name: OsString) {
-        self.filename_input = name.to_string_lossy().into_owned();
+        self.filename_input = pathcodec::display_os(&name);
         self.filename_exact = Some(name);
     }
 
@@ -1025,7 +1025,7 @@ impl FileDialog {
     ///
     /// Built on the exact bytes when the field was filled from a listed file,
     /// so an existing name that is not valid UTF-8 is saved to *as it is on
-    /// disk* rather than as the U+FFFD-substituted text the field can show.
+    /// disk* rather than as the escaped text the field shows.
     /// Which suffix to append is still decided from the text, because the
     /// patterns it is compared against are themselves UTF-8 and a byte that
     /// cannot be decoded cannot match one of them.
@@ -1264,9 +1264,9 @@ impl FileDialog {
             x: x + 6.0,
             y: btn_y + 5.0,
             // One of the two places a path becomes text, and it is producing
-            // glyphs rather than a key to look anything up with, so lossy is
-            // correct here. See `DirEntry::name`.
-            text: self.current_path.to_string_lossy().into_owned(),
+            // glyphs rather than a key to look anything up with. See
+            // `DirEntry::name`, and `pathcodec::display_os` for the spelling.
+            text: pathcodec::display_path(&self.current_path),
             color: palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
@@ -1480,10 +1480,10 @@ impl FileDialog {
                 y: row_y + 6.0,
                 // The other place, and the reason `DirEntry::name` can be an
                 // `OsString` everywhere else: a row has to *show* a name that
-                // has no UTF-8 reading, and U+FFFD is the honest way to show
-                // one. What the row opens is rebuilt from the bytes, not from
-                // this.
-                text: entry.name.to_string_lossy().into_owned(),
+                // has no UTF-8 reading, and an octal escape for each byte
+                // that is not text shows which name it is (`display_os`).
+                // What the row opens is rebuilt from the bytes, not from this.
+                text: pathcodec::display_os(&entry.name),
                 color: name_color,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,

@@ -4,11 +4,13 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS lossless path-in-a-text-record encoding — percent-escape a filename's bytes so a record that must stay human-readable can still name a file that is not text."
 
-# Deliberately none. `apps/backup` is a command-line program that must not link
-# a widget library, which is why this is not a module in `guitk` where the rest
-# of lane C's shared code lives. `apps/safeio` is the precedent for a
-# dependency-free library crate sitting under `apps/`.
+# `apps/backup` is a command-line program that must not link a widget library,
+# which is why this is not a module in `guitk` where the rest of lane C's shared
+# code lives. The one dependency keeps that: `quoting` depends on nothing, and
+# it is where the terminal's rendering of an undecodable name lives, which
+# `display_os` must match byte for byte.
 [dependencies]
+quoting = { path = "../../userspace/quoting" }
 
 [lints]
 workspace = true

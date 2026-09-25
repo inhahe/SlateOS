@@ -289,7 +289,7 @@ impl DirectorySource {
     /// The row for `entry`, whose own key path is `keys`.
     fn item_for(&self, entry: &DirEntryInfo, keys: &[OsString]) -> TreeItem<OsString> {
         // Display only. The key below is what names the file again.
-        let label = entry.name.to_string_lossy().into_owned();
+        let label = pathcodec::display_os(&entry.name);
         let key = entry.name.clone();
         match entry.kind {
             EntryKind::Directory => {
@@ -851,7 +851,8 @@ mod tests {
     }
 
     /// A name that is not UTF-8 keeps its exact bytes as the key, so the path
-    /// rebuilt from it names the real file, while the label shows U+FFFD.
+    /// rebuilt from it names the real file, while the label shows the byte as
+    /// an octal escape, as the terminal spells it.
     #[cfg(unix)]
     #[test]
     fn a_name_that_is_not_text_still_names_its_file() {
@@ -866,7 +867,7 @@ mod tests {
         let path = tree.selected_path().unwrap();
         assert_eq!(path.file_name(), Some(raw));
         assert!(path.exists(), "the rebuilt path is the real file");
-        assert_eq!(tree.view().rows()[0].label, "caf\u{FFFD}.txt");
+        assert_eq!(tree.view().rows()[0].label, r"caf\351.txt");
     }
 
     /// The same, for the host these tests usually run on: a Windows name with
@@ -898,7 +899,7 @@ mod tests {
         let path = tree.selected_path().unwrap();
         assert_eq!(path.file_name(), Some(raw.as_os_str()));
         assert!(path.exists(), "the rebuilt path is the real file");
-        assert!(tree.view().rows()[0].label.contains('\u{FFFD}'));
+        assert_eq!(tree.view().rows()[0].label, r"caf\355\240\200.txt");
     }
 
     #[cfg(unix)]

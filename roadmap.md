@@ -1703,6 +1703,16 @@ live.
   use, still reach their shortcuts with the menu up. The field sits where the
   "Applications" title was.
 
+- `[C]` **A file name that is not text is drawn so it can be told apart** --
+  done 2026-09-25 (`design-decisions.md` §873, proposed by lane E). The file
+  dialog, the path bar, the folder tree and the Run box drew each byte of a
+  name that is not text as `�`, so `café.txt` and `cafè.txt` looked
+  identical; they now draw it as an octal escape, exactly as the command-line
+  tools do (`pathcodec::display_os`, which is `quoting::escape_unprintable`).
+  Nothing is derived from the drawing: opening and navigating still use the
+  exact bytes kept beside it. The applications' own labels are lane E's to
+  move onto the same function.
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's

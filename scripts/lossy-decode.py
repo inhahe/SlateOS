@@ -185,14 +185,13 @@ IGNORE = (
     # every future lossy call in that file as well. Those stay in
     # `lossy-decode-baseline.txt`, where the per-file COUNT still notices a new
     # one -- a weaker claim, and the honest one.
-    ("gui/toolkit/src/pathbar.rs",
-     "self.edit_text = self.path.as_os_str().to_string_lossy()",
-     "the address bar is a text field with a caret, so its contents must be "
-     "text; `edit_exact` holds the bytes and is what a confirm navigates to"),
-    ("gui/toolkit/src/pathbar.rs",
-     "Some(exact) if exact.as_os_str().to_string_lossy() == self.edit_text",
-     "asks whether the field still reads as the rendering of those bytes, "
-     "i.e. whether the user typed; comparing bytes would always say yes"),
+    #
+    # 2026-09-25: the toolkit's and the shell's sites of both shapes -- the path
+    # bar, the file dialog, the folder tree, the Run box -- now draw a name
+    # through `pathcodec::display_os`, which spells each byte that is not text
+    # as an octal escape instead of U+FFFD (`design-decisions.md` §873), so
+    # their entries are gone. The applications' sites below remain until they
+    # move to it too.
     # --- lane C, audited 2026-09-17 ---
     #
     # A third shape, and the first of it: the contents of a file being shown
@@ -247,44 +246,6 @@ IGNORE = (
      "the first 4 KiB of a previewed file, drawn as text; a file's contents "
      "declare no encoding, and dropping the undecodable lines instead -- "
      "which is what this replaced -- hid them from the reader entirely"),
-    ("gui/toolkit/src/pathbar.rs",
-     "label: exact.to_string_lossy().into_owned()",
-     "the drawn breadcrumb pill; `Segment::exact` beside it is the click "
-     "target and is never derived from this"),
-    ("gui/toolkit/src/dialog.rs",
-     "self.filename_input = name.to_string_lossy().into_owned()",
-     "the filename text field; `filename_exact` holds the bytes"),
-    ("gui/toolkit/src/dialog.rs",
-     "text: self.current_path.to_string_lossy().into_owned()",
-     "a rendered label in a `RenderCommand`; reaches the screen only"),
-    ("gui/toolkit/src/dialog.rs",
-     "text: entry.name.to_string_lossy().into_owned()",
-     "a rendered list row; the entry's own path is what opening it uses"),
-    # --- lane C, 2026-09-24 ---
-    # The first shape above, in the directory tree: a row's label is the name
-    # drawn as text, and the name itself -- the `OsString` key the row is
-    # addressed by -- is what `DirectorySource::path_of` rebuilds a path from.
-    # Nothing derives a path from the label; `dirtree`'s test
-    # `a_name_that_is_not_text_still_names_its_file` opens the real file
-    # through a row whose label shows U+FFFD.
-    ("gui/toolkit/src/dirtree.rs",
-     "let label = entry.name.to_string_lossy().into_owned();",
-     "a tree row's drawn label; the row's key is the exact name, and it is "
-     "the key that `path_of` turns back into a path"),
-    ("gui/desktop/src/run_dialog.rs",
-     "self.input.set_text(&exact.to_string_lossy())",
-     "fills the visible field from the kept bytes; `command_exact` remains "
-     "the thing that is run"),
-    ("gui/desktop/src/run_dialog.rs",
-     "to_string_lossy().trim() == text",
-     "matches a candidate against what is on screen, which is the question "
-     "being asked"),
-    ("gui/desktop/src/run_dialog.rs",
-     "to_string_lossy().trim() == command",
-     "likewise, against the command as displayed"),
-    ("gui/desktop/src/run_dialog.rs",
-     "let shown = cmd.to_string_lossy()",
-     "named for what it is: the shown form"),
     ("apps/explorer/src/main.rs",
      "shown.to_string_lossy().into_owned()",
      "the label a search row is drawn with, qualified by its folder; "

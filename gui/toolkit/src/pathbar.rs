@@ -111,10 +111,12 @@ pub struct PathBar {
     /// The bytes `edit_text` was rendered from, while editing.
     ///
     /// `edit_text` is a text field with a caret, so it must stay a `String`.
-    /// That makes it a *lossy* view of a path that need not be text. Keeping
-    /// the original here lets an unedited field navigate to the bytes it was
-    /// opened with rather than to their `U+FFFD`-substituted rendering --
-    /// exactly how `RunDialog::command_exact` keeps a command.
+    /// That makes it a *rendering* of a path that need not be text -- each
+    /// byte that is not text shown as an octal escape
+    /// (`pathcodec::display_os`). Keeping the original here lets an unedited
+    /// field navigate to the bytes it was opened with rather than to the
+    /// escapes spelled out as characters -- exactly how
+    /// `RunDialog::command_exact` keeps a command.
     edit_exact: Option<PathBuf>,
     /// Cursor position: a byte offset into `edit_text`, plus which side of a
     /// direction boundary the caret is drawn on.
@@ -293,7 +295,7 @@ impl PathBar {
             return;
         }
         self.mode = Mode::Edit;
-        self.edit_text = self.path.as_os_str().to_string_lossy().into_owned();
+        self.edit_text = pathcodec::display_path(&self.path);
         self.edit_exact = Some(self.path.clone());
         self.cursor = self.edit_text.len().into();
         self.selection_anchor = None;
@@ -557,10 +559,10 @@ impl PathBar {
     fn navigate_to_edit_text(&mut self) {
         // If the field still reads exactly as the path it was opened with,
         // the user did not edit it, so navigate to the bytes rather than to
-        // their lossy rendering. Typing anything makes the text the source of
+        // their rendering. Typing anything makes the text the source of
         // truth, because then it is what the user actually asked for.
         let typed = match &self.edit_exact {
-            Some(exact) if exact.as_os_str().to_string_lossy() == self.edit_text => {
+            Some(exact) if pathcodec::display_path(exact) == self.edit_text => {
                 exact.clone().into_os_string()
             }
             _ => OsString::from(self.edit_text.clone()),
@@ -1107,10 +1109,11 @@ fn normalize_path(path: &OsStr) -> PathBuf {
 /// One breadcrumb: the bytes it navigates to, and the text drawn on it.
 ///
 /// Two fields rather than one because they answer different questions and only
-/// one of them can be lossy. `label` is what the pill shows, and a pill is
-/// text -- bytes that are not text cannot be drawn, so the lossy rendering is
-/// correct *for drawing*. `exact` is what a click navigates to, and must be
-/// the original bytes. The same split as `dialog.rs`'s `filename_input` /
+/// one of them may be a rendering. `label` is what the pill shows, and a pill is
+/// text -- bytes that are not text cannot be drawn as themselves, so the label
+/// spells them as `pathcodec::display_os` does, which is correct *for
+/// drawing*. `exact` is what a click navigates to, and must be the original
+/// bytes. The same split as `dialog.rs`'s `filename_input` /
 /// `filename_exact` and `RunDialog`'s `command_exact`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Segment {
@@ -1125,7 +1128,7 @@ impl Segment {
     fn new(exact: &OsStr) -> Self {
         Self {
             exact: exact.to_os_string(),
-            label: exact.to_string_lossy().into_owned(),
+            label: pathcodec::display_os(exact),
         }
     }
 
@@ -2104,13 +2107,14 @@ mod tests {
         );
     }
 
-    /// The pill is drawn lossily and navigated to exactly.
+    /// The pill is drawn escaped and navigated to exactly.
     ///
-    /// Both halves matter: a pill is text, so the label *must* be lossy; the
-    /// click target is a path, so `exact` must not be.
+    /// Both halves matter: a pill is text, so the label *must* be a rendering
+    /// -- the lone surrogate as its three bytes in octal; the click target is a
+    /// path, so `exact` must not be.
     #[cfg(windows)]
     #[test]
-    fn a_pill_is_drawn_lossily_and_navigated_to_exactly() {
+    fn a_pill_is_drawn_escaped_and_navigated_to_exactly() {
         use std::os::windows::ffi::OsStringExt;
 
         let name = OsString::from_wide(&[u16::from(b'z'), 0xD800]);
@@ -2122,10 +2126,9 @@ mod tests {
         let bar = PathBar::new(&odd);
 
         let last = bar.segments.last().expect("the trail has a leaf");
-        assert!(
-            last.label.contains(char::REPLACEMENT_CHARACTER),
-            "the fixture is not lossy, so this test proves nothing: {:?}",
-            last.label
+        assert_eq!(
+            last.label, r"z\355\240\200",
+            "the pill is not drawn as the terminal would spell the name"
         );
         assert_eq!(
             last.exact, name,
@@ -2136,7 +2139,7 @@ mod tests {
     /// Confirming an address the user never touched navigates to the bytes.
     ///
     /// The field itself has to be a `String` -- it is a text input with a
-    /// caret. That makes it a lossy view, so confirming it verbatim would
+    /// caret. That makes it a rendering, so confirming it verbatim would
     /// navigate to a path that merely *looks* like the one displayed. The
     /// widget keeps the original beside it and prefers it while the text still
     /// reads as the rendering of those bytes, which is how
@@ -2155,10 +2158,9 @@ mod tests {
         let mut bar = PathBar::new(&odd);
         bar.enter_edit_mode();
 
-        assert!(
-            bar.edit_text.contains(char::REPLACEMENT_CHARACTER),
-            "the fixture is not lossy, so this test proves nothing: {:?}",
-            bar.edit_text
+        assert_eq!(
+            bar.edit_text, r"/z\355\240\200",
+            "the field does not show the name as the terminal would spell it"
         );
 
         bar.navigate_to_edit_text();

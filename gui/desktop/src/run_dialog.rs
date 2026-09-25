@@ -289,8 +289,9 @@ pub struct RunDialog {
     ///
     /// `OsString` rather than `String` because an entry can be a path the user
     /// chose with Browse, and such a path may have no UTF-8 spelling. Held as
-    /// text, re-running it from history would ask for the `U+FFFD` rendering —
-    /// a file that does not exist — and start nothing, without saying why.
+    /// text, re-running it from history would ask for its rendering — the
+    /// octal escapes spelled out as characters, a file that does not exist —
+    /// and start nothing, without saying why.
     history: Vec<OsString>,
     /// Current position in history when cycling (-1 = not browsing history).
     history_index: Option<usize>,
@@ -383,7 +384,7 @@ impl RunDialog {
     /// autocomplete — because each of them can be carrying a name with no UTF-8
     /// spelling, and each of them was a separate opportunity to drop it.
     fn fill_exact(&mut self, exact: &OsStr) {
-        self.input.set_text(&exact.to_string_lossy());
+        self.input.set_text(&pathcodec::display_os(exact));
         self.command_exact = Some(PathBuf::from(exact));
     }
 
@@ -415,7 +416,7 @@ impl RunDialog {
         let shown = self
             .command_exact
             .as_ref()
-            .filter(|p| p.as_os_str().to_string_lossy().trim() == text)
+            .filter(|p| pathcodec::display_path(p).trim() == text)
             .map_or_else(|| PathBuf::from(text), Clone::clone);
         guitk::dialog::parent_of(&shown)
     }
@@ -1070,7 +1071,7 @@ impl RunDialog {
         let exact = self
             .command_exact
             .as_ref()
-            .filter(|p| p.as_os_str().to_string_lossy().trim() == command)
+            .filter(|p| pathcodec::display_path(p).trim() == command)
             .map_or_else(
                 || OsString::from(&command),
                 |p| p.as_os_str().to_os_string(),
@@ -1286,12 +1287,12 @@ impl RunDialog {
         // nothing they could have typed — but the entry's own bytes travel with
         // it so that accepting the suggestion fills in the file it named.
         for cmd in &self.history {
-            let shown = cmd.to_string_lossy();
+            let shown = pathcodec::display_os(cmd);
             if let Some(score) = fuzzy_score(query, &shown) {
                 // Avoid duplicates.
                 if !results.iter().any(|s| s.exact == *cmd) {
                     results.push(Suggestion {
-                        text: shown.into_owned(),
+                        text: shown,
                         exact: cmd.clone(),
                         score: score.saturating_add(5), // slight history bonus
                     });

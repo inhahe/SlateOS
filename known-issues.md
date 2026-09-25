@@ -125951,6 +125951,28 @@ restore, create, import, unlock. Seven verbs, and they are the seven things the
 program is for. A dead-code list that reads like a feature list is not dead
 code; it is a missing caller at the top.
 
+### Lesson 405: a walk that drops build directories from its results has already walked them (lane C, 2026-09-25)
+
+A push from lane C sat in its pre-push hook for twenty minutes, in
+`scripts/check-cfg-unix.py`, with no child process -- a gate whose docstring
+says the whole check takes "about 7 seconds warm". The cargo half was never
+reached. `candidate_crates` found manifests with `REPO.rglob("Cargo.toml")`
+and then skipped any whose path contained `target` -- a filter on the
+*results*, so the walk still descended every `target/` first. That lane's
+`target/` had just gained a `-Zbuild-std` userland, and the function ran three
+times per push (once for the list, twice more for the summary's count).
+`scripts/check-crate-names.py`, also in the hook, had the identical loop.
+Both now walk through `gittree.WorkTree.files_under`, which prunes while
+walking: 0.3 s for the same 421 manifests git tracks.
+
+The comment in `gittree.WorkTree.files_under` already said this ("descending
+into `target/` to throw the results away is minutes of stat() on this tree");
+the two scripts predated or bypassed it. **To enumerate the repository, use
+the `gittree` seam, never `rglob` from the root: a filter after the walk
+decides what you keep, not what you pay for.** How long it takes depends on
+the size of an untracked, per-lane directory, so the same gate can be quick
+on one lane and stuck on another.
+
 ### Lesson 404: a variant's name is not its behaviour, and a tick that trusts the name ticks nothing (lane C, 2026-09-25)
 
 `design.txt` asks for "two options for desktop icon placement: snap to grid,

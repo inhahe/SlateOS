@@ -28,7 +28,6 @@ strictly worse than the real thing.
 
 from __future__ import annotations
 
-import ast
 import contextlib
 import ctypes
 import io
@@ -135,67 +134,144 @@ def skip(label, why):
     print(f"  SKIP {label}: {why}")
 
 
-#: Wall window for `host_headroom`: long enough that the ~15.6 ms scheduler
-#: grid is noise, short enough to be worth paying on a failure path.
-HEADROOM_WINDOW_S = 0.6
+# The host-measurement primitives -- host_headroom, ConcurrentProbe,
+# occupancy_over, stall_over and their constants -- live in hostload.py, shared
+# with the other suites that need to tell a starved host from a broken run.
+# They were written here, for the live cases below.
+from hostload import (  # noqa: E402
+    CONCURRENT_SAMPLE_S,
+    HEADROOM_WINDOW_S,
+    ConcurrentProbe,
+    HostStarved,
+    host_headroom,
+    occupancy_over,
+    stall_over,
+)
 
 
-def host_headroom(n, seconds=HEADROOM_WINDOW_S):
-    """Occupancy that `n` plain spinners actually obtain on this host, now.
+def host_explains(series, t0, t1):
+    """Why the host, not the code, answers for a failure in `[t0, t1]` -- or `None`.
 
-    Deliberately independent of `canary-load.py`: this measures the *machine*,
-    in order to decide whether a shortfall in the code under test is
-    attributable to the host.  Sharing an instrument with the thing being
-    judged would let a broken instrument agree with itself.
-
-    Two choices that matter:
-
-    * **Subprocesses, not `multiprocessing`.**  This suite runs its cases at
-      module scope and Windows spawns rather than forks, so a `Process` here
-      would re-import this file and run the entire suite again inside every
-      worker.
-    * **Each child times its own window** and reports its own `cpu / wall`,
-      rather than dividing every child by one shared window.  Process startup
-      on Windows costs tens of milliseconds and the children do not begin
-      together; against a shared window that skew reads as missing CPU, biasing
-      the probe toward "busy" and skipping cases on an idle host.  Self-timing
-      cancels it.
-
-    Returns mean per-spinner occupancy in 0.0..~1.0, or `None` if the probe
-    could not be run -- in which case the caller must not use it to excuse
-    anything.
+    Two ways, each measured by the probe beside the case over that interval:
+    plain spinners could not clear the occupancy floor (the host had no CPU
+    to give), or one went unscheduled for longer than the controller's poll
+    (the host would not give it when asked, which is what an assertion with a
+    one-poll tolerance measures). Neither is evidence about the code.
     """
-    lines = [
-        "import time, sys",
-        "c0 = time.process_time(); w0 = time.monotonic()",
-        "end = w0 + " + repr(float(seconds)),
-        "while time.monotonic() < end: pass",
-        "sys.stdout.write(repr((time.process_time() - c0,"
-        " time.monotonic() - w0)))",
-    ]
-    code = chr(10).join(lines)
+    headroom = occupancy_over(series, t0, t1)
+    if attribute_shortfall(0.0, headroom, cl.OCCUPANCY_FLOOR) == "host":
+        return (f"plain spinners alongside got {headroom:.3f} of a core -- the "
+                f"host's load, not this code's")
+    stall = stall_over(series, t0, t1)
+    if stall is not None and stall >= cl.POLL_SECONDS:
+        return (f"plain spinners alongside went {stall:.2f}s unscheduled, "
+                f"longer than the {cl.POLL_SECONDS}s poll these checks allow "
+                f"-- the host's scheduling, not this code's")
+    return None
+
+
+#: Set, to its measured reason, once a subprocess has timed out on a host too
+#: starved to run it (`note_timeout`). Every runner after that declines at
+#: once rather than spending a timeout of its own: at 0.06 of a core
+#: (2026-09-25, six lanes building) a `--check-names-only` run that needs well
+#: under a second took more than 90, and this suite holds dozens of runs.
+HOST_STARVED = None
+
+
+def note_timeout(what, seconds):
+    """`what` did not finish within `seconds`: whose fault was that?
+
+    Measured the way a live shortfall is: if plain spinners cannot clear the
+    occupancy floor right now, the host is starved -- the latch is set and the
+    reason returned. Otherwise the process hung, and `None` tells the caller to
+    report it as one. A probe taken right after a timeout of 90 s or more is
+    trusted here where it is not for the live cases: nothing makes a host that
+    was starved for that long idle within the next second.
+    """
+    global HOST_STARVED
+    headroom = host_headroom(2)
+    if attribute_shortfall(0.0, headroom, cl.OCCUPANCY_FLOOR) != "host":
+        return None
+    HOST_STARVED = (f"{what} did not finish within {seconds}s, and plain "
+                    f"spinners get {headroom:.3f} of a core on this host -- too "
+                    f"busy to answer, so live cases from here on were not asked")
+    return HOST_STARVED
+
+
+def live_check(label, got, want):
+    """`check`, for a check that reads a runner's output: a named skip once
+    the host has been found starved (`HOST_STARVED`), since the runner then
+    answered nothing."""
+    if HOST_STARVED is not None:
+        skip(label, HOST_STARVED)
+    else:
+        check(label, got, want)
+
+
+def live_check_true(label, cond, detail=""):
+    """`check_true`, latch-aware as `live_check` is."""
+    if HOST_STARVED is not None:
+        skip(label, HOST_STARVED)
+    else:
+        check_true(label, cond, detail)
+
+
+@contextlib.contextmanager
+def timing_case(name, probe=True):
+    """A scratch directory for one live case, with the host measured beside it.
+
+    The live cases ask physical questions -- was a line read before the stop,
+    did a spinner notice its parent die -- whose answers depend on processes
+    getting CPU when they ask for it, and on a host that cannot give it a
+    failure says nothing about this code. Lane F lost a boot to exactly that
+    on 2026-09-25, and a rerun here at 0.06 of a core failed five cases in
+    three sections and then crashed on a timeout.
+
+    So each live case runs beside a `ConcurrentProbe`. If it records failures,
+    or a runner inside it times out, while plain spinners over the same
+    interval could not clear the occupancy floor, the failures are withdrawn
+    and declined by name instead -- loudly, and never as a pass. On a host with
+    room a failure stands exactly as it did, and a timeout is reported as a
+    hang rather than escaping as a traceback. A runner that finds the latch
+    already set (`HOST_STARVED`) raises `HostStarved`, which ends the case here
+    as a named skip.
+
+    `probe=False` is for a case that measures the host itself (the live
+    occupancy case): a second pair of spinners would only compete with it.
+    """
+    before = len(FAILURES)
+    beside = ConcurrentProbe(2) if probe else None
+    t0 = time.monotonic()
+    starved = None
+    timed_out = None
     try:
-        procs = [
-            subprocess.Popen([sys.executable, "-c", code],
-                             stdout=subprocess.PIPE, text=True)
-            for _ in range(n)
-        ]
-    except OSError:
-        return None
-    ratios = []
-    for proc in procs:
-        try:
-            out, _ = proc.communicate(timeout=seconds * 20 + 30)
-            cpu, wall = ast.literal_eval(out.strip())
-        except Exception:  # noqa: BLE001 - a probe that fails excuses nothing
-            with contextlib.suppress(Exception):
-                proc.kill()
-            continue
-        if wall > 0:
-            ratios.append(cpu / wall)
-    if not ratios:
-        return None
-    return sum(ratios) / len(ratios)
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            try:
+                yield tmpdir
+            except HostStarved as exc:
+                starved = str(exc)
+            except subprocess.TimeoutExpired as exc:
+                timed_out = exc
+    finally:
+        t1 = time.monotonic()
+        series = beside.finish() if beside is not None else []
+    new = FAILURES[before:]
+    if starved is None and (new or timed_out is not None) and probe:
+        starved = host_explains(series, t0, t1)
+    if starved is not None:
+        if new:
+            del FAILURES[before:]
+            print(f"  (the {len(new)} FAIL line(s) above are withdrawn: the "
+                  f"host could not answer them)")
+            for failure in new:
+                skip(failure.split(": ", 1)[0], starved)
+        else:
+            skip(name, starved)
+        return
+    if timed_out is not None:
+        check_true(f"{name}: finishes within its timeout", False,
+                   f"timed out after {timed_out.timeout}s on a host with "
+                   f"headroom -- a hang")
 
 
 def attribute_shortfall(occupancy, headroom, floor):
@@ -314,7 +390,9 @@ def run_controller(serial, extra, wait_for=None, delay=0.0, spinners=0):
     is independent of how much CPU the spinners burn.  The one test that is
     *about* the burning passes a real count.
     """
-    with tempfile.TemporaryDirectory() as tmp:
+    if HOST_STARVED is not None:
+        raise HostStarved(HOST_STARVED)
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         record_path = os.path.join(tmp, "record.json")
         ready_path = os.path.join(tmp, "ready")
         stop_path = os.path.join(tmp, "stop")
@@ -336,13 +414,22 @@ def run_controller(serial, extra, wait_for=None, delay=0.0, spinners=0):
         time.sleep(delay)
         with open(stop_path, "w", encoding="utf-8", newline=""):
             pass
-        out = proc.communicate(timeout=90)[0]
+        try:
+            out = proc.communicate(timeout=90)[0]
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            with contextlib.suppress(Exception):
+                proc.communicate(timeout=30)
+            reason = note_timeout("the load controller", 90)
+            if reason is not None:
+                raise HostStarved(reason) from None
+            raise
         with open(record_path, encoding="utf-8") as handle:
             record = json.load(handle)
         return record, proc.returncode, out
 
 
-with tempfile.TemporaryDirectory() as tmpdir:
+with timing_case("replay #1") as tmpdir:
     serial = os.path.join(tmpdir, "serial.txt")
     thread = None
 
@@ -376,7 +463,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
     check("exit code 0 when the load fired", rc, 0)
 
 
-with tempfile.TemporaryDirectory() as tmpdir:
+with timing_case("replay #2") as tmpdir:
     serial = os.path.join(tmpdir, "serial.txt")
 
     def start_replay2():
@@ -393,7 +480,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
     check("exit code 1 when the load never fired", rc, 1)
 
 
-with tempfile.TemporaryDirectory() as tmpdir:
+with timing_case("replay: --at without --until") as tmpdir:
     serial = os.path.join(tmpdir, "serial.txt")
 
     def start_replay3():
@@ -429,7 +516,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # `drained_after_stop` is deliberately NOT asserted to be non-zero -- a poll
 # can legitimately land inside the burst, and pinning a number that depends on
 # that would make this test the very kind of race it exists to close.
-with tempfile.TemporaryDirectory() as tmpdir:
+with timing_case("replay: a burst just before the stop-file") as tmpdir:
     serial = os.path.join(tmpdir, "serial.txt")
 
     def start_replay_burst():
@@ -486,7 +573,7 @@ def pid_alive(pid):
         ctypes.windll.kernel32.CloseHandle(handle)
 
 
-with tempfile.TemporaryDirectory() as tmpdir:
+with timing_case("orphan defence") as tmpdir:
     serial = os.path.join(tmpdir, "serial.txt")
     ready = os.path.join(tmpdir, "ready")
     # No --at, so the spinners start burning immediately; a short grace so
@@ -546,7 +633,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # successful and was unusable.
 print("unmatched --until")
 
-with tempfile.TemporaryDirectory() as tmpdir:
+with timing_case("unmatched --until") as tmpdir:
     serial = os.path.join(tmpdir, "serial.txt")
 
     def start_replay4():
@@ -572,45 +659,58 @@ print("name validation")
 
 
 def run_validation(extra, known):
-    """Run only far enough to accept or reject the names. Returns (rc, out)."""
-    with tempfile.TemporaryDirectory() as tmp:
+    """Run only far enough to accept or reject the names. Returns (rc, out).
+
+    A timeout on a starved host returns `(None, reason)` and sets the latch,
+    so the checks after it -- `live_check`s -- decline by name; one on a host
+    with room is a hang, and says so. Never a traceback.
+    """
+    if HOST_STARVED is not None:
+        return None, HOST_STARVED
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         names_path = os.path.join(tmp, "names.txt")
         if known is not None:
             with open(names_path, "w", encoding="utf-8", newline="") as handle:
                 handle.write("\n".join(known) + "\n")
-        proc = subprocess.run(
-            [sys.executable, CANARY_LOAD, "--serial",
-             os.path.join(tmp, "nonexistent-serial.txt"),
-             "--spinners", "0", "--timeout", "5",
-             "--known-names", names_path] + extra,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            timeout=90)
+        try:
+            proc = subprocess.run(
+                [sys.executable, CANARY_LOAD, "--serial",
+                 os.path.join(tmp, "nonexistent-serial.txt"),
+                 "--spinners", "0", "--timeout", "5",
+                 "--known-names", names_path] + extra,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                timeout=90)
+        except subprocess.TimeoutExpired:
+            reason = note_timeout(f"`canary-load.py {' '.join(extra)}`", 90)
+            return None, reason or (
+                "canary-load.py did not finish within 90s on a host with "
+                "headroom -- a hang")
         return proc.returncode, proc.stdout
 
 
 rc, out = run_validation(["--at", "bench_05", "--until", "bench_99"], SUITE)
-check("a name absent from the known list is rejected", rc, 2)
-check_true("the rejection names the offending flag and value",
+live_check("a name absent from the known list is rejected", rc, 2)
+live_check_true("the rejection names the offending flag and value",
            "--until 'bench_99'" in out, out[-400:])
-check_true("and suggests the closest live names",
+live_check_true("and suggests the closest live names",
            "bench_09" in out or "bench_98" in out or "closest" in out,
            out[-400:])
-check_true("nothing was spawned before the rejection",
+live_check_true("nothing was spawned before the rejection",
            "load controller ready" not in out, out[-400:])
 
 # A typo one character off is the case the suggestion exists for.
 rc, out = run_validation(["--at", "bench_O5"], SUITE)
-check("a typo'd --at is rejected too", rc, 2)
-check_true("and bench_05 is offered as the correction",
+live_check("a typo'd --at is rejected too", rc, 2)
+live_check_true("and bench_05 is offered as the correction",
            "bench_05" in out, out[-400:])
 
 # Absence of the file must not block a first run on a fresh checkout.
 rc, out = run_validation(["--at", "bench_05"], None)
-check_true("an absent known-names file does not reject anything",
+live_check_true("an absent known-names file does not reject anything",
            rc != 2, f"rc={rc}: {out[-300:]}")
 
 
-with tempfile.TemporaryDirectory() as tmpdir:
+with timing_case("name validation: a run writes its live names") as tmpdir:
     serial = os.path.join(tmpdir, "serial.txt")
     names_path = os.path.join(tmpdir, "names.txt")
 
@@ -687,13 +787,13 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # ends up somewhere the label does not say, and nothing in the output admits it.
 rc, out = run_validation(["--at", "scored_05", "--check-names-only"],
                          SUITE + ["alias scored_05 bench_05"])
-check("a scorecard name is translated, not refused", rc, 0)
-check_true("and the translation is stated",
+live_check("a scorecard name is translated, not refused", rc, 0)
+live_check_true("and the translation is stated",
            "scored_05" in out and "bench_05" in out, out[-400:])
 
 rc, out = run_validation(["--at", "scored_no_such", "--check-names-only"],
                          SUITE + ["alias scored_05 bench_05"])
-check("a name that is neither live nor a known scorecard name is still "
+live_check("a name that is neither live nor a known scorecard name is still "
       "refused", rc, 2)
 
 # The mirror-image trap. `bench_05` is a fine live name -- the load would fire
@@ -703,17 +803,17 @@ _graded = SUITE + ["alias scored_05 bench_05", "scored scored_05",
                    "scored bench_09"]
 rc, out = run_validation(["--at", "bench_05", "--check-names-only",
                           "--require-scored"], _graded)
-check("a live-only name is refused when the run will be graded", rc, 2)
-check_true("and the caller is told the name it should have passed",
+live_check("a live-only name is refused when the run will be graded", rc, 2)
+live_check_true("and the caller is told the name it should have passed",
            "scored_05" in out, out[-500:])
 rc, out = run_validation(["--at", "bench_05", "--check-names-only"], _graded)
-check("...but stands on its own without --require-scored", rc, 0)
+live_check("...but stands on its own without --require-scored", rc, 0)
 rc, out = run_validation(["--at", "scored_05", "--check-names-only",
                           "--require-scored"], _graded)
-check("a name good in both namespaces passes the graded check", rc, 0)
+live_check("a name good in both namespaces passes the graded check", rc, 0)
 rc, out = run_validation(["--at", "bench_09", "--check-names-only",
                           "--require-scored"], _graded)
-check("a name that needs no translation passes it too", rc, 0)
+live_check("a name that needs no translation passes it too", rc, 0)
 
 with tempfile.TemporaryDirectory() as tmpdir:
     names_path = os.path.join(tmpdir, "names.txt")
@@ -927,7 +1027,7 @@ check("a backwards clock contributes nothing rather than a negative",
       backwards["cpu_seconds_total"], 3.0)
 
 
-with tempfile.TemporaryDirectory() as tmpdir:
+with timing_case("spinner occupancy: a loaded run") as tmpdir:
     serial = os.path.join(tmpdir, "serial.txt")
 
     def start_replay6():
@@ -994,7 +1094,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 print()
 print("spinner occupancy (live)")
 
-with tempfile.TemporaryDirectory() as tmpdir:
+with timing_case("spinner occupancy (live)", probe=False) as tmpdir:
     serial = os.path.join(tmpdir, "serial.txt")
 
     def start_replay7():
@@ -1019,9 +1119,14 @@ with tempfile.TemporaryDirectory() as tmpdir:
     # controller's ordering logic, which a fast replay tests harder.  This one
     # is about a physical measurement, and a physical measurement needs enough
     # ticks under it to mean something.
-    record, rc, out = run_controller(
-        serial, ["--at", "bench_05", "--until", "bench_35"],
-        wait_for=start_replay7, delay=0.3, spinners=2)
+    # Plain spinners alongside the run, for attribution: see ConcurrentProbe.
+    probe = ConcurrentProbe(2)
+    try:
+        record, rc, out = run_controller(
+            serial, ["--at", "bench_05", "--until", "bench_35"],
+            wait_for=start_replay7, delay=0.3, spinners=2)
+    finally:
+        probe_series = probe.finish()
 
     occ = record["host_occupancy"]
 
@@ -1046,24 +1151,38 @@ with tempfile.TemporaryDirectory() as tmpdir:
     # Measured while writing this: 0.977 idle, 0.306 under twelve CPU hogs.
     # The boot test that prompted it reported 0.297.
     #
-    # Probed only when a case is about to fail, not up front: it costs a
-    # subprocess round per spinner, the passing path should not pay it, and
-    # measuring next to the failure attributes it better than measuring
-    # earlier would.
-    contended = False
+    # Measured ALONGSIDE the run, over the canary's own window, not after it:
+    # a probe taken next to the failure measured a different instant, and on
+    # a bursty host that instant can be idle while the run was starved (lane
+    # F, 2026-09-25: occupancy 0.113 with a later probe reading headroom). A
+    # run whose spinners never fired has no window, so its probe is judged
+    # over the probe's whole span instead -- the question is then whether the
+    # host was busy at any point the run could have used.
+    #
+    # A run that fired but never released -- `until-never-matched` -- has an
+    # open window, and its right edge is where the run was stopped; the probe
+    # stopped then too, so its last sample is the edge. (Until 2026-09-25 this
+    # passed `None` for it, the interval was unmeasurable, and the case failed
+    # as the code's on the very host that caused it: lane F, 224a24612.)
+    _ends = [s[-1][0] for s in probe_series if s]
+    if record.get("fired_monotonic") is not None:
+        win_t0 = record["fired_monotonic"]
+        win_t1 = record.get("released_monotonic")
+        if win_t1 is None:
+            win_t1 = min(_ends) if _ends else None
+    else:
+        _starts = [s[0][0] for s in probe_series if s]
+        win_t0 = max(_starts) if _starts else None
+        win_t1 = min(_ends) if _ends else None
+    concurrent = occupancy_over(probe_series, win_t0, win_t1)
+    print(f"  concurrent host headroom over the run's window: {concurrent}")
 
     def host_is_contended():
-        """True if the host cannot give this run's spinners a core each."""
-        global contended
-        if contended:
-            return True
-        headroom = host_headroom(record.get("spinners") or 2)
-        # Judged by `attribute_shortfall`, which is unit-tested below against
-        # the real numbers.  An occupancy of 0.0 is passed because the question
-        # here is only "can this host clear the floor at all".
-        contended = attribute_shortfall(0.0, headroom,
-                                        cl.OCCUPANCY_FLOOR) == "host"
-        return contended
+        """True if the host, measured alongside, explains this run's shortfall."""
+        # `host_explains` judges by `attribute_shortfall` -- unit-tested below
+        # against the real numbers -- and by the longest stall a plain spinner
+        # saw, since a starved controller misses the `--until` it waits for.
+        return host_explains(probe_series, win_t0, win_t1) is not None
 
     if occ is None and record.get("problem") == "until-never-matched" \
             and host_is_contended():
@@ -1077,7 +1196,16 @@ with tempfile.TemporaryDirectory() as tmpdir:
     if occ is not None:
         check("one CPU figure per spinner",
               len(occ["cpu_seconds"]), record["spinners"])
-        check("no spinner was starved", occ["idle_spinners"], 0)
+        if occ["idle_spinners"] and host_is_contended():
+            # A starved spinner is the host's doing when plain spinners
+            # running at the same moment could not clear the floor either.
+            # This check used to be the one live assertion with no such
+            # attribution at all.
+            skip("no spinner was starved",
+                 f"{occ['idle_spinners']} spinner(s) starved while plain "
+                 f"spinners alongside got {concurrent} -- the host's load")
+        else:
+            check("no spinner was starved", occ["idle_spinners"], 0)
         if occ["occupancy"] >= cl.OCCUPANCY_FLOOR:
             check_true("occupancy clears the floor", True)
         elif host_is_contended():
@@ -1088,8 +1216,9 @@ with tempfile.TemporaryDirectory() as tmpdir:
                  f"not this code's")
         else:
             check_true("occupancy clears the floor", False,
-                       f"occupancy {occ['occupancy']} (host has headroom, "
-                       f"so this is not contention)")
+                       f"occupancy {occ['occupancy']} while plain spinners "
+                       f"alongside got {concurrent} -- the host had room, "
+                       f"so this is not contention")
         # Upper bound too -- but on `occupancy_measured`, not `occupancy`.
         #
         # This assertion used to read `occupancy <= 2.0`, and on 2026-08-31 it
@@ -1120,12 +1249,16 @@ with tempfile.TemporaryDirectory() as tmpdir:
         # would silently restore the bug this check exists to catch.
         check_true("the measured span is recorded, not assumed",
                    occ["span_s"] is not None, occ)
-    if record.get("problem") == "load-not-applied" and host_is_contended():
-        # Same root cause as the floor case above: the controller sets this
-        # problem *because* occupancy fell short, so on a contended host it is
-        # a restatement of the host's load, not a second finding.
+    if record.get("problem") in ("load-not-applied", "until-never-matched") \
+            and host_is_contended():
+        # Same root cause as the cases above: the controller sets
+        # `load-not-applied` *because* occupancy fell short, and
+        # `until-never-matched` because a starved controller never reached the
+        # line it waits for -- so on a contended host either is a restatement
+        # of the host's load, not a second finding.
         skip("a correctly-loaded run is not flagged as unapplied",
-             "the run was flagged load-not-applied because the host is busy")
+             f"the run was flagged {record.get('problem')} because the host "
+             f"is busy")
     else:
         check_true("a correctly-loaded run is not flagged as unapplied",
                    record.get("problem") is None, record.get("problem"))
@@ -1156,55 +1289,9 @@ print("wrapper argument parsing")
 CANARY_LOAD_TEST = "scripts/canary-load-test.sh"
 
 
-def find_msys_bash():
-    """Git-for-Windows bash, located explicitly rather than taken from PATH.
-
-    **`bash` on the Windows PATH is WSL's**, at `C:\\Windows\\System32\\bash.exe`,
-    and `shutil.which("bash")` finds that one. It runs, so a test that used it
-    would look like it worked -- while actually exercising a Linux environment
-    with a `/mnt/d/...` view of the disk, no MSVC, and none of the toolchain the
-    script is written against. Every shell script in this repo is run under
-    Git/MSYS bash, so testing them under WSL would be testing something the
-    project never executes.
-
-    Candidates are *verified*, not assumed: `uname -o` must say `Msys`. A guess
-    that silently fell back to WSL is exactly the failure this function exists
-    to prevent, so an unverifiable candidate is skipped rather than used.
-    """
-    candidates = []
-    override = os.environ.get("MSYS_BASH")
-    if override:
-        candidates.append(override)
-    # Git bash usually reaches the Windows PATH via its own `usr\bin` or
-    # `mingw64\bin`; both sit beside a `bin\bash.exe` under the install root.
-    for entry in os.environ.get("PATH", "").split(os.pathsep):
-        low = entry.lower().replace("/", "\\")
-        for marker in ("\\git\\usr\\bin", "\\git\\mingw64\\bin", "\\git\\bin"):
-            if low.endswith(marker):
-                root = entry
-                for _ in range(marker.count("\\")):
-                    root = os.path.dirname(root)
-                candidates.append(os.path.join(root, "bin", "bash.exe"))
-                candidates.append(os.path.join(root, "usr", "bin", "bash.exe"))
-    candidates += [
-        r"C:\Program Files\Git\bin\bash.exe",
-        r"C:\Program Files\Git\usr\bin\bash.exe",
-        r"C:\Program Files (x86)\Git\bin\bash.exe",
-    ]
-    seen = set()
-    for candidate in candidates:
-        key = os.path.normcase(os.path.abspath(candidate))
-        if key in seen or not os.path.exists(candidate):
-            continue
-        seen.add(key)
-        try:
-            probe = subprocess.run([candidate, "-c", "uname -o"],
-                                   capture_output=True, text=True, timeout=60)
-        except OSError:
-            continue
-        if probe.returncode == 0 and "msys" in probe.stdout.strip().lower():
-            return candidate
-    return None
+# The search lives in `msysbash.py` now, shared with every suite that runs a
+# repository shell script; this file's copy is where it came from.
+from msysbash import find_msys_bash  # noqa: E402
 
 
 BASH = find_msys_bash()
@@ -1240,20 +1327,38 @@ def wrapper_env():
     return env
 
 
-def run_wrapper(args):
-    """`canary-load-test.sh <args> --dry-run` -> (returncode, stdout+stderr).
+#: How long one wrapper invocation may take. A dry run parses arguments and
+#: prints a plan; on any host with a core to spare that is a few seconds.
+WRAPPER_TIMEOUT_S = 120
+
+def run_wrapper(args, dry_run=True):
+    """`canary-load-test.sh <args> [--dry-run]` -> (returncode, stdout+stderr).
 
     With no MSYS bash this returns a sentinel rather than raising, so the
     section reports one clear cause followed by ordinary failures instead of a
     traceback that hides which checks would have run.
+
+    A timeout takes the same route rather than escaping as a traceback, which
+    is what it did until 2026-09-25 and what failed a boot's tooling-suite
+    gate. Who is responsible is measured (`note_timeout`): on a starved host
+    the latch is set and every later wrapper case declines by name at once;
+    on a host with room the wrapper hung, and that is reported against it.
     """
     if BASH is None:
         return None, "no MSYS bash available"
-    proc = subprocess.run(
-        [BASH, CANARY_LOAD_TEST, *args, "--dry-run"],
-        capture_output=True, text=True, cwd=REPO_ROOT, timeout=120,
-        env=wrapper_env(),
-    )
+    if HOST_STARVED is not None:
+        return None, HOST_STARVED
+    try:
+        proc = subprocess.run(
+            [BASH, CANARY_LOAD_TEST, *args] + (["--dry-run"] if dry_run else []),
+            capture_output=True, text=True, cwd=REPO_ROOT,
+            timeout=WRAPPER_TIMEOUT_S, env=wrapper_env(),
+        )
+    except subprocess.TimeoutExpired:
+        reason = note_timeout("`canary-load-test.sh`", WRAPPER_TIMEOUT_S)
+        return None, reason or (
+            f"the wrapper did not answer within {WRAPPER_TIMEOUT_S}s on a host "
+            f"with headroom -- it hung")
     return proc.returncode, proc.stdout + proc.stderr
 
 
@@ -1333,7 +1438,7 @@ for label, args in [
      [f"--at={WINDOW_AT}", "--load-until", WINDOW_UNTIL]),
 ]:
     rc, out = run_wrapper(args)
-    check_true(label, rc == 0 and WANT_WINDOW in out,
+    live_check_true(label, rc == 0 and WANT_WINDOW in out,
                f"rc={rc} out={out[-300:]}")
 
 # The spinner count, in each of its three forms.
@@ -1343,7 +1448,7 @@ for label, args, want in [
     ("--spinners N", ["--spinners", "3"], "3 spinners"),
 ]:
     rc, out = run_wrapper(args)
-    check_true(label, rc == 0 and want in out, f"rc={rc} out={out[-300:]}")
+    live_check_true(label, rc == 0 and want in out, f"rc={rc} out={out[-300:]}")
 
 # Rejections. Each of these would otherwise produce a *plausible-looking* run
 # that answers a different question than the one asked -- which is worse than a
@@ -1378,7 +1483,7 @@ for label, args, want in [
      "unknown argument: --load-during"),
 ]:
     rc, out = run_wrapper(args)
-    check_true(label, rc == 2 and want in out,
+    live_check_true(label, rc == 2 and want in out,
                f"rc={rc} wanted {want!r} in output; out={out[-300:]}")
 
 # The genuinely-trailing case, with nothing after the flag at all. These run
@@ -1395,14 +1500,8 @@ for label, args, want in [
     ("--spinners as the final argument is refused", ["--spinners"],
      "--spinners needs a count"),
 ]:
-    if BASH is None:
-        rc, out = None, "no MSYS bash available"
-    else:
-        proc = subprocess.run([BASH, CANARY_LOAD_TEST, *args],
-                              capture_output=True, text=True, cwd=REPO_ROOT,
-                              timeout=120, env=wrapper_env())
-        rc, out = proc.returncode, proc.stdout + proc.stderr
-    check_true(label, rc == 2 and want in out,
+    rc, out = run_wrapper(args, dry_run=False)
+    live_check_true(label, rc == 2 and want in out,
                f"rc={rc} wanted {want!r} in output; out={out[-300:]}")
 
 # A dry run must leave the previous experiment's evidence alone. It exits before
@@ -1413,7 +1512,7 @@ serial_path = os.path.join(REPO_ROOT, "build", "serial-test.txt")
 before = os.path.exists(serial_path)
 before_size = os.path.getsize(serial_path) if before else None
 run_wrapper(["--at", WINDOW_AT, "--until", WINDOW_UNTIL])
-check_true("a dry run does not delete the previous run's serial log",
+live_check_true("a dry run does not delete the previous run's serial log",
            os.path.exists(serial_path) == before
            and (not before or os.path.getsize(serial_path) == before_size),
            f"existed={before} size={before_size}")
@@ -1422,7 +1521,7 @@ check_true("a dry run does not delete the previous run's serial log",
 # the specific regression that motivated all of the above: if this line stops
 # parsing, a pre-registered experiment has become unrunnable as published.
 rc, out = run_wrapper(["--at", "io_ring_nop", "--until", "crypto_poly1305_1KiB"])
-check_true("PREDICTION P23's registered command parses",
+live_check_true("PREDICTION P23's registered command parses",
            rc == 0 and "from 'io_ring_nop' until 'crypto_poly1305_1KiB'" in out,
            f"rc={rc} out={out[-300:]}")
 
@@ -1440,7 +1539,7 @@ if NAMES is not None:
     orphans = sorted(n for n in scored if n not in aliases and n not in live)
     if orphans:
         rc, out = run_wrapper(["--at", orphans[0], "--until", WINDOW_UNTIL])
-        check_true("a scored name with no live result line is refused by name",
+        live_check_true("a scored name with no live result line is refused by name",
                    rc == 2 and orphans[0] in out
                    and "not a live benchmark name" in out,
                    f"orphan={orphans[0]} rc={rc} out={out[-300:]}")
@@ -1452,7 +1551,7 @@ if NAMES is not None:
     if unscored:
         back = next(s for s, lv in aliases.items() if lv == unscored[0])
         rc, out = run_wrapper(["--at", unscored[0], "--until", WINDOW_UNTIL])
-        check_true("a live name that never reaches the scorecard is refused, "
+        live_check_true("a live name that never reaches the scorecard is refused, "
                    "naming the spelling to use instead",
                    rc == 2 and "never reaches the scorecard" in out
                    and back in out,
@@ -1484,6 +1583,9 @@ for label, occupancy, headroom, want in [
 ]:
     check(label, attribute_shortfall(occupancy, headroom, cl.OCCUPANCY_FLOOR),
           want)
+
+# occupancy_over and stall_over are unit-tested in test-hostload.py, beside
+# the module they moved to.
 
 print()
 if SKIPS:

@@ -43,6 +43,8 @@ BOOT_TEST = os.path.join(REPO_ROOT, "scripts", "boot-test.sh")
 
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 import gitenv  # noqa: E402
+import hostload  # noqa: E402
+import msysbash  # noqa: E402
 import srcload  # noqa: E402
 
 # The fixtures below are throwaway repositories picked with `-C` and `cwd=`.
@@ -692,9 +694,14 @@ def _run_clippy_gate(probe_body, commit_wait, timeout=60):
             )
 
         try:
-            return subprocess.run(
-                ["bash", "harness.sh"], cwd=tmp, timeout=timeout,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            # `None` means "the gate did not terminate", which the cases read
+            # as a finding -- right on a host with room, and wrong on one too
+            # starved to run a shell script in `timeout` seconds, which
+            # `run_measured` raises as `HostStarved` instead.
+            return hostload.run_measured(
+                [msysbash.bash(), "harness.sh"], timeout, "the clippy gate",
+                cwd=tmp, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True)
         except subprocess.TimeoutExpired:
             return None
     finally:
@@ -808,6 +815,26 @@ def test_a_host_that_never_recovers_is_reported_as_host_load_not_as_a_crash():
           "so memory explains it" in done.stderr, True)
 
 
+def run_harness(tmp, timeout, what):
+    """Run `tmp/harness.sh` under the bash `boot-test.sh` runs under.
+
+    Returns the finished process, or `None` if it did not finish within
+    `timeout` seconds on a host with room -- a hang, which the caller reports
+    against the code. On a host too starved to run a shell script in that
+    time `hostload.run_measured` raises `HostStarved` instead, which `main`
+    declines by name: until 2026-09-25 this timeout escaped as a traceback and
+    failed the whole suite, on a host whose plain spinners got 0.012 of a core.
+    Measured beside the run: a probe taken after it caught a burst of headroom
+    and called a starved suite loop a hang.
+    """
+    try:
+        return hostload.run_measured(
+            [msysbash.bash(), "harness.sh"], timeout, what, cwd=tmp,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    except subprocess.TimeoutExpired:
+        return None
+
+
 def _run_prune_hook(free_gb, below_gb, pruner_rc=0):
     """Drive the real `prune_build_cache_if_low` against a stubbed volume.
 
@@ -847,9 +874,9 @@ def _run_prune_hook(free_gb, below_gb, pruner_rc=0):
                 "echo RETURNED rc=$?\n"
             )
 
-        proc = subprocess.run(
-            ["bash", "harness.sh"], cwd=tmp, timeout=60,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        proc = run_harness(tmp, 60, "the prune hook")
+        if proc is None:
+            return None, "the prune hook did not finish within 60s on a host with room -- a hang", None
         argv_path = os.path.join(tmp, "argv.txt")
         argv = None
         if os.path.exists(argv_path):
@@ -977,9 +1004,9 @@ def _run_python_suites(suites):
                 f"echo \"GATE_RETURNED rc=$?\"\n"
             )
 
-        proc = subprocess.run(
-            ["bash", "harness.sh"], cwd=tmp, timeout=180,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        proc = run_harness(tmp, 180, "the suite loop")
+        if proc is None:
+            return None, "the suite loop did not finish within 180s on a host with room -- a hang"
         return proc.returncode, proc.stdout
     finally:
         drop_fixture(tmp)
@@ -1246,8 +1273,14 @@ def main():
         print(f"swept {swept} fixture director{'y' if swept == 1 else 'ies'} "
               f"left by an earlier run")
 
-    for _name, fn in tests:
-        fn(**{p: {}[p] for p in inspect.signature(fn).parameters})
+    declined = []
+    for name, fn in tests:
+        try:
+            fn(**{p: {}[p] for p in inspect.signature(fn).parameters})
+        except hostload.HostStarved as exc:
+            # Loud and by name, never a pass: see `run_harness`.
+            print(f"SKIP  {name}: {exc}")
+            declined.append(name)
 
     print()
 
@@ -1278,10 +1311,15 @@ def main():
               "next run sweeps it. Anything else is a real leak; see "
               "known-issues.md A-FIXTURE-CLEANUP-LEAVES-EMPTY-DIRECTORIES.")
 
+    if declined:
+        print(f"{len(declined)} test(s) DECLINED -- the host could not answer "
+              f"them: {', '.join(declined)} (not a pass; re-run on a host with "
+              f"room for a verdict)")
     if _FAILURES:
         print(f"{len(_FAILURES)} FAILED: {', '.join(_FAILURES)}")
         return 1
-    print("all boot-test tests passed")
+    print("all boot-test tests passed"
+          + (f" ({len(declined)} declined)" if declined else ""))
     return 0
 
 

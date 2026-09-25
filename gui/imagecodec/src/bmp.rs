@@ -167,24 +167,30 @@ impl Bitfield {
 
     /// The channel's value in `data`, widened to 8 bits.
     fn read(self, data: u32) -> u8 {
-        let data = data.checked_shr(self.shift).unwrap_or(0);
-        let at = |table: &[u8], mask: u32| table.get((data & mask) as usize).copied().unwrap_or(0);
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "each arm masks to at most 8 bits first"
-        )]
-        match self.len {
-            1 => at(&WIDEN_1, 0b1),
-            2 => at(&WIDEN_2, 0b11),
-            3 => at(&WIDEN_3, 0b111),
-            4 => at(&WIDEN_4, 0b1111),
-            5 => at(&WIDEN_5, 0b1_1111),
-            6 => at(&WIDEN_6, 0b11_1111),
-            7 => (((data & 0x7F) << 1) | ((data & 0x7F) >> 6)) as u8,
-            8 => (data & 0xFF) as u8,
-            // 0, and nothing else can be: `from_mask` caps the length at 8.
-            _ => 0,
-        }
+        widen(data.checked_shr(self.shift).unwrap_or(0), self.len)
+    }
+}
+
+/// The low `len` bits of `value` widened to 8, as Chrome widens a channel of
+/// a 16- or 32-bit pixel: `round(v * 255 / (2^len - 1))`. A length of 0 is a
+/// channel that is not there, and reads 0; one over 8 is not a length this is
+/// ever given.
+pub(crate) fn widen(value: u32, len: u32) -> u8 {
+    let at = |table: &[u8], mask: u32| table.get((value & mask) as usize).copied().unwrap_or(0);
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "each arm masks to at most 8 bits first"
+    )]
+    match len {
+        1 => at(&WIDEN_1, 0b1),
+        2 => at(&WIDEN_2, 0b11),
+        3 => at(&WIDEN_3, 0b111),
+        4 => at(&WIDEN_4, 0b1111),
+        5 => at(&WIDEN_5, 0b1_1111),
+        6 => at(&WIDEN_6, 0b11_1111),
+        7 => (((value & 0x7F) << 1) | ((value & 0x7F) >> 6)) as u8,
+        8 => (value & 0xFF) as u8,
+        _ => 0,
     }
 }
 
@@ -228,16 +234,16 @@ impl Bitfields {
     }
 }
 
-const fn argb(a: u8, r: u8, g: u8, b: u8) -> u32 {
+pub(crate) const fn argb(a: u8, r: u8, g: u8, b: u8) -> u32 {
     u32::from_be_bytes([a, r, g, b])
 }
 
-fn le16(bytes: &[u8], at: usize) -> u16 {
+pub(crate) fn le16(bytes: &[u8], at: usize) -> u16 {
     let byte = |i: usize| bytes.get(at.saturating_add(i)).copied().unwrap_or(0);
     u16::from_le_bytes([byte(0), byte(1)])
 }
 
-fn le32(bytes: &[u8], at: usize) -> u32 {
+pub(crate) fn le32(bytes: &[u8], at: usize) -> u32 {
     let byte = |i: usize| bytes.get(at.saturating_add(i)).copied().unwrap_or(0);
     u32::from_le_bytes([byte(0), byte(1), byte(2), byte(3)])
 }

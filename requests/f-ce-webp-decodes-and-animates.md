@@ -6,13 +6,13 @@
 **Status:** OPEN — the decoder is on `lane-f`; the uses below are yours.
 
 **In short:** WebP pictures -- the format browsers save most images in --
-used to show as a plain coloured rectangle in the file manager. `imagecodec`
-now decodes every kind: lossless, lossy (photographs), with transparency,
+had no decoder here. `imagecodec` now decodes every kind: lossless, lossy (photographs), with transparency,
 and animated. Every entry point that already took PNG, JPEG and GIF takes
-WebP too with no change on your side, so thumbnails and the viewer already
-show them; what is left is a stale comment (lane C), telling the viewer's
-info panel that the format has a name (lane E), and playing animations (lane
-E).
+WebP too, so the viewer already shows them. The thumbnailer does not yet: it
+asks its own header parser for a size first, and that parser does not know
+WebP, so a WebP never reaches the decoder (lane C, one line). The rest is
+telling the viewer's info panel that the format has a name (lane E), and
+playing animations (lane E).
 
 ## What works without a change
 
@@ -24,11 +24,16 @@ and a still viewer show.
 
 ## Lane C
 
-- `gui/thumbs/src/lib.rs`, the comment above the colour-swatch fallback in
-  `generate_image_thumbnail` ("Today this is GIF, JPEG, WebP and ICO"): only
-  ICO still reaches the swatch that way, plus a PNG over `max_source_pixels`
-  or any broken file. (The same comment was already out of date for GIF and
-  JPEG -- `requests/f-ce-gif-decodes-and-animates.md`.)
+- `gui/thumbs/src/lib.rs`, `parse_image_dimensions`: it tries BMP, PNG, GIF
+  and JPEG parsers of its own, and a file none of them knows gets the plain
+  category placeholder before any decoder is tried -- so WebP files never
+  reach `try_decoded_thumbnail`, which would decode them. Falling back to
+  `imagecodec::dimensions` (which reads every format `imagecodec` decodes, from
+  the headers alone) is the whole fix; replacing the four parsers with it
+  would also mend the BMP one (see `requests/f-ce-bmp-decodes-as-chrome-does.md`).
+- The comment above the colour-swatch fallback in `generate_image_thumbnail`
+  ("Today this is GIF, JPEG, WebP and ICO") is then out of date for WebP. (It
+  already was for GIF and JPEG -- `requests/f-ce-gif-decodes-and-animates.md`.)
 - If the thumbnailer marks animations (a badge), `imagecodec::webp::Animation::new(bytes,
   limits)?.frame_count() > 1` reads the structure without decoding a frame,
   exactly as for GIF.

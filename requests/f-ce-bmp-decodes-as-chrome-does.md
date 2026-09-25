@@ -13,6 +13,13 @@ does, including which damaged files to refuse (design-decisions.md §1314).
 The viewer already picks it up with no change; the two private readers are
 now a second, weaker opinion on the same files, and can go.
 
+**And icons.** `.ico` and `.cur` files decode too (`imagecodec::ico`): the
+image Chrome shows (the largest, then the deepest), with its transparency
+mask, by Chrome's rules (design-decisions.md §1315). The thumbnailer's own
+header parser does not know icons, so they get the plain placeholder before
+any decoder is tried; the `imagecodec::dimensions` fallback asked for below
+(and in the WebP request) lets them through.
+
 ## What works without a change
 
 `imagecodec::decode`, `decode_scaled` and `dimensions` dispatch on the
@@ -35,7 +42,11 @@ displays BMPs as soon as this reaches `main`.
   `try_decoded_thumbnail` like everything else.
 - `parse_bmp_dimensions` reads width and height at fixed offsets, which is
   wrong for OS/2 1.x files (16-bit fields at 18 and 20).
-  `imagecodec::dimensions` reads the header properly, for every kind.
+  `imagecodec::dimensions` reads the header properly, for every kind -- and
+  for icons and WebP, which `parse_image_dimensions` does not know at all, so
+  that they fall to the plain placeholder before reaching a decoder. Using it
+  in `parse_image_dimensions` (as the only parser, or after the four) is the
+  one change that lets BMP, ICO and WebP thumbnails through.
 
 ## Lane E
 

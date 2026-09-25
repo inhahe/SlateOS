@@ -104,6 +104,10 @@
 //! exactly Chrome's pixels, and refusing exactly the files Chrome refuses.
 //! See [`bmp`].
 //!
+//! ICO and CUR, Windows icons and cursors, as Chrome reads them: the best of
+//! an icon's images -- PNG, or BMP with its transparency mask -- by Chrome's
+//! own rules for which is best and for when the mask applies. See [`ico`].
+//!
 //! # Picture files for *other* crates' tests
 //!
 //! [`testing`] emits real, small PNGs. It is public rather than `#[cfg(test)]`
@@ -121,6 +125,7 @@ use core::fmt;
 
 pub mod bmp;
 pub mod gif;
+pub mod ico;
 pub mod jpeg;
 pub mod png;
 mod scale;
@@ -329,6 +334,9 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
     if bmp::is_bmp(bytes) {
         return bmp::decode(bytes, limits);
     }
+    if ico::is_ico(bytes) {
+        return ico::decode(bytes, limits);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -369,6 +377,9 @@ pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> Im
     if bmp::is_bmp(bytes) {
         return bmp::decode_scaled(bytes, limits, max_w, max_h);
     }
+    if ico::is_ico(bytes) {
+        return ico::decode_scaled(bytes, limits, max_w, max_h);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -397,6 +408,9 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     }
     if bmp::is_bmp(bytes) {
         return bmp::dimensions(bytes);
+    }
+    if ico::is_ico(bytes) {
+        return ico::dimensions(bytes);
     }
     Err(ImageError::UnknownFormat)
 }

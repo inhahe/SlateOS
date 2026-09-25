@@ -1712,7 +1712,7 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
       _(the shell drives these directly as the user's own gesture; a program
       asking for the same transition needs the matching `power.*` capability —
       §1.5 → Capability Types — Power / Session Control)_
-- [ ] Input field for finding and running apps
+- [x] Input field for finding and running apps — 2026-09-25: typing with the start menu open searches it (the launcher's ranking), arrows and Enter choose, and Enter with nothing found runs the text as the Run box would.
 - [ ] Start menu icon: round, shrunken version of the XOR logo (`xor2.png`)
 
 _Kexec-style OS reboot without rebooting the PC, available as a power menu option.

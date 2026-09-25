@@ -180,6 +180,8 @@ use guitk::render::RenderTree;
 use guitk::step;
 use guitk::style::{Border, CornerRadii, Shadow};
 use guitk::text;
+use guitk::textedit::{self, SingleLine};
+use guitk::textinput::{KeyEdit, TextInput};
 use guitk::theme::with_alpha;
 use guitk::wheel;
 use hotkeys::HotkeyAction;
@@ -391,6 +393,14 @@ const START_MENU_HEIGHT: f32 = 400.0;
 /// Space above the first application row, holding the "Applications" heading.
 const START_MENU_TOP_PADDING: f32 = 50.0;
 const START_MENU_ROW_HEIGHT: f32 = 36.0;
+/// How strongly the start menu marks the row the keyboard is on: the accent
+/// at this alpha, under the row's own text.
+const START_MENU_SELECTED_ALPHA: u8 = 70;
+/// How strongly the start menu draws a hint -- the empty search field's
+/// "Type to search", and what Enter will do when nothing is found: the
+/// menu's text colour at this alpha, quieter than anything that can be
+/// chosen.
+const START_MENU_HINT_ALPHA: u8 = 150;
 /// Space below the last application row, holding the power options.
 const START_MENU_FOOTER: f32 = 48.0;
 /// Width of the scroll indicator drawn when the list is longer than the menu.
@@ -1213,6 +1223,15 @@ pub struct DesktopShell {
     /// desktop or the menu's own pinned rows. See
     /// [`finish_start_press`](Self::finish_start_press).
     start_drag: Option<StartDrag>,
+    /// What has been typed into the start menu's search field. Empty is the
+    /// ordinary menu; anything else lists only the programs it finds, best
+    /// first. Emptied each time the menu opens, as a search box is.
+    start_query: TextInput,
+    /// The start-menu row the keyboard is on, as an index into
+    /// [`start_menu_entries`](Self::start_menu_entries): `None` until an arrow
+    /// key is pressed, and again whenever the search changes. Enter starts it;
+    /// with none, Enter starts the best match.
+    start_selected: Option<usize>,
     /// Programs the user pinned to the top of the start menu, in their
     /// order: dropped there, or chosen with "Pin to Start menu". Listed
     /// above the launcher's programs, and a pinned program is still listed
@@ -1826,6 +1845,8 @@ impl DesktopShell {
             start_drag: None,
             start_pins: Vec::new(),
             start_pins_dirty: false,
+            start_query: TextInput::new(),
+            start_selected: None,
             carry_at: (0.0, 0.0),
             button_order: Vec::new(),
             window_press: None,
@@ -2758,16 +2779,58 @@ impl DesktopShell {
     /// above the first: every row -- its hit test, its scroll, its
     /// right-click menu, a drag from it -- is then the same row, asked of
     /// the same index.
+    ///
+    /// While something is typed in the search field, only the programs it
+    /// finds, best first and each once -- a pinned program is also in the
+    /// list below, and a search that found it twice would say so twice.
+    /// Ranked by the launcher's own rule (`launcher::search_score`); ties
+    /// keep menu order.
     #[must_use]
     pub fn start_menu_entries(&self) -> Vec<&AppEntry> {
-        self.start_pins
-            .iter()
-            .chain(
-                self.apps.iter().filter(|app| {
-                    matches!(app.category, Category::Application | Category::Setting)
-                }),
-            )
-            .collect()
+        let listed = self.start_pins.iter().chain(
+            self.apps
+                .iter()
+                .filter(|app| matches!(app.category, Category::Application | Category::Setting)),
+        );
+        let query = self.start_query.text().trim();
+        if query.is_empty() {
+            return listed.collect();
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut found: Vec<(u32, usize, &AppEntry)> = listed
+            .filter(|entry| seen.insert(entry.executable_path.as_str()))
+            .enumerate()
+            .filter_map(|(order, entry)| {
+                launcher::search_score(query, entry).map(|score| (score, order, entry))
+            })
+            .collect();
+        found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        found.into_iter().map(|(_, _, entry)| entry).collect()
+    }
+
+    /// How many of the rows at the top of the start menu are its pinned
+    /// programs: all of them in the ordinary menu, none while searching --
+    /// search results are in the order they were found, and not the user's to
+    /// arrange by dropping onto them.
+    fn start_pins_listed(&self) -> usize {
+        if self.start_query.text().trim().is_empty() {
+            self.start_pins.len()
+        } else {
+            0
+        }
+    }
+
+    /// The start menu's search field, in the space above the rows.
+    #[must_use]
+    pub fn start_search_rect(&self) -> Rect {
+        let menu = self.start_menu_rect();
+        let inset = self.scale(12.0);
+        Rect::new(
+            menu.x + inset,
+            menu.y + self.scale(10.0),
+            (menu.w - inset * 2.0).max(0.0),
+            self.scale(30.0),
+        )
     }
 
     /// The programs pinned to the top of the start menu, in order.
@@ -2898,7 +2961,7 @@ impl DesktopShell {
     /// its upper half, after it when on its lower half, and after them all
     /// when let go on the start button.
     fn start_pin_insert_boundary(&self, x: f32, y: f32) -> usize {
-        let pins = self.start_pins.len();
+        let pins = self.start_pins_listed();
         if let Hit::StartMenuEntry(index) = self.hit_test(x, y)
             && index < pins
             && let Some(row) = index.checked_sub(self.start_menu_scroll)
@@ -2967,6 +3030,10 @@ impl DesktopShell {
             // must be rewound too — otherwise a menu opened just after a
             // part-notch scroll steps off row 0 on the next small delta.
             self.start_menu_wheel.reset();
+            // A search box opens empty: last time's search is not a question
+            // anyone is asking now.
+            self.start_query.clear();
+            self.start_selected = None;
         }
     }
 
@@ -4857,6 +4924,14 @@ impl DesktopShell {
             };
         }
 
+        // The start menu owns the keyboard while it is open, as every popup
+        // here does: typing searches it, the arrows walk its rows, Enter
+        // starts one and Escape empties the search, then closes the menu.
+        // After the pin menu, which opens over it and so owns the keys first.
+        if self.start_menu_open {
+            return self.key_on_start_menu(key);
+        }
+
         // The overview gets every press before the shortcut table does, and
         // swallows the ones it does not recognise. It has a text field in it:
         // if the table went first, typing "d" into the search bar would show the
@@ -4917,6 +4992,141 @@ impl DesktopShell {
         match self.bound_action(key) {
             Some(action) => self.run_desktop_action(&action),
             None => HotkeyOutcome::ignored(),
+        }
+    }
+
+    /// One press while the start menu is open.
+    ///
+    /// Typed text goes to the search field, and every key that is not the
+    /// field's goes no further than the menu -- except a chord with Super,
+    /// which is the desktop's: the Super key that opened the menu closes it
+    /// again, and Super+E closes it and opens the file manager.
+    fn key_on_start_menu(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        let is_super =
+            key.modifiers.super_key || matches!(key.key, Key::LeftSuper | Key::RightSuper);
+        if is_super {
+            return match self.bound_action(key) {
+                // The chord that opened the menu closes it.
+                Some(HotkeyAction::ToggleStartMenu) => {
+                    self.run_desktop_action(&HotkeyAction::ToggleStartMenu)
+                }
+                // Any other gets the menu out of its way first. The bare Super
+                // key opens the menu as it goes down, so Super+E arrives with
+                // the menu open; left there, it would sit over the file
+                // manager the chord just asked for.
+                Some(action) => {
+                    self.close_start_menu();
+                    self.run_desktop_action(&action)
+                }
+                None => HotkeyOutcome::consumed(),
+            };
+        }
+        match key.key {
+            Key::Escape => {
+                if self.start_query.text().is_empty() {
+                    self.close_start_menu();
+                } else {
+                    self.start_query.clear();
+                    self.search_changed();
+                }
+                HotkeyOutcome::consumed()
+            }
+            Key::Down => {
+                self.move_start_selection(true);
+                HotkeyOutcome::consumed()
+            }
+            Key::Up => {
+                self.move_start_selection(false);
+                HotkeyOutcome::consumed()
+            }
+            Key::Enter => self.start_menu_enter(),
+            _ => {
+                let size = self.font_size(TextRole::Body);
+                match self
+                    .start_query
+                    .edit_key(key, size, guitk::render::FontWeightHint::Regular)
+                {
+                    KeyEdit::Changed => {
+                        self.search_changed();
+                        HotkeyOutcome::consumed()
+                    }
+                    KeyEdit::Handled => HotkeyOutcome::consumed(),
+                    // Not the field's -- Tab, a function key, Alt+Tab. A
+                    // shortcut still works with the menu up; anything else
+                    // goes no further than the menu.
+                    KeyEdit::Unhandled => match self.bound_action(key) {
+                        Some(action) => self.run_desktop_action(&action),
+                        None => HotkeyOutcome::consumed(),
+                    },
+                }
+            }
+        }
+    }
+
+    /// The search changed: the list is a different list, so the keyboard's
+    /// row and the scroll through the old one mean nothing now.
+    fn search_changed(&mut self) {
+        self.start_selected = None;
+        self.start_menu_scroll = 0;
+        self.start_menu_wheel.reset();
+    }
+
+    /// Move the keyboard's row one step, keeping it on screen. From no row,
+    /// Down goes to the first and Up to the last.
+    fn move_start_selection(&mut self, down: bool) {
+        let count = self.start_menu_entries().len();
+        let Some(last) = count.checked_sub(1) else {
+            return;
+        };
+        let next = match (self.start_selected, down) {
+            (None, true) => 0,
+            (None, false) => last,
+            (Some(row), true) => row.saturating_add(1).min(last),
+            (Some(row), false) => row.saturating_sub(1),
+        };
+        self.start_selected = Some(next);
+        let rows = self.start_menu_visible_rows().max(1);
+        if next < self.start_menu_scroll {
+            self.start_menu_scroll = next;
+        } else if next >= self.start_menu_scroll.saturating_add(rows) {
+            self.start_menu_scroll = next.saturating_add(1).saturating_sub(rows);
+        }
+    }
+
+    /// Enter in the start menu: start the row the keyboard is on, or the best
+    /// match for what was typed -- or, when nothing listed matches, run what
+    /// was typed as the Run box would, since the field is for "finding *and
+    /// running*" (`design.txt`).
+    fn start_menu_enter(&mut self) -> HotkeyOutcome {
+        let query = self.start_query.text().trim().to_string();
+        let row = self
+            .start_selected
+            .or_else(|| (!query.is_empty()).then_some(0));
+        let chosen = row.and_then(|row| {
+            self.start_menu_entries()
+                .get(row)
+                .map(|entry| entry.executable_path.clone())
+        });
+        if let Some(exec) = chosen {
+            self.close_start_menu();
+            return HotkeyOutcome::start(vec![hotkeys::Launch::program(PathBuf::from(exec))]);
+        }
+        if query.is_empty() {
+            return HotkeyOutcome::consumed();
+        }
+        // A quote left open is not something to guess the end of; the menu
+        // stays up with the line as it was, to be finished.
+        let Ok(words) = run_dialog::split_words(&query) else {
+            return HotkeyOutcome::consumed();
+        };
+        let request = run_dialog::RunRequest {
+            whole: std::ffi::OsString::from(&query),
+            words: words.into_iter().map(std::ffi::OsString::from).collect(),
+        };
+        self.close_start_menu();
+        match self.run_request(request) {
+            Some(launch) => HotkeyOutcome::start(vec![launch]),
+            None => HotkeyOutcome::consumed(),
         }
     }
 
@@ -5994,14 +6204,9 @@ impl DesktopShell {
             radii,
         );
 
-        // Title
-        tree.text(
-            menu.x + self.scale(16.0),
-            menu.y + self.scale(16.0),
-            "Applications",
-            self.theme.accent_color,
-            self.font_size(TextRole::Heading),
-        );
+        // The search field, where the title was: the menu is a list of
+        // programs either way, and the field says how to find one in it.
+        self.render_start_search(&mut tree);
 
         // Application entries. Which entry a row shows is asked of
         // `start_menu_entry_at`, the same function the hit test asks, so a
@@ -6017,6 +6222,21 @@ impl DesktopShell {
                 break;
             };
             let rect = self.start_menu_row_rect(row);
+            // The keyboard's row, marked as the accent marks "you are here"
+            // everywhere else in the shell.
+            if self.start_selected == Some(index) {
+                fill_round(
+                    &mut tree,
+                    Rect::new(
+                        rect.x + self.scale(6.0),
+                        rect.y + self.scale(2.0),
+                        (rect.w - self.scale(12.0)).max(0.0),
+                        (rect.h - self.scale(4.0)).max(0.0),
+                    ),
+                    with_alpha(self.theme.accent_color, START_MENU_SELECTED_ALPHA),
+                    CornerRadii::all(self.scale(4.0)),
+                );
+            }
             tree.text(
                 rect.x + self.scale(24.0),
                 rect.y + self.scale(8.0),
@@ -6027,7 +6247,7 @@ impl DesktopShell {
             // A line along the top of the first row after the pins, so the
             // user's own choices read as a group apart from the launcher's
             // list -- which may name the same programs again below.
-            if index == self.start_pins.len() && index > 0 {
+            if index == self.start_pins_listed() && index > 0 {
                 let inset = self.scale(16.0);
                 tree.push(guitk::render::RenderCommand::FillRect {
                     x: rect.x + inset,
@@ -6098,6 +6318,59 @@ impl DesktopShell {
         }
 
         Some(tree)
+    }
+
+    /// Draw the start menu's search field: what has been typed, with a caret,
+    /// or a hint saying what typing does -- and, when the search finds
+    /// nothing, what Enter will do instead.
+    fn render_start_search(&self, tree: &mut RenderTree) {
+        let field = self.start_search_rect();
+        let size = self.font_size(TextRole::Body);
+        let radii = CornerRadii::all(self.scale(4.0));
+        stroke_round(tree, field, self.theme.accent_color, self.scale(1.0), radii);
+        let inset = self.scale(8.0);
+        let line = text::line_height(size, guitk::render::FontWeightHint::Regular);
+        let y = field.y + ((field.h - line) / 2.0).max(0.0);
+        let query = self.start_query.text();
+        textedit::draw(
+            tree,
+            &SingleLine {
+                text: query,
+                cursor: self.start_query.cursor(),
+                selection_anchor: self.start_query.selection_anchor(),
+                focused: true,
+                x: field.x + inset,
+                y,
+                width: (field.w - inset * 2.0).max(1.0),
+                line_height: line,
+                font_size: size,
+                weight: guitk::render::FontWeightHint::Regular,
+                color: self.theme.start_menu_fg,
+                selection_bg: self.theme.accent_color,
+                selection_fg: self.theme.start_menu_bg,
+                caret_width: self.appearance.caret_width(),
+            },
+        );
+        if query.is_empty() {
+            tree.text_in(
+                field.x + inset + self.scale(4.0),
+                y,
+                (field.w - inset * 2.0).max(0.0),
+                "Type to search",
+                with_alpha(self.theme.start_menu_fg, START_MENU_HINT_ALPHA),
+                size,
+            );
+        } else if self.start_menu_entries().is_empty() {
+            let row = self.start_menu_row_rect(0);
+            tree.text_in(
+                row.x + self.scale(24.0),
+                row.y + self.scale(8.0),
+                (row.w - self.scale(36.0)).max(0.0),
+                "Nothing found. Press Enter to run it.",
+                with_alpha(self.theme.start_menu_fg, START_MENU_HINT_ALPHA),
+                self.font_size(TextRole::Item),
+            );
+        }
     }
 
     /// Draw the power menu into the start menu's tree.
@@ -6944,7 +7217,7 @@ impl DesktopShell {
             // Only the pinned rows take a drop: the rest of the list is the
             // launcher's, in the launcher's order, and not the user's to
             // arrange.
-            Hit::StartMenuEntry(index) if index < self.start_pins.len() => {
+            Hit::StartMenuEntry(index) if index < self.start_pins_listed() => {
                 Some(CarryTarget::StartMenu)
             }
             Hit::Desktop if self.window_at(x, y).is_none() => Some(CarryTarget::Desktop),
@@ -18970,6 +19243,260 @@ mod icon_area_tests {
         assert!(
             bottom <= shell.taskbar_rect().y,
             "under the bar at {bottom}"
+        );
+    }
+}
+
+/// The start menu's search field -- `design.txt` line 721, "input field for
+/// finding and running apps".
+#[cfg(test)]
+mod start_search_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::{DesktopShell, Key, KeyEvent, Modifiers};
+
+    fn shell() -> DesktopShell {
+        let mut shell = DesktopShell::new(1920, 1080);
+        shell.toggle_start_menu();
+        shell
+    }
+
+    fn press(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    /// Type `text` into whatever has the keyboard, a character at a time.
+    fn type_text(shell: &mut DesktopShell, text: &str) {
+        for ch in text.chars() {
+            let key = KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: ch.to_string(),
+            };
+            drop(shell.handle_hotkey(&key));
+        }
+    }
+
+    fn names(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .start_menu_entries()
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect()
+    }
+
+    /// A program's name, as the launcher knows it, to search for.
+    fn some_program(shell: &DesktopShell, row: usize) -> (String, String) {
+        let entry = shell.start_menu_entries()[row];
+        (entry.name.clone(), entry.executable_path.clone())
+    }
+
+    /// Typing with the menu open searches it: the list becomes what the
+    /// search finds, the best match first.
+    #[test]
+    fn typing_in_the_start_menu_searches_it() {
+        let mut shell = shell();
+        let everything = names(&shell).len();
+        let (name, _) = some_program(&shell, 3);
+
+        type_text(&mut shell, &name);
+        let found = names(&shell);
+        assert!(found.len() < everything, "the search filtered nothing");
+        assert_eq!(found[0], name, "the exact name is not the best match");
+        assert_eq!(shell.start_query.text(), name);
+    }
+
+    /// Enter starts the best match, and closes the menu.
+    #[test]
+    fn enter_starts_the_best_match() {
+        let mut shell = shell();
+        let (name, exec) = some_program(&shell, 3);
+        type_text(&mut shell, &name);
+
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert_eq!(outcome.launches.len(), 1);
+        assert_eq!(outcome.launches[0].program.to_string_lossy(), exec);
+        assert!(!shell.start_menu_open);
+    }
+
+    /// The arrows walk the rows, and Enter starts the one the keyboard is on.
+    #[test]
+    fn the_arrows_choose_a_row_and_enter_starts_it() {
+        let mut shell = shell();
+        let (_, second) = some_program(&shell, 1);
+        drop(shell.handle_hotkey(&press(Key::Down)));
+        drop(shell.handle_hotkey(&press(Key::Down)));
+        assert_eq!(shell.start_selected, Some(1));
+        drop(shell.handle_hotkey(&press(Key::Up)));
+        drop(shell.handle_hotkey(&press(Key::Down)));
+
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert_eq!(outcome.launches[0].program.to_string_lossy(), second);
+    }
+
+    /// Walking past the last visible row scrolls the list with it, so the
+    /// keyboard's row is never off the bottom of the menu.
+    #[test]
+    fn the_keyboards_row_stays_on_screen() {
+        let mut shell = shell();
+        let rows = shell.start_menu_visible_rows();
+        assert!(
+            shell.start_menu_entries().len() > rows,
+            "the fixture needs a scroll"
+        );
+        for _ in 0..=rows {
+            drop(shell.handle_hotkey(&press(Key::Down)));
+        }
+        let selected = shell.start_selected.unwrap();
+        assert!(
+            selected >= shell.start_menu_scroll && selected < shell.start_menu_scroll + rows,
+            "row {selected} is off screen at scroll {}",
+            shell.start_menu_scroll
+        );
+    }
+
+    /// Escape empties the search first, and closes the menu second.
+    #[test]
+    fn escape_empties_the_search_then_closes_the_menu() {
+        let mut shell = shell();
+        let everything = names(&shell);
+        type_text(&mut shell, "zz");
+        drop(shell.handle_hotkey(&press(Key::Escape)));
+        assert!(shell.start_menu_open, "the first Escape closed the menu");
+        assert_eq!(names(&shell), everything);
+        drop(shell.handle_hotkey(&press(Key::Escape)));
+        assert!(!shell.start_menu_open);
+    }
+
+    /// Nothing listed matches: Enter runs what was typed, as the Run box
+    /// would -- the field is for finding *and running*.
+    #[test]
+    fn with_nothing_found_enter_runs_what_was_typed() {
+        let mut shell = shell();
+        type_text(&mut shell, "frobnicate --fast \"two words\"");
+        assert!(names(&shell).is_empty(), "the fixture found something");
+
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert_eq!(outcome.launches.len(), 1);
+        let launch = &outcome.launches[0];
+        assert_eq!(launch.program.to_string_lossy(), "frobnicate");
+        let args: Vec<String> = launch
+            .args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["--fast", "two words"]);
+        assert!(!shell.start_menu_open);
+    }
+
+    /// A quote left open is not guessed at: nothing runs, and the menu stays
+    /// up with the line as it was.
+    #[test]
+    fn an_unclosed_quote_runs_nothing() {
+        let mut shell = shell();
+        type_text(&mut shell, "frobnicate \"half");
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert!(outcome.launches.is_empty());
+        assert!(shell.start_menu_open);
+    }
+
+    /// Reopened, the menu's search is empty again.
+    #[test]
+    fn the_menu_reopens_with_an_empty_search() {
+        let mut shell = shell();
+        type_text(&mut shell, "zz");
+        shell.toggle_start_menu();
+        shell.toggle_start_menu();
+        assert!(shell.start_query.text().is_empty());
+        assert_eq!(shell.start_selected, None);
+    }
+
+    /// A pinned program is found once, not once as a pin and again in the
+    /// list below -- and while searching, the rows are results, not pins: no
+    /// line is drawn and nothing can be dropped among them.
+    #[test]
+    fn a_search_lists_a_pinned_program_once() {
+        let mut shell = shell();
+        let (name, exec) = some_program(&shell, 3);
+        shell.pin_to_start(&exec);
+        type_text(&mut shell, &name);
+
+        let hits = shell
+            .start_menu_entries()
+            .iter()
+            .filter(|entry| entry.executable_path == exec)
+            .count();
+        assert_eq!(hits, 1);
+        assert_eq!(shell.start_pins_listed(), 0);
+    }
+
+    /// A chord with Super is still the desktop's with the menu up: the Super
+    /// key that opened it closes it, and types nothing into the search.
+    #[test]
+    fn the_super_key_closes_the_menu_and_types_nothing() {
+        let mut shell = shell();
+        let key = KeyEvent {
+            key: Key::LeftSuper,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+        drop(shell.handle_hotkey(&key));
+        assert!(!shell.start_menu_open);
+        assert!(shell.start_query.text().is_empty());
+    }
+
+    /// Super+E with the menu up -- which is how it arrives, since the Super key
+    /// opens the menu as it goes down -- puts the menu away and opens the file
+    /// manager, and types no "e".
+    #[test]
+    fn a_super_chord_closes_the_menu_and_does_what_it_is_bound_to() {
+        let mut shell = shell();
+        let key = KeyEvent {
+            key: Key::E,
+            pressed: true,
+            modifiers: Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+            text: "e".to_string(),
+        };
+        let outcome = shell.handle_hotkey(&key);
+        assert!(
+            !shell.start_menu_open,
+            "the menu stayed over the file manager"
+        );
+        assert!(
+            shell.start_query.text().is_empty(),
+            "the chord typed into the search"
+        );
+        assert_eq!(
+            outcome.launches[0].program,
+            std::path::PathBuf::from(crate::launcher::FILE_MANAGER)
+        );
+    }
+
+    /// The field is drawn where the title was, with the hint while empty.
+    #[test]
+    fn the_empty_field_says_what_typing_does() {
+        let shell = shell();
+        let drawn = format!("{:?}", shell.render_start_menu().expect("the menu is open"));
+        assert!(drawn.contains("Type to search"), "no hint: {drawn}");
+        assert!(
+            !drawn.contains("\"Applications\""),
+            "the old title is still drawn"
         );
     }
 }

@@ -1691,6 +1691,18 @@ live.
   rows now share also fixed a pin dragged rightwards swapping with its
   neighbour a few pixels into the drag.
 
+- `[C]` **The start menu has a search field** -- done 2026-09-25
+  (`design.txt` line 721: "input field for finding and running apps"). The
+  menu took no keys at all; now typing with it open searches it -- the list
+  becomes the programs found, best first by the launcher's own ranking, each
+  once -- the arrows walk the rows, Enter starts the one the keyboard is on
+  (or the best match), and Escape empties the search before it closes the
+  menu. When nothing is found, Enter runs what was typed the way the Run box
+  would (a whole-line path opened, otherwise the words split POSIX-style),
+  which is the "and running" half. Super chords, and keys the field does not
+  use, still reach their shortcuts with the menu up. The field sits where the
+  "Applications" title was.
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's

@@ -186,7 +186,12 @@ struct LaunchRecord {
 /// See `textfind::fuzzy_score` for what the score rewards.
 pub use guitk::textfind::fuzzy_score;
 
-fn search_score(query: &str, entry: &AppEntry) -> Option<u32> {
+/// How well `query` finds `entry`, or `None` if it does not: the name
+/// counts double, the description once, and a keyword a little over the
+/// name. `pub(crate)` for the start menu's search field, which ranks the
+/// same programs by the same rule this launcher does -- two searches over one
+/// list that disagreed about the best match would be a strange thing to find.
+pub(crate) fn search_score(query: &str, entry: &AppEntry) -> Option<u32> {
     let mut best: Option<u32> = None;
 
     if let Some(s) = fuzzy_score(query, &entry.name) {

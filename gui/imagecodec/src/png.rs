@@ -20,6 +20,17 @@
 //! Doing (2) after (4), or (4) without a limit, is how a decoder turns eight
 //! bytes of header into gigabytes of allocation.
 //!
+//! # A row at a time
+//!
+//! The decompressed stream is every row of the picture plus a filter byte each
+//! — as large as the picture itself — and it is never held whole. Rows are
+//! pulled out of the decompressor as they are reconstructed ([`Scanlines`]),
+//! so a decode holds its output, two rows and the decompressor's 32 KiB
+//! window. That is what makes a thumbnail of any picture cost a thumbnail:
+//! [`decode_scaled`] accumulates rows straight into a destination-sized box
+//! filter, interlaced files included, and never holds the source at its own
+//! size in any form.
+//!
 //! # Checksums
 //!
 //! Every chunk carries a CRC-32. **Critical chunks** (`IHDR`, `PLTE`, `IDAT`,
@@ -34,7 +45,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use deflate::zlib_inflate_limited;
+use deflate::{ZlibInflateStream, zlib_inflate_stream};
 
 use crate::{Image, ImageError, ImageResult, Limits};
 
@@ -233,10 +244,12 @@ fn parse_ihdr(data: &[u8]) -> ImageResult<Header> {
 /// Decode a picture no larger than `max_w` x `max_h`, box-filtered on the way
 /// out.
 ///
-/// For a thumbnailer: the destination is tiny and the source may be enormous,
-/// and the full-size `Vec<u32>` in between is pure waste. Falls back to a full
-/// decode followed by nothing for interlaced files, whose passes arrive
-/// scattered and cannot be accumulated row by row.
+/// For a thumbnailer: the destination is tiny and the source may be enormous.
+/// Rows go from the decompressor straight into the box filter, so the source
+/// is never held at its own size — not as pixels, and not as decompressed
+/// scanlines. Interlaced files take the same path: a box filter adds each
+/// source pixel to its cell whatever order the pixels come in, so Adam7's
+/// scattered passes accumulate exactly as a plain file's rows do.
 ///
 /// The aspect ratio is preserved and the result never exceeds either bound.
 ///
@@ -266,7 +279,7 @@ fn decode_inner(bytes: &[u8], limits: Limits, scale_to: Option<(u32, u32)>) -> I
 
     let mut palette: Vec<u32> = Vec::new();
     let mut trns: Option<Vec<u8>> = None;
-    let mut idat: Vec<u8> = Vec::new();
+    let mut idat_chunks: Vec<&[u8]> = Vec::new();
     let mut seen_iend = false;
     let mut seen_idat = false;
 
@@ -291,7 +304,7 @@ fn decode_inner(bytes: &[u8], limits: Limits, scale_to: Option<(u32, u32)>) -> I
                 // RFC 2083 §4.1.3: the IDATs are one continuous stream that
                 // happens to be chopped up, so they must be joined before the
                 // zlib header is looked at — not decompressed one at a time.
-                idat.extend_from_slice(chunk.data);
+                idat_chunks.push(chunk.data);
             }
             b"IEND" => {
                 seen_iend = true;
@@ -317,6 +330,16 @@ fn decode_inner(bytes: &[u8], limits: Limits, scale_to: Option<(u32, u32)>) -> I
         return Err(ImageError::Malformed("indexed image with no PLTE"));
     }
 
+    // One chunk is borrowed as it stands; only a stream split across several
+    // is copied to join it up.
+    let joined: Vec<u8>;
+    let idat: &[u8] = if let [only] = idat_chunks.as_slice() {
+        only
+    } else {
+        joined = idat_chunks.concat();
+        &joined
+    };
+
     // (3) and (4): the exact size, used as the hard limit.
     let raw_size = raw_size(&header);
     let limit = usize::try_from(raw_size)
@@ -326,48 +349,27 @@ fn decode_inner(bytes: &[u8], limits: Limits, scale_to: Option<(u32, u32)>) -> I
             pixels,
             limit: limits.max_pixels,
         })?;
-    let raw = zlib_inflate_limited(&idat, limit)?;
-    if raw.len() != limit {
-        // Short is a truncated file; the decompressor already refuses long.
-        return Err(ImageError::Truncated);
-    }
+    let mut rows = Scanlines::new(idat, limit)?;
 
-    // The scaled path, when one was asked for and the file allows it. An
-    // interlaced file cannot use it: Adam7's passes arrive scattered across
-    // the image, so a row-by-row accumulator would have nothing coherent to
-    // accumulate, and it falls through to the full decode below.
-    if let Some((max_w, max_h)) = scale_to
-        && !header.interlaced
-    {
+    if let Some((max_w, max_h)) = scale_to {
         let (dw, dh) = fit_within(header.width, header.height, max_w, max_h);
-        let out = expand_scaled(&header, &raw, &palette, trns.as_deref(), dw, dh)?;
+        let mut sink = BoxFilter::new(header.width, header.height, dw, dh)?;
+        expand(&header, &mut rows, &palette, trns.as_deref(), &mut sink)?;
+        rows.finish()?;
         return Ok(Image {
             width: dw,
             height: dh,
-            pixels: out,
+            pixels: sink.finish(),
         });
     }
 
-    let mut out = vec![0u32; usize::try_from(pixels).unwrap_or(0)];
-    if header.interlaced {
-        expand_adam7(&header, &raw, &palette, trns.as_deref(), &mut out)?;
-    } else {
-        expand_pass(
-            &header,
-            &raw,
-            &palette,
-            trns.as_deref(),
-            &mut out,
-            (0, 0, 1, 1),
-            header.width,
-            header.height,
-        )?;
-    }
-
+    let mut sink = FullSize::new(header.width, header.height)?;
+    expand(&header, &mut rows, &palette, trns.as_deref(), &mut sink)?;
+    rows.finish()?;
     Ok(Image {
         width: header.width,
         height: header.height,
-        pixels: out,
+        pixels: sink.pixels,
     })
 }
 
@@ -426,37 +428,288 @@ const fn pass_size(
     (w, h)
 }
 
-/// Walk the seven passes, each of which is an independently filtered image of
-/// its own size, and scatter their pixels into the full-size output.
-fn expand_adam7(
+/// Filtered scanlines, pulled out of the decompressor a row at a time.
+///
+/// The reason a decode costs one picture's worth of memory and not two: the
+/// decompressed stream — every row and its filter byte, as large as the
+/// picture, 72 MB for a 24-megapixel RGB photograph — never exists all at
+/// once. The inflater keeps its 32 KiB window and whatever of the current block
+/// has not been read yet; the reconstruction keeps two rows.
+struct Scanlines<'a> {
+    stream: ZlibInflateStream<'a>,
+}
+
+impl<'a> Scanlines<'a> {
+    /// A reader over `idat`, which must decompress to exactly `limit` bytes.
+    fn new(idat: &'a [u8], limit: usize) -> ImageResult<Self> {
+        Ok(Self {
+            stream: zlib_inflate_stream(idat, limit)?,
+        })
+    }
+
+    /// The next row's filter type, with its filtered bytes read into `row`.
+    fn next_row(&mut self, row: &mut [u8]) -> ImageResult<u8> {
+        let mut filter = [0u8; 1];
+        self.fill(&mut filter)?;
+        self.fill(row)?;
+        Ok(u8::from_le_bytes(filter))
+    }
+
+    /// Fill `buf` completely, or say the stream ended first: a short file.
+    fn fill(&mut self, buf: &mut [u8]) -> ImageResult<()> {
+        let mut filled = 0usize;
+        while filled < buf.len() {
+            let rest = buf.get_mut(filled..).unwrap_or_default();
+            let got = self.stream.read(rest)?;
+            if got == 0 {
+                return Err(ImageError::Truncated);
+            }
+            filled = filled.saturating_add(got);
+        }
+        Ok(())
+    }
+
+    /// Read the stream to its end, which is where its checksum is checked.
+    ///
+    /// Every row the header promised has been read by now, so the stream's
+    /// limit is spent: a byte still to come is refused by the decompressor as
+    /// one too many, exactly as the whole-buffer inflate refused it. Skipping
+    /// this would accept a stream whose checksum is wrong — the one check that
+    /// tells a corrupted picture from a picture.
+    fn finish(mut self) -> ImageResult<()> {
+        let mut past_the_end = [0u8; 1];
+        match self.stream.read(&mut past_the_end)? {
+            0 => Ok(()),
+            // The limit makes this unreachable — the decompressor errors
+            // rather than hand out a byte past it — but a rule that holds only
+            // because a neighbour enforces it is stated here as well.
+            _ => Err(ImageError::Compressed(deflate::Error::OutputTooLarge)),
+        }
+    }
+}
+
+/// Where reconstructed pixels go.
+trait Sink {
+    /// The pixel at `(x, y)` of the picture is `argb`.
+    fn put(&mut self, x: u32, y: u32, argb: u32);
+}
+
+/// The whole picture, at its own size.
+struct FullSize {
+    width: u32,
+    pixels: Vec<u32>,
+}
+
+impl FullSize {
+    fn new(width: u32, height: u32) -> ImageResult<Self> {
+        let len = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or(ImageError::Truncated)?;
+        Ok(Self {
+            width,
+            pixels: vec![0u32; len],
+        })
+    }
+}
+
+impl Sink for FullSize {
+    fn put(&mut self, x: u32, y: u32, argb: u32) {
+        let at = (y as usize)
+            .checked_mul(self.width as usize)
+            .and_then(|row| row.checked_add(x as usize));
+        if let Some(slot) = at.and_then(|at| self.pixels.get_mut(at)) {
+            *slot = argb;
+        }
+    }
+}
+
+/// A picture no larger than a thumbnail, each cell the average of the source
+/// pixels that fall in it.
+///
+/// Every source pixel is added to exactly one cell and each cell is divided
+/// by its own count at the end. Counting per cell rather than assuming
+/// `(w/dw) * (h/dh)` matters because the division is integer — with a
+/// 100-wide source and a 30-wide destination the columns come out
+/// 4,3,3,4,3..., and a fixed divisor would darken the wide ones.
+///
+/// Order does not matter to a sum, which is why interlaced files need no
+/// special case: Adam7's passes arrive scattered across the picture, and each
+/// pixel still lands in the one cell its position names.
+///
+/// Alpha is averaged with the colour rather than premultiplied first. That is
+/// the same thing `box_filter_downscale` in the thumbnailer does, and matching
+/// it is deliberate: two averaging rules would make a scaled decode and a
+/// decode-then-scale disagree about the same picture.
+struct BoxFilter {
+    dest_w: u32,
+    /// Which destination column each source column falls in.
+    col_cell: Vec<u32>,
+    /// Which destination row each source row falls in.
+    row_cell: Vec<u32>,
+    /// Per cell: the sums of alpha, red, green and blue. `u64` because a cell
+    /// can cover the whole source, and 255 times 24 million overflows a `u32`.
+    acc: Vec<[u64; 4]>,
+    /// Per cell: how many source pixels went into it.
+    counts: Vec<u64>,
+}
+
+impl BoxFilter {
+    fn new(src_w: u32, src_h: u32, dest_w: u32, dest_h: u32) -> ImageResult<Self> {
+        let cells = (dest_w as usize)
+            .checked_mul(dest_h as usize)
+            .ok_or(ImageError::Truncated)?;
+        Ok(Self {
+            dest_w,
+            col_cell: cell_map(src_w, dest_w),
+            row_cell: cell_map(src_h, dest_h),
+            acc: vec![[0u64; 4]; cells],
+            counts: vec![0u64; cells],
+        })
+    }
+
+    /// Each cell's average, as `0xAARRGGBB`.
+    fn finish(self) -> Vec<u32> {
+        self.acc
+            .iter()
+            .zip(self.counts.iter())
+            .map(|(cell, &n)| {
+                // `checked_div` for the empty cell, which cannot happen with a
+                // destination no larger than its source — every cell receives
+                // at least one pixel — and would otherwise be a panic in a
+                // decoder that reads files it did not write. It comes out as a
+                // clear pixel.
+                let mean = |v: u64| {
+                    u32::try_from(v.checked_div(n).unwrap_or(0))
+                        .unwrap_or(255)
+                        .min(255)
+                };
+                (mean(cell[0]) << 24) | (mean(cell[1]) << 16) | (mean(cell[2]) << 8) | mean(cell[3])
+            })
+            .collect()
+    }
+}
+
+impl Sink for BoxFilter {
+    fn put(&mut self, x: u32, y: u32, argb: u32) {
+        let (Some(&dx), Some(&dy)) = (self.col_cell.get(x as usize), self.row_cell.get(y as usize))
+        else {
+            return;
+        };
+        let at = (dy as usize)
+            .checked_mul(self.dest_w as usize)
+            .and_then(|row| row.checked_add(dx as usize));
+        let Some(at) = at else {
+            return;
+        };
+        if let (Some(cell), Some(n)) = (self.acc.get_mut(at), self.counts.get_mut(at)) {
+            // Saturating throughout. The sums are bounded by 255 times the
+            // pixel cap and cannot reach a u64 in practice, but a codec is
+            // exactly the place where "in practice" is decided by whoever
+            // supplies the file.
+            cell[0] = cell[0].saturating_add(u64::from((argb >> 24) & 0xFF));
+            cell[1] = cell[1].saturating_add(u64::from((argb >> 16) & 0xFF));
+            cell[2] = cell[2].saturating_add(u64::from((argb >> 8) & 0xFF));
+            cell[3] = cell[3].saturating_add(u64::from(argb & 0xFF));
+            *n = n.saturating_add(1);
+        }
+    }
+}
+
+/// For each of `src` source positions, the destination cell of `dest` it falls
+/// in: `i * dest / src`, clamped so the last position cannot land one past the
+/// end when the division is exact.
+///
+/// A table rather than a division per pixel, because `put` runs once for every
+/// pixel of a picture that may have tens of millions of them.
+fn cell_map(src: u32, dest: u32) -> Vec<u32> {
+    (0..src)
+        .map(|i| {
+            let cell = u64::from(i)
+                .saturating_mul(u64::from(dest))
+                .checked_div(u64::from(src.max(1)))
+                .unwrap_or(0)
+                .min(u64::from(dest.saturating_sub(1)));
+            u32::try_from(cell).unwrap_or(0)
+        })
+        .collect()
+}
+
+/// Reconstruct the whole picture into `sink`: one pass for a plain file, the
+/// seven Adam7 passes in order for an interlaced one. Each pass is an
+/// independently filtered image of its own size, whose pixels land at
+/// `(x_start + x * x_step, y_start + y * y_step)`.
+fn expand(
     h: &Header,
-    raw: &[u8],
+    rows: &mut Scanlines<'_>,
     palette: &[u32],
     trns: Option<&[u8]>,
-    out: &mut [u32],
+    sink: &mut impl Sink,
 ) -> ImageResult<()> {
-    let mut offset = 0usize;
+    if !h.interlaced {
+        return expand_pass(
+            h,
+            rows,
+            palette,
+            trns,
+            sink,
+            (0, 0, 1, 1),
+            h.width,
+            h.height,
+        );
+    }
     for &(xs, ys, xstep, ystep) in &ADAM7 {
         let (pw, ph) = pass_size(h.width, h.height, xs, ys, xstep, ystep);
         if pw == 0 || ph == 0 {
+            // A pass with no pixels has no bytes in the stream at all, not
+            // even filter bytes — see `raw_size`.
             continue;
         }
-        let stride = usize::try_from(h.row_bytes(pw).saturating_add(1))
-            .map_err(|_| ImageError::Truncated)?;
-        let len = stride
-            .checked_mul(ph as usize)
-            .ok_or(ImageError::Truncated)?;
-        let slice = raw
-            .get(offset..offset.saturating_add(len))
-            .ok_or(ImageError::Truncated)?;
-        expand_pass(h, slice, palette, trns, out, (xs, ys, xstep, ystep), pw, ph)?;
-        offset = offset.saturating_add(len);
+        expand_pass(h, rows, palette, trns, sink, (xs, ys, xstep, ystep), pw, ph)?;
     }
     Ok(())
 }
 
-/// Unfilter one pass and convert its samples to `0xAARRGGBB`.
+/// Unfilter one pass, row by row as the stream delivers it, and hand each pixel
+/// to `sink` at its place in the picture.
 ///
+/// `placement` is `(x_start, y_start, x_step, y_step)`; for a non-interlaced
+/// image it is `(0, 0, 1, 1)`, which is why there is no second copy of this
+/// function for the simple case.
+#[allow(clippy::too_many_arguments)]
+fn expand_pass(
+    h: &Header,
+    rows: &mut Scanlines<'_>,
+    palette: &[u32],
+    trns: Option<&[u8]>,
+    sink: &mut impl Sink,
+    placement: (u32, u32, u32, u32),
+    pass_w: u32,
+    pass_h: u32,
+) -> ImageResult<()> {
+    let (xs, ys, xstep, ystep) = placement;
+    let row_len = usize::try_from(h.row_bytes(pass_w)).map_err(|_| ImageError::Truncated)?;
+    let step = h.filter_step();
+
+    // Two rows kept, because Up/Average/Paeth all read the *reconstructed*
+    // previous row and nothing further back.
+    let mut prev = vec![0u8; row_len];
+    let mut cur = vec![0u8; row_len];
+
+    for y in 0..pass_h {
+        let filter = rows.next_row(&mut cur)?;
+        unfilter(filter, &mut cur, &prev, step)?;
+
+        let out_y = ys.saturating_add(y.saturating_mul(ystep));
+        for x in 0..pass_w {
+            let out_x = xs.saturating_add(x.saturating_mul(xstep));
+            let px = pixel_at(h, &cur, x as usize, palette, trns)?;
+            sink.put(out_x, out_y, px);
+        }
+        core::mem::swap(&mut prev, &mut cur);
+    }
+    Ok(())
+}
+
 /// The largest `w x h` that fits in `max_w x max_h` with the aspect ratio of
 /// `w x h`, never zero in either dimension.
 ///
@@ -480,190 +733,6 @@ fn fit_within(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
         let dw = by_h.checked_div(u64::from(h.max(1))).unwrap_or(1).max(1);
         (u32::try_from(dw).unwrap_or(1), max_h.max(1))
     }
-}
-
-/// Reconstruct a non-interlaced image straight into a box-filtered
-/// destination, never holding the picture at its own size.
-///
-/// # What this saves, and what it does not
-///
-/// The full-size path allocates two things: the decompressed scanlines
-/// (`height x (row_bytes + 1)`) and a `Vec<u32>` of every pixel. For a
-/// 24-megapixel photograph that is roughly 96 MB each. This drops the second
-/// -- rows are reconstructed one at a time, as they already were, and summed
-/// into a destination-sized accumulator instead of being stored.
-///
-/// It does **not** drop the first. The decompressed buffer exists before any
-/// of this runs, because `deflate` inflates a whole stream in one call and has
-/// no incremental API. Removing that too is what would let
-/// `ThumbConfig::max_source_pixels` go away entirely; it needs a streaming
-/// inflater, and `deflate/` is outside this lane's globs. See
-/// `known-issues.md` `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE`.
-///
-/// # The filter
-///
-/// A box filter: every source pixel is added to exactly one destination cell
-/// and each cell is divided by its own count at the end. Counting per cell
-/// rather than assuming `(w/dw) * (h/dh)` matters because the division is
-/// integer -- with a 100-wide source and a 30-wide destination the columns
-/// come out 4,3,3,4,3..., and a fixed divisor would darken the wide ones.
-///
-/// Alpha is averaged with the colour rather than premultiplied first. That is
-/// the same thing `box_filter_downscale` in the thumbnailer does, and matching
-/// it is deliberate: two averaging rules would make a scaled decode and a
-/// decode-then-scale disagree about the same picture.
-fn expand_scaled(
-    h: &Header,
-    raw: &[u8],
-    palette: &[u32],
-    trns: Option<&[u8]>,
-    dest_w: u32,
-    dest_h: u32,
-) -> ImageResult<Vec<u32>> {
-    let row_len = usize::try_from(h.row_bytes(h.width)).map_err(|_| ImageError::Truncated)?;
-    let step = h.filter_step();
-    let cells = (dest_w as usize)
-        .checked_mul(dest_h as usize)
-        .ok_or(ImageError::Truncated)?;
-
-    // u64 sums: a destination cell can cover the whole source, so the count is
-    // bounded by the pixel cap rather than by anything small, and 255 * 24e6
-    // overflows a u32.
-    let mut acc = vec![[0u64; 4]; cells];
-    let mut counts = vec![0u64; cells];
-
-    let mut prev = vec![0u8; row_len];
-    let mut cur = vec![0u8; row_len];
-
-    for y in 0..h.height {
-        let at = (y as usize)
-            .checked_mul(row_len.saturating_add(1))
-            .ok_or(ImageError::Truncated)?;
-        let filter = *raw.get(at).ok_or(ImageError::Truncated)?;
-        let src = raw
-            .get(at.saturating_add(1)..at.saturating_add(1).saturating_add(row_len))
-            .ok_or(ImageError::Truncated)?;
-        cur.clear();
-        cur.extend_from_slice(src);
-        unfilter(filter, &mut cur, &prev, step)?;
-
-        // Which destination row this source row falls in. Clamped so the last
-        // source row cannot land one past the end when the division is exact.
-        let dy = usize::try_from(
-            u64::from(y)
-                .saturating_mul(u64::from(dest_h))
-                .checked_div(u64::from(h.height.max(1)))
-                .unwrap_or(0)
-                .min(u64::from(dest_h.saturating_sub(1))),
-        )
-        .unwrap_or(0);
-
-        for x in 0..h.width {
-            let dx = usize::try_from(
-                u64::from(x)
-                    .saturating_mul(u64::from(dest_w))
-                    .checked_div(u64::from(h.width.max(1)))
-                    .unwrap_or(0)
-                    .min(u64::from(dest_w.saturating_sub(1))),
-            )
-            .unwrap_or(0);
-            let Some(idx) = dy
-                .checked_mul(dest_w as usize)
-                .and_then(|v| v.checked_add(dx))
-            else {
-                return Err(ImageError::Truncated);
-            };
-            let px = pixel_at(h, &cur, x as usize, palette, trns)?;
-            if let (Some(cell), Some(n)) = (acc.get_mut(idx), counts.get_mut(idx)) {
-                // Saturating throughout. The sums are bounded by 255 times
-                // the pixel cap and cannot reach a u64 in practice, but a
-                // codec is exactly the place where "in practice" is decided
-                // by whoever supplies the file.
-                cell[0] = cell[0].saturating_add(u64::from((px >> 24) & 0xFF));
-                cell[1] = cell[1].saturating_add(u64::from((px >> 16) & 0xFF));
-                cell[2] = cell[2].saturating_add(u64::from((px >> 8) & 0xFF));
-                cell[3] = cell[3].saturating_add(u64::from(px & 0xFF));
-                *n = n.saturating_add(1);
-            }
-        }
-        core::mem::swap(&mut prev, &mut cur);
-    }
-
-    let mut out = vec![0u32; cells];
-    for (slot, (cell, n)) in out.iter_mut().zip(acc.iter().zip(counts.iter())) {
-        if *n == 0 {
-            continue;
-        }
-        // Every channel divided by the same count, so a cell that covered
-        // fewer source pixels than its neighbour is still its own average
-        // rather than a darker version of one.
-        // `checked_div` although `n` is known non-zero two lines above: the
-        // guard and the division are far enough apart that a later edit could
-        // separate them, and the fallback is a black cell rather than a panic
-        // in a decoder that reads files it did not write.
-        let mean = |v: u64| {
-            u32::try_from(v.checked_div(*n).unwrap_or(0))
-                .unwrap_or(255)
-                .min(255)
-        };
-        *slot =
-            (mean(cell[0]) << 24) | (mean(cell[1]) << 16) | (mean(cell[2]) << 8) | mean(cell[3]);
-    }
-    Ok(out)
-}
-
-/// `placement` is `(x_start, y_start, x_step, y_step)`; for a non-interlaced
-/// image it is `(0, 0, 1, 1)`, which is why there is no second copy of this
-/// function for the simple case.
-#[allow(clippy::too_many_arguments)]
-fn expand_pass(
-    h: &Header,
-    raw: &[u8],
-    palette: &[u32],
-    trns: Option<&[u8]>,
-    out: &mut [u32],
-    placement: (u32, u32, u32, u32),
-    pass_w: u32,
-    pass_h: u32,
-) -> ImageResult<()> {
-    let (xs, ys, xstep, ystep) = placement;
-    let row_len = usize::try_from(h.row_bytes(pass_w)).map_err(|_| ImageError::Truncated)?;
-    let step = h.filter_step();
-
-    // Two rows kept, because Up/Average/Paeth all read the *reconstructed*
-    // previous row and nothing further back. Reconstructing into a full-size
-    // buffer and indexing backwards would work too and would hold the whole
-    // filtered image a second time.
-    let mut prev = vec![0u8; row_len];
-    let mut cur = vec![0u8; row_len];
-
-    for y in 0..pass_h {
-        let at = (y as usize)
-            .checked_mul(row_len.saturating_add(1))
-            .ok_or(ImageError::Truncated)?;
-        let filter = *raw.get(at).ok_or(ImageError::Truncated)?;
-        let src = raw
-            .get(at.saturating_add(1)..at.saturating_add(1).saturating_add(row_len))
-            .ok_or(ImageError::Truncated)?;
-        cur.clear();
-        cur.extend_from_slice(src);
-        unfilter(filter, &mut cur, &prev, step)?;
-
-        let out_y = ys.saturating_add(y.saturating_mul(ystep));
-        for x in 0..pass_w {
-            let out_x = xs.saturating_add(x.saturating_mul(xstep));
-            let idx = (out_y as usize)
-                .checked_mul(h.width as usize)
-                .and_then(|v| v.checked_add(out_x as usize))
-                .ok_or(ImageError::Truncated)?;
-            let px = pixel_at(h, &cur, x as usize, palette, trns)?;
-            if let Some(slot) = out.get_mut(idx) {
-                *slot = px;
-            }
-        }
-        core::mem::swap(&mut prev, &mut cur);
-    }
-    Ok(())
 }
 
 /// Reverse one of the five scanline filters (RFC 2083 §6), in place.
@@ -1654,5 +1723,134 @@ mod tests {
                 "cell {i} is not the uniform colour, so it took no source pixels"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // A row at a time
+    // ------------------------------------------------------------------
+
+    /// The filtered scanlines of an 8-bit greyscale picture, in Adam7 pass
+    /// order, each row behind a filter byte of 0.
+    fn adam7_gray(w: u32, h: u32, value: impl Fn(u32, u32) -> u8) -> Vec<u8> {
+        let mut raw = Vec::new();
+        for &(xs, ys, xstep, ystep) in &ADAM7 {
+            let (pw, ph) = pass_size(w, h, xs, ys, xstep, ystep);
+            if pw == 0 || ph == 0 {
+                continue;
+            }
+            for py in 0..ph {
+                raw.push(0);
+                for px in 0..pw {
+                    raw.push(value(xs + px * xstep, ys + py * ystep));
+                }
+            }
+        }
+        raw
+    }
+
+    /// An interlaced picture scales like any other: its scattered passes
+    /// accumulate into the same cells, and the thumbnail is the average of
+    /// the full decode. It used to fall back to decoding at full size first.
+    #[test]
+    fn an_interlaced_picture_scales_to_the_average_of_its_full_decode() {
+        let (w, h) = (16u32, 16u32);
+        let value = |x: u32, y: u32| ((x * 13 + y * 7) % 256) as u8;
+        let file = png(&ihdr(w, h, 8, 0, 1), &[], &adam7_gray(w, h, value));
+        let full = decode(&file, Limits::default()).expect("full");
+        // The full decode is the picture, pixel for pixel.
+        for y in 0..h {
+            for x in 0..w {
+                let g = u32::from(value(x, y));
+                assert_eq!(
+                    full.pixels[(y * w + x) as usize],
+                    0xFF00_0000 | g << 16 | g << 8 | g
+                );
+            }
+        }
+        let scaled = decode_scaled(&file, Limits::default(), 4, 4).expect("scaled");
+        assert_eq!((scaled.width, scaled.height), (4, 4));
+        for dy in 0..4u32 {
+            for dx in 0..4u32 {
+                // Each cell covers exactly 4x4 here.
+                let mut sum = 0u32;
+                for sy in 0..4u32 {
+                    for sx in 0..4u32 {
+                        sum += u32::from(value(dx * 4 + sx, dy * 4 + sy));
+                    }
+                }
+                let g = sum / 16;
+                assert_eq!(
+                    scaled.pixels[(dy * 4 + dx) as usize],
+                    0xFF00_0000 | g << 16 | g << 8 | g,
+                    "cell ({dx}, {dy})"
+                );
+            }
+        }
+    }
+
+    /// The checksum is still checked. Reading rows as they arrive means the
+    /// stream is never read to its end unless something asks, and the
+    /// Adler-32 trailer is verified only there.
+    #[test]
+    fn a_stream_whose_checksum_is_wrong_is_refused() {
+        let raw = vec![0, 0xFF, 0x00, 0x00];
+        let mut zlib = zlib_stored(&raw);
+        let last = zlib.len() - 1;
+        zlib[last] ^= 0x01;
+        let mut file = Vec::new();
+        file.extend_from_slice(&SIGNATURE);
+        file.extend_from_slice(&ihdr(1, 1, 8, 2, 0));
+        file.extend_from_slice(&chunk(b"IDAT", &zlib));
+        file.extend_from_slice(&chunk(b"IEND", b""));
+        assert!(matches!(
+            decode(&file, Limits::default()),
+            Err(ImageError::Compressed(
+                deflate::Error::ChecksumMismatch { .. }
+            ))
+        ));
+        assert!(matches!(
+            decode_scaled(&file, Limits::default(), 1, 1),
+            Err(ImageError::Compressed(
+                deflate::Error::ChecksumMismatch { .. }
+            ))
+        ));
+    }
+
+    /// A stream longer than the header promises is refused, not cut to fit:
+    /// the extra bytes mean the file is not what its header says.
+    #[test]
+    fn a_stream_longer_than_the_header_promises_is_refused() {
+        let raw = vec![0, 0xFF, 0x00, 0x00, 0x42];
+        let file = png(&ihdr(1, 1, 8, 2, 0), &[], &raw);
+        assert!(matches!(
+            decode(&file, Limits::default()),
+            Err(ImageError::Compressed(deflate::Error::OutputTooLarge))
+        ));
+    }
+
+    /// A stream split across several IDAT chunks is one stream: the chunks are
+    /// joined before it is read, and the picture is the same as from one chunk.
+    #[test]
+    fn a_stream_split_across_chunks_decodes_as_one() {
+        let raw: Vec<u8> = (0..4u8)
+            .flat_map(|row| {
+                let mut r = vec![0u8];
+                r.extend((0..4u8).flat_map(|col| [row * 40, col * 40, 0x80]));
+                r
+            })
+            .collect();
+        let whole = png(&ihdr(4, 4, 8, 2, 0), &[], &raw);
+        let zlib = zlib_stored(&raw);
+        let mut split = Vec::new();
+        split.extend_from_slice(&SIGNATURE);
+        split.extend_from_slice(&ihdr(4, 4, 8, 2, 0));
+        for part in zlib.chunks(7) {
+            split.extend_from_slice(&chunk(b"IDAT", part));
+        }
+        split.extend_from_slice(&chunk(b"IEND", b""));
+        assert_eq!(
+            decode(&split, Limits::default()),
+            decode(&whole, Limits::default())
+        );
     }
 }

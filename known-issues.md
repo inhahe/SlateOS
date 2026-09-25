@@ -95731,6 +95731,7 @@ is the generic file glyph. Neither reports an error.
 ---
 
 ## `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE` (lane C, 2026-08-26) -- **halved 2026-09-07; still open for the other half**
+**Status:** ✅ FIXED 2026-09-24 (lane F), both halves — `imagecodec` now streams a PNG's rows out of the decompressor (`deflate::zlib_inflate_stream`, which had landed in the meantime), so neither `decode` nor `decode_scaled` holds the decompressed stream, and `decode_scaled` box-filters interlaced files too. 2000x1500 PNG: thumbnail peak 24.6 MB → 0.65 MB, full decode 36.0 MB → 12.1 MB (`gui/imagecodec/tests/decode_memory.rs`). `gui/thumbs`' 24-megapixel cap no longer protects anything: `requests/f-c-a-thumbnail-no-longer-decodes-the-picture-whole-so-the-source-cap-can-go.md`.
 
 **Update 2026-09-07: the peak is halved, and the remaining half is not
 reachable from this lane.** `imagecodec::decode_scaled` box-filters during

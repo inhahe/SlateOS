@@ -302,9 +302,13 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
 /// bounds is returned at its own size -- inventing pixels is not what this is
 /// for.
 ///
-/// Falls back to a full decode for formats or files that cannot be scaled
-/// during reconstruction, so a caller may always use it and never has to ask
-/// which case it is in.
+/// Both formats scale *during reconstruction*, so the source is never held at
+/// its own size: a PNG's rows go from the decompressor straight into a box
+/// filter, interlaced files included, and a JPEG's blocks are transformed from
+/// only as many coefficients as the output needs. A 2000x1500 PNG thumbnails
+/// in 0.65 MB where its decompressed stream alone is 12 MB
+/// (`tests/decode_memory.rs`). A caller may always use this and never has to
+/// ask which case a file is in.
 ///
 /// # Errors
 ///

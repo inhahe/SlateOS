@@ -109,7 +109,7 @@ fn main() {
     desktop.load_appearance();
     println!(
         "Appearance: {} theme, {:.0}% scaling, UI font {} at {}pt",
-        if desktop.appearance.theme_mode.is_light() {
+        if desktop.appearance.is_light() {
             "light"
         } else {
             "dark"

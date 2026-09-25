@@ -185,7 +185,7 @@ impl AccentColor {
 
 impl PaletteSource for AppearanceSettings {
     fn is_light(&self) -> bool {
-        self.theme_mode.is_light()
+        AppearanceSettings::is_light(self)
     }
 
     fn accent(&self) -> Color {
@@ -431,8 +431,10 @@ impl ThemeMode {
     /// [`AppearanceSettings`] is tuned against; answering light would flip the
     /// whole desktop for a user who asked only to be left on automatic.
     ///
-    /// When the schedule exists, this is the one place that has to change:
-    /// every colour in the shell is derived from the answer.
+    /// This is the *setting*. Whether what is drawn is light is
+    /// [`AppearanceSettings::is_light`], which also knows about a colour
+    /// theme that has only one mode's colours -- ask that for anything that
+    /// has to match the palette.
     pub fn is_light(self) -> bool {
         match self {
             Self::Light => true,
@@ -1658,6 +1660,23 @@ impl AppearanceSettings {
         guitk::style::FOCUS_RING_WIDTH * self.focus_ring_scale
     }
 
+    /// Whether what is drawn is light: the one answer the palette, the accent
+    /// and anything else with a light and a dark version should all follow.
+    ///
+    /// Not [`ThemeMode::is_light`], which is the *setting* alone. What is
+    /// drawn can differ from it: a colour theme with only one mode's colours
+    /// is shown in that mode whichever was chosen
+    /// ([`ThemeColors::variant`]), and the accent has to match the grounds it
+    /// sits on, not the switch in Settings. Asking the mode for this put the
+    /// light-background accent on a dark-only theme's dark grounds.
+    #[must_use]
+    pub fn is_light(&self) -> bool {
+        let asked = self.theme_mode.is_light();
+        self.color_theme
+            .colors()
+            .map_or(asked, |theme| theme.variant(asked).0)
+    }
+
     /// The accent colour to actually draw with.
     ///
     /// Resolves both things a caller would otherwise have to know: that
@@ -1669,7 +1688,7 @@ impl AppearanceSettings {
     pub fn effective_accent(&self) -> Color {
         if self.accent_color == AccentColor::Custom {
             self.custom_accent
-        } else if self.theme_mode.is_light() {
+        } else if self.is_light() {
             self.accent_color.color_light()
         } else {
             self.accent_color.color()

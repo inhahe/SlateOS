@@ -1321,6 +1321,32 @@ colors:
         assert!(p.light);
     }
 
+    /// A theme with only dark colours, chosen in light mode, is drawn dark --
+    /// and its accent is the dark-background one, matching the grounds it
+    /// sits on rather than the switch in Settings. Asking the mode put the
+    /// light-background accent (a deep blue meant for pale pages) on the
+    /// theme's dark ones.
+    #[test]
+    fn a_one_mode_themes_accent_matches_its_grounds() {
+        let colors = parse("colors:\n  base: \"#101418\"\n").colors;
+        let settings = themed("night", colors, true);
+        assert!(!settings.is_light(), "the theme can only be drawn dark");
+        assert!(!Palette::from_settings(&settings).light);
+        assert_eq!(
+            settings.effective_accent(),
+            settings.accent_color.color(),
+            "the dark-background accent"
+        );
+        // And the ordinary case is untouched: no theme, light mode, the light
+        // accent.
+        let plain = AppearanceSettings {
+            theme_mode: crate::ThemeMode::Light,
+            ..AppearanceSettings::default()
+        };
+        assert!(plain.is_light());
+        assert_eq!(plain.effective_accent(), plain.accent_color.color_light());
+    }
+
     /// High contrast replaces the palette whole, theme and all.
     #[test]
     fn high_contrast_overrides_a_theme() {

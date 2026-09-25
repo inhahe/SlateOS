@@ -4764,7 +4764,10 @@ mod tests {
         }
         // The card is the whole window while it is up; a press on it anywhere
         // puts it away.
-        assert_eq!(probe::click(&mut app, Target::HelpCard), EventResult::Consumed);
+        assert_eq!(
+            probe::click(&mut app, Target::HelpCard),
+            EventResult::Consumed
+        );
         assert!(!app.show_help);
         // And keys reach the app again.
         assert_eq!(app.handle_event(&press(Key::Num2)), EventResult::Consumed);

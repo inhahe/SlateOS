@@ -1,20 +1,21 @@
 //! Slate OS Pipe/File Management Tools
 //!
-//! Multi-personality binary combining four file/pipe utilities, selected via
+//! Multi-personality binary combining two file/pipe utilities, selected via
 //! argv\[0\]:
 //!
 //! - **pv** (default) -- monitor data flowing through a pipe (pipe viewer)
-//! - **truncate** -- shrink or extend file size
 //! - **shred** -- overwrite files to hinder recovery
+//!
+//! `truncate` was a third personality, which no link ever reached. It is
+//! `userspace/coreutils`'s own bin since 2026-09-25, a port of GNU's checked
+//! against it, and a name belongs to the one program that does the job
+//! (design-decisions.md §1019).
 //!
 //! # Examples
 //!
 //! ```text
 //! # Pipe viewer
 //! pv -s 100M bigfile.iso | gzip > bigfile.iso.gz
-//!
-//! # Truncate
-//! truncate -s 10M sparse.img
 //!
 //! # Shred
 //! shred -vuz secret.key
@@ -52,7 +53,6 @@ const DEFAULT_BAR_WIDTH: usize = 25;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Personality {
     Pv,
-    Truncate,
     Shred,
 }
 
@@ -64,7 +64,6 @@ fn detect_personality(argv0: &str) -> Personality {
         .unwrap_or(argv0);
 
     match basename {
-        "truncate" => Personality::Truncate,
         "shred" => Personality::Shred,
         _ => Personality::Pv,
     }
@@ -98,24 +97,6 @@ fn parse_size(s: &str) -> Result<u64, String> {
 
     base.checked_mul(multiplier)
         .ok_or_else(|| format!("size overflow: {s}"))
-}
-
-/// Parse a truncate-style size with optional prefix (+, -, <, >, /, %).
-///
-/// Returns `(prefix_char_or_None, byte_value)`.
-fn parse_truncate_size(s: &str) -> Result<(Option<char>, u64), String> {
-    if s.is_empty() {
-        return Err("empty size specification".into());
-    }
-
-    let first = s.as_bytes()[0];
-    let (prefix, rest) = match first {
-        b'+' | b'-' | b'<' | b'>' | b'/' | b'%' => (Some(first as char), &s[1..]),
-        _ => (None, s),
-    };
-
-    let size = parse_size(rest)?;
-    Ok((prefix, size))
 }
 
 /// Split a string like "100M" into ("100", "M").
@@ -537,153 +518,6 @@ fn run_pv(args: &[String]) -> Result<(), String> {
 }
 
 // ============================================================================
-// truncate mode
-// ============================================================================
-
-/// Configuration for truncate mode.
-struct TruncateConfig {
-    size_spec: Option<String>,
-    no_create: bool,
-    reference: Option<String>,
-    files: Vec<String>,
-}
-
-fn parse_truncate_args(args: &[String]) -> Result<TruncateConfig, String> {
-    let mut cfg = TruncateConfig {
-        size_spec: None,
-        no_create: false,
-        reference: None,
-        files: Vec::new(),
-    };
-    let mut i = 0;
-
-    while i < args.len() {
-        let arg = &args[i];
-        if arg == "--help" || arg == "-h" {
-            print_truncate_usage();
-            process::exit(0);
-        } else if arg == "-c" || arg == "--no-create" {
-            cfg.no_create = true;
-        } else if arg == "-s" || arg == "--size" {
-            i += 1;
-            cfg.size_spec = Some(args.get(i).ok_or("-s requires a SIZE argument")?.clone());
-        } else if let Some(rest) = arg.strip_prefix("--size=") {
-            cfg.size_spec = Some(rest.to_string());
-        } else if arg == "-r" || arg == "--reference" {
-            i += 1;
-            cfg.reference = Some(args.get(i).ok_or("-r requires a FILE argument")?.clone());
-        } else if let Some(rest) = arg.strip_prefix("--reference=") {
-            cfg.reference = Some(rest.to_string());
-        } else if arg.starts_with('-') {
-            return Err(format!("unknown option: {arg}"));
-        } else {
-            cfg.files.push(arg.clone());
-        }
-        i += 1;
-    }
-
-    if cfg.files.is_empty() {
-        return Err("no files specified".into());
-    }
-    if cfg.size_spec.is_none() && cfg.reference.is_none() {
-        return Err("must specify either -s SIZE or -r REFERENCE".into());
-    }
-
-    Ok(cfg)
-}
-
-fn print_truncate_usage() {
-    eprintln!("Usage: truncate -s SIZE FILE...");
-    eprintln!("       truncate -r REFERENCE FILE...");
-    eprintln!("Shrink or extend the size of each FILE.");
-    eprintln!();
-    eprintln!("Options:");
-    eprintln!("  -s SIZE, --size=SIZE     Set or adjust file size");
-    eprintln!("    Prefix: + extend, - shrink, < at most, > at least,");
-    eprintln!("            / round down, % round up (to multiple of SIZE)");
-    eprintln!("    Suffix: K (1024), M, G, T, P, E");
-    eprintln!("  -c, --no-create          Don't create files that don't exist");
-    eprintln!("  -r FILE, --reference=FILE  Use reference file's size");
-    eprintln!("  -h, --help               Show this help");
-}
-
-/// Compute the new file size given the current size and the size spec.
-fn compute_truncate_size(current: u64, prefix: Option<char>, value: u64) -> Result<u64, String> {
-    match prefix {
-        None => Ok(value),
-        Some('+') => current
-            .checked_add(value)
-            .ok_or_else(|| "size overflow".to_string()),
-        Some('-') => Ok(current.saturating_sub(value)),
-        Some('<') => Ok(current.min(value)),
-        Some('>') => Ok(current.max(value)),
-        Some('/') => {
-            // Round down to nearest multiple of value
-            if value == 0 {
-                return Err("cannot round to multiple of zero".into());
-            }
-            Ok((current / value) * value)
-        }
-        Some('%') => {
-            // Round up to nearest multiple of value
-            if value == 0 {
-                return Err("cannot round to multiple of zero".into());
-            }
-            let rem = current % value;
-            if rem == 0 {
-                Ok(current)
-            } else {
-                current
-                    .checked_add(value - rem)
-                    .ok_or_else(|| "size overflow".to_string())
-            }
-        }
-        Some(c) => Err(format!("unknown size prefix {}", quoteaf_os(c.to_string()))),
-    }
-}
-
-fn run_truncate(args: &[String]) -> Result<(), String> {
-    let cfg = parse_truncate_args(args)?;
-
-    // Determine the base size value from -r or -s.
-    let (prefix, base_size) = if let Some(ref refpath) = cfg.reference {
-        let meta = fs::metadata(refpath)
-            .map_err(|e| format!("cannot stat reference {}: {}", quoteaf_os(refpath), e))?;
-        (None, meta.len())
-    } else {
-        let spec = cfg.size_spec.as_ref().expect("validated above");
-        parse_truncate_size(spec)?
-    };
-
-    for path in &cfg.files {
-        let exists = Path::new(path).exists();
-
-        if !exists && cfg.no_create {
-            continue;
-        }
-
-        // Open or create the file.
-        let file = OpenOptions::new()
-            .write(true)
-            .create(!cfg.no_create)
-            .open(path)
-            .map_err(|e| format!("cannot open {}: {e}", quoteaf_os(path)))?;
-
-        let current_len = file
-            .metadata()
-            .map_err(|e| format!("cannot stat {}: {e}", quoteaf_os(path)))?
-            .len();
-
-        let new_size = compute_truncate_size(current_len, prefix, base_size)?;
-
-        file.set_len(new_size)
-            .map_err(|e| format!("cannot truncate {} to {new_size}: {e}", quoteaf_os(path)))?;
-    }
-
-    Ok(())
-}
-
-// ============================================================================
 // shred mode
 // ============================================================================
 
@@ -968,13 +802,11 @@ fn main() {
 
     let tool_name = match personality {
         Personality::Pv => "pv",
-        Personality::Truncate => "truncate",
         Personality::Shred => "shred",
     };
 
     let result = match personality {
         Personality::Pv => run_pv(&tool_args),
-        Personality::Truncate => run_truncate(&tool_args),
         Personality::Shred => run_shred(&tool_args),
     };
 
@@ -1014,17 +846,11 @@ mod tests {
         assert_eq!(detect_personality("something_else"), Personality::Pv);
     }
 
+    /// `truncate` is coreutils' bin now; this binary no longer answers to it,
+    /// so the name falls to the default like any other it does not know.
     #[test]
-    fn test_personality_truncate() {
-        assert_eq!(detect_personality("truncate"), Personality::Truncate);
-    }
-
-    #[test]
-    fn test_personality_truncate_with_path() {
-        assert_eq!(
-            detect_personality("/usr/bin/truncate"),
-            Personality::Truncate
-        );
+    fn truncate_is_not_a_personality_here() {
+        assert_eq!(detect_personality("truncate"), Personality::Pv);
     }
 
     #[test]
@@ -1095,128 +921,6 @@ mod tests {
     #[test]
     fn test_parse_size_unknown_suffix() {
         assert!(parse_size("10X").is_err());
-    }
-
-    // -- Truncate size parsing ------------------------------------------------
-
-    #[test]
-    fn test_truncate_size_no_prefix() {
-        let (prefix, size) = parse_truncate_size("100K").unwrap();
-        assert_eq!(prefix, None);
-        assert_eq!(size, 102400);
-    }
-
-    #[test]
-    fn test_truncate_size_extend() {
-        let (prefix, size) = parse_truncate_size("+50M").unwrap();
-        assert_eq!(prefix, Some('+'));
-        assert_eq!(size, 50 * 1024 * 1024);
-    }
-
-    #[test]
-    fn test_truncate_size_shrink() {
-        let (prefix, size) = parse_truncate_size("-1K").unwrap();
-        assert_eq!(prefix, Some('-'));
-        assert_eq!(size, 1024);
-    }
-
-    #[test]
-    fn test_truncate_size_at_most() {
-        let (prefix, size) = parse_truncate_size("<1G").unwrap();
-        assert_eq!(prefix, Some('<'));
-        assert_eq!(size, 1024 * 1024 * 1024);
-    }
-
-    #[test]
-    fn test_truncate_size_at_least() {
-        let (prefix, size) = parse_truncate_size(">500").unwrap();
-        assert_eq!(prefix, Some('>'));
-        assert_eq!(size, 500);
-    }
-
-    #[test]
-    fn test_truncate_size_round_down() {
-        let (prefix, size) = parse_truncate_size("/4K").unwrap();
-        assert_eq!(prefix, Some('/'));
-        assert_eq!(size, 4096);
-    }
-
-    #[test]
-    fn test_truncate_size_round_up() {
-        let (prefix, size) = parse_truncate_size("%4K").unwrap();
-        assert_eq!(prefix, Some('%'));
-        assert_eq!(size, 4096);
-    }
-
-    // -- Truncate size computation --------------------------------------------
-
-    #[test]
-    fn test_compute_truncate_absolute() {
-        assert_eq!(compute_truncate_size(500, None, 1000).unwrap(), 1000);
-    }
-
-    #[test]
-    fn test_compute_truncate_extend() {
-        assert_eq!(compute_truncate_size(500, Some('+'), 200).unwrap(), 700);
-    }
-
-    #[test]
-    fn test_compute_truncate_shrink() {
-        assert_eq!(compute_truncate_size(500, Some('-'), 200).unwrap(), 300);
-    }
-
-    #[test]
-    fn test_compute_truncate_shrink_underflow() {
-        // Saturating subtraction: 100 - 500 => 0
-        assert_eq!(compute_truncate_size(100, Some('-'), 500).unwrap(), 0);
-    }
-
-    #[test]
-    fn test_compute_truncate_at_most_smaller() {
-        assert_eq!(compute_truncate_size(300, Some('<'), 500).unwrap(), 300);
-    }
-
-    #[test]
-    fn test_compute_truncate_at_most_larger() {
-        assert_eq!(compute_truncate_size(800, Some('<'), 500).unwrap(), 500);
-    }
-
-    #[test]
-    fn test_compute_truncate_at_least_smaller() {
-        assert_eq!(compute_truncate_size(300, Some('>'), 500).unwrap(), 500);
-    }
-
-    #[test]
-    fn test_compute_truncate_at_least_larger() {
-        assert_eq!(compute_truncate_size(800, Some('>'), 500).unwrap(), 800);
-    }
-
-    #[test]
-    fn test_compute_truncate_round_down() {
-        // 1000 rounded down to nearest multiple of 300 => 900
-        assert_eq!(compute_truncate_size(1000, Some('/'), 300).unwrap(), 900);
-    }
-
-    #[test]
-    fn test_compute_truncate_round_down_exact() {
-        assert_eq!(compute_truncate_size(900, Some('/'), 300).unwrap(), 900);
-    }
-
-    #[test]
-    fn test_compute_truncate_round_up() {
-        // 1000 rounded up to nearest multiple of 300 => 1200
-        assert_eq!(compute_truncate_size(1000, Some('%'), 300).unwrap(), 1200);
-    }
-
-    #[test]
-    fn test_compute_truncate_round_up_exact() {
-        assert_eq!(compute_truncate_size(900, Some('%'), 300).unwrap(), 900);
-    }
-
-    #[test]
-    fn test_compute_truncate_round_zero_error() {
-        assert!(compute_truncate_size(100, Some('/'), 0).is_err());
-        assert!(compute_truncate_size(100, Some('%'), 0).is_err());
     }
 
     // -- Human-readable size formatting ---------------------------------------
@@ -1479,11 +1183,6 @@ mod tests {
     #[test]
     fn test_format_size_just_under_kb() {
         assert_eq!(format_size(1023), "1023B");
-    }
-
-    #[test]
-    fn test_compute_truncate_extend_overflow() {
-        assert!(compute_truncate_size(u64::MAX, Some('+'), 1).is_err());
     }
 
     #[test]

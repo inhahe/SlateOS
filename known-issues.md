@@ -155885,7 +155885,8 @@ maintained for a long time without anyone asking whether the spec wanted it**,
 because maintenance asks "is this correct?" and only a reader of the design
 asks "should this be here?"
 
-## TD-C-THE-INSTALLER-RECORDS-A-GRUB-PATH-NOTHING-EVER-READS -- 2026-09-16
+## TD-C-THE-INSTALLER-RECORDS-A-GRUB-PATH-NOTHING-EVER-READS -- 2026-09-16 -- **FIXED 2026-09-25**
+**Status:** FIXED 2026-09-25 by lane E -- both dead fields deleted as this entry prescribes (`grub_cfg_path` and `custom_dir`, with the local that only fed them); the record was serialised nowhere, and `parse_grub_config` itself has only its two tests as callers.
 
 **In short:** the installer builds a record of the boot loader's configuration
 and puts the path of its config file in it. Nothing anywhere reads that field.

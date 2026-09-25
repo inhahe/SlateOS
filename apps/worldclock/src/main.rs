@@ -615,10 +615,16 @@ impl WorldClockApp {
 
     /// The zone abbreviation in force now (`EST` in winter, `EDT` in summer).
     ///
-    /// Lossy only for a name that is not UTF-8, which `Tz::parse` cannot
-    /// produce — its grammar admits alphanumerics and `+`/`-` only.
+    /// Always text: `Tz::parse`'s grammar admits alphanumerics and `+`/`-`
+    /// only. Checked rather than decoded, so a name that somehow were not text
+    /// would be shown as no abbreviation -- the clock and its offset still
+    /// read -- rather than as a replacement character standing for a byte.
     fn abbrev(&self, rule: &Tz) -> String {
-        String::from_utf8_lossy(rule.lookup(self.utc_epoch()).name.as_bytes()).into_owned()
+        std::str::from_utf8(rule.lookup(self.utc_epoch()).name.as_bytes())
+            .map(str::to_owned)
+            // Unreachable by the grammar above; an empty label is the honest
+            // rendering of a name that cannot be shown.
+            .unwrap_or_default()
     }
 
     /// The rule the home city follows, or UTC if the home index is somehow

@@ -102,12 +102,17 @@ impl GrubInstall {
 // ============================================================================
 
 /// Represents the high-level GRUB configuration of interest.
+///
+/// It held two more fields until 2026-09-25, `grub_cfg_path` and `custom_dir`,
+/// each a path flattened to text through `to_string_lossy` and read by
+/// nothing at all -- `known-issues.md`
+/// `TD-C-THE-INSTALLER-RECORDS-A-GRUB-PATH-NOTHING-EVER-READS`. Deleted rather
+/// than made byte-correct: a careful-looking dead field reads as one that
+/// matters. The custom-scripts directory as a real path lives on
+/// [`GrubInstaller`], which uses it; a consumer of `grub.cfg`'s path should
+/// arrive with the field, as a `PathBuf`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrubConfig {
-    /// Absolute path to `grub.cfg`.
-    pub grub_cfg_path: String,
-    /// Absolute path to the custom-scripts directory (`/etc/grub.d/`).
-    pub custom_dir: String,
     /// GRUB menu timeout in seconds.
     pub timeout: u32,
     /// Name of the default boot entry.
@@ -455,9 +460,6 @@ fn extract_grub_setting<'a>(content: &'a str, key: &str) -> Option<&'a str> {
 pub fn parse_grub_config(root: &Path) -> Option<GrubConfig> {
     let detector = GrubDetector::with_root(root);
     let install = detector.detect()?;
-    let custom_dir = detector
-        .detect_custom_dir()
-        .unwrap_or_else(|| root.join("etc/grub.d"));
 
     // Read grub.cfg to extract timeout / default.
     let cfg_text = fs::read_to_string(&install.config_path).ok()?;
@@ -477,8 +479,6 @@ pub fn parse_grub_config(root: &Path) -> Option<GrubConfig> {
     };
 
     Some(GrubConfig {
-        grub_cfg_path: install.config_path.to_string_lossy().into_owned(),
-        custom_dir: custom_dir.to_string_lossy().into_owned(),
         timeout,
         default_entry,
         os_prober_enabled,

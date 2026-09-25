@@ -741,25 +741,36 @@ impl Default for UndoStack {
 /// Generate a non-conflicting destination name.
 ///
 /// Given `/dest/file.txt`, tries `/dest/file (2).txt`, `/dest/file (3).txt`, etc.
+///
+/// The name is assembled as an [`OsString`](std::ffi::OsString), never as
+/// text. A name on this OS may hold any byte but `/` and NUL, and this used to
+/// build the new name from `to_string_lossy` of the old one -- so pasting
+/// `caf\xE9.txt` into a folder that already had it created the copy as
+/// `caf\u{FFFD} (2).txt`: a file under a name the user never gave anything,
+/// with the byte that distinguished it gone. The copy and a recycle-bin restore
+/// both land here, so both did it.
 pub fn resolve_rename(dest: &Path) -> PathBuf {
-    let stem = dest
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let ext = dest
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
+    let stem = dest.file_stem().unwrap_or_default();
+    let ext = dest.extension();
     let parent = dest.parent().unwrap_or(Path::new(""));
+    let named = |marker: &str| {
+        let mut name = stem.to_os_string();
+        name.push(marker);
+        if let Some(ext) = ext {
+            name.push(".");
+            name.push(ext);
+        }
+        parent.join(name)
+    };
 
     for n in 2u32..10_000 {
-        let candidate = parent.join(format!("{stem} ({n}){ext}"));
+        let candidate = named(&format!(" ({n})"));
         if !candidate.exists() {
             return candidate;
         }
     }
     // Extremely unlikely fallback.
-    parent.join(format!("{stem} (renamed){ext}"))
+    named(" (renamed)")
 }
 
 /// Determine whether `src` is newer than `dest` based on modification time.
@@ -2593,6 +2604,55 @@ mod tests {
 
         let renamed = resolve_rename(&original);
         assert_eq!(renamed, dir.join("Makefile (2)"));
+    }
+
+    /// `prefix` followed by one unit that makes the name not text: a lone
+    /// `0xE9` byte (Latin-1 `é`, not UTF-8 on its own) where names are bytes,
+    /// an unpaired surrogate on the Windows host this suite also runs on.
+    #[cfg(unix)]
+    fn not_text(prefix: &str) -> std::ffi::OsString {
+        use std::os::unix::ffi::OsStringExt;
+        let mut bytes = prefix.as_bytes().to_vec();
+        bytes.push(0xE9);
+        std::ffi::OsString::from_vec(bytes)
+    }
+
+    #[cfg(windows)]
+    fn not_text(prefix: &str) -> std::ffi::OsString {
+        use std::os::windows::ffi::OsStringExt;
+        let mut units: Vec<u16> = prefix.encode_utf16().collect();
+        units.push(0xD800);
+        std::ffi::OsString::from_wide(&units)
+    }
+
+    #[test]
+    fn a_name_that_is_not_text_keeps_every_byte_through_a_conflict_rename() {
+        // The copy of a name that is not text used to be created under
+        // U+FFFD, because the new name was built from a lossy decode of the
+        // old one. Both the paste and the recycle-bin restore go through here.
+        let scratch = temp_dir("resolve_rename_not_text");
+        let dir = scratch.dir().to_path_buf();
+        let mut name = not_text("caf");
+        name.push(".txt");
+        let original = dir.join(&name);
+        assert!(
+            original.to_str().is_none(),
+            "the fixture's name is text after all, so this test proves nothing"
+        );
+
+        let mut want = not_text("caf");
+        want.push(" (2).txt");
+        assert_eq!(
+            resolve_rename(&original),
+            dir.join(&want),
+            "the copy's name lost the unit that made it this file's"
+        );
+
+        // And the counter still advances past a taken name that is not text.
+        fs::write(dir.join(&want), "copy 2").unwrap();
+        let mut third = not_text("caf");
+        third.push(" (3).txt");
+        assert_eq!(resolve_rename(&original), dir.join(&third));
     }
 
     #[test]

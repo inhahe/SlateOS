@@ -482,13 +482,6 @@ impl JsonValue {
         }
     }
 
-    fn as_object(&self) -> Option<&Vec<(String, JsonValue)>> {
-        match self {
-            JsonValue::Object(o) => Some(o),
-            _ => None,
-        }
-    }
-
     fn get(&self, key: &str) -> Option<&JsonValue> {
         match self {
             JsonValue::Object(entries) => {
@@ -1081,6 +1074,17 @@ impl Manifest {
     }
 }
 
+/// Backup metadata (`meta.json`) format version written into every new record.
+///
+/// Version 1 stored `source` as a plain JSON string, which it had reached
+/// through `to_string_lossy` -- so the record of *which directory was backed
+/// up* named a different directory whenever that path was not text, and
+/// `list --source` could not find it by the name it really had. Version 2
+/// stores it percent-encoded, as [`MANIFEST_VERSION`] 2 does for every file's
+/// path (design-decisions 426). A record with no version is version 1 and is
+/// read verbatim, so every existing backup still lists.
+const META_VERSION: u64 = 2;
+
 /// Metadata about a backup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BackupMeta {
@@ -1091,7 +1095,10 @@ struct BackupMeta {
     /// Unix timestamp when backup was created.
     timestamp: u64,
     /// Source path that was backed up.
-    source: String,
+    ///
+    /// A `PathBuf`, for the reason [`FileEntry::path`] is one: this is the
+    /// record of a directory, and a directory's name need not be text.
+    source: PathBuf,
     /// Parent backup ID (for incremental/differential).
     parent_id: Option<String>,
     /// Number of files in backup.
@@ -1125,6 +1132,10 @@ impl BackupMeta {
             dedup_blobs,
         } = self;
         let mut entries = vec![
+            (
+                "version".to_string(),
+                JsonValue::Number(META_VERSION as f64),
+            ),
             ("id".to_string(), JsonValue::Str(id.clone())),
             (
                 "backup_type".to_string(),
@@ -1134,7 +1145,7 @@ impl BackupMeta {
                 "timestamp".to_string(),
                 JsonValue::Number(*timestamp as f64),
             ),
-            ("source".to_string(), JsonValue::Str(source.clone())),
+            ("source".to_string(), JsonValue::Str(encode_path(source))),
             (
                 "file_count".to_string(),
                 JsonValue::Number(*file_count as f64),
@@ -1168,7 +1179,16 @@ impl BackupMeta {
         let backup_type_str = val.get("backup_type")?.as_str()?;
         let backup_type = BackupType::from_str(backup_type_str)?;
         let timestamp = val.get("timestamp")?.as_u64()?;
-        let source = val.get("source")?.as_str()?.to_string();
+        // See `META_VERSION`: absent is version 1, whose source was written
+        // verbatim; a percent-decode of it would misread a real `%41` in a
+        // directory's name as `A`.
+        let encoded = val.get("version").and_then(|v| v.as_u64()).unwrap_or(1) >= 2;
+        let raw_source = val.get("source")?.as_str()?;
+        let source = if encoded {
+            decode_path(raw_source)
+        } else {
+            PathBuf::from(raw_source)
+        };
         let parent_id = val
             .get("parent_id")
             .and_then(|v| v.as_str())
@@ -1934,7 +1954,7 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
         id: backup_id.clone(),
         backup_type: effective_type,
         timestamp,
-        source: source.to_string_lossy().to_string(),
+        source: source.clone(),
         parent_id,
         file_count: manifest.files.len() as u64,
         total_size,
@@ -2205,6 +2225,20 @@ fn reconstruct_full_manifest(
 // Command: list
 // ============================================================================
 
+/// Whether `path` contains `needle` as a run of bytes.
+///
+/// `list --source` is a substring filter the user types. It is asked of the
+/// path's own bytes, not of a decoded copy: a directory whose name is not text
+/// still matches on the parts of it that are, and no decode can make a filter
+/// match a byte the path does not have. On a Windows host the bytes are the
+/// platform's own encoding of the name, in which text is spelled as UTF-8, so
+/// the same holds there.
+fn path_contains(path: &Path, needle: &str) -> bool {
+    let hay = path.as_os_str().as_encoded_bytes();
+    let needle = needle.as_bytes();
+    needle.is_empty() || hay.windows(needle.len()).any(|w| w == needle)
+}
+
 fn cmd_list(dest: &Path, source_filter: Option<&str>) -> io::Result<()> {
     let metas = list_backups(dest)?;
 
@@ -2214,7 +2248,10 @@ fn cmd_list(dest: &Path, source_filter: Option<&str>) -> io::Result<()> {
     }
 
     let filtered: Vec<&BackupMeta> = if let Some(source) = source_filter {
-        metas.iter().filter(|m| m.source.contains(source)).collect()
+        metas
+            .iter()
+            .filter(|m| path_contains(&m.source, source))
+            .collect()
     } else {
         metas.iter().collect()
     };
@@ -2753,7 +2790,7 @@ fn cmd_info(dest: &Path, backup_id: &str) -> io::Result<()> {
     println!("Backup: {}", meta.id);
     println!("  Type:       {}", meta.backup_type);
     println!("  Created:    {}", format_timestamp(meta.timestamp));
-    println!("  Source:     {}", meta.source);
+    println!("  Source:     {}", meta.source.display());
     println!(
         "  Parent:     {}",
         meta.parent_id.as_deref().unwrap_or("(none)")
@@ -3794,7 +3831,7 @@ mod tests {
             id: "1700000000-full".to_string(),
             backup_type: BackupType::Full,
             timestamp: 1700000000,
-            source: "/home/user".to_string(),
+            source: PathBuf::from("/home/user"),
             parent_id: None,
             file_count: 42,
             total_size: 1048576,
@@ -3822,7 +3859,7 @@ mod tests {
             id: "1700100000-incremental".to_string(),
             backup_type: BackupType::Incremental,
             timestamp: 1700100000,
-            source: "/home/user".to_string(),
+            source: PathBuf::from("/home/user"),
             parent_id: Some("1700000000-full".to_string()),
             file_count: 5,
             total_size: 4096,
@@ -3843,6 +3880,109 @@ mod tests {
         );
     }
 
+    /// `prefix` followed by one unit that makes a name not text: a lone
+    /// `0xE9` byte where names are bytes, an unpaired surrogate on the Windows
+    /// host this suite also runs on -- so these tests run in the ordinary host
+    /// suite rather than only on a Unix machine.
+    #[cfg(unix)]
+    fn not_text(prefix: &str) -> std::ffi::OsString {
+        use std::os::unix::ffi::OsStringExt;
+        let mut bytes = prefix.as_bytes().to_vec();
+        bytes.push(0xE9);
+        std::ffi::OsString::from_vec(bytes)
+    }
+
+    #[cfg(windows)]
+    fn not_text(prefix: &str) -> std::ffi::OsString {
+        use std::os::windows::ffi::OsStringExt;
+        let mut units: Vec<u16> = prefix.encode_utf16().collect();
+        units.push(0xD800);
+        std::ffi::OsString::from_wide(&units)
+    }
+
+    /// The record of *which directory was backed up* keeps that directory's
+    /// name when the name is not text. It used to go through
+    /// `to_string_lossy`, so `meta.json` named a directory that does not exist.
+    ///
+    /// The record is checked on every build: it holds the escaped bytes and
+    /// no replacement character. The round trip back to a path is checked
+    /// where names are bytes. On the Windows host `pathcodec` can rebuild only
+    /// valid Unicode (its `os_string_from_bytes` host arm), which is a limit
+    /// of developing on Windows rather than of the record.
+    #[test]
+    fn a_source_whose_name_is_not_text_is_recorded_whole() {
+        // Joined as one `OsString` with `/`, not with `PathBuf::push`: on the
+        // Windows host `push` inserts `\`, which JSON then escapes to `\\`, and
+        // the substring test below would be about the host's separator
+        // rather than about the record.
+        let mut name = std::ffi::OsString::from("/srv/");
+        name.push(not_text("caf"));
+        let source = PathBuf::from(name);
+        assert!(
+            source.to_str().is_none(),
+            "the fixture's name is text after all, so this test proves nothing"
+        );
+        let meta = BackupMeta {
+            id: "1700000000-full".to_string(),
+            backup_type: BackupType::Full,
+            timestamp: 1_700_000_000,
+            source: source.clone(),
+            parent_id: None,
+            file_count: 1,
+            total_size: 1,
+            new_blobs: 1,
+            dedup_blobs: 0,
+        };
+        let record = meta.serialize();
+        assert!(
+            record.contains(&encode_path(&source)),
+            "the record does not hold the source's escaped bytes: {record}"
+        );
+        assert!(
+            !record.contains('\u{FFFD}'),
+            "a replacement character reached the record: {record}"
+        );
+        #[cfg(unix)]
+        {
+            let back = BackupMeta::deserialize(&record).unwrap();
+            assert_eq!(
+                back.source, source,
+                "the source directory's name changed on disk"
+            );
+        }
+    }
+
+    /// A record written before `META_VERSION` 2 stored its source verbatim.
+    /// Reading it as percent-encoded would turn a directory really named
+    /// `100%41` into `100A` -- so an old backup would list under a directory it
+    /// never came from.
+    #[test]
+    fn a_version_1_metadata_record_reads_its_source_verbatim() {
+        let legacy = r#"{"id": "1-full", "backup_type": "full", "timestamp": 1, "source": "/home/100%41", "parent_id": null}"#;
+        let meta = BackupMeta::deserialize(legacy).unwrap();
+        assert_eq!(meta.source, PathBuf::from("/home/100%41"));
+    }
+
+    /// `list --source` matches bytes the path has -- including the text parts
+    /// of a name that is not text -- and never a byte it does not have.
+    #[test]
+    fn the_source_filter_matches_the_bytes_the_path_has() {
+        let mut source = PathBuf::from("/srv/photos");
+        source.push(not_text("caf"));
+        assert!(path_contains(&source, "photos"));
+        assert!(path_contains(&source, "/srv/photos"));
+        assert!(path_contains(&source, "caf"));
+        assert!(path_contains(&source, ""), "an empty filter is no filter");
+        assert!(
+            !path_contains(&source, "caf\u{FFFD}"),
+            "the replacement character a decode would have put there matched"
+        );
+        assert!(
+            !path_contains(Path::new("/a"), "/ab"),
+            "a filter longer than the path matched"
+        );
+    }
+
     // --- Pruning Retention Policy Tests ---
 
     #[test]
@@ -3852,7 +3992,7 @@ mod tests {
                 id: "1".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: 100,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3863,7 +4003,7 @@ mod tests {
                 id: "2".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: 200,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3874,7 +4014,7 @@ mod tests {
                 id: "3".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: 300,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3905,7 +4045,7 @@ mod tests {
                 id: "d1_a".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: day * 10 + 100,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3916,7 +4056,7 @@ mod tests {
                 id: "d1_b".to_string(),
                 backup_type: BackupType::Incremental,
                 timestamp: day * 10 + 200,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3927,7 +4067,7 @@ mod tests {
                 id: "d2_a".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: day * 11 + 100,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3938,7 +4078,7 @@ mod tests {
                 id: "d3_a".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: day * 12 + 100,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3971,7 +4111,7 @@ mod tests {
                 id: "1".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: 100,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -3982,7 +4122,7 @@ mod tests {
                 id: "2".to_string(),
                 backup_type: BackupType::Full,
                 timestamp: 200,
-                source: "/src".to_string(),
+                source: PathBuf::from("/src"),
                 parent_id: None,
                 file_count: 0,
                 total_size: 0,
@@ -4344,7 +4484,7 @@ mod tests {
                 BackupType::Full
             },
             timestamp,
-            source: "/src".to_string(),
+            source: PathBuf::from("/src"),
             parent_id: parent.map(str::to_string),
             file_count: 0,
             total_size: 0,

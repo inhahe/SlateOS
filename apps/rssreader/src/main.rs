@@ -180,6 +180,9 @@ const CANNOT_FETCH_LINES: [&str; 3] = [
 
 /// XML parser state.
 struct XmlParser<'a> {
+    /// The document, for slicing out text: see [`XmlParser::text_since`].
+    text: &'a str,
+    /// The same document as bytes, which is what the cursor scans.
     input: &'a [u8],
     pos: usize,
     /// Elements currently open above the cursor. See [`MAX_XML_DEPTH`].
@@ -226,6 +229,7 @@ impl core::fmt::Display for XmlError {
 impl<'a> XmlParser<'a> {
     fn new(input: &'a str) -> Self {
         Self {
+            text: input,
             input: input.as_bytes(),
             pos: 0,
             depth: 0,
@@ -325,13 +329,21 @@ impl<'a> XmlParser<'a> {
         }
     }
 
-    /// The input between `start` and the cursor, decoded as text.
+    /// The input between `start` and the cursor.
     ///
-    /// The lossy decode is exact rather than lossy in practice: `input` came
-    /// from a `&str`, and every position this parser stops at is either a byte
-    /// it matched (all ASCII) or the end, so no slice can split a character.
+    /// Sliced out of the document as text, not decoded out of its bytes: the
+    /// document *is* a `&str`, and every position this parser stops at is a
+    /// byte it matched (all ASCII) or the end, so no slice can split a
+    /// character. This used to take the bytes and run them back through
+    /// `from_utf8_lossy` -- exact in practice, and a decode that could only
+    /// ever have hidden a cursor that stopped mid-character. `str::get` says
+    /// so instead: a slice that is not on character boundaries is `None`,
+    /// which the test `text_is_sliced_on_character_boundaries` guards.
     fn text_since(&self, start: usize) -> String {
-        String::from_utf8_lossy(self.input.get(start..self.pos).unwrap_or_default()).into_owned()
+        self.text
+            .get(start..self.pos)
+            .unwrap_or_default()
+            .to_owned()
     }
 
     /// Skip whitespace characters.
@@ -6817,6 +6829,39 @@ mod tests {
         let elem = parse_xml(xml).unwrap();
         assert_eq!(elem.tag, "root");
         assert_eq!(elem.text_content(), "hello");
+    }
+
+    /// Every slice the parser takes lands on a character boundary.
+    ///
+    /// `text_since` slices the document as text, and a slice that splits a
+    /// character comes back empty -- so a cursor that ever stopped
+    /// mid-character would now lose the whole run rather than garble one
+    /// character. Multibyte characters are put hard against each kind of
+    /// markup the cursor stops at: before `<`, after `>`, inside CDATA, and on
+    /// both sides of an entity.
+    #[test]
+    fn text_is_sliced_on_character_boundaries() {
+        for text in ["é", "日本語", "x€", "€x", "🚀", "naïve ☃"] {
+            let xml = format!(
+                "<root><t>{text}</t><c><![CDATA[{text}]]></c><e>{text}&amp;{text}</e></root>"
+            );
+            let root = parse_xml(&xml).unwrap_or_else(|e| panic!("{xml} failed: {e}"));
+            assert_eq!(
+                root.find_child("t").map(XmlElement::text_content),
+                Some(text.to_string()),
+                "element text for {text}"
+            );
+            assert_eq!(
+                root.find_child("c").map(XmlElement::text_content),
+                Some(text.to_string()),
+                "CDATA for {text}"
+            );
+            assert_eq!(
+                root.find_child("e").map(XmlElement::text_content),
+                Some(format!("{text}&{text}")),
+                "text on both sides of an entity for {text}"
+            );
+        }
     }
 
     /// Attribute values come straight off a remote feed. Accumulating them one

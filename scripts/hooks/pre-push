@@ -801,7 +801,10 @@ toi="${repo_root:-.}/scripts/check-test-order-independence.py"
 # on a coreutils-only push. Left unscoped because `touches` answers
 # yes/no rather than which, and a wrong answer there silently narrows
 # the gate -- the failure this whole gate family keeps producing.
-touches posix/ userspace/authlib/ userspace/coreutils/         scripts/check-test-order-independence.py || skip_toi=1
+# `gui/vulkan/` since 2026-09-24, with `vkloader`'s entry in CRATES: every
+# crate in that list must be a trigger here, or a push touching only it skips
+# the gate that was added to cover it.
+touches posix/ userspace/authlib/ userspace/coreutils/ gui/vulkan/         scripts/check-test-order-independence.py || skip_toi=1
 note_gate test-order "$skip_toi"
 
 toi_failed=0

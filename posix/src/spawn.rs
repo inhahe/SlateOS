@@ -2089,6 +2089,8 @@ fn exec_with(
     argv_buf: &mut [u8],
     envp_buf: &mut [u8],
 ) -> i32 {
+    #[cfg(all(test, not(target_os = "none")))]
+    exec_probe::record(envp);
     // The program, following any `#!` chain, and its packed argument list.
     // `E2BIG` rather than a silent truncation when either list is longer than
     // `ARG_MAX`.
@@ -2974,6 +2976,34 @@ pub extern "C" fn execvpe(file: *const u8, argv: *const *const u8, envp: *const 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Test builds only: the `envp` the latest [`exec_with`] on this thread was
+/// handed.
+///
+/// No exec can succeed on the host -- `load_program` meets `ENOSYS` first -- so
+/// without this nothing can observe which environment an `exec*` call passes
+/// on. That is how `execv` and `execvp` passing none at all went unnoticed
+/// until a CPython rung lost `PYTHONHOME` on the target
+/// (`requests/a-d-execv-execvp-execl-execlp-start-the-new-program-with-no-environment.md`).
+/// Every exec entry point funnels through `exec_with`, so recording there
+/// covers them all.
+#[cfg(all(test, not(target_os = "none")))]
+mod exec_probe {
+    extern crate std;
+    use core::cell::Cell;
+
+    std::thread_local! {
+        static LAST_ENVP: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn record(envp: *const *const u8) {
+        LAST_ENVP.with(|c| c.set(envp as usize));
+    }
+
+    pub(super) fn last() -> *const *const u8 {
+        LAST_ENVP.with(Cell::get) as *const *const u8
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -5117,5 +5147,76 @@ mod tests {
             r.is_err(),
             "the open failed and the spawn must say so: {r:?}"
         );
+    }
+
+    // -- The environment an exec without an `e` passes on --
+
+    /// `execv` and `execvp` hand the new program the caller's environment --
+    /// the list `environ` holds -- as POSIX requires of every `exec` without
+    /// an `e` in its name. Both passed NULL until 2026-09-24, so a program
+    /// started by `execv`, `execvp`, `execl` or `execlp` began with no
+    /// environment at all: no `PATH`, no `HOME`, and for CPython no
+    /// `PYTHONHOME`, so it could not find its own standard library.
+    #[test]
+    fn execv_and_execvp_pass_the_callers_environment() {
+        let _env = crate::environ::lock_env_for_test();
+        // SAFETY: NUL-terminated literals.
+        let set =
+            unsafe { crate::environ::setenv(b"SLATE_EXEC_PROBE\0".as_ptr(), b"1\0".as_ptr(), 1) };
+        assert_eq!(set, 0);
+        let env = crate::environ::current_environ();
+        assert!(
+            !env.is_null(),
+            "a set variable means a non-empty environment"
+        );
+        let argv: [*const u8; 2] = [b"prog\0".as_ptr(), core::ptr::null()];
+
+        exec_probe::record(core::ptr::null());
+        assert_eq!(execv(b"/no/such/prog\0".as_ptr(), argv.as_ptr()), -1);
+        assert_eq!(exec_probe::last(), env, "execv");
+
+        exec_probe::record(core::ptr::null());
+        assert_eq!(execvp(b"/no/such/prog\0".as_ptr(), argv.as_ptr()), -1);
+        assert_eq!(exec_probe::last(), env, "execvp, given a path");
+
+        exec_probe::record(core::ptr::null());
+        assert_eq!(execvp(b"no-such-prog\0".as_ptr(), argv.as_ptr()), -1);
+        assert_eq!(exec_probe::last(), env, "execvp, searching PATH");
+    }
+
+    /// `execve` and `execvpe` pass exactly the list they are given -- NULL
+    /// included -- and never substitute the caller's.
+    #[test]
+    fn execve_and_execvpe_pass_their_own_envp() {
+        let mine: [*const u8; 2] = [b"ONLY=this\0".as_ptr(), core::ptr::null()];
+        let argv: [*const u8; 2] = [b"prog\0".as_ptr(), core::ptr::null()];
+
+        exec_probe::record(core::ptr::null());
+        assert_eq!(
+            execve(b"/no/such/prog\0".as_ptr(), argv.as_ptr(), mine.as_ptr()),
+            -1
+        );
+        assert_eq!(exec_probe::last(), mine.as_ptr());
+
+        exec_probe::record(mine.as_ptr());
+        assert_eq!(
+            execve(
+                b"/no/such/prog\0".as_ptr(),
+                argv.as_ptr(),
+                core::ptr::null()
+            ),
+            -1
+        );
+        assert!(
+            exec_probe::last().is_null(),
+            "an empty environment stays empty"
+        );
+
+        exec_probe::record(core::ptr::null());
+        assert_eq!(
+            execvpe(b"no-such-prog\0".as_ptr(), argv.as_ptr(), mine.as_ptr()),
+            -1
+        );
+        assert_eq!(exec_probe::last(), mine.as_ptr());
     }
 }

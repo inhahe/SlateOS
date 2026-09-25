@@ -156164,7 +156164,7 @@ because it had no other option at the time, and each has its own call sites.
 One crate per change keeps a rename that breaks something attributable to the
 crate it broke.
 
-## TD-C-THE-WALLPAPER-SUBSYSTEM-CARRIES-PATHS-AS-TEXT-THROUGHOUT -- 2026-09-16
+## TD-C-THE-WALLPAPER-SUBSYSTEM-CARRIES-PATHS-AS-TEXT-THROUGHOUT -- 2026-09-16 -- FIXED 2026-09-16
 
 **Status:** FIXED 2026-09-16 (`9ce32d61f`) for the live chain -- the setting,
 the shell and the settings app all carry a `PathBuf`, percent-encoded on disk

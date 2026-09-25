@@ -47,6 +47,7 @@ use alloc::vec::Vec;
 
 use deflate::{ZlibInflateStream, zlib_inflate_stream};
 
+use crate::orientation::Orientation;
 use crate::scale::{BoxFilter, Sink, fit_within};
 use crate::{Image, ImageError, ImageResult, Limits};
 
@@ -173,7 +174,34 @@ impl Header {
 /// [`ImageError::Malformed`] naming the field if one is out of range.
 pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     let h = read_header(bytes)?;
-    Ok((h.width, h.height))
+    Ok(orientation(bytes).shown((h.width, h.height)))
+}
+
+/// Which way up the picture is shown: its EXIF orientation, from the first
+/// `eXIf` chunk before the image data, as Chrome reads it (see
+/// [`crate::orientation`]). As stored if there is none, or none that counts.
+#[must_use]
+pub fn orientation(bytes: &[u8]) -> Orientation {
+    exif(bytes)
+        .and_then(crate::orientation::from_exif)
+        .unwrap_or_default()
+}
+
+/// The first `eXIf` chunk's contents before `IDAT`. One whose CRC is wrong is
+/// passed over, as every ancillary chunk is.
+fn exif(bytes: &[u8]) -> Option<&[u8]> {
+    if !is_png(bytes) {
+        return None;
+    }
+    for chunk in Chunks::new(bytes).skip(1) {
+        let chunk = chunk.ok()?;
+        match &chunk.kind {
+            b"IDAT" | b"IEND" => return None,
+            b"eXIf" => return Some(chunk.data),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Read and validate `IHDR`, which RFC 2083 requires to be the first chunk.
@@ -235,13 +263,6 @@ fn parse_ihdr(data: &[u8]) -> ImageResult<Header> {
     })
 }
 
-/// Decode a PNG into `0xAARRGGBB` pixels.
-///
-/// # Errors
-///
-/// [`ImageError`] — a malformed header, a picture over `limits`, a failed
-/// critical-chunk checksum, or unreadable compressed data. Never panics, for
-/// any input.
 /// Decode a picture no larger than `max_w` x `max_h`, box-filtered on the way
 /// out.
 ///
@@ -258,11 +279,23 @@ fn parse_ihdr(data: &[u8]) -> ImageResult<Header> {
 ///
 /// As [`decode`].
 pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> ImageResult<Image> {
-    decode_inner(bytes, limits, Some((max_w.max(1), max_h.max(1))))
+    // The box is for the picture as shown: turned first for one shown on its
+    // side.
+    let turn = orientation(bytes);
+    let (max_w, max_h) = turn.shown((max_w.max(1), max_h.max(1)));
+    Ok(turn.apply(decode_inner(bytes, limits, Some((max_w, max_h)))?))
 }
 
+/// Decode a PNG into `0xAARRGGBB` pixels, turned as its EXIF orientation
+/// ([`orientation`]) says.
+///
+/// # Errors
+///
+/// [`ImageError`] — a malformed header, a picture over `limits`, a failed
+/// critical-chunk checksum, or unreadable compressed data. Never panics, for
+/// any input.
 pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
-    decode_inner(bytes, limits, None)
+    Ok(orientation(bytes).apply(decode_inner(bytes, limits, None)?))
 }
 
 fn decode_inner(bytes: &[u8], limits: Limits, scale_to: Option<(u32, u32)>) -> ImageResult<Image> {

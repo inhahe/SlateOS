@@ -54,6 +54,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::orientation::Orientation;
 use crate::{Image, ImageError, ImageResult, Limits};
 
 mod progressive;
@@ -903,7 +904,50 @@ impl Default for Tables {
 /// that cannot be true; [`ImageError::Truncated`] when the file stops inside a
 /// structure it announced; [`ImageError::TooLarge`] past `limits`.
 pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
-    decode_at(bytes, limits, 8)
+    Ok(orientation(bytes).apply(decode_at(bytes, limits, 8)?))
+}
+
+/// Which way up the picture is shown: its EXIF orientation, read as Chrome
+/// reads it -- from the first `APP1` segment before the scan whose payload
+/// starts `Exif ` and is longer than that and its pad byte (see
+/// [`crate::orientation`]). As stored if there is none, or none that counts.
+#[must_use]
+pub fn orientation(bytes: &[u8]) -> Orientation {
+    exif(bytes)
+        .and_then(crate::orientation::from_exif)
+        .unwrap_or_default()
+}
+
+/// The EXIF block's contents (a TIFF structure), if the file has one before
+/// its scan.
+fn exif(bytes: &[u8]) -> Option<&[u8]> {
+    if !is_jpeg(bytes) {
+        return None;
+    }
+    let mut at = 2usize;
+    loop {
+        // To the next marker, over any fill bytes.
+        while *bytes.get(at)? != 0xFF {
+            at = at.checked_add(1)?;
+        }
+        while *bytes.get(at)? == 0xFF {
+            at = at.checked_add(1)?;
+        }
+        let marker = *bytes.get(at)?;
+        at = at.checked_add(1)?;
+        match marker {
+            0xD8 | 0x01 | 0xD0..=0xD7 => continue,
+            // The scan, or the end: no EXIF before it.
+            0xDA | 0xD9 => return None,
+            _ => {}
+        }
+        let length = usize::from(read_u16(bytes, at).ok()?);
+        let payload = bytes.get(at.checked_add(2)?..at.checked_add(length)?)?;
+        at = at.checked_add(length)?;
+        if marker == 0xE1 && payload.len() > 6 && payload.starts_with(b"Exif ") {
+            return payload.get(6..);
+        }
+    }
 }
 
 /// [`decode`], with each 8x8 block reconstructed at `block` pixels square.
@@ -1609,7 +1653,8 @@ fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> u32 {
     0xFF00_0000 | (r << 16) | (g << 8) | b
 }
 
-/// The picture's size, without decoding it.
+/// The picture's size as shown -- turned by its EXIF orientation -- without
+/// decoding it.
 ///
 /// Walks to the frame header and stops. A thumbnailer needs this to choose how
 /// much of the picture to reconstruct, and reading it should not cost what
@@ -1619,6 +1664,11 @@ fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> u32 {
 ///
 /// As [`decode`], for the header it does read.
 pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
+    Ok(orientation(bytes).shown(stored_dimensions(bytes)?))
+}
+
+/// The frame's own width and height, before any turning.
+fn stored_dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     if !is_jpeg(bytes) {
         return Err(ImageError::UnknownFormat);
     }
@@ -1703,7 +1753,11 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
 ///
 /// As [`decode`].
 pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> ImageResult<Image> {
-    let (width, height) = dimensions(bytes)?;
+    // The box is for the picture as shown, so for one shown on its side it
+    // is turned before the stored picture is fitted into it.
+    let turn = orientation(bytes);
+    let (max_w, max_h) = turn.shown((max_w, max_h));
+    let (width, height) = stored_dimensions(bytes)?;
     let mut block = 8usize;
     if max_w > 0 && max_h > 0 {
         // The smallest power of two whose reconstruction still covers the
@@ -1719,11 +1773,11 @@ pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> Im
     }
     let image = decode_at(bytes, limits, block)?;
     if max_w == 0 || max_h == 0 || (image.width <= max_w && image.height <= max_h) {
-        return Ok(image);
+        return Ok(turn.apply(image));
     }
     let factor_w = image.width.div_ceil(max_w).max(1);
     let factor_h = image.height.div_ceil(max_h).max(1);
-    Ok(box_filter(&image, factor_w.max(factor_h) as usize))
+    Ok(turn.apply(box_filter(&image, factor_w.max(factor_h) as usize)))
 }
 
 /// Average each `factor` x `factor` square down to one pixel.

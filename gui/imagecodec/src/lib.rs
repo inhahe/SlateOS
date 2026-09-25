@@ -108,6 +108,11 @@
 //! an icon's images -- PNG, or BMP with its transparency mask -- by Chrome's
 //! own rules for which is best and for when the mask applies. See [`ico`].
 //!
+//! **EXIF orientation is applied**, as Chrome applies it: a JPEG's or PNG's
+//! EXIF saying the picture is on its side turns it, so [`decode`],
+//! [`decode_scaled`] and [`dimensions`] all describe the picture as it is shown.
+//! See [`orientation`].
+//!
 //! # Picture files for *other* crates' tests
 //!
 //! [`testing`] emits real, small PNGs. It is public rather than `#[cfg(test)]`
@@ -127,6 +132,7 @@ pub mod bmp;
 pub mod gif;
 pub mod ico;
 pub mod jpeg;
+pub mod orientation;
 pub mod png;
 mod scale;
 pub mod testing;

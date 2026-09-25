@@ -760,40 +760,24 @@ const LONG_FILE_NAME_MAX: usize = 255;
 /// certainly wrong.
 #[cfg(unix)]
 fn name_max(dir: &Path) -> usize {
-    /// `<unistd.h>`'s `_PC_NAME_MAX`. Measured as 3 on the host, and
-    /// `posix::unistd::_PC_NAME_MAX` is 3 on the target.
-    const PC_NAME_MAX: i32 = 3;
+    use crate::pathname::{NameLimit, pathconf};
 
-    unsafe extern "C" {
-        fn pathconf(path: *const u8, name: i32) -> i64;
-        fn __errno_location() -> *mut i32;
-    }
-
-    let Ok(path) = crate::pathname::c_path(dir) else {
-        return usize::MAX;
-    };
-    // SAFETY: `__errno_location` is defined to return a valid pointer to this
-    // thread's `errno`, live for the whole life of the thread, and never fails.
-    unsafe { *__errno_location() = 0 };
-    // SAFETY: `path` is a NUL-terminated byte string that outlives the call, and
-    // `pathconf` reads it without retaining it.
-    let raw = unsafe { pathconf(path.as_ptr(), PC_NAME_MAX) };
-    // SAFETY: as above.
-    let errno = unsafe { *__errno_location() };
-
-    // `name_max -= !errno`, written out. The subtraction applies to a
-    // successful read as well as to the indeterminate one; see the doc comment.
-    let limit = if errno == 0 {
-        raw.saturating_sub(1)
-    } else {
-        raw
-    };
-    if limit >= 0 {
-        usize::try_from(limit).unwrap_or(usize::MAX)
-    } else if limit < -1 {
-        NAME_MAX_MINIMUM
-    } else {
-        usize::MAX
+    // `name_max -= !errno`, written out over the three outcomes. The
+    // subtraction applies to a successful read as well as to the
+    // indeterminate one; see the doc comment.
+    match pathconf(&crate::quote::os_bytes(dir.as_os_str()), NameLimit::Component) {
+        // A limit, read with `errno` still zero, loses upstream's byte. A limit
+        // of zero becomes -1, which the three-way conditional reads as "no
+        // limit" -- unreachable in practice, and kept for exactness.
+        Ok(Some(n)) => n
+            .checked_sub(1)
+            .map_or(usize::MAX, |limit| usize::try_from(limit).unwrap_or(usize::MAX)),
+        // -1 with `errno` zero: the subtraction makes it -2, below -1, so the
+        // conservative floor.
+        Ok(None) => NAME_MAX_MINIMUM,
+        // -1 with `errno` set, or a name with a NUL in it: no limit is imposed
+        // and the rename reports whatever the filesystem thinks.
+        Err(_) => usize::MAX,
     }
 }
 

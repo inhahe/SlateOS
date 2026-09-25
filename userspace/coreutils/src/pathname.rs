@@ -240,6 +240,82 @@ pub fn c_path(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Which of `pathconf`'s two file-name limits to ask a directory for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameLimit {
+    /// `_PC_NAME_MAX`: the longest single component the directory can hold.
+    Component,
+    /// `_PC_PATH_MAX`: the longest relative name that may start there.
+    Path,
+}
+
+impl NameLimit {
+    /// `<unistd.h>`'s selector. Measured as 3 and 4 on the glibc host, and
+    /// `posix::unistd::_PC_NAME_MAX`/`_PC_PATH_MAX` are 3 and 4 on the target.
+    #[cfg(unix)]
+    const fn selector(self) -> i32 {
+        match self {
+            Self::Component => 3,
+            Self::Path => 4,
+        }
+    }
+}
+
+/// `pathconf(2)` for one of the file-name limits, with its three outcomes
+/// kept apart.
+///
+/// The C function folds two of them into one return value: `-1` is both "this
+/// has no limit" and "the call failed", told apart only by whether `errno`
+/// changed -- which is why every caller has to clear `errno` first, and why
+/// that belongs in one place rather than at each call.
+///
+/// * `Ok(Some(n))` -- the limit is `n`.
+/// * `Ok(None)` -- there is no limit (`-1`, `errno` untouched).
+/// * `Err(e)` -- the call failed; `ENOENT` is the common one, for a directory
+///   that does not exist.
+///
+/// `dir` is bytes, not a `Path`, for this module's usual reason: the answer is
+/// about the name exactly as given, trailing slashes included.
+///
+/// # Errors
+///
+/// Whatever `pathconf` reports, or `InvalidInput` if `dir` contains a NUL
+/// (refused rather than truncated, as [`c_path`] does).
+#[cfg(unix)]
+pub fn pathconf(dir: &[u8], limit: NameLimit) -> std::io::Result<Option<u64>> {
+    unsafe extern "C" {
+        fn pathconf(path: *const u8, name: i32) -> i64;
+        fn __errno_location() -> *mut i32;
+    }
+
+    if dir.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path contains a NUL byte",
+        ));
+    }
+    let mut c_dir = Vec::with_capacity(dir.len().saturating_add(1));
+    c_dir.extend_from_slice(dir);
+    c_dir.push(0);
+
+    // SAFETY: `__errno_location` is defined to return a valid pointer to this
+    // thread's `errno`, live for the whole life of the thread, and never fails.
+    unsafe { *__errno_location() = 0 };
+    // SAFETY: `c_dir` is a NUL-terminated byte string that outlives the call,
+    // and `pathconf` reads it without retaining it.
+    let raw = unsafe { pathconf(c_dir.as_ptr(), limit.selector()) };
+    if let Ok(n) = u64::try_from(raw) {
+        return Ok(Some(n));
+    }
+    // SAFETY: as above.
+    let errno = unsafe { *__errno_location() };
+    if errno == 0 {
+        Ok(None)
+    } else {
+        Err(std::io::Error::from_raw_os_error(errno))
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {

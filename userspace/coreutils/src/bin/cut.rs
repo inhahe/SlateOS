@@ -50,7 +50,8 @@
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
-use coreutils::quote::{os_bytes, quote, quotef};
+use coreutils::quote::{os_bytes, quotef};
+use coreutils::setfields::{self, Range};
 use coreutils::stdfd;
 use std::ffi::OsString;
 use std::fs::File;
@@ -81,18 +82,7 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("version", Takes::Nothing),
 ];
 
-/// One selected span, 1-based and inclusive at both ends.
-///
-/// `hi == u64::MAX` is how an open range (`3-`) is written, and a pair of
-/// `u64::MAX` is the sentinel that terminates the list — both are upstream's
-/// representation, kept because the arithmetic around them (`hi + 1` in the
-/// complement, `idx > hi` in the scan) is what the observable output falls out
-/// of.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct Range {
-    lo: u64,
-    hi: u64,
-}
+// `Range`, the list's element, is `coreutils::setfields::Range`.
 
 /// Which of the two scanners runs. `-b` and `-c` both mean [`Mode::Bytes`];
 /// see the module documentation for why `-c` is not characters.
@@ -429,7 +419,15 @@ fn finish(draft: Draft) -> Result<Options, getopt::Error> {
         }
     }
 
-    let ranges = set_fields(&spec, draft.byte_mode, draft.complement)?;
+    let ranges = setfields::set_fields(
+        CUT,
+        &spec,
+        setfields::Flags {
+            errmsg_use_pos: draft.byte_mode,
+            complement: draft.complement,
+            allow_dash: false,
+        },
+    )?;
     let delim = if draft.delim_specified {
         draft.delim
     } else {
@@ -449,254 +447,6 @@ fn finish(draft: Draft) -> Result<Options, getopt::Error> {
         line_delim: draft.line_delim.unwrap_or(b'\n'),
         suppress_non_delimited: draft.suppress_non_delimited,
     })
-}
-
-/// gnulib's `set_fields` (`src/set-fields.c`): parse a LIST into sorted,
-/// merged ranges.
-///
-/// The grammar is `N`, `N-`, `-M` or `N-M`, separated by commas **or by
-/// blanks** — `cut -f '1 3'` is the same as `cut -f 1,3`, which nothing
-/// documents and the code makes plain. Indices are 1-based and 0 is an error.
-///
-/// `use_pos` selects the byte-mode wording of five of the diagnostics; it is
-/// upstream's `SETFLD_ERRMSG_USE_POS`, and it is the only surviving trace of
-/// the `-b`/`-c` distinction.
-///
-/// # Errors
-///
-/// A zero index, a decreasing range, two dashes in one item, a lone `-`, a
-/// non-digit, or a number that does not fit in a `u64`.
-fn set_fields(spec: &[u8], use_pos: bool, complement: bool) -> Result<Vec<Range>, getopt::Error> {
-    let mut ranges: Vec<Range> = Vec::new();
-    let mut initial: u64 = 1;
-    let mut value: u64 = 0;
-    let mut lhs_specified = false;
-    let mut rhs_specified = false;
-    let mut dash_found = false;
-    let mut in_digits = false;
-    let mut num_start = 0usize;
-    let mut at = 0usize;
-
-    loop {
-        // Past the end stands for C's terminating NUL, which the loop treats as
-        // a separator that also ends it.
-        let c = spec.get(at).copied();
-        match c {
-            Some(b'-') => {
-                in_digits = false;
-                if dash_found {
-                    return Err(CUT.usage_referring(
-                        if use_pos {
-                            "invalid byte or character range"
-                        } else {
-                            "invalid field range"
-                        }
-                        .to_string(),
-                    ));
-                }
-                dash_found = true;
-                at = at.saturating_add(1);
-                if lhs_specified && value == 0 {
-                    return Err(CUT.usage_referring(numbered_from_1(use_pos)));
-                }
-                initial = if lhs_specified { value } else { 1 };
-                value = 0;
-            }
-            None | Some(b',' | b' ' | b'\t') => {
-                in_digits = false;
-                if dash_found {
-                    dash_found = false;
-                    if !lhs_specified && !rhs_specified {
-                        return Err(
-                            CUT.usage_referring("invalid range with no endpoint: -".to_string())
-                        );
-                    }
-                    if rhs_specified {
-                        if value < initial {
-                            return Err(CUT.usage_referring("invalid decreasing range".to_string()));
-                        }
-                        ranges.push(Range {
-                            lo: initial,
-                            hi: value,
-                        });
-                    } else {
-                        // `n-`: from here to the end of the line.
-                        ranges.push(Range {
-                            lo: initial,
-                            hi: u64::MAX,
-                        });
-                    }
-                    value = 0;
-                } else {
-                    if value == 0 {
-                        return Err(CUT.usage_referring(numbered_from_1(use_pos)));
-                    }
-                    ranges.push(Range {
-                        lo: value,
-                        hi: value,
-                    });
-                    value = 0;
-                }
-                if c.is_none() {
-                    break;
-                }
-                at = at.saturating_add(1);
-                lhs_specified = false;
-                rhs_specified = false;
-            }
-            Some(d) if d.is_ascii_digit() => {
-                if !in_digits {
-                    num_start = at;
-                }
-                in_digits = true;
-                if dash_found {
-                    rhs_specified = true;
-                } else {
-                    lhs_specified = true;
-                }
-                // `u64::MAX` is not merely an overflow guard: it is the value
-                // that means "to end of line", so a list may not name it.
-                let digit = u64::from(d.wrapping_sub(b'0'));
-                match value.checked_mul(10).and_then(|v| v.checked_add(digit)) {
-                    Some(v) if v != u64::MAX => value = v,
-                    _ => {
-                        // Only the *first* offending number is reported, and
-                        // the whole of it — upstream re-scans from where the
-                        // digit run began, so `cut -c 99999999999999999999,22`
-                        // names the long number and stops.
-                        let run = spec
-                            .get(num_start..)
-                            .unwrap_or_default()
-                            .iter()
-                            .position(|b| !b.is_ascii_digit())
-                            .map_or_else(
-                                || spec.get(num_start..).unwrap_or_default(),
-                                |len| {
-                                    spec.get(num_start..num_start.saturating_add(len))
-                                        .unwrap_or_default()
-                                },
-                            );
-                        return Err(CUT.usage_referring(format!(
-                            "{} {} is too large",
-                            if use_pos {
-                                "byte/character offset"
-                            } else {
-                                "field number"
-                            },
-                            quote(run)
-                        )));
-                    }
-                }
-                at = at.saturating_add(1);
-            }
-            Some(_) => {
-                // The rest of the string, not just the offending byte — GNU
-                // echoes from here to the end.
-                return Err(CUT.usage_referring(format!(
-                    "{} {}",
-                    if use_pos {
-                        "invalid byte/character position"
-                    } else {
-                        "invalid field value"
-                    },
-                    quote(spec.get(at..).unwrap_or_default())
-                )));
-            }
-        }
-    }
-
-    if ranges.is_empty() {
-        return Err(CUT.usage_referring(
-            if use_pos {
-                "missing list of byte/character positions"
-            } else {
-                "missing list of fields"
-            }
-            .to_string(),
-        ));
-    }
-
-    ranges.sort_by_key(|r| r.lo);
-    merge_ranges(&mut ranges);
-    if complement {
-        ranges = complement_ranges(&ranges);
-    }
-    // The sentinel the scanners walk into and never past.
-    ranges.push(Range {
-        lo: u64::MAX,
-        hi: u64::MAX,
-    });
-    Ok(ranges)
-}
-
-/// The wording shared by the two "0 is not an index" diagnostics.
-fn numbered_from_1(use_pos: bool) -> String {
-    if use_pos {
-        "byte/character positions are numbered from 1"
-    } else {
-        "fields are numbered from 1"
-    }
-    .to_string()
-}
-
-/// Fold ranges that **overlap** into one, leaving ones that merely touch
-/// alone.
-///
-/// `2-5,3-4` becomes `2-5`; `1-2,3-4` stays two ranges. The distinction is
-/// visible through `--output-delimiter`, which separates ranges — see the
-/// module documentation.
-fn merge_ranges(ranges: &mut Vec<Range>) {
-    let mut i = 0usize;
-    while i < ranges.len() {
-        loop {
-            let j = i.saturating_add(1);
-            let (Some(&next), Some(&here)) = (ranges.get(j), ranges.get(i)) else {
-                break;
-            };
-            if next.lo > here.hi {
-                break;
-            }
-            if let Some(slot) = ranges.get_mut(i) {
-                slot.hi = here.hi.max(next.hi);
-            }
-            ranges.remove(j);
-        }
-        i = i.saturating_add(1);
-    }
-}
-
-/// `--complement`: everything the given ranges do not cover.
-///
-/// Touching ranges are skipped rather than producing an empty gap, which is why
-/// this cannot be written as "invert each boundary". Applied *after* merging,
-/// so the input is sorted and non-overlapping.
-fn complement_ranges(ranges: &[Range]) -> Vec<Range> {
-    let mut out: Vec<Range> = Vec::new();
-    let (Some(&first), Some(&last)) = (ranges.first(), ranges.last()) else {
-        return out;
-    };
-    if first.lo > 1 {
-        out.push(Range {
-            lo: 1,
-            hi: first.lo.saturating_sub(1),
-        });
-    }
-    for (prev, here) in ranges.iter().zip(ranges.iter().skip(1)) {
-        if prev.hi.saturating_add(1) == here.lo {
-            continue;
-        }
-        out.push(Range {
-            lo: prev.hi.saturating_add(1),
-            hi: here.lo.saturating_sub(1),
-        });
-    }
-    if last.hi < u64::MAX {
-        out.push(Range {
-            lo: last.hi.saturating_add(1),
-            hi: u64::MAX,
-        });
-    }
-    out
 }
 
 /// Where the scan currently is in the range list: upstream's `current_rp`.

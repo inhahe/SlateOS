@@ -487,6 +487,7 @@ pub mod pathname;
 pub use quoting as quote;
 pub mod remove;
 pub mod rename;
+pub mod setfields;
 pub mod shell;
 pub mod stdfd;
 pub mod tabstops;

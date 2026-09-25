@@ -167,7 +167,8 @@ impl<const N: usize> BlockBuffer<N> {
             let space = N.saturating_sub(self.buffered);
             let take = space.min(rest.len());
             let end = self.buffered.saturating_add(take);
-            if let (Some(dst), Some(src)) = (self.buffer.get_mut(self.buffered..end), rest.get(..take))
+            if let (Some(dst), Some(src)) =
+                (self.buffer.get_mut(self.buffered..end), rest.get(..take))
             {
                 dst.copy_from_slice(src);
             }
@@ -188,14 +189,13 @@ impl<const N: usize> BlockBuffer<N> {
             self.buffered = 0;
         }
 
-        let mut blocks = rest.chunks_exact(N);
-        for chunk in &mut blocks {
-            if let Some(block) = chunk.first_chunk::<N>() {
-                compress(block);
-            }
+        // Whole blocks straight from the input, as arrays; what is left over
+        // is at most one partial block, buffered for the next call.
+        let (blocks, remainder) = rest.as_chunks::<N>();
+        for block in blocks {
+            compress(block);
         }
 
-        let remainder = blocks.remainder();
         if let Some(dst) = self.buffer.get_mut(..remainder.len()) {
             dst.copy_from_slice(remainder);
         }

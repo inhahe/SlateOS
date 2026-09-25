@@ -123,8 +123,8 @@ impl Sha1 {
             .finalize(LengthOrder::BigEndian, |block| compress(state, block));
 
         let mut out = [0u8; DIGEST_LEN];
-        for (slot, word) in out.chunks_exact_mut(4).zip(self.state) {
-            slot.copy_from_slice(&word.to_be_bytes());
+        for (slot, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(self.state) {
+            *slot = word.to_be_bytes();
         }
         out
     }
@@ -135,8 +135,8 @@ fn compress(state: &mut [u32; 5], block: &[u8; BLOCK_LEN]) {
     // Message schedule: the sixteen block words, then sixty-four more from a
     // recurrence over them.
     let mut w = [0u32; 80];
-    for (word, bytes) in w.iter_mut().zip(block.chunks_exact(4)) {
-        *word = u32::from_be_bytes(<[u8; 4]>::try_from(bytes).unwrap_or([0; 4]));
+    for (word, bytes) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+        *word = u32::from_be_bytes(*bytes);
     }
     // Taking the previous sixteen words as a `last_chunk` of the filled prefix,
     // rather than as `w[i - 3]` and friends, is what lets the offsets be
@@ -214,12 +214,12 @@ impl fmt::Debug for Hex {
 #[must_use]
 pub fn hex(digest: &[u8; DIGEST_LEN]) -> Hex {
     let mut out = [b'0'; DIGEST_LEN * 2];
-    for (pair, byte) in out.chunks_exact_mut(2).zip(digest) {
+    for (pair, byte) in out.as_chunks_mut::<2>().0.iter_mut().zip(digest) {
         // Both nibbles are `< 16`, so `from_digit` cannot fail; the fallback
         // is unreachable rather than load-bearing.
         let hi = char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0');
         let lo = char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0');
-        pair.copy_from_slice(&[hi as u8, lo as u8]);
+        *pair = [hi as u8, lo as u8];
     }
     Hex(out)
 }

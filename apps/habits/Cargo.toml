@@ -12,5 +12,15 @@ guitk = { path = "../../gui/toolkit" }
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
 
+# The habits and every check-in, kept between runs in the user's settings.
+settingsfile = { path = "../../gui/settingsfile" }
+yamldoc = { path = "../../yamldoc" }
+
+# "Today" is the clock's, in the local zone (design-decisions 1201).
+tzrules = { path = "../../tzrules" }
+
+[dev-dependencies]
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+
 [lints]
 workspace = true

@@ -11,25 +11,28 @@
 //! categories, contribution graphs, and completion statistics.
 //!
 //! Features:
-//! - Habit CRUD (create, edit, delete, archive/unarchive)
-//! - Daily or weekly frequency
-//! - Categories with color coding
-//! - Check-in toggles per day
-//! - Streak tracking (current and best)
-//! - Completion rates (7-day, 30-day, all-time)
-//! - Contribution/heatmap graph
-//! - Archive view for retired habits
-//! - Statistics dashboard
-//! - Simulated date system for testing
-//! - 5 sample habits pre-loaded
+//! - Habits created, archived, restored and deleted (deletion asks first)
+//! - Daily or weekly frequency, and a category each
+//! - Check-ins for today and the six days before it
+//! - Streaks (current and best) and completion rates (7-day, 30-day, all-time)
+//! - A contribution graph, a statistics view and an archive
+//!
+//! "Today" is the clock's, and rolls over at midnight while the window is open
+//! (design-decisions 1201). The habits and every check-in are kept in the
+//! user's settings (`settingsfile`, `habits.yaml`), one entry per habit.
+//! Every control answers the pointer -- the renderer records a hit box where it
+//! draws each one (`guitk::frame::Frame`) -- and every key is on the F1 card.
 
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent};
+use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
 use guitk::render::RenderTree;
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // The shared civil-date arithmetic. This app used to carry its own copy: a
 // Zeller's congruence for the weekday, a *separate* Rata Die day number for
 // differences (offset by -307 rather than the -1 the same formula uses two
@@ -65,9 +68,72 @@ use guitk::table::{Column, Fit, Table};
 /// forty-five days of days they never had.
 const NO_HABITS_LINES: [&str; 3] = [
     "No habits yet.",
+    "Start one with + New Habit or N. Its check-ins are kept between runs.",
     "This app opened with 45 days of check-ins until 2026-09-15 -- a record of days nobody had.",
-    "Nothing is saved between runs either: it has no filesystem access, so today's marks go when the window closes.",
 ];
+
+/// Every key this program answers, and what it does.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    (
+        "1 / 2 / 3 / 4",
+        "Dashboard / statistics / archive / contribution graph",
+    ),
+    ("N", "New habit"),
+    ("Up / Down", "Choose a habit"),
+    ("Left / Right", "Choose a day; another habit, in the graph"),
+    (
+        "Space / Enter",
+        "Check in on the chosen day; restore, in the archive",
+    ),
+    ("A", "Archive the chosen habit"),
+    ("Ctrl+D", "Delete the chosen habit (asks first)"),
+    ("C", "Show one category"),
+    ("PgUp / PgDn", "Scroll the list"),
+    ("F1", "This list"),
+];
+
+/// The statistics view's margin, its cards' height, and its table's row
+/// pitch: `render_statistics` draws with them and `stats_rect` finds the rows
+/// by them, so the two cannot disagree about where a row is.
+const STATS_PAD: f32 = 20.0;
+const STATS_CARD_H: f32 = 100.0;
+const STATS_ROW_H: f32 = 24.0;
+
+/// Room kept under a list's last row when it is scrolled to its end.
+const LIST_END_PAD: f32 = 8.0;
+
+/// The delete question's card.
+const CONFIRM_W: f32 = 440.0;
+const CONFIRM_H: f32 = 150.0;
+
+/// Where the habits are kept (`settingsfile`), under `habits`, one map per
+/// habit named by its id.
+const CONFIG_NAME: &str = "habits";
+const HABITS_KEY: &str = "habits";
+
+/// Today's date from the system clock, or `None` if it cannot be read.
+///
+/// The zone comes from `tzrules` as in `apps/reminders`, so a real local zone
+/// is used on the day `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ` is fixed.
+fn today_from_clock() -> Option<Date> {
+    let (date, _) = clock_now()?;
+    Some(date)
+}
+
+/// Today's date, and how many seconds are left of it.
+fn clock_now() -> Option<(Date, u64)> {
+    let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    let utc = i64::try_from(since_epoch.as_secs()).ok()?;
+    let zone = tzrules::Tz::utc();
+    let local = utc.saturating_add(i64::from(zone.lookup(utc).gmtoff));
+    let into_day = u64::try_from(local.rem_euclid(86_400)).ok()?;
+    let day_start = local.saturating_sub(local.rem_euclid(86_400));
+    let date = Date::from_civil(date::Date::from_unix_utc(day_start));
+    Some((date, 86_400_u64.saturating_sub(into_day)))
+}
 
 const STATS_GAP: f32 = 4.0;
 const STATS_COLUMNS: &[Column] = &[
@@ -126,17 +192,12 @@ struct Date {
 }
 
 impl Date {
-    /// A date, or `None` if there is no such day.
-    ///
-    /// Only the tests build dates this way -- production makes them from a
-    /// clock, where the fields are valid by construction -- which is why the
-    /// non-test build reports it unused. `#[cfg(test)]` says that plainly
-    /// instead of leaving a warning for the next person to re-diagnose.
+    /// A date, or `None` if there is no such day: what a saved check-in is
+    /// read back through.
     ///
     /// Calls `date::days_in_month` rather than a local forwarding wrapper:
     /// there were two such wrappers here whose only caller was this function,
     /// which made three names for one answer.
-    #[cfg(test)]
     fn new(year: i32, month: u32, day: u32) -> Option<Self> {
         if !(1..=12).contains(&month) {
             return None;
@@ -228,6 +289,20 @@ impl Date {
 
     fn format_full(self) -> String {
         format!("{} {:02}, {}", self.month_short(), self.day, self.year)
+    }
+
+    /// `YYYY-MM-DD`: how a date is kept.
+    fn to_iso(self) -> String {
+        format!("{:04}-{:02}-{:02}", self.year, self.month, self.day)
+    }
+
+    /// A kept date read back, or `None` for anything that is not one.
+    fn from_iso(text: &str) -> Option<Self> {
+        let mut parts = text.trim().splitn(3, '-');
+        let year = parts.next()?.parse().ok()?;
+        let month = parts.next()?.parse().ok()?;
+        let day = parts.next()?.parse().ok()?;
+        Self::new(year, month, day)
     }
 }
 
@@ -351,6 +426,9 @@ impl Frequency {
 
 #[derive(Debug, Clone)]
 struct Habit {
+    /// What the habit is kept under. It was taken out when nothing was kept
+    /// ("there is no identity to preserve across a restart"); there is now.
+    id: u64,
     name: String,
     category: Category,
     frequency: Frequency,
@@ -372,6 +450,7 @@ impl Habit {
     /// nothing displayed it.
     fn new(name: &str, category: Category, frequency: Frequency, created: Date) -> Self {
         Self {
+            id: 0,
             name: String::from(name),
             category,
             frequency,
@@ -616,6 +695,25 @@ struct HabitTrackerApp {
     selected_day_col: usize,
     heatmap_habit_idx: usize,
     status_msg: String,
+    /// Whether the shortcut card is up.
+    show_help: bool,
+    /// The habit a delete is waiting on a `Y` for.
+    pending_delete: Option<usize>,
+    /// The id the next habit gets.
+    next_id: u64,
+    /// What the pointer is over, so it can be drawn lit.
+    hover: Option<Target>,
+    /// Every box the last paint recorded, for hover and the wheel.
+    last_hits: Vec<(Target, Rect)>,
+    /// The wheel's remainder over the list.
+    wheel: wheel::Accumulator,
+    /// Whether changes are written to the user's settings. Only
+    /// [`Self::from_settings`] turns it on, so an app made with `new` -- which
+    /// is every test -- is backed by nothing, and a test cannot write the
+    /// developer's own `habits.yaml` by forgetting a scratch config
+    /// (known-issues: "A test that forgets its scratch settings writes the
+    /// developer's own").
+    persist: bool,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -634,11 +732,11 @@ impl HabitTrackerApp {
     const HEATMAP_GAP: f32 = 3.0;
 
     fn new() -> Self {
-        let today = Date {
-            year: 2026,
-            month: 5,
-            day: 18,
-        };
+        // The clock's day (design-decisions 1201). It was 18 May 2026 for
+        // good, moved only by `+` and `-`, so a check-in made today was filed
+        // in May.
+        let today =
+            today_from_clock().unwrap_or_else(|| Date::from_civil(date::Date::from_unix_utc(0)));
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width: 1000.0,
@@ -657,6 +755,13 @@ impl HabitTrackerApp {
             selected_day_col: 0,
             heatmap_habit_idx: 0,
             status_msg: String::from("Habit Tracker"),
+            show_help: false,
+            pending_delete: None,
+            next_id: 1,
+            hover: None,
+            last_hits: Vec::new(),
+            wheel: wheel::Accumulator::default(),
+            persist: false,
         }
     }
 
@@ -668,6 +773,15 @@ impl HabitTrackerApp {
     #[cfg(test)]
     fn with_sample_habits() -> Self {
         let mut app = Self::new();
+        // The day these tests were written against. `new` reads the clock now,
+        // and a history built back from the clock's day would move every
+        // weekday-dependent answer (the week view, a weekly habit's rate) with
+        // the day the suite happened to run.
+        app.today = Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        };
         app.load_sample_habits();
         app
     }
@@ -768,8 +882,131 @@ impl HabitTrackerApp {
             .collect()
     }
 
+    /// Read the user's habits from their settings.
+    ///
+    /// An entry with no name, or a date that is not one, is not shown; it is
+    /// left in the file, which is the user's, and a later write touches only
+    /// the entry it is about.
+    fn load_habits(&mut self, doc: &yamldoc::Document) {
+        let mut keys: Vec<(u64, String)> = doc
+            .keys(&[HABITS_KEY])
+            .into_iter()
+            .filter_map(|k| k.parse::<u64>().ok().map(|id| (id, k)))
+            .collect();
+        keys.sort_unstable();
+        for (id, key) in keys {
+            let get = |field: &str| doc.get_str(&[HABITS_KEY, &key, field]);
+            let Some(name) = get("name").filter(|n| !n.trim().is_empty()) else {
+                continue;
+            };
+            let Some(created) = get("created").and_then(|c| Date::from_iso(&c)) else {
+                continue;
+            };
+            let category = get("category")
+                .and_then(|c| {
+                    Category::ALL
+                        .iter()
+                        .copied()
+                        .find(|cat| cat.label().eq_ignore_ascii_case(&c))
+                })
+                .unwrap_or(Category::Custom);
+            let frequency = match get("frequency").as_deref().map(str::trim) {
+                Some(f) if f.starts_with("weekly") => Frequency::Weekly(
+                    f.trim_start_matches("weekly")
+                        .trim()
+                        .parse::<u32>()
+                        .unwrap_or(3)
+                        .clamp(1, 7),
+                ),
+                _ => Frequency::Daily,
+            };
+            let mut habit = Habit::new(&name, category, frequency, created);
+            habit.id = id;
+            habit.archived = doc
+                .get_bool(&[HABITS_KEY, &key, "archived"])
+                .unwrap_or(false);
+            let mut days: Vec<Date> = doc
+                .get_seq(&[HABITS_KEY, &key, "check_ins"])
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|d| Date::from_iso(d))
+                .collect();
+            days.sort_unstable();
+            days.dedup();
+            habit.check_ins = days;
+            self.next_id = self.next_id.max(id.saturating_add(1));
+            self.habits.push(habit);
+        }
+    }
+
+    /// The tracker the window opens: the user's habits, and every change kept.
+    fn from_settings() -> Self {
+        let mut app = Self::new();
+        app.load_habits(&settingsfile::load(CONFIG_NAME));
+        app.persist = true;
+        app
+    }
+
+    /// Keep habit `index` in the user's settings.
+    ///
+    /// Nothing was kept: the banner said the app had no filesystem access,
+    /// and every habit and check-in went when the window closed -- which for a
+    /// program whose whole purpose is a record over days is the purpose.
+    fn store_habit(&mut self, index: usize) {
+        if !self.persist {
+            return;
+        }
+        let Some(habit) = self.habits.get(index) else {
+            return;
+        };
+        let key = habit.id.to_string();
+        let mut doc = settingsfile::load(CONFIG_NAME);
+        doc.set_str(&[HABITS_KEY, &key, "name"], &habit.name);
+        doc.set_str(
+            &[HABITS_KEY, &key, "category"],
+            &habit.category.label().to_ascii_lowercase(),
+        );
+        doc.set_str(
+            &[HABITS_KEY, &key, "frequency"],
+            &match habit.frequency {
+                Frequency::Daily => "daily".to_string(),
+                Frequency::Weekly(n) => format!("weekly {n}"),
+            },
+        );
+        doc.set_str(&[HABITS_KEY, &key, "created"], &habit.created.to_iso());
+        doc.set_bool(&[HABITS_KEY, &key, "archived"], habit.archived);
+        let days: Vec<String> = habit.check_ins.iter().map(|d| d.to_iso()).collect();
+        let refs: Vec<&str> = days.iter().map(String::as_str).collect();
+        doc.set_seq(&[HABITS_KEY, &key, "check_ins"], &refs);
+        self.write(&doc);
+    }
+
+    /// Take habit `id` out of the user's settings.
+    fn forget_habit(&mut self, id: u64) {
+        if !self.persist {
+            return;
+        }
+        let mut doc = settingsfile::load(CONFIG_NAME);
+        doc.remove(&[HABITS_KEY, &id.to_string()]);
+        self.write(&doc);
+    }
+
+    /// Write the settings, saying so if that fails: a mark that silently was
+    /// not kept is found out the next day, when it is gone.
+    ///
+    /// The failure goes in the status line, so every caller writes *after*
+    /// setting its own message -- or "Habit created!" would cover the news
+    /// that it was not.
+    fn write(&mut self, doc: &yamldoc::Document) {
+        if let Err(e) = settingsfile::store(CONFIG_NAME, doc) {
+            self.status_msg = format!("Could not keep your habits: {e}");
+        }
+    }
+
     fn create_habit(&mut self) {
-        if self.create_name.is_empty() {
+        // Blank, not merely empty: a name of spaces would be kept, and then
+        // dropped by `load_habits` the next time the window opened.
+        if self.create_name.trim().is_empty() {
             self.status_msg = String::from("Name cannot be empty");
             return;
         }
@@ -782,7 +1019,9 @@ impl HabitTrackerApp {
         } else {
             Frequency::Weekly(self.create_weekly_count.clamp(1, 7))
         };
-        let habit = Habit::new(&self.create_name, category, frequency, self.today);
+        let mut habit = Habit::new(&self.create_name, category, frequency, self.today);
+        habit.id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
         self.habits.push(habit);
         self.create_name.clear();
         self.create_category_idx = 0;
@@ -790,6 +1029,7 @@ impl HabitTrackerApp {
         self.create_weekly_count = 3;
         self.show_create_form = false;
         self.status_msg = String::from("Habit created!");
+        self.store_habit(self.habits.len().saturating_sub(1));
     }
 
     fn delete_habit(&mut self, idx: usize) {
@@ -797,11 +1037,12 @@ impl HabitTrackerApp {
             let Some(name) = self.habits.get(idx).map(|h| h.name.clone()) else {
                 return;
             };
-            self.habits.remove(idx);
+            let removed = self.habits.remove(idx);
             if self.selected_habit >= self.active_habits().len() && self.selected_habit > 0 {
                 self.selected_habit = self.selected_habit.saturating_sub(1);
             }
             self.status_msg = format!("Deleted: {name}");
+            self.forget_habit(removed.id);
         }
     }
 
@@ -809,6 +1050,7 @@ impl HabitTrackerApp {
         if let Some(h) = self.habits.get_mut(idx) {
             h.archived = true;
             self.status_msg = format!("Archived: {}", h.name);
+            self.store_habit(idx);
         }
     }
 
@@ -816,6 +1058,7 @@ impl HabitTrackerApp {
         if let Some(h) = self.habits.get_mut(idx) {
             h.archived = false;
             self.status_msg = format!("Restored: {}", h.name);
+            self.store_habit(idx);
         }
     }
 
@@ -833,15 +1076,21 @@ impl HabitTrackerApp {
                 } else {
                     format!("Unchecked: {} on {}", h.name, date.format_short())
                 };
+                self.store_habit(habit_idx);
             }
         }
     }
 
+    /// Move "today" on a day. **Tests only**: today is the clock's, and the
+    /// `+` key that did this for a user is gone (design-decisions 1201).
+    #[cfg(test)]
     fn advance_day(&mut self) {
         self.today = self.today.add_days(1);
         self.status_msg = format!("Date: {}", self.today.format_full());
     }
 
+    /// Move "today" back a day. **Tests only**; see [`Self::advance_day`].
+    #[cfg(test)]
     fn go_back_day(&mut self) {
         self.today = self.today.add_days(-1);
         self.status_msg = format!("Date: {}", self.today.format_full());
@@ -850,16 +1099,47 @@ impl HabitTrackerApp {
     // ── Input handling ──────────────────────────────────────────────
 
     fn handle_key(&mut self, key: &str, ctrl: bool, _shift: bool) {
+        // The list of keys, whatever else is up -- except that `?` is a
+        // character the new habit's name may need.
+        if key == "F1" || (key == "?" && !self.show_create_form) {
+            self.show_help = !self.show_help;
+            return;
+        }
+        if self.show_help {
+            // Modal: a key behind the card would change a list nobody can see.
+            if key == "Escape" || key == "Return" {
+                self.show_help = false;
+            }
+            return;
+        }
         if self.show_create_form {
             self.handle_create_form_key(key, ctrl);
             return;
         }
+        // A delete waiting on its answer takes the next key, and only `y`
+        // deletes: the habit and every check-in go, and there is no undo.
+        if let Some(idx) = self.pending_delete.take() {
+            if key.eq_ignore_ascii_case("y") {
+                self.delete_habit(idx);
+            } else {
+                self.status_msg = String::from("Kept");
+            }
+            return;
+        }
 
         match key {
-            "1" => self.screen = Screen::Dashboard,
-            "2" => self.screen = Screen::Statistics,
-            "3" => self.screen = Screen::Archive,
-            "4" => self.screen = Screen::HeatMap,
+            "1" => {
+                self.show_screen(Screen::Dashboard);
+            }
+            "2" => {
+                self.show_screen(Screen::Statistics);
+            }
+            "3" => {
+                self.show_screen(Screen::Archive);
+            }
+            "4" => {
+                self.show_screen(Screen::HeatMap);
+            }
             "n" | "N" if !ctrl => {
                 self.show_create_form = true;
                 self.status_msg = String::from("New habit -- fill in details");
@@ -907,9 +1187,15 @@ impl HabitTrackerApp {
                 _ => {}
             },
             "d" | "D" if ctrl => {
-                let active = self.active_habits();
-                if let Some(&idx) = active.get(self.selected_habit) {
-                    self.delete_habit(idx);
+                // The habit chosen in the list on screen: the archive's own
+                // selection indexes the archive, not the dashboard.
+                let list = if self.screen == Screen::Archive {
+                    self.archived_habits()
+                } else {
+                    self.active_habits()
+                };
+                if let Some(&idx) = list.get(self.selected_habit) {
+                    self.ask_to_delete(idx);
                 }
             }
             "a" | "A" if !ctrl && self.screen == Screen::Dashboard => {
@@ -918,8 +1204,6 @@ impl HabitTrackerApp {
                     self.archive_habit(idx);
                 }
             }
-            "+" | "=" => self.advance_day(),
-            "-" => self.go_back_day(),
             "c" | "C" => {
                 // Cycle category filter
                 self.category_filter = match self.category_filter {
@@ -939,14 +1223,69 @@ impl HabitTrackerApp {
                     Some(cat) => format!("Filter: {}", cat.label()),
                 };
             }
-            "PageDown" => {
-                self.scroll_offset = (self.scroll_offset + 200.0).min(2000.0);
-            }
-            "PageUp" => {
-                self.scroll_offset = (self.scroll_offset - 200.0).max(0.0);
-            }
+            "PageDown" => self.page(true),
+            "PageUp" => self.page(false),
             _ => {}
         }
+        self.keep_selection_visible();
+    }
+
+    /// Page Down and Page Up: a page of the list on screen, and the chosen
+    /// habit with it, so it stays in view.
+    ///
+    /// They moved the view by 200 pixels and left the selection behind, which
+    /// is what a list's Page Down never does -- and now that the view follows
+    /// the selection, it would have pulled the page straight back.
+    fn page(&mut self, down: bool) {
+        let Some((pane, row_h, rows)) = self.list_pane() else {
+            return;
+        };
+        let per_page = ((pane.h / row_h).floor() as usize).max(1);
+        let step = per_page as f32 * row_h;
+        let to = if down {
+            self.scroll_offset + step
+        } else {
+            self.scroll_offset - step
+        };
+        self.scroll_offset = to.clamp(0.0, self.scroll_limit());
+        if matches!(self.screen, Screen::Dashboard | Screen::Archive) {
+            self.selected_habit = if down {
+                self.selected_habit
+                    .saturating_add(per_page)
+                    .min(rows.saturating_sub(1))
+            } else {
+                self.selected_habit.saturating_sub(per_page)
+            };
+        }
+    }
+
+    /// Ask before deleting habit `idx`: its whole record goes with it.
+    ///
+    /// It was deleted at once, on Ctrl+D beside the D that means nothing and
+    /// the A that archives. The question is a card with a button for each
+    /// answer, so a pointer can give either; `Y` deletes and any other key
+    /// keeps.
+    fn ask_to_delete(&mut self, idx: usize) {
+        if self.habits.get(idx).is_none() {
+            return;
+        }
+        self.pending_delete = Some(idx);
+    }
+
+    /// Change screens, starting the new one's list at its top. Returns
+    /// whether anything changed.
+    ///
+    /// The number keys set the screen and left the selection where it was, so
+    /// the dashboard's fourth row became a selection past the end of a
+    /// one-habit archive; a tab click reset it. One path for both now.
+    fn show_screen(&mut self, screen: Screen) -> bool {
+        if self.screen == screen {
+            return false;
+        }
+        self.screen = screen;
+        self.selected_habit = 0;
+        self.scroll_offset = 0.0;
+        true
     }
 
     fn handle_create_form_key(&mut self, key: &str, _ctrl: bool) {
@@ -966,24 +1305,33 @@ impl HabitTrackerApp {
                     .checked_rem(Category::ALL.len())
                     .unwrap_or(0);
             }
-            "F1" => {
+            // F1 raises the list of keys in every program here, so the
+            // frequency moved to F2 and the count to the vertical arrows.
+            "F2" => {
                 self.create_frequency_daily = !self.create_frequency_daily;
             }
-            "F2" => {
-                self.create_weekly_count = self
-                    .create_weekly_count
-                    .checked_rem(7)
-                    .unwrap_or(0)
-                    .saturating_add(1);
+            "Up" => {
+                self.create_weekly_count = self.create_weekly_count.saturating_add(1).min(7);
+            }
+            "Down" => {
+                self.create_weekly_count = self.create_weekly_count.saturating_sub(1).max(1);
             }
             "Backspace" => {
                 self.create_name.pop();
             }
-            _ => {
-                if key.len() == 1 && self.create_name.len() < 40 {
-                    self.create_name.push_str(key);
-                }
-            }
+            // `key_name` names the space bar rather than passing its text, so
+            // the arm below never saw one: "Read 20 pages" could not be typed.
+            "Space" => self.type_into_name(" "),
+            _ => self.type_into_name(key),
+        }
+    }
+
+    /// Add one typed character to the new habit's name.
+    fn type_into_name(&mut self, key: &str) {
+        // One character, counted in characters: a limit in bytes cut a name
+        // short at a third of its length in some scripts.
+        if key.chars().count() == 1 && self.create_name.chars().count() < 40 {
+            self.create_name.push_str(key);
         }
     }
 
@@ -1136,13 +1484,21 @@ impl HabitTrackerApp {
                 let Some(name) = Self::key_name(key) else {
                     return false;
                 };
-                if self.show_create_form {
-                    self.handle_create_form_key(&name, key.modifiers.ctrl);
-                } else {
-                    self.handle_key(&name, key.modifiers.ctrl, key.modifiers.shift);
-                }
+                self.handle_key(&name, key.modifiers.ctrl, key.modifiers.shift);
                 true
             }
+            // Midnight, or near enough to check.
+            Event::Tick { .. } => {
+                let Some(today) = today_from_clock() else {
+                    return false;
+                };
+                if today == self.today {
+                    return false;
+                }
+                self.today = today;
+                true
+            }
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => false,
         }
     }
@@ -1181,10 +1537,20 @@ impl HabitTrackerApp {
         Some(named.to_string())
     }
 
+    /// The drawn commands. **Tests only**: the window's `render` takes the
+    /// frame itself, because it keeps the frame's boxes for the pointer.
+    ///
     /// Named `render_commands` and not `render`: at equal arity an inherent
     /// method silently wins method lookup over `oswindow::app::App::render`.
+    #[cfg(test)]
     fn render_commands(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::with_capacity(512);
+        self.frame().into_tree().commands
+    }
+
+    /// Draw the window, recording every control where it is drawn: both the
+    /// picture and the hit test.
+    fn frame(&self) -> Frame<Target> {
+        let mut cmds = Frame::new(self.width, self.height);
 
         // Background
         cmds.push(RenderCommand::FillRect {
@@ -1195,32 +1561,6 @@ impl HabitTrackerApp {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
-
-        // After the background, or it would be painted over. Keyed on the
-        // list being empty so it retires itself at the first real habit.
-        if self.habits.is_empty() {
-            for (i, line) in NO_HABITS_LINES.iter().enumerate() {
-                cmds.push(RenderCommand::Text {
-                    x: 8.0,
-                    #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                    y: 2.0 + i as f32 * 12.0,
-                    text: (*line).to_string(),
-                    color: if i == 0 {
-                        self.palette.ink(self.palette.yellow)
-                    } else {
-                        self.palette.subtext0
-                    },
-                    font_size: if i == 0 { 11.0 } else { 9.0 },
-                    font_weight: if i == 0 {
-                        FontWeightHint::Bold
-                    } else {
-                        FontWeightHint::Regular
-                    },
-                    max_width: Some(self.width - 16.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-        }
 
         self.render_header(&mut cmds);
         self.render_nav(&mut cmds);
@@ -1239,11 +1579,57 @@ impl HabitTrackerApp {
         if self.show_create_form {
             self.render_create_form(&mut cmds);
         }
+        if self.pending_delete.is_some() {
+            self.render_delete_confirm(&mut cmds);
+        }
+        // Over everything, because it is the one thing a reader asked for.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.width, self.height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+            cmds.hit(
+                Target::HelpCard,
+                Rect::new(0.0, 0.0, self.width, self.height),
+            );
+        }
 
         cmds
     }
 
-    fn render_header(&self, cmds: &mut Vec<RenderCommand>) {
+    /// A small button, lit while the pointer is on it.
+    fn button(&self, cmds: &mut Frame<Target>, rect: Rect, label: &str, target: Target) {
+        self.palette.push_surface(
+            cmds,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            6.0,
+            if self.hover == Some(target) {
+                Surface::Selected
+            } else {
+                Surface::Card
+            },
+        );
+        cmds.push(RenderCommand::Text {
+            x: rect.x + 8.0,
+            y: rect.y + (rect.h - 11.0) / 2.0,
+            text: label.to_string(),
+            font_size: 11.0,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((rect.w - 12.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cmds.hit(target, rect);
+    }
+
+    fn render_header(&self, cmds: &mut Frame<Target>) {
         self.palette.push_surface(
             cmds,
             0.0,
@@ -1269,11 +1655,11 @@ impl HabitTrackerApp {
         cmds.push(RenderCommand::Text {
             x: 240.0,
             y: 18.0,
+            // The weekday once; it was written at both ends of the line.
             text: format!(
-                "{} {} -- {}",
+                "{} {}",
                 self.today.day_of_week_short(),
-                self.today.format_full(),
-                self.today.day_of_week_short()
+                self.today.format_full()
             ),
             font_size: 14.0,
             color: self.palette.subtext0,
@@ -1330,9 +1716,14 @@ impl HabitTrackerApp {
             y: 10.0,
             width: 90.0,
             height: 30.0,
-            color: self.palette.blue,
+            color: if self.hover == Some(Target::NewHabit) {
+                self.palette.sapphire
+            } else {
+                self.palette.blue
+            },
             corner_radii: CornerRadii::all(6.0),
         });
+        cmds.hit(Target::NewHabit, Rect::new(btn_x, 10.0, 90.0, 30.0));
         cmds.push(RenderCommand::Text {
             x: btn_x + 10.0,
             y: 17.0,
@@ -1345,7 +1736,7 @@ impl HabitTrackerApp {
         });
     }
 
-    fn render_nav(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_nav(&self, cmds: &mut Frame<Target>) {
         let y = Self::HEADER_H;
         self.palette
             .push_surface(cmds, 0.0, y, self.width, Self::NAV_H, 0.0, Surface::Sidebar);
@@ -1375,9 +1766,14 @@ impl HabitTrackerApp {
                 y: y + 4.0,
                 width: w,
                 height: 28.0,
-                color: bg,
+                color: if !selected && self.hover == Some(Target::Tab(*tab)) {
+                    self.palette.surface2
+                } else {
+                    bg
+                },
                 corner_radii: CornerRadii::all(4.0),
             });
+            cmds.hit(Target::Tab(*tab), Rect::new(tx, y + 4.0, w, 28.0));
             cmds.push(RenderCommand::Text {
                 x: tx + 8.0,
                 y: y + 10.0,
@@ -1395,42 +1791,77 @@ impl HabitTrackerApp {
             tx += w + 6.0;
         }
 
-        // Category filter indicator
-        if let Some(cat) = self.category_filter {
-            cmds.push(RenderCommand::FillRect {
-                x: tx + 20.0,
-                y: y + 6.0,
-                width: 120.0,
-                height: 24.0,
-                color: cat.color(&self.palette),
-                corner_radii: CornerRadii::all(12.0),
-            });
-            cmds.push(RenderCommand::Text {
-                x: tx + 30.0,
-                y: y + 10.0,
-                text: format!("{} {}", cat.icon(), cat.label()),
-                font_size: 11.0,
-                color: self.palette.crust,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(100.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
+        // The category filter: a chip that steps through them on a press,
+        // as C does -- drawn when no filter is set too, or there would be
+        // nothing to press to set one.
+        let chip = Rect::new(tx + 20.0, y + 6.0, 140.0, 24.0);
+        let (fill, label, ink) = match self.category_filter {
+            Some(cat) => (
+                cat.color(&self.palette),
+                format!("{} {}", cat.icon(), cat.label()),
+                self.palette.crust,
+            ),
+            None => (
+                if self.hover == Some(Target::FilterChip) {
+                    self.palette.surface2
+                } else {
+                    self.palette.surface1
+                },
+                String::from("All categories"),
+                self.palette.text,
+            ),
+        };
+        cmds.push(RenderCommand::FillRect {
+            x: chip.x,
+            y: chip.y,
+            width: chip.w,
+            height: chip.h,
+            color: fill,
+            corner_radii: CornerRadii::all(12.0),
+        });
+        cmds.push(RenderCommand::Text {
+            x: chip.x + 10.0,
+            y: y + 10.0,
+            text: label,
+            font_size: 11.0,
+            color: ink,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(chip.w - 20.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cmds.hit(Target::FilterChip, chip);
     }
 
-    fn render_dashboard(&self, cmds: &mut Vec<RenderCommand>, start_y: f32) {
+    fn render_dashboard(&self, cmds: &mut Frame<Target>, start_y: f32) {
         let active = self.active_habits();
         if active.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: self.width / 2.0 - 100.0,
-                y: start_y + 80.0,
-                text: String::from("No habits yet. Press N to create one."),
-                font_size: 16.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(300.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            // Where the habits would be. The notice was drawn at the top of
+            // the window before the header, which painted over it.
+            let lines: &[&str] = if self.habits.is_empty() {
+                &NO_HABITS_LINES
+            } else {
+                &["No habits in this category."]
+            };
+            for (i, line) in lines.iter().enumerate() {
+                cmds.push(RenderCommand::Text {
+                    x: 24.0,
+                    y: start_y + 60.0 + i as f32 * 24.0,
+                    text: (*line).to_string(),
+                    font_size: if i == 0 { 16.0 } else { 12.0 },
+                    color: if i == 0 {
+                        self.palette.text
+                    } else {
+                        self.palette.subtext0
+                    },
+                    font_weight: if i == 0 {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(self.width - 48.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
             return;
         }
 
@@ -1506,6 +1937,11 @@ impl HabitTrackerApp {
         });
 
         let row_start_y = start_y + 32.0 - self.scroll_offset;
+        // The rows' pane: the wheel scrolls it, and its clip keeps a row
+        // scrolled under the column heads from being drawn or pressed there.
+        let pane = self.list_rect();
+        cmds.hit(Target::HabitList, pane);
+        cmds.clip(pane);
 
         for (vi, &habit_idx) in active.iter().enumerate() {
             let Some(habit) = self.habits.get(habit_idx) else {
@@ -1516,6 +1952,10 @@ impl HabitTrackerApp {
             if ry + Self::ROW_H < start_y || ry > self.height - Self::STATUS_H {
                 continue; // clipping
             }
+            cmds.hit(
+                Target::HabitRow(habit_idx),
+                Rect::new(8.0, ry, self.width - 16.0, Self::ROW_H - 2.0),
+            );
 
             let is_selected = vi == self.selected_habit;
             let row_bg = if is_selected {
@@ -1584,6 +2024,11 @@ impl HabitTrackerApp {
                 let dot_size = if cell_selected { 22.0 } else { 18.0 };
                 let dot_x = cx + (Self::DAY_COL_W - dot_size) / 2.0;
                 let dot_y = ry + (Self::ROW_H - 2.0 - dot_size) / 2.0;
+                // The day's cell checks it in, or out.
+                cmds.hit(
+                    Target::DayCell(habit_idx, col),
+                    Rect::new(cx, ry, Self::DAY_COL_W, Self::ROW_H - 2.0),
+                );
 
                 cmds.push(RenderCommand::FillRect {
                     x: dot_x,
@@ -1668,13 +2113,122 @@ impl HabitTrackerApp {
                 max_width: Some(40.0),
                 overflow: TextOverflow::Ellipsis,
             });
+
+            // Archiving, from the row it is about. It was `A`, and only `A`.
+            let archive = Rect::new(
+                (self.width - 16.0 - 80.0).max(stats_x + 130.0),
+                ry + 12.0,
+                72.0,
+                24.0,
+            );
+            self.button(cmds, archive, "Archive", Target::ArchiveButton(habit_idx));
+        }
+        cmds.unclip();
+    }
+
+    /// Where the dashboard's rows are drawn: under the day heads, over the
+    /// status bar.
+    fn list_rect(&self) -> Rect {
+        let top = Self::HEADER_H + Self::NAV_H + 30.0;
+        Rect::new(
+            0.0,
+            top,
+            self.width,
+            (self.height - Self::STATUS_H - top).max(0.0),
+        )
+    }
+
+    /// Where the archive's rows are drawn: under its title, over the status
+    /// bar.
+    fn archive_rect(&self, start_y: f32) -> Rect {
+        let top = start_y + 40.0;
+        Rect::new(
+            0.0,
+            top,
+            self.width,
+            (self.height - Self::STATUS_H - top).max(0.0),
+        )
+    }
+
+    /// Where the statistics table's title sits: under the four cards.
+    fn stats_table_y(start_y: f32) -> f32 {
+        start_y + STATS_PAD * 3.0 + STATS_CARD_H * 2.0 + 10.0
+    }
+
+    /// Where the statistics table's rows are drawn: under its column heads,
+    /// over the status bar.
+    fn stats_rect(&self, start_y: f32) -> Rect {
+        let top = Self::stats_table_y(start_y) + 40.0;
+        Rect::new(
+            0.0,
+            top,
+            self.width,
+            (self.height - Self::STATUS_H - top).max(0.0),
+        )
+    }
+
+    /// The list the current screen shows: where its rows are drawn, how tall
+    /// each is, and how many there are. `None` on the graph, which has none.
+    ///
+    /// The archive and the statistics table stopped drawing at the window's
+    /// bottom edge and had no scrolling, so a habit past it could not be seen
+    /// there, nor restored, nor chosen.
+    fn list_pane(&self) -> Option<(Rect, f32, usize)> {
+        let content_y = Self::HEADER_H + Self::NAV_H;
+        match self.screen {
+            Screen::Dashboard => Some((self.list_rect(), Self::ROW_H, self.active_habits().len())),
+            Screen::Archive => Some((
+                self.archive_rect(content_y),
+                Self::ROW_H,
+                self.archived_habits().len(),
+            )),
+            Screen::Statistics => Some((
+                self.stats_rect(content_y),
+                STATS_ROW_H,
+                self.active_habits().len(),
+            )),
+            Screen::HeatMap => None,
         }
     }
 
-    fn render_statistics(&self, cmds: &mut Vec<RenderCommand>, start_y: f32) {
-        let pad = 20.0;
+    /// How far the list on screen can scroll: its rows past the room they
+    /// have. Page Down was capped at 2000 pixels whatever the list, so it
+    /// scrolled a list that fitted away into empty space.
+    fn scroll_limit(&self) -> f32 {
+        self.list_pane().map_or(0.0, |(pane, row_h, rows)| {
+            (rows as f32 * row_h + LIST_END_PAD - pane.h).max(0.0)
+        })
+    }
+
+    /// Keep the chosen habit in its list and on screen, and the scroll in
+    /// range.
+    ///
+    /// The list had an offset only Page Up and Page Down moved, so the arrows
+    /// walked the selection off the bottom. And nothing moved the selection
+    /// when its list shrank -- archiving the last row left it past the end,
+    /// choosing nothing.
+    fn keep_selection_visible(&mut self) {
+        let active = self.active_habits().len();
+        self.heatmap_habit_idx = self.heatmap_habit_idx.min(active.saturating_sub(1));
+        if let Some((pane, row_h, rows)) = self.list_pane()
+            && matches!(self.screen, Screen::Dashboard | Screen::Archive)
+        {
+            self.selected_habit = self.selected_habit.min(rows.saturating_sub(1));
+            let top = self.selected_habit as f32 * row_h;
+            let bottom = top + row_h + LIST_END_PAD;
+            if top < self.scroll_offset {
+                self.scroll_offset = top;
+            } else if bottom > self.scroll_offset + pane.h {
+                self.scroll_offset = bottom - pane.h;
+            }
+        }
+        self.scroll_offset = self.scroll_offset.clamp(0.0, self.scroll_limit());
+    }
+
+    fn render_statistics(&self, cmds: &mut Frame<Target>, start_y: f32) {
+        let pad = STATS_PAD;
         let card_w = (self.width - pad * 3.0) / 2.0;
-        let card_h = 100.0;
+        let card_h = STATS_CARD_H;
 
         // Card 1: Overall today
         let (done, total) = self.overall_completion_today();
@@ -1733,7 +2287,7 @@ impl HabitTrackerApp {
         );
 
         // Per-habit stats table
-        let table_y = start_y + pad * 3.0 + card_h * 2.0 + 10.0;
+        let table_y = Self::stats_table_y(start_y);
         cmds.push(RenderCommand::Text {
             x: pad,
             y: table_y,
@@ -1746,12 +2300,9 @@ impl HabitTrackerApp {
         });
 
         let table = Table::with_gap(STATS_COLUMNS, pad, STATS_GAP);
-        table.header(
-            cmds,
-            table_y + 24.0,
-            self.palette.subtext0,
-            STATS_HEADER_FONT,
-        );
+        cmds.draw_with(|c| {
+            table.header(c, table_y + 24.0, self.palette.subtext0, STATS_HEADER_FONT);
+        });
 
         cmds.push(RenderCommand::Line {
             x1: pad,
@@ -1762,15 +2313,26 @@ impl HabitTrackerApp {
             width: 1.0,
         });
 
+        // The rows scroll under the column heads. They stopped at the bottom
+        // edge, so a habit past it had no statistics anywhere.
+        let pane = self.stats_rect(start_y);
+        cmds.hit(Target::StatsList, pane);
+        cmds.clip(pane);
         let active = self.active_habits();
         for (vi, &idx) in active.iter().enumerate() {
             let Some(h) = self.habits.get(idx) else {
                 continue;
             };
-            let ry = table_y + 44.0 + vi as f32 * 24.0;
-            if ry > self.height - Self::STATUS_H {
-                break;
+            let row = Rect::new(
+                pad,
+                pane.y + vi as f32 * STATS_ROW_H - self.scroll_offset,
+                self.width - pad * 2.0,
+                STATS_ROW_H,
+            );
+            if cmds.visible_part(row).is_none() {
+                continue;
             }
+            let ry = row.y + 4.0;
 
             // A habit name is user-entered, so it is the one cell here with no
             // bound on its length. It was clipped with no marker, which reads
@@ -1824,10 +2386,15 @@ impl HabitTrackerApp {
                 table.len(),
                 "a cell with no column is positioned past the table and drawn empty",
             );
-            for (index, text, color) in &cells {
-                table.cell(cmds, *index, ry, text, *color, STATS_ROW_FONT, Fit::Start);
-            }
+            cmds.draw_with(|c| {
+                for (index, text, color) in &cells {
+                    table.cell(c, *index, ry, text, *color, STATS_ROW_FONT, Fit::Start);
+                }
+            });
+            // A row opens its habit's graph.
+            cmds.hit(Target::StatsRow(idx), row);
         }
+        cmds.unclip();
     }
 
     // Stat-card render takes self + cmds + rect (x,y,w,h) + 2 labels + accent
@@ -1835,7 +2402,7 @@ impl HabitTrackerApp {
     #[allow(clippy::too_many_arguments)]
     fn render_stat_card(
         &self,
-        cmds: &mut Vec<RenderCommand>,
+        cmds: &mut Frame<Target>,
         x: f32,
         y: f32,
         w: f32,
@@ -1876,14 +2443,14 @@ impl HabitTrackerApp {
         });
     }
 
-    fn render_archive(&self, cmds: &mut Vec<RenderCommand>, start_y: f32) {
+    fn render_archive(&self, cmds: &mut Frame<Target>, start_y: f32) {
         let archived = self.archived_habits();
 
         if archived.is_empty() {
             cmds.push(RenderCommand::Text {
                 x: self.width / 2.0 - 120.0,
                 y: start_y + 80.0,
-                text: String::from("No archived habits. Press A to archive one."),
+                text: String::from("No archived habits. Archive one from its row, or with A."),
                 font_size: 16.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
@@ -1904,13 +2471,21 @@ impl HabitTrackerApp {
             overflow: TextOverflow::Ellipsis,
         });
 
+        // The rows scroll. They stopped at the bottom edge, so a habit
+        // archived past it could not be restored.
+        let pane = self.archive_rect(start_y);
+        cmds.hit(Target::ArchiveList, pane);
+        cmds.clip(pane);
         for (vi, &idx) in archived.iter().enumerate() {
             let Some(h) = self.habits.get(idx) else {
                 continue;
             };
-            let ry = start_y + 42.0 + vi as f32 * Self::ROW_H;
-            if ry > self.height - Self::STATUS_H {
-                break;
+            let ry = pane.y + 2.0 + vi as f32 * Self::ROW_H - self.scroll_offset;
+            if cmds
+                .visible_part(Rect::new(16.0, ry, self.width - 32.0, Self::ROW_H))
+                .is_none()
+            {
+                continue;
             }
 
             let is_selected = vi == self.selected_habit;
@@ -1965,23 +2540,109 @@ impl HabitTrackerApp {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            // Restore hint
-            if is_selected {
-                cmds.push(RenderCommand::Text {
-                    x: self.width - 180.0,
-                    y: ry + 14.0,
-                    text: String::from("Enter to restore"),
-                    font_size: 11.0,
-                    color: self.palette.ink(self.palette.blue),
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(140.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
+            cmds.hit(
+                Target::ArchiveRow(idx),
+                Rect::new(16.0, ry, self.width - 32.0, Self::ROW_H - 4.0),
+            );
+            // Restoring, from the row: it was Enter on the selected row only.
+            let restore = Rect::new(self.width - 32.0 - 180.0, ry + 11.0, 80.0, 24.0);
+            self.button(cmds, restore, "Restore", Target::RestoreButton(idx));
+            // Deleting, which asks first: a habit's record goes with it.
+            let delete = Rect::new(self.width - 32.0 - 90.0, ry + 11.0, 80.0, 24.0);
+            self.button(cmds, delete, "Delete", Target::DeleteButton(idx));
         }
+        cmds.unclip();
     }
 
-    fn render_heatmap_screen(&self, cmds: &mut Vec<RenderCommand>, start_y: f32) {
+    /// The question before a delete: a card with the habit's name, what goes
+    /// with it, and a button for each answer.
+    fn render_delete_confirm(&self, cmds: &mut Frame<Target>) {
+        let Some(habit) = self.pending_delete.and_then(|i| self.habits.get(i)) else {
+            return;
+        };
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: self.height,
+            color: Color::rgba(0, 0, 0, 160),
+            corner_radii: CornerRadii::ZERO,
+        });
+        cmds.hit(
+            Target::ConfirmBackdrop,
+            Rect::new(0.0, 0.0, self.width, self.height),
+        );
+        let card = Rect::new(
+            (self.width - CONFIRM_W) / 2.0,
+            (self.height - CONFIRM_H) / 2.0,
+            CONFIRM_W,
+            CONFIRM_H,
+        );
+        let mut paint = self.palette.surface_paint(Surface::Card);
+        paint.border = Some(paint.border.unwrap_or(self.palette.surface1));
+        self.palette.push_paint_radii(
+            cmds,
+            card.x,
+            card.y,
+            card.w,
+            card.h,
+            CornerRadii::all(12.0),
+            paint,
+        );
+        cmds.hit(Target::ConfirmCard, card);
+        cmds.push(RenderCommand::Text {
+            x: card.x + 20.0,
+            y: card.y + 20.0,
+            text: format!("Delete {}?", habit.name),
+            font_size: 16.0,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(card.w - 40.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cmds.push(RenderCommand::Text {
+            x: card.x + 20.0,
+            y: card.y + 52.0,
+            text: format!(
+                "Its {} check-in(s) go with it, and this cannot be undone.",
+                habit.total_check_ins()
+            ),
+            font_size: 12.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(card.w - 40.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let delete = Rect::new(
+            card.right() - 20.0 - 200.0,
+            card.bottom() - 52.0,
+            110.0,
+            32.0,
+        );
+        cmds.push(RenderCommand::FillRect {
+            x: delete.x,
+            y: delete.y,
+            width: delete.w,
+            height: delete.h,
+            color: self.palette.red,
+            corner_radii: CornerRadii::all(6.0),
+        });
+        cmds.push(RenderCommand::Text {
+            x: delete.x + 12.0,
+            y: delete.y + 9.0,
+            text: String::from("Delete (Y)"),
+            font_size: 12.0,
+            color: self.palette.crust,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(delete.w - 16.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cmds.hit(Target::ConfirmDelete, delete);
+        let keep = Rect::new(card.right() - 20.0 - 80.0, card.bottom() - 52.0, 80.0, 32.0);
+        self.button(cmds, keep, "Keep", Target::KeepHabit);
+    }
+
+    fn render_heatmap_screen(&self, cmds: &mut Frame<Target>, start_y: f32) {
         let active = self.active_habits();
         if active.is_empty() {
             cmds.push(RenderCommand::Text {
@@ -2017,17 +2678,11 @@ impl HabitTrackerApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Navigation hint
-        cmds.push(RenderCommand::Text {
-            x: 20.0,
-            y: start_y + 34.0,
-            text: String::from("Left/Right to switch habits"),
-            font_size: 11.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(300.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // Another habit: the arrows, or these.
+        let prev = Rect::new(20.0, start_y + 30.0, 96.0, 22.0);
+        let next = Rect::new(122.0, start_y + 30.0, 96.0, 22.0);
+        self.button(cmds, prev, "< Previous", Target::GraphPrev);
+        self.button(cmds, next, "Next >", Target::GraphNext);
 
         // Heatmap: 52 weeks x 7 days
         let data = self.heatmap_data(habit_idx, 364);
@@ -2191,8 +2846,8 @@ impl HabitTrackerApp {
         }
     }
 
-    fn render_create_form(&self, cmds: &mut Vec<RenderCommand>) {
-        // Modal overlay
+    fn render_create_form(&self, cmds: &mut Frame<Target>) {
+        // Modal overlay, which takes every press that misses the form.
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
@@ -2201,6 +2856,10 @@ impl HabitTrackerApp {
             color: Color::rgba(0, 0, 0, 160),
             corner_radii: CornerRadii::ZERO,
         });
+        cmds.hit(
+            Target::FormBackdrop,
+            Rect::new(0.0, 0.0, self.width, self.height),
+        );
 
         let fw = 400.0;
         let fh = 300.0;
@@ -2211,6 +2870,7 @@ impl HabitTrackerApp {
         paint.border = Some(paint.border.unwrap_or(self.palette.surface1));
         self.palette
             .push_paint_radii(cmds, fx, fy, fw, fh, CornerRadii::all(12.0), paint);
+        cmds.hit(Target::FormBackdrop, Rect::new(fx, fy, fw, fh));
 
         cmds.push(RenderCommand::Text {
             x: fx + 20.0,
@@ -2290,6 +2950,11 @@ impl HabitTrackerApp {
             max_width: Some(120.0),
             overflow: TextOverflow::Ellipsis,
         });
+        // A press on the category moves to the next, as Tab does.
+        cmds.hit(
+            Target::FormCategory,
+            Rect::new(fx + 110.0, fy + 88.0, 140.0, 24.0),
+        );
 
         // Frequency
         cmds.push(RenderCommand::Text {
@@ -2302,21 +2967,91 @@ impl HabitTrackerApp {
             max_width: Some(80.0),
             overflow: TextOverflow::Ellipsis,
         });
-        let freq_text = if self.create_frequency_daily {
-            String::from("Daily (F1 to toggle)")
-        } else {
-            format!("{}x/week (F1 toggle, F2 count)", self.create_weekly_count)
-        };
+        // Daily or weekly, and how many times a week: buttons, with their
+        // keys named on them. The frequency was F1, which is the list of keys
+        // in every other program here.
+        let daily = Rect::new(fx + 110.0, fy + 128.0, 70.0, 24.0);
+        let weekly = Rect::new(fx + 186.0, fy + 128.0, 70.0, 24.0);
+        for (rect, label, on, target) in [
+            (
+                daily,
+                "Daily",
+                self.create_frequency_daily,
+                Target::FormDaily,
+            ),
+            (
+                weekly,
+                "Weekly",
+                !self.create_frequency_daily,
+                Target::FormWeekly,
+            ),
+        ] {
+            cmds.push(RenderCommand::FillRect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.w,
+                height: rect.h,
+                color: if on {
+                    self.palette.blue
+                } else if self.hover == Some(target) {
+                    self.palette.surface2
+                } else {
+                    self.palette.surface1
+                },
+                corner_radii: CornerRadii::all(6.0),
+            });
+            cmds.push(RenderCommand::Text {
+                x: rect.x + 10.0,
+                y: rect.y + 5.0,
+                text: label.to_string(),
+                font_size: 12.0,
+                color: if on {
+                    self.palette.crust
+                } else {
+                    self.palette.text
+                },
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(rect.w - 12.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            cmds.hit(target, rect);
+        }
         cmds.push(RenderCommand::Text {
-            x: fx + 110.0,
+            x: fx + 264.0,
             y: fy + 134.0,
-            text: freq_text,
-            font_size: 12.0,
-            color: self.palette.text,
+            text: String::from("F2"),
+            font_size: 10.0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(250.0),
+            max_width: Some(30.0),
             overflow: TextOverflow::Ellipsis,
         });
+        if !self.create_frequency_daily {
+            let minus = Rect::new(fx + 110.0, fy + 164.0, 28.0, 24.0);
+            let plus = Rect::new(fx + 186.0, fy + 164.0, 28.0, 24.0);
+            self.button(cmds, minus, "-", Target::FormFewer);
+            self.button(cmds, plus, "+", Target::FormMore);
+            cmds.push(RenderCommand::Text {
+                x: fx + 146.0,
+                y: fy + 169.0,
+                text: format!("{}x", self.create_weekly_count),
+                font_size: 12.0,
+                color: self.palette.text,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(36.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            cmds.push(RenderCommand::Text {
+                x: fx + 222.0,
+                y: fy + 169.0,
+                text: String::from("a week  (Up / Down)"),
+                font_size: 10.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(150.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Buttons
         cmds.push(RenderCommand::FillRect {
@@ -2327,6 +3062,14 @@ impl HabitTrackerApp {
             color: self.palette.green,
             corner_radii: CornerRadii::all(6.0),
         });
+        cmds.hit(
+            Target::FormCreate,
+            Rect::new(fx + 100.0, fy + fh - 60.0, 90.0, 32.0),
+        );
+        cmds.hit(
+            Target::FormCancel,
+            Rect::new(fx + 210.0, fy + fh - 60.0, 90.0, 32.0),
+        );
         cmds.push(RenderCommand::Text {
             x: fx + 118.0,
             y: fy + fh - 52.0,
@@ -2359,7 +3102,7 @@ impl HabitTrackerApp {
         });
     }
 
-    fn render_status(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_status(&self, cmds: &mut Frame<Target>) {
         let y = self.height - Self::STATUS_H;
         self.palette
             .push_surface(cmds, 0.0, y, self.width, Self::STATUS_H, 0.0, Surface::Card);
@@ -2376,7 +3119,7 @@ impl HabitTrackerApp {
         cmds.push(RenderCommand::Text {
             x: self.width - 320.0,
             y: y + 7.0,
-            text: String::from("N:New  A:Archive  C:Filter  Space:Check  +/-:Date"),
+            text: String::from("N:New  A:Archive  C:Filter  Space:Check  F1:Keys"),
             font_size: 10.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
@@ -2426,19 +3169,213 @@ impl App for HabitTrackerApp {
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
         self.width = width;
         self.height = height;
-        let mut tree = RenderTree::new();
-        tree.commands = self.render_commands();
-        tree
+        let frame = self.frame();
+        self.last_hits = frame.hits().to_vec();
+        frame.into_tree()
     }
 
-    // No `tick_interval`: nothing here ages. The day advances by a keystroke
-    // (`d` / `a`), not by a clock — deliberately, since a habit tracker that
-    // rolled over at midnight while the window was open would move the user's
-    // check-ins under them. Checked by grepping for `elapsed` and finding none.
+    /// Woken at the next midnight, when "today" moves on (design-decisions
+    /// 1201) -- at most an hour away, so a clock that jumped or a machine that
+    /// slept is caught up within the hour.
+    fn tick_interval(&self) -> Option<Duration> {
+        let left = clock_now().map_or(3600, |(_, left)| left.saturating_add(1));
+        Some(Duration::from_secs(left.min(3600)))
+    }
 }
 
 fn main() -> ExitCode {
-    app::launch("habits", &mut HabitTrackerApp::new())
+    app::launch("habits", &mut HabitTrackerApp::from_settings())
+}
+
+// ── The pointer ─────────────────────────────────────────────────────
+
+/// Everything in the window a pointer can press, as the renderer records it.
+///
+/// The tracker drew four tabs, a New Habit button, a row and seven day cells
+/// per habit, an archive and a form, and handled no pointer event
+/// (`known-issues.md` →
+/// `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`). A habit is
+/// named by its index in `habits`, not by its row: the category filter
+/// renumbers rows and not habits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    Tab(Screen),
+    NewHabit,
+    /// The category filter's chip: a press steps to the next category.
+    FilterChip,
+    /// The dashboard's list, which scrolls.
+    HabitList,
+    HabitRow(usize),
+    /// A habit's day: 0 is today, 6 six days ago.
+    DayCell(usize, usize),
+    ArchiveButton(usize),
+    /// The statistics table's rows, which scroll.
+    StatsList,
+    StatsRow(usize),
+    /// The archive's list, which scrolls.
+    ArchiveList,
+    ArchiveRow(usize),
+    RestoreButton(usize),
+    /// Deleting an archived habit, which asks first.
+    DeleteButton(usize),
+    /// The question's answers: delete it, or keep it.
+    ConfirmDelete,
+    KeepHabit,
+    /// The question's card, where a press does nothing.
+    ConfirmCard,
+    /// Everything around the question: a press there keeps the habit, as
+    /// Escape does.
+    ConfirmBackdrop,
+    GraphPrev,
+    GraphNext,
+    FormCategory,
+    FormDaily,
+    FormWeekly,
+    FormFewer,
+    FormMore,
+    FormCreate,
+    FormCancel,
+    /// Everything behind and around the form's controls: a press there does
+    /// nothing.
+    FormBackdrop,
+    HelpCard,
+}
+
+impl HabitTrackerApp {
+    /// What is under `(x, y)` in the frame last shown.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self.frame().hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                let Some(target) = self.frame().hit_test(event.x, event.y) else {
+                    return false;
+                };
+                self.activate(target)
+            }
+            MouseEventKind::Move => {
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return false;
+                }
+                self.hover = over;
+                true
+            }
+            MouseEventKind::Leave => self.hover.take().is_some(),
+            MouseEventKind::Scroll { dy, .. } => {
+                // Over the list on screen, and only there: the wheel over
+                // the cards above the statistics table scrolls nothing.
+                let over = self.target_at(event.x, event.y);
+                if !matches!(
+                    over,
+                    Some(
+                        Target::HabitList
+                            | Target::HabitRow(_)
+                            | Target::DayCell(..)
+                            | Target::ArchiveButton(_)
+                            | Target::ArchiveList
+                            | Target::ArchiveRow(_)
+                            | Target::RestoreButton(_)
+                            | Target::DeleteButton(_)
+                            | Target::StatsList
+                            | Target::StatsRow(_)
+                    )
+                ) {
+                    return false;
+                }
+                let Some((_, row_h, _)) = self.list_pane() else {
+                    return false;
+                };
+                let rows = self.wheel.rows(dy);
+                let before = self.scroll_offset;
+                self.scroll_offset =
+                    (self.scroll_offset + rows as f32 * row_h).clamp(0.0, self.scroll_limit());
+                (self.scroll_offset - before).abs() > f32::EPSILON
+            }
+            _ => false,
+        }
+    }
+
+    /// Put the selection on habit `index` (in `habits`), in the list shown.
+    fn select_habit(&mut self, index: usize) -> bool {
+        let list = if self.screen == Screen::Archive {
+            self.archived_habits()
+        } else {
+            self.active_habits()
+        };
+        let Some(position) = list.iter().position(|i| *i == index) else {
+            return false;
+        };
+        self.selected_habit = position;
+        true
+    }
+
+    fn activate(&mut self, target: Target) -> bool {
+        match target {
+            Target::Tab(screen) => return self.show_screen(screen),
+            Target::NewHabit => self.handle_key("n", false, false),
+            Target::FilterChip => self.handle_key("c", false, false),
+            Target::HabitRow(index) | Target::ArchiveRow(index) => {
+                return self.select_habit(index);
+            }
+            Target::DayCell(index, col) => {
+                if !self.select_habit(index) {
+                    return false;
+                }
+                self.selected_day_col = col.min(6);
+                self.toggle_check_in_selected();
+            }
+            Target::ArchiveButton(index) => self.archive_habit(index),
+            Target::RestoreButton(index) => self.unarchive_habit(index),
+            Target::DeleteButton(index) => self.ask_to_delete(index),
+            Target::ConfirmDelete => {
+                let Some(index) = self.pending_delete.take() else {
+                    return false;
+                };
+                self.delete_habit(index);
+            }
+            Target::KeepHabit | Target::ConfirmBackdrop => {
+                if self.pending_delete.take().is_none() {
+                    return false;
+                }
+                self.status_msg = String::from("Kept");
+            }
+            Target::StatsRow(index) => {
+                // To this habit's graph.
+                let Some(position) = self.active_habits().iter().position(|i| *i == index) else {
+                    return false;
+                };
+                self.heatmap_habit_idx = position;
+                self.screen = Screen::HeatMap;
+            }
+            Target::GraphPrev => self.handle_key("Left", false, false),
+            Target::GraphNext => self.handle_key("Right", false, false),
+            Target::FormCategory => self.handle_create_form_key("Tab", false),
+            Target::FormDaily => self.create_frequency_daily = true,
+            Target::FormWeekly => self.create_frequency_daily = false,
+            Target::FormFewer => self.handle_create_form_key("Down", false),
+            Target::FormMore => self.handle_create_form_key("Up", false),
+            Target::FormCreate => self.create_habit(),
+            Target::FormCancel => self.handle_create_form_key("Escape", false),
+            Target::HelpCard => self.show_help = false,
+            Target::HabitList
+            | Target::ArchiveList
+            | Target::StatsList
+            | Target::FormBackdrop
+            | Target::ConfirmCard => return false,
+        }
+        self.keep_selection_visible();
+        true
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -2459,34 +3396,42 @@ mod tests {
 
     use super::*;
 
-    /// And the window says why it is empty, and that nothing is kept.
+    /// An empty tracker says so where the habits would be, and says how to
+    /// start one.
     ///
-    /// Two different absences, and the second is the one a habit tracker
-    /// cannot leave unsaid: there is no filesystem access, so a mark made
-    /// today is gone when the window closes. An app whose entire purpose is
-    /// to accumulate a record over weeks has to say if it cannot keep one.
+    /// The notice was drawn at the top of the window *before* the header,
+    /// which painted over it, so nobody ever read it. And it said "Nothing is
+    /// saved between runs", which is no longer true.
     #[test]
-    fn the_window_says_it_has_no_history_and_keeps_none() {
+    fn an_empty_tracker_says_so_where_the_habits_would_be() {
         let app = HabitTrackerApp::new();
-        let texts: Vec<String> = app
+        let drawn: Vec<(String, f32)> = app
             .render_commands()
             .iter()
             .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.clone()),
+                RenderCommand::Text { text, y, .. } => Some((text.clone(), *y)),
                 _ => None,
             })
             .collect();
+        let top = HabitTrackerApp::HEADER_H + HabitTrackerApp::NAV_H;
         for line in NO_HABITS_LINES {
+            let Some((_, y)) = drawn.iter().find(|(t, _)| t == line) else {
+                panic!("the window never said {line:?}");
+            };
             assert!(
-                texts.iter().any(|t| t == line),
-                "the window never said {line:?}"
+                *y > top && *y < app.height - HabitTrackerApp::STATUS_H,
+                "{line:?} is drawn at y={y}, under the header or the status bar"
             );
         }
         assert!(
-            NO_HABITS_LINES
+            !NO_HABITS_LINES
                 .iter()
-                .any(|l| l.contains("Nothing is saved between runs")),
-            "nothing warns that today's marks do not survive the window",
+                .any(|l| l.contains("Nothing is saved")),
+            "the notice still says nothing is kept"
+        );
+        assert!(
+            NO_HABITS_LINES.iter().any(|l| l.contains("+ New Habit")),
+            "the notice does not say how to start a habit"
         );
     }
 
@@ -3098,12 +4043,18 @@ mod tests {
         assert_eq!(app.screen, Screen::Dashboard);
     }
 
+    /// "Today" is the clock's (design-decisions 1201). It was 18 May 2026 in
+    /// every run, so a check-in made today was filed in May.
     #[test]
-    fn test_app_date() {
-        let app = HabitTrackerApp::with_sample_habits();
-        assert_eq!(app.today.year, 2026);
-        assert_eq!(app.today.month, 5);
-        assert_eq!(app.today.day, 18);
+    fn a_new_tracker_takes_today_from_the_clock() {
+        let before = today_from_clock().expect("the clock is readable here");
+        let app = HabitTrackerApp::new();
+        let after = today_from_clock().expect("the clock is readable here");
+        assert!(
+            app.today == before || app.today == after,
+            "today is {:?}; the clock said {before:?} then {after:?}",
+            app.today
+        );
     }
 
     // ── Habit management tests ──────────────────────────────────────
@@ -3364,20 +4315,17 @@ mod tests {
         assert!(app.habits[idx].archived);
     }
 
+    /// `+` and `-` moved "today" for the user, which filed the next check-in
+    /// on whatever day the keys had reached. Today is the clock's now, and a
+    /// missed day is filled in from its column.
     #[test]
-    fn test_key_advance_date() {
+    fn the_keys_that_moved_today_are_gone() {
         let mut app = HabitTrackerApp::with_sample_habits();
-        let d = app.today;
-        app.handle_key("+", false, false);
-        assert_eq!(app.today.days_since(d), 1);
-    }
-
-    #[test]
-    fn test_key_go_back_date() {
-        let mut app = HabitTrackerApp::with_sample_habits();
-        let d = app.today;
-        app.handle_key("-", false, false);
-        assert_eq!(d.days_since(app.today), 1);
+        let day = app.today;
+        for k in ["+", "=", "-"] {
+            app.handle_key(k, false, false);
+            assert_eq!(app.today, day, "{k} still moves today");
+        }
     }
 
     #[test]
@@ -3398,11 +4346,33 @@ mod tests {
         assert!(app.category_filter.is_none());
     }
 
+    /// Page Down scrolls a list that overflows, and stops where its last row
+    /// is in view.
     #[test]
-    fn test_key_page_down() {
+    fn page_down_scrolls_a_long_list_to_its_end_and_no_further() {
+        let mut app = app_with_habits(30);
+        app.handle_key("PageDown", false, false);
+        assert!(app.scroll_offset > 0.0, "Page Down did not scroll");
+        for _ in 0..40 {
+            app.handle_key("PageDown", false, false);
+        }
+        assert_eq!(app.scroll_offset, app.scroll_limit());
+        let last = *app.active_habits().last().unwrap();
+        let row = probe::rect_of(&app, Target::HabitRow(last)).expect("the last row is drawn");
+        let pane = app.list_rect();
+        assert!(
+            row.bottom() <= pane.bottom() + 0.5,
+            "at the end of the list its last row is cut off: {row:?} in {pane:?}"
+        );
+    }
+
+    /// And a list that fits does not scroll at all. The limit was 2000 pixels
+    /// whatever the list, so four habits could be paged away into nothing.
+    #[test]
+    fn page_down_does_not_scroll_a_list_that_fits() {
         let mut app = HabitTrackerApp::with_sample_habits();
         app.handle_key("PageDown", false, false);
-        assert!(app.scroll_offset > 0.0);
+        assert_eq!(app.scroll_offset, 0.0);
     }
 
     #[test]
@@ -3449,24 +4419,61 @@ mod tests {
         assert_eq!(app.create_category_idx, 1);
     }
 
+    /// F2 switches the new habit between daily and weekly. It was F1, which
+    /// is the list of keys in every other program here.
     #[test]
-    fn test_create_form_f1_toggles_frequency() {
+    fn test_create_form_f2_toggles_frequency() {
         let mut app = HabitTrackerApp::with_sample_habits();
         app.show_create_form = true;
         assert!(app.create_frequency_daily);
-        app.handle_key("F1", false, false);
+        app.handle_key("F2", false, false);
         assert!(!app.create_frequency_daily);
-        app.handle_key("F1", false, false);
+        app.handle_key("F2", false, false);
         assert!(app.create_frequency_daily);
     }
 
+    /// Up and Down set how many times a week, from one to seven. It was F2,
+    /// which counted up and wrapped from seven to one.
     #[test]
-    fn test_create_form_f2_cycles_weekly_count() {
+    fn test_create_form_up_and_down_set_the_weekly_count() {
         let mut app = HabitTrackerApp::with_sample_habits();
         app.show_create_form = true;
         app.create_weekly_count = 3;
-        app.handle_key("F2", false, false);
+        app.handle_key("Up", false, false);
         assert_eq!(app.create_weekly_count, 4);
+        app.handle_key("Down", false, false);
+        app.handle_key("Down", false, false);
+        assert_eq!(app.create_weekly_count, 2);
+        for _ in 0..10 {
+            app.handle_key("Down", false, false);
+        }
+        assert_eq!(app.create_weekly_count, 1);
+        for _ in 0..10 {
+            app.handle_key("Up", false, false);
+        }
+        assert_eq!(app.create_weekly_count, 7);
+    }
+
+    /// F1 in the form shows the keys, and leaves the form as it was.
+    #[test]
+    fn f1_in_the_form_shows_the_keys() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        app.show_create_form = true;
+        app.create_name = String::from("Walk");
+        app.handle_key("F1", false, false);
+        assert!(app.show_help);
+        assert!(
+            app.create_frequency_daily,
+            "F1 still switches the frequency"
+        );
+        app.handle_key("F1", false, false);
+        assert!(!app.show_help);
+        assert!(app.show_create_form);
+        assert_eq!(app.create_name, "Walk");
+        // And `?` is a character a name may hold while the form is up.
+        app.handle_key("?", false, false);
+        assert_eq!(app.create_name, "Walk?");
+        assert!(!app.show_help);
     }
 
     #[test]
@@ -3854,13 +4861,41 @@ mod tests {
 
     // ── Ctrl+D delete test ──────────────────────────────────────────
 
+    /// Ctrl+D asks, and only `y` deletes. It deleted at once -- a habit and
+    /// every check-in behind it, beside the A that archives.
     #[test]
-    fn test_ctrl_d_deletes() {
+    fn ctrl_d_asks_and_only_y_deletes() {
         let mut app = HabitTrackerApp::with_sample_habits();
         let count = app.habits.len();
         app.selected_habit = 0;
         app.handle_key("d", true, false);
+        assert_eq!(app.habits.len(), count, "deleted without asking");
+        assert!(app.pending_delete.is_some());
+        app.handle_key("n", false, false);
+        assert_eq!(app.habits.len(), count);
+        assert!(app.pending_delete.is_none());
+        // Enter is not yes: the default answer to a question with no undo is
+        // the one that keeps.
+        app.handle_key("d", true, false);
+        app.handle_key("Return", false, false);
+        assert_eq!(app.habits.len(), count);
+        app.handle_key("d", true, false);
+        app.handle_key("y", false, false);
         assert_eq!(app.habits.len(), count - 1);
+    }
+
+    /// In the archive, Ctrl+D is about the archived habit chosen there. It
+    /// looked the archive's selection up in the dashboard's list.
+    #[test]
+    fn ctrl_d_in_the_archive_deletes_the_archived_habit() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        let gone = app.habits[2].name.clone();
+        app.archive_habit(2);
+        app.show_screen(Screen::Archive);
+        app.handle_key("d", true, false);
+        app.handle_key("y", false, false);
+        assert!(app.habits.iter().all(|h| h.name != gone), "{gone} survived");
+        assert!(app.habits.iter().all(|h| !h.archived));
     }
 
     // ── Completions in week test ────────────────────────────────────
@@ -3965,9 +5000,9 @@ mod tests {
     /// column's left edge, and the assertion would then fail on chrome that was
     /// never part of this table.
     fn statistics_commands(app: &HabitTrackerApp) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-        app.render_statistics(&mut cmds, 0.0);
-        cmds
+        let mut f = Frame::new(app.width, app.height);
+        app.render_statistics(&mut f, 0.0);
+        f.into_tree().commands
     }
 
     #[test]
@@ -4219,5 +5254,812 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+    // ── The pointer, the questions, the lists, and what is kept ─────
+
+    use guitk::event::MouseEvent;
+    use guitk::probe::{self, Probe};
+    use std::time::Duration;
+
+    impl Probe for HabitTrackerApp {
+        type Target = Target;
+        type Outcome = bool;
+        const SIZE: (f32, f32) = (1000.0, 700.0);
+
+        /// Drawn at the app's own size, which these tests leave at `SIZE`.
+        fn draw(&self, _size: (f32, f32)) -> Frame<Target> {
+            self.frame()
+        }
+
+        fn click_at(&mut self, x: f32, y: f32, button: MouseButton, _size: (f32, f32)) -> bool {
+            self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> bool {
+            self.handle_event(&Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, _size: (f32, f32)) -> Option<bool> {
+            Some(self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })))
+        }
+    }
+
+    /// The day the fixtures are built on.
+    const FIXTURE_DAY: Date = Date {
+        year: 2026,
+        month: 5,
+        day: 18,
+    };
+
+    /// A tracker with `n` daily habits, far more than a window shows when `n`
+    /// is large.
+    fn app_with_habits(n: usize) -> HabitTrackerApp {
+        let mut app = HabitTrackerApp::new();
+        app.today = FIXTURE_DAY;
+        for i in 0..n {
+            app.create_name = format!("Habit {i}");
+            app.create_habit();
+        }
+        app
+    }
+
+    /// What the topmost box at `target`'s centre is: whether it can be pressed
+    /// or something is over it.
+    fn topmost_at_centre_of(app: &HabitTrackerApp, target: Target) -> Option<Target> {
+        let r = probe::rect_of(app, target)?;
+        app.frame().hit_test(r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    #[test]
+    fn every_tab_is_a_button() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        for screen in [
+            Screen::Statistics,
+            Screen::Archive,
+            Screen::HeatMap,
+            Screen::Dashboard,
+        ] {
+            assert!(probe::click(&mut app, Target::Tab(screen)));
+            assert_eq!(app.screen, screen);
+        }
+        // The tab of the screen already shown changes nothing.
+        assert!(!probe::click(&mut app, Target::Tab(Screen::Dashboard)));
+    }
+
+    #[test]
+    fn the_new_habit_button_opens_the_form() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        assert!(probe::click(&mut app, Target::NewHabit));
+        assert!(app.show_create_form);
+    }
+
+    /// The category filter is a chip that is there with no filter set, or
+    /// there would be nothing to press to set one.
+    #[test]
+    fn the_filter_chip_is_there_unset_and_steps_through_categories() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        assert!(app.category_filter.is_none());
+        assert!(probe::click(&mut app, Target::FilterChip));
+        assert_eq!(app.category_filter, Some(Category::Health));
+        assert!(probe::click(&mut app, Target::FilterChip));
+        assert_eq!(app.category_filter, Some(Category::Fitness));
+    }
+
+    /// A day's cell checks that habit in on that day, and out again.
+    #[test]
+    fn a_day_cell_checks_its_habit_in_on_its_day() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        let habit = app.active_habits()[2];
+        let day = app.today.add_days(-3);
+        let was = app.habits[habit].is_checked_on(day);
+        assert!(probe::click(&mut app, Target::DayCell(habit, 3)));
+        assert_eq!(app.habits[habit].is_checked_on(day), !was);
+        assert_eq!(app.selected_habit, 2, "the press did not choose its habit");
+        assert_eq!(app.selected_day_col, 3);
+        assert!(probe::click(&mut app, Target::DayCell(habit, 3)));
+        assert_eq!(app.habits[habit].is_checked_on(day), was);
+    }
+
+    #[test]
+    fn a_row_press_chooses_its_habit() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        let habit = app.active_habits()[3];
+        assert!(probe::click(&mut app, Target::HabitRow(habit)));
+        assert_eq!(app.selected_habit, 3);
+    }
+
+    /// Archiving was `A` and only `A`.
+    #[test]
+    fn the_archive_button_archives_its_own_row() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        let habit = app.active_habits()[1];
+        assert!(probe::click(&mut app, Target::ArchiveButton(habit)));
+        assert!(app.habits[habit].archived);
+        assert!(probe::rect_of(&app, Target::ArchiveButton(habit)).is_none());
+    }
+
+    /// Restoring was Enter on the selected row, and deleting was not in the
+    /// pointer's reach at all.
+    #[test]
+    fn an_archived_row_restores_and_deletes() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        app.archive_habit(0);
+        app.archive_habit(1);
+        assert!(probe::click(&mut app, Target::Tab(Screen::Archive)));
+        assert!(probe::click(&mut app, Target::RestoreButton(0)));
+        assert!(!app.habits[0].archived);
+        let doomed = app.habits[1].name.clone();
+        let count = app.habits.len();
+        assert!(probe::click(&mut app, Target::DeleteButton(1)));
+        assert_eq!(app.habits.len(), count, "deleted without asking");
+        assert!(probe::click(&mut app, Target::ConfirmDelete));
+        assert_eq!(app.habits.len(), count - 1);
+        assert!(app.habits.iter().all(|h| h.name != doomed));
+    }
+
+    /// The question can be answered either way by pointer, and a press on
+    /// the card itself answers nothing.
+    #[test]
+    fn the_delete_question_answers_to_the_pointer() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        let count = app.habits.len();
+        for keep in [Target::KeepHabit, Target::ConfirmBackdrop] {
+            app.ask_to_delete(0);
+            assert!(!probe::click(&mut app, Target::ConfirmCard));
+            assert!(app.pending_delete.is_some(), "a press on the card answered");
+            if keep == Target::ConfirmBackdrop {
+                // Anywhere outside the card: where the New Habit button is.
+                let r = probe::rect_of(&app, Target::NewHabit).unwrap();
+                app.handle_event(&Event::Mouse(MouseEvent {
+                    x: r.x + 2.0,
+                    y: r.y + 2.0,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }));
+            } else {
+                assert!(probe::click(&mut app, keep));
+            }
+            assert!(app.pending_delete.is_none());
+            assert_eq!(app.habits.len(), count, "{keep:?} deleted");
+            assert!(!app.show_create_form, "the press reached the button behind");
+        }
+    }
+
+    /// While a question or the form is up, nothing behind it can be pressed.
+    #[test]
+    fn nothing_behind_a_question_or_the_form_can_be_pressed() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        let row = app.active_habits()[0];
+        app.ask_to_delete(row);
+        for behind in [
+            Target::NewHabit,
+            Target::DayCell(row, 0),
+            Target::Tab(Screen::Archive),
+        ] {
+            assert_eq!(
+                topmost_at_centre_of(&app, behind),
+                Some(Target::ConfirmBackdrop)
+            );
+        }
+        app.pending_delete = None;
+        app.show_create_form = true;
+        for behind in [
+            Target::NewHabit,
+            Target::DayCell(row, 0),
+            Target::Tab(Screen::Archive),
+        ] {
+            assert_eq!(
+                topmost_at_centre_of(&app, behind),
+                Some(Target::FormBackdrop)
+            );
+        }
+    }
+
+    /// The form can be filled in and sent by pointer, except for the name,
+    /// which is typed.
+    #[test]
+    fn the_form_answers_to_the_pointer() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        let count = app.habits.len();
+        probe::click(&mut app, Target::NewHabit);
+        probe::type_str(&mut app, "Read");
+        assert!(probe::click(&mut app, Target::FormWeekly));
+        assert!(!app.create_frequency_daily);
+        assert!(probe::click(&mut app, Target::FormMore));
+        assert!(probe::click(&mut app, Target::FormMore));
+        assert!(probe::click(&mut app, Target::FormFewer));
+        assert_eq!(app.create_weekly_count, 4);
+        assert!(probe::click(&mut app, Target::FormCategory));
+        assert_eq!(app.create_category_idx, 1);
+        // Beside the controls, on the card and off it: the backdrop's own
+        // centre is the Weekly button, so the points are chosen, not probed.
+        let card = probe::rect_of(&app, Target::FormBackdrop).unwrap();
+        for (x, y) in [(card.x + 6.0, card.y + 6.0), (4.0, 4.0)] {
+            assert_eq!(app.frame().hit_test(x, y), Some(Target::FormBackdrop));
+            assert!(!app.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            })));
+        }
+        assert!(
+            app.show_create_form,
+            "a press beside the controls closed the form"
+        );
+        assert!(probe::click(&mut app, Target::FormCreate));
+        assert_eq!(app.habits.len(), count + 1);
+        let made = app.habits.last().unwrap();
+        assert_eq!(made.name, "Read");
+        assert_eq!(made.frequency, Frequency::Weekly(4));
+        assert_eq!(made.category, Category::ALL[1]);
+
+        probe::click(&mut app, Target::NewHabit);
+        assert!(probe::click(&mut app, Target::FormDaily));
+        assert!(probe::click(&mut app, Target::FormCancel));
+        assert!(!app.show_create_form);
+        assert_eq!(app.habits.len(), count + 1);
+    }
+
+    /// The count's buttons are there only for a weekly habit.
+    #[test]
+    fn the_weekly_count_is_offered_only_for_a_weekly_habit() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        app.show_create_form = true;
+        assert!(probe::rect_of(&app, Target::FormMore).is_none());
+        app.create_frequency_daily = false;
+        assert!(probe::rect_of(&app, Target::FormMore).is_some());
+        assert!(probe::rect_of(&app, Target::FormFewer).is_some());
+    }
+
+    /// A name can hold a space. The space bar arrives as the named key
+    /// "Space", which the form's catch-all refused as too long.
+    #[test]
+    fn a_name_can_hold_a_space() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        app.handle_key("n", false, false);
+        for k in [
+            key(Key::R, "R"),
+            key(Key::E, "e"),
+            key(Key::Space, " "),
+            key(Key::A, "a"),
+        ] {
+            app.handle_event(&k);
+        }
+        assert_eq!(app.create_name, "Re a");
+    }
+
+    /// A name of spaces is refused: it would be kept, and then dropped as
+    /// blank the next time the window opened.
+    #[test]
+    fn a_blank_name_is_refused() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        let count = app.habits.len();
+        app.create_name = String::from("   ");
+        app.create_habit();
+        assert_eq!(app.habits.len(), count);
+        assert_eq!(app.status_msg, "Name cannot be empty");
+    }
+
+    /// A statistics row opens its habit's graph.
+    #[test]
+    fn a_statistics_row_opens_its_graph() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        app.show_screen(Screen::Statistics);
+        let habit = app.active_habits()[2];
+        assert!(probe::click(&mut app, Target::StatsRow(habit)));
+        assert_eq!(app.screen, Screen::HeatMap);
+        assert_eq!(app.heatmap_habit_idx, 2);
+    }
+
+    #[test]
+    fn the_graph_buttons_step_through_the_habits() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        app.show_screen(Screen::HeatMap);
+        assert!(probe::click(&mut app, Target::GraphNext));
+        assert!(probe::click(&mut app, Target::GraphNext));
+        assert_eq!(app.heatmap_habit_idx, 2);
+        assert!(probe::click(&mut app, Target::GraphPrev));
+        assert_eq!(app.heatmap_habit_idx, 1);
+    }
+
+    /// The wheel scrolls the list it is over, and nothing when it is over the
+    /// header.
+    #[test]
+    fn the_wheel_scrolls_the_list_it_is_over() {
+        // A negative `dy` is toward the user: toward the end of the list.
+        let mut app = app_with_habits(30);
+        assert!(!probe::scroll_at_point(&mut app, Target::NewHabit, -3.0));
+        assert_eq!(app.scroll_offset, 0.0);
+        assert!(probe::scroll_at_point(&mut app, Target::HabitList, -3.0));
+        assert!(app.scroll_offset > 0.0);
+        let down = app.scroll_offset;
+        assert!(probe::scroll_at_point(&mut app, Target::HabitList, 3.0));
+        assert!(app.scroll_offset < down);
+    }
+
+    /// A row scrolled up under the day heads is not drawn there, nor pressed
+    /// there: the list's clip covers its hit boxes too.
+    #[test]
+    fn a_row_scrolled_under_the_day_heads_cannot_be_pressed() {
+        let mut app = app_with_habits(30);
+        app.scroll_offset = HabitTrackerApp::ROW_H * 1.5;
+        let pane = app.list_rect();
+        let first = app.active_habits()[0];
+        for target in [
+            Target::HabitRow(first),
+            Target::DayCell(first, 0),
+            Target::ArchiveButton(first),
+        ] {
+            if let Some(r) = probe::rect_of(&app, target) {
+                assert!(
+                    r.y >= pane.y - 0.5,
+                    "{target:?} reaches above the list: {r:?}"
+                );
+            }
+        }
+    }
+
+    /// The arrows keep the chosen habit on screen: the offset moved only with
+    /// Page Up and Page Down, so Down walked the selection off the bottom.
+    #[test]
+    fn the_arrows_keep_the_chosen_habit_on_screen() {
+        let mut app = app_with_habits(30);
+        for _ in 0..20 {
+            app.handle_key("Down", false, false);
+        }
+        assert_eq!(app.selected_habit, 20);
+        let habit = app.active_habits()[20];
+        let row = probe::rect_of(&app, Target::HabitRow(habit)).expect("the chosen row is drawn");
+        let pane = app.list_rect();
+        assert!(
+            row.y >= pane.y - 0.5 && row.bottom() <= pane.bottom() + 0.5,
+            "{row:?} in {pane:?}"
+        );
+        for _ in 0..20 {
+            app.handle_key("Up", false, false);
+        }
+        assert_eq!(app.scroll_offset, 0.0);
+    }
+
+    /// Archiving the last row leaves a habit chosen. The selection stayed
+    /// past the end of the shorter list, choosing nothing.
+    #[test]
+    fn archiving_the_last_row_leaves_a_habit_chosen() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        let last = app.active_habits().len() - 1;
+        app.selected_habit = last;
+        app.handle_key("a", false, false);
+        assert_eq!(app.selected_habit, last - 1);
+    }
+
+    /// The number keys start each screen at its top, as a tab click does.
+    #[test]
+    fn the_number_keys_start_each_screen_at_its_top() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        // Three archived, so a selection of 2 is a real row there too: the
+        // clamp to the list's length would otherwise hide a missing reset.
+        for i in 0..3 {
+            app.archive_habit(i);
+        }
+        app.selected_habit = 2;
+        app.handle_key("3", false, false);
+        assert_eq!(app.screen, Screen::Archive);
+        assert_eq!(app.selected_habit, 0);
+    }
+
+    /// The archive scrolls, so a habit archived past the bottom edge can be
+    /// reached and restored. It stopped drawing at the edge.
+    #[test]
+    fn the_archive_scrolls_to_its_last_habit() {
+        let mut app = app_with_habits(30);
+        for i in 0..30 {
+            app.archive_habit(i);
+        }
+        app.show_screen(Screen::Archive);
+        assert!(probe::rect_of(&app, Target::RestoreButton(29)).is_none());
+        for _ in 0..60 {
+            probe::scroll_at_point(&mut app, Target::ArchiveList, -3.0);
+        }
+        assert!(probe::click(&mut app, Target::RestoreButton(29)));
+        assert!(!app.habits[29].archived);
+    }
+
+    /// And the statistics table scrolls, so every habit's numbers can be
+    /// read, and its graph opened.
+    #[test]
+    fn the_statistics_table_scrolls_to_its_last_habit() {
+        let mut app = app_with_habits(30);
+        app.show_screen(Screen::Statistics);
+        assert!(probe::rect_of(&app, Target::StatsRow(29)).is_none());
+        // The wheel over the cards above the table scrolls nothing.
+        let r = app.stats_rect(HabitTrackerApp::HEADER_H + HabitTrackerApp::NAV_H);
+        assert!(!app.handle_event(&Event::Mouse(MouseEvent {
+            x: 40.0,
+            y: r.y - 150.0,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        })));
+        for _ in 0..60 {
+            probe::scroll_at_point(&mut app, Target::StatsList, -3.0);
+        }
+        assert!(probe::click(&mut app, Target::StatsRow(29)));
+        assert_eq!(app.screen, Screen::HeatMap);
+        assert_eq!(app.heatmap_habit_idx, 29);
+    }
+
+    /// The pointer lights what it is over.
+    #[test]
+    fn hovering_a_control_lights_it() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        let r = probe::rect_of(&app, Target::NewHabit).unwrap();
+        assert!(app.handle_event(&Event::Mouse(MouseEvent {
+            x: r.x + 4.0,
+            y: r.y + 4.0,
+            kind: MouseEventKind::Move,
+        })));
+        assert_eq!(app.hover, Some(Target::NewHabit));
+        assert!(app.handle_event(&Event::Mouse(MouseEvent {
+            x: 0.0,
+            y: 0.0,
+            kind: MouseEventKind::Leave,
+        })));
+        assert_eq!(app.hover, None);
+    }
+
+    /// F1 raises the list of keys, which is modal, and a press or Escape
+    /// puts it away.
+    #[test]
+    fn f1_shows_the_keys_and_the_card_is_modal() {
+        let mut app = HabitTrackerApp::with_sample_habits();
+        app.handle_key("F1", false, false);
+        assert!(app.show_help);
+        app.handle_key("n", false, false);
+        assert!(
+            !app.show_create_form,
+            "a key reached the app behind the card"
+        );
+        app.handle_key("Escape", false, false);
+        assert!(!app.show_help);
+        app.handle_key("F1", false, false);
+        assert!(probe::click(&mut app, Target::HelpCard));
+        assert!(!app.show_help);
+    }
+
+    /// Every key on the card does something, in a state where it has
+    /// something to do.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (keys, what) in SHORTCUTS {
+            match *keys {
+                "1 / 2 / 3 / 4" => {
+                    let mut app = HabitTrackerApp::with_sample_habits();
+                    for (k, screen) in [
+                        ("2", Screen::Statistics),
+                        ("3", Screen::Archive),
+                        ("4", Screen::HeatMap),
+                        ("1", Screen::Dashboard),
+                    ] {
+                        app.handle_key(k, false, false);
+                        assert_eq!(app.screen, screen, "{k}");
+                    }
+                }
+                "N" => {
+                    let mut app = HabitTrackerApp::with_sample_habits();
+                    app.handle_key("n", false, false);
+                    assert!(app.show_create_form);
+                }
+                "Up / Down" => {
+                    let mut app = HabitTrackerApp::with_sample_habits();
+                    app.handle_key("Down", false, false);
+                    assert_eq!(app.selected_habit, 1);
+                    app.handle_key("Up", false, false);
+                    assert_eq!(app.selected_habit, 0);
+                }
+                "Left / Right" => {
+                    let mut app = HabitTrackerApp::with_sample_habits();
+                    app.handle_key("Left", false, false);
+                    assert_eq!(app.selected_day_col, 1);
+                    app.handle_key("Right", false, false);
+                    assert_eq!(app.selected_day_col, 0);
+                    app.show_screen(Screen::HeatMap);
+                    app.handle_key("Right", false, false);
+                    assert_eq!(app.heatmap_habit_idx, 1);
+                    app.handle_key("Left", false, false);
+                    assert_eq!(app.heatmap_habit_idx, 0);
+                }
+                "Space / Enter" => {
+                    let mut app = HabitTrackerApp::with_sample_habits();
+                    let habit = app.active_habits()[0];
+                    let was = app.habits[habit].is_checked_on(app.today);
+                    app.handle_key("Space", false, false);
+                    assert_ne!(app.habits[habit].is_checked_on(app.today), was);
+                    app.handle_key("Return", false, false);
+                    assert_eq!(app.habits[habit].is_checked_on(app.today), was);
+                    app.archive_habit(habit);
+                    app.show_screen(Screen::Archive);
+                    app.handle_key("Return", false, false);
+                    assert!(!app.habits[habit].archived);
+                }
+                "A" => {
+                    let mut app = HabitTrackerApp::with_sample_habits();
+                    let habit = app.active_habits()[0];
+                    app.handle_key("a", false, false);
+                    assert!(app.habits[habit].archived);
+                }
+                "Ctrl+D" => {
+                    let mut app = HabitTrackerApp::with_sample_habits();
+                    app.handle_key("d", true, false);
+                    assert!(app.pending_delete.is_some());
+                }
+                "C" => {
+                    let mut app = HabitTrackerApp::with_sample_habits();
+                    app.handle_key("c", false, false);
+                    assert_eq!(app.category_filter, Some(Category::Health));
+                }
+                "PgUp / PgDn" => {
+                    let mut app = app_with_habits(30);
+                    app.handle_key("PageDown", false, false);
+                    assert!(app.scroll_offset > 0.0);
+                    app.handle_key("PageUp", false, false);
+                    assert_eq!(app.scroll_offset, 0.0);
+                }
+                "F1" => {
+                    let mut app = HabitTrackerApp::with_sample_habits();
+                    app.handle_key("F1", false, false);
+                    assert!(app.show_help);
+                }
+                other => panic!(
+                    "the card offers {other:?} ({what}) and this test has no case for it -- \
+                     add one, or the row advertises a key nothing checks"
+                ),
+            }
+        }
+    }
+
+    /// The header names the day once. It read "Mon May 18, 2026 -- Mon".
+    #[test]
+    fn the_header_names_the_day_once() {
+        let app = HabitTrackerApp::with_sample_habits();
+        let full = app.today.format_full();
+        let header = app
+            .render_commands()
+            .into_iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, .. } if text.contains(&full) => Some(text),
+                _ => None,
+            })
+            .expect("the header shows the date");
+        assert_eq!(
+            header.matches(app.today.day_of_week_short()).count(),
+            1,
+            "{header:?}"
+        );
+    }
+
+    /// The status bar names F1, and no longer the date keys.
+    #[test]
+    fn the_status_bar_names_the_help_key() {
+        let app = HabitTrackerApp::with_sample_habits();
+        let texts: Vec<String> = app
+            .render_commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t.contains("F1:Keys")));
+        assert!(!texts.iter().any(|t| t.contains("+/-:Date")));
+    }
+
+    // ── The clock ───────────────────────────────────────────────────
+
+    /// A tick after midnight moves today on, and one on the same day does
+    /// nothing.
+    #[test]
+    fn a_tick_after_midnight_moves_today_on() {
+        let mut app = HabitTrackerApp::new();
+        let clock = today_from_clock().unwrap();
+        app.today = clock.add_days(-1);
+        assert!(app.handle_event(&Event::Tick { elapsed_ms: 60_000 }));
+        let now = app.today;
+        assert!(now == clock || now == clock.add_days(1), "today is {now:?}");
+        let again = app.handle_event(&Event::Tick { elapsed_ms: 60_000 });
+        // Unless midnight fell between the two ticks, the second changes nothing.
+        assert_eq!(again, app.today != now);
+    }
+
+    /// The window asks to be woken by the next midnight, and within the hour
+    /// whatever the clock does.
+    #[test]
+    fn the_window_asks_to_be_woken_by_midnight() {
+        let app = HabitTrackerApp::new();
+        let wake = app.tick_interval().expect("the window never wakes");
+        assert!(
+            wake >= Duration::from_secs(1) && wake <= Duration::from_hours(1),
+            "{wake:?}"
+        );
+    }
+
+    // ── What is kept ────────────────────────────────────────────────
+
+    #[test]
+    fn iso_dates_round_trip_and_nonsense_is_refused() {
+        let d = Date {
+            year: 2026,
+            month: 2,
+            day: 28,
+        };
+        assert_eq!(d.to_iso(), "2026-02-28");
+        assert_eq!(Date::from_iso("2026-02-28"), Some(d));
+        assert_eq!(Date::from_iso(" 2026-02-28 "), Some(d));
+        for bad in [
+            "",
+            "2026-02-30",
+            "2026-13-01",
+            "yesterday",
+            "2026-02",
+            "2026-xx-01",
+        ] {
+            assert_eq!(Date::from_iso(bad), None, "{bad:?}");
+        }
+    }
+
+    /// Habits, their check-ins, and archiving survive the window closing.
+    /// Nothing did: every mark went when the window closed.
+    #[test]
+    fn habits_and_their_check_ins_survive_a_restart() {
+        settingsfile::testing::with_scratch_config("habits-kept", |_| {
+            let mut app = HabitTrackerApp::from_settings();
+            app.today = FIXTURE_DAY;
+            app.create_name = String::from("Read 20 pages");
+            app.create_category_idx = 4;
+            app.create_frequency_daily = false;
+            app.create_weekly_count = 3;
+            app.create_habit();
+            app.create_name = String::from("Stretch");
+            app.create_habit();
+            app.selected_habit = 0;
+            app.selected_day_col = 0;
+            app.toggle_check_in_selected();
+            app.selected_day_col = 2;
+            app.toggle_check_in_selected();
+            app.archive_habit(1);
+
+            let again = HabitTrackerApp::from_settings();
+            assert_eq!(again.habits.len(), 2);
+            let read = &again.habits[0];
+            assert_eq!(read.name, "Read 20 pages");
+            assert_eq!(read.category, Category::Learning);
+            assert_eq!(read.frequency, Frequency::Weekly(3));
+            assert_eq!(read.created, FIXTURE_DAY);
+            assert_eq!(read.check_ins, vec![FIXTURE_DAY.add_days(-2), FIXTURE_DAY]);
+            assert!(!read.archived);
+            assert_eq!(again.habits[1].name, "Stretch");
+            assert!(again.habits[1].archived);
+
+            // Restored, unchecked and deleted are kept too.
+            let mut app = again;
+            app.today = FIXTURE_DAY;
+            app.unarchive_habit(1);
+            app.selected_habit = 0;
+            app.selected_day_col = 0;
+            app.toggle_check_in_selected();
+            app.ask_to_delete(1);
+            app.handle_key("y", false, false);
+            let third = HabitTrackerApp::from_settings();
+            assert_eq!(third.habits.len(), 1);
+            assert_eq!(third.habits[0].check_ins, vec![FIXTURE_DAY.add_days(-2)]);
+        });
+    }
+
+    /// A new habit's id is past every kept one, so two habits never share an
+    /// entry in the file.
+    #[test]
+    fn a_new_habit_after_a_restart_gets_a_new_id() {
+        settingsfile::testing::with_scratch_config("habits-ids", |_| {
+            let mut app = HabitTrackerApp::from_settings();
+            for name in ["A", "B"] {
+                app.create_name = name.to_string();
+                app.create_habit();
+            }
+            let mut app = HabitTrackerApp::from_settings();
+            app.create_name = String::from("C");
+            app.create_habit();
+            let ids: Vec<u64> = app.habits.iter().map(|h| h.id).collect();
+            assert_eq!(ids, vec![1, 2, 3]);
+            assert_eq!(HabitTrackerApp::from_settings().habits.len(), 3);
+        });
+    }
+
+    /// An entry that cannot be read is not shown, and is left in the file,
+    /// which is the user's: a later write touches only the entry it is about.
+    #[test]
+    fn an_unreadable_entry_is_skipped_and_left_alone() {
+        settingsfile::testing::with_scratch_config("habits-broken", |_| {
+            let mut doc = yamldoc::Document::new();
+            doc.set_str(&[HABITS_KEY, "1", "created"], "2026-05-01");
+            doc.set_str(&[HABITS_KEY, "2", "name"], "No date");
+            doc.set_str(&[HABITS_KEY, "2", "created"], "yesterday");
+            doc.set_str(&[HABITS_KEY, "7", "name"], "Kept");
+            doc.set_str(&[HABITS_KEY, "7", "category"], "gardening");
+            doc.set_str(&[HABITS_KEY, "7", "frequency"], "weekly 9");
+            doc.set_str(&[HABITS_KEY, "7", "created"], "2026-05-01");
+            doc.set_seq(
+                &[HABITS_KEY, "7", "check_ins"],
+                &["2026-05-02", "not a day", "2026-05-02"],
+            );
+            settingsfile::store(CONFIG_NAME, &doc).unwrap();
+
+            let mut app = HabitTrackerApp::from_settings();
+            assert_eq!(app.habits.len(), 1);
+            let kept = &app.habits[0];
+            assert_eq!(kept.name, "Kept");
+            assert_eq!(kept.id, 7);
+            assert_eq!(kept.category, Category::Custom);
+            assert_eq!(kept.frequency, Frequency::Weekly(7));
+            assert_eq!(
+                kept.check_ins,
+                vec![Date {
+                    year: 2026,
+                    month: 5,
+                    day: 2
+                }]
+            );
+            app.create_name = String::from("New");
+            app.create_habit();
+            assert_eq!(app.habits[1].id, 8);
+            let file = settingsfile::load(CONFIG_NAME);
+            let mut keys = file.keys(&[HABITS_KEY]);
+            keys.sort();
+            assert_eq!(keys, vec!["1", "2", "7", "8"]);
+        });
+    }
+
+    /// A tracker made with `new` -- every test's -- writes nothing, so a test
+    /// that forgets its scratch settings cannot write the developer's own.
+    #[test]
+    fn a_tracker_made_with_new_writes_nothing() {
+        settingsfile::testing::with_scratch_config("habits-quiet", |_| {
+            let mut app = HabitTrackerApp::new();
+            app.create_name = String::from("Walk");
+            app.create_habit();
+            app.toggle_check_in_selected();
+            app.archive_habit(0);
+            app.delete_habit(0);
+            let path = settingsfile::path_for(CONFIG_NAME).unwrap();
+            assert!(!path.exists(), "{} was written", path.display());
+        });
+    }
+
+    /// A write that fails says so, and is not covered by the message of the
+    /// change it failed to keep.
+    #[test]
+    fn a_failed_write_is_reported() {
+        settingsfile::testing::with_scratch_config("habits-refused", |dir| {
+            // A file where the settings directory must go.
+            std::fs::write(dir.join("slateos"), b"not a directory").unwrap();
+            let mut app = HabitTrackerApp::from_settings();
+            app.create_name = String::from("Walk");
+            app.create_habit();
+            assert!(
+                app.status_msg.starts_with("Could not keep your habits"),
+                "{}",
+                app.status_msg
+            );
+            app.status_msg.clear();
+            app.delete_habit(0);
+            assert!(
+                app.status_msg.starts_with("Could not keep your habits"),
+                "{}",
+                app.status_msg
+            );
+        });
     }
 }

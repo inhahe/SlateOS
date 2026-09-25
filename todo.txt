@@ -58742,6 +58742,21 @@ test of the fixture, not of the bound.
   a second close). Reversing it is one branch. User-visible, so the operator
   may want it the other way; nothing else depends on it.
 
+- **The habit tracker keeps its record in the settings directory.**
+  (2026-09-25, `apps/habits/src/main.rs` -> `CONFIG_NAME`, `store_habit`,
+  `load_habits`.) Check-ins are a record of the user's days -- data, not
+  configuration -- and the XDG layout puts data under `$XDG_DATA_HOME`
+  (`~/.local/share`), not `~/.config`. They go through `settingsfile`
+  (`~/.config/slateos/habits.yaml`) because it is the tree's one
+  comment-preserving, atomically written YAML store and it has no
+  data-directory twin; the regex tester's library and the file search's saved
+  searches already live there on the same reasoning. The cost: anything that
+  treats `~/.config` as "preferences" -- a reset, a selective backup -- treats
+  the record the same way. If the operator wants the split, the fix is a
+  data-directory twin of `settingsfile` (lane C's crate) and a one-time move
+  of those three files; `CONFIG_NAME`'s load and store are the only call
+  sites here.
+
 ### Deferred, each with the condition that un-defers it
 
 - **The terminal polls for its shell's output** -- 16 ms while the shell is

@@ -1090,6 +1090,9 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "settingsfile",
+ "tzrules",
+ "yamldoc",
 ]
 
 [[package]]

@@ -159821,6 +159821,24 @@ selection, and Page Down reads on; a saved web page opened with Open…
 subscribes to the feeds it links to. The reader still forgets everything at
 exit -- its own entry below. Nine examined; twelve to go.
 
+**`apps/habits`, 2026-09-25 -- the clock's day, a record that is kept, a
+pointer layer, and two lists that stopped at the edge.** "Today" was 18 May
+2026 in every run, moved only by `+` and `-`, so a check-in made today was
+filed in May; it is the clock's now, and rolls over at midnight while the
+window is open (design-decisions 1201). Nothing was kept -- the notice said
+so, from under the header that painted over it -- and every habit and
+check-in is now kept in the user's settings (`habits.yaml`, one entry per
+habit; an entry that cannot be read is skipped and left in the file). Ctrl+D
+deleted a habit and its whole record without asking; it asks now, on a card
+whose buttons answer the pointer, and an archived habit can be deleted from
+its row. Every tab, button, row, day cell and form control answers the
+pointer, and F1 lists the keys (the form's frequency moved from F1 to F2, its
+weekly count to Up and Down). The archive and the statistics table stopped
+drawing at the window's bottom edge; both scroll now, the dashboard follows
+its selection, Page Down pages, and the number keys start a screen at its top
+as a tab does. And a space could not be typed into a habit's name. 167 tests;
+`apps/habits/mutate.py` has 55 rows. Ten examined; eleven to go.
+
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 
 **In short:** a `cargo test --workspace` failed with exactly one failing test,
@@ -165426,6 +165444,13 @@ the first time it forgot, instead of writing somebody's home. Not filed as a
 request yet: whether a feature-gated panic in a shared crate is acceptable is
 lane C's call, and the six files above should be looked at by whoever owns
 the apps that wrote them first.
+
+**A second defence, per app (2026-09-25, `apps/habits`).** An app can make
+keeping opt-in: `HabitTrackerApp::new`, which every test uses, is backed by
+nothing, and only `from_settings` -- what `main` calls -- turns writing on. A
+test that forgets its scratch directory then writes nowhere, and
+`a_tracker_made_with_new_writes_nothing` pins that. It protects the one app
+that does it, not the next one written; the guard above is still the fix.
 
 ### [E] The feed reader forgets its subscriptions, folders and marks at exit -- 2026-09-25
 **Status:** OPEN

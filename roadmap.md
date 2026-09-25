@@ -1841,8 +1841,10 @@ word; text inside them that says "lane C" is history.
   library that loads and saves), `weather` (2026-09-25 — every control; the
   shortcut card and the settings work with nothing fetched, and the units are
   kept), `rssreader` (2026-09-25 — every control, three panes that scroll, a
-  notice that can be seen, and feed discovery from a saved page).
-  **Next:** habits, slides, flashcards — then the rest. (`reminders` was
+  notice that can be seen, and feed discovery from a saved page), `habits`
+  (2026-09-25 — every control; the clock's day, a record that is kept,
+  deletion that asks, and an archive and a table that scroll).
+  **Next:** slides, flashcards — then the rest. (`reminders` was
   examined 2026-09-18: keyboard-driven by design, its two gaps fixed.)
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;

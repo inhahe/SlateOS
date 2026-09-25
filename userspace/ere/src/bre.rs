@@ -42,10 +42,12 @@
 //! `\|`, `\+` and `\?` are GNU extensions to BRE, not POSIX; `\w`, `\W`, `\s`
 //! and `\S` likewise. They are accepted because every `sed` script and `grep`
 //! pattern written in the last thirty years uses them, and because refusing
-//! them would leave no way at all to write alternation in a BRE. `\<`, `\>`,
-//! `\b` and `\B` are *refused* rather than accepted, because unlike the others
-//! they need a matcher feature (word boundaries) that the engine does not have,
-//! and there is no spelling that would quietly do the wrong thing.
+//! them would leave no way at all to write alternation in a BRE. So are the
+//! zero-width GNU operators -- the word assertions `\<`, `\>`, `\b` and `\B`,
+//! and the buffer anchors `` \` `` and `\'` -- which pass through to the ERE
+//! parser unchanged. (The word assertions were refused until the engine could
+//! match word boundaries; a spelling that quietly did the wrong thing would
+//! have been worse than an error.)
 
 use alloc::vec::Vec;
 
@@ -152,8 +154,9 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                     // The four word assertions are zero-width, so they leave
                     // `prev_atom` alone rather than setting it: `\<*` has no
                     // more to repeat than `^*` does, and BRE reads the `*` in
-                    // both as a literal.
-                    Some('<' | '>' | 'b' | 'B') => {
+                    // both as a literal. The two buffer anchors, `` \` `` and
+                    // `\'`, are zero-width in the same way.
+                    Some('<' | '>' | 'b' | 'B' | '`' | '\'') => {
                         out.push(b'\\');
                         e.push_to(&mut out);
                     }
@@ -243,7 +246,7 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
 
 /// Whether the `$` at `i` is in the position that makes it an anchor: the end
 /// of the pattern, or immediately before `\)` or `\|`.
-fn ends_here(cs: &[Ch], i: usize) -> bool {
+pub(crate) fn ends_here(cs: &[Ch], i: usize) -> bool {
     let next = i.saturating_add(1);
     match (cs.get(next), cs.get(next.saturating_add(1))) {
         (None, _) => true,

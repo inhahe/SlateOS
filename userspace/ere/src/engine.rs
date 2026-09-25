@@ -109,6 +109,10 @@ pub enum RegCode {
     BadRepeat,
     /// `REG_ESIZE`: the compiled program would be too large.
     TooBig,
+    /// `REG_ECOLLATE`: a `[.name.]` or `[=name=]` naming no single character.
+    /// Only the Emacs dialect ([`crate::emacs`]) reads those; the ERE parser
+    /// takes `[.` as two members.
+    BadCollation,
 }
 
 impl RegCode {
@@ -128,6 +132,7 @@ impl RegCode {
             Self::BadRangeEnd => "Invalid range end",
             Self::BadRepeat => "Invalid preceding regular expression",
             Self::TooBig => "Regular expression too big",
+            Self::BadCollation => "Invalid collation character",
         }
     }
 }
@@ -304,6 +309,13 @@ enum Node {
     Class(ClassData),
     Start,
     End,
+    /// `` \` ``: the start of the subject, and only that. `^` becomes more than
+    /// that under [`Regex::with_newline_anchor`] and less under
+    /// [`StartOfLine::No`]; this never changes.
+    BufStart,
+    /// `\'`: the end of the subject, and only that -- `$`'s twin, as
+    /// [`Node::BufStart`] is `^`'s.
+    BufEnd,
     /// A zero-width assertion about the word characters either side of the
     /// current position: `\b`, `\B`, `\<` or `\>`.
     Word(WordAssert),
@@ -838,7 +850,10 @@ impl EParser {
         // An assertion is not something to repeat, so it leaves the branch
         // still wanting an atom: that is the whole of why `^*` warns and `a^*b`
         // does not.
-        if !matches!(atom, Node::Start | Node::End | Node::Word(_)) {
+        if !matches!(
+            atom,
+            Node::Start | Node::End | Node::BufStart | Node::BufEnd | Node::Word(_)
+        ) {
             self.seen_atom = true;
         }
         self.stack_quantifiers(atom)
@@ -868,7 +883,8 @@ impl EParser {
             // becomes the anchor repeated zero-or-more times — which is why
             // `grep -E 'a^*b'` matches "ab": zero repetitions of an assertion
             // that can never hold is the empty string.
-            if matches!(node, Node::Start) && !self.syntax.context_indep_ops {
+            // `` \` `` is `^`'s twin and answers the same way; `\'` is `$`'s.
+            if matches!(node, Node::Start | Node::BufStart) && !self.syntax.context_indep_ops {
                 return Err(nothing_to_repeat());
             }
             // Each *stacked* quantifier warns too, not just the first: `**a`
@@ -1141,6 +1157,13 @@ impl EParser {
                         'B' => return Ok(Node::Word(WordAssert::NotBoundary)),
                         '<' => return Ok(Node::Word(WordAssert::Start)),
                         '>' => return Ok(Node::Word(WordAssert::End)),
+                        // The buffer anchors, glibc's `BUF_FIRST` and
+                        // `BUF_LAST`. They were literals here -- `\'` a quote --
+                        // where GNU `grep`, `sed`, `awk` and bash's `=~` all read
+                        // anchors, so `grep "don\'t"` matched a line GNU's never
+                        // can.
+                        '`' => return Ok(Node::BufStart),
+                        '\'' => return Ok(Node::BufEnd),
                         _ => {}
                     }
                 }
@@ -1357,6 +1380,9 @@ enum Inst {
     Save(usize),
     AssertStart,
     AssertEnd,
+    /// `` \` `` and `\'`: see [`Node::BufStart`].
+    AssertBufStart,
+    AssertBufEnd,
     /// A word assertion: zero-width, like the two above, and decided from the
     /// characters either side of the position rather than from the position
     /// alone. See [`WordAssert`].
@@ -1413,6 +1439,12 @@ impl Compiler {
             }
             Node::End => {
                 self.emit(Inst::AssertEnd);
+            }
+            Node::BufStart => {
+                self.emit(Inst::AssertBufStart);
+            }
+            Node::BufEnd => {
+                self.emit(Inst::AssertBufEnd);
             }
             Node::Word(w) => {
                 self.emit(Inst::AssertWord(*w));
@@ -1564,6 +1596,9 @@ pub struct Regex {
     /// matcher runs: the linear Pike VM for everything else, the budgeted
     /// backtracker for this. See [`Regex::backtrack_at`].
     has_backref: bool,
+    /// Whether `^` and `$` also match next to a newline inside the subject.
+    /// See [`Regex::with_newline_anchor`].
+    newline_anchor: bool,
 }
 
 /// A compiled regex prints as its shape, not its program.
@@ -1723,9 +1758,47 @@ impl Regex {
                 entry: real,
                 ci,
                 has_backref: c.has_backref,
+                newline_anchor: false,
             },
             warnings,
         ))
+    }
+
+    /// Make `^` match after every newline in the subject, and `$` before
+    /// every one, as well as at the subject's two ends.
+    ///
+    /// glibc's `newline_anchor`, which its GNU entry point `re_compile_pattern`
+    /// turns on unconditionally -- so every program that compiles through that
+    /// interface rather than POSIX's `regcomp` has it, whatever its syntax.
+    /// `ptx` is the one here: it searches a whole file for the end of a
+    /// sentence, and its built-in pattern ends a sentence at `$`, which has to
+    /// mean the end of any line in that file, not only of the last one.
+    /// POSIX's `REG_NEWLINE` asks for the same thing (and more, for `.`, which
+    /// is a matter for the pattern here: see [`crate::emacs`]).
+    ///
+    /// The buffer anchors, `` \` `` and `\'`, are unaffected: they are the
+    /// subject's ends and nothing else, which is what they are for.
+    #[must_use]
+    pub fn with_newline_anchor(mut self, on: bool) -> Regex {
+        self.newline_anchor = on;
+        self
+    }
+
+    /// Whether `^` holds at character position `sp` of `input`.
+    fn line_start_at(&self, input: &[Ch], sp: usize, bol: StartOfLine) -> bool {
+        if sp == 0 {
+            return bol == StartOfLine::Yes;
+        }
+        self.newline_anchor
+            && sp
+                .checked_sub(1)
+                .and_then(|i| input.get(i))
+                .is_some_and(|&c| c == Ch::U('\n'))
+    }
+
+    /// Whether `$` holds at character position `sp` of `input`.
+    fn line_end_at(&self, input: &[Ch], sp: usize) -> bool {
+        sp == input.len() || (self.newline_anchor && input.get(sp) == Some(&Ch::U('\n')))
     }
 
     /// Number of capturing groups (excluding the whole-match group 0).
@@ -2178,8 +2251,10 @@ impl Regex {
                         });
                         f.pc = *x;
                     }
-                    Inst::AssertStart if f.sp == 0 && bol == StartOfLine::Yes => f.pc = next_pc,
-                    Inst::AssertEnd if f.sp == input.len() => f.pc = next_pc,
+                    Inst::AssertStart if self.line_start_at(input, f.sp, bol) => f.pc = next_pc,
+                    Inst::AssertEnd if self.line_end_at(input, f.sp) => f.pc = next_pc,
+                    Inst::AssertBufStart if f.sp == 0 => f.pc = next_pc,
+                    Inst::AssertBufEnd if f.sp == input.len() => f.pc = next_pc,
                     Inst::AssertWord(w) if w.holds_at(input, f.sp) => f.pc = next_pc,
                     Inst::Match => {
                         if best_end.is_none_or(|e| f.sp > e) {
@@ -2402,11 +2477,21 @@ impl Regex {
                 }
             }
             Inst::AssertStart => {
-                if sp == 0 && bol == StartOfLine::Yes {
+                if self.line_start_at(input, sp, bol) {
                     self.add_thread(list, next, sp, caps, input, bol);
                 }
             }
             Inst::AssertEnd => {
+                if self.line_end_at(input, sp) {
+                    self.add_thread(list, next, sp, caps, input, bol);
+                }
+            }
+            Inst::AssertBufStart => {
+                if sp == 0 {
+                    self.add_thread(list, next, sp, caps, input, bol);
+                }
+            }
+            Inst::AssertBufEnd => {
                 if sp == input.len() {
                     self.add_thread(list, next, sp, caps, input, bol);
                 }
@@ -2461,6 +2546,111 @@ impl Search<'_> {
             return Ok(None);
         };
         Ok(Some(self.re.spans_from_slots(&self.scan, &slots)))
+    }
+
+    /// The leftmost-longest match inside the byte window `lo..hi`, the window
+    /// taken as the **whole** subject: `^` and `` \` `` hold at `lo`, `$` and
+    /// `\'` at `hi`, and a word boundary at either edge sees nothing beyond it.
+    /// The offsets returned are into the whole subject.
+    ///
+    /// glibc's `re_search (re, s + lo, hi - lo, 0, hi - lo, regs)`, which is
+    /// how `ptx` looks for the next word in each sentence of a file it holds in
+    /// memory whole. Taking the window as a slice of the subject decoded once is
+    /// what keeps that linear: decoding each window afresh would make a file
+    /// held as one sentence cost its length once per word in it.
+    ///
+    /// # Errors
+    /// [`MatchLimit`] if a backreference search exceeded its budget.
+    pub fn find_window(&self, lo: usize, hi: usize) -> Result<Option<(usize, usize)>, MatchLimit> {
+        self.in_window(lo, hi, |re, input| {
+            let Some(slots) = re.run(input, 0, StartOfLine::Yes)? else {
+                return Ok(None);
+            };
+            Ok(slots
+                .first()
+                .copied()
+                .flatten()
+                .zip(slots.get(1).copied().flatten()))
+        })
+    }
+
+    /// The end of the longest match that starts exactly at `lo`, inside the
+    /// window `lo..hi` taken as the whole subject, or `None` if nothing matches
+    /// there -- glibc's `re_match`, which reports the length of that match.
+    ///
+    /// # Errors
+    /// [`MatchLimit`] if a backreference search exceeded its budget.
+    pub fn longest_at(&self, lo: usize, hi: usize) -> Result<Option<usize>, MatchLimit> {
+        let span = self.in_window(lo, hi, |re, input| {
+            let slots = if re.has_backref {
+                let mut budget = Regex::backtrack_budget(input.len());
+                re.backtrack_at(input, 0, &mut budget, StartOfLine::Yes)?
+            } else {
+                re.scan(input, 0, re.entry, true, StartOfLine::Yes)
+            };
+            Ok(slots
+                .and_then(|s| s.get(1).copied().flatten())
+                .map(|end| (0, end)))
+        })?;
+        Ok(span.map(|(_, end)| end))
+    }
+
+    /// Run `search` over the characters of the window `lo..hi` and turn the
+    /// character span it answers into byte offsets into the whole subject.
+    ///
+    /// A window whose edges are character boundaries is a slice of the subject
+    /// already decoded. One that starts or ends inside a character is decoded
+    /// afresh from its own bytes, because that is what the window *is* to
+    /// glibc: `ptx` steps over a byte it cannot place one byte at a time, and
+    /// the next search then begins with the tail of a character, which reads
+    /// as bytes that decode to nothing.
+    fn in_window(
+        &self,
+        lo: usize,
+        hi: usize,
+        search: impl Fn(&Regex, &[Ch]) -> Result<Option<(usize, usize)>, MatchLimit>,
+    ) -> Result<Option<(usize, usize)>, MatchLimit> {
+        let hi = hi.max(lo);
+        let (clo, chi) = (self.scan.char_index(lo), self.scan.char_index(hi));
+        let aligned = self.scan.offs.get(clo) == Some(&lo) && self.scan.offs.get(chi) == Some(&hi);
+        if aligned {
+            let window = self.scan.chars.get(clo..chi).unwrap_or_default();
+            let Some((s, e)) = search(self.re, window)? else {
+                return Ok(None);
+            };
+            return Ok(self.scan.span(clo.saturating_add(s), clo.saturating_add(e)));
+        }
+        let bytes = self.window_bytes(lo, hi);
+        let sub = Scan::new(&bytes);
+        let Some((s, e)) = search(self.re, &sub.chars)? else {
+            return Ok(None);
+        };
+        Ok(sub
+            .span(s, e)
+            .map(|(s, e)| (lo.saturating_add(s), lo.saturating_add(e))))
+    }
+
+    /// The subject's bytes `lo..hi`, rebuilt from the decoded characters that
+    /// cover them.
+    fn window_bytes(&self, lo: usize, hi: usize) -> Str {
+        let mut out = Str::new();
+        let first = self.scan.char_index(lo.saturating_add(1)).saturating_sub(1);
+        for (i, c) in self.scan.chars.iter().enumerate().skip(first) {
+            let Some(&at) = self.scan.offs.get(i) else {
+                break;
+            };
+            if at >= hi {
+                break;
+            }
+            let bytes = c.to_str();
+            for (k, &b) in bytes.iter().enumerate() {
+                let pos = at.saturating_add(k);
+                if pos >= lo && pos < hi {
+                    out.push(b);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -2650,6 +2840,87 @@ mod tests {
     // needs importing because the crate is `no_std`, so the prelude in scope
     // here is `core`'s and does not carry `ToString`.
     use alloc::string::ToString;
+
+    fn found(pattern: &str, text: &str) -> Option<(usize, usize)> {
+        Regex::new(pattern.as_bytes())
+            .unwrap()
+            .find(text.as_bytes())
+            .unwrap()
+    }
+
+    /// `` \` `` and `\'` are the subject's ends, where they were a backquote and
+    /// a quote -- so `don\'t` could match "don't", which glibc's never can.
+    #[test]
+    fn the_buffer_anchors_are_the_ends_of_the_subject() {
+        assert_eq!(found(r"\`ab", "abab"), Some((0, 2)));
+        assert_eq!(found(r"ab\'", "abab"), Some((2, 4)));
+        assert_eq!(found(r"don\'t", "don't"), None);
+        assert_eq!(found(r"a\`", "a"), None);
+        // `^*` is refused in this syntax, and so is its twin.
+        assert!(Regex::new(br"\`*a").is_err());
+    }
+
+    /// Under newline anchoring `^` and `$` hold at every line; the buffer
+    /// anchors still hold only at the ends.
+    #[test]
+    fn newline_anchoring_moves_the_line_anchors_only() {
+        let re = |p: &str| Regex::new(p.as_bytes()).unwrap().with_newline_anchor(true);
+        assert_eq!(re("^b").find(b"a\nb").unwrap(), Some((2, 3)));
+        assert_eq!(re("a$").find(b"a\nb").unwrap(), Some((0, 1)));
+        assert_eq!(re(r"\`b").find(b"a\nb").unwrap(), None);
+        assert_eq!(re(r"a\'").find(b"a\nb").unwrap(), None);
+        // Off by default.
+        assert_eq!(found("^b", "a\nb"), None);
+        // The backtracker agrees with the Pike VM.
+        let br = Regex::new(br"^(b)\1$").unwrap().with_newline_anchor(true);
+        assert_eq!(br.find(b"a\nbb\nc").unwrap(), Some((2, 4)));
+    }
+
+    /// A window of a subject is searched as though it were the whole subject:
+    /// its edges are the anchors and the word boundaries see nothing past them.
+    #[test]
+    fn a_window_is_a_subject_of_its_own() {
+        let re = Regex::new(br"^\<b[a-z]*\>").unwrap();
+        let text = b"xbat bbb";
+        let search = re.search(text);
+        // In the whole subject, `^` holds only at 0.
+        assert_eq!(
+            search.capture_spans_from(0, StartOfLine::Yes).unwrap(),
+            None
+        );
+        // From byte 1 it holds at 1, and `\<` sees no `x` before it.
+        assert_eq!(search.find_window(1, 8).unwrap(), Some((1, 4)));
+        assert_eq!(search.find_window(5, 8).unwrap(), Some((5, 8)));
+        // The window's end is `$`.
+        let end = Regex::new(br"a$").unwrap();
+        assert_eq!(end.search(b"bab").find_window(0, 2).unwrap(), Some((1, 2)));
+    }
+
+    /// `re_match`: the longest match starting exactly at the window's start.
+    #[test]
+    fn the_longest_match_at_a_position() {
+        let re = Regex::new(br"a|ab|abc").unwrap();
+        let search = re.search(b"xabcd");
+        assert_eq!(search.longest_at(1, 5).unwrap(), Some(4));
+        assert_eq!(search.longest_at(1, 3).unwrap(), Some(3));
+        assert_eq!(search.longest_at(0, 5).unwrap(), None);
+        let empty = Regex::new(br"x*").unwrap();
+        assert_eq!(empty.search(b"abc").longest_at(1, 3).unwrap(), Some(1));
+        let backref = Regex::new(br"(a)\1").unwrap();
+        assert_eq!(backref.search(b"baab").longest_at(1, 4).unwrap(), Some(3));
+    }
+
+    /// A window that starts inside a character is decoded from its own bytes:
+    /// the tail of the character is bytes that decode to nothing.
+    #[test]
+    fn a_window_inside_a_character_sees_bytes() {
+        let re = Regex::new(br"[^a]b").unwrap();
+        // "é" is C3 A9; from byte 2 the window is A9, then "b".
+        let text = "aéb".as_bytes();
+        let search = re.search(text);
+        assert_eq!(search.find_window(2, 4).unwrap(), Some((2, 4)));
+        assert_eq!(search.longest_at(2, 4).unwrap(), Some(4));
+    }
 
     /// Every malformed pattern is classified the way glibc classifies it.
     ///

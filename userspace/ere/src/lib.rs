@@ -114,6 +114,7 @@ extern crate std;
 
 pub mod bre;
 pub mod ch;
+pub mod emacs;
 pub mod engine;
 
 pub use ch::{BStr, Ch, Str, chars, from_chars};

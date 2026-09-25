@@ -749,7 +749,8 @@ enum Request {
 struct Refusal {
     /// Complete stderr lines, prefixed where GNU prefixes them.
     lines: Vec<String>,
-    /// Whether `Try 'ls --help' for more information.` follows.
+    /// Whether `Try 'ls --help' for more information.` follows -- naming the
+    /// program actually run, so `dir --zzz` refers the reader to `dir --help`.
     referral: bool,
     status: i32,
 }
@@ -781,7 +782,10 @@ impl Refusal {
             let _ = writeln!(err, "{line}");
         }
         if self.referral {
-            let _ = writeln!(err, "Try 'ls --help' for more information.");
+            // Upstream's `emit_try_help` prints `program_name`, which is
+            // argv[0]'s base name -- `dir` and `vdir` are separate builds of
+            // this file, and each refers to itself.
+            let _ = writeln!(err, "Try '{} --help' for more information.", program_name());
         }
     }
 }
@@ -4138,13 +4142,16 @@ fn calculate_columns(cfg: &Config, lengths: &[usize], by_columns: bool) -> (usiz
                 continue;
             }
             let cols = i.saturating_add(1);
+            // `cols` is at least 1 and so is `rows`, so neither fallback is
+            // ever taken; they stand in for a division clippy cannot see is
+            // safe.
             let idx = if by_columns {
                 // `(n + i) / (i + 1)` is `ceil(n / cols)`: the rows this
                 // layout needs. It cannot be zero, because `max_cols <= n`.
-                let rows = n.saturating_add(i) / cols;
-                filesno / rows.max(1)
+                let rows = n.saturating_add(i).checked_div(cols).unwrap_or(1);
+                filesno.checked_div(rows.max(1)).unwrap_or(filesno)
             } else {
-                filesno % cols
+                filesno.checked_rem(cols).unwrap_or(0)
             };
             // Wrapping, twice, because upstream's is `size_t` arithmetic on a
             // width that may be `usize::MAX` — see [`display_width`]. It is
@@ -4196,10 +4203,13 @@ fn calculate_columns(cfg: &Config, lengths: &[usize], by_columns: bool) -> (usiz
 /// `tabsize` of zero is `-T0`, which asks for spaces only.
 fn indent(out: &mut Vec<u8>, tabsize: usize, mut from: usize, to: usize) {
     while from < to {
-        if tabsize != 0 && to / tabsize > from.saturating_add(1) / tabsize {
+        // `checked_div` is `None` exactly when `tabsize` is 0, and two `None`s
+        // compare equal -- so `-T0` never takes the tab branch.
+        if to.checked_div(tabsize) > from.saturating_add(1).checked_div(tabsize) {
             out.push(b'\t');
             // Advance to the next tab stop, not by a whole `tabsize`.
-            from = from.saturating_add(tabsize.saturating_sub(from % tabsize));
+            from =
+                from.saturating_add(tabsize.saturating_sub(from.checked_rem(tabsize).unwrap_or(0)));
         } else {
             out.push(b' ');
             from = from.saturating_add(1);
@@ -4222,7 +4232,9 @@ fn print_many_per_line(
 ) {
     let n = files.len();
     let (cols, col_arr) = calculate_columns(cfg, lengths, true);
-    let rows = n / cols + usize::from(!n.is_multiple_of(cols));
+    // `calculate_columns` never answers 0 columns; `max(1)` says so to the
+    // division rather than trusting it.
+    let rows = n.div_ceil(cols.max(1));
 
     for row in 0..rows {
         let mut col = 0usize;
@@ -4271,7 +4283,9 @@ fn print_horizontal(
     print_file_name_and_frills(out, cfg, w, cwd_some_quoted, first, 0);
 
     for (filesno, f) in files.iter().enumerate().skip(1) {
-        let col = filesno % cols;
+        // `calculate_columns` never answers 0 columns, so the fallback -- a
+        // new line for every name -- is never taken.
+        let col = filesno.checked_rem(cols).unwrap_or(0);
         if col == 0 {
             out.buf.push(cfg.eolbyte);
             pos = 0;
@@ -7203,9 +7217,7 @@ mod tests {
         let mut out = Out::default();
         out.set_normal_color(cfg);
         print_name_with_quoting(&mut out, cfg, false, f, false, Dired::No, start_col);
-        String::from_utf8_lossy(&out.buf)
-            .replace('\u{1b}', "\\e")
-            .to_string()
+        String::from_utf8_lossy(&out.buf).replace('\u{1b}', "\\e")
     }
 
     /// gnulib's `get_funky_string` decodes four escape families, and two of its

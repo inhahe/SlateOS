@@ -6,13 +6,13 @@
 
 ## In short
 
-The `coreutils` crate now builds sixteen programs it did not build when the
+The `coreutils` crate now builds seventeen programs it did not build when the
 manifest was written: `sha1sum`, `printenv`, `link`, `unlink`, `sync`,
 `truncate`, `groups`, `arch`, `pathchk`, `users`, `nproc`, `chgrp`, `mknod`,
-`hostid`, `dircolors` and `numfmt`. Each is a port of GNU coreutils 9.4 and has been checked against a
+`hostid`, `dircolors`, `numfmt` and `sum`. Each is a port of GNU coreutils 9.4 and has been checked against a
 build of 9.4 (a script runs both on the same inputs and compares their output,
 errors and exit status). A binary the manifest does not name does not go on
-the image, so today all sixteen are built and then left out. Please add
+the image, so today all seventeen are built and then left out. Please add
 them.
 
 ## Why they belong by the manifest's own rule
@@ -24,13 +24,13 @@ bin list. The only coreutils names it leaves out on purpose are:
 - `sort`, for the same reason;
 - `sh`, because `/bin/sh` is dash.
 
-These sixteen are none of those. They are missing only because they did not
+These seventeen are none of those. They are missing only because they did not
 exist when the list was generated. Nothing else stages these names:
 `create-ext4-rootfs.sh`'s `PROMOTED` map has none of them. So listing them
 takes no name away from anything.
 
 **Size.** At the manifest's own average of about 813 KiB per static binary,
-sixteen come to roughly 13 MiB. The header records 59 MiB used of a 96 MiB
+seventeen come to roughly 14 MiB. The header records 59 MiB used of a 96 MiB
 budget.
 
 ## The programs
@@ -53,6 +53,7 @@ budget.
 | `hostid` | the host's numeric identifier, as the libc's `gethostid` reports it | `scripts/hostid-diff.sh` |
 | `dircolors` | the `LS_COLORS` setup every stock shell start-up file runs (`eval "$(dircolors -b)"`) | `scripts/dircolors-diff.sh` |
 | `numfmt` | numbers to and from `1.5K`/`2.0Mi` form, in a column of `df` or `du` output as much as on its own | `scripts/numfmt-diff.sh` |
+| `sum` | the BSD and System V 16-bit checksums, which old scripts and package tools still compare | `scripts/sum-diff.sh` |
 
 **One alias as well: `[ = test`.** Our `test` already behaves as `[` when it
 is started under that name: it then insists on the closing `]`. But nothing

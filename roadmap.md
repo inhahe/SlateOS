@@ -4080,11 +4080,12 @@ _Port ext4 first. Don't write a custom filesystem._
     on the way, §1029), `mknod` (FIFOs work; device nodes get the libc's honest `ENOSYS`), `hostid`, `dircolors`
     (GNU's database embedded as its `-p` prints it), `numfmt` (its digits x87-exact through
     `coreutils::extfloat`, which gained the division it needed; shares `coreutils::setfields` with `cut`, as
-    upstream shares `set-fields.c`); and `nproc`,
+    upstream shares `set-fields.c`), `sum` (both algorithms; it reads its files through the same
+    `coreutils::digest::feed_file` the hash programs do, as upstream builds it from `digest.c`); and `nproc`,
     re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
     names in part lost those branches (§1005: `getopt` printenv/sync, `pv` truncate, `nproc` arch/pathchk/users, `shuf` numfmt).
     **Still missing:** `b2sum`, `base32`, `basenc`, `cksum`, `dir`, `factor`, `pinky`, `pr`, `ptx`,
-    `sha224sum`, `sha384sum`, `sha512sum`, `shred`, `sum`, `vdir`. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
+    `sha224sum`, `sha384sum`, `sha512sum`, `shred`, `vdir`. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
     `LD_PRELOAD` into a dynamically linked program). `[` is `test` under another name and needs only the image alias. None
     ships until lane D lists it: `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.
 - [x] Port rsync (replaces robocopy need) — Rust implementation: recursive, archive mode, checksums, delete, exclude/include, dry-run, progress, stats

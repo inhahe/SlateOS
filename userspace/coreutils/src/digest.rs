@@ -402,20 +402,41 @@ enum Hashed {
     Failed,
 }
 
-/// Upstream's `digest_file`. `-` is standard input, and is *not* a file called
-/// `-`: that is POSIX for this utility, unlike `tee`.
+/// What reading one operand came to: [`feed_file`]'s answer.
+pub enum Fed {
+    /// Every byte reached the sink.
+    Ok,
+    /// `ENOENT`, and the caller asked for that to be quiet (`--ignore-missing`).
+    Missing,
+    /// It could not be opened or read. The diagnostic is already written.
+    Failed,
+}
+
+/// Upstream's `digest_file`, minus the digest: open NAME, hand every byte of
+/// it to `sink` in 64 KiB pieces, and say how that went.
 ///
-/// Diagnoses its own failures, because upstream does and because the caller
-/// (`--check`) prints a *second*, different line about the same file.
-fn hash_file(algo: &Algorithm, name: &[u8], ignore_missing: bool, read_stdin: &mut bool) -> Hashed {
-    let mut hasher = (algo.new)();
+/// `-` is standard input, and is *not* a file called `-`: that is POSIX for
+/// these utilities, unlike `tee`. A failure is diagnosed here, as
+/// `PROGRAM: NAME: strerror`, because upstream does and because a caller like
+/// `--check` goes on to print a *second*, different line about the same file.
+///
+/// Public because `sum` is upstream's `digest.c` too, compiled with
+/// `HASH_ALGO_SUM`: its two checksums are not a [`Stream`] -- they need the byte
+/// count as well as the bytes -- but the reading is the same reading.
+pub fn feed_file(
+    program: &str,
+    name: &[u8],
+    ignore_missing: bool,
+    read_stdin: &mut bool,
+    sink: &mut dyn FnMut(&[u8]),
+) -> Fed {
     let mut buf = vec![0u8; READ_CHUNK];
 
     let mut feed = |src: &mut dyn Read| -> io::Result<()> {
         loop {
             match src.read(&mut buf) {
                 Ok(0) => return Ok(()),
-                Ok(n) => hasher.update(buf.get(..n).unwrap_or(&[])),
+                Ok(n) => sink(buf.get(..n).unwrap_or(&[])),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
             }
@@ -435,20 +456,36 @@ fn hash_file(algo: &Algorithm, name: &[u8], ignore_missing: bool, read_stdin: &m
             }
             Err(e) => {
                 if ignore_missing && e.kind() == io::ErrorKind::NotFound {
-                    return Hashed::Missing;
+                    return Fed::Missing;
                 }
-                diag!("{}: {}: {}", algo.program, quotef(name), strerror(&e));
-                return Hashed::Failed;
+                diag!("{program}: {}: {}", quotef(name), strerror(&e));
+                return Fed::Failed;
             }
         }
     };
 
     match result {
-        Ok(()) => Hashed::Ok(hasher.finish()),
+        Ok(()) => Fed::Ok,
         Err(e) => {
-            diag!("{}: {}: {}", algo.program, quotef(name), strerror(&e));
-            Hashed::Failed
+            diag!("{program}: {}: {}", quotef(name), strerror(&e));
+            Fed::Failed
         }
+    }
+}
+
+/// [`feed_file`] into a fresh hash.
+fn hash_file(algo: &Algorithm, name: &[u8], ignore_missing: bool, read_stdin: &mut bool) -> Hashed {
+    let mut hasher = (algo.new)();
+    match feed_file(
+        algo.program,
+        name,
+        ignore_missing,
+        read_stdin,
+        &mut |data| hasher.update(data),
+    ) {
+        Fed::Ok => Hashed::Ok(hasher.finish()),
+        Fed::Missing => Hashed::Missing,
+        Fed::Failed => Hashed::Failed,
     }
 }
 

@@ -514,7 +514,38 @@ pub fn write_error(program: &str, err: &io::Error) {
     // like any other. It makes no difference to the status when stdout is what
     // failed — the caller is already returning a failure — but it does when
     // some other stream is, and it costs nothing to be consistent.
-    diag_bytes(format!("{program}: write error: {}\n", strerror(err)).as_bytes());
+    if is_earlier_failure(err) {
+        // `errno` was zeroed by `close_stream`: `error (0, 0, ...)` prints
+        // no reason. See [`Stream::finish`].
+        diag_bytes(format!("{program}: write error\n").as_bytes());
+    } else {
+        diag_bytes(format!("{program}: write error: {}\n", strerror(err)).as_bytes());
+    }
+}
+
+/// A write failed before the stream was closed, and the close itself did not:
+/// the one failure gnulib reports with `errno` set to zero.
+///
+/// `close_stream` returns `EOF` for an earlier failure (`ferror`) *or* a failing
+/// `fclose`, and keeps `errno` only in the second case -- `if (! fclose_fail)
+/// errno = 0;` -- because only then is there a reason to give. When is the
+/// earlier failure alone? When nothing was left for `fclose` to flush, since
+/// glibc discards a buffer whose flush failed. On a line-buffered stream that
+/// is every time: each line fails, and is dropped, as it is written.
+#[derive(Debug)]
+struct EarlierFailure;
+
+impl std::fmt::Display for EarlierFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an earlier write failed")
+    }
+}
+
+impl std::error::Error for EarlierFailure {}
+
+fn is_earlier_failure(err: &io::Error) -> bool {
+    err.get_ref()
+        .is_some_and(|inner| inner.is::<EarlierFailure>())
 }
 
 /// Whether a failed write failed because the reader went away.
@@ -918,6 +949,22 @@ impl Stream {
         Self::new(1, mode)
     }
 
+    /// Standard output line-buffered whatever it is attached to: upstream's
+    /// `setvbuf (stdout, nullptr, _IOLBF, 0)`.
+    ///
+    /// `wc` and the `digest.c` family (`md5sum`, `sum`, ...) call it before
+    /// parsing their options, "to ensure lines are written atomically and
+    /// immediately so that processes running in parallel do not intersperse
+    /// their output". It is visible in more than timing: each line is
+    /// written, and on a full disk fails, as it is finished, so nothing is
+    /// left for the close to fail with and the diagnostic has no reason --
+    /// `md5sum: write error`, where a block-buffered `cat` says
+    /// `cat: write error: No space left on device`. See [`Stream::finish`].
+    #[must_use]
+    pub fn stdout_line_buffered() -> Self {
+        Self::new(1, Buffering::Line)
+    }
+
     /// Standard error, unbuffered, as stdio has it.
     #[must_use]
     pub fn stderr() -> Self {
@@ -1045,7 +1092,7 @@ impl Stream {
         });
     }
 
-    /// Flush, and hand back the first failure of the stream's whole life.
+    /// Flush, and hand back the stream's verdict.
     ///
     /// gnulib's `close_stream`, minus the close: a utility calls this instead
     /// of letting the buffer go out with the process, because a buffer flushed
@@ -1054,11 +1101,26 @@ impl Stream {
     ///
     /// # Errors
     ///
-    /// The first write that did not arrive, whether during this flush or any
-    /// earlier one.
+    /// Any write that did not arrive, as `close_stream` words it:
+    ///
+    /// * the final flush failed -- that failure, with its `errno`;
+    /// * only an earlier flush failed -- an error carrying no `errno`, which
+    ///   [`write_error`] prints as a bare `write error`, since gnulib zeroes
+    ///   `errno` when `fclose` itself succeeded;
+    /// * except that an earlier `EPIPE` comes back as itself, so that
+    ///   [`reader_gone`] still recognises the reader leaving -- upstream never
+    ///   reaches the close in that case, having died of `SIGPIPE` at the
+    ///   write.
     pub fn finish(mut self) -> io::Result<()> {
+        let earlier = self.with(|inner, _| inner.error.take());
         self.drain();
-        self.with(|inner, _| inner.error.take()).map_or(Ok(()), Err)
+        let at_close = self.with(|inner, _| inner.error.take());
+        match (earlier, at_close) {
+            (_, Some(e)) => Err(e),
+            (Some(e), None) if reader_gone(&e) => Err(e),
+            (Some(_), None) => Err(io::Error::other(EarlierFailure)),
+            (None, None) => Ok(()),
+        }
     }
 }
 
@@ -1192,6 +1254,44 @@ mod tests {
             first,
             "a later failure does not displace the first"
         );
+    }
+
+    /// `close_stream`: a line-buffered stream's failure happened before the
+    /// close and left nothing to flush, so the verdict carries no `errno`.
+    #[test]
+    fn an_earlier_failure_alone_is_reported_without_a_reason() {
+        let mut s = broken(Buffering::Line);
+        let _ = s.write(b"a line\n");
+        assert!(s.errored(), "the newline sent it, and it failed");
+        let e = s.finish().unwrap_err();
+        assert!(super::is_earlier_failure(&e));
+        assert_eq!(e.raw_os_error(), None);
+    }
+
+    /// ... whereas a close that has something to flush, and fails, keeps its
+    /// reason, whether or not an earlier flush also failed.
+    #[test]
+    fn a_failing_close_keeps_its_reason() {
+        let mut s = broken(Buffering::Block);
+        let _ = s.write(b"small");
+        let e = s.finish().unwrap_err();
+        // The error itself, whatever it is on this platform -- the host's
+        // descriptor -1 fails without an errno -- and not the sentinel.
+        assert!(!super::is_earlier_failure(&e));
+
+        let mut s = broken(Buffering::Line);
+        let _ = s.write(b"first\nsecond, pending");
+        let e = s.finish().unwrap_err();
+        assert!(
+            !super::is_earlier_failure(&e),
+            "the pending line failed at the close"
+        );
+    }
+
+    #[test]
+    fn a_stream_that_never_failed_finishes_clean() {
+        let s = Stream::new(-1, Buffering::Line);
+        assert!(s.finish().is_ok(), "nothing written, nothing to fail");
     }
 
     /// The one test that touches the process-global flag, and it is one test

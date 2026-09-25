@@ -211,7 +211,7 @@ fn run() -> ExitCode {
             return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
         }
     };
-    let mut out = Stream::stdout();
+    let mut out = Stream::stdout_line_buffered();
     let (algorithm, files) = match request {
         Request::Help => {
             // Deliberately unread: `Stream` records a failed write, and

@@ -773,7 +773,7 @@ fn run_main(algo: &Algorithm) -> ExitCode {
         set.files.push(OsString::from("-"));
     }
 
-    let mut out = stdfd::Stream::stdout();
+    let mut out = stdfd::Stream::stdout_line_buffered();
     let mut ok = true;
     let mut read_stdin = false;
 
@@ -814,7 +814,7 @@ fn run_main(algo: &Algorithm) -> ExitCode {
 /// `--help` and `--version`: the whole of the program's output, and then the
 /// verdict on whether it arrived.
 fn say(algo: &Algorithm, text: &str) -> ExitCode {
-    let mut out = stdfd::Stream::stdout();
+    let mut out = stdfd::Stream::stdout_line_buffered();
     let _ = out.write_all(text.as_bytes());
     stdfd::close_stdout(algo.program, out, ExitCode::SUCCESS)
 }

@@ -224,6 +224,28 @@ report() {
 
 run_case() { compare "$@"; report "$PROG $*"; }
 
+# A write error: the status and the message, with standard output on a full
+# device. See section 10 for why the message is what it is.
+full_case() {
+  local o_err g_err o_rc g_rc
+  o_err=$(mktemp); g_err=$(mktemp)
+  ( cd "$scratch" && printf 'hello\n' \
+      | timeout -k 2 60 env PATH="$bindir/ours" "$PROG" "$@" >/dev/full 2>"$o_err" )
+  o_rc=$?
+  ( cd "$scratch" && printf 'hello\n' \
+      | timeout -k 2 60 env PATH="$bindir/gnu" "$PROG" "$@" >/dev/full 2>"$g_err" )
+  g_rc=$?
+  if [ "$o_rc" = "$g_rc" ] && cmp -s "$o_err" "$g_err"; then
+    AGREED=yes
+  else
+    AGREED=no
+    REPORT=$(printf '  ours (rc=%s): err{%s}\n  gnu  (rc=%s): err{%s}' \
+      "$o_rc" "$(tr '\n' '|' <"$o_err")" "$g_rc" "$(tr '\n' '|' <"$g_err")")
+  fi
+  rm -f "$o_err" "$g_err"
+  report "$PROG $* [>/dev/full]"
+}
+
 # A case expected to differ, with the reason. Counted apart so that one which
 # starts agreeing is reported too: a stale xfail is a claim nobody rechecked.
 xfail_case() {
@@ -543,6 +565,19 @@ run_case -c TP
 
 SETUP="$sums"; run_case -c SUMS SUMS      # the same file twice
 SETUP='printf "one\n" > a'; run_case -c a  # a data file read as a check file
+
+# =============================================================================
+# 10. A write error
+# =============================================================================
+# digest.c line-buffers stdout (`setvbuf (stdout, nullptr, _IOLBF, 0)`) before
+# it parses a single option, so every line -- the --help text's too -- fails
+# and is discarded as it is finished. The close then has nothing left to fail
+# with, gnulib's `close_stream` zeroes errno, and the message is a bare
+# `write error`: a block-buffered program's close fails and gives a reason.
+
+full_case
+full_case -
+full_case --help
 
   printf '  %s: %d passed, %d differed, %d differ on purpose\n' \
     "$PROG" "$pass" "$fail" "$xfail"

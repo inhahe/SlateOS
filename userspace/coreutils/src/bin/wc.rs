@@ -211,7 +211,7 @@ fn run_main() -> ExitCode {
     // `--help` and `--version` are writes like any other, so they fail like any
     // other: `wc --help >&-` is `wc: write error: Bad file descriptor` and
     // exits 1.
-    let mut out = Stream::stdout();
+    let mut out = Stream::stdout_line_buffered();
     let earned = match request {
         Request::Help => {
             let _ = out.write_all(help_text().as_bytes());

@@ -390,6 +390,31 @@ run_getopt --files0-from=- plain.txt
 # which was measured with precisely this command rather than recalled.
 run_getopt --=x
 
+# --- a write error -----------------------------------------------------------
+# Upstream line-buffers stdout (`setvbuf (stdout, nullptr, _IOLBF, 0)`), so each
+# line fails, and is discarded, as it is finished; the close then has nothing
+# left to fail with, gnulib's `close_stream` zeroes errno, and the message is
+# `wc: write error` with no reason. Status and message are compared; there is
+# no output to compare.
+full_case() {
+  local o_err g_err o_rc g_rc
+  o_err=$(mktemp); g_err=$(mktemp)
+  run_side ours "$@" </dev/null >/dev/full 2>"$o_err"; o_rc=$?
+  run_side gnu  "$@" </dev/null >/dev/full 2>"$g_err"; g_rc=$?
+  if [ "$o_rc" = "$g_rc" ] && cmp -s "$o_err" "$g_err"; then
+    AGREED=yes
+  else
+    AGREED=no
+    REPORT=$(printf '  ours (rc=%s): {%s}\n  gnu  (rc=%s): {%s}' \
+      "$o_rc" "$(tr '\n' '|' <"$o_err")" "$g_rc" "$(tr '\n' '|' <"$g_err")")
+  fi
+  rm -f "$o_err" "$g_err"
+  report "wc $* [>/dev/full]"
+}
+full_case plain.txt
+full_case plain.txt blanks.txt
+full_case --help
+
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then
   printf ' (%d of which no longer do)' "$xpass"

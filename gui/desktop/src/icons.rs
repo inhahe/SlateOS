@@ -55,7 +55,7 @@ use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use yamldoc::Document;
 
 // ============================================================================
@@ -173,7 +173,34 @@ pub enum IconType {
     Executable,
 }
 
+// The spellings are the layout file's, for a shortcut the user added: renaming
+// one changes how every saved shortcut of that kind is drawn at the next login.
+settingsfile::yaml_enum!(IconType {
+    Folder => "folder",
+    File => "file",
+    Shortcut => "shortcut",
+    Drive => "drive",
+    RecycleBin => "recycle-bin",
+    Computer => "computer",
+    Document => "document",
+    Image => "image",
+    Executable => "executable",
+});
+
 impl IconType {
+    /// Every type, for the file-spelling round trip.
+    pub const ALL: [Self; 9] = [
+        Self::Folder,
+        Self::File,
+        Self::Shortcut,
+        Self::Drive,
+        Self::RecycleBin,
+        Self::Computer,
+        Self::Document,
+        Self::Image,
+        Self::Executable,
+    ];
+
     /// Unicode glyph representing this icon type.
     fn glyph(self) -> &'static str {
         match self {
@@ -220,11 +247,24 @@ pub enum IconAction {
     /// exist -- and the bytes were available: the caller reads `HOME` with
     /// `var_os` and already had a `PathBuf` in hand before flattening it.
     OpenPath(PathBuf),
-    /// Launch a system tool/dialog.
+    /// A destination this system defines rather than a path: [`THIS_PC`] or
+    /// [`RECYCLE_BIN`]. The shell says what each one opens.
     LaunchSystem(String),
     /// Custom action string.
     Custom(String),
 }
+
+/// The "This PC" icon's destination: the machine's filesystem, from the top.
+///
+/// Spelled as it always was -- like a command line, which it never was run
+/// as -- because it is also the icon's storage key, `system:explorer
+/// --computer`, in every saved layout, and a new spelling would forget where
+/// the user put the icon.
+pub const THIS_PC: &str = "explorer --computer";
+
+/// The "Recycle Bin" icon's destination. The spelling is kept for the reason
+/// [`THIS_PC`]'s is.
+pub const RECYCLE_BIN: &str = "explorer --recycle-bin";
 
 /// The file the desktop icon layout lives in, under the user's config
 /// directory.
@@ -246,6 +286,13 @@ const GRID_KEY: &str = "grid";
 /// How the icons are placed: an [`ArrangementMode`]'s file spelling.
 const ARRANGEMENT_KEY: &str = "arrangement";
 
+/// The shortcuts the user added: icon key -> `{label, type}`.
+///
+/// Keyed by the same key the positions are, which is the icon's *action* in
+/// text -- `path:/usr/bin/editor` -- so the action is recovered from the key
+/// (`DesktopIconLayer::action_for_key`) and is not written twice.
+const SHORTCUTS_KEY: &str = "shortcuts";
+
 /// A single desktop icon.
 #[derive(Clone, Debug)]
 pub struct DesktopIcon {
@@ -261,6 +308,13 @@ pub struct DesktopIcon {
     pub action: IconAction,
     /// Whether this icon is currently selected.
     pub selected: bool,
+    /// Whether the user put this icon here -- "Add to desktop" from the start
+    /// menu or the taskbar -- as opposed to its being one of the defaults.
+    ///
+    /// An added icon can be removed and is written into the layout file, so
+    /// that it is still there after a login; a default is recreated at every
+    /// login by [`DesktopIconLayer::populate_defaults`] and stays.
+    pub added: bool,
 }
 
 /// Describes the current interaction state of the icon layer.
@@ -772,9 +826,58 @@ impl DesktopIconLayer {
             icon_type,
             action,
             selected: false,
+            added: false,
         });
 
         id
+    }
+
+    /// Put a shortcut the user asked for on the desktop, in the next free
+    /// place the arrangement gives it -- or, if one for the same thing is
+    /// already there, select that one instead of adding a second. Answers the
+    /// icon and whether it is new.
+    ///
+    /// Two icons that open the same thing would be one icon the user has to
+    /// find twice, and they would share a position key in the layout file, so
+    /// one of them could never be saved where it was left.
+    pub fn add_shortcut(
+        &mut self,
+        label: &str,
+        icon_type: IconType,
+        action: IconAction,
+    ) -> (IconId, bool) {
+        let key = Self::storage_key(&action);
+        if let Some(existing) = self
+            .icons
+            .iter()
+            .find(|icon| Self::storage_key(&icon.action) == key)
+            .map(|icon| icon.id)
+        {
+            self.select_single(existing);
+            return (existing, false);
+        }
+        let id = self.add_icon_auto(label, icon_type, action);
+        if let Some(icon) = self.get_icon_mut(id) {
+            icon.added = true;
+        }
+        self.select_single(id);
+        (id, true)
+    }
+
+    /// Take the icons in `ids` off the desktop, of those the user added.
+    /// Answers how many went.
+    ///
+    /// A default in `ids` stays: it is recreated at every login, so removing
+    /// it would last until the next one and then be undone without a word.
+    pub fn remove_added(&mut self, ids: &[IconId]) -> usize {
+        let before = self.icons.len();
+        self.icons
+            .retain(|icon| !(icon.added && ids.contains(&icon.id)));
+        let removed = before.saturating_sub(self.icons.len());
+        if removed > 0 && self.arrangement == ArrangementMode::AutoArrange {
+            self.pack();
+        }
+        removed
     }
 
     /// Add an icon at the next available grid position.
@@ -827,20 +930,21 @@ impl DesktopIconLayer {
     /// from one pointing at a real one until it is clicked, and the guess is
     /// wrong far more often than it is right.
     ///
-    /// "This PC" and "Recycle Bin" are unconditional and are not paths -- they
-    /// launch the explorer with a flag, which is a destination this system
-    /// defines rather than a claim about a filesystem.
+    /// "This PC" and "Recycle Bin" are unconditional and are not paths: they
+    /// name destinations this system defines ([`THIS_PC`], [`RECYCLE_BIN`])
+    /// rather than make a claim about a filesystem, and the shell says what
+    /// each opens.
     pub fn populate_defaults(&mut self) {
         let mut defaults = vec![
             (
                 "This PC".to_string(),
                 IconType::Computer,
-                IconAction::LaunchSystem("explorer --computer".to_string()),
+                IconAction::LaunchSystem(THIS_PC.to_string()),
             ),
             (
                 "Recycle Bin".to_string(),
                 IconType::RecycleBin,
-                IconAction::LaunchSystem("explorer --recycle-bin".to_string()),
+                IconAction::LaunchSystem(RECYCLE_BIN.to_string()),
             ),
         ];
 
@@ -1641,8 +1745,87 @@ impl DesktopIconLayer {
                 }
                 IconEvent::None
             }
-            _ => IconEvent::None,
+            DesktopKey::Escape => {
+                self.deselect_all();
+                IconEvent::None
+            }
+            DesktopKey::Arrow(direction) => {
+                self.select_toward(direction);
+                IconEvent::None
+            }
+            // Select-all without Ctrl is the letter A, which the desktop does
+            // nothing with.
+            DesktopKey::SelectAll => IconEvent::None,
         }
+    }
+
+    /// Move the selection to the icon nearest the selected one in
+    /// `direction`, answering whether it moved.
+    ///
+    /// "Nearest" weighs sideways distance three times as heavily as distance
+    /// in the direction of travel, so Right from an icon goes to the next icon
+    /// along the same row even when a diagonal neighbour is closer as the crow
+    /// flies -- on a grid that is the icon the user is looking at -- and to
+    /// a diagonal one only when nothing is on the row. Ties go to reading
+    /// order, down each column and then the next.
+    ///
+    /// From nothing selected, the first icon in reading order is selected: an
+    /// arrow key on a desktop with no selection has to start somewhere, and
+    /// the top-left is where the eye does. From several selected, the
+    /// journey starts at the first of them in reading order, and ends with
+    /// the one icon it reached selected.
+    pub fn select_toward(&mut self, direction: Direction) -> bool {
+        let grid = self.grid;
+        let reading = |icon: &DesktopIcon| grid.desktop_cell(icon.x, icon.y);
+        let from = self
+            .icons
+            .iter()
+            .filter(|icon| icon.selected)
+            .min_by_key(|icon| reading(icon))
+            .map(|icon| (icon.id, self.centre_of(icon)));
+        let Some((from_id, (fx, fy))) = from else {
+            let first = self
+                .icons
+                .iter()
+                .min_by_key(|icon| reading(icon))
+                .map(|icon| icon.id);
+            return first.is_some_and(|id| {
+                self.select_single(id);
+                true
+            });
+        };
+        let best = self
+            .icons
+            .iter()
+            .filter(|icon| icon.id != from_id)
+            .filter_map(|icon| {
+                let (cx, cy) = self.centre_of(icon);
+                let (dx, dy) = (cx.saturating_sub(fx), cy.saturating_sub(fy));
+                let (along, across) = match direction {
+                    Direction::Right => (dx, dy),
+                    Direction::Left => (dx.saturating_neg(), dy),
+                    Direction::Down => (dy, dx),
+                    Direction::Up => (dy.saturating_neg(), dx),
+                };
+                (along > 0).then(|| {
+                    let score = i64::from(along)
+                        .saturating_add(i64::from(across.unsigned_abs()).saturating_mul(3));
+                    (score, reading(icon), icon.id)
+                })
+            })
+            .min_by_key(|&(score, cell, _)| (score, cell));
+        best.is_some_and(|(_, _, id)| {
+            self.select_single(id);
+            true
+        })
+    }
+
+    /// The pixel centre of an icon's cell-sized footprint.
+    fn centre_of(&self, icon: &DesktopIcon) -> (i32, i32) {
+        let half_w = i32::try_from(self.grid.cell_width().checked_div(2).unwrap_or(0)).unwrap_or(0);
+        let half_h =
+            i32::try_from(self.grid.cell_height().checked_div(2).unwrap_or(0)).unwrap_or(0);
+        (icon.x.saturating_add(half_w), icon.y.saturating_add(half_h))
     }
 
     // ======================================================================
@@ -1916,8 +2099,37 @@ impl DesktopIconLayer {
         }
     }
 
+    /// A name for an icon that has none: the file or folder it opens, or the
+    /// destination it names.
+    fn name_for(action: &IconAction) -> String {
+        match action {
+            IconAction::OpenPath(path) => path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| Path::new(name).display().to_string(),
+            ),
+            IconAction::LaunchSystem(name) | IconAction::Custom(name) => name.clone(),
+        }
+    }
+
+    /// The action a storage key names: [`storage_key`](Self::storage_key)
+    /// run backwards. `None` for a key this build does not know the shape
+    /// of -- a newer desktop's -- which is skipped rather than guessed at.
+    fn action_for_key(key: &str) -> Option<IconAction> {
+        if let Some(text) = key.strip_prefix("path:") {
+            Some(IconAction::OpenPath(PathBuf::from(text)))
+        } else if let Some(encoded) = key.strip_prefix("pathx:") {
+            Some(IconAction::OpenPath(pathcodec::decode_path(encoded)))
+        } else if let Some(name) = key.strip_prefix("system:") {
+            Some(IconAction::LaunchSystem(name.to_string()))
+        } else {
+            key.strip_prefix("custom:")
+                .map(|name| IconAction::Custom(name.to_string()))
+        }
+    }
+
     /// Fold the layout into a configuration document: every icon's position,
-    /// the grid those positions are on, and the arrangement.
+    /// the grid those positions are on, the arrangement, and the shortcuts the
+    /// user added.
     ///
     /// Entries for icons that are no longer on the desktop are **removed**,
     /// not merely left unwritten: an icon deleted and later recreated would
@@ -1941,6 +2153,25 @@ impl DesktopIconLayer {
         doc.set_i64(&[GRID_KEY, "w"], i64::from(self.grid.cell_width()));
         doc.set_i64(&[GRID_KEY, "h"], i64::from(self.grid.cell_height()));
         doc.set_str(&[ARRANGEMENT_KEY], self.arrangement.yaml_name());
+
+        // Removed ones out, as with the positions: a shortcut the user took
+        // off the desktop must not come back at the next login.
+        let added: Vec<String> = self
+            .icons
+            .iter()
+            .filter(|icon| icon.added)
+            .map(|icon| Self::storage_key(&icon.action))
+            .collect();
+        for key in doc.keys(&[SHORTCUTS_KEY]) {
+            if !added.contains(&key) {
+                doc.remove(&[SHORTCUTS_KEY, &key]);
+            }
+        }
+        for icon in self.icons.iter().filter(|icon| icon.added) {
+            let key = Self::storage_key(&icon.action);
+            doc.set_str(&[SHORTCUTS_KEY, &key, "label"], &icon.label);
+            doc.set_str(&[SHORTCUTS_KEY, &key, "type"], icon.icon_type.yaml_name());
+        }
     }
 
     /// The grid a document's positions were laid out on: what it says, or the
@@ -1987,6 +2218,36 @@ impl DesktopIconLayer {
             .and_then(|word| ArrangementMode::from_yaml_name(&word))
         {
             self.arrangement = mode;
+        }
+        // The user's shortcuts before the positions, which are filed against
+        // the icons that exist: a shortcut has to be back on the desktop
+        // before it can be put where it was left.
+        for key in doc.keys(&[SHORTCUTS_KEY]) {
+            let Some(action) = Self::action_for_key(&key) else {
+                continue;
+            };
+            if self
+                .icons
+                .iter()
+                .any(|icon| Self::storage_key(&icon.action) == key)
+            {
+                continue;
+            }
+            // A shortcut saved without a label -- hand-edited -- is named for
+            // what it opens rather than coming back blank.
+            let label = doc
+                .get_str(&[SHORTCUTS_KEY, &key, "label"])
+                .unwrap_or_else(|| Self::name_for(&action));
+            // A type this build has no word for draws as a plain shortcut
+            // rather than dropping the icon.
+            let icon_type = doc
+                .get_str(&[SHORTCUTS_KEY, &key, "type"])
+                .and_then(|word| IconType::from_yaml_name(&word))
+                .unwrap_or(IconType::Shortcut);
+            let id = self.add_icon_auto(&label, icon_type, action);
+            if let Some(icon) = self.get_icon_mut(id) {
+                icon.added = true;
+            }
         }
         let saved = Self::saved_grid(doc);
         let mut restored = Vec::new();
@@ -2078,6 +2339,17 @@ pub enum DesktopKey {
     Enter,
     SelectAll,
     Escape,
+    /// An arrow key: move the selection to the nearest icon that way.
+    Arrow(Direction),
+}
+
+/// A way to move across the desktop, for the arrow keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 // ============================================================================
@@ -4088,5 +4360,245 @@ mod tests {
         restarted.read_layout(&doc);
         assert_eq!(cell(&restarted, "a"), (0, 0), "where the file put it");
         assert_ne!(cell(&restarted, "new"), (0, 0));
+    }
+
+    // ------------------------------------------------------------------
+    // The arrow keys
+    // ------------------------------------------------------------------
+
+    /// A layer with an icon in each of the given cells, named by its cell.
+    fn icons_at(cells: &[(i32, i32)]) -> DesktopIconLayer {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        for &(col, row) in cells {
+            let (x, y) = layer.cell_origin(col, row);
+            let name = format!("{col},{row}");
+            layer.add_icon(&name, IconType::File, custom(&name), x, y);
+        }
+        layer
+    }
+
+    fn selected_names(layer: &DesktopIconLayer) -> Vec<String> {
+        layer
+            .icons
+            .iter()
+            .filter(|i| i.selected)
+            .map(|i| i.label.clone())
+            .collect()
+    }
+
+    /// **An arrow key with nothing selected starts at the top-left**, and
+    /// from there each press moves one icon.
+    #[test]
+    fn an_arrow_with_nothing_selected_starts_at_the_top_left() {
+        let mut layer = icons_at(&[(2, 0), (0, 1), (0, 0), (1, 0)]);
+        assert!(layer.select_toward(Direction::Down));
+        assert_eq!(selected_names(&layer), ["0,0"]);
+        assert!(layer.select_toward(Direction::Down));
+        assert_eq!(selected_names(&layer), ["0,1"]);
+        assert!(layer.select_toward(Direction::Up));
+        assert!(layer.select_toward(Direction::Right));
+        assert_eq!(selected_names(&layer), ["1,0"]);
+    }
+
+    /// **Right goes along the row**, past a diagonal neighbour that is nearer
+    /// as the crow flies, and to a diagonal one only when the row is empty.
+    #[test]
+    fn the_arrows_keep_to_the_row_before_taking_a_diagonal() {
+        let mut layer = icons_at(&[(0, 0), (1, 1), (3, 0)]);
+        layer.select_single(layer.icons[0].id);
+        assert!(layer.select_toward(Direction::Right));
+        assert_eq!(
+            selected_names(&layer),
+            ["3,0"],
+            "along the row, not down to (1, 1)"
+        );
+
+        let mut layer = icons_at(&[(0, 0), (1, 1)]);
+        layer.select_single(layer.icons[0].id);
+        assert!(layer.select_toward(Direction::Right));
+        assert_eq!(
+            selected_names(&layer),
+            ["1,1"],
+            "the row is empty, so the diagonal"
+        );
+    }
+
+    /// An arrow with nowhere to go leaves the selection where it is and says
+    /// nothing moved.
+    #[test]
+    fn an_arrow_with_nowhere_to_go_keeps_the_selection() {
+        let mut layer = icons_at(&[(0, 0), (0, 1)]);
+        layer.select_single(layer.icons[0].id);
+        assert!(!layer.select_toward(Direction::Up));
+        assert!(!layer.select_toward(Direction::Left));
+        assert_eq!(selected_names(&layer), ["0,0"]);
+        // And on an empty desktop there is nothing to start from.
+        assert!(!DesktopIconLayer::new(1920, 1080, 40).select_toward(Direction::Down));
+    }
+
+    /// From several selected icons the journey starts at the first in
+    /// reading order and ends with one icon selected.
+    #[test]
+    fn an_arrow_from_a_multiple_selection_selects_one() {
+        let mut layer = icons_at(&[(0, 0), (0, 1), (0, 2)]);
+        layer.select_all();
+        assert!(layer.select_toward(Direction::Down));
+        assert_eq!(selected_names(&layer), ["0,1"]);
+    }
+
+    /// Escape clears the selection.
+    #[test]
+    fn escape_clears_the_selection() {
+        let mut layer = icons_at(&[(0, 0), (0, 1)]);
+        layer.select_all();
+        assert_eq!(layer.handle_key(DesktopKey::Escape, false), IconEvent::None);
+        assert!(layer.selected_ids().is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Shortcuts the user added
+    // ------------------------------------------------------------------
+
+    /// Every action's storage key reads back as the same action -- which is
+    /// what lets the layout file keep a shortcut's action in its key alone.
+    #[test]
+    fn a_storage_key_reads_back_as_its_action() {
+        let actions = [
+            IconAction::OpenPath(PathBuf::from("/usr/bin/editor")),
+            IconAction::OpenPath(PathBuf::from("/home/u/My Stuff")),
+            IconAction::LaunchSystem(THIS_PC.to_string()),
+            IconAction::Custom("weather".to_string()),
+        ];
+        for action in actions {
+            let key = DesktopIconLayer::storage_key(&action);
+            assert_eq!(
+                DesktopIconLayer::action_for_key(&key),
+                Some(action),
+                "{key}"
+            );
+        }
+        assert_eq!(DesktopIconLayer::action_for_key("hologram:x"), None);
+    }
+
+    /// A path that is not text reads back as the same bytes.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_text_key_reads_back_as_its_bytes() {
+        let action = IconAction::OpenPath(not_text_path());
+        let key = DesktopIconLayer::storage_key(&action);
+        assert_eq!(DesktopIconLayer::action_for_key(&key), Some(action));
+    }
+
+    /// Every icon type has a word in the file, and reads back from it.
+    #[test]
+    fn every_icon_type_has_a_word_in_the_file() {
+        for ty in IconType::ALL {
+            assert_eq!(IconType::from_yaml_name(ty.yaml_name()), Some(ty));
+        }
+        // `ALL` is every type: this match stops compiling when one is added.
+        for ty in IconType::ALL {
+            match ty {
+                IconType::Folder
+                | IconType::File
+                | IconType::Shortcut
+                | IconType::Drive
+                | IconType::RecycleBin
+                | IconType::Computer
+                | IconType::Document
+                | IconType::Image
+                | IconType::Executable => {}
+            }
+        }
+    }
+
+    /// **A shortcut the user added is still there after a login**, where it
+    /// was left, and still removable; a default is not written as one.
+    #[test]
+    fn an_added_shortcut_survives_a_restart() {
+        let mut layer = populated();
+        let editor = IconAction::OpenPath(PathBuf::from("/usr/bin/editor"));
+        let (id, new) = layer.add_shortcut("Editor", IconType::Executable, editor.clone());
+        assert!(new);
+        let (x, y) = layer.cell_origin(4, 2);
+        let icon = layer.get_icon_mut(id).unwrap();
+        icon.x = x;
+        icon.y = y;
+        let mut doc = Document::new();
+        layer.write_layout(&mut doc);
+        assert_eq!(
+            doc.keys(&[SHORTCUTS_KEY]).len(),
+            1,
+            "only the added icon is a shortcut"
+        );
+
+        let mut restarted = populated();
+        restarted.read_layout(&doc);
+        let back = restarted
+            .icons
+            .iter()
+            .find(|i| i.action == editor)
+            .expect("the shortcut came back");
+        assert_eq!(
+            (back.label.as_str(), back.icon_type),
+            ("Editor", IconType::Executable)
+        );
+        assert!(back.added, "and it can still be removed");
+        assert_eq!((back.x, back.y), (x, y));
+    }
+
+    /// Adding a shortcut for something already on the desktop selects it
+    /// rather than making a second.
+    #[test]
+    fn adding_a_shortcut_twice_selects_the_first() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let action = IconAction::OpenPath(PathBuf::from("/usr/bin/editor"));
+        let (first, new) = layer.add_shortcut("Editor", IconType::Executable, action.clone());
+        assert!(new);
+        layer.deselect_all();
+        let (again, new) = layer.add_shortcut("Editor", IconType::Executable, action);
+        assert!(!new);
+        assert_eq!(again, first);
+        assert_eq!(layer.icons.len(), 1);
+        assert_eq!(layer.selected_ids(), [first]);
+    }
+
+    /// **Removing takes only what the user added**, and a removed shortcut
+    /// is taken out of the file too.
+    #[test]
+    fn removing_takes_only_added_icons_and_the_file_forgets_them() {
+        let mut layer = populated();
+        let (added, _) = layer.add_shortcut(
+            "Editor",
+            IconType::Executable,
+            IconAction::OpenPath(PathBuf::from("/usr/bin/editor")),
+        );
+        let defaults = layer.icons.len() - 1;
+        let mut doc = Document::new();
+        layer.write_layout(&mut doc);
+
+        let everything = layer.icon_ids();
+        assert_eq!(layer.remove_added(&everything), 1);
+        assert_eq!(layer.icons.len(), defaults, "a default went too");
+        assert!(layer.get_icon(added).is_none());
+        layer.write_layout(&mut doc);
+        assert!(
+            doc.keys(&[SHORTCUTS_KEY]).is_empty(),
+            "the file still has it"
+        );
+        assert_eq!(layer.remove_added(&everything), 0, "nothing left to remove");
+    }
+
+    /// A hand-edited shortcut with no label is named for what it opens, and
+    /// one with an unknown type is drawn as a plain shortcut.
+    #[test]
+    fn a_hand_edited_shortcut_is_named_and_drawn_sensibly() {
+        let mut doc = Document::new();
+        doc.set_str(&[SHORTCUTS_KEY, "path:/usr/bin/editor", "type"], "hologram");
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        layer.read_layout(&doc);
+        let icon = &layer.icons[0];
+        assert_eq!(icon.label, "editor");
+        assert_eq!(icon.icon_type, IconType::Shortcut);
+        assert!(icon.added);
     }
 }

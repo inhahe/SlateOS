@@ -74,6 +74,14 @@ use guitk::text;
 use guitk::text::TextCursor;
 use guitk::theme::with_alpha;
 
+/// The file manager: what opens a folder, from the desktop and from Super+E.
+///
+/// One constant for the three places that name it -- this database's entry,
+/// the default Super+E shortcut, and the desktop's folder icons -- so that
+/// moving the program is one edit rather than three that can disagree about
+/// which program a folder opens in.
+pub const FILE_MANAGER: &str = "/usr/bin/explorer";
+
 /// How opaque the dialog itself is.
 ///
 /// Named because it is asserted: a floating panel that reached full opacity
@@ -888,7 +896,7 @@ pub fn builtin_app_database() -> Vec<AppEntry> {
         AppEntry {
             name: "File Explorer".to_string(),
             description: "Browse and manage files".to_string(),
-            executable_path: "/usr/bin/explorer".to_string(),
+            executable_path: FILE_MANAGER.to_string(),
             keywords: vec![
                 "files".into(),
                 "browse".into(),

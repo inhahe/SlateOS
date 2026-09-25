@@ -40,6 +40,13 @@ globmatch = { path = "../globmatch" }
 
 # design-decisions 426's path escape, for the wallpaper's own config format.
 pathcodec = { path = "../pathcodec" }
+
+# Which program opens which kind of file. A document on the desktop opens in
+# the program File Associations chose for it -- the same lookup the file
+# manager makes on every open, so the two cannot disagree about what a file
+# opens in. What it depends on -- guitk, yamldoc, settingsfile -- this crate
+# already does.
+associations = { path = "../associations" }
 # The session group, for the screen-lock delay. One integer with two
 # readers -- `apps/settings` writes it -- which is the `fileassoc` shape
 # rather than a typed crate like `appearance`. See src/idle_lock.rs.

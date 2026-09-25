@@ -1750,7 +1750,8 @@ fn adding_a_widget_from_the_menu_puts_it_on_the_desktop() {
 
         let added = session
             .shell_mut()
-            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+            .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK)
+            .changed();
 
         assert!(added, "the menu item reported no change");
         assert_eq!(session.shell().widgets.count(), 1);
@@ -1774,13 +1775,21 @@ fn remove_all_widgets_empties_the_desktop() {
         shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CALENDAR);
         assert_eq!(shell.widgets.count(), 2);
 
-        assert!(shell.activate_desktop_menu_item(DesktopShell::MENU_REMOVE_WIDGETS));
+        assert!(
+            shell
+                .activate_desktop_menu_item(DesktopShell::MENU_REMOVE_WIDGETS)
+                .changed()
+        );
         assert_eq!(shell.widgets.count(), 0);
         assert!(shell.render_widgets().is_empty());
 
         // And again on an empty desktop reports no change, so a caller that
         // repaints on `true` does not repaint for nothing.
-        assert!(!shell.activate_desktop_menu_item(DesktopShell::MENU_REMOVE_WIDGETS));
+        assert!(
+            !shell
+                .activate_desktop_menu_item(DesktopShell::MENU_REMOVE_WIDGETS)
+                .changed()
+        );
     });
 }
 
@@ -1987,7 +1996,8 @@ fn remove_this_widget_does_nothing_when_the_menu_was_not_about_one() {
 
         let removed = session
             .shell_mut()
-            .activate_desktop_menu_item(DesktopShell::MENU_REMOVE_ONE_WIDGET);
+            .activate_desktop_menu_item(DesktopShell::MENU_REMOVE_ONE_WIDGET)
+            .changed();
         assert!(!removed);
         assert_eq!(session.shell().widgets.count(), 1);
     });
@@ -4363,8 +4373,14 @@ fn the_view_menu_choices_survive_a_restart() {
             session
                 .shell_mut()
                 .activate_desktop_menu_item(DesktopShell::MENU_AUTO_ARRANGE)
+                .changed()
         );
-        assert!(session.shell_mut().activate_desktop_menu_item(large));
+        assert!(
+            session
+                .shell_mut()
+                .activate_desktop_menu_item(large)
+                .changed()
+        );
         session.pump().expect("pump");
         let before: Vec<(String, (i32, i32))> = {
             let shell = session.shell();
@@ -4435,6 +4451,7 @@ fn an_icon_layout_that_cannot_be_saved_says_so_once_beside_a_failing_widget_layo
                 session
                     .shell_mut()
                     .activate_desktop_menu_item(DesktopShell::MENU_ALIGN_TO_GRID)
+                    .changed()
             );
             session.pump().expect("a failed save is not a failed pump");
         }
@@ -4460,12 +4477,14 @@ fn an_icon_layout_that_cannot_be_saved_says_so_once_beside_a_failing_widget_layo
             session
                 .shell_mut()
                 .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK)
+                .changed()
         );
         session.pump().expect("pump");
         assert!(
             session
                 .shell_mut()
                 .activate_desktop_menu_item(DesktopShell::MENU_ALIGN_TO_GRID)
+                .changed()
         );
         session.pump().expect("pump");
         let posted = reports(&session);
@@ -4511,6 +4530,7 @@ fn a_widget_layout_that_cannot_be_saved_says_so_once_and_not_as_the_wallpaper() 
                 session
                     .shell_mut()
                     .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK)
+                    .changed()
             );
             session.pump().expect("a failed save is not a failed pump");
         }
@@ -4528,6 +4548,53 @@ fn a_widget_layout_that_cannot_be_saved_says_so_once_and_not_as_the_wallpaper() 
             session.wallpaper_error(),
             None,
             "a layout that was not saved is not a wallpaper that was not shown"
+        );
+    });
+}
+
+// ---- the desktop's own keys ----
+
+/// Ctrl+A, as a compositor would deliver it to `surface`.
+fn ctrl_a_on(desktop: &Desktop, surface: Surface) {
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        surface.window(),
+        guitk::event::Event::Key(KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        }),
+    )]);
+}
+
+/// **A key on the desktop reaches its icons, and the same key on the
+/// taskbar does not.** The compositor sends keys to the focused surface; the
+/// session hands the icons only what arrived on the desktop's, so Ctrl+A in
+/// the taskbar does not select the desktop. Before 2026-09-25 no key reached
+/// the icons from anywhere.
+#[test]
+fn a_key_on_the_desktop_reaches_its_icons_and_on_the_taskbar_does_not() {
+    settingsfile::testing::with_scratch_config("session-desktop-keys", |_root| {
+        let (mut session, desktop, _turn) = session();
+        assert!(
+            !session.shell().icons.icon_ids().is_empty(),
+            "no icons to select"
+        );
+        assert!(session.shell().icons.selected_ids().is_empty());
+
+        ctrl_a_on(&desktop, session.panel());
+        session.pump().expect("pump");
+        assert!(
+            session.shell().icons.selected_ids().is_empty(),
+            "a key typed on the taskbar selected the desktop"
+        );
+
+        ctrl_a_on(&desktop, session.background());
+        session.pump().expect("pump");
+        assert_eq!(
+            session.shell().icons.selected_ids().len(),
+            session.shell().icons.icon_ids().len(),
+            "Ctrl+A on the desktop did not select every icon"
         );
     });
 }

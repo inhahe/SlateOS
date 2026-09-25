@@ -2096,7 +2096,8 @@ impl<T: Transport> ShellSession<T> {
             Event::Mouse(mouse) => self.pointer(&surface.to_screen(&mouse))?,
             Event::Key(key) => {
                 let outcome = self.shell.handle_hotkey(&key);
-                if outcome.consumed {
+                let claimed = outcome.consumed;
+                if claimed {
                     self.dirty = true;
                 }
                 // Sent in the order the shortcut named them, and every one is
@@ -2115,6 +2116,15 @@ impl<T: Transport> ShellSession<T> {
                 // does not start the program either, it only records that one
                 // was asked for.
                 self.queue_launches(outcome.launches);
+                // A key on the desktop itself that no shortcut and no open
+                // surface claimed: the icons' -- Enter, Ctrl+A, the arrows.
+                // Only from the desktop's own surface, because the compositor
+                // sends keys to the focused surface and a key typed into the
+                // taskbar or a menu is not about the icons.
+                if !claimed && surface.window() == self.background.window() {
+                    let action = self.shell.handle_desktop_key(&key);
+                    self.act(action)?;
+                }
             }
             // Somebody rewrote `input.yaml`. The one field the shell owns
             // there is which shortcut cycles the keyboard layout, and picking
@@ -2565,19 +2575,25 @@ impl<T: Transport> ShellSession<T> {
     /// One pointer event, already in screen coordinates.
     fn pointer(&mut self, event: &MouseEvent) -> Result<(), Error<T>> {
         self.autohide_pointer(event);
-        match self.shell.handle_mouse(event) {
+        let action = self.shell.handle_mouse(event);
+        self.act(action)
+    }
+
+    /// Carry out what the shell answered an event with -- a pointer event, or
+    /// a key on the desktop. One place, so a key and a click that mean the
+    /// same thing cannot be carried out differently.
+    fn act(&mut self, action: ShellAction) -> Result<(), Error<T>> {
+        match action {
             // Not the shell's, and nothing the shell drew has changed. The
             // compositor routes a press to the topmost window containing it, so
             // in a live session this is a click on bare desktop.
             ShellAction::Pass => {}
             ShellAction::Consumed => self.dirty = true,
-            ShellAction::Launch(path) => {
-                // A program named by the start menu, which names programs
-                // and not invocations of them.
-                self.queue_launches(vec![crate::hotkeys::Launch {
-                    program: path,
-                    args: Vec::new(),
-                }]);
+            // A program the start menu or the taskbar named, or a folder or
+            // document a desktop icon opens -- which is a program *given that
+            // path*, and why the action carries arguments.
+            ShellAction::Launch(launch) => {
+                self.queue_launches(vec![launch]);
                 self.dirty = true;
             }
             ShellAction::Control(request) => self.request(request)?,

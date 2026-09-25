@@ -28,7 +28,7 @@
 //! // Drain events to act on:
 //! for event in run_dialog.drain_events() {
 //!     match event {
-//!         RunDialogEvent::Execute(cmd) => { /* spawn process */ }
+//!         RunDialogEvent::Execute(request) => { /* open or run it */ }
 //!         RunDialogEvent::Browse => { /* open file picker */ }
 //!         RunDialogEvent::Cancel => { /* dismiss */ }
 //!         RunDialogEvent::Closed => { /* cleanup */ }
@@ -111,15 +111,9 @@ const MAX_HISTORY: usize = 50;
 /// Events produced by the Run dialog for the shell to act on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunDialogEvent {
-    /// User pressed OK or Enter — start the program at this path.
-    ///
-    /// A `PathBuf`, not a `String`. Most of the time it is simply the typed
-    /// text turned into a path, but a command the user chose through
-    /// **Browse** may name a file with no UTF-8 spelling — our filenames
-    /// admit every byte but `/` and NUL — and the text field can only *show*
-    /// a lossy rendering of such a name. Carrying the path keeps the program
-    /// that starts the one the user pointed at.
-    Execute(PathBuf),
+    /// User pressed OK or Enter — run or open what was asked for. See
+    /// [`RunRequest`] for what it carries and why both halves.
+    Execute(RunRequest),
     /// User clicked Browse — open a file picker.
     Browse,
     /// User pressed Cancel or Escape.
@@ -127,6 +121,113 @@ pub enum RunDialogEvent {
     /// Dialog was dismissed (after Cancel or Execute).
     Closed,
 }
+
+/// What the Run box was asked for: the whole line, and the same line as a
+/// program and its arguments.
+///
+/// Both, because a line means one of two things and only the shell can tell
+/// which: `/home/u/My Documents` is a folder to open, whole, spaces and all;
+/// `editor /home/u/notes.txt` is a program to run with an argument. Windows'
+/// Run box -- which `design.txt` asks this one to be like -- takes both, and
+/// tries the whole line as a path first. So does the shell
+/// (`DesktopShell::run_request`), and that order is what lets a path with a
+/// space in it through without quotes.
+///
+/// Until 2026-09-25 the event carried the whole line as one program path, so
+/// `editor notes.txt` asked for a program called "editor notes.txt" and a
+/// folder asked to be executed. `design-decisions.md` §870 records the
+/// quoting rule and why it is the shell's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunRequest {
+    /// Everything that was asked for, exactly: the typed line, or the bytes
+    /// **Browse** chose while the field still shows them. An `OsString`
+    /// because a chosen file may have no UTF-8 spelling -- the field can only
+    /// *show* a lossy rendering of such a name, and carrying the bytes keeps
+    /// what opens the file the user pointed at.
+    pub whole: OsString,
+    /// The line as words: a program, then its arguments. A path chosen
+    /// through Browse is one word, never split.
+    pub words: Vec<OsString>,
+}
+
+/// Split a typed line into words the way a POSIX shell splits them, which is
+/// the rule the rest of this system's command lines follow.
+///
+/// - Whitespace separates words; any run of it is one separator.
+/// - `'...'` keeps everything inside literally.
+/// - `"..."` keeps everything inside, except that `\"` is a quote and `\\`
+///   a backslash.
+/// - Outside quotes, a backslash makes the next character ordinary.
+/// - Quotes join to what touches them: `a"b c"d` is the one word `ab cd`, and
+///   `""` is an empty word.
+///
+/// An unclosed quote is an error rather than a guess: running `editor "my
+/// file` as though the quote were closed would open a file the user may not
+/// have finished naming.
+pub fn split_words(line: &str) -> Result<Vec<String>, UnclosedQuote> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    // Whether a word has started, which is not the same as being non-empty:
+    // `""` is a word with nothing in it.
+    let mut in_word = false;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => {
+                if in_word {
+                    words.push(core::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(c) => word.push(c),
+                        None => return Err(UnclosedQuote('\'')),
+                    }
+                }
+            }
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some(c @ ('"' | '\\')) => word.push(c),
+                            Some(c) => {
+                                word.push('\\');
+                                word.push(c);
+                            }
+                            None => return Err(UnclosedQuote('"')),
+                        },
+                        Some(c) => word.push(c),
+                        None => return Err(UnclosedQuote('"')),
+                    }
+                }
+            }
+            '\\' => {
+                in_word = true;
+                // A trailing backslash escapes nothing and is kept, rather than
+                // silently dropped.
+                word.push(chars.next().unwrap_or('\\'));
+            }
+            c => {
+                in_word = true;
+                word.push(c);
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    Ok(words)
+}
+
+/// A line whose quote was opened and never closed -- which quote it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnclosedQuote(pub char);
 
 // ============================================================================
 // Button identifiers
@@ -975,13 +1076,45 @@ impl RunDialog {
                 |p| p.as_os_str().to_os_string(),
             );
 
-        // Resolve the command.
-        if self.resolve_command(&command) {
+        // The line as a program and its arguments. A path Browse chose is one
+        // word whatever is in it: it is a name, not a command line, and a
+        // name with a space in it split into two would be two things that do
+        // not exist.
+        let chose_browse = self
+            .command_exact
+            .as_ref()
+            .is_some_and(|p| p.as_os_str() == exact.as_os_str());
+        let words: Vec<OsString> = if chose_browse {
+            vec![exact.clone()]
+        } else {
+            match split_words(&command) {
+                Ok(words) => words.into_iter().map(OsString::from).collect(),
+                Err(UnclosedQuote(quote)) => {
+                    self.error_message = Some(format!(
+                        "A {} quote is not closed.",
+                        if quote == '"' { "double" } else { "single" }
+                    ));
+                    return;
+                }
+            }
+        };
+
+        // Resolved by the program -- the first word -- unless the whole line
+        // is an absolute path, which the shell will try as a thing to open
+        // before it splits anything. `is_absolute` rather than a leading `/`:
+        // the same question, asked the way the platform spells it.
+        let program = words
+            .first()
+            .and_then(|w| w.to_str())
+            .unwrap_or(command.as_str());
+        if Path::new(&command).is_absolute() || self.resolve_command(program) {
             // The history gets the bytes, not the rendering, so that pressing
             // Up and Enter re-runs the file that ran — see `add_to_history`.
             self.add_to_history(&exact);
-            self.events
-                .push(RunDialogEvent::Execute(PathBuf::from(exact)));
+            self.events.push(RunDialogEvent::Execute(RunRequest {
+                whole: exact,
+                words,
+            }));
             self.hide();
         } else {
             self.error_message = Some(format!(
@@ -1643,11 +1776,15 @@ mod tests {
             "the completion entered the rendering rather than the file"
         );
 
-        // And it survives all the way out as a launch.
+        // And it survives all the way out as a launch -- as one word, since a
+        // chosen file is a name and not a command line.
         dialog.execute_current();
         assert_eq!(
             dialog.drain_events().first(),
-            Some(&RunDialogEvent::Execute(PathBuf::from(&chosen)))
+            Some(&RunDialogEvent::Execute(RunRequest {
+                whole: chosen.clone(),
+                words: vec![chosen.clone()],
+            }))
         );
     }
 
@@ -1665,7 +1802,10 @@ mod tests {
         dialog.handle_key_event(&event);
 
         let events = dialog.drain_events();
-        assert!(events.contains(&RunDialogEvent::Execute(PathBuf::from("terminal"))));
+        assert!(events.contains(&RunDialogEvent::Execute(RunRequest {
+            whole: OsString::from("terminal"),
+            words: vec![OsString::from("terminal")],
+        })));
         assert!(events.contains(&RunDialogEvent::Closed));
     }
 
@@ -1723,9 +1863,113 @@ mod tests {
         dialog.handle_key_event(&event);
 
         let events = dialog.drain_events();
-        assert!(events.contains(&RunDialogEvent::Execute(PathBuf::from(
-            "/usr/bin/something"
-        ))));
+        assert!(events.contains(&RunDialogEvent::Execute(RunRequest {
+            whole: OsString::from("/usr/bin/something"),
+            words: vec![OsString::from("/usr/bin/something")],
+        })));
+    }
+
+    // ====================================================================
+    // A program and its arguments
+    // ====================================================================
+
+    fn words(line: &str) -> Vec<String> {
+        split_words(line).expect("the line splits")
+    }
+
+    #[test]
+    fn words_are_split_on_whitespace_of_any_length() {
+        assert_eq!(
+            words("editor  notes.txt\t--new "),
+            ["editor", "notes.txt", "--new"]
+        );
+        assert!(words("   ").is_empty());
+        assert!(words("").is_empty());
+    }
+
+    /// Quotes keep a space inside one word, which is how a path with a space
+    /// in it is written when it is an argument rather than the whole line.
+    #[test]
+    fn quotes_keep_a_word_together() {
+        assert_eq!(
+            words("editor \"/home/u/My Notes/a b.txt\""),
+            ["editor", "/home/u/My Notes/a b.txt"]
+        );
+        assert_eq!(words("echo 'it''s'"), ["echo", "its"]);
+        assert_eq!(
+            words("a\"b c\"d"),
+            ["ab cd"],
+            "quotes join what touches them"
+        );
+        assert_eq!(
+            words("run \"\""),
+            ["run", ""],
+            "an empty quote is an empty word"
+        );
+    }
+
+    /// Inside double quotes only `\"` and `\\` are escapes; inside single
+    /// quotes nothing is; outside quotes a backslash makes the next character
+    /// ordinary.
+    #[test]
+    fn backslashes_follow_the_shell() {
+        assert_eq!(words("\"say \\\"hi\\\"\""), ["say \"hi\""]);
+        assert_eq!(words("\"a\\\\b\""), ["a\\b"]);
+        assert_eq!(words("\"keep \\n\""), ["keep \\n"], "not an escape here");
+        assert_eq!(words("'\\n'"), ["\\n"]);
+        assert_eq!(words("My\\ Documents"), ["My Documents"]);
+        assert_eq!(words("trailing\\"), ["trailing\\"], "kept, not dropped");
+    }
+
+    /// An unclosed quote is refused, with a message, and runs nothing.
+    #[test]
+    fn an_unclosed_quote_is_refused() {
+        assert_eq!(split_words("editor \"my file"), Err(UnclosedQuote('"')));
+        assert_eq!(split_words("editor 'my file"), Err(UnclosedQuote('\'')));
+
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        dialog.input.set_text("editor \"my file");
+        dialog.execute_current();
+        assert!(
+            !dialog
+                .drain_events()
+                .iter()
+                .any(|e| matches!(e, RunDialogEvent::Execute(_))),
+            "a half-quoted line ran"
+        );
+        assert!(dialog.is_visible(), "the box stays up to be corrected");
+        assert!(
+            dialog
+                .error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("double quote")),
+            "{:?}",
+            dialog.error_message
+        );
+    }
+
+    /// **A program with arguments reaches the shell as a program and its
+    /// arguments** -- it used to arrive as one program named by the whole
+    /// line.
+    #[test]
+    fn a_command_with_arguments_is_a_program_and_its_arguments() {
+        let mut dialog = RunDialog::new();
+        dialog.show();
+        dialog
+            .input
+            .set_text("terminal --working-directory \"/home/u/My Stuff\"");
+        dialog.execute_current();
+        assert_eq!(
+            dialog.drain_events().first(),
+            Some(&RunDialogEvent::Execute(RunRequest {
+                whole: OsString::from("terminal --working-directory \"/home/u/My Stuff\""),
+                words: ["terminal", "--working-directory", "/home/u/My Stuff"]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+            }))
+        );
     }
 
     #[test]

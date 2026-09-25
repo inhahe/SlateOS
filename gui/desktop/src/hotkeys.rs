@@ -103,6 +103,30 @@ pub struct Launch {
 }
 
 impl Launch {
+    /// `program`, started with no arguments -- a start-menu row, a pinned
+    /// button, a program shortcut on the desktop.
+    #[must_use]
+    pub fn program(program: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+        }
+    }
+
+    /// `program`, asked to open `path` -- a folder in the file manager, a
+    /// document in the program chosen for its kind.
+    ///
+    /// The path goes over as its own argument and as the bytes that name it,
+    /// never spliced into a command line: a file called `a b.txt` is one
+    /// argument, and one whose name has no UTF-8 spelling still arrives.
+    #[must_use]
+    pub fn opening(program: impl Into<PathBuf>, path: &std::path::Path) -> Self {
+        Self {
+            program: program.into(),
+            args: vec![path.as_os_str().to_os_string()],
+        }
+    }
+
     /// The whole invocation, as one line, for showing to a person.
     ///
     /// Display only. Both halves go through `Path::display`, which renders
@@ -1097,7 +1121,7 @@ fn register_defaults(reg: &mut HotkeyRegistry) {
             // The path the start menu's "File Explorer" entry uses, not the bare
             // word "explorer": `HotkeyOutcome::launches` carries command lines,
             // and whoever executes one is not obliged to search a path.
-            HotkeyAction::LaunchApp("/usr/bin/explorer".to_string()),
+            HotkeyAction::LaunchApp(crate::launcher::FILE_MANAGER.to_string()),
         ),
         (Hotkey::new(Key::L, sup()), HotkeyAction::ScreenLock),
         (

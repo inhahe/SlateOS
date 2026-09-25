@@ -1639,6 +1639,26 @@ live.
   save that fails is reported instead of dropped.
   `gui/desktop/src/icons.rs`, `DesktopShell::desktop_menu_items`.
 
+- `[C]` **Desktop icons and the Run box open what they name; the desktop
+  answers the keyboard; shortcuts can be added and removed** -- done
+  2026-09-25. A double-click or Enter on a folder opens it in the file
+  manager, a document in the program File Associations chose for its kind,
+  a program runs, and anything else says why in a notification -- a folder
+  icon used to ask for the folder to be executed, and This PC and the Recycle
+  Bin did nothing (This PC now opens `/`; the Recycle Bin explains itself,
+  `requests/c-e-the-recycle-bin-icon-has-nowhere-to-open.md`). The Run box
+  takes arguments and opens paths by the same rules (`design-decisions.md`
+  §870); it used to take the whole line as one program's name. Enter,
+  Ctrl+A, Escape, the arrow keys and Delete work on the desktop -- nothing
+  called the icon layer's key handler before. "Add to desktop" on a
+  start-menu row or a pinned button puts a program shortcut there, saved
+  with the layout; a right-click on an icon opens its own menu (Open, Pin
+  to taskbar, Remove from desktop). **Next, and open:** F2 rename, and
+  dragging between the start menu, the taskbar and the desktop
+  (`design.txt` line 712) -- which wants lane F's implicit pointer grab
+  (`requests/c-f-a-drag-that-leaves-its-window-stops-being-told-where-the-pointer-is.md`)
+  to survive crossing a program's window.
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's
@@ -7366,10 +7386,10 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Rubber-band selection, Ctrl+Click toggle, Ctrl+A select all
   - [x] Drag-and-drop repositioning with ghost indicator, multi-select drag
   - [x] Default icons (This PC, Recycle Bin, Documents, Home), icon types (9 variants)
-  - [x] Double-click activate, right-click context menu, F2 rename, Delete
+  - [-] Double-click activate, right-click context menu, F2 rename, Delete -- **corrected 2026-09-25**: ticked from the start, when only the double-click reached anything, and it asked for a folder to be *executed* and did nothing for This PC or the Recycle Bin. Opening, the icon's own right-click menu (Open, Pin to taskbar, Remove from desktop) and Delete are real now; **F2 rename is still to do** -- lane C's next item.
 - [x] Taskbar enhancements:
   - [x] Pinned apps on left, running apps on right, divider between sections
-  - [x] Drag to reorder, drag to/from desktop and start menu
+  - [-] Drag to reorder (done), drag to/from desktop and start menu (**not done**, ticked in error: a pinned button only reorders within the pinned run, and nothing can be dragged between the start menu, the taskbar and the desktop. "Add to desktop" on the start menu's and the taskbar's right-click menu is the non-drag way in, done 2026-09-25; the drag is lane C's next item. Corrected 2026-09-25)
   - [x] Optional app name alongside icon
   - [x] Aero-style blurry transparency (blur.rs: 3-pass box blur, 5 presets, BlurManager with dirty cache, rounded corners)
 - [x] System tray:

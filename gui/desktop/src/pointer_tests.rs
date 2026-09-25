@@ -33,7 +33,6 @@ use appearance::{AppearanceSettings, WindowCorners};
 use guitk::render::{RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
 use guitk::wheel;
-use std::path::PathBuf;
 
 fn shell() -> DesktopShell {
     DesktopShell::new(1000, 800)
@@ -155,7 +154,7 @@ fn clicking_settings_in_the_start_menu_asks_for_the_settings_program() {
     let action = click_at(&mut shell, rect);
     assert_eq!(
         action,
-        ShellAction::Launch(std::path::PathBuf::from("/usr/bin/settings"))
+        ShellAction::Launch(crate::hotkeys::Launch::program("/usr/bin/settings"))
     );
     // Picking something dismisses the menu; a menu still open over the program
     // it just started is nobody's idea of a launcher.
@@ -199,7 +198,7 @@ fn every_visible_row_launches_the_program_named_on_it() {
         let action = click_at(&mut shell, rect);
         assert_eq!(
             action,
-            ShellAction::Launch(std::path::PathBuf::from(&expected)),
+            ShellAction::Launch(crate::hotkeys::Launch::program(&expected)),
             "row {row}"
         );
     }
@@ -228,7 +227,7 @@ fn a_scrolled_row_launches_the_program_named_on_it() {
     let action = click_at(&mut shell, rect);
     assert_eq!(
         action,
-        ShellAction::Launch(std::path::PathBuf::from(&expected))
+        ShellAction::Launch(crate::hotkeys::Launch::program(&expected))
     );
 }
 
@@ -391,7 +390,7 @@ fn the_power_menu_offers_every_system_action_and_launches_them() {
         let action = click_at(&mut shell, rect);
         assert_eq!(
             action,
-            ShellAction::Launch(std::path::PathBuf::from(&expected)),
+            ShellAction::Launch(crate::hotkeys::Launch::program(&expected)),
             "row {row}"
         );
         // Both menus go: the machine is about to shut down behind them.
@@ -1533,34 +1532,33 @@ fn pressing_an_icon_selects_it() {
     });
 }
 
-/// **A double-click on an icon asks for the thing it names.**
+/// **A double-click on a folder icon opens the folder in the file manager.**
+///
+/// Until 2026-09-25 it asked for the folder to be *run*: the action named the
+/// icon's path as the program, and `Command::new` on a directory fails. The
+/// test that stood here asserted exactly that request, against a path that did
+/// not exist, so it passed while the thing it described could never happen.
 #[test]
-fn double_clicking_an_icon_launches_what_it_points_at() {
-    settingsfile::testing::with_scratch_config("icons-double-click", |_root| {
+fn double_clicking_a_folder_icon_opens_it_in_the_file_manager() {
+    settingsfile::testing::with_scratch_config("icons-double-click", |root| {
         let mut shell = shell_with_icons();
-        // An icon whose action is a path, since those are the ones the shell
-        // can act on: `LaunchSystem` names nothing runnable yet.
-        //
-        // Added here rather than found among the defaults. Since 2026-09-15
-        // the Home and Documents icons appear only when `HOME` is set -- they
-        // used to point at the literal `/home/user`, which is correct for a
-        // user named "user" and wrong for everyone else. A test that needs an
-        // OpenPath icon should make one rather than depend on the environment
-        // the runner happens to have.
+        // A folder that exists, since opening one is a question about the
+        // filesystem. Added here rather than found among the defaults: since
+        // 2026-09-15 Home and Documents appear only when `HOME` is set, and a
+        // test should not depend on the environment the runner has.
+        let folder = root.join("Somewhere");
+        std::fs::create_dir(&folder).expect("the scratch root is writable");
         let id = shell.icons.add_icon(
             "Somewhere",
             icons::IconType::Folder,
-            icons::IconAction::OpenPath(std::path::PathBuf::from("/somewhere")),
+            icons::IconAction::OpenPath(folder.clone()),
             40,
             40,
         );
-        let (x, y, want) = {
-            let icon = shell.icons.get_icon(id).expect("just found");
-            let icons::IconAction::OpenPath(path) = &icon.action else {
-                unreachable!("filtered above")
-            };
+        let (x, y) = {
+            let icon = shell.icons.get_icon(id).expect("just added");
             #[allow(clippy::cast_precision_loss)]
-            (icon.x as f32 + 8.0, icon.y as f32 + 8.0, path.clone())
+            (icon.x as f32 + 8.0, icon.y as f32 + 8.0)
         };
 
         let event = MouseEvent {
@@ -1570,8 +1568,194 @@ fn double_clicking_an_icon_launches_what_it_points_at() {
         };
         assert_eq!(
             shell.handle_mouse(&event),
-            ShellAction::Launch(PathBuf::from(&want)),
-            "a double-click on an icon did not ask for its path"
+            ShellAction::Launch(crate::hotkeys::Launch::opening(
+                crate::launcher::FILE_MANAGER,
+                &folder
+            )),
+            "a double-click on a folder did not open it in the file manager"
+        );
+    });
+}
+
+/// Double-click the icon `id`, through the route a real pointer takes.
+fn double_click_icon(shell: &mut DesktopShell, id: icons::IconId) -> ShellAction {
+    let (x, y) = {
+        let icon = shell.icons.get_icon(id).expect("the icon exists");
+        #[allow(clippy::cast_precision_loss)]
+        (icon.x as f32 + 8.0, icon.y as f32 + 8.0)
+    };
+    shell.handle_mouse(&MouseEvent {
+        x,
+        y,
+        kind: MouseEventKind::DoubleClick(MouseButton::Left),
+    })
+}
+
+/// The "cannot open" notices posted so far, as `(title, body)`.
+fn cannot_open_notices(shell: &DesktopShell) -> Vec<(String, String)> {
+    shell
+        .notifications
+        .notifications()
+        .iter()
+        .filter(|n| n.title.starts_with("Cannot open"))
+        .map(|n| (n.title.clone(), n.body.clone()))
+        .collect()
+}
+
+/// An icon on the desktop for `path`.
+fn icon_for(shell: &mut DesktopShell, label: &str, path: &std::path::Path) -> icons::IconId {
+    shell.icons.add_icon(
+        label,
+        icons::IconType::File,
+        icons::IconAction::OpenPath(path.to_path_buf()),
+        600,
+        400,
+    )
+}
+
+/// **A document opens in the program File Associations chose for its kind**
+/// -- the lookup the file manager makes, so the desktop and the file manager
+/// cannot disagree about what a file opens in.
+#[test]
+fn double_clicking_a_document_opens_it_in_its_chosen_program() {
+    settingsfile::testing::with_scratch_config("icons-open-document", |root| {
+        let mut doc = yamldoc::Document::new();
+        doc.set_str(&[associations::ASSOCIATIONS, "txt"], "/usr/bin/editor");
+        appearance::config::store(associations::CONFIG_NAME, &doc)
+            .expect("the scratch config directory is writable");
+        let file = root.join("notes.TXT");
+        std::fs::write(&file, b"hello").expect("the scratch root is writable");
+
+        let mut shell = shell_with_icons();
+        let id = icon_for(&mut shell, "notes", &file);
+        assert_eq!(
+            double_click_icon(&mut shell, id),
+            ShellAction::Launch(crate::hotkeys::Launch::opening("/usr/bin/editor", &file)),
+            "an upper-case extension is the same kind of file"
+        );
+        assert!(cannot_open_notices(&shell).is_empty());
+    });
+}
+
+/// **A document nothing is set to open says so**, and points at where to
+/// choose something, rather than doing nothing the user can see.
+#[test]
+fn a_document_nothing_opens_says_so() {
+    settingsfile::testing::with_scratch_config("icons-open-nothing", |root| {
+        let file = root.join("mystery.xyz");
+        std::fs::write(&file, b"?").expect("the scratch root is writable");
+        let mut shell = shell_with_icons();
+        let id = icon_for(&mut shell, "mystery", &file);
+
+        assert_eq!(double_click_icon(&mut shell, id), ShellAction::Consumed);
+        let notices = cannot_open_notices(&shell);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].0, "Cannot open mystery");
+        assert!(notices[0].1.contains("File Associations"), "{notices:?}");
+    });
+}
+
+/// **An icon whose file has gone says so**, naming the path.
+#[test]
+fn an_icon_whose_file_is_gone_says_so() {
+    settingsfile::testing::with_scratch_config("icons-open-missing", |root| {
+        let gone = root.join("gone.txt");
+        let mut shell = shell_with_icons();
+        let id = icon_for(&mut shell, "gone", &gone);
+
+        assert_eq!(double_click_icon(&mut shell, id), ShellAction::Consumed);
+        let notices = cannot_open_notices(&shell);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].1.contains("is not there any more"),
+            "{notices:?}"
+        );
+        assert!(notices[0].1.contains("gone.txt"), "{notices:?}");
+    });
+}
+
+/// **"This PC" opens the machine's files, from the top, in the file manager.**
+/// It used to do nothing: nothing said what its destination was.
+#[test]
+fn this_pc_opens_the_root_in_the_file_manager() {
+    settingsfile::testing::with_scratch_config("icons-open-this-pc", |_root| {
+        let mut shell = shell_with_icons();
+        let id = shell
+            .icons
+            .icon_ids()
+            .into_iter()
+            .find(|id| {
+                shell
+                    .icons
+                    .get_icon(*id)
+                    .is_some_and(|i| i.label == "This PC")
+            })
+            .expect("This PC is a default icon");
+
+        assert_eq!(
+            double_click_icon(&mut shell, id),
+            ShellAction::Launch(crate::hotkeys::Launch::opening(
+                launcher::FILE_MANAGER,
+                std::path::Path::new("/")
+            ))
+        );
+    });
+}
+
+/// **The Recycle Bin says it cannot show its contents yet**, rather than
+/// opening its storage -- internal folders named by ids -- or nothing at all.
+#[test]
+fn the_recycle_bin_says_it_cannot_show_its_contents_yet() {
+    settingsfile::testing::with_scratch_config("icons-open-bin", |_root| {
+        let mut shell = shell_with_icons();
+        let id = shell
+            .icons
+            .icon_ids()
+            .into_iter()
+            .find(|id| {
+                shell
+                    .icons
+                    .get_icon(*id)
+                    .is_some_and(|i| i.label == "Recycle Bin")
+            })
+            .expect("the Recycle Bin is a default icon");
+
+        assert_eq!(double_click_icon(&mut shell, id), ShellAction::Consumed);
+        let notices = cannot_open_notices(&shell);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].0, "Cannot open Recycle Bin");
+    });
+}
+
+/// **A program on the desktop runs** -- what a program shortcut is. And a
+/// program whose kind *has* a chosen opener is opened by it, not run: a disk
+/// that marks every file executable must not turn every document into a
+/// program.
+#[cfg(unix)]
+#[test]
+fn a_program_on_the_desktop_runs_and_a_document_marked_executable_does_not() {
+    use std::os::unix::fs::PermissionsExt;
+    settingsfile::testing::with_scratch_config("icons-open-program", |root| {
+        let tool = root.join("tool");
+        std::fs::write(&tool, b"#!/bin/sh\n").expect("the scratch root is writable");
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let mut doc = yamldoc::Document::new();
+        doc.set_str(&[associations::ASSOCIATIONS, "txt"], "/usr/bin/editor");
+        appearance::config::store(associations::CONFIG_NAME, &doc).expect("store");
+        let text = root.join("readme.txt");
+        std::fs::write(&text, b"hi").expect("write");
+        std::fs::set_permissions(&text, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+
+        let mut shell = shell_with_icons();
+        let id = icon_for(&mut shell, "tool", &tool);
+        assert_eq!(
+            double_click_icon(&mut shell, id),
+            ShellAction::Launch(crate::hotkeys::Launch::program(&tool))
+        );
+        let id = icon_for(&mut shell, "readme", &text);
+        assert_eq!(
+            double_click_icon(&mut shell, id),
+            ShellAction::Launch(crate::hotkeys::Launch::opening("/usr/bin/editor", &text))
         );
     });
 }

@@ -41,11 +41,16 @@
 //! Stated plainly, because assuming otherwise is how wrong code gets written
 //! against this.
 //!
-//! - **A launch has nowhere to go.** [`ShellAction::Launch`] names a program and
-//!   [`session::ShellSession`] queues it, but nothing starts a process: policy
-//!   about *how* a program starts belongs to the process server, not to the
-//!   window manager. See `known-issues.md`
-//!   `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`.
+//! - **A launch is started by this crate's binary, not by a process server.**
+//!   [`ShellAction::Launch`] names a program and its arguments,
+//!   [`session::ShellSession`] queues it, and the `desktop` binary spawns it
+//!   (`drain` in `main.rs`). That spawn inherits the shell's own environment
+//!   and privileges, which is acceptable on a development host and not on
+//!   SlateOS: policy about *how* a program starts belongs to the process
+//!   server, and nothing here has a channel to one yet. See `known-issues.md`
+//!   `TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH`. (This bullet said until
+//!   2026-09-25 that nothing started a process at all, which stopped being
+//!   true on 2026-09-13.)
 //! - **Edge-drag tiling is not this crate's.** Super+Z opens the zone chooser
 //!   and a click in it tiles the focused window; the *other* way every desktop
 //!   offers the same thing — drag a window to an edge and drop — lives in the
@@ -53,12 +58,12 @@
 //!   without a round trip. The rules are `guiremote::zones::drop_at`, shared by
 //!   both. The shell used to carry its own copy of them with no drag to fire on
 //!   and no caller; it was deleted rather than kept as a second opinion.
-//! - **Theme support reaches five surfaces, not the desktop.** The appearance
-//!   settings are read and honoured by [`DesktopShell`]'s own render methods.
-//!   The 49 modules beside it — every settings page, dialog and OSD — each hold
-//!   a private hardcoded palette and ignore the user's choice entirely. See
-//!   `known-issues.md`
-//!   `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`.
+//!
+//! (A third bullet here said the 49 modules beside [`DesktopShell`] each drew
+//! from a private hardcoded palette and ignored the user's theme. That was
+//! fixed on 2026-08-24 --
+//! `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE` -- and
+//! the bullet outlived it by a month.)
 
 // The desktop shell is a widget-heavy crate: render/draw functions
 // commonly take many positional parameters (font, theme, geometry,
@@ -720,14 +725,18 @@ pub enum ShellAction {
     Pass,
     /// The shell handled the event; no window should see it.
     Consumed,
-    /// Start the program at this path. Implies [`Consumed`](Self::Consumed).
+    /// Start a program, with its arguments. Implies
+    /// [`Consumed`](Self::Consumed).
     ///
-    /// A `PathBuf`, not a `String`, because it names a file: our filenames
-    /// admit every byte but `/` and NUL, so a program the user *pointed at*
-    /// in the Run box's file chooser may have no UTF-8 spelling, and a lossy
-    /// one would name a different program or none at all. Rows whose path
-    /// came from a text config are simply converted at the edge.
-    Launch(PathBuf),
+    /// A [`hotkeys::Launch`], program and arguments, rather than a bare path:
+    /// until 2026-09-25 this carried only a program, so the one thing a desktop
+    /// icon exists for -- opening a folder or a document, which means starting
+    /// a program *with that path* -- could not be said at all, and a folder
+    /// icon asked the operating system to execute the folder. The program is a
+    /// `PathBuf` and each argument an `OsString`, for the reason given on
+    /// `Launch`: a program the user *pointed at* may have no UTF-8 spelling,
+    /// and a lossy one would name a different program or none.
+    Launch(hotkeys::Launch),
     /// Ask the compositor to act on a window the shell does not own. Implies
     /// [`Consumed`](Self::Consumed).
     ///
@@ -748,6 +757,18 @@ pub enum ShellAction {
     /// — the window closed between the list the button was drawn from and the
     /// click — needs no undo.
     Control(ShellRequest),
+}
+
+impl ShellAction {
+    /// Whether the shell did anything with the event: everything but
+    /// [`Pass`](Self::Pass). The question a caller that only repaints on a
+    /// change asks, and the one [`DesktopShell::activate_desktop_menu_item`]
+    /// used to answer with a `bool` before one of its items could start a
+    /// program.
+    #[must_use]
+    pub const fn changed(&self) -> bool {
+        !matches!(self, Self::Pass)
+    }
 }
 
 /// Something the shell wants done to a window it does not own.
@@ -1212,6 +1233,10 @@ pub struct DesktopShell {
     /// pointer is over the menu, which is drawn *on top of* the widget, so a
     /// second hit test would answer about wherever the menu happens to sit.
     menu_widget: Option<WidgetInstanceId>,
+    /// The icon the open menu is about, if it was opened over one -- held for
+    /// the reason `menu_widget` is: by the time an item is chosen the pointer
+    /// is over the menu, not the icon.
+    menu_icon: Option<icons::IconId>,
     /// The widget being dragged, and where inside it the pointer took hold.
     ///
     /// The offset is what stops a drag snapping the widget's corner to the
@@ -1659,6 +1684,22 @@ const fn icon_button(button: MouseButton) -> icons::MouseButton {
     }
 }
 
+/// Whether a file may be run as a program: any of its execute bits set.
+#[cfg(unix)]
+fn is_executable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    (meta.permissions().mode() & 0o111) != 0
+}
+
+/// The development host's answer. SlateOS is `target-family = "unix"`, so
+/// this is only ever asked on a machine none of whose programs are
+/// SlateOS's, and "no" sends such a file to the "nothing opens it" notice
+/// rather than to a program it was never built to be.
+#[cfg(not(unix))]
+fn is_executable(_meta: &std::fs::Metadata) -> bool {
+    false
+}
+
 impl DesktopShell {
     pub fn new(screen_width: u32, screen_height: u32) -> Self {
         let mut shell = Self {
@@ -1707,6 +1748,7 @@ impl DesktopShell {
             icons_dirty: false,
             widgets: DesktopWidgetManager::new(),
             menu_widget: None,
+            menu_icon: None,
             widget_drag: None,
             widgets_dirty: false,
             appearance_watch: config::Watcher::new(appearance::CONFIG_NAME),
@@ -2748,7 +2790,9 @@ impl DesktopShell {
             // program is the part only the caller can do.
             // `PathBuf::from` at the edge: a notification's path comes from
             // its sender as text, so this is where text becomes a path.
-            (ShellAction::Consumed, Some(path)) => ShellAction::Launch(PathBuf::from(path)),
+            (ShellAction::Consumed, Some(path)) => {
+                ShellAction::Launch(hotkeys::Launch::program(PathBuf::from(path)))
+            }
             (action, _) => action,
         }
     }
@@ -2768,7 +2812,12 @@ impl DesktopShell {
                     match self.desktop_menu.handle_click(event.x, event.y) {
                         Some(id) => {
                             self.desktop_menu.hide();
-                            self.activate_desktop_menu_item(id);
+                            // An icon's Open starts a program; every other
+                            // item has already done its work.
+                            if let ShellAction::Launch(launch) = self.activate_desktop_menu_item(id)
+                            {
+                                return ShellAction::Launch(launch);
+                            }
                         }
                         // A press that named no item: on the panel's own
                         // padding, or outside it. `handle_click` cannot tell
@@ -2933,9 +2982,13 @@ impl DesktopShell {
             // press reaches at most one button, and only the OK button executes,
             // so the drained list holds at most one path. The keyboard path
             // returns the whole `Vec` because `HotkeyOutcome` can carry one;
-            // `ShellAction::Launch` names a single program and cannot.
-            if let Some(path) = self.drain_run_dialog().into_iter().next() {
-                return ShellAction::Launch(path);
+            // `ShellAction::Launch` names a single launch and cannot. A request
+            // that opened nothing -- a path whose kind nothing opens -- has
+            // already said so in a notification.
+            if let Some(request) = self.drain_run_dialog().into_iter().next() {
+                return self
+                    .run_request(request)
+                    .map_or(ShellAction::Consumed, ShellAction::Launch);
             }
             if handled == EventResult::Consumed {
                 return ShellAction::Consumed;
@@ -3282,7 +3335,7 @@ impl DesktopShell {
                 match path {
                     Some(path) => {
                         self.close_start_menu();
-                        ShellAction::Launch(path)
+                        ShellAction::Launch(hotkeys::Launch::program(path))
                     }
                     None => ShellAction::Consumed,
                 }
@@ -3303,7 +3356,7 @@ impl DesktopShell {
                 match path {
                     Some(path) => {
                         self.close_start_menu();
-                        ShellAction::Launch(path)
+                        ShellAction::Launch(hotkeys::Launch::program(path))
                     }
                     None => ShellAction::Consumed,
                 }
@@ -4185,10 +4238,8 @@ impl DesktopShell {
                 Some(Some(MenuAction::Selected(id))) => {
                     let target = self.pin_menu.as_ref().map(|(_, target)| *target);
                     self.pin_menu = None;
-                    if id == Self::MENU_PIN_TOGGLE
-                        && let Some(target) = target
-                    {
-                        self.toggle_pin(target);
+                    if let Some(target) = target {
+                        self.activate_pin_menu_item(id, target);
                     }
                 }
                 Some(Some(MenuAction::Closed)) => self.pin_menu = None,
@@ -4231,8 +4282,10 @@ impl DesktopShell {
             return match self.desktop_menu.handle_key(key) {
                 Some(MenuAction::Selected(id)) => {
                     self.desktop_menu.hide();
-                    self.activate_desktop_menu_item(id);
-                    HotkeyOutcome::consumed()
+                    match self.activate_desktop_menu_item(id) {
+                        ShellAction::Launch(launch) => HotkeyOutcome::start(vec![launch]),
+                        _ => HotkeyOutcome::consumed(),
+                    }
                 }
                 Some(MenuAction::Closed) => {
                     self.desktop_menu.hide();
@@ -4731,25 +4784,55 @@ impl DesktopShell {
         // a press the dialog had no meaning for is still not the desktop's while
         // the dialog is up.
         let _ = self.run_dialog.handle_key_event(key);
-        // Wrapped with no arguments, because that is what this box produces:
-        // what the user typed is taken as the whole name of one program.
-        // Splitting it would need a quoting rule, and inventing one silently
-        // would make `my program` two words to the shell and one to the
-        // filesystem. Whether the Run box should accept arguments at all is a
-        // real question and a separate one; it is not settled by a conversion.
+        // Each request opened or run by the one rule the OK button uses. This
+        // comment used to explain why the box took no arguments -- a quoting
+        // rule invented silently "would make `my program` two words to the
+        // shell and one to the filesystem". The rule is now stated
+        // (`run_dialog::split_words`, design-decisions.md §870), and the
+        // whole line is tried as a path before anything is split, which is
+        // what keeps `my program` one thing when it names one.
+        let requests = self.drain_run_dialog();
         HotkeyOutcome::start(
-            self.drain_run_dialog()
+            requests
                 .into_iter()
-                .map(|program| hotkeys::Launch {
-                    program,
-                    args: Vec::new(),
-                })
+                .filter_map(|request| self.run_request(request))
                 .collect(),
         )
     }
 
+    /// Carry out one thing the Run box was asked for, the way Windows' Run
+    /// box does -- which `design.txt` asks this one to be like:
+    ///
+    /// - if the **whole line is an absolute path that exists**, open it by
+    ///   the rules a double-click on the desktop uses
+    ///   ([`open_path`](Self::open_path)): a folder in the file manager, a
+    ///   document in its program, a program run. Tried first, so a path with
+    ///   a space in it needs no quotes when it is the whole line;
+    /// - otherwise **run the first word with the rest as its arguments**,
+    ///   split by [`run_dialog::split_words`].
+    ///
+    /// `None` when nothing is to start: a path whose kind nothing opens (and
+    /// which has said so in a notification), or a line with no words.
+    fn run_request(&mut self, request: run_dialog::RunRequest) -> Option<hotkeys::Launch> {
+        let whole = Path::new(&request.whole);
+        if whole.is_absolute() && std::fs::metadata(whole).is_ok() {
+            let label = whole.display().to_string();
+            return match self.open_path(whole, &label) {
+                ShellAction::Launch(launch) => Some(launch),
+                _ => None,
+            };
+        }
+        let mut words = request.words.into_iter();
+        let program = words.next()?;
+        Some(hotkeys::Launch {
+            program: PathBuf::from(program),
+            args: words.collect(),
+        })
+    }
+
     /// Answer whatever the Run box has asked for since it was last emptied, and
-    /// report the programs it wants started.
+    /// hand back what it was asked to run or open (see
+    /// [`run_request`](Self::run_request)).
     ///
     /// `Cancel` and `Closed` need no answer — the dialog has already hidden
     /// itself by the time it reports them — but they must still be drained, or
@@ -4768,11 +4851,11 @@ impl DesktopShell {
     /// opening the chooser needs `&mut self` and a closure passed to `filter_map`
     /// would be holding a borrow of it. The drained `Vec` is owned, so the loop
     /// borrows nothing.
-    fn drain_run_dialog(&mut self) -> Vec<PathBuf> {
+    fn drain_run_dialog(&mut self) -> Vec<run_dialog::RunRequest> {
         let mut launches = Vec::new();
         for event in self.run_dialog.drain_events() {
             match event {
-                run_dialog::RunDialogEvent::Execute(command) => launches.push(command),
+                run_dialog::RunDialogEvent::Execute(request) => launches.push(request),
                 run_dialog::RunDialogEvent::Browse => self.open_run_browser(),
                 // No answer needed — the dialog has already hidden itself by the
                 // time it reports these — but they must still be drained, or the
@@ -5765,14 +5848,24 @@ impl DesktopShell {
         } else {
             "Pin to taskbar"
         };
-        let items = vec![guitk::menu::MenuItem::Action {
-            id: Self::MENU_PIN_TOGGLE,
-            label: label.to_string(),
-            shortcut: None,
-            icon: None,
-            enabled: true,
-            checked: None,
-        }];
+        let items = vec![
+            guitk::menu::MenuItem::Action {
+                id: Self::MENU_PIN_TOGGLE,
+                label: label.to_string(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            },
+            guitk::menu::MenuItem::Action {
+                id: Self::MENU_ADD_TO_DESKTOP,
+                label: "Add to desktop".to_string(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            },
+        ];
         let mut menu = guitk::menu::ContextMenu::new(items);
         // The real screen, not the toolkit's assumed one -- the same reason
         // the overflow list passes it: this opens from wherever the start menu
@@ -5794,10 +5887,46 @@ impl DesktopShell {
             return ShellAction::Consumed;
         };
         self.pin_menu = None;
-        if id == Self::MENU_PIN_TOGGLE {
-            self.toggle_pin(target);
-        }
+        self.activate_pin_menu_item(id, target);
         ShellAction::Consumed
+    }
+
+    /// One row of the pin menu, chosen by click or by key.
+    fn activate_pin_menu_item(&mut self, id: MenuItemId, target: PinTarget) {
+        match id {
+            Self::MENU_PIN_TOGGLE => self.toggle_pin(target),
+            Self::MENU_ADD_TO_DESKTOP => self.add_to_desktop(target),
+            _ => {}
+        }
+    }
+
+    /// Put a shortcut to the program `target` names on the desktop -- the pin
+    /// menu's "Add to desktop" -- or select the one already there.
+    ///
+    /// Named as the start menu or the taskbar names it, and saved with the
+    /// layout, so it is still there after a login.
+    fn add_to_desktop(&mut self, target: PinTarget) {
+        let Some(exec) = self.exec_of(target) else {
+            return;
+        };
+        let name = match target {
+            PinTarget::StartMenuRow(index) => self
+                .start_menu_entries()
+                .get(index)
+                .map(|entry| entry.name.clone()),
+            PinTarget::Pinned(index) => self
+                .taskbar
+                .pinned_apps()
+                .get(index)
+                .map(|app| app.display_name.clone()),
+        }
+        .unwrap_or_else(|| exec.clone());
+        let (_, added) = self.icons.add_shortcut(
+            &name,
+            icons::IconType::Executable,
+            icons::IconAction::OpenPath(PathBuf::from(&exec)),
+        );
+        self.icons_dirty |= added;
     }
 
     /// The executable a pin menu target names, if it still names one.
@@ -6018,7 +6147,7 @@ impl DesktopShell {
             return ShellAction::Consumed;
         }
         exec.map_or(ShellAction::Consumed, |exec| {
-            ShellAction::Launch(PathBuf::from(exec))
+            ShellAction::Launch(hotkeys::Launch::program(exec))
         })
     }
 
@@ -6722,9 +6851,11 @@ impl DesktopShell {
             .as_secs()
     }
 
-    /// The pin menu's only row. Numbered well clear of the desktop menu's
+    /// The pin menu's first row. Numbered well clear of the desktop menu's
     /// ids, which are a different menu with a different handler.
     const MENU_PIN_TOGGLE: u64 = 900;
+    /// The pin menu's "Add to desktop".
+    const MENU_ADD_TO_DESKTOP: u64 = 901;
 
     // The desktop menu's item ids. Stable numbers rather than positions, so
     // inserting an item cannot silently reassign what the ones below it do;
@@ -6739,6 +6870,10 @@ impl DesktopShell {
     const MENU_SORT_BY_NAME: u64 = 8;
     const MENU_ADD_WIDGET_SUBMENU: u64 = 100;
     const MENU_VIEW_SUBMENU: u64 = 101;
+    // An icon's own menu, opened by a right-click on the icon.
+    const MENU_ICON_OPEN: u64 = 300;
+    const MENU_ICON_PIN: u64 = 301;
+    const MENU_ICON_REMOVE: u64 = 302;
     /// The first icon size's id; the others follow in
     /// [`IconSize::ALL`](appearance::IconSize::ALL)'s order. A block of its
     /// own, far from the rest, so a size added to the setting cannot land on
@@ -6830,6 +6965,66 @@ impl DesktopShell {
             MenuItem::Separator,
             item(Self::MENU_REMOVE_WIDGETS, "Remove all widgets", None),
         ]
+    }
+
+    /// The items for a right-click on the icon `id`.
+    ///
+    /// "Open" always; "Pin to taskbar" (or "Unpin") for a program; "Remove
+    /// from desktop" when the selection holds anything the user added -- the
+    /// defaults are not the user's to remove, and offering to would be a door
+    /// that does nothing. Each label says the *action*, not the state, the
+    /// rule the pin menu set.
+    fn icon_menu_items(&self, id: icons::IconId) -> Vec<MenuItem> {
+        let item = |id: u64, label: &str| MenuItem::Action {
+            id,
+            label: label.to_string(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: None,
+        };
+        let mut items = vec![item(Self::MENU_ICON_OPEN, "Open")];
+        let mut more = Vec::new();
+        if let Some(exec) = self.icon_program(id) {
+            more.push(item(
+                Self::MENU_ICON_PIN,
+                if self.is_pinned(&exec) {
+                    "Unpin from taskbar"
+                } else {
+                    "Pin to taskbar"
+                },
+            ));
+        }
+        let any_added = self
+            .icons
+            .selected_ids()
+            .into_iter()
+            .chain(core::iter::once(id))
+            .any(|each| self.icons.get_icon(each).is_some_and(|icon| icon.added));
+        if any_added {
+            more.push(item(Self::MENU_ICON_REMOVE, "Remove from desktop"));
+        }
+        if !more.is_empty() {
+            items.push(MenuItem::Separator);
+            items.extend(more);
+        }
+        items
+    }
+
+    /// The program an icon starts, as the taskbar spells one, if it is a
+    /// program: an executable that the icon opens by path. A folder or a
+    /// document is not something a taskbar button can start.
+    fn icon_program(&self, id: icons::IconId) -> Option<String> {
+        let icon = self.icons.get_icon(id)?;
+        match (&icon.icon_type, &icon.action) {
+            (icons::IconType::Executable, icons::IconAction::OpenPath(path)) => {
+                // The pinned list is text (`taskbar.yaml`), so a program whose
+                // path is not text cannot be pinned -- refused, not flattened
+                // into a path that names a different program.
+                path.to_str().map(str::to_string)
+            }
+            _ => None,
+        }
     }
 
     /// The items for a right-click *on a widget*.
@@ -7145,8 +7340,24 @@ impl DesktopShell {
     pub fn open_desktop_menu(&mut self, x: f32, y: f32) {
         self.dismiss_popups();
         self.menu_widget = self.widgets.hit_test(x, y);
+        // Widgets are drawn over the icons, so a widget under the pointer is
+        // what was clicked even when an icon lies beneath it.
+        self.menu_icon = if self.menu_widget.is_some() {
+            None
+        } else {
+            self.icons.icon_at(x, y)
+        };
         let items = if self.menu_widget.is_some() {
             Self::widget_menu_items()
+        } else if let Some(id) = self.menu_icon {
+            // A right-click on an icon that is not selected selects it alone,
+            // as a left click would: the menu is about what is selected, and
+            // a menu about an icon the user cannot see is selected is a menu
+            // about nothing they chose.
+            if !self.icons.selected_ids().contains(&id) {
+                self.icons.select_single(id);
+            }
+            self.icon_menu_items(id)
         } else {
             Self::desktop_menu_items(self.appearance.icon_size, self.icons.arrangement())
         };
@@ -7187,7 +7398,7 @@ impl DesktopShell {
         self.widgets.move_widget(id, pos)
     }
 
-    /// Act on a desktop-menu selection. Returns whether anything changed.
+    /// Act on a desktop-menu selection.
     ///
     /// Public because a click is not the only way to choose an item: the
     /// keyboard path below routes `MenuAction::Selected` here too, and a future
@@ -7195,13 +7406,79 @@ impl DesktopShell {
     /// the same door. It takes the id rather than a position for the reason the
     /// ids are constants — a position is only meaningful next to the item list
     /// it indexes.
-    pub fn activate_desktop_menu_item(&mut self, id: MenuItemId) -> bool {
-        if let Some(changed) = self.activate_icon_menu_item(id) {
-            return changed;
+    ///
+    /// Answers a [`ShellAction`] rather than the `bool` it used to, because
+    /// an icon's "Open" starts a program and a `bool` has nowhere to put one:
+    /// [`Pass`](ShellAction::Pass) is "nothing changed",
+    /// [`Consumed`](ShellAction::Consumed) "something did", and a
+    /// [`Launch`](ShellAction::Launch) is what to start.
+    /// [`ShellAction::changed`] is the old `bool`.
+    pub fn activate_desktop_menu_item(&mut self, id: MenuItemId) -> ShellAction {
+        if let Some(action) = self.activate_icon_context_item(id) {
+            return action;
         }
-        let changed = self.activate_desktop_menu_item_inner(id);
-        self.widgets_dirty |= changed;
-        changed
+        let changed = match self.activate_icon_menu_item(id) {
+            Some(changed) => changed,
+            None => {
+                let changed = self.activate_desktop_menu_item_inner(id);
+                self.widgets_dirty |= changed;
+                changed
+            }
+        };
+        if changed {
+            ShellAction::Consumed
+        } else {
+            ShellAction::Pass
+        }
+    }
+
+    /// The items of an icon's own menu. `None` for an id that is not one of
+    /// them.
+    ///
+    /// All three act on `menu_icon`, the icon the menu was opened over, and
+    /// Remove on the whole selection, as Delete does.
+    fn activate_icon_context_item(&mut self, id: MenuItemId) -> Option<ShellAction> {
+        if !matches!(
+            id,
+            Self::MENU_ICON_OPEN | Self::MENU_ICON_PIN | Self::MENU_ICON_REMOVE
+        ) {
+            return None;
+        }
+        let Some(icon) = self.menu_icon.take() else {
+            // The icon went while the menu was open -- a layout reloaded
+            // under it. There is nothing left to act on.
+            return Some(ShellAction::Pass);
+        };
+        Some(match id {
+            Self::MENU_ICON_OPEN => match self.icons.get_icon(icon).map(|i| i.action.clone()) {
+                Some(action) => self.open_icon(icon, &action),
+                None => ShellAction::Pass,
+            },
+            Self::MENU_ICON_PIN => match self.icon_program(icon) {
+                Some(exec) => {
+                    if self.is_pinned(&exec) {
+                        self.unpin_app(&exec);
+                    } else {
+                        let name = self
+                            .icons
+                            .get_icon(icon)
+                            .map_or_else(|| exec.clone(), |i| i.label.clone());
+                        self.pin_app(&exec, &name);
+                    }
+                    ShellAction::Consumed
+                }
+                None => ShellAction::Pass,
+            },
+            _ => {
+                let selected = self.icons.selected_ids();
+                if self.icons.remove_added(&selected) > 0 {
+                    self.icons_dirty = true;
+                    ShellAction::Consumed
+                } else {
+                    ShellAction::Pass
+                }
+            }
+        })
     }
 
     /// The items about the desktop's icons: the View submenu and "Sort by
@@ -7366,24 +7643,190 @@ impl DesktopShell {
             return self.handle_press(x, y, button);
         }
         match self.icons.handle_double_click(x, y) {
-            icons::IconEvent::Activate(_, icons::IconAction::OpenPath(path)) => {
-                // Launched as the path the icon holds. This was
-                // `PathBuf::from(path)` over a `String`, which re-parsed text
-                // that had already lost any byte the home directory's name
-                // could not spell.
-                ShellAction::Launch(path)
-            }
-            // `LaunchSystem` and `Custom` name a thing this shell has no way to
-            // start yet: there is no registry mapping "recycle-bin" to anything
-            // runnable. Consumed rather than passed on, because the click did
-            // land on an icon and handing it to whatever is underneath would be
-            // worse than doing nothing visible.
-            icons::IconEvent::Activate(..) => ShellAction::Consumed,
+            icons::IconEvent::Activate(id, action) => self.open_icon(id, &action),
             // A double-click on empty desktop. The first click already went
             // through `handle_press`, so the layer's state is settled either
             // way and there is nothing further to do.
             _ => ShellAction::Consumed,
         }
+    }
+
+    /// A key pressed while the desktop itself has the keyboard -- the bare
+    /// desktop was the last thing clicked -- that no shortcut and no open
+    /// surface took. These are the icons' keys:
+    ///
+    /// - **Enter** opens the selected icon, when exactly one is selected;
+    /// - **Ctrl+A** selects every icon, **Escape** selects none;
+    /// - the **arrow keys** move the selection to the nearest icon that way.
+    ///
+    /// The session calls this only for a key that arrived on the desktop's own
+    /// surface, so Enter typed into the taskbar's search, say, never opens an
+    /// icon. Until 2026-09-25 nothing called the icon layer's key handler at
+    /// all, and every one of these keys did nothing on the desktop.
+    ///
+    /// - **Delete** takes the selected shortcuts the user added off the
+    ///   desktop; the defaults stay, as they would come back at the next login.
+    ///
+    /// F2 reaches the layer and is not acted on yet: there is no rename.
+    /// `Pass` for any key that changed nothing, so the frame is not repainted
+    /// for it.
+    pub fn handle_desktop_key(&mut self, key: &KeyEvent) -> ShellAction {
+        if !key.pressed {
+            return ShellAction::Pass;
+        }
+        let ctrl = key.modifiers.ctrl;
+        let desktop_key = match key.key {
+            Key::Enter => icons::DesktopKey::Enter,
+            Key::Escape => icons::DesktopKey::Escape,
+            Key::Delete => icons::DesktopKey::Delete,
+            Key::F2 => icons::DesktopKey::F2,
+            Key::A if ctrl => icons::DesktopKey::SelectAll,
+            Key::Up => icons::DesktopKey::Arrow(icons::Direction::Up),
+            Key::Down => icons::DesktopKey::Arrow(icons::Direction::Down),
+            Key::Left => icons::DesktopKey::Arrow(icons::Direction::Left),
+            Key::Right => icons::DesktopKey::Arrow(icons::Direction::Right),
+            _ => return ShellAction::Pass,
+        };
+        let before = self.icons.selected_ids();
+        match self.icons.handle_key(desktop_key, ctrl) {
+            icons::IconEvent::Activate(id, action) => self.open_icon(id, &action),
+            icons::IconEvent::Delete(ids) if self.icons.remove_added(&ids) > 0 => {
+                self.icons_dirty = true;
+                ShellAction::Consumed
+            }
+            _ if self.icons.selected_ids() != before => ShellAction::Consumed,
+            _ => ShellAction::Pass,
+        }
+    }
+
+    /// Open what a desktop icon names: the double-click, and Enter.
+    ///
+    /// Until 2026-09-25 this handed an icon's path to be *executed*, which is
+    /// right for a program and wrong for everything else on a desktop: the
+    /// Documents and Home icons asked the operating system to run a folder,
+    /// and "This PC" and "Recycle Bin" did nothing at all, because nothing
+    /// said what their destinations were. See [`open_path`](Self::open_path)
+    /// for the rules, which are the file manager's.
+    fn open_icon(&mut self, id: icons::IconId, action: &icons::IconAction) -> ShellAction {
+        let label = self
+            .icons
+            .get_icon(id)
+            .map_or_else(String::new, |icon| icon.label.clone());
+        match action {
+            icons::IconAction::OpenPath(path) => self.open_path(path, &label),
+            icons::IconAction::LaunchSystem(what) if what == icons::THIS_PC => {
+                // The machine's files, from the top: the nearest thing this
+                // system has to a drive list, and a destination that exists
+                // on every install.
+                self.open_path(Path::new("/"), &label)
+            }
+            icons::IconAction::LaunchSystem(what) if what == icons::RECYCLE_BIN => {
+                // The bin exists -- the file manager moves files into it and
+                // restores them -- but nothing can show what is in it: the
+                // file manager has no view of it, and pointing it at the bin's
+                // storage would list internal entry folders named by ids.
+                // Said rather than faked. `requests/c-e-the-recycle-bin-icon-
+                // has-nowhere-to-open.md` asks lane E for the view.
+                self.say_cannot_open(
+                    &label,
+                    "Nothing can show the recycle bin's contents yet. What is \
+                     in it is kept, in the .recycle folder in your home \
+                     folder, until something can.",
+                );
+                ShellAction::Consumed
+            }
+            // A destination this build does not know -- a layout written by a
+            // newer desktop -- or an application-defined action with no
+            // handler here. Consumed rather than passed on: the click did land
+            // on an icon, and handing it to whatever is underneath would be
+            // worse than saying nothing.
+            icons::IconAction::LaunchSystem(_) | icons::IconAction::Custom(_) => {
+                self.say_cannot_open(&label, "This desktop does not know what it opens.");
+                ShellAction::Consumed
+            }
+        }
+    }
+
+    /// Open `path` the way the file manager opens what is double-clicked in
+    /// it, so that the desktop and the file manager cannot disagree about
+    /// what a file opens in:
+    ///
+    /// - a **folder** opens in the file manager ([`launcher::FILE_MANAGER`]);
+    /// - a **file** whose kind has a program chosen for it in File
+    ///   Associations opens in that program, the association read afresh
+    ///   on every open as the file manager does -- a choice made a moment ago
+    ///   in another window counts;
+    /// - a file with no such program that is itself **executable** runs --
+    ///   which is what a program shortcut on the desktop is;
+    /// - anything else says why it cannot be opened, in a notification,
+    ///   rather than doing nothing where the user cannot see why.
+    ///
+    /// The association comes first so that a document on a disk that marks
+    /// every file executable -- a USB stick, most network shares -- opens in
+    /// its program rather than being run.
+    fn open_path(&mut self, path: &Path, label: &str) -> ShellAction {
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(err) => {
+                let why = if err.kind() == std::io::ErrorKind::NotFound {
+                    format!("{} is not there any more.", path.display())
+                } else {
+                    format!("{} cannot be read: {err}", path.display())
+                };
+                self.say_cannot_open(label, &why);
+                return ShellAction::Consumed;
+            }
+        };
+        if meta.is_dir() {
+            return ShellAction::Launch(hotkeys::Launch::opening(launcher::FILE_MANAGER, path));
+        }
+        // `to_str` rather than bytes, as the file manager does: associations
+        // are keys in a YAML document, so an extension that is not text could
+        // never match one, and answering "none" is a refusal rather than a
+        // lossy match.
+        let chosen = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(|ext| {
+                associations::program_for(&config::load(associations::CONFIG_NAME), ext)
+            });
+        if let Some(program) = chosen {
+            return ShellAction::Launch(hotkeys::Launch::opening(program, path));
+        }
+        if is_executable(&meta) {
+            return ShellAction::Launch(hotkeys::Launch::program(path));
+        }
+        self.say_cannot_open(
+            label,
+            "Nothing is set to open files of this kind. Choose a program for it \
+             in File Associations.",
+        );
+        ShellAction::Consumed
+    }
+
+    /// Tell the user that `what` could not be opened, and why.
+    ///
+    /// A notification rather than nothing: a double-click that visibly does
+    /// nothing is the one outcome a user cannot learn anything from. The pane
+    /// is not opened -- this explains, it does not interrupt.
+    fn say_cannot_open(&mut self, what: &str, why: &str) {
+        let title = if what.is_empty() {
+            "Cannot open this".to_string()
+        } else {
+            format!("Cannot open {what}")
+        };
+        // The id is discarded: this is a message, not something to update.
+        let _ = self.notify(notif_pane::Notification {
+            id: 0,
+            app_name: "Desktop".to_string(),
+            title,
+            body: why.to_string(),
+            timestamp: Self::unix_now(),
+            priority: notif_pane::NotifPriority::Normal,
+            read: false,
+            action: None,
+            silent: false,
+        });
     }
 
     /// Whether any of the shell's own surfaces is open over the desktop.
@@ -10528,7 +10971,7 @@ mod window_manager_tests {
 )]
 mod overview_wiring_tests {
     use super::{
-        DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, PathBuf,
+        DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
         RenderTree, ShellAction, ShellControlAction, ShellRequest, TRAY_OVERFLOW_GLYPH, WindowId,
         WindowInfo, WindowList, focus_assist, notif_pane, overview, tray_dnd,
     };
@@ -12668,7 +13111,7 @@ mod overview_wiring_tests {
         let (x, y) = pane_label_at(&s, "Three new messages");
         assert_eq!(
             press(&mut s, x, y),
-            ShellAction::Launch(PathBuf::from("/apps/mail"))
+            ShellAction::Launch(crate::hotkeys::Launch::program("/apps/mail"))
         );
     }
 
@@ -12802,6 +13245,117 @@ mod run_box_wiring_tests {
             launches.extend(s.handle_hotkey(&typed(ch)).launches);
         }
         programs(&launches)
+    }
+
+    /// The keystroke for any character a command line holds: a real key for
+    /// what [`typed`] knows and for the space, and for everything else --
+    /// capitals, quotes, a drive letter's colon -- a key the shell binds to
+    /// nothing, carrying the character as its text, which is what the box
+    /// inserts. The keys that matter to the box's own arms (Enter, the
+    /// arrows) are never typed through here.
+    fn typed_any(ch: char) -> KeyEvent {
+        match ch {
+            'a'..='z' | '/' => typed(ch),
+            _ => KeyEvent {
+                key: if ch == ' ' {
+                    Key::Space
+                } else {
+                    Key::Unknown(0)
+                },
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: ch.to_string(),
+            },
+        }
+    }
+
+    /// Type a line into the open box and press Enter, answering the launches
+    /// it asked for -- program and arguments both.
+    fn run_line(s: &mut DesktopShell, line: &str) -> Vec<crate::hotkeys::Launch> {
+        for ch in line.chars() {
+            drop(s.handle_hotkey(&typed_any(ch)));
+        }
+        s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
+            .launches
+    }
+
+    /// **The Run box runs a program with its arguments.** It used to ask for
+    /// one program named by the whole line -- a file called
+    /// `terminal --title "two words"`, which cannot exist.
+    #[test]
+    fn the_run_box_runs_a_program_with_its_arguments() {
+        let mut s = shell();
+        drop(s.handle_hotkey(&super_r()));
+        assert!(s.run_dialog.is_visible());
+        let launches = run_line(&mut s, "terminal --title \"two words\"");
+        assert_eq!(
+            launches,
+            [crate::hotkeys::Launch {
+                program: PathBuf::from("terminal"),
+                args: vec!["--title".into(), "two words".into()],
+            }]
+        );
+    }
+
+    /// **The Run box opens a folder, in the file manager -- spaces and all,
+    /// with no quotes**, because the whole line is tried as a path before
+    /// anything is split. It used to ask for the folder to be executed.
+    #[test]
+    fn the_run_box_opens_a_folder_whose_name_has_a_space() {
+        appearance::config::testing::with_scratch_config("run-box-folder", |root| {
+            let folder = root.join("My Stuff");
+            std::fs::create_dir(&folder).expect("the scratch root is writable");
+            let line = folder.to_str().expect("a scratch path is text").to_string();
+            let mut s = shell();
+            drop(s.handle_hotkey(&super_r()));
+            let launches = run_line(&mut s, &line);
+            assert_eq!(
+                launches,
+                [crate::hotkeys::Launch::opening(
+                    crate::launcher::FILE_MANAGER,
+                    &folder
+                )]
+            );
+        });
+    }
+
+    /// **The Run box opens a document in the program chosen for it**, by the
+    /// rule a double-click uses; and a document nothing opens starts nothing
+    /// and says why.
+    #[test]
+    fn the_run_box_opens_a_document_by_the_desktops_rules() {
+        appearance::config::testing::with_scratch_config("run-box-document", |root| {
+            let mut doc = yamldoc::Document::new();
+            doc.set_str(&[associations::ASSOCIATIONS, "md"], "/usr/bin/editor");
+            appearance::config::store(associations::CONFIG_NAME, &doc)
+                .expect("the scratch config directory is writable");
+            let readme = root.join("readme.md");
+            std::fs::write(&readme, b"# hi").expect("write");
+            let odd = root.join("data.qqq");
+            std::fs::write(&odd, b"?").expect("write");
+
+            let mut s = shell();
+            drop(s.handle_hotkey(&super_r()));
+            let line = readme.to_str().expect("text").to_string();
+            assert_eq!(
+                run_line(&mut s, &line),
+                [crate::hotkeys::Launch::opening("/usr/bin/editor", &readme)]
+            );
+
+            drop(s.handle_hotkey(&super_r()));
+            let line = odd.to_str().expect("text").to_string();
+            assert!(
+                run_line(&mut s, &line).is_empty(),
+                "nothing opens it, so nothing starts"
+            );
+            assert!(
+                s.notifications
+                    .notifications()
+                    .iter()
+                    .any(|n| n.title.starts_with("Cannot open")),
+                "and it said so"
+            );
+        });
     }
 
     /// The programs a batch of launches names, without their arguments.
@@ -13155,7 +13709,7 @@ mod run_box_wiring_tests {
         let (x, y) = button_centre(&s, "OK");
         assert_eq!(
             press(&mut s, x, y),
-            ShellAction::Launch(PathBuf::from("terminal"))
+            ShellAction::Launch(crate::hotkeys::Launch::program("terminal"))
         );
     }
 
@@ -14807,8 +15361,16 @@ mod taskbar_pin_tests {
                 "the press launched it before the release could say it was a click"
             );
             match shell.handle_mouse(&at(cx, cy, MouseEventKind::Release(MouseButton::Left))) {
-                ShellAction::Launch(path) => {
-                    assert_eq!(path.to_string_lossy(), exec, "it started the wrong program");
+                ShellAction::Launch(launch) => {
+                    assert_eq!(
+                        launch.program.to_string_lossy(),
+                        exec,
+                        "it started the wrong program"
+                    );
+                    assert!(
+                        launch.args.is_empty(),
+                        "a pinned program takes no arguments"
+                    );
                 }
                 other => panic!("a pinned button did not launch anything: {other:?}"),
             }
@@ -15302,7 +15864,10 @@ mod view_menu_tests {
         for (from, item, to) in cases {
             let mut shell = DesktopShell::new(1920, 1080);
             shell.icons.set_arrangement(from);
-            assert!(shell.activate_desktop_menu_item(item), "{from:?} + {item}");
+            assert!(
+                shell.activate_desktop_menu_item(item).changed(),
+                "{from:?} + {item}"
+            );
             assert_eq!(shell.icons.arrangement(), to, "{from:?} + {item}");
             assert!(
                 shell.take_icons_dirty(),
@@ -15327,7 +15892,11 @@ mod view_menu_tests {
                 "proves nothing"
             );
 
-            assert!(shell.activate_desktop_menu_item(size_item(IconSize::Large)));
+            assert!(
+                shell
+                    .activate_desktop_menu_item(size_item(IconSize::Large))
+                    .changed()
+            );
             assert_eq!(shell.icons.icon_px(), IconSize::Large.pixels());
             assert_eq!(shell.appearance.icon_size, IconSize::Large);
             assert_eq!(
@@ -15346,7 +15915,11 @@ mod view_menu_tests {
             );
 
             // The same size again is no change.
-            assert!(!shell.activate_desktop_menu_item(size_item(IconSize::Large)));
+            assert!(
+                !shell
+                    .activate_desktop_menu_item(size_item(IconSize::Large))
+                    .changed()
+            );
             assert!(!shell.take_icons_dirty());
         });
     }
@@ -15364,7 +15937,11 @@ mod view_menu_tests {
             let mut shell = DesktopShell::new(1920, 1080);
             assert!(!shell.appearance.night_light);
 
-            assert!(shell.activate_desktop_menu_item(size_item(IconSize::Small)));
+            assert!(
+                shell
+                    .activate_desktop_menu_item(size_item(IconSize::Small))
+                    .changed()
+            );
             let saved = appearance::AppearanceFile::load().settings;
             assert_eq!(saved.icon_size, IconSize::Small);
             assert!(
@@ -15436,7 +16013,11 @@ mod view_menu_tests {
                 y,
             );
         }
-        assert!(shell.activate_desktop_menu_item(DesktopShell::MENU_SORT_BY_NAME));
+        assert!(
+            shell
+                .activate_desktop_menu_item(DesktopShell::MENU_SORT_BY_NAME)
+                .changed()
+        );
         let labels: Vec<String> = shell
             .icons
             .icon_ids()
@@ -15445,10 +16026,481 @@ mod view_menu_tests {
             .collect();
         assert_eq!(labels, ["apple", "pear"]);
         assert!(shell.take_icons_dirty());
-        assert!(!shell.activate_desktop_menu_item(DesktopShell::MENU_SORT_BY_NAME));
+        assert!(
+            !shell
+                .activate_desktop_menu_item(DesktopShell::MENU_SORT_BY_NAME)
+                .changed()
+        );
         assert!(
             !shell.take_icons_dirty(),
             "nothing moved, so nothing to save"
         );
+    }
+}
+
+/// The desktop's own keys: what a key does when the desktop has the keyboard
+/// and no shortcut or open surface took it.
+#[cfg(test)]
+mod desktop_key_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::{DesktopShell, ShellAction, icons};
+    use appearance::config::testing::with_scratch_config;
+    use guitk::event::{Key, KeyEvent, Modifiers};
+
+    fn press(key: Key) -> KeyEvent {
+        press_with(key, Modifiers::NONE)
+    }
+
+    fn press_with(key: Key, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }
+    }
+
+    /// A shell with three icons down the first column, named a, b and c.
+    fn shell_with_three() -> DesktopShell {
+        let mut shell = DesktopShell::new(1920, 1080);
+        for (row, name) in ["a", "b", "c"].into_iter().enumerate() {
+            let (x, y) = shell.icons.cell_origin(0, i32::try_from(row).unwrap());
+            shell.icons.add_icon(
+                name,
+                icons::IconType::File,
+                icons::IconAction::Custom(name.to_string()),
+                x,
+                y,
+            );
+        }
+        shell
+    }
+
+    fn selected(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .icons
+            .selected_ids()
+            .into_iter()
+            .filter_map(|id| shell.icons.get_icon(id).map(|i| i.label.clone()))
+            .collect()
+    }
+
+    /// **Ctrl+A selects every icon and Escape none**, and each says it
+    /// changed something so the frame is redrawn.
+    #[test]
+    fn ctrl_a_selects_every_icon_and_escape_none() {
+        let mut shell = shell_with_three();
+        assert_eq!(
+            shell.handle_desktop_key(&press_with(Key::A, Modifiers::ctrl())),
+            ShellAction::Consumed
+        );
+        assert_eq!(selected(&shell), ["a", "b", "c"]);
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Escape)),
+            ShellAction::Consumed
+        );
+        assert!(selected(&shell).is_empty());
+        // A plain A is the letter, and the desktop does nothing with it.
+        assert_eq!(shell.handle_desktop_key(&press(Key::A)), ShellAction::Pass);
+        assert!(selected(&shell).is_empty());
+    }
+
+    /// **The arrow keys walk the icons.**
+    #[test]
+    fn the_arrow_keys_walk_the_icons() {
+        let mut shell = shell_with_three();
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Down)),
+            ShellAction::Consumed
+        );
+        assert_eq!(selected(&shell), ["a"], "from nothing, the top-left");
+        drop(shell.handle_desktop_key(&press(Key::Down)));
+        drop(shell.handle_desktop_key(&press(Key::Down)));
+        assert_eq!(selected(&shell), ["c"]);
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Down)),
+            ShellAction::Pass,
+            "nowhere further down, so nothing changed and nothing is redrawn"
+        );
+        drop(shell.handle_desktop_key(&press(Key::Up)));
+        assert_eq!(selected(&shell), ["b"]);
+    }
+
+    /// **Enter opens the one selected icon**, through the same door as a
+    /// double-click.
+    #[test]
+    fn enter_opens_the_selected_icon() {
+        with_scratch_config("desktop-key-enter", |root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            let folder = root.join("Projects");
+            std::fs::create_dir(&folder).expect("the scratch root is writable");
+            let id = shell.icons.add_icon(
+                "Projects",
+                icons::IconType::Folder,
+                icons::IconAction::OpenPath(folder.clone()),
+                200,
+                200,
+            );
+            assert_eq!(
+                shell.handle_desktop_key(&press(Key::Enter)),
+                ShellAction::Pass,
+                "nothing selected, nothing to open"
+            );
+            shell.icons.select_single(id);
+            assert_eq!(
+                shell.handle_desktop_key(&press(Key::Enter)),
+                ShellAction::Launch(crate::hotkeys::Launch::opening(
+                    crate::launcher::FILE_MANAGER,
+                    &folder
+                ))
+            );
+        });
+    }
+
+    /// A release, and a key the desktop has no use for, are passed on.
+    #[test]
+    fn keys_the_desktop_has_no_use_for_are_passed_on() {
+        let mut shell = shell_with_three();
+        let mut up = press(Key::Down);
+        up.pressed = false;
+        assert_eq!(shell.handle_desktop_key(&up), ShellAction::Pass);
+        assert!(
+            selected(&shell).is_empty(),
+            "a key coming up is not a press"
+        );
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Tab)),
+            ShellAction::Pass
+        );
+        // Delete and F2 reach the layer and are not acted on yet.
+        shell.icons.select_all();
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Delete)),
+            ShellAction::Pass
+        );
+        assert_eq!(
+            shell.icons.icon_ids().len(),
+            3,
+            "the default icons cannot be removed"
+        );
+    }
+}
+
+/// Shortcuts the user adds to the desktop, and an icon's own menu.
+#[cfg(test)]
+mod icon_menu_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::{DesktopShell, PinTarget, ShellAction, icons};
+    use appearance::config::testing::with_scratch_config;
+    use guitk::event::{Key, KeyEvent, Modifiers};
+    use guitk::render::RenderCommand;
+
+    fn press(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    /// The first start-menu entry's program and name.
+    fn first_entry(shell: &DesktopShell) -> (String, String) {
+        let entry = shell.start_menu_entries()[0];
+        (entry.executable_path.clone(), entry.name.clone())
+    }
+
+    /// "Add to desktop" on the first start-menu entry, through the pin menu
+    /// the way a right-click would reach it. Answers the new icon.
+    fn add_first_entry(shell: &mut DesktopShell) -> icons::IconId {
+        let (exec, _) = first_entry(shell);
+        shell.activate_pin_menu_item(
+            DesktopShell::MENU_ADD_TO_DESKTOP,
+            PinTarget::StartMenuRow(0),
+        );
+        shell
+            .icons
+            .icon_ids()
+            .into_iter()
+            .find(|id| {
+                shell.icons.get_icon(*id).is_some_and(|i| {
+                    i.action == icons::IconAction::OpenPath(std::path::PathBuf::from(&exec))
+                })
+            })
+            .expect("Add to desktop put no icon on the desktop")
+    }
+
+    /// The labels of the menu currently open.
+    fn menu_labels(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .render_desktop_menu()
+            .expect("the menu is open")
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Right-click the icon `id`.
+    fn right_click(shell: &mut DesktopShell, id: icons::IconId) {
+        let icon = shell.icons.get_icon(id).expect("the icon exists");
+        #[allow(clippy::cast_precision_loss)]
+        let (x, y) = (icon.x as f32 + 10.0, icon.y as f32 + 10.0);
+        shell.open_desktop_menu(x, y);
+    }
+
+    /// **"Add to desktop" puts a program shortcut on the desktop, named as
+    /// the start menu names it, marked for saving** -- and a second time
+    /// selects the one already there.
+    #[test]
+    fn add_to_desktop_puts_a_shortcut_there_once() {
+        let mut shell = DesktopShell::new(1920, 1080);
+        let (exec, name) = first_entry(&shell);
+        let id = add_first_entry(&mut shell);
+        let icon = shell.icons.get_icon(id).unwrap();
+        assert_eq!(icon.label, name);
+        assert_eq!(icon.icon_type, icons::IconType::Executable);
+        assert!(icon.added);
+        assert!(
+            shell.take_icons_dirty(),
+            "the new shortcut will not be saved"
+        );
+        assert_eq!(
+            shell.icons.selected_ids(),
+            [id],
+            "and it is selected, to be seen"
+        );
+
+        shell.icons.deselect_all();
+        let again = add_first_entry(&mut shell);
+        assert_eq!(again, id);
+        assert_eq!(
+            shell.icons.icon_ids().len(),
+            1,
+            "a second shortcut to {exec}"
+        );
+        assert!(!shell.take_icons_dirty(), "nothing new to save");
+    }
+
+    /// The pin menu offers it, beside pinning.
+    #[test]
+    fn the_pin_menu_offers_add_to_desktop() {
+        let mut shell = DesktopShell::new(1920, 1080);
+        shell.open_pin_menu(PinTarget::StartMenuRow(0), 100.0, 100.0);
+        let labels: Vec<String> = shell
+            .pin_menu
+            .as_ref()
+            .expect("the pin menu is open")
+            .0
+            .render(&appearance::Palette::for_mode(false))
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.iter().any(|l| l == "Add to desktop"), "{labels:?}");
+        assert!(labels.iter().any(|l| l == "Pin to taskbar"), "{labels:?}");
+    }
+
+    /// **A right-click on an icon opens the icon's menu, not the desktop's**,
+    /// offering what that icon can do: a program can be pinned, and what the
+    /// user added can be removed; a default folder can only be opened.
+    #[test]
+    fn a_right_click_on_an_icon_opens_its_own_menu() {
+        with_scratch_config("icon-menu-items", |root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            let program = add_first_entry(&mut shell);
+            right_click(&mut shell, program);
+            let labels = menu_labels(&shell);
+            for want in ["Open", "Pin to taskbar", "Remove from desktop"] {
+                assert!(labels.iter().any(|l| l == want), "no {want}: {labels:?}");
+            }
+            assert!(
+                !labels.iter().any(|l| l == "View"),
+                "the desktop's menu opened over an icon: {labels:?}"
+            );
+
+            let folder = root.join("Stuff");
+            std::fs::create_dir(&folder).unwrap();
+            let plain = shell.icons.add_icon(
+                "Stuff",
+                icons::IconType::Folder,
+                icons::IconAction::OpenPath(folder),
+                900,
+                500,
+            );
+            right_click(&mut shell, plain);
+            assert_eq!(
+                menu_labels(&shell),
+                ["Open"],
+                "a default folder can only be opened"
+            );
+            assert_eq!(
+                shell.icons.selected_ids(),
+                [plain],
+                "the icon clicked is selected"
+            );
+        });
+    }
+
+    /// **The icon's menu does what it says**: Open opens, by the rule a
+    /// double-click uses; Pin pins and unpins; Remove removes.
+    #[test]
+    fn the_icon_menu_opens_pins_and_removes() {
+        with_scratch_config("icon-menu-actions", |root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            let folder = root.join("Stuff");
+            std::fs::create_dir(&folder).unwrap();
+            let plain = shell.icons.add_icon(
+                "Stuff",
+                icons::IconType::Folder,
+                icons::IconAction::OpenPath(folder.clone()),
+                900,
+                500,
+            );
+            right_click(&mut shell, plain);
+            assert_eq!(
+                shell.activate_desktop_menu_item(DesktopShell::MENU_ICON_OPEN),
+                ShellAction::Launch(crate::hotkeys::Launch::opening(
+                    crate::launcher::FILE_MANAGER,
+                    &folder
+                ))
+            );
+
+            let program = add_first_entry(&mut shell);
+            let (exec, _) = first_entry(&shell);
+            right_click(&mut shell, program);
+            assert!(
+                shell
+                    .activate_desktop_menu_item(DesktopShell::MENU_ICON_PIN)
+                    .changed()
+            );
+            assert!(shell.is_pinned(&exec));
+            right_click(&mut shell, program);
+            assert!(
+                menu_labels(&shell)
+                    .iter()
+                    .any(|l| l == "Unpin from taskbar")
+            );
+            assert!(
+                shell
+                    .activate_desktop_menu_item(DesktopShell::MENU_ICON_PIN)
+                    .changed()
+            );
+            assert!(!shell.is_pinned(&exec));
+
+            assert!(shell.take_icons_dirty(), "adding it marked the layout");
+            right_click(&mut shell, program);
+            assert!(
+                shell
+                    .activate_desktop_menu_item(DesktopShell::MENU_ICON_REMOVE)
+                    .changed()
+            );
+            assert!(shell.icons.get_icon(program).is_none());
+            assert!(shell.take_icons_dirty(), "the removal will not be saved");
+        });
+    }
+
+    /// Open from the icon's menu with the keyboard starts what it opens --
+    /// the keyboard route can carry a launch as the pointer's can.
+    #[test]
+    fn open_from_the_icon_menu_by_keyboard_starts_it() {
+        with_scratch_config("icon-menu-keyboard", |root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            let folder = root.join("Stuff");
+            std::fs::create_dir(&folder).unwrap();
+            let plain = shell.icons.add_icon(
+                "Stuff",
+                icons::IconType::Folder,
+                icons::IconAction::OpenPath(folder.clone()),
+                900,
+                500,
+            );
+            right_click(&mut shell, plain);
+            drop(shell.handle_hotkey(&press(Key::Down)));
+            let outcome = shell.handle_hotkey(&press(Key::Enter));
+            assert_eq!(
+                outcome.launches,
+                [crate::hotkeys::Launch::opening(
+                    crate::launcher::FILE_MANAGER,
+                    &folder
+                )]
+            );
+        });
+    }
+
+    /// **Delete removes the selected shortcuts the user added, and leaves
+    /// the defaults**, which would only come back at the next login.
+    #[test]
+    fn delete_removes_added_shortcuts_and_leaves_the_defaults() {
+        let mut shell = DesktopShell::new(1920, 1080);
+        let default = shell.icons.add_icon(
+            "This PC",
+            icons::IconType::Computer,
+            icons::IconAction::LaunchSystem(icons::THIS_PC.to_string()),
+            0,
+            0,
+        );
+        let added = add_first_entry(&mut shell);
+        assert!(shell.take_icons_dirty(), "adding it marked the layout");
+        shell.icons.select_all();
+
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Delete)),
+            ShellAction::Consumed
+        );
+        assert!(shell.icons.get_icon(added).is_none());
+        assert!(shell.icons.get_icon(default).is_some());
+        assert!(shell.take_icons_dirty());
+        assert_eq!(
+            shell.handle_desktop_key(&press(Key::Delete)),
+            ShellAction::Pass,
+            "only a default left selected: nothing to remove"
+        );
+    }
+
+    /// **A shortcut added on the desktop is there after a login**, through
+    /// the shell's own save and load.
+    #[test]
+    fn an_added_shortcut_is_there_after_a_login() {
+        with_scratch_config("icon-shortcut-login", |_root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            shell.populate_icons();
+            let (exec, name) = first_entry(&shell);
+            add_first_entry(&mut shell);
+            assert!(shell.take_icons_dirty());
+            shell
+                .save_icon_layout()
+                .expect("the scratch config directory is writable");
+
+            let mut next = DesktopShell::new(1920, 1080);
+            next.populate_icons();
+            let back = next
+                .icons
+                .icon_ids()
+                .into_iter()
+                .filter_map(|id| next.icons.get_icon(id))
+                .find(|i| i.action == icons::IconAction::OpenPath(std::path::PathBuf::from(&exec)))
+                .map(|i| (i.label.clone(), i.added));
+            assert_eq!(back, Some((name, true)));
+        });
     }
 }

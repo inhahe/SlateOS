@@ -17,6 +17,13 @@
 //! `WAVE_FORMAT_EXTENSIBLE` ones naming either. Not compressed WAV (ADPCM,
 //! mu-law, A-law) and not RF64.
 //!
+//! **Without decoding:** a header from a file's first part
+//! ([`parse_header_prefix`]), a waveform overview straight from the stored
+//! samples ([`peaks`]), the markers sound editors keep in `cue ` and
+//! `LIST`/`adtl` chunks, read and replaced ([`cues`], [`with_cues`]), and a
+//! stretch cut out as a file of its own, its samples copied as stored
+//! ([`cut`]).
+//!
 //! `apps/mediaconvert` is the first user.
 
 use std::fmt;
@@ -147,13 +154,44 @@ fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
     ]))
 }
 
-/// Read a WAV file's header: its format and where its samples are.
+/// One chunk of a RIFF file: its id, and where its body lies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Chunk {
+    id: [u8; 4],
+    start: usize,
+    len: usize,
+}
+
+impl Chunk {
+    /// The chunk's body. Always within `bytes`: [`chunks`] checked it.
+    fn body<'a>(&self, bytes: &'a [u8]) -> &'a [u8] {
+        bytes
+            .get(self.start..self.start.saturating_add(self.len))
+            .unwrap_or(&[])
+    }
+
+    /// Whether this is a `LIST` chunk of the given type (`adtl`, `INFO`).
+    fn is_list(&self, bytes: &[u8], kind: &[u8; 4]) -> bool {
+        &self.id == b"LIST" && self.body(bytes).get(..4) == Some(kind.as_slice())
+    }
+}
+
+/// The chunks of a WAV file, in order, every size checked against the bytes
+/// there.
+fn chunks(bytes: &[u8]) -> Result<Vec<Chunk>, WavError> {
+    chunks_of(bytes, bytes.len())
+}
+
+/// The chunks of a file `whole` bytes long, of which `bytes` is the start,
+/// every size checked against `whole`. A chunk past the end of `bytes` is
+/// listed and has an empty body; one whose header is past it ends the list.
 ///
-/// # Errors
-///
-/// As [`WavError`]: not a WAV, a chunk longer than the file, no format or no
-/// data, a header that contradicts itself, or a format this does not decode.
-pub fn parse_header(bytes: &[u8]) -> Result<Info, WavError> {
+/// Before the samples, a chunk longer than the file is an error: the format
+/// may be in it. After them it is where reading stops -- bytes a writer left
+/// at the end are no reason to refuse the audio before them. A `data` size of
+/// zero or past the end is what a streaming writer leaves, and there the
+/// samples are the rest of the file.
+fn chunks_of(bytes: &[u8], whole: usize) -> Result<Vec<Chunk>, WavError> {
     if bytes.get(..4) == Some(b"RF64") {
         return Err(WavError::Unsupported(String::from(
             "RF64 (a WAV over 4 GiB)",
@@ -162,57 +200,89 @@ pub fn parse_header(bytes: &[u8]) -> Result<Info, WavError> {
     if bytes.get(..4) != Some(b"RIFF") || bytes.get(8..12) != Some(b"WAVE") {
         return Err(WavError::NotWav);
     }
+    let mut out = Vec::new();
+    let mut seen_data = false;
     let mut at = 12_usize;
-    let mut format: Option<(u32, u16, SampleFormat, u16)> = None;
-    loop {
-        let (Some(id), Some(size)) = (
-            bytes.get(at..at.saturating_add(4)),
-            u32_at(bytes, at.saturating_add(4)),
-        ) else {
-            return Err(if format.is_some() {
-                WavError::NoData
-            } else {
-                WavError::NoFormat
-            });
-        };
-        let body = at.saturating_add(8);
+    while let (Some(id), Some(size)) = (
+        bytes.get(at..at.saturating_add(4)),
+        u32_at(bytes, at.saturating_add(4)),
+    ) {
+        let id: [u8; 4] = id.try_into().map_err(|_| WavError::NotWav)?;
+        let start = at.saturating_add(8);
         let size = usize::try_from(size).unwrap_or(usize::MAX);
-        let remaining = bytes.len().saturating_sub(body);
-        if id == b"data" {
-            let Some((rate, channels, sample, block)) = format else {
-                return Err(WavError::NoFormat);
-            };
-            // A streaming writer leaves the size at zero or all ones; the
-            // samples are the rest of the file.
-            let len = if size == 0 || size > remaining {
-                remaining
-            } else {
-                size
-            };
-            let frames = len.checked_div(usize::from(block)).unwrap_or(0);
-            return Ok(Info {
-                sample_rate: rate,
-                channels,
-                format: sample,
-                frames: u64::try_from(frames).unwrap_or(u64::MAX),
-                data_offset: body,
-                data_len: frames.saturating_mul(usize::from(block)),
-            });
-        }
-        if size > remaining {
-            return Err(WavError::Truncated(if id == b"fmt " {
+        let remaining = whole.max(bytes.len()).saturating_sub(start);
+        let len = if size <= remaining && !(&id == b"data" && size == 0) {
+            size
+        } else if &id == b"data" {
+            remaining
+        } else if seen_data {
+            break;
+        } else {
+            return Err(WavError::Truncated(if &id == b"fmt " {
                 "format chunk"
             } else {
                 "header"
             }));
-        }
-        if id == b"fmt " {
-            let chunk = bytes.get(body..body.saturating_add(size)).unwrap_or(&[]);
-            format = Some(parse_format(chunk)?);
-        }
+        };
+        seen_data |= &id == b"data";
+        out.push(Chunk { id, start, len });
         // Chunks are padded to an even length.
-        at = body.saturating_add(size).saturating_add(size & 1);
+        at = start.saturating_add(len).saturating_add(len & 1);
     }
+    Ok(out)
+}
+
+/// Read a WAV file's header: its format and where its samples are.
+///
+/// # Errors
+///
+/// As [`WavError`]: not a WAV, a chunk longer than the file, no format or no
+/// data, a header that contradicts itself, or a format this does not decode.
+pub fn parse_header(bytes: &[u8]) -> Result<Info, WavError> {
+    parse_header_prefix(bytes, u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+}
+
+/// [`parse_header`] from the first part of a file `file_len` bytes long --
+/// enough to list a folder of recordings without reading every one whole.
+///
+/// The length has to be given. Measured against the prefix alone, a `data`
+/// chunk that runs past it looks like a streaming writer's, whose samples are
+/// "the rest of the file" -- and a ten-minute recording read through its
+/// first megabyte would be reported as six seconds long.
+///
+/// # Errors
+///
+/// As [`parse_header`]; and [`WavError::Truncated`] when the format is not
+/// within `prefix`.
+pub fn parse_header_prefix(prefix: &[u8], file_len: u64) -> Result<Info, WavError> {
+    let bytes = prefix;
+    let whole = usize::try_from(file_len).unwrap_or(usize::MAX);
+    let mut format: Option<(u32, u16, SampleFormat, u16)> = None;
+    for chunk in chunks_of(bytes, whole)? {
+        match &chunk.id {
+            b"fmt " => format = Some(parse_format(chunk.body(bytes))?),
+            b"data" => {
+                let Some((rate, channels, sample, block)) = format else {
+                    return Err(WavError::NoFormat);
+                };
+                let frames = chunk.len.checked_div(usize::from(block)).unwrap_or(0);
+                return Ok(Info {
+                    sample_rate: rate,
+                    channels,
+                    format: sample,
+                    frames: u64::try_from(frames).unwrap_or(u64::MAX),
+                    data_offset: chunk.start,
+                    data_len: frames.saturating_mul(usize::from(block)),
+                });
+            }
+            _ => {}
+        }
+    }
+    Err(if format.is_some() {
+        WavError::NoData
+    } else {
+        WavError::NoFormat
+    })
 }
 
 /// The `fmt ` chunk: sample rate, channels, sample format, block size.
@@ -342,6 +412,270 @@ fn decode_sample(format: SampleFormat, s: &[u8]) -> f32 {
         }
     };
     if value.is_finite() { value } else { 0.0 }
+}
+
+/// The lowest and highest sample in a stretch of audio, across its channels:
+/// one column of a waveform overview.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Peak {
+    pub low: f32,
+    pub high: f32,
+}
+
+impl Peak {
+    /// A stretch with nothing in it.
+    pub const SILENT: Self = Self {
+        low: 0.0,
+        high: 0.0,
+    };
+}
+
+/// A file's waveform in `columns` equal stretches, each its lowest and highest
+/// sample across the channels -- what an overview draws.
+///
+/// Read from the stored samples as they are, a frame at a time, rather than
+/// by decoding the whole file first: an hour of stereo would be seven hundred
+/// megabytes of `f32` to find four thousand pairs of numbers.
+///
+/// # Errors
+///
+/// As [`parse_header`].
+pub fn peaks(bytes: &[u8], columns: usize) -> Result<Vec<Peak>, WavError> {
+    let info = parse_header(bytes)?;
+    let data = bytes
+        .get(info.data_offset..info.data_offset.saturating_add(info.data_len))
+        .ok_or(WavError::Truncated("samples"))?;
+    let width = info.format.bytes();
+    let frame = usize::from(info.channels).saturating_mul(width);
+    let frames = data.len().checked_div(frame).unwrap_or(0);
+    let mut out = Vec::with_capacity(columns);
+    for column in 0..columns {
+        // Stretch `column` is frames [frames * c / columns, frames * (c+1) /
+        // columns): every frame in exactly one stretch, and none empty while
+        // there are frames to share.
+        let edge = |c: usize| {
+            u128::try_from(frames)
+                .ok()
+                .and_then(|f| f.checked_mul(u128::try_from(c).ok()?))
+                .and_then(|n| n.checked_div(u128::try_from(columns).ok()?))
+                .and_then(|n| usize::try_from(n).ok())
+                .unwrap_or(frames)
+        };
+        let from = edge(column);
+        let to = edge(column.saturating_add(1))
+            .max(from.saturating_add(1))
+            .min(frames);
+        let stretch = data
+            .get(from.saturating_mul(frame)..to.saturating_mul(frame))
+            .unwrap_or(&[]);
+        let mut peak: Option<Peak> = None;
+        for sample in stretch.chunks_exact(width) {
+            let v = decode_sample(info.format, sample);
+            let p = peak.get_or_insert(Peak { low: v, high: v });
+            p.low = p.low.min(v);
+            p.high = p.high.max(v);
+        }
+        out.push(peak.unwrap_or(Peak::SILENT));
+    }
+    Ok(out)
+}
+
+/// A marker in a file: a frame, and what it is called.
+///
+/// Stored as the standard `cue ` chunk, with its names in a `LIST` chunk of
+/// type `adtl` holding one `labl` per marker -- the form sound editors read
+/// and write, so a marker set here is a marker there.
+///
+/// `label` is bytes: the format does not say what encoding a name is in, and
+/// a name read from one file and written to the next must come out as it went
+/// in, whatever it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cue {
+    pub frame: u32,
+    pub label: Vec<u8>,
+}
+
+/// The markers in a file, in the order of their frames. A file with none has
+/// an empty list; a `cue ` chunk shorter than it claims gives the points that
+/// are whole.
+///
+/// # Errors
+///
+/// As [`parse_header`].
+pub fn cues(bytes: &[u8]) -> Result<Vec<Cue>, WavError> {
+    parse_header(bytes)?;
+    let mut points: Vec<(u32, u32)> = Vec::new();
+    let mut labels: Vec<(u32, Vec<u8>)> = Vec::new();
+    for chunk in chunks(bytes)? {
+        let body = chunk.body(bytes);
+        if &chunk.id == b"cue " {
+            let count = u32_at(body, 0).map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
+            for i in 0..count {
+                // 24 bytes a point: name, position, chunk id, chunk start,
+                // block start, and the sample offset -- the frame.
+                let at = i.saturating_mul(24).saturating_add(4);
+                let (Some(name), Some(frame)) =
+                    (u32_at(body, at), u32_at(body, at.saturating_add(20)))
+                else {
+                    break;
+                };
+                points.push((name, frame));
+            }
+        } else if chunk.is_list(bytes, b"adtl") {
+            let mut at = 4_usize;
+            while let (Some(id), Some(size)) = (
+                body.get(at..at.saturating_add(4)),
+                u32_at(body, at.saturating_add(4)),
+            ) {
+                let start = at.saturating_add(8);
+                let len = usize::try_from(size).unwrap_or(usize::MAX);
+                let Some(sub) = body.get(start..start.saturating_add(len)) else {
+                    break;
+                };
+                if id == b"labl"
+                    && let Some(name) = u32_at(sub, 0)
+                {
+                    let text = sub.get(4..).unwrap_or(&[]);
+                    let end = text.iter().position(|b| *b == 0).unwrap_or(text.len());
+                    labels.push((name, text.get(..end).unwrap_or(&[]).to_vec()));
+                }
+                at = start.saturating_add(len).saturating_add(len & 1);
+            }
+        }
+    }
+    let mut out: Vec<Cue> = points
+        .into_iter()
+        .map(|(name, frame)| Cue {
+            frame,
+            label: labels
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, l)| l.clone())
+                .unwrap_or_default(),
+        })
+        .collect();
+    out.sort_by_key(|c| c.frame);
+    Ok(out)
+}
+
+/// Append a chunk, padded to an even length.
+fn push_chunk(out: &mut Vec<u8>, id: &[u8; 4], body: &[u8]) -> Result<(), WavError> {
+    let len = u32::try_from(body.len()).map_err(|_| WavError::TooLarge)?;
+    out.extend_from_slice(id);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(body);
+    if len & 1 == 1 {
+        out.push(0);
+    }
+    Ok(())
+}
+
+/// Append the `cue ` chunk and the `LIST`/`adtl` names for `cues`, if any.
+/// Each point's name is its place in the list, from 1.
+fn push_cues(out: &mut Vec<u8>, cues: &[Cue]) -> Result<(), WavError> {
+    if cues.is_empty() {
+        return Ok(());
+    }
+    let count = u32::try_from(cues.len()).map_err(|_| WavError::TooLarge)?;
+    let mut points = count.to_le_bytes().to_vec();
+    let mut names = b"adtl".to_vec();
+    for (name, cue) in (1_u32..).zip(cues) {
+        points.extend_from_slice(&name.to_le_bytes());
+        points.extend_from_slice(&cue.frame.to_le_bytes());
+        points.extend_from_slice(b"data");
+        points.extend_from_slice(&0_u32.to_le_bytes());
+        points.extend_from_slice(&0_u32.to_le_bytes());
+        points.extend_from_slice(&cue.frame.to_le_bytes());
+        let mut labl = name.to_le_bytes().to_vec();
+        labl.extend(cue.label.iter().copied().take_while(|b| *b != 0));
+        labl.push(0);
+        push_chunk(&mut names, b"labl", &labl)?;
+    }
+    push_chunk(out, b"cue ", &points)?;
+    push_chunk(out, b"LIST", &names)
+}
+
+/// Set the RIFF size of a finished file.
+fn finish_riff(mut out: Vec<u8>) -> Result<Vec<u8>, WavError> {
+    let riff = u32::try_from(out.len().saturating_sub(8)).map_err(|_| WavError::TooLarge)?;
+    if let Some(size) = out.get_mut(4..8) {
+        size.copy_from_slice(&riff.to_le_bytes());
+    }
+    Ok(out)
+}
+
+/// The same file with `cues` as its markers: every other chunk as it was, in
+/// its place, and the old markers and their names replaced.
+///
+/// # Errors
+///
+/// As [`parse_header`]; and [`WavError::TooLarge`] past 4 GiB.
+pub fn with_cues(bytes: &[u8], cues: &[Cue]) -> Result<Vec<u8>, WavError> {
+    parse_header(bytes)?;
+    let mut out = b"RIFF\0\0\0\0WAVE".to_vec();
+    for chunk in chunks(bytes)? {
+        if &chunk.id == b"cue " || chunk.is_list(bytes, b"adtl") {
+            continue;
+        }
+        push_chunk(&mut out, &chunk.id, chunk.body(bytes))?;
+    }
+    push_cues(&mut out, cues)?;
+    finish_riff(out)
+}
+
+/// Frames `start..end` of a file as a file of their own: the same format,
+/// the samples copied as they are stored -- nothing decoded, nothing
+/// re-dithered -- the markers in that stretch moved to where it now begins,
+/// and the file's `INFO` tags kept.
+///
+/// # Errors
+///
+/// As [`parse_header`]; [`WavError::Invalid`] when the stretch holds no
+/// frame.
+pub fn cut(bytes: &[u8], start: u64, end: u64) -> Result<Vec<u8>, WavError> {
+    let info = parse_header(bytes)?;
+    let end = end.min(info.frames);
+    if start >= end {
+        return Err(WavError::Invalid(String::from(
+            "there is nothing between the start and the end",
+        )));
+    }
+    let frame = u64::from(info.channels)
+        .saturating_mul(u64::try_from(info.format.bytes()).unwrap_or(u64::MAX));
+    let offset = |f: u64| {
+        usize::try_from(f.saturating_mul(frame))
+            .ok()
+            .and_then(|n| info.data_offset.checked_add(n))
+    };
+    let samples = offset(start)
+        .zip(offset(end))
+        .and_then(|(a, b)| bytes.get(a..b))
+        .ok_or(WavError::Truncated("samples"))?;
+    let kept: Vec<Cue> = cues(bytes)?
+        .into_iter()
+        .filter(|c| (start..end).contains(&u64::from(c.frame)))
+        .map(|c| Cue {
+            frame: u32::try_from(u64::from(c.frame).saturating_sub(start)).unwrap_or(u32::MAX),
+            label: c.label,
+        })
+        .collect();
+    let all = chunks(bytes)?;
+    // The format the samples were read in: the last before them, as
+    // `parse_header` takes it.
+    let format = all
+        .iter()
+        .take_while(|c| &c.id != b"data")
+        .filter(|c| &c.id == b"fmt ")
+        .last()
+        .ok_or(WavError::NoFormat)?;
+    let mut out = b"RIFF\0\0\0\0WAVE".to_vec();
+    push_chunk(&mut out, b"fmt ", format.body(bytes))?;
+    for chunk in all.iter().filter(|c| c.is_list(bytes, b"INFO")) {
+        push_chunk(&mut out, b"LIST", chunk.body(bytes))?;
+    }
+    push_chunk(&mut out, b"data", samples)?;
+    push_cues(&mut out, &kept)?;
+    finish_riff(out)
 }
 
 /// A small deterministic generator for dither: the same seed gives the same
@@ -1041,5 +1375,203 @@ mod tests {
             data_len: 6,
         };
         assert!((info.seconds() - 3.0).abs() < 1e-9);
+    }
+
+    /// A 16-bit file laid out by hand, so its samples are exactly these.
+    fn pcm16(channels: u16, samples: &[i16]) -> Vec<u8> {
+        let mut b = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+        b.extend_from_slice(&16_u32.to_le_bytes());
+        b.extend_from_slice(&1_u16.to_le_bytes());
+        b.extend_from_slice(&channels.to_le_bytes());
+        b.extend_from_slice(&8_000_u32.to_le_bytes());
+        b.extend_from_slice(&(8_000 * 2 * u32::from(channels)).to_le_bytes());
+        b.extend_from_slice(&(2 * channels).to_le_bytes());
+        b.extend_from_slice(&16_u16.to_le_bytes());
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&(samples.len() as u32 * 2).to_le_bytes());
+        for s in samples {
+            b.extend_from_slice(&s.to_le_bytes());
+        }
+        let riff = (b.len() - 8) as u32;
+        b[4..8].copy_from_slice(&riff.to_le_bytes());
+        b
+    }
+
+    /// Each column is the lowest and highest sample of its stretch, across
+    /// the channels; every frame is in a column, and no column is empty while
+    /// there are frames.
+    #[test]
+    fn peaks_are_the_extremes_of_each_stretch() {
+        let q = 32_768.0;
+        let mono = pcm16(1, &[16_384, -8_192, 3_277, -29_491, 0, 9_830]);
+        let p = peaks(&mono, 3).unwrap();
+        let pairs: Vec<(f32, f32)> = p.iter().map(|p| (p.low * q, p.high * q)).collect();
+        assert_eq!(
+            pairs,
+            vec![(-8_192.0, 16_384.0), (-29_491.0, 3_277.0), (0.0, 9_830.0)]
+        );
+        // Stereo: both channels count.
+        let stereo = pcm16(2, &[6_000, -22_000, 1_000, 2_000]);
+        let p = peaks(&stereo, 1).unwrap();
+        assert_eq!((p[0].low * q, p[0].high * q), (-22_000.0, 6_000.0));
+        // More columns than frames: each still has one.
+        let p = peaks(&pcm16(1, &[100, -100]), 4).unwrap();
+        assert_eq!(p.len(), 4);
+        assert!(p.iter().all(|p| p.low != 0.0 || p.high != 0.0));
+        // No frames: silent columns, not an error.
+        assert_eq!(peaks(&pcm16(1, &[]), 2).unwrap(), vec![Peak::SILENT; 2]);
+    }
+
+    /// Markers go in as the standard chunks and come out as they went in --
+    /// names that are not UTF-8 included -- with the samples untouched, and
+    /// replacing them does not leave the old ones behind.
+    #[test]
+    fn markers_survive_a_round_trip_with_the_rest_of_the_file() {
+        let bytes = encode(&tone(8_000, 440.0, 0.01, 0.5), SampleFormat::I16, 1).unwrap();
+        let set = [
+            Cue {
+                frame: 60,
+                label: b"verse".to_vec(),
+            },
+            Cue {
+                frame: 3,
+                label: b"\xE9t\xE9".to_vec(),
+            },
+        ];
+        let marked = with_cues(&bytes, &set).unwrap();
+        let read = cues(&marked).unwrap();
+        assert_eq!(read, vec![set[1].clone(), set[0].clone()], "in frame order");
+        // A name is a NUL-terminated string inside its chunk, which other
+        // readers rely on even though this one would manage without.
+        let at = marked.windows(4).position(|w| w == b"labl").unwrap();
+        let len = u32::from_le_bytes(marked[at + 4..at + 8].try_into().unwrap()) as usize;
+        assert_eq!(marked[at + 8 + len - 1], 0);
+        assert_eq!(decode(&marked).unwrap(), decode(&bytes).unwrap());
+        assert_eq!(
+            u32::from_le_bytes(marked[4..8].try_into().unwrap()) as usize,
+            marked.len() - 8
+        );
+        let again = with_cues(&marked, &set[..1]).unwrap();
+        assert_eq!(cues(&again).unwrap(), vec![set[0].clone()]);
+        let count = |b: &[u8], what: &[u8]| b.windows(4).filter(|w| *w == what).count();
+        assert_eq!(count(&again, b"cue "), 1);
+        assert_eq!(count(&again, b"adtl"), 1);
+        let bare = with_cues(&marked, &[]).unwrap();
+        assert!(cues(&bare).unwrap().is_empty());
+        assert_eq!(count(&bare, b"cue "), 0);
+        assert_eq!(bare, bytes, "no markers is the file it was");
+    }
+
+    /// Insert a `LIST`/`INFO` chunk naming the take, after the format.
+    fn with_title(bytes: &[u8]) -> Vec<u8> {
+        let mut info = b"INFOINAM".to_vec();
+        info.extend_from_slice(&6_u32.to_le_bytes());
+        info.extend_from_slice(b"Take1\0");
+        let mut b = bytes[..36].to_vec();
+        push_chunk(&mut b, b"LIST", &info).unwrap();
+        b.extend_from_slice(&bytes[36..]);
+        finish_riff(b).unwrap()
+    }
+
+    /// A cut is the stretch as it is stored -- the same bytes, the same
+    /// format -- with the markers inside it moved to where it now begins, the
+    /// ones outside it gone, and the title kept.
+    #[test]
+    fn a_cut_is_the_stretch_as_stored_with_its_markers() {
+        let audio = Audio {
+            sample_rate: 44_100,
+            channels: 2,
+            samples: (0..200).map(|i| (i as f32 / 200.0) - 0.5).collect(),
+        };
+        let plain = encode(&audio, SampleFormat::I24, 7).unwrap();
+        let marks = [5_u32, 50, 90]
+            .map(|frame| Cue {
+                frame,
+                label: format!("m{frame}").into_bytes(),
+            })
+            .to_vec();
+        let source = with_cues(&with_title(&plain), &marks).unwrap();
+        let info = parse_header(&source).unwrap();
+        let out = cut(&source, 40, 80).unwrap();
+        let got = parse_header(&out).unwrap();
+        assert_eq!(
+            (got.sample_rate, got.channels, got.format, got.frames),
+            (44_100, 2, SampleFormat::I24, 40)
+        );
+        let frame = 6;
+        assert_eq!(
+            &out[got.data_offset..got.data_offset + got.data_len],
+            &source[info.data_offset + 40 * frame..info.data_offset + 80 * frame],
+        );
+        assert_eq!(
+            cues(&out).unwrap(),
+            vec![Cue {
+                frame: 10,
+                label: b"m50".to_vec()
+            }]
+        );
+        assert!(out.windows(5).any(|w| w == b"Take1"), "the title is kept");
+        // Past the end is the end; an empty stretch is refused.
+        assert_eq!(
+            parse_header(&cut(&source, 90, 1_000).unwrap())
+                .unwrap()
+                .frames,
+            10
+        );
+        assert!(matches!(cut(&source, 50, 50), Err(WavError::Invalid(_))));
+        assert!(matches!(cut(&source, 120, 130), Err(WavError::Invalid(_))));
+    }
+
+    /// Chunks after the samples are read -- markers usually live there -- and
+    /// a torn chunk at the very end is where reading stops, not a reason to
+    /// refuse the audio.
+    #[test]
+    fn chunks_after_the_samples_are_read_and_a_torn_tail_is_ignored() {
+        let bytes = encode(&tone(8_000, 440.0, 0.01, 0.5), SampleFormat::I16, 1).unwrap();
+        let marked = with_cues(
+            &bytes,
+            &[Cue {
+                frame: 7,
+                label: b"here".to_vec(),
+            }],
+        )
+        .unwrap();
+        let mut torn = marked.clone();
+        torn.extend_from_slice(b"junk");
+        torn.extend_from_slice(&1_000_u32.to_le_bytes());
+        torn.extend_from_slice(b"abcd");
+        assert_eq!(parse_header(&torn).unwrap(), parse_header(&marked).unwrap());
+        assert_eq!(cues(&torn).unwrap().len(), 1);
+        torn.extend_from_slice(b"LI");
+        assert_eq!(decode(&torn).unwrap(), decode(&bytes).unwrap());
+    }
+
+    /// The first part of a long file reads as the whole file's header: the
+    /// length comes from the data chunk's size measured against the file, not
+    /// against the part that was read.
+    #[test]
+    fn a_prefix_reads_as_the_whole_files_header() {
+        let bytes = pcm16(1, &vec![0; 50_000]);
+        let whole = bytes.len() as u64;
+        let info = parse_header_prefix(&bytes[..4_096], whole).unwrap();
+        assert_eq!(info.frames, 50_000);
+        assert_eq!(info, parse_header(&bytes).unwrap());
+        assert!(
+            parse_header(&bytes[..4_096]).unwrap().frames < 50_000,
+            "against the prefix alone it is a streaming file's tail"
+        );
+        assert!(matches!(
+            parse_header_prefix(&bytes[..30], whole),
+            Err(WavError::Truncated(_))
+        ));
+    }
+
+    /// A streaming writer that never went back leaves the data size at zero:
+    /// the samples are the rest of the file.
+    #[test]
+    fn a_zero_data_size_means_the_rest_of_the_file() {
+        let mut bytes = pcm16(1, &[1, 2, 3, 4]);
+        bytes[40..44].copy_from_slice(&0_u32.to_le_bytes());
+        assert_eq!(parse_header(&bytes).unwrap().frames, 4);
     }
 }

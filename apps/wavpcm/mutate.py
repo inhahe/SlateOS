@@ -26,16 +26,76 @@ MUTATIONS = [
         ["stored_samples_read_as_the_format_says"],
     ),
     (
-        "a streaming writer's size is believed",
-        "            let len = if size == 0 || size > remaining {",
-        "            let len = if false {",
+        "a prefix is taken for the whole file",
+        "        let remaining = whole.max(bytes.len()).saturating_sub(start);",
+        "        let remaining = bytes.len().saturating_sub(start);",
+        ["a_prefix_reads_as_the_whole_files_header"],
+    ),
+    (
+        "a streaming writer's zero size is believed",
+        "        let len = if size <= remaining && !(&id == b\"data\" && size == 0) {",
+        "        let len = if size <= remaining {",
+        ["a_zero_data_size_means_the_rest_of_the_file"],
+    ),
+    (
+        "a streaming writer's all-ones size is refused",
+        "        } else if &id == b\"data\" {\n"
+        "            remaining",
+        "        } else if false {\n"
+        "            remaining",
         ["extensible_headers_and_other_chunks_are_read"],
     ),
     (
+        "a torn chunk after the samples refuses the file",
+        "        } else if seen_data {\n"
+        "            break;",
+        "        } else if false {\n"
+        "            break;",
+        ["chunks_after_the_samples_are_read_and_a_torn_tail_is_ignored"],
+    ),
+    (
         "chunks are not padded to even",
-        "        at = body.saturating_add(size).saturating_add(size & 1);",
-        "        at = body.saturating_add(size);",
+        "        // Chunks are padded to an even length.\n"
+        "        at = start.saturating_add(len).saturating_add(len & 1);",
+        "        // Chunks are padded to an even length.\n"
+        "        at = start.saturating_add(len);",
         ["extensible_headers_and_other_chunks_are_read"],
+    ),
+    (
+        "a peak's low is the last sample, not the lowest",
+        "            p.low = p.low.min(v);",
+        "            p.low = v;",
+        ["peaks_are_the_extremes_of_each_stretch"],
+    ),
+    (
+        "old markers are kept beside the new",
+        "        if &chunk.id == b\"cue \" || chunk.is_list(bytes, b\"adtl\") {",
+        "        if false {",
+        ["markers_survive_a_round_trip_with_the_rest_of_the_file"],
+    ),
+    (
+        "a marker's name is not NUL-terminated",
+        "        labl.push(0);",
+        "",
+        ["markers_survive_a_round_trip_with_the_rest_of_the_file"],
+    ),
+    (
+        "a cut keeps the markers outside it",
+        "        .filter(|c| (start..end).contains(&u64::from(c.frame)))",
+        "        .filter(|_| true)",
+        ["a_cut_is_the_stretch_as_stored_with_its_markers"],
+    ),
+    (
+        "a cut's markers are not moved",
+        "            frame: u32::try_from(u64::from(c.frame).saturating_sub(start)).unwrap_or(u32::MAX),",
+        "            frame: c.frame,",
+        ["a_cut_is_the_stretch_as_stored_with_its_markers"],
+    ),
+    (
+        "a cut drops the title",
+        "    for chunk in all.iter().filter(|c| c.is_list(bytes, b\"INFO\")) {",
+        "    for chunk in all.iter().filter(|_| false) {",
+        ["a_cut_is_the_stretch_as_stored_with_its_markers"],
     ),
     (
         "an extensible header is read as its wrapper",

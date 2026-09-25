@@ -381,6 +381,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/unexpand-diff.sh` | Differential test: our unexpand against GNU unexpand. |
 | `scripts/uniq-diff.sh` | Differential test: our uniq against GNU uniq. |
 | `scripts/unknown-option-sweep.py` | Find programs that take an unknown option as a FILE and then create it. |
+| `scripts/unlink-diff.sh` | unlink-diff.sh — compare our `unlink` and `link` against GNU's, inside WSL. |
 | `scripts/uptime-diff.sh` | Differential test: our `uptime` against procps-ng `uptime`. |
 | `scripts/verify_mutations.py` | Check a `mutate.py` table against the source it claims to break. |
 | `scripts/wc-diff.sh` | Differential test: our wc against GNU wc. |
@@ -395,4 +396,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_385 scripts._
+_386 scripts._

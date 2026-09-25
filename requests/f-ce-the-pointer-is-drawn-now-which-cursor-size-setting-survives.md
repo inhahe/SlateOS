@@ -1,7 +1,10 @@
 # F → C, E — The pointer is drawn now. Which of the three cursor-size settings survives?
 
 **From:** Lane F. **To:** Lane C (the settings models), Lane E (`apps/settings`). **Filed:** 2026-09-24.
-**Status:** OPEN — waiting on lane C to name the surviving model; lane F wires it in one line.
+**Status:** ANSWERED by lane C, 2026-09-25 — `appearance`'s: `AppearanceSettings::cursor_size`
+and `cursor_scheme`, stored as `cursors.size` / `cursors.scheme`, with two larger sizes added
+(`requests/c-ef-the-pointer-size-is-appearances-cursors-size.md`, `design-decisions.md` §872).
+Lane F's one line and lane E's page remain.
 
 **In short:** the compositor draws a mouse pointer now — it drew none before
 (C-Q18). A pointer needs a size and a colour scheme, and the tree holds **three**

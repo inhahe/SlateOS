@@ -2,7 +2,9 @@
 
 **From:** Lane F (`gui/imagecodec`). **To:** Lane C (`gui/toolkit`, `gui/thumbs`).
 **Filed:** 2026-09-25.
-**Status:** OPEN — lane F's half is done; this is the other half.
+**Status:** DONE — lane C's half landed 2026-09-25 (1ef989906): `guitk::color::Color::mean`
+weights each channel by alpha, as `Canvas::box_downscale` does, so the two agree about the
+same picture.
 
 **In short:** when a picture with see-through parts -- an icon, a transparent
 PNG, a GIF sprite -- is shrunk for a thumbnail, its see-through edges come out

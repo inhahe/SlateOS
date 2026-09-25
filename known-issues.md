@@ -23898,7 +23898,11 @@ pointer cannot be painted onto a frame that is never painted. Software cursor
 always (fullscreen loses the shortcut), software except over fullscreen (the
 pointer vanishes there), or a hardware cursor plane (most work, gives nothing
 up) is an architectural fork with a measured performance feature on one side,
-so it is the operator's. See `open-questions.md` → **C-Q18**.
+so it is the operator's. See `open-questions.md` → **C-Q18**. *(2026-09-25:
+answered by construction and deferred. Lane F drew the pointer as a layer over
+the picture as it is shown, which costs fullscreen nothing on every presenter
+that exists, since each copies the fullscreen picture anyway; the question is
+now `deferred-questions.md` DQ3, waiting for a presenter that does not copy.)*
 
 **Which makes the order of work clear, and it is not this entry.** Four models
 disagreeing about a size matters only once something draws a pointer. The

@@ -1430,77 +1430,6 @@ every sweep, every conversion and every audit pays attention to these files.
 I spent real effort on one of them tonight before discovering it was
 unreachable.
 
-## C-Q18 — [C] Nothing draws the mouse pointer. When we start, what happens to fullscreen video and games? — Status: OPEN
-
-**In short:** SlateOS does not draw a mouse pointer. On the development
-machine you see Windows' arrow, borrowed from the host; on real hardware there
-would be no pointer at all. The system already works out *which* pointer to
-show — an I-beam over text, arrows on a window edge — and then draws none of
-them. Starting to draw one is straightforward except in a single case:
-fullscreen video and games currently take a shortcut that skips drawing
-altogether, and a pointer cannot be painted on top of a frame that is never
-painted. What you are choosing is what happens in that case.
-
-**Glossary.** *Direct scanout* is the shortcut: when one window covers the
-whole screen and is fully opaque, its picture is handed to the display exactly
-as the program drew it, with no copying. It is what makes fullscreen video and
-games cheap. A *hardware cursor* is a pointer the graphics chip draws for
-itself, from a small image the display controller holds separately — it costs
-nothing per frame and does not disturb the picture underneath.
-
-**Where it bites:** `gui/compositor/src/lib.rs` — `compose_frame`'s
-`direct_scanout_window` bypass, and `cursor_shape`, which is computed on every
-pointer move and read by two tests.
-
-**What is already true, measured 2026-09-13:** `CursorShape` has ten members
-and the compositor picks the right one continuously. Across all three
-presenters there is exactly one line of cursor code — `LoadCursorW(IDC_ARROW)`
-in the Windows host window class — so the shape is chosen and discarded. The
-kernel has cursor-plane support (`kernel/src/drm/`); the compositor's DRM
-presenter never reaches for it.
-
-**The options**
-
-**A. Draw the pointer in software, always — fullscreen loses its shortcut.**
-*What changes:* the pointer appears everywhere, and fullscreen video and games
-go back to being composited frame by frame.
-For: one code path, correct on every backend, and the pointer is never missing.
-Against: it spends a measured performance feature on a 32×32 image. The
-shortcut exists because copying a 4K frame is expensive, and this would pay
-that cost on every frame of every film.
-
-**B. Draw it in software, except over fullscreen content.**
-*What changes:* the pointer appears everywhere except on top of a fullscreen
-video or game, where it disappears.
-For: keeps the shortcut, and for games it is arguably *right* — a game hides
-the pointer itself. Costs nothing new.
-Against: a fullscreen video player with on-screen controls becomes unusable,
-because you cannot see what you are pointing at. "The pointer vanishes
-sometimes" is a hard thing for a user to form a rule about.
-
-**C. Ask the graphics chip to draw it, with software as the fallback.**
-*What changes:* the same as A from the user's side — a pointer that is always
-there — with fullscreen keeping its shortcut on real hardware.
-For: it is what the hardware is for, and it is the only option where nothing
-is given up. The kernel already has the plane support.
-Against: the most work by a wide margin, and the development host has no such
-plane, so the software path has to exist anyway and B or A is what a developer
-would see. Two paths mean the one you test is not the one that ships.
-
-**My recommendation: C, built as B first.** The software renderer is needed
-either way — it is the fallback, and it is what the dev host will use — so the
-first commit is the same under all three answers. The question is only what
-happens when it meets a fullscreen window, and B is a safe place to stand while
-the hardware path is built, because it is the one answer that gives nothing up
-today. What I would not do is A: spending direct scanout permanently, to solve
-a case that C solves properly, is the kind of trade that is easy to make and
-hard to take back.
-
-**If it is never answered:** there is no pointer on real hardware and Windows'
-arrow on the development host, which is also what makes the current state easy
-to miss. Three settings stay inert — `cursor_size`, `cursor_scheme` and the
-whole `CursorShape` vocabulary — and every accessibility question about pointer
-size stays unanswerable. Nothing degrades with time; it simply does not exist.
 ## C-Q20 — [C] Four lists of "which programs are installed", and nothing can read the others. Which is the real one? — Status: OPEN
 
 **In short:** four different parts of the system each keep their own list of
@@ -3244,6 +3173,15 @@ answered question left in the body is pure cost — and, being older, it sorts
   and updated as a `pkg/` package.
 
 ## Resolved — lane C
+- **Nothing draws the mouse pointer; what happens over fullscreen?** (C-Q18)
+  — deferred 2026-09-25 to `deferred-questions.md` DQ3, at lane F's request
+  (`requests/f-c-c-q18s-premise-changed-the-pointer-is-drawn-over-fullscreen-at-no-cost.md`).
+  Lane F built the pointer as a layer laid over the picture as it is shown, the
+  way a graphics chip's cursor plane is, and every presenter that exists copies
+  a fullscreen picture anyway, so the pointer costs fullscreen nothing -- the
+  trade the question asked about does not exist yet. It comes back when a
+  presenter scans a fullscreen window out without copying it.
+
 - **What does "selected" look like, and what happens to a toolbar?** (C-Q13,
   C-Q14) — both answered 2026-09-12. Selection takes the accent everywhere, at
   the *same* one-pixel thickness rather than a thicker line — the code already

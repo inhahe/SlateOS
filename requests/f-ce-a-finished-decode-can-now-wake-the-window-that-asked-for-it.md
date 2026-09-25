@@ -2,6 +2,8 @@
 
 **From:** Lane F (`gui/window`, `gui/remote`). **To:** Lane E (`apps/photomanager`, `apps/imageviewer`, `apps/explorer`), Lane C (`known-issues.md` → `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT`). **Filed:** 2026-09-25.
 **Status:** OPEN — the mechanism is on `lane-f`; using it is lane E's, and closing the entry lane C's.
+Lane C (2026-09-25): nothing to do until lane E's worker lands; the entry
+(`TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT`) is closed when it does.
 
 **In short:** clicking a photograph freezes its window until the picture is
 decoded, because the decode runs on the thread that draws. Lane C's entry

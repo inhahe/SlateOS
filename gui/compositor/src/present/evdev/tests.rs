@@ -78,6 +78,9 @@ struct DeviceState {
     /// How many `read`s have been issued, so a test can prove a dead device is
     /// left alone rather than retried once a frame.
     reads_issued: usize,
+    /// What the device offers to be waited on — `None`, like every fake,
+    /// unless a test about waiting gives it a number to be counted by.
+    wait_handle: Option<guiremote::WaitHandle>,
 }
 
 impl Default for DeviceState {
@@ -89,6 +92,7 @@ impl Default for DeviceState {
             name: Some("scripted device"),
             fail_reads_with: None,
             reads_issued: 0,
+            wait_handle: None,
         }
     }
 }
@@ -153,6 +157,13 @@ impl FakeDevice {
     fn reads_issued(&self) -> usize {
         self.0.borrow().reads_issued
     }
+
+    /// Give the device something to be waited on. Nothing ever waits on it —
+    /// the number only has to be counted into a set.
+    fn waitable(&self, handle: u16) -> &Self {
+        self.0.borrow_mut().wait_handle = Some(guiremote::WaitHandle::from(handle));
+        self
+    }
 }
 
 impl EventSys for FakeDevice {
@@ -193,6 +204,10 @@ impl EventSys for FakeDevice {
             }
             _ => Err(ENODEV),
         }
+    }
+
+    fn wait_handle(&self) -> Option<guiremote::WaitHandle> {
+        self.0.borrow().wait_handle
     }
 }
 
@@ -593,6 +608,107 @@ fn the_users_own_delay_and_interval_are_the_ones_used() {
         key_downs(&input.poll_at(start + Duration::from_millis(160))),
         vec![SCAN_A]
     );
+}
+
+// ---------------------------------------------------------------------------
+// Waiting: what the compositor's loop blocks on, and when it must wake
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_held_key_is_a_deadline_at_its_next_repeat() {
+    // The kernel generates no repeats, so no device becomes readable when one
+    // is due: without a deadline, a held key would repeat only when something
+    // else woke the compositor.
+    let (mut input, device) = one_device();
+    assert_eq!(input.deadline(), None, "nothing is held");
+    device.feed(&[key(KEY_A, 1), syn()]);
+    let start = Instant::now();
+    input.poll_at(start);
+    assert_eq!(input.deadline(), Some(start + Duration::from_millis(500)));
+
+    // And once it has repeated, the next one.
+    assert_eq!(
+        key_downs(&input.poll_at(start + Duration::from_millis(500))),
+        vec![SCAN_A]
+    );
+    assert_eq!(input.deadline(), Some(start + Duration::from_millis(530)));
+}
+
+#[test]
+fn a_released_key_leaves_no_deadline() {
+    let (mut input, device) = one_device();
+    device.feed(&[key(KEY_A, 1), syn()]);
+    let start = Instant::now();
+    input.poll_at(start);
+    device.feed(&[key(KEY_A, 0), syn()]);
+    input.poll_at(start + Duration::from_millis(100));
+    assert_eq!(
+        input.deadline(),
+        None,
+        "a released key would wake the loop for nothing"
+    );
+}
+
+#[test]
+fn a_held_modifier_is_no_deadline() {
+    let (mut input, device) = one_device();
+    device.feed(&[key(KEY_LEFTSHIFT, 1), syn()]);
+    input.poll_at(Instant::now());
+    assert_eq!(
+        input.deadline(),
+        None,
+        "Shift does not repeat, so there is nothing to wake for"
+    );
+}
+
+#[test]
+fn with_repeat_off_a_held_key_is_no_deadline() {
+    let (mut source, device) = FakeDevices::one();
+    let mut settings = plain();
+    settings.keyboard.enabled = false;
+    let mut input = EvdevInput::from_source(&mut source, settings, 800, 600).unwrap();
+    device.feed(&[key(KEY_A, 1), syn()]);
+    input.poll_at(Instant::now());
+    assert_eq!(input.deadline(), None);
+}
+
+#[test]
+fn every_device_is_waited_on() {
+    let (mut source, first, second) = FakeDevices::two();
+    first.waitable(5);
+    second.waitable(6);
+    let input = EvdevInput::from_source(&mut source, plain(), 800, 600).unwrap();
+    let mut set = guiremote::WaitSet::new();
+    input.wait_on(&mut set);
+    assert_eq!(
+        set.len(),
+        2,
+        "a keystroke on either would go unnoticed until something else woke the loop"
+    );
+}
+
+#[test]
+fn a_dead_device_is_not_waited_on() {
+    // A descriptor the kernel reports as failed is "ready" on every wait for
+    // ever; waiting on one would turn the loop into a spin.
+    let (mut source, first, second) = FakeDevices::two();
+    first.waitable(5);
+    second.waitable(6);
+    let mut input = EvdevInput::from_source(&mut source, plain(), 800, 600).unwrap();
+    second.breaks();
+    input.poll_at(Instant::now());
+
+    let mut set = guiremote::WaitSet::new();
+    input.wait_on(&mut set);
+    assert_eq!(set.len(), 1);
+}
+
+#[test]
+fn a_device_with_nothing_to_wait_on_adds_nothing() {
+    let (input, _device) = one_device();
+    let mut set = guiremote::WaitSet::new();
+    input.wait_on(&mut set);
+    assert!(set.is_empty());
 }
 
 #[test]

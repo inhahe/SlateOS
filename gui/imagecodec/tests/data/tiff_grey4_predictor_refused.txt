@@ -1,0 +1,1 @@
+REFUSED read: Horizontal differencing "Predictor" not supported with 4-bit samples

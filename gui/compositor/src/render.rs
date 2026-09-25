@@ -73,8 +73,12 @@ use osfont::raster::GlyphMask;
 ///
 /// - The **frame clip** ([`set_frame_clip`](Self::set_frame_clip)) is the
 ///   compositor's own damage/occlusion cull. It is backend state, applies to
-///   every primitive, and exists so a partial recomposite cannot paint outside
-///   the region it was asked to repaint.
+///   every primitive except [`clear`](Self::clear) and
+///   [`clear_rect`](Self::clear_rect), and exists so a partial recomposite
+///   cannot paint outside the region it was asked to repaint. That includes
+///   the background clear, [`clear_except`](Self::clear_except): a partial
+///   frame clears the desktop one repaint rectangle at a time, under that
+///   rectangle's clip.
 /// - The **draw clip** (the `clip` argument on the primitives that take one) is
 ///   the *client's* clip stack, resolved for this one primitive. It is passed
 ///   per call rather than stored because the caller pushes and pops it far more
@@ -112,11 +116,16 @@ pub trait RenderTarget {
     /// Fill `rect` with `color`, ignoring the frame clip.
     fn clear_rect(&mut self, rect: &Rect, color: u32);
 
-    /// Fill everything *except* `covered` with `color`, ignoring the frame clip.
+    /// Fill everything *except* `covered` with `color`, within the frame clip.
     ///
     /// `covered` is the occlusion cull's answer: rectangles that provably get
     /// overwritten with opaque content later in the frame, so clearing them
     /// would be pure overdraw.
+    ///
+    /// Clipped, unlike the two clears above, because it is the one the
+    /// compositor clears *damage* with: a partial frame repaints a region one
+    /// rectangle at a time, and a background clear that ignored the rectangle
+    /// would wipe pixels no window is going to redraw.
     fn clear_except(&mut self, color: u32, covered: &[Rect]);
 
     // -- primitives ---------------------------------------------------------
@@ -193,13 +202,38 @@ pub trait RenderTarget {
     /// returns.
     fn present(&mut self);
 
+    /// How stale the surface about to be drawn into is: how many presents ago
+    /// its pixels were the current frame.
+    ///
+    /// This is the contract a partial recomposite rests on, and the reason it
+    /// is on the trait rather than assumed. The compositor repaints only what
+    /// changed — but "changed" is relative to whatever the surface already
+    /// holds, and that depends on how many buffers the target rotates through.
+    /// So the compositor asks, and repaints this frame's damage plus the damage
+    /// of the `age - 1` frames before it (the `EGL_EXT_buffer_age` model):
+    ///
+    /// | answer | the surface holds | the compositor repaints |
+    /// |---|---|---|
+    /// | `Some(1)` | the frame just presented | this frame's damage |
+    /// | `Some(n)` | the frame `n` presents ago | this frame's and the last `n - 1` frames' |
+    /// | `None` | no frame at all | everything |
+    ///
+    /// A target that answers wrongly draws correct pixels into the wrong
+    /// places: it is how the front/back swap this compositor used to have lost
+    /// every change a frame made outside the next frame's damage.
+    fn buffer_age(&self) -> Option<u32>;
+
     /// The pixels of the most recently presented frame, row-major ARGB8888.
+    ///
+    /// For a single-buffered target this is the same memory as
+    /// [`working_pixels`](Self::working_pixels), so it shows a frame in progress
+    /// between the first draw and the present. Only read it after a present.
     fn presented_pixels(&self) -> &[u32];
 
     /// The pixels currently being composited into, row-major ARGB8888.
     ///
     /// Distinct from [`presented_pixels`](Self::presented_pixels) for a
-    /// double-buffered target: this is the frame in progress. Used by the scene
+    /// multi-buffered target: this is the frame in progress. Used by the scene
     /// capture and by tests that inspect a composite without presenting it.
     fn working_pixels(&self) -> &[u32];
 }
@@ -211,7 +245,8 @@ pub trait RenderTarget {
 /// file and a new [`RenderTarget`] implementation, not a change to the
 /// compositor: nothing above the seam names a `Framebuffer`.
 pub enum RenderBackend {
-    /// CPU rasterization into a double-buffered [`Framebuffer`].
+    /// CPU rasterization into a [`Framebuffer`] — a single buffer, since every
+    /// presenter copies the frame out before the next one starts.
     Software(Framebuffer),
 }
 
@@ -377,6 +412,13 @@ impl RenderTarget for RenderBackend {
     fn present(&mut self) {
         match self {
             Self::Software(fb) => RenderTarget::present(fb),
+        }
+    }
+
+    #[inline]
+    fn buffer_age(&self) -> Option<u32> {
+        match self {
+            Self::Software(fb) => RenderTarget::buffer_age(fb),
         }
     }
 
@@ -631,6 +673,11 @@ mod tests {
             self.ops.push(Primitive::Present);
         }
 
+        fn buffer_age(&self) -> Option<u32> {
+            // It owns no pixels, so there is never a frame in it to keep.
+            None
+        }
+
         fn presented_pixels(&self) -> &[u32] {
             &self.pixels
         }
@@ -881,22 +928,110 @@ mod tests {
     }
 
     #[test]
-    fn the_software_backend_reports_itself_and_keeps_its_double_buffer() {
+    fn the_software_backend_is_one_buffer_that_always_holds_the_last_frame() {
         let mut backend = RenderBackend::software(64, 32).expect("software backend");
         assert_eq!(backend.name(), "software");
         assert_eq!(RenderBackend::size(&backend), (64, 32));
 
-        // A composite into the working frame is invisible in the presented one
-        // until `present`. Double buffering is this backend's property, and the
-        // seam preserves it rather than papering over it.
+        // Nothing has been presented, so the buffer holds a placeholder rather
+        // than a frame, and the first composite must be drawn whole.
+        assert_eq!(backend.buffer_age(), None);
+
         backend.fill_rect(Rect::new(0, 0, 64, 32), 0xFF_11_22_33, 1.0);
-        assert_eq!(backend.working_pixels().first(), Some(&0xFF_11_22_33));
-        assert_eq!(backend.presented_pixels().first(), Some(&0xFF_00_00_00));
         backend.present();
         assert_eq!(backend.presented_pixels().first(), Some(&0xFF_11_22_33));
+        // One buffer: the next frame is drawn over exactly the one just shown,
+        // so a partial frame needs to repaint nothing but its own damage.
+        assert_eq!(backend.buffer_age(), Some(1));
+        assert_eq!(backend.working_pixels(), backend.presented_pixels());
+
+        // And it stays that way however many frames go by.
+        for shade in 0..5u32 {
+            backend.fill_rect(Rect::new(0, 0, 8, 8), 0xFF_00_00_00 | shade, 1.0);
+            backend.present();
+            assert_eq!(
+                backend.buffer_age(),
+                Some(1),
+                "after {} presents",
+                shade + 2
+            );
+        }
 
         assert!(backend.as_software().is_some());
         assert!(backend.as_software_mut().is_some());
+    }
+
+    /// The ring answers the question a swapchain does: how many frames old is
+    /// the buffer I am about to draw into?
+    ///
+    /// Checked against the pixels as well as the number. An age is only a
+    /// claim about contents, and a ring that rotated one way while counting
+    /// the other would report the right numbers over the wrong buffers.
+    #[test]
+    fn a_ring_reports_how_many_frames_old_its_next_buffer_is() {
+        for len in 2..=Framebuffer::MAX_RING {
+            let mut fb = Framebuffer::with_ring(4, 4, len).expect("ring");
+            assert_eq!(fb.ring_len(), len);
+            // Frame `n` fills the working buffer with colour `n`, then presents.
+            for frame in 1..=(3 * len as u32) {
+                let age = RenderTarget::buffer_age(&fb);
+                if frame <= len as u32 {
+                    // Not yet rotated through: this buffer has never held a
+                    // frame, so its contents cannot be relied on at all.
+                    assert_eq!(age, None, "ring of {len}, frame {frame}");
+                } else {
+                    assert_eq!(age, Some(len as u32), "ring of {len}, frame {frame}");
+                    // ...and it really does hold the frame `len` presents ago.
+                    let held = fb.working_pixels().first().copied();
+                    assert_eq!(
+                        held,
+                        Some(0xFF_00_00_00 | (frame - len as u32)),
+                        "ring of {len}, frame {frame}: the buffer's contents disagree with its age"
+                    );
+                }
+                RenderTarget::fill_rect(&mut fb, Rect::new(0, 0, 4, 4), 0xFF_00_00_00 | frame, 1.0);
+                RenderTarget::present(&mut fb);
+                assert_eq!(
+                    fb.presented_pixels().first().copied(),
+                    Some(0xFF_00_00_00 | frame),
+                    "ring of {len}: frame {frame} is not the one on show"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_ring_is_clamped_to_between_one_and_four_buffers() {
+        assert_eq!(Framebuffer::with_ring(2, 2, 0).expect("ring").ring_len(), 1);
+        assert_eq!(Framebuffer::with_ring(2, 2, 1).expect("ring").ring_len(), 1);
+        assert_eq!(
+            Framebuffer::with_ring(2, 2, 99).expect("ring").ring_len(),
+            Framebuffer::MAX_RING
+        );
+    }
+
+    /// A resize replaces every buffer with a placeholder, so none of them may
+    /// claim to hold a frame afterwards — the next frame into each is drawn
+    /// whole.
+    #[test]
+    fn resizing_forgets_every_frame_the_ring_held() {
+        for len in 1..=3 {
+            let mut fb = Framebuffer::with_ring(4, 4, len).expect("ring");
+            for _ in 0..(2 * len) {
+                RenderTarget::present(&mut fb);
+            }
+            assert!(RenderTarget::buffer_age(&fb).is_some(), "ring of {len}");
+            RenderTarget::resize(&mut fb, 8, 8).expect("resize");
+            for step in 0..len {
+                assert_eq!(
+                    RenderTarget::buffer_age(&fb),
+                    None,
+                    "ring of {len}: buffer {step} after the resize claims to hold a frame"
+                );
+                RenderTarget::present(&mut fb);
+            }
+            assert!(RenderTarget::buffer_age(&fb).is_some(), "ring of {len}");
+        }
     }
 
     #[test]

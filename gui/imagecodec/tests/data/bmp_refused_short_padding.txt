@@ -1,0 +1,1 @@
+REFUSED pixels: failed to fill whole buffer

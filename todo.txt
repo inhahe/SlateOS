@@ -58706,3 +58706,95 @@ where a `ScanResult` is appended, and its test has to push entries *through
 that path* rather than through a call that refuses. The shape to avoid is the
 one just removed: a bound asserted over a collection that nothing fills is a
 test of the fixture, not of the bound.
+
+## Lane F — graphics stack
+
+### Judgment Calls
+
+- **TIFF is read as libtiff's RGBA interface reads it** (2026-09-25,
+  design-decisions §1317): no browser shows TIFF, so the reference is what
+  libtiff-based viewers (gdk-pixbuf) show -- including its crude CMYK
+  conversion and its quirks -- and a file is refused on its first bad strip,
+  as they refuse it. Alternatives: the TIFF 6.0 spec directly, or macOS/Windows
+  behaviour (closed). Reversible by replacing `tiff/rgba.rs`'s conversions.
+- 2026-09-25, lossy WebP (`gui/imagecodec/src/webp/lossy.rs`): where libwebp
+  and RFC 6386's reference decoder disagree -- segmentation with no values
+  (libwebp: absolute zeros; dixie and libvpx: deltas), when the loop-filter
+  level is clamped (libwebp: once; dixie: twice), the colour-space bits
+  (libwebp ignores, dixie refuses) -- this follows libwebp, since that is
+  what browsers show. Only streams no encoder writes are affected. Reversible
+  in `Segmentation::read` and `FilterHeader::strengths`. design-decisions.md
+  §1312.
+- 2026-09-25, animated WebP (`gui/imagecodec/src/webp.rs`, `Animation`):
+  a frame whose data is broken is an error, as it is in libwebp's animation
+  decoder and in Pillow -- unlike a broken GIF frame, which draws what it had
+  because browsers do. What browsers do with a broken WebP frame was not
+  checked (they decode WebP through libwebp's incremental decoder, not its
+  animation decoder). The canvas is left as the last good frame drew it, so
+  a viewer can show that and stop. Reversible in `Animation::next_frame`.
+  design-decisions.md §1313.
+- 2026-09-25, WebP alpha presentation (`gui/imagecodec/src/webp.rs`): whether
+  a picture is shown with its alpha is what `WebPGetFeatures` says of the
+  file, as in Pillow and Firefox -- so an animation whose `VP8X` chunk lacks
+  the alpha flag is shown opaque, its uncovered canvas black. Chrome decides
+  from the demuxer's flags instead; the two differ only on files no encoder
+  writes. Reversible in `File::read`. design-decisions.md §1313.
+- 2026-09-25, BMP (`gui/imagecodec/src/bmp.rs`): the reference is Chrome's
+  *current* BMP decoder (image-rs 0.25.10 with Chromium's patches), not
+  Firefox's or Chrome's older one, where they differ: pixels a run-length
+  stream skips are black (Firefox: transparent), an all-zero V4/V5 alpha
+  channel is transparent (older Chrome: opaque), and a file short by even one
+  padding byte is refused (Pillow shows it). Reversible per rule in
+  `decode_rle`, `read_header` and `Reader::take`'s callers.
+  design-decisions.md §1314.
+- 2026-09-25, ICO (`gui/imagecodec/src/ico.rs`): Chrome's older icon rules
+  (best = largest then deepest, no fallback; mask read after the pixels;
+  all-zero 32-bit alpha shown opaque under the mask), answered in the tests
+  by those rules rather than a running Chrome, which cannot be built alone.
+  Two icons with the same size and depth are taken in directory order;
+  Chrome's unstable sort may pick either. Reversible in `directory`.
+  design-decisions.md §1315.
+- **JPEG colour is blended back to full resolution, not repeated**
+  (`gui/imagecodec/src/jpeg/upsample.rs`, design-decisions §1306). This
+  reverses the decoder's earlier call that interpolating "would be a better
+  picture than the file contains": libjpeg's triangle filter is what every
+  browser and image library shows, so a photograph now looks here as it does
+  everywhere else. It also follows libjpeg in *not* filtering an eighth-scale
+  decode (a thumbnail, box-filtered after), which is libjpeg's implementation
+  limit rather than a quality choice. To go back to repetition, make
+  `Filter::choose` return `Repeat` for every plane that is not `Same`.
+- **A JPEG thumbnail averages, as libjpeg-turbo's does, rather than
+  truncating the transform** (`gui/imagecodec/src/jpeg.rs` `idct_scaled`,
+  design-decisions §1307). IJG libjpeg 9 truncates instead, which is sharper
+  with some ringing; averaging was chosen because libjpeg-turbo is what users'
+  other programs show, and because it gives the scaled path a reference to be
+  tested against. The cost is that a progressive thumbnail keeps 7x7 or 5x5
+  coefficients a block at half or quarter scale rather than 4x4 or 2x2.
+- **The pointer is drawn over fullscreen direct-scanout frames**
+  (`POINTER_OVER_DIRECT_SCANOUT = true`, `gui/compositor/src/server.rs`;
+  design-decisions §1301). C-Q18 put the fullscreen case to the operator as a
+  trade between the fullscreen shortcut and the pointer; drawing the pointer as
+  a presentation-time layer removed the cost on every presenter that exists, so
+  it is shown (the outcome options A and C share). Set the constant to `false`
+  for option B. Asked lane C to defer C-Q18 to the trigger "a presenter scans a
+  client buffer out without copying it":
+  `requests/f-c-c-q18s-premise-changed-the-pointer-is-drawn-over-fullscreen-at-no-cost.md`.
+- **The pointer ignores the user's size and scheme for now**
+  (`Compositor::pointer_preferences` returns the defaults). Three rival
+  cursor-size settings exist and lane C's `known-issues.md` entry asks that none
+  be wired before they are one. When lane C names the survivor, make
+  `pointer_preferences` read it and update
+  `the_pointer_does_not_read_a_rival_copy_of_its_settings`:
+  `requests/f-ce-the-pointer-is-drawn-now-which-cursor-size-setting-survives.md`.
+- **On SlateOS the compositor asks its listener every tick and waits at most a
+  frame** (`guiremote::LISTENER_READINESS`, `gui/compositor/src/server.rs`
+  `listener_worth_asking`/`accept_deadline`; design-decisions §1302). SlateOS's
+  `poll` never reports a pending connection, so trusting the wait would strand
+  every newly launched application; this keeps the old accept latency (one
+  frame) at the old idle wakeup rate. Remove both helpers and the constant when
+  lane A answers
+  `requests/f-a-poll-never-reports-a-connection-waiting-on-a-listening-socket.md`.
+- **Pointer-only frames are paced like composed ones** — at most one frame per
+  refresh, measured from the last frame shown (`Server::next_wake`,
+  design-decisions §1302). A fixed vblank-aligned grid would not drift, but the
+  kernel sends no flip event to align to; revisit when it does.

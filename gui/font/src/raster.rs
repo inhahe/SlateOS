@@ -321,7 +321,7 @@ impl Accumulator {
                 // The segment stays within a single pixel column on this
                 // scanline: split its area between that column and the next
                 // in proportion to how far right its midpoint sits.
-                let xmf = 0.5 * (x + x_next) - x0_floor;
+                let xmf = x.midpoint(x_next) - x0_floor;
                 self.add(row_start, x0i, d - d * xmf);
                 self.add(row_start, x0i.saturating_add(1), d * xmf);
             } else {

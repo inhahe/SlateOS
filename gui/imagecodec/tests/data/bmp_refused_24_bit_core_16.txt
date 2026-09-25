@@ -1,0 +1,1 @@
+REFUSED metadata: Format error decoding Bmp: Invalid channel bit count for RGB: 16

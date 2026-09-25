@@ -124,9 +124,12 @@
 //!    mode exists not to do.
 //! 5. **`--version` reports `free from SlateOS coreutils 0.1.0`**, as every
 //!    other utility here does.
-//! 6. **Bytes echoed back in a diagnostic go through
-//!    `coreutils::quote::escape_unprintable`**, so a control character in a
-//!    rejected argument cannot rewrite the terminal.
+//! 6. **Bytes echoed back in a diagnostic cannot rewrite the terminal.**
+//!    Upstream prints a rejected argument raw. Here the ones between procps'
+//!    apostrophes go through `coreutils::quote::quoteaf`, which prints the same
+//!    `'abc'` for anything printable and a control character as `$'\033'`; the
+//!    one between its older backquote-and-apostrophe pair, in the "is not
+//!    positive number" message, goes through `escape_unprintable`.
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -1028,8 +1031,8 @@ fn scan(argv: &[OsString]) -> Result<Request, Fault> {
                 let text = coreutils::quote::os_bytes(&raw).into_owned();
                 let seconds = strtod_nol(&text).map_err(|f| {
                     Fault::message(format!(
-                        "seconds argument failed: '{}'{}",
-                        shown(&text),
+                        "seconds argument failed: {}{}",
+                        coreutils::quote::quoteaf(&text),
                         f.suffix()
                     ))
                 })?;
@@ -1051,8 +1054,8 @@ fn scan(argv: &[OsString]) -> Result<Request, Fault> {
                 let text = coreutils::quote::os_bytes(&raw).into_owned();
                 let count = strtol(&text).map_err(|f| {
                     Fault::message(format!(
-                        "failed to parse count argument: '{}'{}",
-                        shown(&text),
+                        "failed to parse count argument: {}{}",
+                        coreutils::quote::quoteaf(&text),
                         f.suffix()
                     ))
                 })?;
@@ -1062,8 +1065,8 @@ fn scan(argv: &[OsString]) -> Result<Request, Fault> {
                 // the counts that happen to truncate below 1.
                 let out_of_range = || {
                     Fault::message(format!(
-                        "failed to parse count argument: '{}': Numerical result out of range",
-                        shown(&text)
+                        "failed to parse count argument: {}: Numerical result out of range",
+                        coreutils::quote::quoteaf(&text)
                     ))
                 };
                 let count = i32::try_from(count).map_err(|_| out_of_range())?;
@@ -1772,12 +1775,13 @@ mod tests {
     }
 
     /// A control character in a rejected argument cannot reach the terminal
-    /// unescaped.
+    /// unescaped -- and the quoted word still names the exact argument, which a
+    /// `\033` inside hand-written apostrophes did not (it reads as four bytes).
     #[test]
     fn echoed_arguments_are_escaped() {
         assert_eq!(
             render(A, &["-c", "a\u{1b}[2Jb"]).1,
-            "free: failed to parse count argument: 'a\\033[2Jb'\n"
+            "free: failed to parse count argument: 'a'$'\\033''[2Jb'\n"
         );
     }
 

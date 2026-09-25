@@ -734,8 +734,8 @@ fn num_error(msg: &str, arg: &OsStr, e: NumErr) -> Error {
     match e {
         NumErr::Invalid => fail(format!("{msg}: {}", quoteaf_os(arg))),
         NumErr::Range => fail(format!(
-            "{msg}: '{}': {}",
-            shown(arg),
+            "{msg}: {}: {}",
+            quoteaf_os(arg),
             NumErr::Range.strerror()
         )),
     }

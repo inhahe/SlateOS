@@ -46,21 +46,13 @@
 # the half of that macro rustfmt had wrapped. An empty ratchet is a
 # claim about the detector as much as about the code.
 #
-# 94 sites across 41 files.
+# 74 sites across 33 files.
 
 init/servicebus/src/main.rs:1
 userspace/ar/src/main.rs:1
 userspace/at/src/main.rs:4
 userspace/capsh/src/main.rs:1
 userspace/chroot/src/main.rs:3
-userspace/coreutils/src/bin/cal.rs:1
-userspace/coreutils/src/bin/csplit.rs:1
-userspace/coreutils/src/bin/df.rs:1
-userspace/coreutils/src/bin/find.rs:9
-userspace/coreutils/src/bin/free.rs:3
-userspace/coreutils/src/bin/sort/keydef.rs:3
-userspace/coreutils/src/bin/tar.rs:1
-userspace/coreutils/src/tabstops.rs:1
 userspace/cpio/src/main.rs:2
 userspace/crontab/src/main.rs:1
 userspace/curl/src/main.rs:4

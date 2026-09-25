@@ -256,8 +256,8 @@ fn skip_one_field(line: &[u8], from: usize, lim: usize, tab: Option<u8>, consume
 pub fn parse_key(spec: &[u8]) -> Result<KeySpec, String> {
     let bad = |msg: &str| -> String {
         format!(
-            "{msg}: invalid field specification '{}'",
-            String::from_utf8_lossy(spec)
+            "{msg}: invalid field specification {}",
+            coreutils::quote::quote(spec)
         )
     };
     let mut key = KeySpec::default();
@@ -363,8 +363,8 @@ pub fn parse_obsolete_end(spec: &[u8], key: &mut KeySpec) -> Result<(), String> 
     let rest = set_ordering(rest, key, Blanks::End);
     if !rest.is_empty() {
         return Err(format!(
-            "stray character in field spec: invalid field specification '{}'",
-            String::from_utf8_lossy(spec)
+            "stray character in field spec: invalid field specification {}",
+            coreutils::quote::quote(spec)
         ));
     }
     check_kinds(spec, key)
@@ -467,8 +467,8 @@ fn parse_count<'a>(s: &'a [u8], msgid: &str) -> Result<(usize, &'a [u8]), String
         .unwrap_or(s.len());
     if end == 0 {
         return Err(format!(
-            "{msgid}: invalid count at start of '{}'",
-            String::from_utf8_lossy(s)
+            "{msgid}: invalid count at start of {}",
+            coreutils::quote::quote(s)
         ));
     }
     let mut value = 0usize;
@@ -540,31 +540,31 @@ mod tests {
         let err = |s: &str| parse_key(s.as_bytes()).unwrap_err();
         assert_eq!(
             err("0"),
-            "field number is zero: invalid field specification '0'"
+            "field number is zero: invalid field specification ‘0’"
         );
         assert_eq!(
             err("1.0"),
-            "character offset is zero: invalid field specification '1.0'"
+            "character offset is zero: invalid field specification ‘1.0’"
         );
         assert_eq!(
             err("x"),
-            "invalid number at field start: invalid count at start of 'x'"
+            "invalid number at field start: invalid count at start of ‘x’"
         );
         assert_eq!(
             err("1x"),
-            "stray character in field spec: invalid field specification '1x'"
+            "stray character in field spec: invalid field specification ‘1x’"
         );
         assert_eq!(
             err("1,0"),
-            "field number is zero: invalid field specification '1,0'"
+            "field number is zero: invalid field specification ‘1,0’"
         );
         assert_eq!(
             err("1,x"),
-            "invalid number after ',': invalid count at start of 'x'"
+            "invalid number after ',': invalid count at start of ‘x’"
         );
         assert_eq!(
             err("1."),
-            "invalid number after '.': invalid count at start of ''"
+            "invalid number after '.': invalid count at start of ‘’"
         );
         assert_eq!(err("1n,2M"), "options '-nM' are incompatible");
     }

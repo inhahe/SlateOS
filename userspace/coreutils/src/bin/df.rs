@@ -1683,7 +1683,8 @@ fn parse_args(argv: &[OsString], env: &Environment) -> Result<Request, Refusal> 
             // produce has an arm above.
             _ => {
                 return Err(Refusal::usage(&format!(
-                    "option '{spelling}' is not implemented"
+                    "option {} is not implemented",
+                    quoteaf(spelling.as_bytes())
                 )));
             }
         }

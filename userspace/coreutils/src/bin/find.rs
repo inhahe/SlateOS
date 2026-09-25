@@ -1446,8 +1446,8 @@ fn parse_type_letters(name: &[u8], arg: &[u8]) -> Parsed<Vec<u8>> {
         }
         if letters.contains(&c) {
             return Err(Fatal::new(format!(
-                "Duplicate file type '{}' in the argument list to {pname}.",
-                chr(c)
+                "Duplicate file type {} in the argument list to {pname}.",
+                quote::quoteaf_os(chr(c))
             )));
         }
         letters.push(c);
@@ -1519,8 +1519,8 @@ fn compile_regex(pattern: &[u8], extended: bool, ci: bool) -> Parsed<ere::Regex>
         // greps this line was written against. The `-regex` block in
         // `scripts/find-diff.sh` pins every code this can produce.
         Fatal::new(format!(
-            "failed to compile regular expression '{}': {}",
-            quote::escape_unprintable(pattern),
+            "failed to compile regular expression {}: {}",
+            quote::quoteaf(pattern),
             e.message()
         ))
     })
@@ -2773,15 +2773,15 @@ impl Builder<'_> {
             PKind::And | PKind::Or | PKind::Comma => {
                 // e.g. `find . -a`
                 return Err(Fatal::new(format!(
-                    "invalid expression; you have used a binary operator '{}' with nothing before it.",
-                    self.name(this)
+                    "invalid expression; you have used a binary operator {} with nothing before it.",
+                    quote::quoteaf_os(self.name(this))
                 )));
             }
             PKind::Close => {
                 let Some(prev) = prev_pred else {
                     return Err(Fatal::new(format!(
-                        "invalid expression: expected expression before closing parentheses '{}'.",
-                        self.name(this)
+                        "invalid expression: expected expression before closing parentheses {}.",
+                        quote::quoteaf_os(self.name(this))
                     )));
                 };
                 let prev_is_op = matches!(
@@ -2791,15 +2791,15 @@ impl Builder<'_> {
                 return Err(if prev_is_op && !self.artificial(this) {
                     // e.g. `find \( -not \)`
                     Fatal::new(format!(
-                        "expected an expression between '{}' and ')'",
-                        self.name(prev)
+                        "expected an expression between {} and ')'",
+                        quote::quoteaf_os(self.name(prev))
                     ))
                 } else if self.artificial(this) {
                     // The user's predicates ran out inside the wrapper: the
                     // `)` we tripped over is one `find` added itself.
                     Fatal::new(format!(
-                        "expected an expression after '{}'",
-                        self.name(prev)
+                        "expected an expression after {}",
+                        quote::quoteaf_os(self.name(prev))
                     ))
                 } else {
                     Fatal::new("invalid expression; you have too many ')'")
@@ -2821,16 +2821,16 @@ impl Builder<'_> {
                     // `(` never got a partner.
                     return Err(Fatal::new(format!(
                         "invalid expression; expected to find a ')' but didn't see one. \
-                         Perhaps you need an extra predicate after '{}'",
-                        self.name(this)
+                         Perhaps you need an extra predicate after {}",
+                        quote::quoteaf_os(self.name(this))
                     )));
                 }
                 self.i = after;
                 if self.kind() == Some(PKind::Close) {
                     if self.artificial(this) {
                         return Err(Fatal::new(format!(
-                            "invalid expression: expected expression before closing parentheses '{}'.",
-                            self.name(self.i)
+                            "invalid expression: expected expression before closing parentheses {}.",
+                            quote::quoteaf_os(self.name(self.i))
                         )));
                     }
                     return Err(Fatal::new(
@@ -2903,8 +2903,8 @@ fn build_tree(nodes: &[Node]) -> Parsed<Expr> {
             Fatal::new("you have too many ')'")
         } else {
             Fatal::new(format!(
-                "unexpected extra predicate '{}'",
-                builder.name(builder.i)
+                "unexpected extra predicate {}",
+                quote::quoteaf_os(builder.name(builder.i))
             ))
         });
     }

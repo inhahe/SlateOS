@@ -767,9 +767,9 @@ impl OldFiles {
         if *self != Self::Replace && *self != wanted {
             return Err(getopt::Error {
                 sentence: format!(
-                    "'{}' cannot be used with '{}'",
-                    wanted.long_name(),
-                    self.long_name()
+                    "{} cannot be used with {}",
+                    quoteaf(wanted.long_name().as_bytes()),
+                    quoteaf(self.long_name().as_bytes())
                 ),
                 referral: None,
                 status: EXIT_FATAL,

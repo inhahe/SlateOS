@@ -40,7 +40,7 @@
 
 use coreutils::extfloat::{ExtF80, Spec, render};
 use coreutils::getopt::{self, Opt, Program, Takes};
-use coreutils::quote::{os_bytes, quote};
+use coreutils::quote::{os_bytes, quote, quoteaf};
 use coreutils::setfields::{self, Range};
 use coreutils::xnum::{Status, xstrtoimax, xstrtoumax};
 use std::ffi::OsString;
@@ -59,23 +59,17 @@ const MAX_UNSCALED_DIGITS: u64 = 18;
 /// 999Q: the largest value with a suffix to write it with.
 const MAX_ACCEPTABLE_DIGITS: u64 = 33;
 
-/// A rendered number between ASCII apostrophes, the way upstream's messages
-/// print one: `value too large to be printed: '1.23457e+19'`.
+/// A rendered number the way upstream's messages show one, between ASCII
+/// apostrophes: `value too large to be printed: '1.23457e+19'`.
 ///
-/// Upstream writes these as `'%Lg'` in the format string rather than through
-/// `quote()`, and this port prints the same bytes, because what stands between
-/// the apostrophes is `printf`'s rendering of a `long double` -- digits, a
-/// sign, a point, an exponent, `inf` or `nan` -- which can hold neither a
-/// newline nor a quote to break out of the message with. They are added here
-/// instead of around a placeholder in each format string so that that shape,
-/// which `scripts/quote-names.py` refuses, keeps meaning "a name somebody
-/// quoted by hand".
+/// Upstream writes `'%Lg'` into the format string rather than calling
+/// `quote()`. [`quoteaf`] prints exactly those bytes for anything `printf`
+/// renders a `long double` as -- digits, a sign, a point, an exponent, `inf`,
+/// `nan`, and here a `/` -- because none of them needs quoting inside `'…'`;
+/// and unlike apostrophes written around a placeholder, it would stay safe if
+/// that ever stopped being true.
 fn apostrophes(number: &str) -> String {
-    let mut out = String::with_capacity(number.len().saturating_add(2));
-    out.push('\'');
-    out.push_str(number);
-    out.push('\'');
-    out
+    quoteaf(number.as_bytes())
 }
 
 /// The suffix letters, from K (1) to Q (10).

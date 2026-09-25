@@ -594,6 +594,19 @@ run_msg --check=
 run_msg --sort=
 run_msg --check=quiets
 run_msg --sort=NUMERIC
+# The -k refusals, compared by their words and not only by their status.
+# `run_case` further up sees just that stderr is non-empty, and these
+# printed ASCII apostrophes -- where upstream's `badfieldspec` and
+# `parse_field_count` call quote(), curly under this file's C.UTF-8 -- for
+# as long as they existed, unseen by every row that ran them.
+run_msg -k0
+run_msg -k1.0
+run_msg -kx
+run_msg -k1x
+run_msg -k1,0
+run_msg -k1,x
+run_msg -k1.
+run_msg -k1n,2M
 run_stdin '10\n9\n' --sort=hum
 run_stdin '10\n9\n' --sort=n
 run_stdin 'b\na\n' --check=q

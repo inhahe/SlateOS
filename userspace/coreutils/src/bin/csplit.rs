@@ -597,9 +597,9 @@ fn extract_regexp(bytes: &[u8], skip: bool) -> Result<Control, Fail> {
     let rest = bytes.get(1..).unwrap_or_default();
     let close = rest.iter().rposition(|&c| c == delim).ok_or_else(|| {
         Fail::fatal(format!(
-            "{}: closing delimiter '{}' missing",
+            "{}: closing delimiter {} missing",
             String::from_utf8_lossy(bytes),
-            delim as char
+            coreutils::quote::quoteaf(&[delim])
         ))
     })?;
     let pattern = rest.get(..close).unwrap_or_default();

@@ -158705,6 +158705,7 @@ one of these was introduced by an edit that added something and left the
 header alone.
 
 ## `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT` (lane C, 2026-09-17)
+**Status:** OPEN — 2026-09-24 (lane F): the stall is about 3.5x shorter, not gone. `imagecodec`'s JPEG decoder is now about 3.3x faster with bit-identical output (4000x5333: whole picture 3.65 s → ~1.1 s, 128-px thumbnail 1.25 s → ~0.34 s, release, this machine), but the decode still runs on the thread that draws; moving it off that thread is still the fix.
 
 **In short:** click a photograph and the window stops responding until the
 picture has been decoded -- about two thirds of a second for a photograph from

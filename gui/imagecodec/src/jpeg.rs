@@ -103,15 +103,46 @@ struct Huffman {
     first: [u32; 16],
     offset: [usize; 16],
     values: Vec<u8>,
+    /// For every [`FAST_BITS`]-bit prefix, the symbol the canonical walk finds
+    /// within those bits, as `(length << 8) | value`, or 0 when it needs more
+    /// of them. Empty until [`Self::index`] runs.
+    fast: Vec<u16>,
 }
+
+/// How many bits the fast lookup resolves at once.
+///
+/// Nine covers the codes a table spends on its common symbols — the JPEG
+/// standard's own example tables put every DC code and the most frequent AC
+/// codes within it — so nearly every symbol is one table read rather than a
+/// walk of up to sixteen bits.
+const FAST_BITS: u32 = 9;
 
 impl Huffman {
     /// Read one value, or `None` if no code matches.
     // `code - first` is guarded by the `code >= first` test immediately
     // above it, which is the only subtraction here; everything else is
     // `checked_`.
-    #[allow(clippy::arithmetic_side_effects, reason = "guarded by the bound above")]
+    ///
+    /// One table read for a code of up to [`FAST_BITS`] bits. Anything longer,
+    /// or a code that would run past the end of the data, takes the canonical
+    /// walk a bit at a time — which is also what the table was built from, so
+    /// the two cannot disagree about any table, a malformed one included.
     fn decode(&self, bits: &mut BitReader<'_>) -> Option<u8> {
+        let (prefix, real) = bits.peek(FAST_BITS);
+        if let Some(&entry) = self.fast.get(prefix as usize) {
+            let length = u32::from(entry >> 8);
+            if length != 0 && length <= real {
+                bits.consume(length);
+                return u8::try_from(entry & 0xFF).ok();
+            }
+        }
+        self.decode_slowly(bits)
+    }
+
+    /// The canonical walk: one bit at a time until a length's code range
+    /// holds the code read so far.
+    #[allow(clippy::arithmetic_side_effects, reason = "guarded by the bound above")]
+    fn decode_slowly(&self, bits: &mut BitReader<'_>) -> Option<u8> {
         let mut code = 0u32;
         for length in 0..16usize {
             code = code.checked_mul(2)?.checked_add(u32::from(bits.bit()?))?;
@@ -149,20 +180,69 @@ impl Huffman {
             code = code.saturating_add(count).saturating_mul(2);
             offset = offset.saturating_add(count as usize);
         }
+        self.fast = (0..1u32 << FAST_BITS)
+            .map(|prefix| self.fast_entry(prefix))
+            .collect();
+    }
+
+    /// What the canonical walk returns reading the [`FAST_BITS`]-bit `prefix`,
+    /// if it returns within those bits: `(length << 8) | value`, else 0.
+    ///
+    /// Computed by walking, rather than by writing each code's range into the
+    /// table, so that a table whose counts oversubscribe the code space — which
+    /// a hostile file can send — gets exactly the answer [`Self::decode_slowly`]
+    /// would give, instead of whichever code happened to be written last.
+    fn fast_entry(&self, prefix: u32) -> u16 {
+        let mut code = 0u32;
+        for length in 0..FAST_BITS {
+            let bit = (prefix >> (FAST_BITS.saturating_sub(1).saturating_sub(length))) & 1;
+            code = code.saturating_mul(2).saturating_add(bit);
+            let at = length as usize;
+            let count = u32::from(self.counts.get(at).copied().unwrap_or(0));
+            let first = self.first.get(at).copied().unwrap_or(0);
+            if count > 0 && code >= first && code < first.saturating_add(count) {
+                let index = self
+                    .offset
+                    .get(at)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(code.saturating_sub(first) as usize);
+                return match self.values.get(index) {
+                    Some(&value) => {
+                        let length = u16::try_from(length.saturating_add(1)).unwrap_or(0);
+                        (length << 8) | u16::from(value)
+                    }
+                    // The walk would return nothing here; so does the table,
+                    // and the slow path says so.
+                    None => 0,
+                };
+            }
+        }
+        0
     }
 }
 
-/// The entropy-coded data, read one bit at a time.
+/// The entropy-coded data, read in bits.
 ///
 /// Two pieces of awkwardness live here. A `0xFF` in the data is written
 /// `0xFF 0x00`, so the zero is skipped; and any other `0xFF xx` is a marker,
 /// which ends the run of data rather than being read as bits.
+///
+/// Bytes are loaded up to eight at a time into a 64-bit buffer, so a code or a
+/// coefficient of up to sixteen bits is a shift rather than a loop. Loading
+/// stops at a marker without consuming it — which is what keeps the read-ahead
+/// invisible: the buffer never holds a byte from beyond a marker, so a restart
+/// finds the marker exactly where a byte-at-a-time reader would.
 struct BitReader<'a> {
     data: &'a [u8],
     pos: usize,
-    /// Bits not yet handed out, most-significant first.
-    buffer: u32,
+    /// Bits not yet handed out, the next one in bit 63.
+    buffer: u64,
+    /// How many of the buffer's top bits are real.
     count: u32,
+    /// Loading has reached a marker or the end of the data, and loads nothing
+    /// more until a restart marker is consumed.
+    stopped: bool,
 }
 
 impl<'a> BitReader<'a> {
@@ -172,32 +252,99 @@ impl<'a> BitReader<'a> {
             pos: 0,
             buffer: 0,
             count: 0,
+            stopped: false,
+        }
+    }
+
+    /// Load whole bytes until the buffer holds more than 56 bits, a marker is
+    /// reached, or the data runs out.
+    fn refill(&mut self) {
+        while self.count <= 56 && !self.stopped {
+            let Some(&byte) = self.data.get(self.pos) else {
+                self.stopped = true;
+                break;
+            };
+            if byte == 0xFF {
+                match self.data.get(self.pos.saturating_add(1)) {
+                    // A stuffed zero: the 0xFF is data.
+                    Some(0x00) => self.pos = self.pos.saturating_add(2),
+                    // Anything else is a marker and the data ends here; the
+                    // marker is left for `restart` to find.
+                    _ => {
+                        self.stopped = true;
+                        break;
+                    }
+                }
+            } else {
+                self.pos = self.pos.saturating_add(1);
+            }
+            self.buffer |= u64::from(byte) << (56u32.saturating_sub(self.count));
+            self.count = self.count.saturating_add(8);
         }
     }
 
     /// One bit, or `None` at the end of the data or at a marker.
     fn bit(&mut self) -> Option<u8> {
         if self.count == 0 {
-            let byte = *self.data.get(self.pos)?;
-            self.pos = self.pos.saturating_add(1);
-            if byte == 0xFF {
-                match self.data.get(self.pos) {
-                    // A stuffed zero: the 0xFF is data.
-                    Some(0x00) => self.pos = self.pos.saturating_add(1),
-                    // Anything else is a marker and the scan ends here.
-                    _ => return None,
-                }
+            self.refill();
+            if self.count == 0 {
+                return None;
             }
-            self.buffer = u32::from(byte);
-            self.count = 8;
         }
-        self.count = self.count.saturating_sub(1);
-        let bit = (self.buffer >> self.count) & 1;
-        u8::try_from(bit).ok()
+        let bit = u8::try_from(self.buffer >> 63).ok();
+        self.consume(1);
+        bit
+    }
+
+    /// The next `n` bits (1 to 16) without consuming them, as a number, and
+    /// how many of them are real: past the end of the data they read as 0.
+    fn peek(&mut self, n: u32) -> (u32, u32) {
+        if self.count < n {
+            self.refill();
+        }
+        let n = n.clamp(1, 16);
+        let value = u32::try_from(self.buffer >> (64u32.saturating_sub(n))).unwrap_or(0);
+        (value, self.count.min(n))
+    }
+
+    /// Drop `n` bits the caller has read with [`Self::peek`]. Never more than
+    /// are real: the caller checked.
+    fn consume(&mut self, n: u32) {
+        let n = n.min(self.count);
+        self.buffer = self.buffer.checked_shl(n).unwrap_or(0);
+        self.count = self.count.saturating_sub(n);
     }
 
     /// `n` bits as an unsigned number.
+    ///
+    /// Up to sixteen at once, which is every size a legal baseline file uses.
+    /// Past the end of the data the bits that exist are consumed and the answer
+    /// is `None` — exactly what reading them one at a time did, so a truncated
+    /// file comes apart in the same place it always did.
     fn bits(&mut self, n: u32) -> Option<i32> {
+        if n == 0 {
+            return Some(0);
+        }
+        if n > 16 {
+            // A size no legal table produces; read the long way round, which
+            // is also how a value too big for an `i32` is refused.
+            return self.bits_slowly(n);
+        }
+        if self.count < n {
+            self.refill();
+            if self.count < n {
+                self.buffer = 0;
+                self.count = 0;
+                return None;
+            }
+        }
+        let value = i32::try_from(self.buffer >> (64u32.saturating_sub(n))).ok();
+        self.consume(n);
+        value
+    }
+
+    /// [`Self::bits`], one bit at a time.
+    fn bits_slowly(&mut self, n: u32) -> Option<i32> {
         let mut value = 0i32;
         for _ in 0..n {
             value = value.checked_mul(2)?.checked_add(i32::from(self.bit()?))?;
@@ -226,16 +373,28 @@ impl<'a> BitReader<'a> {
 
     /// Step to the next byte boundary and past a restart marker, if one is
     /// there. Returns whether a restart was consumed.
+    ///
+    /// Only the rest of the byte being read is dropped. Whole bytes already
+    /// loaded mean the data went on without a marker — loading stops *at* a
+    /// marker — so there is none to consume, and reading resumes with them,
+    /// just as it would have from the data.
     fn restart(&mut self) -> bool {
-        self.count = 0;
+        let partial = self.count % 8;
+        self.consume(partial);
+        if self.count > 0 {
+            return false;
+        }
+        self.buffer = 0;
         // A restart marker is `FF D0` through `FF D7`.
         while let Some(byte) = self.data.get(self.pos) {
             if *byte != 0xFF {
+                self.stopped = false;
                 return false;
             }
             match self.data.get(self.pos.saturating_add(1)) {
                 Some(0xD0..=0xD7) => {
                     self.pos = self.pos.saturating_add(2);
+                    self.stopped = false;
                     return true;
                 }
                 Some(0xFF) => self.pos = self.pos.saturating_add(1),
@@ -256,6 +415,9 @@ impl<'a> BitReader<'a> {
 /// arithmetic; only the cosines moved.
 struct Basis {
     table: [[f32; 8]; 8],
+    /// The same numbers by output position: `columns[x][u]` is `table[u][x]`,
+    /// so the row pass can walk one output's weights in order.
+    columns: [[f32; 8]; 8],
 }
 
 impl Basis {
@@ -280,7 +442,15 @@ impl Basis {
                 }
             }
         }
-        Self { table }
+        let mut columns = [[0.0f32; 8]; 8];
+        for (u, row) in table.iter().enumerate() {
+            for (x, &weight) in row.iter().enumerate() {
+                if let Some(cell) = columns.get_mut(x).and_then(|c| c.get_mut(u)) {
+                    *cell = weight;
+                }
+            }
+        }
+        Self { table, columns }
     }
 
     fn at(&self, u: usize, x: usize) -> f32 {
@@ -380,17 +550,75 @@ const fn scaled_position(index: usize, n: usize) -> usize {
 /// clarity rather than speed beyond that: the fast integer approximations
 /// trade exactness for cycles, and a decoder that is subtly wrong is the thing
 /// this whole module is trying not to be.
-// Float arithmetic on values the format bounds: a coefficient is at most a
-// quantised 12-bit sample times its divisor, and the sums below are 8 terms of
-// those. The one index expression, `y * 8 + x`, is `0..8` in both, and every
-// access through it is a `get`.
+///
+/// **What it does skip is zeros, and only zeros.** Quantisation leaves most of
+/// a block's coefficients at zero — typically all but the first row or two —
+/// and a term with a zero coefficient adds `±0.0` to a sum that started at
+/// `+0.0`, which changes nothing, not even the sign of a zero. So each row
+/// stops at its last non-zero coefficient, an all-zero row is not transformed
+/// at all, and the column pass leaves out the rows that came out zero. The
+/// output is bit for bit what the full arithmetic gives, in the same order;
+/// the table `tests::the_fast_idct_is_the_full_idct` holds it to that.
+fn idct_8x8(block: &mut [f32; 64], basis: &Basis) {
+    let mut scratch = [[0.0f32; 8]; 8];
+    let mut live = [false; 8];
+    // Rows.
+    let (rows, _) = block.as_chunks::<8>();
+    for ((row, out), alive) in rows.iter().zip(scratch.iter_mut()).zip(live.iter_mut()) {
+        let Some(last) = row.iter().rposition(|&c| c != 0.0) else {
+            continue;
+        };
+        *alive = true;
+        let terms = last.saturating_add(1);
+        for (slot, weights) in out.iter_mut().zip(&basis.columns) {
+            let mut sum = 0.0f32;
+            for (b, &c) in weights.iter().zip(row).take(terms) {
+                sum += b * c;
+            }
+            *slot = sum / 2.0;
+        }
+    }
+    // Columns, a row of output at a time: each output sample still adds its
+    // terms in increasing `v`, which is the order the full transform used.
+    // `basis.columns[y][v]` is `basis(v, y)`.
+    let (out_rows, _) = block.as_chunks_mut::<8>();
+    for (out_row, weights) in out_rows.iter_mut().zip(&basis.columns) {
+        let mut acc = [0.0f32; 8];
+        for ((srow, &b), &alive) in scratch.iter().zip(weights).zip(&live) {
+            if alive {
+                for (a, &sv) in acc.iter_mut().zip(srow) {
+                    *a += b * sv;
+                }
+            }
+        }
+        for (slot, a) in out_row.iter_mut().zip(acc) {
+            *slot = a / 2.0;
+        }
+    }
+}
+
+/// The value every sample of a block with only a DC coefficient comes out as.
+///
+/// The row pass's one live row is the DC times `basis(0, x)`, halved, which is
+/// the same for every `x` because the first basis function is the constant
+/// `1/sqrt 2` — `cosine(0)` sums its series to exactly 1. The column pass then
+/// does the same to that. These are the very operations [`idct_8x8`] and
+/// [`idct_scaled`] perform for such a block, with the zero terms (which change
+/// nothing) left out, so the answer is theirs bit for bit, at every scale.
+fn flat_block(dc: f32, basis: &Basis) -> f32 {
+    let row = (basis.at(0, 0) * dc) / 2.0;
+    (basis.at(0, 0) * row) / 2.0
+}
+
+/// The transform as it was before zeros were skipped: every term of every sum.
+/// Kept as the reference the fast one is tested against.
+#[cfg(test)]
 #[allow(
     clippy::arithmetic_side_effects,
     reason = "bounded coefficients and 0..8 indices"
 )]
-fn idct_8x8(block: &mut [f32; 64], basis: &Basis) {
+fn idct_8x8_reference(block: &mut [f32; 64], basis: &Basis) {
     let mut scratch = [0.0f32; 64];
-    // Rows.
     for y in 0..8usize {
         for x in 0..8usize {
             let mut sum = 0.0f32;
@@ -402,7 +630,6 @@ fn idct_8x8(block: &mut [f32; 64], basis: &Basis) {
             }
         }
     }
-    // Columns.
     for x in 0..8usize {
         for y in 0..8usize {
             let mut sum = 0.0f32;
@@ -713,6 +940,7 @@ fn read_huffman_tables(payload: &[u8], tables: &mut Tables) -> ImageResult<()> {
             first: [0; 16],
             offset: [0; 16],
             values,
+            fast: Vec::new(),
         };
         table.index();
         let slot = if is_ac {
@@ -848,10 +1076,18 @@ fn decode_scan(
                 for by in 0..component.v {
                     for bx in 0..component.h {
                         let mut block = [0.0f32; 64];
-                        decode_block(&mut bits, component, tables, &mut block)?;
-                        let mut scaled = [0.0f32; 64];
-                        idct_scaled(&block, &basis, block_size, &mut scaled);
-                        let block = scaled;
+                        let any_ac = decode_block(&mut bits, component, tables, &mut block)?;
+                        if !any_ac {
+                            // Every output of the transform is the same one
+                            // number; see `flat_block`.
+                            block = [flat_block(block[0], &basis); 64];
+                        } else if block_size == 8 {
+                            idct_8x8(&mut block, &basis);
+                        } else {
+                            let mut scaled = [0.0f32; 64];
+                            idct_scaled(&block, &basis, block_size, &mut scaled);
+                            block = scaled;
+                        }
                         let Some((plane_w, plane_h, plane)) = planes.get_mut(index) else {
                             continue;
                         };
@@ -863,26 +1099,9 @@ fn decode_scan(
                             .saturating_mul(component.v)
                             .saturating_add(by)
                             .saturating_mul(block_size);
-                        for y in 0..block_size {
-                            for x in 0..block_size {
-                                let px = origin_x.saturating_add(x);
-                                let py = origin_y.saturating_add(y);
-                                if px >= *plane_w || py >= *plane_h {
-                                    continue;
-                                }
-                                // `+ 0.5` because `as` truncates. Without it
-                                // every sample is biased half a level low,
-                                // which is invisible in any one pixel and
-                                // measurable across an image.
-                                let value = block.get(y * 8 + x).copied().unwrap_or(0.0) + 128.5;
-                                #[allow(clippy::cast_possible_truncation, reason = "clamped")]
-                                #[allow(clippy::cast_sign_loss, reason = "clamped to 0..=255")]
-                                let byte = value.clamp(0.0, 255.0) as u8;
-                                if let Some(slot) = plane.get_mut(py * *plane_w + px) {
-                                    *slot = byte;
-                                }
-                            }
-                        }
+                        store_block(
+                            &block, block_size, plane, *plane_w, *plane_h, origin_x, origin_y,
+                        );
                     }
                 }
             }
@@ -899,7 +1118,52 @@ fn decode_scan(
     })
 }
 
+/// Write one reconstructed block into its plane at `(origin_x, origin_y)`,
+/// clipped to the plane, level-shifted and clamped to a byte.
+///
+/// A row at a time: the plane's row is sliced once and the block's samples
+/// are zipped along it, where writing a sample at a time recomputed and
+/// bounds-checked the index sixty-four times a block.
+fn store_block(
+    block: &[f32; 64],
+    block_size: usize,
+    plane: &mut [u8],
+    plane_w: usize,
+    plane_h: usize,
+    origin_x: usize,
+    origin_y: usize,
+) {
+    if origin_x >= plane_w {
+        return;
+    }
+    let cols = block_size.min(plane_w.saturating_sub(origin_x));
+    for (y, samples) in block.chunks_exact(8).take(block_size).enumerate() {
+        let py = origin_y.saturating_add(y);
+        if py >= plane_h {
+            break;
+        }
+        let start = py.saturating_mul(plane_w).saturating_add(origin_x);
+        let Some(row) = plane.get_mut(start..start.saturating_add(cols)) else {
+            continue;
+        };
+        for (slot, &sample) in row.iter_mut().zip(samples) {
+            // `+ 0.5` because `as` truncates. Without it every sample is
+            // biased half a level low, which is invisible in any one pixel
+            // and measurable across an image.
+            let value = sample + 128.5;
+            #[allow(clippy::cast_possible_truncation, reason = "clamped")]
+            #[allow(clippy::cast_sign_loss, reason = "clamped to 0..=255")]
+            let byte = value.clamp(0.0, 255.0) as u8;
+            *slot = byte;
+        }
+    }
+}
+
 /// One 8x8 block: a DC difference, then run-length coded AC coefficients.
+///
+/// Returns whether any AC coefficient came out non-zero. A block that is its
+/// DC alone — a flat patch, and much of every photograph's chroma — is one
+/// value everywhere, which the caller fills rather than transforms.
 // The coefficient arithmetic is bounded by the format: a dequantised value is
 // a 12-bit coefficient times a 16-bit divisor, and the DC predictor is a
 // `saturating_add` chain of those.
@@ -909,7 +1173,7 @@ fn decode_block(
     component: &mut Component,
     tables: &Tables,
     block: &mut [f32; 64],
-) -> ImageResult<()> {
+) -> ImageResult<bool> {
     let quant = tables
         .quant
         .get(component.quant)
@@ -930,7 +1194,7 @@ fn decode_block(
         // Running out of bits mid-image is a truncated file, and the pixels
         // decoded so far are still worth returning -- but a block half-read
         // would be visibly wrong, so this stops at the block boundary.
-        return Ok(());
+        return Ok(false);
     };
     let diff = bits.receive_extend(u32::from(length)).unwrap_or(0);
     component.dc_prediction = component.dc_prediction.saturating_add(diff);
@@ -940,6 +1204,7 @@ fn decode_block(
     }
 
     // The 63 AC coefficients, as (run of zeros, value) pairs.
+    let mut any_ac = false;
     let mut n = 1usize;
     while n < 64 {
         let Some(symbol) = ac_table.decode(bits) else {
@@ -965,20 +1230,22 @@ fn decode_block(
         #[allow(clippy::cast_precision_loss, reason = "coefficients are small")]
         if let Some(cell) = block.get_mut(slot) {
             *cell = (value * i32::from(quant.get(slot).copied().unwrap_or(1))) as f32;
+            any_ac |= *cell != 0.0;
         }
         n = n.saturating_add(1);
     }
-    Ok(())
+    Ok(any_ac)
 }
 
 /// Upsample the planes and convert to `0xAARRGGBB`.
-// Index arithmetic bounded by the loops, and every access through it is a
-// `get`. The multiplications are `saturating_mul` where a hostile size could
-// reach them.
-#[allow(
-    clippy::arithmetic_side_effects,
-    reason = "bounded by the loops; accesses are checked"
-)]
+///
+/// Nearest-neighbour upsampling. A photograph's chroma is already
+/// half-resolution and the eye is poor at it, which is why the format throws
+/// it away; interpolating would be a better picture than the file contains.
+///
+/// Where each output pixel samples each plane is worked out once per column and
+/// once per row, not once per pixel: `x * h / max_h` is a division, and it was
+/// three per pixel for every pixel of the picture.
 fn to_pixels(
     width: usize,
     height: usize,
@@ -988,43 +1255,134 @@ fn to_pixels(
     max_v: usize,
 ) -> Vec<u32> {
     let mut out = vec![0u32; width.saturating_mul(height)];
-    for y in 0..height {
-        for x in 0..width {
-            // Nearest-neighbour upsampling. A photograph's chroma is already
-            // half-resolution and the eye is poor at it, which is why the
-            // format throws it away; interpolating would be a better picture
-            // than the file contains.
-            let sample = |index: usize| -> u8 {
-                let Some(component) = components.get(index) else {
-                    return 0;
-                };
-                let Some((plane_w, plane_h, plane)) = planes.get(index) else {
-                    return 0;
-                };
-                let sx = x.saturating_mul(component.h) / max_h;
-                let sy = y.saturating_mul(component.v) / max_v;
-                if sx >= *plane_w || sy >= *plane_h {
-                    return 0;
-                }
-                plane.get(sy * *plane_w + sx).copied().unwrap_or(0)
-            };
-            let pixel = if components.len() >= 3 {
-                ycbcr_to_rgb(sample(0), sample(1), sample(2))
-            } else {
-                let grey = u32::from(sample(0));
-                0xFF00_0000 | (grey << 16) | (grey << 8) | grey
-            };
-            if let Some(slot) = out.get_mut(y.saturating_mul(width).saturating_add(x)) {
-                *slot = pixel;
+    // Per component: which plane column each output column reads. A column
+    // past the plane's edge reads `usize::MAX`, which no row has, and so
+    // samples 0 through the same `get` as every other column.
+    let columns: Vec<Vec<usize>> = components
+        .iter()
+        .zip(planes)
+        .map(|(component, (plane_w, _, _))| {
+            (0..width)
+                .map(|x| {
+                    let sx = x
+                        .saturating_mul(component.h)
+                        .checked_div(max_h)
+                        .unwrap_or(0);
+                    if sx < *plane_w { sx } else { usize::MAX }
+                })
+                .collect()
+        })
+        .collect();
+    let colour = components.len() >= 3;
+    let chroma = Chroma::new();
+    // The plane row output row `y` reads, for one component; an empty row past
+    // the plane's bottom edge, which samples 0 everywhere.
+    let row_of = |index: usize, y: usize| -> &[u8] {
+        let (Some(component), Some((plane_w, plane_h, plane))) =
+            (components.get(index), planes.get(index))
+        else {
+            return &[];
+        };
+        let sy = y
+            .saturating_mul(component.v)
+            .checked_div(max_v)
+            .unwrap_or(0);
+        if sy >= *plane_h {
+            return &[];
+        }
+        let start = sy.saturating_mul(*plane_w);
+        plane
+            .get(start..start.saturating_add(*plane_w))
+            .unwrap_or(&[])
+    };
+    let map = |index: usize| columns.get(index).map_or(&[][..], Vec::as_slice);
+    let at = |row: &[u8], sx: usize| row.get(sx).copied().unwrap_or(0);
+    for (y, out_row) in out.chunks_exact_mut(width.max(1)).enumerate() {
+        if colour {
+            let (luma, blue, red) = (row_of(0, y), row_of(1, y), row_of(2, y));
+            for (((slot, &cy), &cb), &cr) in out_row.iter_mut().zip(map(0)).zip(map(1)).zip(map(2))
+            {
+                *slot = chroma.rgb(at(luma, cy), at(blue, cb), at(red, cr));
+            }
+        } else {
+            let grey_row = row_of(0, y);
+            for (slot, &cg) in out_row.iter_mut().zip(map(0)) {
+                let grey = u32::from(at(grey_row, cg));
+                *slot = 0xFF00_0000 | (grey << 16) | (grey << 8) | grey;
             }
         }
     }
     out
 }
 
+/// [`ycbcr_to_rgb`]'s four chroma products, for every byte a chroma sample can
+/// be.
+///
+/// Each entry is the very expression `ycbcr_to_rgb` evaluates — the same
+/// multiplication of the same two floats — so a lookup gives the same bits the
+/// arithmetic would, and the sums built from them are added in the same order.
+/// What goes is four multiplications per pixel, which over a 21-megapixel
+/// photograph is eighty million of them.
+struct Chroma {
+    red_cr: [f32; 256],
+    green_cb: [f32; 256],
+    green_cr: [f32; 256],
+    blue_cb: [f32; 256],
+}
+
+impl Chroma {
+    fn new() -> Self {
+        let mut tables = Self {
+            red_cr: [0.0; 256],
+            green_cb: [0.0; 256],
+            green_cr: [0.0; 256],
+            blue_cb: [0.0; 256],
+        };
+        for (byte, (((r, gb), gr), b)) in (0u8..=255).zip(
+            tables
+                .red_cr
+                .iter_mut()
+                .zip(tables.green_cb.iter_mut())
+                .zip(tables.green_cr.iter_mut())
+                .zip(tables.blue_cb.iter_mut()),
+        ) {
+            let centred = f32::from(byte) - 128.0;
+            *r = 1.402 * centred;
+            *gb = 0.344_136 * centred;
+            *gr = 0.714_136 * centred;
+            *b = 1.772 * centred;
+        }
+        tables
+    }
+
+    /// [`ycbcr_to_rgb`], by table.
+    fn rgb(&self, y: u8, cb: u8, cr: u8) -> u32 {
+        let y = f32::from(y);
+        let (cb, cr) = (usize::from(cb), usize::from(cr));
+        let at = |table: &[f32; 256], i: usize| table.get(i).copied().unwrap_or(0.0);
+        let r = clamp_byte(y + at(&self.red_cr, cr));
+        let g = clamp_byte(y - at(&self.green_cb, cb) - at(&self.green_cr, cr));
+        let b = clamp_byte(y + at(&self.blue_cb, cb));
+        0xFF00_0000 | (r << 16) | (g << 8) | b
+    }
+}
+
+/// A channel value rounded to the nearest byte and clamped: `+ 0.5` because
+/// `as` truncates.
+fn clamp_byte(v: f32) -> u32 {
+    #[allow(clippy::cast_possible_truncation, reason = "clamped")]
+    #[allow(clippy::cast_sign_loss, reason = "clamped to 0..=255")]
+    let byte = (v + 0.5).clamp(0.0, 255.0) as u32;
+    byte
+}
+
 /// JFIF's YCbCr to RGB, with the chroma centred on 128.
+///
+/// The definition [`Chroma::rgb`] is a faster way of computing, and the test
+/// that holds the two to the same answer for every input.
 // Three bytes widened to floats and combined with constants under 2: the
 // results are clamped to `0..=255` before they become bytes again.
+#[cfg(test)]
 #[allow(clippy::arithmetic_side_effects, reason = "clamped before use")]
 fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8) -> u32 {
     let y = f32::from(y);
@@ -1117,10 +1475,18 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
 /// prefix of the coefficients gives; the caller's exact box is fitted by
 /// averaging what remains, which is at most a 2x reduction.
 ///
-/// **Measured**, on a 4000x5333 photograph from this machine: a 128-pixel
-/// thumbnail in 669 ms against 91 seconds to decode the picture whole, and
-/// 9408 pixels held rather than 21332000. The same run in a debug build takes
-/// 7.6 seconds, which is worth knowing before anyone optimises against it.
+/// **Measured**, release build, a 4000x5333 photograph (7.5 MB, quality 90,
+/// 4:2:0): a 128-pixel thumbnail in about 0.34 s and the whole picture in about
+/// 1.1 s, holding 9408 pixels rather than 21332000. Those were 1.25 s and
+/// 3.65 s before the bit reader loaded 64 bits at a time, Huffman codes were
+/// read from a table, the transform skipped zero coefficients and colour
+/// conversion stopped dividing per pixel — every one of which leaves the
+/// output bit for bit as it was (`tests::the_fast_*`, and a 28-output
+/// comparison against the previous decoder over 4:2:0, 4:2:2, 4:4:4, greyscale,
+/// restart-marker and quality-100 files). A debug build is roughly ten times
+/// slower, which is worth knowing before anyone optimises against one.
+/// (An earlier figure here, 91 seconds for the whole picture, was not
+/// reproducible on this machine; 3.65 s was the pre-optimisation baseline.)
 ///
 /// # Errors
 ///
@@ -1469,6 +1835,209 @@ mod tests {
                 assert_eq!(pixels, 24 * 16);
             }
             other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // The fast paths are the slow arithmetic, not an approximation of it
+    // ------------------------------------------------------------------
+
+    /// A deterministic stream of numbers, so a failure names its case.
+    struct Dice(u64);
+
+    impl Dice {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n.max(1)
+        }
+    }
+
+    /// The zero-skipping transform gives the full transform's bits, for
+    /// blocks shaped like real ones (a few low frequencies), dense ones, rows
+    /// with zeros inside them, and the all-zero block.
+    #[test]
+    fn the_fast_idct_is_the_full_idct() {
+        let basis = Basis::new();
+        let mut dice = Dice(0x51A7_E05D);
+        for case in 0..4000 {
+            let mut block = [0.0f32; 64];
+            // How far into the block coefficients may appear: 0 keeps only
+            // the DC, 64 fills it.
+            let reach = match case % 4 {
+                0 => 1 + dice.below(4) as usize,
+                1 => 1 + dice.below(16) as usize,
+                2 => 64,
+                _ => 0,
+            };
+            for &slot in ZIGZAG.iter().take(reach.max(1)) {
+                if dice.below(3) != 0 {
+                    block[slot] = (dice.below(2048) as i32 - 1024) as f32;
+                }
+            }
+            let mut fast = block;
+            let mut full = block;
+            idct_8x8(&mut fast, &basis);
+            idct_8x8_reference(&mut full, &basis);
+            for i in 0..64 {
+                assert_eq!(
+                    fast[i].to_bits(),
+                    full[i].to_bits(),
+                    "case {case}, sample {i}: {} against {}",
+                    fast[i],
+                    full[i]
+                );
+            }
+        }
+    }
+
+    /// A block that is its DC alone fills to the one value every scale of the
+    /// transform gives it.
+    #[test]
+    fn a_flat_block_is_what_the_transform_makes_of_its_dc() {
+        let basis = Basis::new();
+        for dc in (-2048..=2048).step_by(7).map(|v| v as f32) {
+            let mut block = [0.0f32; 64];
+            block[0] = dc;
+            let mut full = block;
+            idct_8x8_reference(&mut full, &basis);
+            let flat = flat_block(dc, &basis);
+            assert!(
+                full.iter().all(|v| v.to_bits() == flat.to_bits()),
+                "DC {dc}: {flat} against {:?}",
+                &full[..4]
+            );
+            for n in 1..8 {
+                let mut scaled = [0.0f32; 64];
+                idct_scaled(&block, &basis, n, &mut scaled);
+                for y in 0..n {
+                    for x in 0..n {
+                        assert_eq!(
+                            scaled[y * 8 + x].to_bits(),
+                            flat.to_bits(),
+                            "DC {dc} at scale {n}, ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The chroma tables give what the formula gives, for every one of the
+    /// sixteen million inputs there are.
+    #[test]
+    fn the_chroma_tables_are_the_colour_formula_for_every_input() {
+        let chroma = Chroma::new();
+        for y in 0..=255u8 {
+            for cb in 0..=255u8 {
+                for cr in 0..=255u8 {
+                    assert_eq!(
+                        chroma.rgb(y, cb, cr),
+                        ycbcr_to_rgb(y, cb, cr),
+                        "Y {y} Cb {cb} Cr {cr}: by table, then by formula"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A Huffman table from counts, as `DHT` would give it.
+    fn table(counts: [u8; 16], values: &[u8]) -> Huffman {
+        let mut t = Huffman {
+            counts,
+            values: values.to_vec(),
+            ..Huffman::default()
+        };
+        t.index();
+        t
+    }
+
+    /// Decode every symbol in `data` with `decode` (the table lookup) and with
+    /// `decode_slowly` (the walk), side by side, and require the same symbols.
+    ///
+    /// The whole sequence, to the end of the data: a lookup that consumed one
+    /// bit too many or too few would put every later symbol out of step, so the
+    /// sequence is the check on the bit position too. (The readers' buffers are
+    /// not compared: when a refill happens depends on how many bits were
+    /// asked for, and that is allowed to differ.)
+    fn same_symbols(t: &Huffman, data: &[u8]) {
+        let mut fast = BitReader::new(data);
+        let mut slow = BitReader::new(data);
+        for step in 0..10_000 {
+            let a = t.decode(&mut fast);
+            let b = t.decode_slowly(&mut slow);
+            assert_eq!(a, b, "symbol {step}");
+            if a.is_none() {
+                return;
+            }
+        }
+    }
+
+    /// The fast lookup reads the same symbols from the same bits as the
+    /// canonical walk: for the JPEG standard's own luminance AC table, for
+    /// tables with codes longer than the lookup covers, and for tables whose
+    /// counts claim more codes than there is room for, which a hostile file
+    /// can send.
+    #[test]
+    fn the_fast_huffman_lookup_is_the_canonical_walk() {
+        // ITU-T T.81 Table K.5, luminance AC.
+        let k5 = table(
+            [0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7D],
+            &(0..=255u8).cycle().take(162).collect::<Vec<_>>(),
+        );
+        // Every length used once, out to sixteen bits.
+        let long = table([1; 16], &(0..16u8).collect::<Vec<_>>());
+        // Oversubscribed: more codes of length 2 than two bits can hold.
+        let crowded = table(
+            [1, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            &[1, 2, 3, 4, 5, 6, 7],
+        );
+        // Values listed short of what the counts promise.
+        let short = table([0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], &[9]);
+        let mut dice = Dice(0xC0DE_D00D);
+        for t in [&k5, &long, &crowded, &short] {
+            for _ in 0..50 {
+                let len = dice.below(300) as usize;
+                let mut data: Vec<u8> = (0..len).map(|_| dice.below(256) as u8).collect();
+                // Sometimes a marker in the middle, where the data must stop.
+                if len > 10 && dice.below(2) == 0 {
+                    let at = dice.below(len as u64 - 2) as usize;
+                    data[at] = 0xFF;
+                    data[at + 1] = 0xD9;
+                }
+                same_symbols(t, &data);
+            }
+        }
+    }
+
+    /// Reading sixteen bits at a time gives what reading them one at a time
+    /// gives, including across stuffed bytes and up to a marker.
+    #[test]
+    fn many_bits_at_once_are_the_same_bits_one_at_a_time() {
+        let data = [
+            0x12, 0xFF, 0x00, 0xAB, 0xCD, 0xFF, 0x00, 0x7F, 0xFF, 0xD0, 0x55,
+        ];
+        let mut dice = Dice(7);
+        for _ in 0..500 {
+            let mut fast = BitReader::new(&data);
+            let mut slow = BitReader::new(&data);
+            loop {
+                let n = 1 + dice.below(16) as u32;
+                let a = fast.bits(n);
+                let b = slow.bits_slowly(n);
+                assert_eq!(a, b, "{n} bits");
+                if a.is_none() {
+                    // Both consumed what there was, so both are now dry.
+                    assert_eq!(fast.bit(), None);
+                    assert_eq!(slow.bit(), None);
+                    break;
+                }
+            }
         }
     }
 }

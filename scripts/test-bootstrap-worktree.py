@@ -231,6 +231,44 @@ def test_truncated_rootfs_is_not_treated_as_present(tmp):
           "got %d\n%s" % (status, out))
 
 
+def _stub_image_gate(root: str, verdict: int) -> None:
+    """Give the fake tree a `ctest-fixtures.py` whose `image-check` answers
+    `verdict`, standing in for the boot test's real gate."""
+    with open(os.path.join(root, "scripts", "ctest-fixtures.py"), "w",
+              newline="") as fh:
+        fh.write("import sys\n"
+                 "sys.exit(%d if sys.argv[1:] == ['image-check'] else 2)\n"
+                 % verdict)
+
+
+def test_an_image_the_boot_gate_refuses_blocks(tmp):
+    """The case that cost lane B a three-and-a-half-hour boot on 2026-09-25.
+
+    An image copied from a sibling without the fixtures its manifest names is
+    refused by `ctest-fixtures.py image-check` -- fatally, after the build.
+    `--check` runs before the build, so it must say so as a *blocker*: the run
+    it would otherwise wave through cannot pass.
+    """
+    root = make_tree(tmp, "refused-rootfs", ["init"])
+    _stub_image_gate(root, 1)
+    status, out = run_check(root)
+    check("a refused rootfs.ext4 exits 1", status == BLOCKING,
+          "got %d\n%s" % (status, out))
+    check("a refused rootfs.ext4 is named as refused", "REFUSED" in out, out)
+    check("a refused rootfs.ext4 says how to repack it",
+          "create-ext4-rootfs.sh" in out, out)
+
+
+def test_an_image_the_boot_gate_accepts_is_present(tmp):
+    root = make_tree(tmp, "accepted-rootfs", ["init"])
+    _stub_image_gate(root, 0)
+    status, out = run_check(root)
+    check("an accepted rootfs.ext4 exits 0", status == OK,
+          "got %d\n%s" % (status, out))
+    check("an accepted rootfs.ext4 is reported present",
+          "present  rootfs.ext4" in out, out)
+
+
 def test_no_embeds_at_all_is_an_error_not_a_pass(tmp):
     """An empty scan must never read as a clean bill of health.
 
@@ -355,6 +393,8 @@ def main() -> int:
         test_missing_limine_blocks,
         test_missing_rootfs_degrades_but_does_not_block,
         test_truncated_rootfs_is_not_treated_as_present,
+        test_an_image_the_boot_gate_refuses_blocks,
+        test_an_image_the_boot_gate_accepts_is_present,
         test_no_embeds_at_all_is_an_error_not_a_pass,
         test_one_service_two_artifacts_is_refused,
         test_unknown_service_argument_is_rejected,

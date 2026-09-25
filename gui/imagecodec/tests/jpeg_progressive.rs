@@ -67,10 +67,12 @@ fn answer(name: &str) -> (u32, u32, Vec<u32>) {
     let mut words = text.split_whitespace();
     let width: u32 = words.next().unwrap().parse().unwrap();
     let height: u32 = words.next().unwrap().parse().unwrap();
-    let pixels: Vec<u32> = words
-        .map(|w| u32::from_str_radix(w, 16).unwrap())
-        .collect();
-    assert_eq!(pixels.len(), (width * height) as usize, "{path}: wrong count");
+    let pixels: Vec<u32> = words.map(|w| u32::from_str_radix(w, 16).unwrap()).collect();
+    assert_eq!(
+        pixels.len(),
+        (width * height) as usize,
+        "{path}: wrong count"
+    );
     (width, height, pixels)
 }
 
@@ -113,7 +115,10 @@ const NOT_SUBSAMPLED: &[&str] = &["jpeg444", "jpeggrey"];
 
 #[test]
 fn a_progressive_file_agrees_with_a_reference_decoder() {
-    for (name, why) in CASES.iter().filter(|(name, _)| NOT_SUBSAMPLED.contains(name)) {
+    for (name, why) in CASES
+        .iter()
+        .filter(|(name, _)| NOT_SUBSAMPLED.contains(name))
+    {
         let file = format!("{name}_progressive");
         let image = decoded(&file);
         let (width, height, want) = answer(&file);

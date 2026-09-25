@@ -4078,10 +4078,12 @@ _Port ext4 first. Don't write a custom filesystem._
     `arch` (shares `coreutils::utsname::MACHINE` with `uname -m`), `pathchk`, `users`, `chgrp` (shares
     `coreutils::chowncore` with `chown`, as upstream shares `chown-core.c`; `chown`'s symlink rules became GNU's exactly
     on the way, §1029), `mknod` (FIFOs work; device nodes get the libc's honest `ENOSYS`), `hostid`, `dircolors`
-    (GNU's database embedded as its `-p` prints it); and `nproc`,
+    (GNU's database embedded as its `-p` prints it), `numfmt` (its digits x87-exact through
+    `coreutils::extfloat`, which gained the division it needed; shares `coreutils::setfields` with `cut`, as
+    upstream shares `set-fields.c`); and `nproc`,
     re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
-    names in part lost those branches (§1005: `getopt` printenv/sync, `pv` truncate, `nproc` arch/pathchk/users).
-    **Still missing:** `b2sum`, `base32`, `basenc`, `cksum`, `dir`, `factor`, `numfmt`, `pinky`, `pr`, `ptx`,
+    names in part lost those branches (§1005: `getopt` printenv/sync, `pv` truncate, `nproc` arch/pathchk/users, `shuf` numfmt).
+    **Still missing:** `b2sum`, `base32`, `basenc`, `cksum`, `dir`, `factor`, `pinky`, `pr`, `ptx`,
     `sha224sum`, `sha384sum`, `sha512sum`, `shred`, `sum`, `vdir`. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
     `LD_PRELOAD` into a dynamically linked program). `[` is `test` under another name and needs only the image alias. None
     ships until lane D lists it: `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.

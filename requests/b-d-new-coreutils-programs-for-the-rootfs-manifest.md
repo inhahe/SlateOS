@@ -6,13 +6,13 @@
 
 ## In short
 
-The `coreutils` crate now builds fifteen programs it did not build when the
+The `coreutils` crate now builds sixteen programs it did not build when the
 manifest was written: `sha1sum`, `printenv`, `link`, `unlink`, `sync`,
 `truncate`, `groups`, `arch`, `pathchk`, `users`, `nproc`, `chgrp`, `mknod`,
-`hostid` and `dircolors`. Each is a port of GNU coreutils 9.4 and has been checked against a
+`hostid`, `dircolors` and `numfmt`. Each is a port of GNU coreutils 9.4 and has been checked against a
 build of 9.4 (a script runs both on the same inputs and compares their output,
 errors and exit status). A binary the manifest does not name does not go on
-the image, so today all fifteen are built and then left out. Please add
+the image, so today all sixteen are built and then left out. Please add
 them.
 
 ## Why they belong by the manifest's own rule
@@ -24,13 +24,13 @@ bin list. The only coreutils names it leaves out on purpose are:
 - `sort`, for the same reason;
 - `sh`, because `/bin/sh` is dash.
 
-These fifteen are none of those. They are missing only because they did not
+These sixteen are none of those. They are missing only because they did not
 exist when the list was generated. Nothing else stages these names:
 `create-ext4-rootfs.sh`'s `PROMOTED` map has none of them. So listing them
 takes no name away from anything.
 
 **Size.** At the manifest's own average of about 813 KiB per static binary,
-fifteen come to roughly 12 MiB. The header records 59 MiB used of a 96 MiB
+sixteen come to roughly 13 MiB. The header records 59 MiB used of a 96 MiB
 budget.
 
 ## The programs
@@ -52,6 +52,7 @@ budget.
 | `mknod` | make a FIFO or a device node, what a chroot or container `/dev` is set up with | `scripts/mknod-diff.sh` |
 | `hostid` | the host's numeric identifier, as the libc's `gethostid` reports it | `scripts/hostid-diff.sh` |
 | `dircolors` | the `LS_COLORS` setup every stock shell start-up file runs (`eval "$(dircolors -b)"`) | `scripts/dircolors-diff.sh` |
+| `numfmt` | numbers to and from `1.5K`/`2.0Mi` form, in a column of `df` or `du` output as much as on its own | `scripts/numfmt-diff.sh` |
 
 **One alias as well: `[ = test`.** Our `test` already behaves as `[` when it
 is started under that name: it then insists on the closing `]`. But nothing
@@ -61,9 +62,10 @@ example `find . -exec [ -s {} ] \; -print` or `env [ -d /tmp ]`. The
 manifest's alias syntax (`name = producer`) covers it, and `test` is
 already listed.
 
-Six of these names used to be answered, partly, by other crates that read
+Seven of these names used to be answered, partly, by other crates that read
 `argv[0]` to decide what to be: `getopt` had `printenv` and `sync`, `pv` had
-`truncate`, and `nproc` had `arch`, `pathchk` and `users`. Those branches were
+`truncate`, `nproc` had `arch`, `pathchk` and `users`, and `shuf` had
+`numfmt`. Those branches were
 removed, because under design-decisions §1005 `coreutils` is the one home for
 these tools and a duplicate is deleted. The `userspace/nproc` crate went
 entirely, its own `nproc` being replaced by the port above. None of those
@@ -72,7 +74,7 @@ crates was on the image, so no name moves from one program to another there.
 ## This list may grow before you read it
 
 I am porting the rest of the programs GNU 9.4 has and we do not (`cksum`,
-`base32`, `basenc`, `numfmt` and others). Each one that lands before
+`base32`, `basenc`, `factor` and others). Each one that lands before
 this request reaches `main` will be added to the table above, not filed as a
 separate request. Whatever the table says when you read it is the whole ask.
 

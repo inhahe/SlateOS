@@ -233,6 +233,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/nl-diff.sh` | Differential test: our nl against GNU nl. |
 | `scripts/nohup-diff.sh` | Differential test: our `nohup` against GNU coreutils'. |
 | `scripts/nproc-diff.sh` | nproc-diff.sh — compare our `nproc` against GNU's, inside WSL. |
+| `scripts/numfmt-diff.sh` | numfmt-diff.sh — compare our `numfmt` against GNU's, inside WSL. |
 | `scripts/od-diff.sh` | Differential test: our od against GNU od. |
 | `scripts/open-requests.py` | List the `requests/` entries addressed to a lane that are still open. |
 | `scripts/option-gap-ref.sh` | The reference half of `scripts/option-gap.sh`, run where the reference lives |
@@ -407,4 +408,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_397 scripts._
+_398 scripts._

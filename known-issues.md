@@ -165419,11 +165419,11 @@ ported (design-decisions §1318), and fuzz it against the same oracle.
 
 **Status:** OPEN — lane F's, in progress.
 
-**In short:** TIFFs compressed with old-style JPEG, NeXT, ThunderScan, SGI
-LogLuv or PixarLog are refused (`ImageError::Unsupported`) though libtiff
-reads them. All are rare: old-style JPEG is a 1990s scheme superseded in
-1995, and the others are single vendors' formats. (`YCbCr` and CIELab
-samples, fax and JPEG were on this list; they decode now.)
+**In short:** TIFFs compressed with old-style JPEG, SGI LogLuv or PixarLog
+are refused (`ImageError::Unsupported`) though libtiff reads them. All are
+rare: old-style JPEG is a 1990s scheme superseded in 1995, and the others
+are single vendors' formats. (`YCbCr` and CIELab samples, fax, JPEG, NeXT
+and ThunderScan were on this list; they decode now.)
 
 **Where.** `gui/imagecodec/src/tiff/read.rs` (`run_codec`) and `rgba.rs`
 (`pick_contig`, `pick_separate`, `begin`).

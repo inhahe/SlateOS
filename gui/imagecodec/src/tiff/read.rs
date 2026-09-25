@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 use super::dir::{self, Directory, File, compression, photometric};
 use super::fax::{self, Fax};
 use super::lzw::Lzw;
+use super::{next, thunder};
 use crate::jpeg::{ColorSpace, Decompress, Headed, Tables};
 use crate::{ImageError, ImageResult, Limits};
 
@@ -174,7 +175,11 @@ impl<'a> Reader<'a> {
     /// that fails fails every strip.
     fn setup(&mut self) -> ImageResult<()> {
         if self.setup.is_none() {
-            let ok = predictor_valid(self.dir) && self.setup_fax() && self.setup_jpeg();
+            let ok = predictor_valid(self.dir)
+                && self.setup_fax()
+                && self.setup_jpeg()
+                && (self.dir.compression != compression::THUNDERSCAN
+                    || thunder::setup(self.dir.bits_per_sample));
             self.setup = Some(ok);
         }
         if self.setup == Some(true) {
@@ -417,6 +422,26 @@ impl<'a> Reader<'a> {
                 };
                 self.decode_jpeg(bytes, out, index)
             }
+            compression::NEXT => {
+                // `NeXTPreDecode`, then the decode, whose rows are the
+                // image's scanlines even in a tile.
+                next::pre_decode(self.dir.bits_per_sample)?;
+                let width = if self.dir.tiled {
+                    self.dir.tile_width
+                } else {
+                    self.dir.width
+                };
+                next::decode(bytes, out, scanline(self.dir)?, u64::from(width))
+            }
+            compression::THUNDERSCAN => {
+                // No tile decoder (`_TIFFNoTileDecode`).
+                if self.dir.tiled {
+                    return Err(ImageError::Unsupported("TIFF ThunderScan tiles"));
+                }
+                let width = usize::try_from(self.dir.width)
+                    .map_err(|_| ImageError::Malformed("TIFF width"))?;
+                thunder::decode(bytes, out, scanline(self.dir)?, width)
+            }
             compression::DEFLATE | compression::ADOBE_DEFLATE => {
                 let full = if self.dir.tiled {
                     self.dir.tile_size()
@@ -489,6 +514,14 @@ impl<'a> Reader<'a> {
         }
         Ok(())
     }
+}
+
+/// The image's scanline in bytes (`tif_scanlinesize`), which the NeXT and
+/// ThunderScan decoders measure rows by, tiles included.
+fn scanline(dir: &Directory) -> ImageResult<usize> {
+    dir.scanline_size()
+        .and_then(|size| usize::try_from(size).ok())
+        .ok_or(ImageError::Malformed("TIFF scanline size"))
 }
 
 /// Where a filled strip's bytes are.

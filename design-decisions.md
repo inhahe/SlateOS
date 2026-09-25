@@ -11278,8 +11278,9 @@ of TIFF are not read yet (listed below) and are refused by name.
   and 2-D, Group 4, Modified Huffman byte- and word-aligned: `tif_fax3.c`'s
   macros written out, its code tables built as `mkg3states` builds them), and
   JPEG through this crate's port of libjpeg-turbo (§1318) driven as
-  `tif_jpeg.c` drives libjpeg -- with the horizontal predictor, `FillOrder`,
-  and big-endian 16-bit samples.
+  `tif_jpeg.c` drives libjpeg, and NeXT's 2-bit and ThunderScan's 4-bit
+  codecs in `next.rs` and `thunder.rs` -- with the horizontal predictor,
+  `FillOrder`, and big-endian 16-bit samples.
 - `rgba.rs`: `tif_getimage.c` -- `TIFFRGBAImageOK`, `TIFFRGBAImageBegin`, the
   strip and tile readers and their pixel routines: grey of 1 to 16 bits,
   palettes, RGB of 8 and 16 with each kind of alpha, CMYK, `YCbCr` (all seven
@@ -11327,8 +11328,8 @@ of TIFF are not read yet (listed below) and are refused by name.
 
 ### Not yet read
 
-Old-style JPEG compression, NeXT, ThunderScan, SGI LogLuv and PixarLog:
-libtiff reads them, and this refuses them by name, for now.
+Old-style JPEG compression, SGI LogLuv and PixarLog: libtiff reads them,
+and this refuses them by name, for now.
 (`YCbCr` and CIE L*a*b* samples followed on the same day, held the same way:
 23 more fixtures, and 12,000 mutants of them without a disagreement. So did
 fax, whose leniency is kept whole -- a bad code word ends only its row, a
@@ -11348,23 +11349,29 @@ redefines them for the abbreviated strips after it. libtiff ignores what that
 finish says: it returns `rows_left || finish()`, and a C `||` is 1 for the
 failure's -1. 38 fixtures, 30 of them decoded, and 12,000 mutants; and five
 more with lossless strips, which libtiff reads as it reads any other -- except
-in a `YCbCr` file, where libjpeg will not convert them.) Only
+in a `YCbCr` file, where libjpeg will not convert them. NeXT and ThunderScan
+followed, with libtiff's edges: a NeXT strip whose data stops at a row's
+start is white from there and reads, a NeXT tile's rows are measured by the
+image's scanline, not the tile's, and ThunderScan has no tile decoder at all.
+libtiff writes neither, so their 27 fixtures come from encoders in the
+generator; 12,000 mutants.) Only
 the first page of a multi-page TIFF is read -- as gdk-pixbuf reads it.
 
 ### How it is held
 
-`tests/tiff.rs` against 229 fixtures (`tests/data/generate_tiff.py`: a
+`tests/tiff.rs` against 256 fixtures (`tests/data/generate_tiff.py`: a
 small TIFF writer for every layout, plus Pillow's libtiff-backed writer for
 real encoder output), each answered by libtiff 4.7.1 built from pinned
-sources: 191 decoded to exactly libtiff's raster, 38 refused where libtiff
+sources: 209 decoded to exactly libtiff's raster, 47 refused where libtiff
 refuses. Separate tests hold the straight-alpha conversion to libtiff's
 premultiplied raster, the eight orientations to the stored picture turned,
 limits, and every bit flip of eight fixtures to not panicking. A mutation
 fuzzer against the same libtiff -- bit flips, entry types, counts and values
 changed, entries dropped and duplicated, files cut short -- found no
 disagreement in 30,000 files without Deflate data, and in 8,000 with it only
-the nine Deflate cases above; the rounds for `YCbCr` with CIELab, for fax and for
-JPEG (12,000 each) found none once the two port errors the fax round turned up were
+the nine Deflate cases above; the rounds for `YCbCr` with CIELab, for fax, for
+JPEG and for NeXT with ThunderScan (12,000 each), and for lossless JPEG strips
+(6,000), found none once the two port errors the fax round turned up were
 fixed -- `RowsPerStrip` also sets the tile size while no tile tags have
 been read, and the tile truth test above.
 

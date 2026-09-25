@@ -1083,6 +1083,198 @@ def jpeg_fixtures() -> dict[str, bytes]:
     return out
 
 
+NEXT, THUNDERSCAN = 32766, 32809
+
+
+def next_row(row: list[int], width: int, how: str, rng: random.Random) -> bytes:
+    """One row of 2-bit pixels as NeXT codes it: `literal` (the packed row),
+    `span` (the row's non-white middle, into a white row), or `runs`."""
+    packed = pack_samples(row, 2, "<")
+    if how == "literal":
+        return b"\x00" + packed
+    if how == "span":
+        first = next((i for i, b in enumerate(packed) if b != 0xFF), len(packed))
+        last = max((i for i, b in enumerate(packed) if b != 0xFF), default=first - 1)
+        span = packed[first:last + 1]
+        return bytes([0x40]) + struct.pack(">HH", first, len(span)) + span
+    out = bytearray()
+    x = 0
+    while x < width:
+        grey = row[x]
+        n = 1
+        while x + n < width and row[x + n] == grey and n < 63:
+            n += 1
+        out.append((grey << 6) | n)
+        x += n
+    return bytes(out)
+
+
+def next_strips(pixels: list[list[int]], rows: int, hows, rng: random.Random) -> list[bytes]:
+    width = len(pixels[0])
+    strips = []
+    for y in range(0, len(pixels), rows):
+        strips.append(b"".join(next_row(pixels[r], width, hows(r), rng)
+                               for r in range(y, min(len(pixels), y + rows))))
+    return strips
+
+
+def thunder_row(row: list[int], rng: random.Random, style: str = "best") -> bytes:
+    """One row of 4-bit pixels as ThunderScan codes it: runs of the last
+    pixel, two- and three-bit deltas from it, raw pixels -- chosen greedily,
+    or (`raw`) raw only."""
+    out = bytearray()
+    last, x, width = 0, 0, len(row)
+    two = {0: 0, 1: 1, -1: 3}
+    three = {0: 0, 1: 1, 2: 2, 3: 3, -3: 5, -2: 6, -1: 7}
+    while x < width:
+        if style == "best":
+            n = 0
+            while x + n < width and row[x + n] == last and n < 63:
+                n += 1
+            if n >= 2:
+                out.append(n)
+                x += n
+                continue
+            if x + 3 <= width:
+                a, b, c = row[x] - last, row[x + 1] - row[x], row[x + 2] - row[x + 1]
+                if a in two and b in two and c in two:
+                    out.append(0x40 | (two[a] << 4) | (two[b] << 2) | two[c])
+                    last = row[x + 2]
+                    x += 3
+                    continue
+            if x + 2 <= width:
+                a, b = row[x] - last, row[x + 1] - row[x]
+                if a in three and b in three:
+                    out.append(0x80 | (three[a] << 3) | three[b])
+                    last = row[x + 1]
+                    x += 2
+                    continue
+        out.append(0xC0 | row[x])
+        last = row[x]
+        x += 1
+    return bytes(out)
+
+
+def next_thunder_fixtures() -> dict[str, bytes]:
+    """NeXT's 2-bit and ThunderScan's 4-bit codecs, which libtiff decodes and
+    cannot write: every code each has, and the edges libtiff's decoders have."""
+    rng = random.Random(4242)
+    out: dict[str, bytes] = {}
+
+    def grey2(w: int, h: int, seed: int) -> list[list[int]]:
+        r = random.Random(seed)
+        return [[(x // 5 + y // 3 + (r.random() < 0.2)) % 4 for x in range(w)] for y in range(h)]
+
+    def entries(w, h, bits, compression, photometric=1, rows=4, extra=()):
+        return [(WIDTH, LONG, [w]), (LENGTH, LONG, [h]), (BITS, SHORT, [bits]),
+                (COMPRESSION, SHORT, [compression]), (PHOTOMETRIC, SHORT, [photometric]),
+                (SAMPLES, SHORT, [1]), (ROWS_PER_STRIP, LONG, [rows])] + list(extra)
+
+    pic = grey2(21, 9, 1)
+    for how in ("literal", "span", "runs"):
+        out[f"next_{how}"] = write_tiff(entries(21, 9, 2, NEXT), next_strips(pic, 4, lambda r, h=how: h, rng))
+    out["next_mixed"] = write_tiff(entries(21, 9, 2, NEXT),
+                                   next_strips(pic, 4, lambda r: ("literal", "span", "runs")[r % 3], rng))
+    # Spans into white rows: mostly white, a stretch of grey.
+    white = [[3] * 21 for _ in range(6)]
+    for y, row in enumerate(white):
+        for x in range(3 + y, 12 + y):
+            row[x] = (x + y) % 3
+    out["next_span_into_white"] = write_tiff(entries(21, 6, 2, NEXT), next_strips(white, 3, lambda r: "span", rng))
+    # Data that stops at a row's start: the rest of the strip stays white,
+    # and it reads. Stopping inside a row does not.
+    strips = next_strips(pic, 9, lambda r: "runs", rng)
+    rows = [next_row(pic[r], 21, "runs", rng) for r in range(9)]
+    out["next_data_stops_at_a_row"] = write_tiff(entries(21, 9, 2, NEXT, rows=9), [b"".join(rows[:5])])
+    out["next_data_stops_in_a_row_refused"] = write_tiff(entries(21, 9, 2, NEXT, rows=9),
+                                                        [b"".join(rows[:5]) + rows[5][:1]])
+    # A run longer than the row stops at the width.
+    over = bytearray()
+    for r in range(9):
+        over += bytes([(1 << 6) | 63])
+    out["next_run_past_the_width"] = write_tiff(entries(21, 9, 2, NEXT, rows=9), [bytes(over)])
+    # A literal row cut short, a span past the row.
+    out["next_literal_cut_refused"] = write_tiff(entries(21, 9, 2, NEXT, rows=9), [b"\x00" + b"\x55" * 3])
+    out["next_span_past_the_row_refused"] = write_tiff(
+        entries(21, 9, 2, NEXT, rows=9), [bytes([0x40]) + struct.pack(">HH", 4, 3) + b"\x11\x22\x33"])
+    out["next_4_bits_refused"] = write_tiff(entries(21, 9, 4, NEXT), next_strips(pic, 4, lambda r: "literal", rng))
+    out["next_min_is_white"] = write_tiff(entries(21, 9, 2, NEXT, photometric=0),
+                                          next_strips(pic, 4, lambda r: "runs", rng))
+    out["next_palette"] = write_tiff(entries(21, 9, 2, NEXT, photometric=3, extra=[colour_map(2)]),
+                                     next_strips(pic, 4, lambda r: ("runs", "literal")[r % 2], rng))
+    # Tiles: rows are still measured by the image's scanline.
+    tile_pic = grey2(16, 20, 7)
+    tiles = []
+    for ty in range(0, 32, 16):
+        block = [tile_pic[y] if y < 20 else [3] * 16 for y in range(ty, ty + 16)]
+        tiles.append(b"".join(next_row(block[r], 16, "runs", rng) for r in range(16)))
+    tile_entries = [(WIDTH, LONG, [16]), (LENGTH, LONG, [20]), (BITS, SHORT, [2]),
+                    (COMPRESSION, SHORT, [NEXT]), (PHOTOMETRIC, SHORT, [1]), (SAMPLES, SHORT, [1]),
+                    (TILE_WIDTH, LONG, [16]), (TILE_LENGTH, LONG, [16])]
+    tiled = {"offsets_tag": TILE_OFFSETS, "counts_tag": TILE_BYTE_COUNTS}
+    out["next_tiled"] = write_tiff(tile_entries, tiles, **tiled)
+    wide = grey2(32, 16, 8)
+    wide_tiles = []
+    for tx in range(0, 32, 16):
+        block = [row[tx:tx + 16] for row in wide]
+        wide_tiles.append(b"".join(next_row(block[r], 16, "literal", rng) for r in range(16)))
+    wide_entries = [(WIDTH, LONG, [32]), (LENGTH, LONG, [16]), (BITS, SHORT, [2]),
+                    (COMPRESSION, SHORT, [NEXT]), (PHOTOMETRIC, SHORT, [1]), (SAMPLES, SHORT, [1]),
+                    (TILE_WIDTH, LONG, [16]), (TILE_LENGTH, LONG, [16])]
+    out["next_tiled_in_a_wider_image"] = write_tiff(wide_entries, wide_tiles, **tiled)
+    odd_entries = [e if e[0] != WIDTH else (WIDTH, LONG, [40]) for e in wide_entries]
+    out["next_tiled_fractional_scanlines_refused"] = write_tiff(odd_entries, wide_tiles * 2 + wide_tiles[:1],
+                                                                **tiled)
+
+    # ThunderScan.
+    def grey4(w: int, h: int, seed: int, flat: float) -> list[list[int]]:
+        r = random.Random(seed)
+        rows = []
+        for y in range(h):
+            row, v = [], (y * 3) % 16
+            for x in range(w):
+                if r.random() > flat:
+                    v = max(0, min(15, v + r.choice([-3, -2, -1, 1, 2, 3, 7, -7])))
+                row.append(v)
+            rows.append(row)
+        return rows
+
+    def thunder(pic, rows_per_strip=4, style="best", extra=(), photometric=1, bits=4):
+        w, h = len(pic[0]), len(pic)
+        strips = [b"".join(thunder_row(pic[r], rng, style) for r in range(y, min(h, y + rows_per_strip)))
+                  for y in range(0, h, rows_per_strip)]
+        return entries(w, h, bits, THUNDERSCAN, photometric, rows_per_strip, extra), strips
+
+    smooth = grey4(23, 11, 3, 0.1)
+    flat = grey4(23, 11, 4, 0.8)
+    out["thunder_raw"] = write_tiff(*thunder(smooth, style="raw"))
+    out["thunder_deltas"] = write_tiff(*thunder(smooth))
+    out["thunder_runs"] = write_tiff(*thunder(flat))
+    out["thunder_one_strip"] = write_tiff(*thunder(flat, rows_per_strip=11))
+    out["thunder_palette"] = write_tiff(*thunder(flat, photometric=3, extra=[colour_map(4)]))
+    # A run that starts on an odd pixel, and runs of odd length.
+    odd = [[5, 5, 5, 9, 9, 9, 9, 9, 2, 2, 2, 2, 7] for _ in range(4)]
+    out["thunder_odd_runs"] = write_tiff(*thunder(odd))
+    # The data cut short: the last row does not finish, and fails.
+    e, strips = thunder(flat, rows_per_strip=11)
+    out["thunder_cut_refused"] = write_tiff(e, [strips[0][:-2]])
+    # A run that overfills its row.
+    e, strips = thunder([[4] * 10 for _ in range(4)])
+    out["thunder_run_overfills_refused"] = write_tiff(e, [bytes([0xC4, 20]) + strips[0][2:]])
+    # Trailing bytes after the last row are ignored.
+    e, strips = thunder(flat, rows_per_strip=11)
+    out["thunder_trailing_bytes"] = write_tiff(e, [strips[0] + b"\xC1\xC2\xC3"])
+    out["thunder_8_bits_refused"] = write_tiff(*thunder(flat, bits=8))
+    # No tile decoder.
+    tile_pic4 = grey4(16, 16, 5, 0.5)
+    tile_strip = b"".join(thunder_row(tile_pic4[r], rng) for r in range(16))
+    t_entries = [(WIDTH, LONG, [16]), (LENGTH, LONG, [16]), (BITS, SHORT, [4]),
+                 (COMPRESSION, SHORT, [THUNDERSCAN]), (PHOTOMETRIC, SHORT, [1]), (SAMPLES, SHORT, [1]),
+                 (TILE_WIDTH, LONG, [16]), (TILE_LENGTH, LONG, [16])]
+    out["thunder_tiled_refused"] = write_tiff(t_entries, [tile_strip], **tiled)
+    return out
+
+
 def pillow_fixtures() -> dict[str, bytes]:
     """Pictures written by Pillow's writer, which is libtiff's encoder."""
     rng = random.Random(99)
@@ -1104,7 +1296,8 @@ def pillow_fixtures() -> dict[str, bytes]:
 def main() -> None:
     oracle = build_oracle()
     made = {f"tiff_{name}": data for name, data in
-            (fixtures() | pillow_fixtures() | fax_fixtures() | jpeg_fixtures()).items()}
+            (fixtures() | pillow_fixtures() | fax_fixtures() | jpeg_fixtures()
+             | next_thunder_fixtures()).items()}
     for old in HERE.glob("tiff_*.tif"):
         old.unlink()
     for old in HERE.glob("tiff_*.txt"):

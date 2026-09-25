@@ -5,8 +5,11 @@
 //! - Input modes: text, URL, email, phone, `WiFi`, vCard
 //! - Customizable module size and foreground/background colors
 //! - Code128 barcode generation
-//! - History of recently generated codes
-//! - Multi-panel UI: input, preview, and options panels
+//! - History of the codes made, one entry per code (not per keystroke); a
+//!   press brings one back
+//! - Multi-panel UI: input, preview, and options panels, every control of
+//!   which answers the pointer as well as the keys (F1 lists them)
+//! - Saving the code as an SVG picture, at the module size, in its colours
 //!
 //! Uses the guitk library for UI rendering.
 
@@ -40,11 +43,18 @@ use appearance::Surface;
 use core::num::NonZeroUsize;
 
 use guitk::Color;
-use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::colorpicker::{ColorPickerDialog, ColorPickerEvent};
+use guitk::dialog::{FilePicker, Picked};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
-use guitk::text;
+use guitk::text::{self, TextCursor};
+use guitk::textedit;
+use guitk::textinput::TextInput;
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -76,21 +86,80 @@ const CORNER_RADIUS: f32 = 4.0;
 /// somebody was about to print, and the only way to know was to read the
 /// source.
 const SHORTCUTS: &[(&str, &str)] = &[
-    ("Ctrl+I", "What kind of thing to encode"),
-    ("Tab", "Next box, where a mode has more than one"),
+    (
+        "Ctrl+I / Ctrl+Shift+I",
+        "Next / previous kind of thing to encode",
+    ),
+    (
+        "Tab / Shift+Tab",
+        "Next / previous box, where a kind has more than one",
+    ),
+    ("Left / Right / Home / End", "Move in the box"),
+    ("Backspace / Delete", "Delete a character"),
+    (
+        "Ctrl+A / Ctrl+C / Ctrl+X / Ctrl+V",
+        "Select all / copy / cut / paste, in the box",
+    ),
+    ("Escape", "Empty the box"),
     ("Ctrl+Q / Ctrl+B", "Make a QR code / a Code128 barcode"),
     (
         "Ctrl+E",
         "Error correction: more of it survives more damage",
     ),
-    ("Ctrl+M", "How big each square is drawn"),
-    ("Ctrl+S", "WiFi: open, WEP or WPA"),
+    ("Ctrl+M", "How big each square is drawn and saved"),
+    ("Ctrl+T", "WiFi: open, WEP or WPA"),
     ("Ctrl+H", "WiFi: whether the network is hidden"),
+    ("Ctrl+S", "Save the code as a picture (SVG)"),
     ("Ctrl+K", "Forget the history"),
-    ("Backspace", "Delete a character from the box"),
-    ("Escape", "Empty the box"),
     ("F1", "This list"),
 ];
+
+/// The most characters one box takes. A QR code this program makes holds at
+/// most 271 bytes, so this is far past anything that can be encoded; it is
+/// there so a paste cannot make a box without end.
+const MAX_FIELD_CHARS: usize = 1000;
+
+/// The most codes the history keeps; the oldest goes first.
+const HISTORY_CAP: usize = 100;
+
+/// A history row's height, with the gap under it.
+const HISTORY_ROW_H: f32 = 28.0;
+
+/// Everything in the window a pointer can press, as the renderer records it.
+///
+/// Nothing answered the pointer: the code-type toggle, the six kinds, the
+/// boxes, the history, the error-correction and size lists and the colour
+/// swatches were drawn as controls and were pictures of them (`known-issues.md`
+/// -> `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    CodeType(CodeType),
+    Save,
+    Help,
+    Mode(InputMode),
+    Field(Field),
+    /// The WiFi code's security.
+    Encryption,
+    /// Whether the WiFi network is hidden.
+    Hidden,
+    HistoryList,
+    /// A history entry, by its place in `QrApp::history`.
+    HistoryRow(usize),
+    ClearHistory,
+    Ec(EcLevel),
+    Size(ModuleSize),
+    Foreground,
+    Background,
+    ResetColors,
+    HelpCard,
+}
+
+/// Which colour the colour dialog is choosing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Swatch {
+    Foreground,
+    Background,
+}
 
 const GF_PRIMITIVE: u16 = 0x11D;
 
@@ -498,6 +567,33 @@ impl QrMatrix {
         }
     }
 
+    /// Place the version information, which versions 7 and up carry twice:
+    /// eighteen bits -- the version in six, a BCH check in twelve -- in a 6x3
+    /// block beside the top-right finder and a 3x6 one above the bottom-left.
+    ///
+    /// It was not placed at all, so a version 7-10 symbol had its data where
+    /// the version belongs: every bit after the first block was one place
+    /// from where a scanner reads it, and the code was unreadable. Anything
+    /// past about 120 bytes -- most contacts, a long WiFi password -- needs
+    /// version 7.
+    fn place_version_info(&mut self, version: u8) {
+        if version < 7 {
+            return;
+        }
+        let bits = version_info_bits(version);
+        for i in 0..18_usize {
+            let module = if (bits >> i) & 1 == 1 {
+                Module::FunctionDark
+            } else {
+                Module::FunctionLight
+            };
+            let across = self.size - 11 + i % 3;
+            let down = i / 3;
+            self.set(down, across, module);
+            self.set(across, down, module);
+        }
+    }
+
     /// Reserve format information areas (they'll be written after masking).
     fn reserve_format_info(&mut self) {
         // Around top-left finder
@@ -564,7 +660,10 @@ fn alignment_positions(version: u8) -> Vec<usize> {
         7 => vec![6, 22, 38],
         8 => vec![6, 24, 42],
         9 => vec![6, 26, 46],
-        10 => vec![6, 28, 52],
+        // 50, not 52: the last centre is always seven in from the edge, and
+        // a version-10 symbol is 57 modules across. At 52 every version-10
+        // code had its bottom-right alignment patterns where no scanner looks.
+        10 => vec![6, 28, 50],
         _ => vec![],
     }
 }
@@ -922,53 +1021,63 @@ fn check_finder_like(matrix: &QrMatrix, row: usize, col: usize, horizontal: bool
     true
 }
 
-/// Write format information into the matrix.
-fn write_format_info(matrix: &mut QrMatrix, ec_level: EcLevel, mask_pattern: u8) {
+/// A version's eighteen information bits: the version in the top six, and a
+/// BCH(18,6) check with generator 0x1F25 in the low twelve.
+fn version_info_bits(version: u8) -> u32 {
+    let mut rem = u32::from(version);
+    for _ in 0..12 {
+        rem = (rem << 1) ^ ((rem >> 11) * 0x1F25);
+    }
+    (u32::from(version) << 12) | rem
+}
+
+/// The fifteen format bits: the error correction level and the mask, a
+/// BCH(15,5) check, and the fixed pattern 101010000010010 over all of it.
+fn format_bits(ec_level: EcLevel, mask_pattern: u8) -> u32 {
     let format_data = (u16::from(ec_level.format_bits()) << 3) | u16::from(mask_pattern);
     let format_ecc = format_info_ecc(format_data);
-    let format_bits = (u32::from(format_data) << 10) | u32::from(format_ecc);
-    // XOR with mask pattern 101010000010010
-    let format_bits = format_bits ^ 0x5412;
+    ((u32::from(format_data) << 10) | u32::from(format_ecc)) ^ 0x5412
+}
 
+/// Write format information into the matrix: bit `i` of `format_bits` at
+/// the standard's place for it, in both copies.
+///
+/// The copy under the top-right finder was one bit short: bit 7, at row 8
+/// column `size - 8`, was reserved and never written, so it read 0 whatever
+/// it should have been. A scanner corrects one bad bit in fifteen, which is
+/// why it went unnoticed; it is also one of the three a damaged code can
+/// spare.
+fn write_format_info(matrix: &mut QrMatrix, ec_level: EcLevel, mask_pattern: u8) {
+    let bits = format_bits(ec_level, mask_pattern);
     let size = matrix.size;
-
-    // Place format bits around top-left finder
-    for i in 0..15 {
-        let bit = ((format_bits >> (14u32.saturating_sub(i as u32))) & 1) == 1;
-        let module = if bit {
+    let module = |i: usize| {
+        if (bits >> i) & 1 == 1 {
             Module::FunctionDark
         } else {
             Module::FunctionLight
-        };
-
-        // Horizontal placement (row 8)
-        let col = match i {
-            0..=5 => i,
-            6 => 7,
-            7 => 8,
-            _ => size.saturating_sub(15).saturating_add(i),
-        };
-        matrix.set(8, col, module);
-
-        // Vertical placement (column 8)
-        let row = match i {
-            0 | 1 => size.saturating_sub(1).saturating_sub(i),
-            2..=5 => size.saturating_sub(1).saturating_sub(i),
-            6 => size.saturating_sub(1).saturating_sub(i),
-            7 => 8_usize.saturating_sub(i.saturating_sub(7)),
-            i_val => {
-                let offset = 14_usize.saturating_sub(i_val);
-                if offset > 5 {
-                    offset.saturating_add(1)
-                } else {
-                    offset
-                }
-            }
-        };
-        if row < size {
-            matrix.set(row, 8, module);
         }
+    };
+    // Beside the top-left finder: down column 8, then back along row 8,
+    // stepping over the timing pattern each way.
+    for i in 0..=5 {
+        matrix.set(i, 8, module(i));
     }
+    matrix.set(7, 8, module(6));
+    matrix.set(8, 8, module(7));
+    matrix.set(8, 7, module(8));
+    for i in 9..15 {
+        matrix.set(8, 14 - i, module(i));
+    }
+    // The copy: along row 8 under the top-right finder, then down column 8
+    // beside the bottom-left one.
+    for i in 0..8 {
+        matrix.set(8, size - 1 - i, module(i));
+    }
+    for i in 8..15 {
+        matrix.set(size - 15 + i, 8, module(i));
+    }
+    // The dark module, which the copy runs past and which is always dark.
+    matrix.set(size - 8, 8, Module::FunctionDark);
 }
 
 /// Compute format information ECC (BCH code).
@@ -1070,6 +1179,9 @@ impl QrCode {
         // Place dark module
         base_matrix.place_dark_module(version);
 
+        // Place the version information (versions 7 and up)
+        base_matrix.place_version_info(version);
+
         // Reserve format info
         base_matrix.reserve_format_info();
 
@@ -1122,6 +1234,13 @@ impl QrCode {
 /// Code128 character set B values and patterns.
 /// Each pattern is a sequence of bar/space widths (bars are odd indices, spaces even).
 const CODE128_PATTERNS: &[[u8; 6]] = &[
+    // The widths of bar, space, bar, space, bar, space for each value, from
+    // the standard's table. Values 36-38 and 60 onward were wrong -- entries
+    // marked "placeholder", one with a space zero modules wide, several the
+    // same as others -- so every lowercase letter and most punctuation made
+    // bars no scanner could read. `every_code128_pattern_is_well_formed`
+    // checks the rules each must keep and `the_code128_table_is_the_standards`
+    // a sample against the published table.
     [2, 1, 2, 2, 2, 2], // 0: space
     [2, 2, 2, 1, 2, 2], // 1: !
     [2, 2, 2, 2, 2, 1], // 2: "
@@ -1158,9 +1277,9 @@ const CODE128_PATTERNS: &[[u8; 6]] = &[
     [1, 1, 1, 3, 2, 3], // 33: A
     [1, 3, 1, 1, 2, 3], // 34: B
     [1, 3, 1, 3, 2, 1], // 35: C
-    [1, 1, 2, 3, 2, 2], // 36: D (originally index 36, char D)
-    [1, 3, 2, 1, 2, 2], // 37: E (originally index 37)
-    [1, 3, 2, 3, 2, 0], // 38: F -- placeholder, widths adjusted
+    [1, 1, 2, 3, 1, 3], // 36: D
+    [1, 3, 2, 1, 1, 3], // 37: E
+    [1, 3, 2, 3, 1, 1], // 38: F
     [2, 1, 1, 3, 1, 3], // 39: G
     [2, 3, 1, 1, 1, 3], // 40: H
     [2, 3, 1, 3, 1, 1], // 41: I
@@ -1182,49 +1301,49 @@ const CODE128_PATTERNS: &[[u8; 6]] = &[
     [3, 1, 2, 1, 1, 3], // 57: Y
     [3, 1, 2, 3, 1, 1], // 58: Z
     [3, 3, 2, 1, 1, 1], // 59: [
-    [2, 1, 1, 2, 1, 4], // 60: backslash
-    [2, 1, 1, 4, 1, 2], // 61: ]
-    [4, 1, 1, 2, 1, 2], // 62: ^
-    [2, 4, 1, 2, 1, 1], // 63: _
-    [2, 2, 1, 1, 1, 4], // 64: NUL / ` in B
-    [4, 1, 2, 1, 1, 2], // 65: a (Code B value 65)
-    [4, 2, 1, 1, 1, 2], // 66: b
-    [2, 1, 2, 1, 4, 1], // 67: c
-    [2, 1, 4, 1, 2, 1], // 68: d
-    [4, 1, 2, 1, 2, 1], // 69: e
-    [1, 1, 1, 1, 4, 3], // 70: f
-    [1, 1, 1, 3, 4, 1], // 71: g
-    [4, 1, 1, 1, 1, 3], // 72: h (placeholder)
-    [1, 1, 4, 1, 1, 3], // 73: i
-    [1, 1, 4, 3, 1, 1], // 74: j
-    [4, 1, 1, 1, 3, 1], // 75: k
-    [1, 1, 3, 1, 4, 1], // 76: l
-    [1, 1, 4, 1, 3, 1], // 77: m
-    [3, 1, 1, 1, 4, 1], // 78: n
-    [4, 1, 1, 1, 3, 1], // 79: o  (duplicate width check, placeholder)
-    [2, 1, 1, 4, 1, 2], // 80: p
-    [1, 2, 1, 1, 2, 4], // 81: q (placeholder)
-    [1, 4, 1, 1, 2, 2], // 82: r
-    [1, 4, 1, 2, 2, 1], // 83: s
-    [1, 2, 2, 4, 1, 1], // 84: t
+    [3, 1, 4, 1, 1, 1], // 60: backslash
+    [2, 2, 1, 4, 1, 1], // 61: ]
+    [4, 3, 1, 1, 1, 1], // 62: ^
+    [1, 1, 1, 2, 2, 4], // 63: _
+    [1, 1, 1, 4, 2, 2], // 64: `
+    [1, 2, 1, 1, 2, 4], // 65: a
+    [1, 2, 1, 4, 2, 1], // 66: b
+    [1, 4, 1, 1, 2, 2], // 67: c
+    [1, 4, 1, 2, 2, 1], // 68: d
+    [1, 1, 2, 2, 1, 4], // 69: e
+    [1, 1, 2, 4, 1, 2], // 70: f
+    [1, 2, 2, 1, 1, 4], // 71: g
+    [1, 2, 2, 4, 1, 1], // 72: h
+    [1, 4, 2, 1, 1, 2], // 73: i
+    [1, 4, 2, 2, 1, 1], // 74: j
+    [2, 4, 1, 2, 1, 1], // 75: k
+    [2, 2, 1, 1, 1, 4], // 76: l
+    [4, 1, 3, 1, 1, 1], // 77: m
+    [2, 4, 1, 1, 1, 2], // 78: n
+    [1, 3, 4, 1, 1, 1], // 79: o
+    [1, 1, 1, 2, 4, 2], // 80: p
+    [1, 2, 1, 1, 4, 2], // 81: q
+    [1, 2, 1, 2, 4, 1], // 82: r
+    [1, 1, 4, 2, 1, 2], // 83: s
+    [1, 2, 4, 1, 1, 2], // 84: t
     [1, 2, 4, 2, 1, 1], // 85: u
-    [1, 4, 2, 2, 1, 1], // 86: v
-    [4, 1, 2, 2, 1, 1], // 87: w
-    [4, 2, 2, 1, 1, 1], // 88: x
-    [2, 1, 2, 1, 1, 4], // 89: y
-    [2, 1, 1, 1, 2, 4], // 90: z
-    [1, 3, 4, 1, 1, 1], // 91: {
-    [1, 1, 1, 2, 4, 2], // 92: |
-    [1, 2, 1, 1, 4, 2], // 93: }
-    [1, 2, 1, 2, 4, 1], // 94: ~
-    [1, 1, 4, 2, 1, 2], // 95: DEL
-    [1, 2, 4, 1, 1, 2], // 96: FNC3
-    [1, 2, 4, 2, 1, 1], // 97: FNC2
-    [2, 4, 2, 1, 1, 1], // 98: SHIFT
-    [2, 2, 4, 1, 1, 1], // 99: CODE_C
-    [1, 1, 1, 1, 4, 3], // 100: CODE_B (FNC4 in A)
-    [1, 1, 1, 3, 4, 1], // 101: CODE_A (FNC4 in B)
-    [1, 3, 1, 1, 4, 1], // 102: FNC1
+    [4, 1, 1, 2, 1, 2], // 86: v
+    [4, 2, 1, 1, 1, 2], // 87: w
+    [4, 2, 1, 2, 1, 1], // 88: x
+    [2, 1, 2, 1, 4, 1], // 89: y
+    [2, 1, 4, 1, 2, 1], // 90: z
+    [4, 1, 2, 1, 2, 1], // 91: {
+    [1, 1, 1, 1, 4, 3], // 92: |
+    [1, 1, 1, 3, 4, 1], // 93: }
+    [1, 3, 1, 1, 4, 1], // 94: ~
+    [1, 1, 4, 1, 1, 3], // 95: DEL
+    [1, 1, 4, 3, 1, 1], // 96: FNC3
+    [4, 1, 1, 1, 1, 3], // 97: FNC2
+    [4, 1, 1, 3, 1, 1], // 98: SHIFT
+    [1, 1, 3, 1, 4, 1], // 99: CODE_C
+    [1, 1, 4, 1, 3, 1], // 100: CODE_B (FNC4 in A)
+    [3, 1, 1, 1, 4, 1], // 101: CODE_A (FNC4 in B)
+    [4, 1, 1, 1, 3, 1], // 102: FNC1
     [2, 1, 1, 4, 1, 2], // 103: START_A
     [2, 1, 1, 2, 1, 4], // 104: START_B
     [2, 1, 1, 2, 3, 2], // 105: START_C
@@ -1251,11 +1370,13 @@ impl Code128Barcode {
         let start_code = 104u32; // START B
         let mut values: Vec<u32> = vec![start_code];
 
-        // Convert characters to Code B values
+        // Convert characters to Code B values. A character Code B has no
+        // value for refuses the whole barcode: it was skipped, so "Caf\u{e9}"
+        // made a barcode that scans as "Caf" under a label reading "Caf\u{e9}".
         for ch in data.chars() {
             let ascii_val = ch as u32;
             if !(32..=127).contains(&ascii_val) {
-                continue; // Skip non-printable for Code B
+                return None;
             }
             values.push(ascii_val.saturating_sub(32));
         }
@@ -1310,6 +1431,22 @@ impl Code128Barcode {
     pub fn width(&self) -> usize {
         self.bars.len()
     }
+}
+
+/// Why `data` cannot be a Code128 barcode, if it cannot: Code B holds the
+/// printable ASCII characters and nothing else.
+fn code128_refusal(data: &str) -> Option<String> {
+    let bad = data
+        .chars()
+        .find(|c| !(32..=127).contains(&u32::from(*c)))?;
+    let shown = if bad.is_control() {
+        format!("U+{:04X}", u32::from(bad))
+    } else {
+        format!("\u{201c}{bad}\u{201d}")
+    };
+    Some(format!(
+        "A Code128 barcode holds letters, digits and ASCII punctuation only, and {shown} is none of them"
+    ))
 }
 
 // ============================================================================
@@ -1432,7 +1569,7 @@ impl Field {
 }
 
 /// `WiFi` configuration for QR encoding.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WifiConfig {
     pub ssid: String,
     pub password: String,
@@ -1469,7 +1606,7 @@ impl WifiEncryption {
 }
 
 /// vCard contact information.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VCardInfo {
     pub first_name: String,
     pub last_name: String,
@@ -1570,6 +1707,15 @@ impl ModuleSize {
         }
     }
 
+    /// The same, as a whole number of pixels for a saved picture.
+    fn whole_pixels(self) -> usize {
+        match self {
+            Self::Small => 3,
+            Self::Medium => 5,
+            Self::Large => 8,
+        }
+    }
+
     fn all() -> &'static [ModuleSize] {
         &[ModuleSize::Small, ModuleSize::Medium, ModuleSize::Large]
     }
@@ -1579,13 +1725,29 @@ impl ModuleSize {
 // History
 // ============================================================================
 
+/// A code that was made, with what made it, so a press brings it back.
+///
+/// One per code, not per keystroke: typing "Hello" added five entries --
+/// "H", "He", "Hel", "Hell", "Hello" -- because every keystroke re-encodes.
+/// The newest entry is updated while its code is being typed, and a new one
+/// starts when a new code does (`QrApp::history_open`). The `timestamp` that
+/// was here counted from 1000 and was shown nowhere.
 #[derive(Clone, Debug)]
 pub struct HistoryEntry {
     pub data: String,
     pub mode: InputMode,
     pub code_type: CodeType,
     pub ec_level: EcLevel,
-    pub timestamp: u64,
+    pub input_text: String,
+    pub wifi: WifiConfig,
+    pub vcard: VCardInfo,
+}
+
+impl HistoryEntry {
+    /// Whether two entries are the same code.
+    fn same_code(&self, other: &Self) -> bool {
+        self.data == other.data && self.code_type == other.code_type && self.mode == other.mode
+    }
 }
 
 // ============================================================================
@@ -1609,10 +1771,37 @@ pub struct QrApp {
     pub current_qr: Option<QrCode>,
     pub current_barcode: Option<Code128Barcode>,
     pub history: Vec<HistoryEntry>,
+    /// Why the last attempt made no code: too long, or a character a barcode
+    /// cannot hold.
     pub error_message: Option<String>,
+    /// Why there is no code when nothing is wrong: the box is empty, or a
+    /// WiFi code has no network name yet.
+    pub waiting_for: Option<&'static str>,
     pub window_width: f32,
     pub window_height: f32,
-    timestamp: u64,
+    /// The box being typed into, as a field with a caret and a selection. It
+    /// edits the text of `focused_field()`, and is reloaded from it whenever
+    /// the two differ, so the strings stay the one record of what is typed.
+    editor: TextInput,
+    /// The boxes' clipboard.
+    clipboard: String,
+    /// Whether the newest history entry is the code being typed, so the next
+    /// change updates it rather than adding another.
+    history_open: bool,
+    /// How far the history list is scrolled, in rows.
+    history_scroll: usize,
+    /// What the last save said.
+    notice: Option<String>,
+    /// Where to save the code.
+    picker: FilePicker,
+    /// A colour being chosen, and the dialog choosing it.
+    color_dialog: Option<(Swatch, ColorPickerDialog)>,
+    /// What the pointer is over, so it can be drawn lit.
+    hover: Option<Target>,
+    /// Every box the last paint recorded, for hover and the wheel.
+    last_hits: Vec<(Target, Rect)>,
+    /// The wheel's remainder.
+    wheel: wheel::Accumulator,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -1646,20 +1835,66 @@ impl QrApp {
             current_barcode: None,
             history: Vec::new(),
             error_message: None,
+            waiting_for: Some(NOTHING_TYPED),
             window_width: 1100.0,
             window_height: 700.0,
-            timestamp: 1000,
+            editor: TextInput::new(),
+            clipboard: String::new(),
+            history_open: false,
+            history_scroll: 0,
+            notice: None,
+            picker: FilePicker::default(),
+            color_dialog: None,
+            hover: None,
+            last_hits: Vec::new(),
+            wheel: wheel::Accumulator::default(),
         }
     }
 
-    fn tick(&mut self) -> u64 {
-        self.timestamp = self.timestamp.saturating_add(1);
-        self.timestamp
+    /// Why there is nothing to encode, if there is not.
+    fn missing_input(&self) -> Option<&'static str> {
+        match self.input_mode {
+            InputMode::Text | InputMode::Url | InputMode::Email | InputMode::Phone => {
+                self.input_text.is_empty().then_some(NOTHING_TYPED)
+            }
+            InputMode::Wifi => self
+                .wifi_config
+                .ssid
+                .is_empty()
+                .then_some("A WiFi code needs the network's name (SSID)"),
+            InputMode::VCard => {
+                let v = &self.vcard_info;
+                [
+                    &v.first_name,
+                    &v.last_name,
+                    &v.phone,
+                    &v.email,
+                    &v.organization,
+                ]
+                .iter()
+                .all(|s| s.is_empty())
+                .then_some("A contact needs a name, a phone number or an email address")
+            }
+        }
     }
 
     /// Generate a code from current settings.
+    ///
+    /// With nothing to encode there is no code: the one for what was there
+    /// before stayed on screen, a code for text no longer in the box. And the
+    /// four text-shaped kinds encoded their prefix alone -- an empty URL box
+    /// made a code for `https://`.
     pub fn generate(&mut self) {
         self.error_message = None;
+        self.waiting_for = self.missing_input();
+        if self.waiting_for.is_some() {
+            self.current_qr = None;
+            self.current_barcode = None;
+            // The code being typed is finished with; what is typed next is
+            // a new one.
+            self.history_open = false;
+            return;
+        }
 
         let data = format_qr_data(
             self.input_mode,
@@ -1668,52 +1903,113 @@ impl QrApp {
             &self.vcard_info,
         );
 
-        if data.is_empty() {
-            self.error_message = Some("No input data provided".to_owned());
-            return;
-        }
-
-        let ts = self.tick();
-
         match self.code_type {
             CodeType::QrCode => match QrCode::encode(data.as_bytes(), self.ec_level) {
                 Some(qr) => {
                     self.current_qr = Some(qr);
                     self.current_barcode = None;
-                    self.history.push(HistoryEntry {
-                        data: data.clone(),
-                        mode: self.input_mode,
-                        code_type: self.code_type,
-                        ec_level: self.ec_level,
-                        timestamp: ts,
-                    });
+                    self.remember(data);
                 }
                 None => {
-                    self.error_message = Some("Data too long for QR version 1-10".to_owned());
-                }
-            },
-            CodeType::Barcode128 => match Code128Barcode::encode(&data) {
-                Some(barcode) => {
-                    self.current_barcode = Some(barcode);
                     self.current_qr = None;
-                    self.history.push(HistoryEntry {
-                        data: data.clone(),
-                        mode: self.input_mode,
-                        code_type: self.code_type,
-                        ec_level: self.ec_level,
-                        timestamp: ts,
-                    });
-                }
-                None => {
-                    self.error_message = Some("Cannot encode data as Code128".to_owned());
+                    self.current_barcode = None;
+                    let most =
+                        get_version_info(10, self.ec_level).map_or(0, |v| v.byte_mode_capacity());
+                    self.error_message = Some(format!(
+                        "Too long for a QR code: {} bytes, and at error correction {} the most is {most}",
+                        data.len(),
+                        self.ec_level.short_label()
+                    ));
                 }
             },
+            CodeType::Barcode128 => {
+                if let Some(why) = code128_refusal(&data) {
+                    self.current_qr = None;
+                    self.current_barcode = None;
+                    self.error_message = Some(why);
+                    return;
+                }
+                match Code128Barcode::encode(&data) {
+                    Some(barcode) => {
+                        self.current_barcode = Some(barcode);
+                        self.current_qr = None;
+                        self.remember(data);
+                    }
+                    None => {
+                        self.current_qr = None;
+                        self.current_barcode = None;
+                        self.error_message = Some("Cannot encode data as Code128".to_owned());
+                    }
+                }
+            }
         }
     }
 
+    /// Put the code just made in the history: over the newest entry while
+    /// that code is being typed, as a new one otherwise. An older entry for
+    /// the same code goes, so one code is one row.
+    fn remember(&mut self, data: String) {
+        let entry = HistoryEntry {
+            data,
+            mode: self.input_mode,
+            code_type: self.code_type,
+            ec_level: self.ec_level,
+            input_text: self.input_text.clone(),
+            wifi: self.wifi_config.clone(),
+            vcard: self.vcard_info.clone(),
+        };
+        match self.history.last_mut() {
+            Some(last) if self.history_open => *last = entry,
+            _ => {
+                self.history.push(entry);
+                self.history_open = true;
+            }
+        }
+        let newest = self.history.len().saturating_sub(1);
+        if let Some(newest_entry) = self.history.get(newest).cloned()
+            && let Some(older) = self
+                .history
+                .iter()
+                .take(newest)
+                .position(|e| e.same_code(&newest_entry))
+        {
+            self.history.remove(older);
+        }
+        if self.history.len() > HISTORY_CAP {
+            self.history.remove(0);
+        }
+    }
+
+    /// Bring history entry `index` back: its kind, its boxes and its
+    /// settings, as the newest entry.
+    fn restore(&mut self, index: usize) {
+        if index >= self.history.len() {
+            return;
+        }
+        let entry = self.history.remove(index);
+        self.input_mode = entry.mode;
+        self.code_type = entry.code_type;
+        self.ec_level = entry.ec_level;
+        self.input_text.clone_from(&entry.input_text);
+        self.wifi_config = entry.wifi.clone();
+        self.vcard_info = entry.vcard.clone();
+        self.focused_field = 0;
+        self.history.push(entry);
+        self.history_open = true;
+        self.history_scroll = 0;
+        self.notice = None;
+        self.load_editor();
+        self.generate();
+    }
+
     /// Set input text and auto-generate.
+    ///
+    /// A whole new text, not an edit of the last, so it starts a new
+    /// history entry.
     pub fn set_input(&mut self, text: &str) {
         self.input_text = text.to_owned();
+        self.history_open = false;
+        self.load_editor();
     }
 
     /// The box the keyboard is typing into.
@@ -1783,12 +2079,244 @@ impl QrApp {
         // its first box would put the cursor somewhere the eye has to hunt
         // for, and possibly past the end.
         self.focused_field = 0;
+        // The same text as a URL is a different code from it as text.
+        self.history_open = false;
+        self.load_editor();
         self.generate();
     }
 
     /// Clear history.
     pub fn clear_history(&mut self) {
         self.history.clear();
+        self.history_open = false;
+        self.history_scroll = 0;
+    }
+
+    /// Load the box being typed into from what it holds, caret at the end.
+    fn load_editor(&mut self) {
+        let text = self.field_text(self.focused_field()).to_owned();
+        self.editor.set_text(&text);
+    }
+
+    /// Apply a keystroke to the box being typed into, and answer whether it
+    /// changed anything.
+    fn edit(&mut self, key: &KeyEvent) -> EventResult {
+        let field = self.focused_field();
+        if self.editor.text() != self.field_text(field) {
+            // Changed from outside the box -- a restore, a test -- so start
+            // from what it holds, not from what the editor last saw.
+            self.load_editor();
+        }
+        let before = (
+            self.editor.text().to_owned(),
+            self.editor.cursor(),
+            self.editor.selection_anchor(),
+        );
+        let clipboard = self.clipboard.clone();
+        let done = edit_line(&mut self.editor, key, MAX_FIELD_CHARS, &clipboard);
+        let copied = done.copied.is_some();
+        if let Some(text) = done.copied {
+            self.clipboard = text;
+        }
+        let typed = self.editor.text() != before.0;
+        if typed {
+            *self.field_text_mut(field) = self.editor.text().to_owned();
+            self.notice = None;
+            self.generate();
+        }
+        if typed
+            || copied
+            || self.editor.cursor() != before.1
+            || self.editor.selection_anchor() != before.2
+        {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// Empty the box being typed into.
+    fn clear_box(&mut self) -> EventResult {
+        let field = self.focused_field();
+        if self.field_text(field).is_empty() {
+            return EventResult::Ignored;
+        }
+        self.field_text_mut(field).clear();
+        self.load_editor();
+        self.generate();
+        EventResult::Consumed
+    }
+
+    /// The WiFi code's security, one step on. Only in WiFi mode.
+    fn step_encryption(&mut self) -> EventResult {
+        if self.input_mode != InputMode::Wifi {
+            return EventResult::Ignored;
+        }
+        self.wifi_config.encryption = match self.wifi_config.encryption {
+            WifiEncryption::None => WifiEncryption::Wep,
+            WifiEncryption::Wep => WifiEncryption::Wpa,
+            WifiEncryption::Wpa => WifiEncryption::None,
+        };
+        self.generate();
+        EventResult::Consumed
+    }
+
+    /// Whether the WiFi network is hidden, the other way. Only in WiFi mode.
+    fn toggle_hidden(&mut self) -> EventResult {
+        if self.input_mode != InputMode::Wifi {
+            return EventResult::Ignored;
+        }
+        self.wifi_config.hidden = !self.wifi_config.hidden;
+        self.generate();
+        EventResult::Consumed
+    }
+
+    // ------------------------------------------------------------------
+    // Saving
+    // ------------------------------------------------------------------
+
+    /// Ask where to save the code on screen.
+    ///
+    /// There was no way to keep a code at all: the toolbar's Generate button
+    /// did nothing (typing already generates), and a code could only be
+    /// scanned off the screen.
+    fn ask_where_to_save(&mut self) -> EventResult {
+        if self.current_qr.is_none() && self.current_barcode.is_none() {
+            self.notice = Some(String::from("Nothing to save yet: there is no code"));
+            return EventResult::Consumed;
+        }
+        self.picker.open_to_write(match self.code_type {
+            CodeType::QrCode => "qrcode.svg",
+            CodeType::Barcode128 => "barcode.svg",
+        });
+        EventResult::Consumed
+    }
+
+    /// Write the code on screen to `path` as SVG, and say how that went.
+    pub fn save_svg(&mut self, path: &Path) -> String {
+        let Some(svg) = self.svg() else {
+            return String::from("Nothing to save: there is no code");
+        };
+        match safeio::write_str_atomically(path, &svg) {
+            Ok(()) => format!("Saved {}", path.display()),
+            Err(err) => format!("Could not save {}: {err}", path.display()),
+        }
+    }
+
+    /// The code on screen as an SVG picture: its colours, the quiet margin a
+    /// scanner needs round it, and the module size as its size in pixels. A
+    /// vector picture, so it prints sharp at any size.
+    #[must_use]
+    pub fn svg(&self) -> Option<String> {
+        let scale = self.module_size.whole_pixels();
+        let fg = svg_paint(self.fg_color);
+        let bg = svg_paint(self.bg_color);
+        if let Some(qr) = &self.current_qr {
+            // Four modules of margin, which the standard requires.
+            let quiet = 4;
+            let size = qr.size();
+            let side = size + 2 * quiet;
+            let mut d = String::new();
+            for row in 0..size {
+                let mut col = 0;
+                while col < size {
+                    if !qr.is_dark(row, col) {
+                        col += 1;
+                        continue;
+                    }
+                    let start = col;
+                    while col < size && qr.is_dark(row, col) {
+                        col += 1;
+                    }
+                    let run = col - start;
+                    d.push_str(&format!(
+                        "M{} {}h{run}v1h-{run}z",
+                        start + quiet,
+                        row + quiet
+                    ));
+                }
+            }
+            return Some(format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {side} {side}\" \
+                 width=\"{w}\" height=\"{w}\" shape-rendering=\"crispEdges\">\n\
+                 <rect width=\"{side}\" height=\"{side}\" {bg}/>\n\
+                 <path {fg} d=\"{d}\"/>\n</svg>\n",
+                w = side * scale,
+            ));
+        }
+        let bc = self.current_barcode.as_ref()?;
+        // `bars` carries its ten-module quiet zones already.
+        let width = bc.width();
+        let bars_h = 50;
+        let height = bars_h + 14;
+        let mut d = String::new();
+        let mut x = 0;
+        while x < width {
+            if !bc.bars.get(x).copied().unwrap_or(false) {
+                x += 1;
+                continue;
+            }
+            let start = x;
+            while x < width && bc.bars.get(x).copied().unwrap_or(false) {
+                x += 1;
+            }
+            let run = x - start;
+            d.push_str(&format!("M{start} 0h{run}v{bars_h}h-{run}z"));
+        }
+        Some(format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {width} {height}\" \
+             width=\"{w}\" height=\"{h}\" shape-rendering=\"crispEdges\">\n\
+             <rect width=\"{width}\" height=\"{height}\" {bg}/>\n\
+             <path {fg} d=\"{d}\"/>\n\
+             <text x=\"{mid}\" y=\"{text_y}\" font-family=\"monospace\" font-size=\"9\" \
+             text-anchor=\"middle\" {fg}>{label}</text>\n</svg>\n",
+            w = width * scale,
+            h = height * scale,
+            mid = width / 2,
+            text_y = bars_h + 11,
+            label = xml_escape(&bc.data),
+        ))
+    }
+
+    /// Whether a scanner can be expected to read the code in its colours:
+    /// the squares darker than the ground, by a margin.
+    #[must_use]
+    pub fn colors_scannable(&self) -> bool {
+        let (dark, light) = (luminance(self.fg_color), luminance(self.bg_color));
+        dark < light && (light + 0.05) / (dark + 0.05) >= 3.0
+    }
+
+    // ------------------------------------------------------------------
+    // The colour dialog
+    // ------------------------------------------------------------------
+
+    /// Hand an event to the colour dialog, and take its answer.
+    fn color_dialog_event(&mut self, event: &Event) -> EventResult {
+        let (width, height) = (self.window_width, self.window_height);
+        let Some((swatch, dialog)) = self.color_dialog.as_mut() else {
+            return EventResult::Ignored;
+        };
+        let swatch = *swatch;
+        let outcome = match event {
+            Event::Key(key) if key.pressed => dialog.handle_key(key),
+            Event::Mouse(mouse) => dialog.handle_mouse(mouse, width, height),
+            _ => None,
+        };
+        match outcome {
+            Some(ColorPickerEvent::Confirmed(color)) => {
+                match swatch {
+                    Swatch::Foreground => self.fg_color = color,
+                    Swatch::Background => self.bg_color = color,
+                }
+                self.color_dialog = None;
+            }
+            Some(ColorPickerEvent::Cancelled) => self.color_dialog = None,
+            // The live preview, which the dialog draws for itself.
+            _ => {}
+        }
+        // Everything reaches the dialog while it is up, and it is drawn afresh
+        // for each -- a drag across its square included.
+        EventResult::Consumed
     }
 
     // -----------------------------------------------------------------------
@@ -1801,8 +2329,25 @@ impl QrApp {
 
     /// Route a compositor event into the app.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The save dialog takes input first while it is up, or a filename is
+        // typed into the box behind it.
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
+        {
+            Picked::Chose(path) => {
+                self.notice = Some(self.save_svg(&path));
+                return EventResult::Consumed;
+            }
+            Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
+            Picked::Ignored => {}
+        }
+        if self.color_dialog.is_some() && !matches!(event, Event::Resize { .. }) {
+            return self.color_dialog_event(event);
+        }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Resize { width, height } => {
                 #[allow(
                     clippy::cast_precision_loss,
@@ -1821,7 +2366,7 @@ impl QrApp {
 
     /// Apply a key press.
     ///
-    /// The text field always has focus, because a program whose entire input is
+    /// The box always has the keys, because a program whose entire input is
     /// "the thing to encode" should not need a keystroke before it will accept
     /// it. Everything else is therefore on Ctrl.
     pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
@@ -1829,15 +2374,19 @@ impl QrApp {
             return EventResult::Ignored;
         }
         let ctrl = key.modifiers.ctrl;
-        match key.key {
-            Key::F1 => {
-                self.show_help = !self.show_help;
-                EventResult::Consumed
-            }
-            Key::Escape if self.show_help => {
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        // The list of keys is modal while it is up.
+        if self.show_help {
+            if matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
-                EventResult::Consumed
+                return EventResult::Consumed;
             }
+            return EventResult::Ignored;
+        }
+        match key.key {
             // What kind of thing is being encoded. Six modes were drawn as
             // a row of buttons with the active one highlighted, and nothing
             // could move the highlight, so `format_qr_data`'s Url, Email,
@@ -1854,29 +2403,13 @@ impl QrApp {
                     return EventResult::Ignored;
                 }
                 self.step_field(!key.modifiers.shift);
+                self.load_editor();
                 EventResult::Consumed
             }
-            Key::Backspace => {
-                let field = self.focused_field();
-                if self.field_text_mut(field).pop().is_none() {
-                    return EventResult::Ignored;
-                }
-                self.generate();
-                EventResult::Consumed
-            }
-            Key::Escape => {
-                // The box the cursor is on, for the same reason Backspace
-                // works on that one: clearing a box the user is not looking
-                // at is a surprise, and clearing the only box four modes
-                // have was all this could ever do.
-                let field = self.focused_field();
-                if self.field_text_mut(field).is_empty() {
-                    return EventResult::Ignored;
-                }
-                self.field_text_mut(field).clear();
-                self.generate();
-                EventResult::Consumed
-            }
+            // The box the cursor is on, for the same reason Backspace works
+            // on that one: clearing a box the user is not looking at is a
+            // surprise.
+            Key::Escape => self.clear_box(),
             // Ctrl+Q and Ctrl+B pick what kind of code to make.
             Key::Q if ctrl => self.set_code_type(CodeType::QrCode),
             Key::B if ctrl => self.set_code_type(CodeType::Barcode128),
@@ -1902,31 +2435,17 @@ impl QrApp {
                 // itself does not change, so there is nothing to regenerate.
                 EventResult::Consumed
             }
-            // What the WiFi code claims about the network. Both were
-            // fixed at construction, so a code for an open network told the
-            // phone it was WPA -- which is a connection that fails with no
-            // useful message -- and a hidden network's code left out the
-            // flag that makes a phone go looking for it.
-            Key::S if ctrl => {
-                if self.input_mode != InputMode::Wifi {
-                    return EventResult::Ignored;
-                }
-                self.wifi_config.encryption = match self.wifi_config.encryption {
-                    WifiEncryption::None => WifiEncryption::Wep,
-                    WifiEncryption::Wep => WifiEncryption::Wpa,
-                    WifiEncryption::Wpa => WifiEncryption::None,
-                };
-                self.generate();
-                EventResult::Consumed
-            }
-            Key::H if ctrl => {
-                if self.input_mode != InputMode::Wifi {
-                    return EventResult::Ignored;
-                }
-                self.wifi_config.hidden = !self.wifi_config.hidden;
-                self.generate();
-                EventResult::Consumed
-            }
+            // What the WiFi code claims about the network. Both were fixed at
+            // construction, so a code for an open network told the phone it
+            // was WPA -- a connection that fails with no useful message --
+            // and a hidden network's code left out the flag that makes a
+            // phone go looking for it. On T and H, the letters the code
+            // itself writes them under (`WIFI:T:...;H:true;`); T was S, which
+            // everywhere else saves, and here changed the code the user was
+            // about to print.
+            Key::T if ctrl => self.step_encryption(),
+            Key::H if ctrl => self.toggle_hidden(),
+            Key::S if ctrl => self.ask_where_to_save(),
             Key::K if ctrl => {
                 if self.history.is_empty() {
                     return EventResult::Ignored;
@@ -1934,19 +2453,9 @@ impl QrApp {
                 self.clear_history();
                 EventResult::Consumed
             }
-            _ => {
-                if key.text.is_empty() || ctrl {
-                    return EventResult::Ignored;
-                }
-                // Into the box the cursor is on. It was always `input_text`,
-                // which is the only box four of the six modes have -- and
-                // none of the boxes the other two draw.
-                let field = self.focused_field();
-                let typed = key.text.clone();
-                self.field_text_mut(field).push_str(&typed);
-                self.generate();
-                EventResult::Consumed
-            }
+            // Into the box the cursor is on: typing, moving, deleting,
+            // selecting, copying and pasting.
+            _ => self.edit(key),
         }
     }
 
@@ -1960,15 +2469,198 @@ impl QrApp {
         EventResult::Consumed
     }
 
+    // ------------------------------------------------------------------
+    // The pointer
+    // ------------------------------------------------------------------
+
+    /// What is under `(x, y)` in the frame last shown.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self
+                .frame(self.window_width, self.window_height)
+                .hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                let frame = self.frame(self.window_width, self.window_height);
+                let Some(target) = frame.hit_test(event.x, event.y) else {
+                    return EventResult::Ignored;
+                };
+                let rect = frame.rect_of(|t| *t == target);
+                self.press(target, event.x, rect)
+            }
+            MouseEventKind::Move => {
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return EventResult::Ignored;
+                }
+                self.hover = over;
+                EventResult::Consumed
+            }
+            MouseEventKind::Leave => {
+                if self.hover.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            MouseEventKind::Scroll { dy, .. } => self.wheel_at(event.x, event.y, dy),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// A left press on `target`, at `x` in the box `rect` it was drawn in.
+    fn press(&mut self, target: Target, x: f32, rect: Option<Rect>) -> EventResult {
+        match target {
+            Target::HelpCard => self.show_help = false,
+            Target::Help => self.show_help = true,
+            Target::CodeType(code_type) => return self.set_code_type(code_type),
+            Target::Save => return self.ask_where_to_save(),
+            Target::Mode(mode) => {
+                if mode == self.input_mode {
+                    return EventResult::Ignored;
+                }
+                self.set_input_mode(mode);
+            }
+            Target::Field(field) => {
+                let Some(at) = self.input_mode.fields().iter().position(|f| *f == field) else {
+                    return EventResult::Ignored;
+                };
+                let was = self.focused_field();
+                self.focused_field = at;
+                if was != field || self.editor.text() != self.field_text(field) {
+                    self.load_editor();
+                }
+                if let Some(rect) = rect {
+                    self.place_caret(rect, x, was == field);
+                }
+            }
+            Target::Encryption => return self.step_encryption(),
+            Target::Hidden => return self.toggle_hidden(),
+            Target::HistoryRow(index) => self.restore(index),
+            Target::ClearHistory => {
+                if self.history.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.clear_history();
+            }
+            Target::Ec(level) => {
+                if level == self.ec_level {
+                    return EventResult::Ignored;
+                }
+                self.ec_level = level;
+                self.generate();
+            }
+            Target::Size(size) => {
+                if size == self.module_size {
+                    return EventResult::Ignored;
+                }
+                self.module_size = size;
+            }
+            Target::Foreground => {
+                self.color_dialog =
+                    Some((Swatch::Foreground, ColorPickerDialog::new(self.fg_color)));
+            }
+            Target::Background => {
+                self.color_dialog =
+                    Some((Swatch::Background, ColorPickerDialog::new(self.bg_color)));
+            }
+            Target::ResetColors => {
+                if (self.fg_color, self.bg_color) == (Color::BLACK, Color::WHITE) {
+                    return EventResult::Ignored;
+                }
+                self.fg_color = Color::BLACK;
+                self.bg_color = Color::WHITE;
+            }
+            Target::HistoryList => return EventResult::Ignored,
+        }
+        EventResult::Consumed
+    }
+
+    /// Put the box's caret under the pointer at `x`, measured against the
+    /// box as it was drawn: from its start when the keys were elsewhere,
+    /// scrolled to its caret when they were in it.
+    fn place_caret(&mut self, rect: Rect, x: f32, was_focused: bool) {
+        let drawn = if was_focused {
+            self.editor.cursor()
+        } else {
+            TextCursor::default()
+        };
+        let cursor = textedit::cursor_at_click(
+            self.editor.text(),
+            drawn,
+            (rect.w - 16.0).max(0.0),
+            12.0,
+            FontWeightHint::Regular,
+            x - rect.x - 8.0,
+        );
+        self.editor.set_selection_anchor(None);
+        self.editor.set_cursor(cursor);
+    }
+
+    /// The wheel over the history.
+    fn wheel_at(&mut self, x: f32, y: f32, dy: f32) -> EventResult {
+        if !matches!(
+            self.target_at(x, y),
+            Some(Target::HistoryList | Target::HistoryRow(_))
+        ) {
+            return EventResult::Ignored;
+        }
+        let rows = self.wheel.rows(dy);
+        let last = self.history_last_scroll();
+        let now = self.history_scroll;
+        let next = if rows < 0 {
+            now.saturating_sub(rows.unsigned_abs())
+        } else {
+            now.saturating_add(rows.unsigned_abs())
+        }
+        .min(last);
+        if next == now {
+            return EventResult::Ignored;
+        }
+        self.history_scroll = next;
+        EventResult::Consumed
+    }
+
+    /// How many history rows the list shows at once.
+    fn history_rows(&self) -> usize {
+        let (_, pane) = self.input_layout();
+        ((pane.h / HISTORY_ROW_H).floor().max(1.0)) as usize
+    }
+
+    /// The furthest the history list scrolls.
+    fn history_last_scroll(&self) -> usize {
+        self.history.len().saturating_sub(self.history_rows())
+    }
+
+    // ------------------------------------------------------------------
+    // Rendering
+    // ------------------------------------------------------------------
+
     /// Named `render_commands` and not `render`: this takes a width and a
     /// height, exactly as `oswindow::app::App::render` does, and at equal arity
     /// an inherent method silently wins method lookup over the trait's — so an
     /// app that keeps the name draws nothing and reports no error.
+    ///
+    /// For the tests: the window draws `frame`, whose boxes it keeps.
+    #[cfg(test)]
     pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+        self.frame(width, height).into_tree().commands
+    }
 
-        // Background
-        cmds.push(RenderCommand::FillRect {
+    /// Draw the window, recording every control where it is drawn: both the
+    /// picture and the hit test.
+    pub fn frame(&self, width: f32, height: f32) -> Frame<Target> {
+        let mut f = Frame::new(width, height);
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width,
@@ -1977,41 +2669,177 @@ impl QrApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        self.render_toolbar(&mut cmds, width);
-        self.render_status_bar(&mut cmds, width, height);
+        self.render_toolbar(&mut f, width);
+        self.render_status_bar(&mut f, width, height);
 
         let content_y = TOOLBAR_HEIGHT;
-        let content_h = height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT;
+        let content_h = (height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT).max(0.0);
 
-        // Left panel: input controls
-        self.render_input_panel(&mut cmds, content_y, content_h);
+        // Each panel is held to its own area: the preview of a large code ran
+        // over both of its neighbours.
+        f.clip(Rect::new(0.0, content_y, LEFT_PANEL_WIDTH, content_h));
+        self.render_input_panel(&mut f, content_y, content_h);
+        f.unclip();
 
-        // Center panel: preview
-        let center_x = LEFT_PANEL_WIDTH;
-        let center_w = width - LEFT_PANEL_WIDTH - RIGHT_PANEL_WIDTH;
-        self.render_preview_panel(&mut cmds, center_x, content_y, center_w, content_h);
+        let center_w = (width - LEFT_PANEL_WIDTH - RIGHT_PANEL_WIDTH).max(0.0);
+        f.clip(Rect::new(LEFT_PANEL_WIDTH, content_y, center_w, content_h));
+        self.render_preview_panel(&mut f, LEFT_PANEL_WIDTH, content_y, center_w, content_h);
+        f.unclip();
 
-        // Right panel: options
         let right_x = width - RIGHT_PANEL_WIDTH;
-        self.render_options_panel(&mut cmds, right_x, content_y, RIGHT_PANEL_WIDTH, content_h);
+        f.clip(Rect::new(right_x, content_y, RIGHT_PANEL_WIDTH, content_h));
+        self.render_options_panel(&mut f, right_x, content_y, RIGHT_PANEL_WIDTH, content_h);
+        f.unclip();
 
+        if let Some((_, dialog)) = &self.color_dialog {
+            f.extend(dialog.render(&self.palette, width, height));
+        }
         if self.show_help {
             guitk::shortcut::render_card(
-                &mut cmds,
+                &mut f,
                 &self.palette,
                 (width, height),
                 0.0,
                 SHORTCUTS,
                 "F1 closes this",
             );
+            f.hit(Target::HelpCard, Rect::new(0.0, 0.0, width, height));
         }
-
-        cmds
+        // Last, so it is above everything.
+        f.extend(self.picker.render(&self.palette, width, height));
+        f
     }
 
-    fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>, width: f32) {
+    /// A button, lit while the pointer is on it; one with nothing to do is
+    /// drawn dim and records no box.
+    fn button(
+        &self,
+        f: &mut Frame<Target>,
+        rect: Rect,
+        label: &str,
+        target: Target,
+        enabled: bool,
+    ) {
+        let lit = enabled && self.hover == Some(target);
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: if lit {
+                self.palette.surface2
+            } else {
+                self.palette.surface1
+            },
+            corner_radii: CornerRadii::all(CORNER_RADIUS),
+        });
+        f.push(RenderCommand::Text {
+            x: text::center_x(label, rect.x + rect.w / 2.0, 11.0, FontWeightHint::Regular)
+                .max(rect.x + 4.0),
+            y: rect.y + (rect.h - 11.0) / 2.0,
+            text: label.to_owned(),
+            color: if enabled {
+                self.palette.text
+            } else {
+                self.palette.overlay0
+            },
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((rect.w - 8.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if enabled {
+            f.hit(target, rect);
+        }
+    }
+
+    /// One of a set of choices, drawn chosen or not, lit under the pointer.
+    fn choice(
+        &self,
+        f: &mut Frame<Target>,
+        rect: Rect,
+        label: &str,
+        target: Target,
+        (chosen, ink): (bool, Color),
+    ) {
+        self.plate(f, rect, chosen, self.hover == Some(target));
+        f.push(RenderCommand::Text {
+            x: rect.x + 8.0,
+            y: rect.y + (rect.h - 10.0) / 2.0,
+            text: label.to_owned(),
+            color: if chosen { ink } else { self.palette.subtext0 },
+            font_size: 10.0,
+            font_weight: if chosen {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            },
+            max_width: Some((rect.w - 12.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        f.hit(target, rect);
+    }
+
+    /// The ground of a row or a choice: chosen, lit under the pointer, or
+    /// neither.
+    fn plate(&self, f: &mut Frame<Target>, rect: Rect, chosen: bool, lit: bool) {
+        if lit && !chosen {
+            f.push(RenderCommand::FillRect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.w,
+                height: rect.h,
+                color: self.palette.surface1,
+                corner_radii: CornerRadii::all(CORNER_RADIUS),
+            });
+            return;
+        }
         self.palette.push_surface(
-            cmds,
+            f,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            CORNER_RADIUS,
+            if chosen {
+                Surface::Selected
+            } else {
+                Surface::Card
+            },
+        );
+    }
+
+    /// A small heading.
+    fn heading(&self, f: &mut Frame<Target>, x: f32, y: f32, text: String, width: f32) {
+        f.push(RenderCommand::Text {
+            x,
+            y,
+            text,
+            color: self.palette.subtext0,
+            font_size: 10.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(width.max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    /// A line of quiet text.
+    fn note(&self, f: &mut Frame<Target>, x: f32, y: f32, text: String, width: f32) {
+        f.push(RenderCommand::Text {
+            x,
+            y,
+            text,
+            color: self.palette.subtext0,
+            font_size: 10.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(width.max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    fn render_toolbar(&self, f: &mut Frame<Target>, width: f32) {
+        self.palette.push_surface(
+            f,
             0.0,
             0.0,
             width,
@@ -2020,82 +2848,45 @@ impl QrApp {
             Surface::Strip(Edge::Bottom),
         );
 
-        // App title
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 12.0,
             y: 12.0,
             text: "QR Code Generator".to_owned(),
             color: self.palette.ink(self.palette.blue),
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
-            max_width: Some(200.0),
+            max_width: Some(180.0),
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Code type toggle
-        let types = [CodeType::QrCode, CodeType::Barcode128];
+        // What kind of code to make.
         let mut tx = 200.0;
-        for ct in &types {
-            let is_active = *ct == self.code_type;
+        for ct in [CodeType::QrCode, CodeType::Barcode128] {
             let btn_w = text::padded_width(ct.label(), 10.0, 11.0, FontWeightHint::Regular);
-            self.palette.push_surface(
-                cmds,
-                tx,
-                8.0,
-                btn_w,
-                24.0,
-                CORNER_RADIUS,
-                if is_active {
-                    Surface::Selected
-                } else {
-                    Surface::Card
-                },
+            self.choice(
+                f,
+                Rect::new(tx, 8.0, btn_w, 24.0),
+                ct.label(),
+                Target::CodeType(ct),
+                (ct == self.code_type, self.palette.ink(self.palette.blue)),
             );
-            cmds.push(RenderCommand::Text {
-                x: tx + 10.0,
-                y: 14.0,
-                text: ct.label().to_owned(),
-                color: if is_active {
-                    self.palette.ink(self.palette.blue)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: 11.0,
-                font_weight: if is_active {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(btn_w - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
             tx += btn_w + 4.0;
         }
 
-        // Generate button
-        let gen_btn_w = 100.0;
-        let gen_btn_x = width - gen_btn_w - 12.0;
-        cmds.push(RenderCommand::FillRect {
-            x: gen_btn_x,
-            y: 8.0,
-            width: gen_btn_w,
-            height: 24.0,
-            color: self.palette.green,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
-        cmds.push(RenderCommand::Text {
-            x: gen_btn_x + 16.0,
-            y: 14.0,
-            text: "Generate".to_owned(),
-            color: self.palette.crust,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(gen_btn_w - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // Saving, and the keys. There was a Generate button here that did
+        // nothing: typing already generates.
+        let has_code = self.current_qr.is_some() || self.current_barcode.is_some();
+        let save = Rect::new(width - 12.0 - 100.0, 8.0, 100.0, 24.0);
+        self.button(f, save, "Save SVG\u{2026}", Target::Save, has_code);
+        self.button(
+            f,
+            Rect::new(save.x - 8.0 - 84.0, 8.0, 84.0, 24.0),
+            "Keys (F1)",
+            Target::Help,
+            true,
+        );
 
-        // Divider line
-        cmds.push(RenderCommand::Line {
+        f.push(RenderCommand::Line {
             x1: 0.0,
             y1: TOOLBAR_HEIGHT,
             x2: width,
@@ -2105,10 +2896,10 @@ impl QrApp {
         });
     }
 
-    fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>, width: f32, height: f32) {
+    fn render_status_bar(&self, f: &mut Frame<Target>, width: f32, height: f32) {
         let bar_y = height - STATUS_BAR_HEIGHT;
         self.palette.push_surface(
-            cmds,
+            f,
             0.0,
             bar_y,
             width,
@@ -2117,52 +2908,128 @@ impl QrApp {
             Surface::Strip(Edge::Top),
         );
 
-        let status = if let Some(ref err) = self.error_message {
-            err.clone()
-        } else if let Some(ref qr) = self.current_qr {
-            format!(
-                "QR v{} | EC: {} | Mask: {} | Size: {}x{} | {} bytes",
-                qr.version,
-                qr.ec_level.short_label(),
-                qr.mask_pattern,
-                qr.size(),
-                qr.size(),
-                qr.data_len,
+        let (status, status_color) = if let Some(err) = &self.error_message {
+            (err.clone(), self.palette.ink(self.palette.red))
+        } else if let Some(notice) = &self.notice {
+            (notice.clone(), self.palette.subtext0)
+        } else if let Some(qr) = &self.current_qr {
+            (
+                format!(
+                    "QR v{} | EC: {} | Mask: {} | Size: {}x{} | {} bytes",
+                    qr.version,
+                    qr.ec_level.short_label(),
+                    qr.mask_pattern,
+                    qr.size(),
+                    qr.size(),
+                    qr.data_len,
+                ),
+                self.palette.subtext0,
             )
-        } else if let Some(ref bc) = self.current_barcode {
-            format!(
-                "Code128 | Width: {} modules | Data: {} chars",
-                bc.width(),
-                bc.data.len()
+        } else if let Some(bc) = &self.current_barcode {
+            (
+                format!(
+                    "Code128 | Width: {} modules | Data: {} chars",
+                    bc.width(),
+                    bc.data.len()
+                ),
+                self.palette.subtext0,
             )
         } else {
-            "Ready — enter data and click Generate".to_owned()
+            (
+                self.waiting_for.unwrap_or(NOTHING_TYPED).to_owned(),
+                self.palette.subtext0,
+            )
         };
-
-        let status_color = if self.error_message.is_some() {
-            self.palette.red
-        } else {
-            self.palette.subtext0
-        };
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 12.0,
             y: bar_y + 6.0,
             text: status,
             color: status_color,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(width - 24.0),
+            max_width: Some((width - 24.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
     }
 
-    fn render_input_panel(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
-        // Panel background
-        self.palette
-            .push_surface(cmds, 0.0, y, LEFT_PANEL_WIDTH, height, 0.0, Surface::Card);
+    /// Where the kind buttons go, wrapping onto a second row as they must;
+    /// and the height they take.
+    fn mode_rects(top: f32) -> (Vec<(InputMode, Rect)>, f32) {
+        let lx = 12.0;
+        let mut x = lx;
+        let mut y = top;
+        let mut rects = Vec::new();
+        for mode in InputMode::all() {
+            let w = text::padded_width(mode.label(), 8.0, 11.0, FontWeightHint::Regular);
+            if x + w > LEFT_PANEL_WIDTH - 12.0 {
+                x = lx;
+                y += 26.0;
+            }
+            rects.push((*mode, Rect::new(x, y, w, 22.0)));
+            x += w + 4.0;
+        }
+        (rects, y + 22.0 - top)
+    }
 
-        // Right border
-        cmds.push(RenderCommand::Line {
+    /// The left panel's layout: where each box goes, and the history pane.
+    fn input_layout(&self) -> (Vec<(Field, Rect)>, Rect) {
+        let top = TOOLBAR_HEIGHT;
+        let height = (self.window_height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT).max(0.0);
+        let (_, modes_h) = Self::mode_rects(top + 30.0);
+        let mut y = top + 30.0 + modes_h + 16.0;
+        let mut boxes = Vec::new();
+        for field in self.input_mode.fields() {
+            boxes.push((
+                *field,
+                Rect::new(12.0, y + 14.0, LEFT_PANEL_WIDTH - 24.0, 28.0),
+            ));
+            y += 50.0;
+        }
+        if self.input_mode == InputMode::Wifi {
+            y += 32.0;
+        }
+        // The history's heading, then its rows to the panel's foot.
+        let list_top = y + 12.0 + 24.0;
+        let pane = Rect::new(
+            12.0,
+            list_top,
+            LEFT_PANEL_WIDTH - 24.0,
+            (top + height - 8.0 - list_top).max(0.0),
+        );
+        (boxes, pane)
+    }
+
+    /// What a box is called: the one box the text-shaped kinds share is
+    /// named for what it holds.
+    fn field_caption(&self, field: Field) -> &'static str {
+        match (field, self.input_mode) {
+            (Field::Text, InputMode::Url) => "Web address",
+            (Field::Text, InputMode::Email) => "Email address",
+            (Field::Text, InputMode::Phone) => "Phone number",
+            (Field::Text, _) => "Text",
+            (Field::Ssid, _) => "Network name (SSID)",
+            (Field::Password, _) => "Password",
+            _ => field.label(),
+        }
+    }
+
+    /// What an empty box says it wants.
+    fn placeholder(&self, field: Field) -> &'static str {
+        match (field, self.input_mode) {
+            (Field::Text, InputMode::Url) => "example.com/page",
+            (Field::Text, InputMode::Email) => "name@example.com",
+            (Field::Text, InputMode::Phone) => "+1 555 0100",
+            (Field::Text, _) => "Type or paste what to encode",
+            (Field::Password, _) => "Empty for an open network",
+            (Field::Ssid, _) => "The network's name",
+            _ => "Optional",
+        }
+    }
+
+    fn render_input_panel(&self, f: &mut Frame<Target>, y: f32, height: f32) {
+        self.palette
+            .push_surface(f, 0.0, y, LEFT_PANEL_WIDTH, height, 0.0, Surface::Card);
+        f.push(RenderCommand::Line {
             x1: LEFT_PANEL_WIDTH,
             y1: y,
             x2: LEFT_PANEL_WIDTH,
@@ -2173,144 +3040,91 @@ impl QrApp {
 
         let lx = 12.0;
         let max_w = LEFT_PANEL_WIDTH - 24.0;
-        let mut cy = y + 12.0;
-
-        // Input mode selector
-        cmds.push(RenderCommand::Text {
-            x: lx,
-            y: cy,
-            text: "INPUT MODE".to_owned(),
-            color: self.palette.subtext0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(max_w),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 18.0;
-
-        let mut mx = lx;
-        for mode in InputMode::all() {
-            let is_active = *mode == self.input_mode;
-            let btn_w = text::padded_width(mode.label(), 8.0, 11.0, FontWeightHint::Regular);
-            if mx + btn_w > LEFT_PANEL_WIDTH - 12.0 {
-                mx = lx;
-                cy += 26.0;
-            }
-            self.palette.push_surface(
-                cmds,
-                mx,
-                cy,
-                btn_w,
-                22.0,
-                CORNER_RADIUS,
-                if is_active {
-                    Surface::Selected
-                } else {
-                    Surface::Card
-                },
+        self.heading(f, lx, y + 12.0, String::from("WHAT TO ENCODE"), max_w);
+        let (modes, _) = Self::mode_rects(y + 30.0);
+        for (mode, rect) in modes {
+            self.choice(
+                f,
+                rect,
+                mode.label(),
+                Target::Mode(mode),
+                (
+                    mode == self.input_mode,
+                    self.palette.ink(self.palette.lavender),
+                ),
             );
-            cmds.push(RenderCommand::Text {
-                x: mx + 8.0,
-                y: cy + 5.0,
-                text: mode.label().to_owned(),
-                color: if is_active {
-                    self.palette.ink(self.palette.lavender)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: 10.0,
-                font_weight: if is_active {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(btn_w - 12.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            mx += btn_w + 4.0;
         }
-        cy += 34.0;
 
-        // Input field
-        cmds.push(RenderCommand::Text {
-            x: lx,
-            y: cy,
-            text: "DATA".to_owned(),
-            color: self.palette.subtext0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(max_w),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 16.0;
+        let (boxes, pane) = self.input_layout();
+        let focused = self.focused_field();
+        for (field, rect) in &boxes {
+            self.render_box(f, *field, *rect, *field == focused);
+        }
 
-        let mut paint = self.palette.surface_paint(Surface::Card);
-        paint.border = Some(paint.border.unwrap_or(self.palette.surface2));
-        self.palette.push_paint_radii(
-            cmds,
+        if self.input_mode == InputMode::Wifi {
+            // What the WiFi code says about the network: `format_qr_data`
+            // writes `T:` from one and `H:true` from the other.
+            let row_y = boxes.last().map_or(y + 100.0, |(_, r)| r.bottom() + 12.0);
+            let half = (max_w - 6.0) / 2.0;
+            self.button(
+                f,
+                Rect::new(lx, row_y, half, 24.0),
+                &format!("Security: {}", self.wifi_config.encryption.label()),
+                Target::Encryption,
+                true,
+            );
+            self.button(
+                f,
+                Rect::new(lx + half + 6.0, row_y, half, 24.0),
+                if self.wifi_config.hidden {
+                    "Hidden network: yes"
+                } else {
+                    "Hidden network: no"
+                },
+                Target::Hidden,
+                true,
+            );
+        }
+
+        // The history, newest first.
+        let heading_y = pane.y - 24.0;
+        self.heading(
+            f,
             lx,
-            cy,
-            max_w,
-            60.0,
-            CornerRadii::all(CORNER_RADIUS),
-            paint,
+            heading_y + 4.0,
+            format!("HISTORY ({})", self.history.len()),
+            max_w - 80.0,
         );
-
-        let display_text = if self.input_text.is_empty() {
-            match self.input_mode {
-                InputMode::Text => "Enter text...",
-                InputMode::Url => "Enter URL...",
-                InputMode::Email => "Enter email address...",
-                InputMode::Phone => "Enter phone number...",
-                InputMode::Wifi => "Configure below...",
-                InputMode::VCard => "Configure below...",
-            }
-        } else {
-            &self.input_text
-        };
-        let text_color = if self.input_text.is_empty() {
-            self.palette.overlay0
-        } else {
-            self.palette.text
-        };
-        cmds.push(RenderCommand::Text {
-            x: lx + 8.0,
-            y: cy + 8.0,
-            text: display_text.to_owned(),
-            color: text_color,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(max_w - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 72.0;
-
-        // Mode-specific fields
-        self.render_mode_fields(cmds, lx, &mut cy, max_w);
-
-        // History section
-        cy += 12.0;
-        cmds.push(RenderCommand::Text {
-            x: lx,
-            y: cy,
-            text: format!("HISTORY ({})", self.history.len()),
-            color: self.palette.subtext0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(max_w),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 18.0;
-
-        for entry in self.history.iter().rev().take(8) {
-            if cy > y + height - 20.0 {
-                break;
-            }
-
-            self.palette
-                .push_surface(cmds, lx, cy, max_w, 24.0, CORNER_RADIUS, Surface::Card);
-
-            // Mode indicator
+        self.button(
+            f,
+            Rect::new(lx + max_w - 70.0, heading_y, 70.0, 20.0),
+            "Forget",
+            Target::ClearHistory,
+            !self.history.is_empty(),
+        );
+        f.hit(Target::HistoryList, pane);
+        if self.history.is_empty() {
+            self.note(
+                f,
+                lx,
+                pane.y + 4.0,
+                String::from("Each code made is kept here; a press brings one back."),
+                max_w,
+            );
+        }
+        let rows = self.history_rows();
+        for (shown, index) in (0..self.history.len())
+            .rev()
+            .skip(self.history_scroll)
+            .take(rows.saturating_add(1))
+            .enumerate()
+        {
+            let Some(entry) = self.history.get(index) else {
+                continue;
+            };
+            let row = Rect::new(lx, pane.y + shown as f32 * HISTORY_ROW_H, max_w, 24.0);
+            let target = Target::HistoryRow(index);
+            self.plate(f, row, false, self.hover == Some(target));
             let mode_color = match entry.mode {
                 InputMode::Text => self.palette.text,
                 InputMode::Url => self.palette.blue,
@@ -2319,234 +3133,229 @@ impl QrApp {
                 InputMode::Wifi => self.palette.teal,
                 InputMode::VCard => self.palette.lavender,
             };
-            cmds.push(RenderCommand::FillRect {
-                x: lx + 4.0,
-                y: cy + 8.0,
+            f.push(RenderCommand::FillRect {
+                x: row.x + 4.0,
+                y: row.y + 8.0,
                 width: 8.0,
                 height: 8.0,
                 color: mode_color,
                 corner_radii: CornerRadii::all(4.0),
             });
-
-            // Truncate data for display
-            let display = if entry.data.len() > 30 {
-                let truncated: String = entry.data.chars().take(27).collect();
-                format!("{truncated}...")
-            } else {
-                entry.data.clone()
-            };
-
-            cmds.push(RenderCommand::Text {
-                x: lx + 18.0,
-                y: cy + 6.0,
-                text: display,
+            // One line, however many the data has: a vCard is seven.
+            let one_line: String = entry
+                .data
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            f.push(RenderCommand::Text {
+                x: row.x + 18.0,
+                y: row.y + 6.0,
+                text: format!(
+                    "{}{}",
+                    if entry.code_type == CodeType::Barcode128 {
+                        "Code128: "
+                    } else {
+                        ""
+                    },
+                    one_line
+                ),
                 color: self.palette.subtext1,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(max_w - 26.0),
+                max_width: Some(row.w - 26.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            cy += 28.0;
+            f.hit(target, row);
         }
     }
 
-    /// Draw the boxes this mode has, marking the one being typed into.
-    ///
-    /// One function walking `InputMode::fields` rather than two hand-written
-    /// lists, so the boxes drawn are exactly the boxes Tab visits and typing
-    /// reaches. The pair it replaces wrote out "SSID"/"Password" and the five
-    /// vCard labels inline, which is the second copy that made them look
-    /// editable while nothing could edit them.
-    ///
-    /// `Field::Text` is skipped: the big box above already draws it.
-    fn render_mode_fields(&self, cmds: &mut Vec<RenderCommand>, lx: f32, cy: &mut f32, max_w: f32) {
-        let focused = self.focused_field();
-        for field in self.input_mode.fields() {
-            if *field == Field::Text {
-                continue;
-            }
-            let is_focused = *field == focused;
-            cmds.push(RenderCommand::Text {
-                x: lx,
-                y: *cy,
-                text: field.label().to_owned(),
-                color: if is_focused {
-                    self.palette.ink(self.palette.blue)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: 10.0,
-                font_weight: if is_focused {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(max_w),
-                overflow: TextOverflow::Ellipsis,
-            });
-            *cy += 14.0;
-
-            // The focused box is drawn on a different surface. Without it the
-            // cursor is invisible and Tab is a key with no effect on screen.
-            self.palette.push_surface(
-                cmds,
-                lx,
-                *cy,
-                max_w,
-                24.0,
-                CORNER_RADIUS,
-                if is_focused {
-                    Surface::Selected
-                } else {
-                    Surface::Card
-                },
-            );
-            let value = self.field_text(*field);
-            let disp = if value.is_empty() {
-                format!("Enter {}...", field.label())
+    /// A box to type into: its caption, and what it holds with the caret
+    /// when the keys are in it.
+    fn render_box(&self, f: &mut Frame<Target>, field: Field, rect: Rect, focused: bool) {
+        f.push(RenderCommand::Text {
+            x: rect.x,
+            y: rect.y - 14.0,
+            text: self.field_caption(field).to_owned(),
+            color: if focused {
+                self.palette.ink(self.palette.blue)
             } else {
-                value.to_owned()
-            };
-            let color = if value.is_empty() {
-                self.palette.overlay0
-            } else {
-                self.palette.text
-            };
-            cmds.push(RenderCommand::Text {
-                x: lx + 8.0,
-                y: *cy + 6.0,
-                text: disp,
-                color,
-                font_size: 11.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(max_w - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            *cy += 30.0;
-        }
-
-        if self.input_mode == InputMode::Wifi {
-            // The two settings that decide what the WiFi code actually says.
-            // `format_qr_data` writes `T:WPA` or `T:nopass` from the first and
-            // `H:true` from the second, and both were fixed at construction --
-            // so a code for an open network told the phone it was encrypted,
-            // and a hidden network's code left out the flag that makes a
-            // phone look for it.
-            cmds.push(RenderCommand::Text {
-                x: lx,
-                y: *cy,
-                text: format!(
-                    "Encryption: {} (Ctrl+S)    Hidden: {} (Ctrl+H)",
-                    self.wifi_config.encryption.label(),
-                    if self.wifi_config.hidden { "yes" } else { "no" },
-                ),
-                color: self.palette.subtext0,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(max_w),
-                overflow: TextOverflow::Ellipsis,
-            });
-            *cy += 18.0;
-        }
-    }
-    fn render_preview_panel(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    ) {
-        let lx = x + 12.0;
-        let max_w = width - 24.0;
-        let mut cy = y + 12.0;
-
-        cmds.push(RenderCommand::Text {
-            x: lx,
-            y: cy,
-            text: "PREVIEW".to_owned(),
-            color: self.palette.subtext0,
+                self.palette.subtext0
+            },
             font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(max_w),
+            font_weight: if focused {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            },
+            max_width: Some(rect.w),
             overflow: TextOverflow::Ellipsis,
         });
-        cy += 22.0;
-
-        if let Some(ref qr) = self.current_qr {
-            self.render_qr_preview(cmds, qr, lx, cy, max_w, height - 50.0);
-        } else if let Some(ref barcode) = self.current_barcode {
-            self.render_barcode_preview(cmds, barcode, lx, cy, max_w);
+        let mut paint = self.palette.surface_paint(Surface::Card);
+        paint.border = Some(if focused {
+            self.palette.blue
         } else {
-            // Placeholder
-            let placeholder_h = 200.0;
-            let placeholder_w = 200.0;
-            let px = lx + (max_w - placeholder_w) / 2.0;
-            let py = cy + 40.0;
-
-            self.palette.push_surface(
-                cmds,
-                px,
-                py,
-                placeholder_w,
-                placeholder_h,
-                8.0,
-                Surface::Card,
+            paint.border.unwrap_or(self.palette.surface2)
+        });
+        self.palette.push_paint_radii(
+            f,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            CornerRadii::all(CORNER_RADIUS),
+            paint,
+        );
+        let value = if focused && self.editor.text() == self.field_text(field) {
+            self.editor.text()
+        } else {
+            self.field_text(field)
+        };
+        if value.is_empty() && !focused {
+            f.push(RenderCommand::Text {
+                x: rect.x + 8.0,
+                y: rect.y + 8.0,
+                text: self.placeholder(field).to_owned(),
+                color: self.palette.subtext0,
+                font_size: 12.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((rect.w - 16.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        } else {
+            let editing = focused && self.editor.text() == value;
+            let mut tree = RenderTree::new();
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: value,
+                    cursor: if editing {
+                        self.editor.cursor()
+                    } else {
+                        TextCursor::from(value.len())
+                    },
+                    selection_anchor: if editing {
+                        self.editor.selection_anchor()
+                    } else {
+                        None
+                    },
+                    focused,
+                    x: rect.x + 8.0,
+                    y: rect.y + 5.0,
+                    width: (rect.w - 16.0).max(0.0),
+                    line_height: 18.0,
+                    font_size: 12.0,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.blue,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
             );
-            cmds.push(RenderCommand::StrokeRect {
+            f.extend(tree.commands);
+        }
+        // A press puts the keys in the box, and the caret under the pointer.
+        f.hit(Target::Field(field), rect);
+    }
+
+    fn render_preview_panel(&self, f: &mut Frame<Target>, x: f32, y: f32, width: f32, height: f32) {
+        let lx = x + 12.0;
+        let max_w = (width - 24.0).max(0.0);
+        let cy = y + 12.0;
+        self.heading(f, lx, cy, String::from("PREVIEW"), max_w);
+
+        // Room for the code, under the heading and above its info line and
+        // the colour warning.
+        let room_h = (height - 22.0 - 12.0 - 60.0).max(0.0);
+        let bottom = if let Some(qr) = &self.current_qr {
+            self.render_qr_preview(f, qr, lx, cy + 22.0, max_w, room_h)
+        } else if let Some(barcode) = &self.current_barcode {
+            self.render_barcode_preview(f, barcode, lx, cy + 22.0, max_w)
+        } else {
+            let (w, h) = (max_w.min(260.0), 160.0_f32.min(room_h.max(60.0)));
+            let px = lx + (max_w - w) / 2.0;
+            let py = cy + 40.0;
+            self.palette
+                .push_surface(f, px, py, w, h, 8.0, Surface::Card);
+            f.push(RenderCommand::StrokeRect {
                 x: px,
                 y: py,
-                width: placeholder_w,
-                height: placeholder_h,
+                width: w,
+                height: h,
                 color: self.palette.surface2,
                 line_width: 2.0,
                 corner_radii: CornerRadii::all(8.0),
             });
-
-            cmds.push(RenderCommand::Text {
-                x: px + 30.0,
-                y: py + 85.0,
-                text: "No code generated".to_owned(),
+            f.push(RenderCommand::Text {
+                x: px + 16.0,
+                y: py + h / 2.0 - 16.0,
+                text: "No code yet".to_owned(),
                 color: self.palette.subtext0,
                 font_size: 13.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(placeholder_w - 20.0),
+                font_weight: FontWeightHint::Bold,
+                max_width: Some((w - 32.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::Text {
-                x: px + 20.0,
-                y: py + 105.0,
-                text: "Enter data and click Generate".to_owned(),
-                color: self.palette.subtext0,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(placeholder_w - 20.0),
+            let why = self
+                .error_message
+                .clone()
+                .unwrap_or_else(|| self.waiting_for.unwrap_or(NOTHING_TYPED).to_owned());
+            let lines = text::wrap(&why, (w - 32.0).max(1.0), 10.0, FontWeightHint::Regular);
+            for (i, line) in lines.iter().take(4).enumerate() {
+                f.push(RenderCommand::Text {
+                    x: px + 16.0,
+                    y: py + h / 2.0 + 4.0 + i as f32 * 14.0,
+                    text: line.clone(),
+                    color: self.palette.subtext0,
+                    font_size: 10.0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some((w - 32.0).max(0.0)),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+            py + h
+        };
+
+        if (self.current_qr.is_some() || self.current_barcode.is_some()) && !self.colors_scannable()
+        {
+            f.push(RenderCommand::Text {
+                x: lx,
+                y: bottom + 28.0,
+                text: String::from(
+                    "Scanners may not read this: the squares need to be much darker than the ground.",
+                ),
+                color: self.palette.ink(self.palette.yellow),
+                font_size: 11.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(max_w),
                 overflow: TextOverflow::Ellipsis,
             });
         }
     }
 
+    /// The QR code at its module size, or smaller when that would not fit;
+    /// answers where it ends.
     fn render_qr_preview(
         &self,
-        cmds: &mut Vec<RenderCommand>,
+        f: &mut Frame<Target>,
         qr: &QrCode,
         panel_x: f32,
         panel_y: f32,
         panel_w: f32,
-        _panel_h: f32,
-    ) {
-        let module_px = self.module_size.pixels();
+        panel_h: f32,
+    ) -> f32 {
         let qr_size = qr.size();
         let quiet_zone = 4; // 4-module quiet zone
         let total_modules = qr_size + quiet_zone * 2;
+        let fit = (panel_w.min(panel_h - 20.0) / total_modules as f32)
+            .floor()
+            .max(1.0);
+        let module_px = self.module_size.pixels().min(fit);
         let total_px = total_modules as f32 * module_px;
 
-        // Center the QR code in the panel
-        let qr_x = panel_x + (panel_w - total_px) / 2.0;
+        let qr_x = panel_x + ((panel_w - total_px) / 2.0).max(0.0);
         let qr_y = panel_y + 20.0;
 
-        // Background (quiet zone + code)
-        cmds.push(RenderCommand::FillRect {
+        f.push(RenderCommand::FillRect {
             x: qr_x,
             y: qr_y,
             width: total_px,
@@ -2554,16 +3363,12 @@ impl QrApp {
             color: self.bg_color,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
-
-        // Draw modules
         for row in 0..qr_size {
             for col in 0..qr_size {
                 if qr.is_dark(row, col) {
-                    let mx = qr_x + (col + quiet_zone) as f32 * module_px;
-                    let my = qr_y + (row + quiet_zone) as f32 * module_px;
-                    cmds.push(RenderCommand::FillRect {
-                        x: mx,
-                        y: my,
+                    f.push(RenderCommand::FillRect {
+                        x: qr_x + (col + quiet_zone) as f32 * module_px,
+                        y: qr_y + (row + quiet_zone) as f32 * module_px,
                         width: module_px,
                         height: module_px,
                         color: self.fg_color,
@@ -2573,17 +3378,21 @@ impl QrApp {
             }
         }
 
-        // Info below QR
         let info_y = qr_y + total_px + 12.0;
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: panel_x,
             y: info_y,
             text: format!(
-                "Version {} | {} | {}x{} modules",
+                "Version {} | {} | {}x{} modules{}",
                 qr.version,
                 qr.ec_level.label(),
                 qr_size,
                 qr_size,
+                if module_px < self.module_size.pixels() {
+                    " | shown smaller to fit"
+                } else {
+                    ""
+                },
             ),
             color: self.palette.subtext0,
             font_size: 10.0,
@@ -2591,25 +3400,28 @@ impl QrApp {
             max_width: Some(panel_w),
             overflow: TextOverflow::Ellipsis,
         });
+        info_y
     }
 
+    /// The barcode, as wide as fits; answers where it ends.
     fn render_barcode_preview(
         &self,
-        cmds: &mut Vec<RenderCommand>,
+        f: &mut Frame<Target>,
         barcode: &Code128Barcode,
         panel_x: f32,
         panel_y: f32,
         panel_w: f32,
-    ) {
-        let bar_width = 2.0_f32;
+    ) -> f32 {
+        let bar_width = (panel_w / barcode.width().max(1) as f32)
+            .floor()
+            .clamp(1.0, 2.0);
         let bar_height = 80.0_f32;
         let total_w = barcode.width() as f32 * bar_width;
 
-        let bc_x = panel_x + (panel_w - total_w) / 2.0;
+        let bc_x = panel_x + ((panel_w - total_w) / 2.0).max(0.0);
         let bc_y = panel_y + 40.0;
 
-        // Background
-        cmds.push(RenderCommand::FillRect {
+        f.push(RenderCommand::FillRect {
             x: bc_x - 10.0,
             y: bc_y - 10.0,
             width: total_w + 20.0,
@@ -2617,11 +3429,9 @@ impl QrApp {
             color: self.bg_color,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
-
-        // Draw bars
         for (i, &is_bar) in barcode.bars.iter().enumerate() {
             if is_bar {
-                cmds.push(RenderCommand::FillRect {
+                f.push(RenderCommand::FillRect {
                     x: bc_x + i as f32 * bar_width,
                     y: bc_y,
                     width: bar_width,
@@ -2631,47 +3441,45 @@ impl QrApp {
                 });
             }
         }
-
-        // Data text below barcode
-        cmds.push(RenderCommand::Text {
+        // In the code's own ink: it was always black, and so invisible on a
+        // dark ground.
+        f.push(RenderCommand::Text {
             x: bc_x,
             y: bc_y + bar_height + 8.0,
             text: barcode.data.clone(),
-            color: Color::BLACK,
+            color: self.fg_color,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(total_w),
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Info
         let info_y = bc_y + bar_height + 40.0;
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: panel_x,
             y: info_y,
-            text: format!("Code128 | {} modules wide", barcode.width()),
+            text: format!(
+                "Code128 | {} modules wide{}",
+                barcode.width(),
+                if total_w > panel_w {
+                    " | wider than this window"
+                } else {
+                    ""
+                }
+            ),
             color: self.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_w),
             overflow: TextOverflow::Ellipsis,
         });
+        info_y
     }
 
-    fn render_options_panel(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    ) {
-        // Panel background
+    fn render_options_panel(&self, f: &mut Frame<Target>, x: f32, y: f32, width: f32, height: f32) {
         self.palette
-            .push_surface(cmds, x, y, width, height, 0.0, Surface::Card);
-
-        // Left border
-        cmds.push(RenderCommand::Line {
+            .push_surface(f, x, y, width, height, 0.0, Surface::Card);
+        f.push(RenderCommand::Line {
             x1: x,
             y1: y,
             x2: x,
@@ -2684,251 +3492,120 @@ impl QrApp {
         let max_w = width - 24.0;
         let mut cy = y + 12.0;
 
-        // Error correction
-        cmds.push(RenderCommand::Text {
-            x: lx,
-            y: cy,
-            text: "ERROR CORRECTION".to_owned(),
-            color: self.palette.subtext0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(max_w),
-            overflow: TextOverflow::Ellipsis,
-        });
+        self.heading(f, lx, cy, String::from("ERROR CORRECTION"), max_w);
         cy += 18.0;
-
         for ec in EcLevel::all() {
-            let is_active = *ec == self.ec_level;
-            self.palette.push_surface(
-                cmds,
-                lx,
-                cy,
-                max_w,
-                22.0,
-                CORNER_RADIUS,
-                if is_active {
-                    Surface::Selected
-                } else {
-                    Surface::Card
-                },
+            self.choice(
+                f,
+                Rect::new(lx, cy, max_w, 22.0),
+                ec.label(),
+                Target::Ec(*ec),
+                (*ec == self.ec_level, self.palette.ink(self.palette.green)),
             );
-            cmds.push(RenderCommand::Text {
-                x: lx + 8.0,
-                y: cy + 5.0,
-                text: ec.label().to_owned(),
-                color: if is_active {
-                    self.palette.ink(self.palette.green)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: 10.0,
-                font_weight: if is_active {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(max_w - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
             cy += 26.0;
         }
 
-        // Module size
         cy += 8.0;
-        cmds.push(RenderCommand::Text {
-            x: lx,
-            y: cy,
-            text: "MODULE SIZE".to_owned(),
-            color: self.palette.subtext0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(max_w),
-            overflow: TextOverflow::Ellipsis,
-        });
+        self.heading(f, lx, cy, String::from("MODULE SIZE"), max_w);
         cy += 18.0;
-
         for ms in ModuleSize::all() {
-            let is_active = *ms == self.module_size;
-            self.palette.push_surface(
-                cmds,
-                lx,
-                cy,
-                max_w,
-                22.0,
-                CORNER_RADIUS,
-                if is_active {
-                    Surface::Selected
-                } else {
-                    Surface::Card
-                },
+            self.choice(
+                f,
+                Rect::new(lx, cy, max_w, 22.0),
+                ms.label(),
+                Target::Size(*ms),
+                (
+                    *ms == self.module_size,
+                    self.palette.ink(self.palette.yellow),
+                ),
             );
-            cmds.push(RenderCommand::Text {
-                x: lx + 8.0,
-                y: cy + 5.0,
-                text: ms.label().to_owned(),
-                color: if is_active {
-                    self.palette.ink(self.palette.yellow)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: 10.0,
-                font_weight: if is_active {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(max_w - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
             cy += 26.0;
         }
 
-        // Colors
+        // The colours: a press opens the colour dialog. They were drawn as
+        // swatches that nothing could change.
         cy += 8.0;
-        cmds.push(RenderCommand::Text {
-            x: lx,
-            y: cy,
-            text: "COLORS".to_owned(),
-            color: self.palette.subtext0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(max_w),
-            overflow: TextOverflow::Ellipsis,
-        });
+        self.heading(f, lx, cy, String::from("COLOURS"), max_w);
         cy += 18.0;
+        for (label, color, target) in [
+            ("Squares", self.fg_color, Target::Foreground),
+            ("Ground", self.bg_color, Target::Background),
+        ] {
+            let row = Rect::new(lx, cy, max_w, 22.0);
+            self.plate(f, row, false, self.hover == Some(target));
+            f.push(RenderCommand::Text {
+                x: row.x + 8.0,
+                y: row.y + 6.0,
+                text: label.to_owned(),
+                color: self.palette.subtext0,
+                font_size: 10.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(max_w - 40.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            f.push(RenderCommand::FillRect {
+                x: row.right() - 28.0,
+                y: row.y + 4.0,
+                width: 20.0,
+                height: 14.0,
+                color,
+                corner_radii: CornerRadii::all(2.0),
+            });
+            f.push(RenderCommand::StrokeRect {
+                x: row.right() - 28.0,
+                y: row.y + 4.0,
+                width: 20.0,
+                height: 14.0,
+                color: self.palette.surface2,
+                line_width: 1.0,
+                corner_radii: CornerRadii::all(2.0),
+            });
+            f.hit(target, row);
+            cy += 26.0;
+        }
+        self.button(
+            f,
+            Rect::new(lx, cy, max_w, 22.0),
+            "Black on white",
+            Target::ResetColors,
+            (self.fg_color, self.bg_color) != (Color::BLACK, Color::WHITE),
+        );
+        cy += 34.0;
 
-        // Foreground color swatch
-        cmds.push(RenderCommand::Text {
-            x: lx,
-            y: cy,
-            text: "Foreground".to_owned(),
-            color: self.palette.subtext0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(max_w - 30.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cmds.push(RenderCommand::FillRect {
-            x: lx + max_w - 24.0,
-            y: cy - 1.0,
-            width: 20.0,
-            height: 14.0,
-            color: self.fg_color,
-            corner_radii: CornerRadii::all(2.0),
-        });
-        cmds.push(RenderCommand::StrokeRect {
-            x: lx + max_w - 24.0,
-            y: cy - 1.0,
-            width: 20.0,
-            height: 14.0,
-            color: self.palette.surface2,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(2.0),
-        });
-        cy += 20.0;
-
-        // Background color swatch
-        cmds.push(RenderCommand::Text {
-            x: lx,
-            y: cy,
-            text: "Background".to_owned(),
-            color: self.palette.subtext0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(max_w - 30.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cmds.push(RenderCommand::FillRect {
-            x: lx + max_w - 24.0,
-            y: cy - 1.0,
-            width: 20.0,
-            height: 14.0,
-            color: self.bg_color,
-            corner_radii: CornerRadii::all(2.0),
-        });
-        cmds.push(RenderCommand::StrokeRect {
-            x: lx + max_w - 24.0,
-            y: cy - 1.0,
-            width: 20.0,
-            height: 14.0,
-            color: self.palette.surface2,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(2.0),
-        });
-        cy += 24.0;
-
-        // QR info section
-        cy += 8.0;
-        cmds.push(RenderCommand::Text {
-            x: lx,
-            y: cy,
-            text: "INFO".to_owned(),
-            color: self.palette.subtext0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(max_w),
-            overflow: TextOverflow::Ellipsis,
-        });
+        self.heading(f, lx, cy, String::from("INFO"), max_w);
         cy += 18.0;
-
-        if let Some(ref qr) = self.current_qr {
-            let info_lines = [
+        let info_lines: Vec<String> = if let Some(qr) = &self.current_qr {
+            vec![
                 format!("Version: {}", qr.version),
                 format!("Size: {}x{}", qr.size(), qr.size()),
                 format!("EC Level: {}", qr.ec_level.label()),
                 format!("Mask: {}", qr.mask_pattern),
                 format!("Data: {} bytes", qr.data_len),
-            ];
-            for line in &info_lines {
-                cmds.push(RenderCommand::Text {
-                    x: lx,
-                    y: cy,
-                    text: line.clone(),
-                    color: self.palette.text,
-                    font_size: 10.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(max_w),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cy += 16.0;
-            }
-        } else if let Some(ref bc) = self.current_barcode {
-            let info_lines = [
+            ]
+        } else if let Some(bc) = &self.current_barcode {
+            vec![
                 "Type: Code128".to_string(),
                 format!("Width: {} modules", bc.width()),
                 format!("Data: {} chars", bc.data.len()),
-            ];
-            for line in &info_lines {
-                cmds.push(RenderCommand::Text {
-                    x: lx,
-                    y: cy,
-                    text: line.clone(),
-                    color: self.palette.text,
-                    font_size: 10.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(max_w),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cy += 16.0;
-            }
+            ]
         } else {
-            cmds.push(RenderCommand::Text {
+            vec![String::from("No code yet")]
+        };
+        for line in info_lines {
+            f.push(RenderCommand::Text {
                 x: lx,
                 y: cy,
-                text: "No code generated yet".to_owned(),
-                color: self.palette.subtext0,
+                text: line,
+                color: self.palette.text,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
                 overflow: TextOverflow::Ellipsis,
             });
+            cy += 16.0;
         }
     }
 }
-
-// ============================================================================
-// Main
-// ============================================================================
 
 impl App for QrApp {
     fn theme_changed(&mut self, palette: &Palette) {
@@ -2977,18 +3654,118 @@ impl App for QrApp {
         // for, and the first frame is drawn before any `Resize` arrives.
         self.window_width = width;
         self.window_height = height;
-        RenderTree {
-            commands: self.render_commands(width, height),
+        let frame = self.frame(width, height);
+        self.last_hits = frame.hits().to_vec();
+        frame.into_tree()
+    }
+}
+
+/// What the preview and the status bar say before anything is typed.
+const NOTHING_TYPED: &str = "Nothing to encode yet: type or paste into the box on the left";
+
+/// A colour as SVG paint: `fill="#rrggbb"`, and its opacity when it has one.
+fn svg_paint(c: Color) -> String {
+    let rgb = format!("fill=\"#{:02x}{:02x}{:02x}\"", c.r, c.g, c.b);
+    if c.a == 255 {
+        rgb
+    } else {
+        format!("{rgb} fill-opacity=\"{:.3}\"", f32::from(c.a) / 255.0)
+    }
+}
+
+/// Text made safe to put in XML.
+fn xml_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(ch),
         }
+    }
+    out
+}
+
+/// A colour's relative luminance, as WCAG defines it.
+fn luminance(c: Color) -> f32 {
+    let channel = |v: u8| {
+        let v = f32::from(v) / 255.0;
+        if v <= 0.040_45 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+}
+
+/// What one keystroke did to a one-line box.
+struct LineEdit {
+    copied: Option<String>,
+}
+
+/// Apply a keystroke to a one-line box, as `apps/flashcards` and
+/// `apps/finance` do (see `requests/e-c-a-text-field-that-takes-its-own-keys.md`).
+fn edit_line(input: &mut TextInput, key: &KeyEvent, capacity: usize, clipboard: &str) -> LineEdit {
+    let shift = key.modifiers.shift;
+    let ctrl = key.modifiers.ctrl;
+    let mut copied = None;
+    match key.key {
+        Key::Left => input.move_cursor_left(shift, 12.0, FontWeightHint::Regular),
+        Key::Right => input.move_cursor_right(shift, 12.0, FontWeightHint::Regular),
+        Key::Home => input.move_home(shift),
+        Key::End => input.move_end(shift),
+        Key::Backspace => input.backspace(),
+        Key::Delete => input.delete(),
+        Key::A if ctrl => input.select_all(),
+        Key::C if ctrl => {
+            if input.has_selection() {
+                copied = Some(input.selected_text().to_string());
+            }
+        }
+        Key::X if ctrl => {
+            if input.has_selection() {
+                copied = Some(input.selected_text().to_string());
+                input.delete_selection();
+            }
+        }
+        Key::V if ctrl => insert_limited(input, clipboard, capacity),
+        _ => {
+            if !ctrl {
+                insert_limited(input, &key.text, capacity);
+            }
+        }
+    }
+    LineEdit { copied }
+}
+
+/// Type `typed` into `input` over its selection, up to `capacity`
+/// characters, leaving control characters out.
+fn insert_limited(input: &mut TextInput, typed: &str, capacity: usize) {
+    if typed.chars().all(char::is_control) {
+        return;
+    }
+    if input.has_selection() {
+        input.delete_selection();
+    }
+    for ch in typed.chars() {
+        if ch.is_control() {
+            continue;
+        }
+        if input.text().chars().count() >= capacity {
+            break;
+        }
+        input.insert_char(ch);
     }
 }
 
 fn main() -> ExitCode {
-    let mut app = QrApp::new();
-    // So the first frame shows a code rather than an empty square.
-    app.set_input("Hello, Slate OS!");
-    app.generate();
-    app::launch("qrcode", &mut app)
+    // Empty, and saying why: it opened on a code for "Hello, Slate OS!",
+    // with that in its history, which the user had not made.
+    app::launch("qrcode", &mut QrApp::new())
 }
 
 // ============================================================================
@@ -3731,11 +4508,14 @@ mod tests {
         assert_eq!(app.history.len(), 1);
     }
 
+    /// Nothing typed is not an error, and it is not a code either.
     #[test]
     fn test_app_generate_empty() {
         let mut app = QrApp::new();
         app.generate();
-        assert!(app.error_message.is_some());
+        assert!(app.error_message.is_none(), "an empty box is not an error");
+        assert_eq!(app.waiting_for, Some(NOTHING_TYPED));
+        assert!(app.current_qr.is_none() && app.current_barcode.is_none());
     }
 
     #[test]
@@ -3955,7 +4735,7 @@ mod tests {
         // With history, so `Ctrl+K` has something to forget.
         let mut with_history = typed();
         with_history.generate();
-        // In WiFi mode, so `Ctrl+S`, `Ctrl+H` and `Tab` have a reason to act.
+        // In WiFi mode, so `Ctrl+T`, `Ctrl+H` and `Tab` have a reason to act.
         let mut wifi = QrApp::new();
         wifi.set_input_mode(InputMode::Wifi);
         wifi.wifi_config.ssid = String::from("net");
@@ -3968,7 +4748,25 @@ mod tests {
         // guard caught.
         let mut barcode = typed();
         barcode.set_code_type(CodeType::Barcode128);
-        vec![typed(), with_history, wifi, helping, barcode]
+        // The caret in the middle of the box, so every movement moves it and
+        // Delete has a character in front of it.
+        let mut middle = typed();
+        middle.handle_key(&press_key(Key::Left));
+        middle.handle_key(&press_key(Key::Left));
+        // Everything selected and something on the clipboard, for Ctrl+C,
+        // Ctrl+X and Ctrl+V.
+        let mut selected = typed();
+        selected.handle_key(&ctrl_key(Key::A));
+        selected.clipboard = String::from("pasted");
+        vec![
+            typed(),
+            with_history,
+            wifi,
+            helping,
+            barcode,
+            middle,
+            selected,
+        ]
     }
 
     /// Every key the list advertises does something somewhere.
@@ -4191,10 +4989,10 @@ mod tests {
             |a: &QrApp| format_qr_data(a.input_mode, &a.input_text, &a.wifi_config, &a.vcard_info);
 
         assert!(encoded(&app).contains("T:WPA"), "control: WPA by default");
-        app.handle_key(&ctrl_key(Key::S));
+        app.handle_key(&ctrl_key(Key::T));
         assert!(
             !encoded(&app).contains("T:WPA"),
-            "Ctrl+S did not change what the code says about encryption"
+            "Ctrl+T did not change what the code says about encryption"
         );
 
         assert!(
@@ -4214,9 +5012,9 @@ mod tests {
         let mut app = QrApp::new();
         assert_eq!(app.input_mode, InputMode::Text);
         assert_eq!(
-            app.handle_key(&ctrl_key(Key::S)),
+            app.handle_key(&ctrl_key(Key::T)),
             EventResult::Ignored,
-            "Ctrl+S acted on a setting this mode does not show"
+            "Ctrl+T acted on a setting this mode does not show"
         );
         assert_eq!(
             app.handle_key(&ctrl_key(Key::H)),
@@ -4261,5 +5059,933 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: c.to_string(),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // The pointer, the boxes, the history, saving and the colours
+    // ------------------------------------------------------------------
+
+    use guitk::probe::{self, Probe};
+
+    impl Probe for QrApp {
+        type Target = Target;
+        type Outcome = EventResult;
+        const SIZE: (f32, f32) = (1100.0, 700.0);
+
+        /// Drawn at the app's own size, which these tests leave at `SIZE`.
+        fn draw(&self, _size: (f32, f32)) -> Frame<Target> {
+            self.frame(self.window_width, self.window_height)
+        }
+
+        fn click_at(
+            &mut self,
+            x: f32,
+            y: f32,
+            button: MouseButton,
+            _size: (f32, f32),
+        ) -> EventResult {
+            self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> EventResult {
+            self.handle_event(&Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, _size: (f32, f32)) -> Option<EventResult> {
+            Some(self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })))
+        }
+    }
+
+    fn texts(app: &QrApp) -> Vec<String> {
+        app.frame(app.window_width, app.window_height)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn press_at(app: &mut QrApp, x: f32, y: f32) -> EventResult {
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }))
+    }
+
+    /// **Typing "Hello" added five entries**, "H" to "Hello": every
+    /// keystroke re-encodes, and every encoding was remembered.
+    #[test]
+    fn typing_one_thing_leaves_one_history_entry() {
+        let mut app = QrApp::new();
+        probe::type_str(&mut app, "Hello");
+        assert_eq!(
+            app.history.len(),
+            1,
+            "{:?}",
+            app.history.iter().map(|e| &e.data).collect::<Vec<_>>()
+        );
+        assert_eq!(app.history[0].data, "Hello");
+        // Changing the error correction is the same code, made differently.
+        app.handle_key(&ctrl_key(Key::E));
+        assert_eq!(app.history.len(), 1);
+        assert_eq!(app.history[0].ec_level, app.ec_level);
+    }
+
+    #[test]
+    fn a_new_code_starts_a_new_entry() {
+        let mut app = QrApp::new();
+        probe::type_str(&mut app, "first");
+        // Emptied, then typed again: a second code.
+        app.handle_key(&press_key(Key::Escape));
+        probe::type_str(&mut app, "second");
+        assert_eq!(app.history.len(), 2);
+        // Another kind, with the box emptied first: nothing to encode yet.
+        app.handle_key(&press_key(Key::Escape));
+        probe::click(&mut app, Target::Mode(InputMode::Url));
+        assert_eq!(
+            app.history.len(),
+            2,
+            "switching kinds with the box empty made a code"
+        );
+        probe::type_str(&mut app, "example.com");
+        assert_eq!(app.history.len(), 3);
+        assert_eq!(app.history[2].data, "https://example.com");
+    }
+
+    /// The same words as a web address are a different code, so a
+    /// different entry.
+    #[test]
+    fn another_kind_of_the_same_words_is_a_new_entry() {
+        let mut app = QrApp::new();
+        probe::type_str(&mut app, "example.com");
+        probe::click(&mut app, Target::Mode(InputMode::Url));
+        let data: Vec<&str> = app.history.iter().map(|e| e.data.as_str()).collect();
+        assert_eq!(data, ["example.com", "https://example.com"]);
+    }
+
+    /// A box changed from outside -- a restore, a caller -- is typed onto
+    /// as it now stands, not as the editor last saw it.
+    #[test]
+    fn a_box_changed_from_outside_is_typed_onto() {
+        let mut app = QrApp::new();
+        probe::type_str(&mut app, "x");
+        app.input_text = String::from("abc");
+        probe::type_str(&mut app, "d");
+        assert_eq!(app.input_text, "abcd");
+    }
+
+    /// The label under a barcode is in the code's own ink: it was black
+    /// whatever the ground, so it vanished on a dark one.
+    #[test]
+    fn the_barcode_label_is_in_the_codes_ink() {
+        let mut app = QrApp::new();
+        app.fg_color = Color::rgba(0x10, 0x20, 0x60, 255);
+        app.handle_key(&ctrl_key(Key::B));
+        probe::type_str(&mut app, "LABEL");
+        let ink = app
+            .frame(app.window_width, app.window_height)
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, color, .. } if text == "LABEL" => Some(*color),
+                _ => None,
+            })
+            .expect("the label is not drawn");
+        assert_eq!(ink, app.fg_color);
+    }
+
+    #[test]
+    fn the_same_code_twice_is_one_entry() {
+        let mut app = QrApp::new();
+        probe::type_str(&mut app, "again");
+        app.handle_key(&press_key(Key::Escape));
+        probe::type_str(&mut app, "other");
+        app.handle_key(&press_key(Key::Escape));
+        probe::type_str(&mut app, "again");
+        let data: Vec<&str> = app.history.iter().map(|e| e.data.as_str()).collect();
+        assert_eq!(data, ["other", "again"]);
+    }
+
+    #[test]
+    fn a_history_row_brings_its_code_back() {
+        let mut app = QrApp::new();
+        probe::click(&mut app, Target::Mode(InputMode::Wifi));
+        probe::type_str(&mut app, "Home");
+        probe::key(&mut app, &press_key(Key::Tab));
+        probe::type_str(&mut app, "secret");
+        probe::click(&mut app, Target::Hidden);
+        let wifi_entry = app.history.len() - 1;
+        probe::click(&mut app, Target::Mode(InputMode::Text));
+        probe::type_str(&mut app, "something else");
+        assert_eq!(app.input_mode, InputMode::Text);
+        probe::click(&mut app, Target::HistoryRow(wifi_entry));
+        assert_eq!(app.input_mode, InputMode::Wifi);
+        assert_eq!(app.wifi_config.ssid, "Home");
+        assert_eq!(app.wifi_config.password, "secret");
+        assert!(app.wifi_config.hidden);
+        assert!(app.current_qr.is_some());
+        assert_eq!(
+            app.history.last().map(|e| e.mode),
+            Some(InputMode::Wifi),
+            "the brought-back code is not the newest"
+        );
+        // And the box has it, caret at the end, so typing adds to it.
+        probe::type_str(&mut app, "2");
+        assert_eq!(app.wifi_config.ssid, "Home2");
+    }
+
+    /// Emptying the box left the last code on screen: a code for text that
+    /// was no longer there.
+    #[test]
+    fn emptying_the_box_takes_the_code_away() {
+        let mut app = QrApp::new();
+        probe::type_str(&mut app, "abc");
+        assert!(app.current_qr.is_some());
+        for _ in 0..3 {
+            app.handle_key(&press_key(Key::Backspace));
+        }
+        assert!(app.current_qr.is_none(), "the code outlived its text");
+        assert!(texts(&app).iter().any(|t| t == "No code yet"));
+    }
+
+    /// An empty web-address box encoded `https://`.
+    #[test]
+    fn an_empty_box_is_no_code_in_any_kind() {
+        for mode in [
+            InputMode::Url,
+            InputMode::Email,
+            InputMode::Phone,
+            InputMode::VCard,
+        ] {
+            let mut app = QrApp::new();
+            probe::click(&mut app, Target::Mode(mode));
+            assert!(app.current_qr.is_none(), "{mode:?} made a code of nothing");
+            assert!(app.waiting_for.is_some());
+        }
+        let mut app = QrApp::new();
+        probe::click(&mut app, Target::Mode(InputMode::Wifi));
+        app.handle_key(&press_key(Key::Tab));
+        probe::type_str(&mut app, "password only");
+        assert!(
+            app.current_qr.is_none(),
+            "a WiFi code with no network was made"
+        );
+        assert_eq!(
+            app.waiting_for,
+            Some("A WiFi code needs the network's name (SSID)")
+        );
+    }
+
+    /// Code B has no value for a character outside printable ASCII; it was
+    /// skipped, so the barcode scanned as something other than its label.
+    #[test]
+    fn a_barcode_refuses_what_it_cannot_hold() {
+        assert!(
+            Code128Barcode::encode("Caf\u{e9}").is_none(),
+            "a character was dropped"
+        );
+        let mut app = QrApp::new();
+        app.handle_key(&ctrl_key(Key::B));
+        probe::type_str(&mut app, "Caf\u{e9}");
+        assert!(app.current_barcode.is_none());
+        let why = app.error_message.clone().expect("no reason given");
+        assert!(why.contains('\u{e9}'), "{why}");
+        assert!(texts(&app).contains(&why), "the reason is not on screen");
+    }
+
+    #[test]
+    fn too_long_says_how_much_fits() {
+        let mut app = QrApp::new();
+        let long = "x".repeat(400);
+        app.set_input(&long);
+        app.generate();
+        let why = app.error_message.clone().expect("no reason given");
+        let most = get_version_info(10, app.ec_level)
+            .unwrap()
+            .byte_mode_capacity();
+        assert!(
+            why.contains("400") && why.contains(&most.to_string()),
+            "{why}"
+        );
+        assert!(app.current_qr.is_none());
+    }
+
+    #[test]
+    fn the_caret_moves_and_typing_goes_where_it_is() {
+        let mut app = QrApp::new();
+        probe::type_str(&mut app, "held");
+        app.handle_key(&press_key(Key::Left));
+        app.handle_key(&press_key(Key::Left));
+        probe::type_str(&mut app, "x");
+        assert_eq!(app.input_text, "hexld");
+        app.handle_key(&press_key(Key::Home));
+        app.handle_key(&press_key(Key::Delete));
+        assert_eq!(app.input_text, "exld");
+        app.handle_key(&ctrl_key(Key::A));
+        probe::type_str(&mut app, "new");
+        assert_eq!(
+            app.input_text, "new",
+            "typing over a selection did not replace it"
+        );
+    }
+
+    #[test]
+    fn copy_and_paste_between_boxes() {
+        let mut app = QrApp::new();
+        probe::type_str(&mut app, "Ada");
+        app.handle_key(&ctrl_key(Key::A));
+        assert_eq!(app.handle_key(&ctrl_key(Key::C)), EventResult::Consumed);
+        probe::click(&mut app, Target::Mode(InputMode::VCard));
+        assert_eq!(app.handle_key(&ctrl_key(Key::V)), EventResult::Consumed);
+        assert_eq!(app.vcard_info.first_name, "Ada");
+        app.handle_key(&ctrl_key(Key::A));
+        app.handle_key(&ctrl_key(Key::X));
+        assert!(app.vcard_info.first_name.is_empty(), "cut left the text");
+    }
+
+    #[test]
+    fn a_press_in_a_box_puts_the_keys_there() {
+        let mut app = QrApp::new();
+        probe::click(&mut app, Target::Mode(InputMode::VCard));
+        probe::click(&mut app, Target::Field(Field::Email));
+        assert_eq!(app.focused_field(), Field::Email);
+        probe::type_str(&mut app, "ada@example.com");
+        assert_eq!(app.vcard_info.email, "ada@example.com");
+        assert!(
+            app.current_qr.is_some(),
+            "a contact with an email made no code"
+        );
+        probe::click(&mut app, Target::Field(Field::FirstName));
+        probe::type_str(&mut app, "Ada");
+        assert_eq!(app.vcard_info.first_name, "Ada");
+        assert_eq!(
+            app.vcard_info.email, "ada@example.com",
+            "the other box changed"
+        );
+    }
+
+    #[test]
+    fn every_setting_answers_the_pointer() {
+        let mut app = QrApp::new();
+        probe::type_str(&mut app, "ABC");
+        probe::click(&mut app, Target::CodeType(CodeType::Barcode128));
+        assert!(app.current_barcode.is_some());
+        probe::click(&mut app, Target::CodeType(CodeType::QrCode));
+        assert!(app.current_qr.is_some());
+        probe::click(&mut app, Target::Ec(EcLevel::H));
+        assert_eq!(app.current_qr.as_ref().unwrap().ec_level, EcLevel::H);
+        probe::click(&mut app, Target::Size(ModuleSize::Large));
+        assert_eq!(app.module_size, ModuleSize::Large);
+        probe::click(&mut app, Target::Mode(InputMode::Wifi));
+        probe::type_str(&mut app, "net");
+        probe::click(&mut app, Target::Encryption);
+        assert_eq!(app.wifi_config.encryption, WifiEncryption::None);
+        probe::click(&mut app, Target::Hidden);
+        assert!(app.wifi_config.hidden);
+        assert!(!app.history.is_empty());
+        probe::click(&mut app, Target::ClearHistory);
+        assert!(app.history.is_empty());
+        assert!(
+            probe::rect_of(&app, Target::ClearHistory).is_none(),
+            "Forget is offered with nothing to forget"
+        );
+        probe::click(&mut app, Target::Help);
+        assert!(app.show_help);
+        probe::click(&mut app, Target::HelpCard);
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn the_list_of_keys_is_modal() {
+        let mut app = QrApp::new();
+        app.handle_key(&press_key(Key::F1));
+        assert_eq!(app.handle_key(&typed_key('x')), EventResult::Ignored);
+        assert!(
+            app.input_text.is_empty(),
+            "a key reached the box under the list"
+        );
+        let mode = probe::rect_of(&app, Target::HelpCard).unwrap();
+        let url = {
+            let mut closed = QrApp::new();
+            closed.show_help = false;
+            probe::rect_of(&closed, Target::Mode(InputMode::Url)).unwrap()
+        };
+        assert!(mode.contains(url.x + 2.0, url.y + 2.0));
+        press_at(&mut app, url.x + 2.0, url.y + 2.0);
+        assert!(!app.show_help, "a press left the list up");
+        assert_eq!(
+            app.input_mode,
+            InputMode::Text,
+            "the press went through the list"
+        );
+    }
+
+    #[test]
+    fn the_history_scrolls() {
+        let mut app = QrApp::new();
+        for i in 0..40 {
+            app.set_input(&format!("code {i}"));
+            app.generate();
+        }
+        let rows = app.history_rows();
+        assert!(rows < 40, "the list is not long enough to scroll");
+        assert_eq!(
+            probe::scroll_at_point(&mut app, Target::HistoryList, -3.0),
+            EventResult::Consumed
+        );
+        assert!(app.history_scroll > 0);
+        for _ in 0..50 {
+            probe::scroll_at_point(&mut app, Target::HistoryList, -3.0);
+        }
+        assert_eq!(app.history_scroll, 40 - rows);
+        // The oldest is on screen now, and a press brings it back.
+        probe::click(&mut app, Target::HistoryRow(0));
+        assert_eq!(app.input_text, "code 0");
+    }
+
+    #[test]
+    fn saving_is_offered_only_with_a_code() {
+        let mut app = QrApp::new();
+        assert!(
+            probe::rect_of(&app, Target::Save).is_none(),
+            "Save with nothing to save"
+        );
+        app.handle_key(&ctrl_key(Key::S));
+        assert!(!app.picker.is_open());
+        probe::type_str(&mut app, "x");
+        probe::click(&mut app, Target::Save);
+        assert!(app.picker.is_open(), "Save asked nothing");
+    }
+
+    /// The picture saved is the code on screen, square for square.
+    #[test]
+    fn a_saved_picture_is_the_code() {
+        let mut app = QrApp::new();
+        probe::type_str(&mut app, "https://example.com/");
+        let qr = app.current_qr.clone().unwrap();
+        let svg = app.svg().expect("no picture");
+        let side = qr.size() + 8;
+        assert!(
+            svg.contains(&format!("viewBox=\"0 0 {side} {side}\"")),
+            "{svg}"
+        );
+        assert!(
+            svg.contains(&format!("width=\"{}\"", side * 5)),
+            "not at the module size"
+        );
+        assert!(svg.contains("fill=\"#000000\"") && svg.contains("fill=\"#ffffff\""));
+        let mut dark = 0;
+        for row in 0..qr.size() {
+            for col in 0..qr.size() {
+                if qr.is_dark(row, col) {
+                    dark += 1;
+                }
+            }
+        }
+        // Each run is `M{x} {y}h{run}v1h-{run}z`.
+        let path = svg
+            .split(" d=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let drawn: usize = path
+            .split('M')
+            .skip(1)
+            .map(|run| {
+                let across = run.split('h').nth(1).unwrap();
+                across.split('v').next().unwrap().parse::<usize>().unwrap()
+            })
+            .sum();
+        assert_eq!(drawn, dark, "the picture has a different number of squares");
+
+        let file = std::env::temp_dir().join(format!("qrcode-test-{}.svg", std::process::id()));
+        let said = app.save_svg(&file);
+        assert!(said.starts_with("Saved "), "{said}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), svg);
+        std::fs::remove_file(&file).unwrap();
+    }
+
+    #[test]
+    fn a_saved_barcode_keeps_its_label_as_text() {
+        let mut app = QrApp::new();
+        app.handle_key(&ctrl_key(Key::B));
+        probe::type_str(&mut app, "A&B<1>");
+        let svg = app.svg().expect("no picture");
+        assert!(svg.contains(">A&amp;B&lt;1&gt;</text>"), "{svg}");
+    }
+
+    #[test]
+    fn the_colours_are_chosen_in_the_colour_dialog() {
+        let mut app = QrApp::new();
+        probe::type_str(&mut app, "x");
+        probe::click(&mut app, Target::Foreground);
+        assert!(app.color_dialog.is_some(), "no colour dialog");
+        app.handle_event(&press(Key::Escape));
+        assert!(app.color_dialog.is_none());
+        assert_eq!(app.fg_color, Color::BLACK, "a cancelled colour was used");
+        probe::click(&mut app, Target::Foreground);
+        if let Some((_, dialog)) = app.color_dialog.as_mut() {
+            dialog.picker_mut().set_rgb(0x20, 0x40, 0x80);
+        }
+        app.handle_event(&press(Key::Enter));
+        assert!(app.color_dialog.is_none());
+        assert_eq!(
+            (app.fg_color.r, app.fg_color.g, app.fg_color.b),
+            (0x20, 0x40, 0x80)
+        );
+        assert!(
+            app.svg().unwrap().contains("fill=\"#204080\""),
+            "the picture is not in the colour"
+        );
+        probe::click(&mut app, Target::ResetColors);
+        assert_eq!((app.fg_color, app.bg_color), (Color::BLACK, Color::WHITE));
+        assert!(probe::rect_of(&app, Target::ResetColors).is_none());
+    }
+
+    #[test]
+    fn pale_squares_are_warned_about() {
+        let mut app = QrApp::new();
+        probe::type_str(&mut app, "x");
+        let warning =
+            "Scanners may not read this: the squares need to be much darker than the ground.";
+        assert!(app.colors_scannable());
+        assert!(!texts(&app).iter().any(|t| t == warning));
+        app.fg_color = Color::WHITE;
+        app.bg_color = Color::BLACK;
+        assert!(!app.colors_scannable(), "an inverted code is not flagged");
+        assert!(texts(&app).iter().any(|t| t == warning));
+        app.fg_color = Color::rgba(0xcc, 0xcc, 0xcc, 255);
+        app.bg_color = Color::WHITE;
+        assert!(!app.colors_scannable(), "pale grey on white is not flagged");
+    }
+
+    #[test]
+    fn a_big_code_is_shown_smaller_to_fit() {
+        let mut app = QrApp::new();
+        app.window_width = 900.0;
+        app.window_height = 600.0;
+        app.module_size = ModuleSize::Large;
+        app.set_input(&"y".repeat(200));
+        app.generate();
+        assert!(app.current_qr.is_some(), "{:?}", app.error_message);
+        assert!(
+            texts(&app)
+                .iter()
+                .any(|t| t.ends_with("| shown smaller to fit"))
+        );
+        let panel_right = app.window_width - RIGHT_PANEL_WIDTH;
+        // The code's squares: in its ink, and five pixels across -- the
+        // "Squares" swatch is in the same ink, and twenty.
+        for c in app.frame(app.window_width, app.window_height).commands() {
+            if let RenderCommand::FillRect {
+                x, width, color, ..
+            } = c
+                && *color == app.fg_color
+                && (*width - 5.0).abs() < 0.01
+            {
+                assert!(
+                    x + width <= panel_right + 0.5,
+                    "a square past the preview at {x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_starts_empty_and_says_why() {
+        let app = QrApp::new();
+        assert!(app.history.is_empty(), "history the user did not make");
+        assert!(app.current_qr.is_none());
+        assert!(texts(&app).iter().any(|t| t == NOTHING_TYPED));
+    }
+
+    // ------------------------------------------------------------------
+    // Reading a symbol back, from the standard's layout
+    //
+    // Nothing checked the symbol a scanner reads: the tests checked the
+    // codewords and the tables, and version 7-10 symbols had their data in
+    // the version information's place, version 10's alignment patterns two
+    // modules off, and one format bit never written. These read a symbol the
+    // way a scanner does, with the layout worked out again from the
+    // standard rather than taken from the encoder -- so the two have to
+    // agree, and a mistake in one cannot agree with itself.
+    // ------------------------------------------------------------------
+
+    /// The alignment-pattern centres of versions 1 to 10, from the standard.
+    fn standard_alignment(version: u8) -> &'static [usize] {
+        match version {
+            1 => &[],
+            2 => &[6, 18],
+            3 => &[6, 22],
+            4 => &[6, 26],
+            5 => &[6, 30],
+            6 => &[6, 34],
+            7 => &[6, 22, 38],
+            8 => &[6, 24, 42],
+            9 => &[6, 26, 46],
+            10 => &[6, 28, 50],
+            _ => panic!("version {version} is past this program"),
+        }
+    }
+
+    /// Which modules a symbol of `version` gives to function patterns.
+    fn reserved_modules(version: u8) -> Vec<Vec<bool>> {
+        let size = 17 + 4 * usize::from(version);
+        let mut reserved = vec![vec![false; size]; size];
+        // The three finders with their separators: the 8x8 corners.
+        for i in 0..8 {
+            for j in 0..8 {
+                reserved[i][j] = true;
+                reserved[i][size - 1 - j] = true;
+                reserved[size - 1 - i][j] = true;
+            }
+        }
+        // The timing patterns.
+        for i in 0..size {
+            reserved[6][i] = true;
+            reserved[i][6] = true;
+        }
+        // The alignment patterns, but for the three a finder covers.
+        let centres = standard_alignment(version);
+        if let (Some(&first), Some(&last)) = (centres.first(), centres.last()) {
+            for &r in centres {
+                for &c in centres {
+                    if [(first, first), (first, last), (last, first)].contains(&(r, c)) {
+                        continue;
+                    }
+                    for row in reserved.iter_mut().take(r + 3).skip(r - 2) {
+                        for cell in row.iter_mut().take(c + 3).skip(c - 2) {
+                            *cell = true;
+                        }
+                    }
+                }
+            }
+        }
+        // Both copies of the format information, and the dark module.
+        for i in 0..9 {
+            reserved[8][i] = true;
+            reserved[i][8] = true;
+        }
+        for i in 0..8 {
+            reserved[8][size - 1 - i] = true;
+            reserved[size - 1 - i][8] = true;
+        }
+        // Both copies of the version information, from version 7.
+        if version >= 7 {
+            for i in 0..6 {
+                for j in 0..3 {
+                    reserved[i][size - 11 + j] = true;
+                    reserved[size - 11 + j][i] = true;
+                }
+            }
+        }
+        reserved
+    }
+
+    /// The modules left over past the last codeword: seven for versions 2
+    /// to 6, none for the others up to 13.
+    fn remainder_bits(version: u8) -> usize {
+        if (2..=6).contains(&version) { 7 } else { 0 }
+    }
+
+    /// Whether mask `mask` inverts the module at `(row, col)`.
+    fn mask_inverts(mask: u32, row: usize, col: usize) -> bool {
+        match mask {
+            0 => (row + col).is_multiple_of(2),
+            1 => row.is_multiple_of(2),
+            2 => col.is_multiple_of(3),
+            3 => (row + col).is_multiple_of(3),
+            4 => (row / 2 + col / 3).is_multiple_of(2),
+            5 => (row * col) % 2 + (row * col) % 3 == 0,
+            6 => ((row * col) % 2 + (row * col) % 3).is_multiple_of(2),
+            7 => ((row + col) % 2 + (row * col) % 3).is_multiple_of(2),
+            _ => panic!("mask {mask}"),
+        }
+    }
+
+    /// What a scanner reads from a symbol.
+    struct ReadBack {
+        /// The two copies of the format information.
+        format: (u32, u32),
+        /// The two copies of the version information (0 below version 7).
+        version: (u32, u32),
+        /// The bytes the data codewords carry.
+        data: Vec<u8>,
+    }
+
+    fn read_back(qr: &QrCode) -> ReadBack {
+        let size = qr.size();
+        let version = qr.version;
+        assert_eq!(size, 17 + 4 * usize::from(version));
+        let dark = |r: usize, c: usize| u32::from(qr.is_dark(r, c));
+
+        let copy1: Vec<(usize, usize)> = (0..=5)
+            .map(|i| (i, 8))
+            .chain([(7, 8), (8, 8), (8, 7)])
+            .chain((9..15).map(|i| (8, 14 - i)))
+            .collect();
+        let copy2: Vec<(usize, usize)> = (0..8)
+            .map(|i| (8, size - 1 - i))
+            .chain((8..15).map(|i| (size - 15 + i, 8)))
+            .collect();
+        let read = |places: &[(usize, usize)]| {
+            places
+                .iter()
+                .enumerate()
+                .fold(0, |acc, (i, &(r, c))| acc | (dark(r, c) << i))
+        };
+        let format = (read(&copy1), read(&copy2));
+        assert_eq!(dark(size - 8, 8), 1, "the dark module is not dark");
+
+        let version_info = if version >= 7 {
+            let mut top_right = 0;
+            let mut bottom_left = 0;
+            for i in 0..18 {
+                top_right |= dark(i / 3, size - 11 + i % 3) << i;
+                bottom_left |= dark(size - 11 + i % 3, i / 3) << i;
+            }
+            (top_right, bottom_left)
+        } else {
+            (0, 0)
+        };
+
+        // The data: two columns at a time from the right, skipping the
+        // timing column, up and down in turn.
+        let reserved = reserved_modules(version);
+        let mask = ((format.0 ^ 0x5412) >> 10) & 0b111;
+        let mut bits = Vec::new();
+        let mut right = size - 1;
+        let mut upward = true;
+        loop {
+            if right == 6 {
+                right = 5;
+            }
+            for step in 0..size {
+                let row = if upward { size - 1 - step } else { step };
+                for col in [right, right - 1] {
+                    if !reserved[row][col] {
+                        bits.push(qr.is_dark(row, col) ^ mask_inverts(mask, row, col));
+                    }
+                }
+            }
+            upward = !upward;
+            if right < 2 {
+                break;
+            }
+            right -= 2;
+        }
+        let info = get_version_info(version, qr.ec_level).unwrap();
+        assert_eq!(
+            bits.len(),
+            info.total_codewords * 8 + remainder_bits(version),
+            "v{version}: the symbol has room for other than exactly its codewords"
+        );
+        let codewords: Vec<u8> = bits
+            .chunks(8)
+            .take(info.total_codewords)
+            .map(|b| b.iter().fold(0u8, |acc, &x| (acc << 1) | u8::from(x)))
+            .collect();
+
+        // The data codewords, un-interleaved: the short blocks first.
+        let data_total = info.data_codewords();
+        let blocks = info.num_blocks;
+        let short = data_total / blocks;
+        let long_from = blocks - data_total % blocks;
+        let lengths: Vec<usize> = (0..blocks)
+            .map(|b| short + usize::from(b >= long_from))
+            .collect();
+        let mut per_block = vec![Vec::new(); blocks];
+        let mut next = codewords.iter();
+        for i in 0..=short {
+            for (b, block) in per_block.iter_mut().enumerate() {
+                if i < lengths[b] {
+                    block.push(*next.next().unwrap());
+                }
+            }
+        }
+        let stream: Vec<bool> = per_block
+            .concat()
+            .iter()
+            .flat_map(|byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1))
+            .collect();
+        let take = |at: &mut usize, n: usize| {
+            let value = stream[*at..*at + n]
+                .iter()
+                .fold(0usize, |acc, &b| (acc << 1) | usize::from(b));
+            *at += n;
+            value
+        };
+        let mut at = 0;
+        assert_eq!(take(&mut at, 4), 0b0100, "not byte mode");
+        let count = take(&mut at, if version <= 9 { 8 } else { 16 });
+        let data = (0..count).map(|_| take(&mut at, 8) as u8).collect();
+        ReadBack {
+            format,
+            version: version_info,
+            data,
+        }
+    }
+
+    /// Every version this program makes, at every level, reads back as what
+    /// was encoded -- with both copies of the format and version
+    /// information whole.
+    #[test]
+    fn every_symbol_reads_back_as_what_was_encoded() {
+        let mut seen = std::collections::BTreeSet::new();
+        for ec in EcLevel::all() {
+            for len in [1_usize, 10, 20, 40, 60, 90, 120, 150, 180, 210, 240, 270] {
+                let text: Vec<u8> = (0..len).map(|i| b"QR:qr/09+x"[i % 10]).collect();
+                let Some(qr) = QrCode::encode(&text, *ec) else {
+                    continue;
+                };
+                seen.insert(qr.version);
+                let back = read_back(&qr);
+                assert_eq!(
+                    back.data, text,
+                    "v{} {ec:?} read back as something else",
+                    qr.version
+                );
+                let expected = format_bits(*ec, qr.mask_pattern);
+                assert_eq!(
+                    back.format.0, expected,
+                    "v{} {ec:?}: the first format copy",
+                    qr.version
+                );
+                assert_eq!(
+                    back.format.1, expected,
+                    "v{} {ec:?}: the second format copy",
+                    qr.version
+                );
+                if qr.version >= 7 {
+                    let v = version_info_bits(qr.version);
+                    assert_eq!(
+                        back.version,
+                        (v, v),
+                        "v{}: the version information",
+                        qr.version
+                    );
+                }
+            }
+        }
+        assert_eq!(seen.len(), 10, "not every version was made: {seen:?}");
+    }
+
+    /// The version information is the standard's, whose table gives these.
+    #[test]
+    fn version_information_is_the_standards() {
+        assert_eq!(version_info_bits(7), 0x07C94);
+        assert_eq!(version_info_bits(8), 0x085BC);
+        assert_eq!(version_info_bits(9), 0x09A99);
+        assert_eq!(version_info_bits(10), 0x0A4D3);
+    }
+
+    /// The format information is the standard's for mask 0 at each level.
+    #[test]
+    fn format_information_is_the_standards() {
+        assert_eq!(format_bits(EcLevel::L, 0), 0b111_0111_1100_0100);
+        assert_eq!(format_bits(EcLevel::M, 0), 0b101_0100_0001_0010);
+        assert_eq!(format_bits(EcLevel::Q, 0), 0b011_0101_0101_1111);
+        assert_eq!(format_bits(EcLevel::H, 0), 0b001_0110_1000_1001);
+    }
+
+    /// The rules every Code128 symbol keeps: three bars and three spaces,
+    /// each one to four modules, eleven in all, the bars an even number of
+    /// modules; and no two alike, or two values would scan as one.
+    #[test]
+    fn every_code128_pattern_is_well_formed() {
+        assert_eq!(CODE128_PATTERNS.len(), 106);
+        for (value, pattern) in CODE128_PATTERNS.iter().enumerate() {
+            assert!(
+                pattern.iter().all(|w| (1..=4).contains(w)),
+                "{value}: {pattern:?}"
+            );
+            assert_eq!(
+                pattern.iter().map(|w| u32::from(*w)).sum::<u32>(),
+                11,
+                "{value}: {pattern:?}"
+            );
+            let bars: u32 = pattern.iter().step_by(2).map(|w| u32::from(*w)).sum();
+            assert_eq!(
+                bars % 2,
+                0,
+                "{value}: the bars are an odd number of modules"
+            );
+            for (other, earlier) in CODE128_PATTERNS.iter().enumerate().take(value) {
+                assert_ne!(pattern, earlier, "{value} and {other} are the same pattern");
+            }
+        }
+        assert_eq!(CODE128_STOP.iter().map(|w| u32::from(*w)).sum::<u32>(), 13);
+    }
+
+    /// A sample of the published table, from both ends of it.
+    #[test]
+    fn the_code128_table_is_the_standards() {
+        let sample: [(usize, [u8; 6]); 8] = [
+            (0, [2, 1, 2, 2, 2, 2]),
+            (33, [1, 1, 1, 3, 2, 3]),
+            (36, [1, 1, 2, 3, 1, 3]),
+            (60, [3, 1, 4, 1, 1, 1]),
+            (65, [1, 2, 1, 1, 2, 4]),
+            (90, [2, 1, 4, 1, 2, 1]),
+            (95, [1, 1, 4, 1, 1, 3]),
+            (104, [2, 1, 1, 2, 1, 4]),
+        ];
+        for (value, widths) in sample {
+            assert_eq!(CODE128_PATTERNS[value], widths, "value {value}");
+        }
+    }
+
+    /// A barcode reads back as its text, through the table it was made
+    /// from, with the check value the standard's sum gives.
+    #[test]
+    fn a_barcode_reads_back_as_its_text() {
+        let text = "Wikipedia, 2026!";
+        let barcode = Code128Barcode::encode(text).unwrap();
+        // Strip the quiet zones, then read eleven modules at a time.
+        let bars: Vec<bool> = barcode.bars[10..barcode.bars.len() - 10].to_vec();
+        let mut widths = Vec::new();
+        let mut run = 1_u8;
+        for pair in bars.windows(2) {
+            if pair[0] == pair[1] {
+                run += 1;
+            } else {
+                widths.push(run);
+                run = 1;
+            }
+        }
+        widths.push(run);
+        let stop = widths.split_off(widths.len() - 7);
+        assert_eq!(stop, CODE128_STOP);
+        let values: Vec<usize> = widths
+            .chunks(6)
+            .map(|w| {
+                CODE128_PATTERNS
+                    .iter()
+                    .position(|p| p[..] == *w)
+                    .unwrap_or_else(|| panic!("{w:?} is no symbol"))
+            })
+            .collect();
+        assert_eq!(values[0], 104, "not Start B");
+        let (body, check) = values[1..].split_at(values.len() - 2);
+        let decoded: String = body.iter().map(|v| char::from(*v as u8 + 32)).collect();
+        assert_eq!(decoded, text);
+        let sum = body
+            .iter()
+            .enumerate()
+            .fold(104, |acc, (i, v)| acc + (i + 1) * v);
+        assert_eq!(check[0], sum % 103, "the check value");
     }
 }

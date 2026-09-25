@@ -12,5 +12,9 @@ guitk = { path = "../../gui/toolkit" }
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
 
+# A saved code is written through `safeio::write_str_atomically`, so a crash
+# mid-save cannot leave half a picture where a whole one was.
+safeio = { path = "../safeio" }
+
 [lints]
 workspace = true

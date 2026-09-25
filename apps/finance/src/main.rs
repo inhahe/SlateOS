@@ -5848,6 +5848,24 @@ mod tests {
         assert_eq!(app.total_balance(), -25_000);
     }
 
+    /// On the accounts screen N adds an account, whether or not there is
+    /// one to put a transaction in.
+    #[test]
+    fn n_on_the_accounts_screen_adds_an_account() {
+        let mut app = one_account();
+        app.screen = Screen::Accounts;
+        probe::key(&mut app, &probe::typing("n"));
+        assert!(
+            matches!(app.form, Some(Form::Account { id: None, .. })),
+            "N on the accounts screen opened {:?}",
+            app.form
+        );
+        app.form = None;
+        app.screen = Screen::Transactions;
+        probe::key(&mut app, &probe::typing("n"));
+        assert!(matches!(app.form, Some(Form::Transaction { id: None, .. })));
+    }
+
     #[test]
     fn an_account_is_changed_in_place() {
         let mut app = FinanceApp::with_sample_data();
@@ -5911,12 +5929,16 @@ mod tests {
         assert!(app.selected_id.is_some());
         for screen in [Screen::Dashboard, Screen::Budgets, Screen::Reports] {
             app.screen = screen;
-            probe::key(&mut app, &probe::ctrl(Key::D));
-            probe::key(&mut app, &probe::press(Key::Delete));
-            assert!(
-                app.pending_delete.is_none(),
-                "{screen:?} asked to delete a transaction it does not show"
-            );
+            // Each key on its own: a question the first raised would take
+            // the second as its answer, and hide that it had been asked.
+            for key in [probe::ctrl(Key::D), probe::press(Key::Delete)] {
+                probe::key(&mut app, &key);
+                assert!(
+                    app.pending_delete.is_none(),
+                    "{:?} on {screen:?} asked to delete a transaction it does not show",
+                    key.key
+                );
+            }
             probe::key(&mut app, &probe::press(Key::Enter));
             if screen != Screen::Budgets {
                 assert!(

@@ -55705,6 +55705,18 @@ derives the payload size from the block structure and a test asserts it equals
 every row's stated capacity; both halves of the encoder read the data codeword
 count from one `data_codewords()` instead of each spelling out the subtraction.
 
+**It was not the last of them (2026-09-25, lane E).** The second opinion this
+finding asked for arrived as a test that reads each symbol back the way a
+scanner does, from a layout written again from the standard
+(`every_symbol_reads_back_as_what_was_encoded`). It found versions 7-10 with
+no version information at all -- the data placed where the version belongs,
+every later bit one place off, so the symbol was unreadable from 123 bytes at
+M, the same threshold as above -- version 10's alignment centres at 52 instead
+of 50, and the second format copy missing its bit 7. Fixed with the qrcode
+rework (see `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`).
+**The lesson is this finding's own, one layer down:** the tests checked the
+codewords, and nothing checked the matrix a scanner reads them from.
+
 **A lint suppression whose justification did not cover the case that bit.**
 `apps/qrcode` allows `arithmetic_side_effects` and `indexing_slicing`
 file-wide, with a comment explaining that "indices are computed from QR-version
@@ -159916,6 +159928,34 @@ come from the clock; and the ledger is kept as it changes (a text file under
 the settings directory, refused whole and left alone if it cannot be read
 whole -- `design-decisions.md` §1202). 105 tests; `apps/finance/mutate.py`
 has 49 rows. Thirteen examined; eight to go.
+
+**`apps/qrcode`, 2026-09-25 -- a generator whose codes could not be kept,
+whose history was keystrokes, and whose symbols a scanner could not always
+read.** Nothing answered the pointer; the toolbar's Generate button did
+nothing (typing already generates) and nothing else could keep a code; the
+colour swatches could not be changed; the one box took typing at its end and
+nothing else; the history gained an entry per keystroke ("H", "He", "Hel"...)
+and a press on one did nothing; emptying the box left the old code on screen;
+an empty web-address box encoded `https://`; a barcode silently dropped what
+Code B cannot hold ("Café" scanned as "Caf" under a label reading
+"Café"); WiFi security was Ctrl+S, which everywhere else saves; and the
+window opened on a code and a history entry for "Hello, Slate OS!". Reading
+the symbols back as a scanner does found worse: **versions 7-10 had no version
+information**, so their data sat where the version belongs and every later bit
+was misplaced (anything past about 120 bytes -- most contacts); **version 10's
+alignment centres were 52 instead of 50**; the second format copy never wrote
+its bit 7; and **the Code128 table was corrupt from value 60** (entries
+marked "placeholder", one with a zero-width space, several duplicates), so no
+barcode with a lowercase letter could be read. Now: every control answers the
+pointer; the boxes are text fields (caret, selection, copy, cut, paste); one
+history entry per code, which a press brings back; SVG saving at the module
+size, in the chosen colours (PNG waits on
+`requests/e-f-a-png-encoder-applications-can-save-with.md`); colours chosen in
+the toolkit's colour dialog, with a warning when scanners may fail; the
+preview shrinks to fit; and a test reads every version back through a layout
+written again from the standard, and checks the Code128 table's rules and a
+sample of the published one. 114 tests; `apps/qrcode/mutate.py` has 41 rows.
+Fourteen examined; seven to go.
 
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 

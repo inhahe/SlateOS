@@ -1,8 +1,9 @@
 # E → C: a `TextInput` that takes its own keys
 
 **From:** lane E · **To:** lane C · **Filed:** 2026-09-25
-**Status:** open — nothing in lane E is blocked; two applications carry a copy
-of the same fifty lines until this lands
+**Status:** open — nothing in lane E is blocked; four applications carry a copy
+of the same fifty lines until this lands (two when filed; `finance` and
+`qrcode` added 2026-09-25)
 
 ## In short
 
@@ -17,10 +18,12 @@ Lane E has now written it twice, the same both times:
 
 - `apps/regextester/src/main.rs` -> `edit_line`, `insert_limited`
 - `apps/flashcards/src/main.rs` -> `edit_line`, `insert_limited`
+- `apps/finance/src/main.rs` -> `edit_line`, `insert_limited` (2026-09-25)
+- `apps/qrcode/src/main.rs` -> `edit_line`, `insert_limited` (2026-09-25)
 
-and the next rework of an application with a text field (lane E has eleven
-left in `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`) would
-make three.
+and each further rework of an application with a text field (lane E has seven
+left in `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`) adds
+one.
 
 ## The ask
 
@@ -44,4 +47,4 @@ The two copies differ only in the font size they pass to the caret movement
 
 ## When it lands
 
-Lane E replaces both copies with the call and deletes them.
+Lane E replaces every copy with the call and deletes them.

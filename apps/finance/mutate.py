@@ -42,7 +42,7 @@ MUTATIONS = [
         "                    self.open_new_account();",
         "                if false {\n"
         "                    self.open_new_account();",
-        ["an_account_is_entered_with_what_it_held"],
+        ["n_on_the_accounts_screen_adds_an_account"],
     ),
     (
         "Enter changes nothing",

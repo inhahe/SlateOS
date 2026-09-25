@@ -536,7 +536,6 @@ mod tests {
         assert_eq!(detect_mode("base64.exe"), Mode::Base64);
     }
 
-
     /// `base32` is coreutils' bin now; this binary no longer answers to it,
     /// so the name falls to the default like any other it does not know.
     #[test]
@@ -690,18 +689,6 @@ mod tests {
         assert_eq!(&decoded, data);
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
     // ── UU encode/decode ──
 
     #[test]
@@ -780,7 +767,6 @@ mod tests {
         assert_eq!(decoded, data);
     }
 
-
     #[test]
     fn test_b64_wrap_zero() {
         let data = b"Hello, World! This is a longer message for testing.";
@@ -805,7 +791,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_uu_encode_mode_octal() {
         let encoded = uu_encode(b"x", "test", 0o644);
@@ -823,5 +808,4 @@ mod tests {
         assert_eq!(table[b'!' as usize], 0xFF);
         assert_eq!(table[b'@' as usize], 0xFF);
     }
-
 }

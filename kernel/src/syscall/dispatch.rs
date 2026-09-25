@@ -68,12 +68,13 @@ use super::number::{
     SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE,
     SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE,
     SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS,
-    SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE,
-    SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID,
-    SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS,
-    SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_SID,
-    SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2,
-    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE,
+    SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_INITIAL_FDS,
+    SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID,
+    SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID,
+    SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_CWD, SYS_PROCESS_SET_EXEC_FDS,
+    SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_SID, SYS_PROCESS_SETGROUPS,
+    SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT,
+    SYS_PROCESS_UMASK, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE,
     SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ,
     SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
     SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE,
@@ -462,6 +463,11 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_COUNT as usize] = Some(handlers::sys_process_count);
     handlers[SYS_PROCESS_GET_CREDENTIALS as usize] = Some(handlers::sys_process_get_credentials);
     handlers[SYS_PROCESS_SET_CREDENTIALS as usize] = Some(handlers::sys_process_set_credentials);
+    // Working directory and file-creation mask as the process's own record
+    // (1077-1079), so both survive exec and reach spawned children.
+    handlers[SYS_PROCESS_SET_CWD as usize] = Some(handlers::sys_process_set_cwd);
+    handlers[SYS_PROCESS_GET_CWD as usize] = Some(handlers::sys_process_get_cwd);
+    handlers[SYS_PROCESS_UMASK as usize] = Some(handlers::sys_process_umask);
     handlers[SYS_PROCESS_GET_NICE as usize] = Some(handlers::sys_process_get_nice);
     handlers[SYS_PROCESS_SET_NICE as usize] = Some(handlers::sys_process_set_nice);
 
@@ -992,6 +998,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_ctty_syscalls()?;
     test_dispatch_termios_syscalls()?;
     test_tty_flush()?;
+    test_process_cwd_umask_registered()?;
     test_dispatch_pty_syscalls()?;
     test_dispatch_rlimit_syscalls()?;
     test_dispatch_spawn_ex2_registered()?;
@@ -2112,6 +2119,51 @@ fn test_dispatch_termios_syscalls() -> KernelResult<()> {
     }
 
     serial_println!("[syscall]   Native termios (541/542) reaches the line discipline: OK");
+    Ok(())
+}
+
+/// `SYS_PROCESS_SET_CWD`, `SYS_PROCESS_GET_CWD` and `SYS_PROCESS_UMASK`
+/// (1077-1079) are registered.
+///
+/// This runs on a kernel task with no owning process, so each must answer
+/// `NoSuchProcess` -- the handler ran and found no record to read or write --
+/// rather than `NoSuchSyscall`, which is what an unwired number returns. The
+/// handlers' logic is a canonical-form check (`pcb::is_canonical_path`, tested
+/// in `pcb::self_test`) around `pcb::get_cwd`/`set_cwd`/`get_umask`/
+/// `set_umask`, and inheritance is tested in `spawn::self_test`; a user
+/// pointer can only be exercised from ring 3.
+fn test_process_cwd_umask_registered() -> KernelResult<()> {
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let want = i64::from(KernelError::NoSuchProcess.code());
+    for (name, number, a) in [
+        ("SYS_PROCESS_SET_CWD", SYS_PROCESS_SET_CWD, args(0x1000, 1)),
+        ("SYS_PROCESS_GET_CWD", SYS_PROCESS_GET_CWD, args(0x1000, 64)),
+        (
+            "SYS_PROCESS_UMASK",
+            SYS_PROCESS_UMASK,
+            args(handlers::UMASK_QUERY, 0),
+        ),
+    ] {
+        let got = dispatch(number, &a).value;
+        if got != want {
+            serial_println!(
+                "[syscall]   FAIL: {} ({}) from a kernel task returned {}, expected NoSuchProcess ({}) -- is it registered?",
+                name,
+                number,
+                got,
+                want
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!("[syscall]   Native cwd/umask record (1077-1079) is wired: OK");
     Ok(())
 }
 

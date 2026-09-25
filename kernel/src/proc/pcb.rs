@@ -2483,6 +2483,30 @@ pub fn get_cwd(pid: ProcessId) -> Option<Vec<u8>> {
     table.get(&pid).map(|p| p.cwd.clone())
 }
 
+/// Whether `path` is already in the canonical form [`Process::cwd`]
+/// requires: absolute, no empty (`//`), `.` or `..` component, no trailing
+/// `/` except the root itself, no NUL, at most [`CWD_MAX_LEN`] bytes.
+///
+/// A check, not a normaliser: the native `SYS_PROCESS_SET_CWD` refuses a
+/// path that fails it rather than rewriting it, because the caller (libc's
+/// `chdir`) has already resolved and `stat`ed the directory, and a kernel
+/// that silently rewrote the path would record a directory the caller never
+/// checked. Bytes, not UTF-8: a component may hold any byte but `/` and NUL.
+#[must_use]
+pub fn is_canonical_path(path: &[u8]) -> bool {
+    let Some(rest) = path.strip_prefix(b"/") else {
+        return false;
+    };
+    if path.len() > CWD_MAX_LEN || path.contains(&0) {
+        return false;
+    }
+    // The root is the only canonical path that ends in a slash.
+    rest.is_empty()
+        || rest
+            .split(|&b| b == b'/')
+            .all(|c| !c.is_empty() && c != b"." && c != b"..")
+}
+
 /// Replace the current working directory of a process.
 ///
 /// The caller is responsible for ensuring `new_cwd` already satisfies
@@ -7460,7 +7484,67 @@ pub fn self_test() -> KernelResult<()> {
     test_reset_linux_state_for_exec()?;
     test_prot_none()?;
     test_rlimits()?;
+    test_canonical_path()?;
 
+    Ok(())
+}
+
+/// Test: [`is_canonical_path`] accepts exactly the form `Process::cwd`
+/// stores, and refuses every near miss.
+///
+/// The near misses are the point. `SYS_PROCESS_SET_CWD` records the path
+/// it is given without rewriting it, so each accepted spelling is a second
+/// name for one directory (`/a/` and `/a`, `/a/./b` and `/a/b`), and
+/// `/proc/<pid>/cwd` and every child that inherits the record would carry
+/// whichever one libc happened to send.
+fn test_canonical_path() -> KernelResult<()> {
+    let accept: &[&[u8]] = &[
+        b"/",
+        b"/a",
+        b"/a/b",
+        b"/.hidden",
+        b"/a..b",
+        b"/...",
+        b"/\xff\x01name",
+    ];
+    let refuse: &[&[u8]] = &[
+        b"", b"a", b"a/b", b"//", b"/a/", b"/a//b", b"/.", b"/..", b"/a/.", b"/a/./b", b"/a/../b",
+        b"/a\0b",
+    ];
+    for &p in accept {
+        if !is_canonical_path(p) {
+            serial_println!("[pcb]   FAIL: canonical path {:?} refused", p);
+            return Err(KernelError::InternalError);
+        }
+    }
+    for &p in refuse {
+        if is_canonical_path(p) {
+            serial_println!("[pcb]   FAIL: non-canonical path {:?} accepted", p);
+            return Err(KernelError::InternalError);
+        }
+    }
+    // The length bound is inclusive: CWD_MAX_LEN bytes fit, one more does not.
+    let mut long = alloc::vec![b'a'; CWD_MAX_LEN];
+    if let Some(first) = long.first_mut() {
+        *first = b'/';
+    }
+    if !is_canonical_path(&long) {
+        serial_println!(
+            "[pcb]   FAIL: a {}-byte path (the maximum) refused",
+            CWD_MAX_LEN
+        );
+        return Err(KernelError::InternalError);
+    }
+    long.push(b'a');
+    if is_canonical_path(&long) {
+        serial_println!("[pcb]   FAIL: a path one byte over CWD_MAX_LEN accepted");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[pcb]   canonical cwd form: OK ({} accepted, {} refused, length bound exact)",
+        accept.len().saturating_add(1),
+        refuse.len().saturating_add(1)
+    );
     Ok(())
 }
 

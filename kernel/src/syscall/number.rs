@@ -5441,6 +5441,54 @@ pub const SYS_BRIGHTNESS_SET: u64 = 1075;
 /// Chosen number 1076, next free slot after 1075.
 pub const SYS_TTY_FLUSH: u64 = 1076;
 
+/// Record the calling process's working directory.
+///
+/// `arg0`: pointer to the path bytes; `arg1`: their length (no NUL). The
+/// path must already be canonical — absolute, no `.`/`..`/empty component,
+/// no trailing `/` except the root, no NUL, at most `pcb::CWD_MAX_LEN`
+/// bytes (`pcb::is_canonical_path`) — and anything else is
+/// `InvalidArgument`: libc's `chdir` resolves and `stat`s the directory
+/// first, and a kernel that rewrote the path would record one the caller
+/// never checked. Returns 0.
+///
+/// **A record, not a lookup base** (design-decisions.md §960, and why this
+/// does not reopen §648): no native call resolves a path against it — libc
+/// still turns every relative path into an absolute one itself, and each is
+/// checked against the caller's capabilities as before. The record exists so
+/// the working directory survives what the libc copy cannot: `exec`, which
+/// replaces libc's memory, and `spawn`, which starts a child from the
+/// parent's record (see `SYS_PROCESS_SPAWN_EX2`). It is also what
+/// `/proc/<pid>/cwd` shows and what a Linux image `exec`'d by a native
+/// process starts in. There is therefore no existence or capability check
+/// here: a name for a directory confers nothing a capability check at use
+/// does not already decide.
+///
+/// Chosen number 1077, next free slot after 1076.
+pub const SYS_PROCESS_SET_CWD: u64 = 1077;
+
+/// Read the calling process's recorded working directory.
+///
+/// `arg0`: destination buffer; `arg1`: its capacity. Writes the path bytes
+/// (no NUL) and returns their length, or `BufferTooSmall` if they do not fit
+/// (nothing is written then). libc's start-up calls it once, so a program
+/// begins in the directory its parent recorded rather than at `/`.
+///
+/// Chosen number 1078.
+pub const SYS_PROCESS_GET_CWD: u64 = 1078;
+
+/// Set or query the calling process's file-creation mask (`umask(2)`).
+///
+/// `arg0`: the new mask, `0..=0o777`, or `u64::MAX` to query without
+/// changing it. Returns the previous mask. A value above `0o777` (other than
+/// the query sentinel) is `InvalidArgument` rather than silently truncated
+/// as Linux's `umask` does, because the native ABI has no reason to accept a
+/// mask it will not store. The same record the Linux shim's `umask` reads
+/// and writes, inherited across `fork`, kept across `exec` and passed to a
+/// spawned child.
+///
+/// Chosen number 1079.
+pub const SYS_PROCESS_UMASK: u64 = 1079;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

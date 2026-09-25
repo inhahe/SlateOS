@@ -3390,7 +3390,7 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    spawn_ex_common(&spawn_args, CapInherit::All)
+    spawn_ex_common(&spawn_args, CapInherit::All, None)
 }
 
 /// The body shared by `SYS_PROCESS_SPAWN_EX` and `SYS_PROCESS_SPAWN_EX2`.
@@ -3411,6 +3411,7 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
 fn spawn_ex_common(
     spawn_args: &crate::proc::spawn::SpawnExArgs,
     cap_inherit: crate::proc::spawn::CapInherit<'_>,
+    cwd: Option<&[u8]>,
 ) -> SyscallResult {
     use crate::proc::spawn::{FdMapEntry, SpawnOptions, spawn_process_with_caps};
 
@@ -3514,11 +3515,16 @@ fn spawn_ex_common(
     //
     // `fork` was unaffected because it sets the parent on its own path,
     // which is why the fork→exec→reap tests passed throughout.
-    let options = SpawnOptions::new(name)
+    let mut options = SpawnOptions::new(name)
         .parent(caller_pid().unwrap_or(0))
         .fd_map(&fd_pairs)
         .argv(&argv_slices)
         .envp(&envp_slices);
+    // Without one the child inherits the parent's directory (spawn_process
+    // does that for every child with a parent); with one, it starts there.
+    if let Some(dir) = cwd {
+        options = options.cwd(dir);
+    }
 
     match spawn_process_with_caps(&elf_data, &options, cap_inherit) {
         Ok(result) =>
@@ -3652,8 +3658,29 @@ pub fn sys_process_spawn_ex2(args: &SyscallArgs) -> SyscallResult {
         envc: ex2.envc,
     };
 
+    // The child's working directory, when the caller named one (see the
+    // field's doc: zero length inherits the parent's). Read once, from the
+    // kernel copy of the struct, and refused rather than ignored if it is not
+    // canonical — a child started somewhere other than where it was asked to
+    // start is in the wrong directory without knowing it.
+    let cwd: Option<alloc::vec::Vec<u8>> = if ex2.cwd_len == 0 {
+        None
+    } else {
+        let Ok(len) = usize::try_from(ex2.cwd_len) else {
+            return SyscallResult::err(KernelError::InvalidArgument);
+        };
+        if ex2.cwd_ptr == 0 {
+            return SyscallResult::err(KernelError::InvalidArgument);
+        }
+        match crate::mm::user::read_user_vec(ex2.cwd_ptr, len, crate::proc::pcb::CWD_MAX_LEN) {
+            Ok(path) if crate::proc::pcb::is_canonical_path(&path) => Some(path),
+            Ok(_) => return SyscallResult::err(KernelError::InvalidArgument),
+            Err(e) => return SyscallResult::err(e),
+        }
+    };
+
     match ex2.cap_mode {
-        SPAWN_CAP_MODE_INHERIT_ALL => spawn_ex_common(&spawn_args, CapInherit::All),
+        SPAWN_CAP_MODE_INHERIT_ALL => spawn_ex_common(&spawn_args, CapInherit::All, cwd.as_deref()),
         SPAWN_CAP_MODE_SUBSET => {
             // A null pointer with a non-zero count is a caller bug, and is
             // refused rather than read as "no capabilities".
@@ -3708,7 +3735,7 @@ pub fn sys_process_spawn_ex2(args: &SyscallArgs) -> SyscallResult {
                 ));
             }
 
-            spawn_ex_common(&spawn_args, CapInherit::Subset(&requested))
+            spawn_ex_common(&spawn_args, CapInherit::Subset(&requested), cwd.as_deref())
         }
         // Not clamped and not defaulted — see the struct's `cap_mode` doc.
         _ => SyscallResult::err(KernelError::InvalidArgument),
@@ -6541,6 +6568,100 @@ pub fn sys_process_get_credentials(args: &SyscallArgs) -> SyscallResult {
     let packed: u64 = (u64::from(gid) << 32) | u64::from(uid);
     #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(packed as i64)
+}
+
+/// `SYS_PROCESS_SET_CWD` — record the caller's working directory.
+///
+/// See the number's doc for the contract: the path must already be
+/// canonical ([`crate::proc::pcb::is_canonical_path`]), and it is a record
+/// for inheritance and `/proc`, never a base any native lookup resolves
+/// against (design-decisions.md §960).
+pub fn sys_process_set_cwd(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
+
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let Ok(len) = usize::try_from(args.arg1) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if len == 0 || args.arg0 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // `read_user_vec` refuses a length above the bound before allocating.
+    let path = match crate::mm::user::read_user_vec(args.arg0, len, pcb::CWD_MAX_LEN) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if !pcb::is_canonical_path(&path) {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    match pcb::set_cwd(pid, path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_GET_CWD` — copy the caller's recorded working directory out.
+///
+/// Returns the length written. A buffer too small for the whole path is
+/// `BufferTooSmall` with nothing written: a truncated directory name is a
+/// different directory, so there is no useful partial answer.
+pub fn sys_process_get_cwd(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
+
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let Some(cwd) = pcb::get_cwd(pid) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let Ok(cap) = usize::try_from(args.arg1) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if cwd.len() > cap {
+        return SyscallResult::err(KernelError::BufferTooSmall);
+    }
+    // SAFETY: `cwd` is a live kernel buffer of `cwd.len()` bytes;
+    // `copy_to_user` validates the user destination range itself.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(cwd.as_ptr(), args.arg0, cwd.len()) } {
+        return SyscallResult::err(e);
+    }
+    #[allow(clippy::cast_possible_wrap)] // At most CWD_MAX_LEN (4095).
+    SyscallResult::ok(cwd.len() as i64)
+}
+
+/// Sentinel for [`sys_process_umask`]'s `arg0`: report the mask, change
+/// nothing.
+pub const UMASK_QUERY: u64 = u64::MAX;
+
+/// `SYS_PROCESS_UMASK` — set or query the caller's file-creation mask.
+///
+/// Reads and writes the same `linux_umask` record as the Linux shim's
+/// `umask`, so a native parent and a Linux child (or the reverse) agree on
+/// it. Returns the previous mask.
+pub fn sys_process_umask(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
+
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    if args.arg0 == UMASK_QUERY {
+        return match pcb::get_umask(pid) {
+            Some(mask) => SyscallResult::ok(i64::from(mask)),
+            None => SyscallResult::err(KernelError::NoSuchProcess),
+        };
+    }
+    let Ok(mask) = u16::try_from(args.arg0) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if mask > 0o777 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    match pcb::set_umask(pid, mask) {
+        Some(old) => SyscallResult::ok(i64::from(old)),
+        None => SyscallResult::err(KernelError::NoSuchProcess),
+    }
 }
 
 /// `SYS_PROCESS_SET_CREDENTIALS` — mutate the caller's own real uid/gid.

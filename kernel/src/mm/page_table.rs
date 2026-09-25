@@ -2731,8 +2731,8 @@ fn test_install_table_race(hhdm: u64) -> KernelResult<()> {
                 11,
                 PageTableEntry::new(0x20_0000, flags | PageFlags::HUGE_PAGE),
                 hhdm,
-            )
-        };
+            );
+        }
         let loser = alloc_pt_page()?;
         // SAFETY: as above.
         let got = unsafe {

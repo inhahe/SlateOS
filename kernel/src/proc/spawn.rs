@@ -717,6 +717,20 @@ pub struct SpawnEx2Args {
     pub cap_ptr: u64,
     /// Number of entries at `cap_ptr`. Capped at [`SPAWN_CAP_MAX`].
     pub cap_count: u64,
+    /// The child's working directory (`posix_spawn_file_actions_addchdir_np`):
+    /// pointer to the path bytes, no NUL. Read only when `cwd_len != 0`.
+    ///
+    /// Zero length — including a caller whose `struct_size` stops before
+    /// these two fields — means **inherit the parent's**, as POSIX requires
+    /// of `posix_spawn` (design-decisions.md §960). Otherwise the path must
+    /// be canonical (`pcb::is_canonical_path`); libc resolves the `chdir`
+    /// actions in order against the parent's directory and `stat`s the
+    /// result before it gets here. A non-canonical path is `InvalidArgument`,
+    /// never ignored: a child started somewhere other than where its caller
+    /// asked is running in the wrong directory without knowing it.
+    pub cwd_ptr: u64,
+    /// Length of the path at `cwd_ptr`, at most `pcb::CWD_MAX_LEN`.
+    pub cwd_len: u64,
 }
 
 /// `cap_mode`: the child inherits the parent's entire capability table.
@@ -1896,11 +1910,39 @@ fn spawn_process_inner(
         }
     }
 
-    // Apply the initial working directory (container `WorkingDir`/`--workdir`)
-    // when the caller supplied one.  Best-effort: a malformed value (not an
-    // absolute path, too long, or containing NUL) is rejected by `set_cwd` and
-    // logged — the child simply stays at the PCB default cwd `/`, never failing
-    // the spawn.
+    // Inherit the parent's working directory and file-creation mask, as POSIX
+    // requires of `posix_spawn` and as `fork` already does: both are the
+    // process's own record (design-decisions.md §960), and a child that
+    // started at `/` with umask 022 is what made a shell's `cd` and `umask`
+    // stop at the first command it ran. A kernel-spawned process
+    // (`parent == 0`) has no parent record and keeps the defaults.
+    // `options.cwd`, applied just below, still overrides the directory.
+    if options.parent != 0 {
+        if let Some(dir) = pcb::get_cwd(options.parent) {
+            // The parent's record already meets `set_cwd`'s invariants, so a
+            // refusal would mean it did not; the child keeping `/` is the safe
+            // outcome, and the spawn goes on.
+            if let Err(e) = pcb::set_cwd(pid, dir) {
+                serial_println!(
+                    "[spawn] Could not inherit parent {}'s cwd into process {}: {:?}",
+                    options.parent,
+                    pid,
+                    e,
+                );
+            }
+        }
+        if let Some(mask) = pcb::get_umask(options.parent) {
+            // Ignoring the result: `None` means the child's record is already
+            // gone, which the steps below discover for themselves.
+            let _ = pcb::set_umask(pid, mask);
+        }
+    }
+
+    // Apply the initial working directory (container `WorkingDir`/`--workdir`,
+    // or `SpawnEx2Args::cwd_ptr`) when the caller supplied one.  Best-effort: a
+    // malformed value (not an absolute path, too long, or containing NUL) is
+    // rejected by `set_cwd` and logged — the child simply keeps the inherited
+    // (or default) cwd, never failing the spawn.
     if let Some(dir) = options.cwd {
         if let Err(e) = pcb::set_cwd(pid, dir.to_vec()) {
             serial_println!(
@@ -3048,6 +3090,7 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_with_argv()?;
     test_spawn_with_argv_envp()?;
     test_spawn_with_cwd()?;
+    test_spawn_inherits_cwd_and_umask()?;
     test_spawn_with_uid_gid()?;
     test_spawn_args_one_shot()?;
     test_spawn_ex_args_layout()?;
@@ -33346,13 +33389,14 @@ fn test_ex2_copy_plan() -> KernelResult<()> {
 
     // The constants must describe the struct they gate, or every case below is
     // testing the wrong boundary.  `SPAWN_EX2_MIN_SIZE` is "version 1 plus the
-    // size field"; the struct adds exactly `cap_mode`, `cap_ptr`, `cap_count`.
-    if known != SPAWN_EX2_MIN_SIZE + 3 * 8 {
+    // size field"; the struct adds exactly `cap_mode`, `cap_ptr`, `cap_count`,
+    // `cwd_ptr` and `cwd_len`.
+    if known != SPAWN_EX2_MIN_SIZE + 5 * 8 {
         serial_println!(
             "[spawn]   FAIL: SpawnEx2Args is {} bytes but SPAWN_EX2_MIN_SIZE implies {} \
              — a field was added without revisiting the minimum",
             known,
-            SPAWN_EX2_MIN_SIZE + 3 * 8
+            SPAWN_EX2_MIN_SIZE + 5 * 8
         );
         return Err(KernelError::InternalError);
     }
@@ -34620,6 +34664,87 @@ fn test_spawn_with_cwd() -> KernelResult<()> {
 
     serial_println!("[spawn]   Spawn with initial cwd (valid + invalid): OK");
     Ok(())
+}
+
+/// Test: a spawned child starts in its parent's working directory with its
+/// parent's file-creation mask, an explicit `cwd` still wins, and a process
+/// with no parent keeps the defaults (design-decisions.md §960).
+///
+/// The parent is given a directory and a mask that are not the defaults, so
+/// the failure this exists for — every child starting at `/` with umask 022,
+/// which is what made a shell's `cd` and `umask` stop at the first command it
+/// ran — cannot pass by coincidence.
+fn test_spawn_inherits_cwd_and_umask() -> KernelResult<()> {
+    let elf_data = elf::build_test_elf_public();
+    let parent = spawn_process(&elf_data, &SpawnOptions::new("spawn-cwd-parent"))?;
+    let mut spawned = alloc::vec![(parent.pid, parent.task_id)];
+
+    let check = |what: &str, pid: ProcessId, cwd: &[u8], mask: u16| -> KernelResult<()> {
+        let got_cwd = pcb::get_cwd(pid);
+        let got_mask = pcb::get_umask(pid);
+        if got_cwd.as_deref() == Some(cwd) && got_mask == Some(mask) {
+            Ok(())
+        } else {
+            serial_println!(
+                "[spawn]   FAIL: {}: cwd {:?} umask {:?}, expected {:?} and {:#o}",
+                what,
+                got_cwd,
+                got_mask,
+                cwd,
+                mask
+            );
+            Err(KernelError::InternalError)
+        }
+    };
+
+    let result = (|| -> KernelResult<()> {
+        pcb::set_cwd(parent.pid, b"/srv/build".to_vec())?;
+        pcb::set_umask(parent.pid, 0o077).ok_or(KernelError::NoSuchProcess)?;
+
+        let child = spawn_process(
+            &elf_data,
+            &SpawnOptions::new("spawn-cwd-child").parent(parent.pid),
+        )?;
+        spawned.push((child.pid, child.task_id));
+        check("a child inherits", child.pid, b"/srv/build", 0o077)?;
+
+        let placed = spawn_process(
+            &elf_data,
+            &SpawnOptions::new("spawn-cwd-placed")
+                .parent(parent.pid)
+                .cwd(b"/elsewhere"),
+        )?;
+        spawned.push((placed.pid, placed.task_id));
+        check(
+            "an explicit cwd wins, the mask is still inherited",
+            placed.pid,
+            b"/elsewhere",
+            0o077,
+        )?;
+
+        let orphan = spawn_process(&elf_data, &SpawnOptions::new("spawn-cwd-orphan"))?;
+        spawned.push((orphan.pid, orphan.task_id));
+        check(
+            "a process with no parent keeps the defaults",
+            orphan.pid,
+            b"/",
+            0o022,
+        )
+    })();
+
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    for &(pid, task) in spawned.iter().rev() {
+        thread::on_thread_exit(task);
+        pcb::destroy(pid);
+    }
+    if result.is_ok() {
+        serial_println!(
+            "[spawn]   Spawned child inherits cwd and umask; an explicit cwd wins; no parent keeps defaults: OK"
+        );
+    }
+    result
 }
 
 /// Test: an initial `(uid, gid)` is applied to the child's credentials, and a

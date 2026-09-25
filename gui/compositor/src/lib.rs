@@ -23088,9 +23088,9 @@ mod tests {
             if let Some((x, y, got, want)) =
                 first_difference(partial.present_pixels(), full.present_pixels(), WIDTH)
             {
+                let last_ops: Vec<&SceneOp> = script.iter().rev().take(4).collect();
                 panic!(
-                    "ring of {buffers}, seed {seed}, frame {frame}: pixel ({x}, {y}) is                      {got:#010x} after a partial frame and {want:#010x} after a full one.                      Last ops: {:?}",
-                    script.iter().rev().take(4).collect::<Vec<_>>()
+                    "ring of {buffers}, seed {seed}, frame {frame}: pixel ({x}, {y}) is {got:#010x} after a partial frame and {want:#010x} after a full one. Last ops: {last_ops:?}"
                 );
             }
         }

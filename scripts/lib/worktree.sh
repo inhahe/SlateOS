@@ -536,9 +536,11 @@ slate_ensure_cmake_src() {
 # The eSpeak NG counterpart, for scripts/espeak-spike/.
 slate_ensure_espeak_src() {
     # SLATE_ESPEAK_TARBALL is this function's OUTPUT PARAMETER, read by
-    # scripts/espeak-spike/run.sh (`tar xzf "$SLATE_ESPEAK_TARBALL"`).
-    # shellcheck cannot follow a `source`, so it sees the write and never the
-    # read.
+    # scripts/espeak-spike/run.sh (`tar xzf "$SLATE_ESPEAK_TARBALL"`). The
+    # linter cannot follow a `source`, so it sees the write and never the
+    # read. (Not "shellcheck cannot…" at the start of a line: any comment
+    # that begins with that word is parsed as a directive, and that sentence
+    # is not one.)
     # shellcheck disable=SC2034
     SLATE_ESPEAK_TARBALL="$(slate_ensure_src espeak-ng "$SLATE_ESPEAK_VERSION" \
         "$SLATE_ESPEAK_SHA256" \

@@ -77999,6 +77999,18 @@ machine's own zone, read exactly as `date` reads it.
 | The NTP settings and "set the zone automatically"? | not in the file; they stay in the unreachable panel's own state | persist them | nothing obeys them: `userspace/ntpd` chooses its own polling, as the protocol requires, and nothing can detect a zone. A stored setting nothing obeys is the §856 failure. |
 | When is the file read? | when the shell starts | also on change | a change reaching a running shell needs a fifth relayed settings group, and adding one breaks `gui/remote`'s exhaustive `match` -- lane F's file. The relay is requested (`requests/c-f-a-settings-group-for-the-date-and-time.md`); nothing edits the file in a session until lane E's page exists anyway. |
 
+### Found and fixed along the way
+
+The `desktop` binary started its session with `ShellSession::start`, which by
+its own documentation does not read the appearance settings -- and nothing
+else did. So from the day the binary was written (2026-09-13) a real desktop
+started in the default theme, with no wallpaper and no widgets, and took up
+the user's settings only when something happened to send `ReloadAppearance`.
+`ShellSession::start_for_user` is `start` plus that read and a repaint; the
+binary calls it, and a session test walks through it. Clock settings load
+through the same call. `known-issues.md`
+`TD-C-THE-DESKTOP-STARTED-WITHOUT-THE-USERS-APPEARANCE` has the details.
+
 ### Not done here
 
 - The Settings page: `requests/c-e-a-date-and-time-page.md`.

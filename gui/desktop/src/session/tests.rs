@@ -4848,3 +4848,62 @@ fn a_colour_theme_that_cannot_be_used_is_said_once_per_loss() {
         assert_eq!(notices(&session).len(), 2, "losing it again is news again");
     });
 }
+
+// ---- the desktop a person signs in to ----------------------------------------
+
+/// **A session started the way the `desktop` binary starts one comes up in the
+/// user's settings.** The binary used to call `ShellSession::start`, which by
+/// its own documentation does not read the appearance settings -- so a real
+/// desktop started in the default theme, with no wallpaper and no widgets, and
+/// took up the user's choices only when something happened to send
+/// `ReloadAppearance`. `start_for_user` is the door the binary walks through
+/// now; this walks through it with an accent and a time zone on disk.
+#[test]
+fn a_session_started_for_a_user_starts_in_their_settings() {
+    settingsfile::testing::with_scratch_config("session-starts-in-settings", |_root| {
+        let mut look = appearance::AppearanceFile::load();
+        assert_ne!(
+            look.settings.accent_color,
+            AccentColor::Teal,
+            "the fixture must change something"
+        );
+        look.settings.accent_color = AccentColor::Teal;
+        look.save().expect("save");
+        let mut clock = datetimesettings::DateTimeFile::load();
+        assert!(clock.settings.set_zone(Some("Asia/Tokyo")));
+        clock.save().expect("save");
+
+        let _turn = settingsfile::testing::config_turn();
+        let (events, _desktop) = wired();
+        let session = ShellSession::start_for_user(events).expect("the harness refused a surface");
+        assert_eq!(
+            session.shell().appearance.accent_color,
+            AccentColor::Teal,
+            "the desktop started without the user's appearance settings"
+        );
+        assert_eq!(
+            session.shell().datetime.zone.as_deref(),
+            Some("Asia/Tokyo"),
+            "the desktop started without the user's clock settings"
+        );
+    });
+}
+
+/// And `start` itself still reads nothing of the kind -- the contract every
+/// test that builds a session relies on, so that none of them depends on what
+/// is in the configuration directory of the machine running it.
+#[test]
+fn a_bare_session_does_not_read_the_users_appearance_or_clock() {
+    settingsfile::testing::with_scratch_config("session-bare", |_root| {
+        let mut look = appearance::AppearanceFile::load();
+        look.settings.accent_color = AccentColor::Teal;
+        look.save().expect("save");
+        let mut clock = datetimesettings::DateTimeFile::load();
+        assert!(clock.settings.set_zone(Some("Asia/Tokyo")));
+        clock.save().expect("save");
+
+        let (session, _desktop, _turn) = session();
+        assert_ne!(session.shell().appearance.accent_color, AccentColor::Teal);
+        assert_eq!(session.shell().datetime.zone, None);
+    });
+}

@@ -418,6 +418,33 @@ impl<T: Transport> ShellSession<T> {
         Self::start_with(events, Some(users_yaml))
     }
 
+    /// Start the desktop a person signs in to: [`start`](Self::start), then
+    /// what `start` deliberately leaves alone -- the appearance settings, the
+    /// widget layout and how the time is told ([`load_appearance`]) -- and a
+    /// repaint in them.
+    ///
+    /// What the `desktop` binary calls. It exists because the binary called
+    /// `start` alone, and `start` says in so many words that it does not read
+    /// the appearance settings: so from the day the binary was written
+    /// (2026-09-13) until this, a real desktop started in the default theme,
+    /// with no wallpaper and no widgets, and took up the user's settings only
+    /// when something happened to send `ReloadAppearance`. The door existed
+    /// and nothing walked through it -- `load_appearance`'s one other caller
+    /// is the scripted demo, which is why no check for an uncalled loader
+    /// could see it.
+    ///
+    /// # Errors
+    ///
+    /// As [`start`](Self::start) and [`repaint`](Self::repaint).
+    ///
+    /// [`load_appearance`]: Self::load_appearance
+    pub fn start_for_user(events: EventLoop<T>) -> Result<Self, Error<T>> {
+        let mut session = Self::start(events)?;
+        session.load_appearance();
+        session.repaint()?;
+        Ok(session)
+    }
+
     fn start_with(mut events: EventLoop<T>, users_yaml: Option<&Path>) -> Result<Self, Error<T>> {
         let display = events.display_info()?;
         let mut shell = DesktopShell::new(display.width, display.height);

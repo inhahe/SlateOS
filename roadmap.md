@@ -1741,8 +1741,11 @@ live.
   `datetime.yaml`, modelled by `gui/datetimesettings` for the shell and the
   Settings app; with no zone chosen the clock reads the machine's, exactly as
   `date` does (`tzrules::tz_source`, one statement of glibc's `TZ` order,
-  added for the libc and `osh` to share). The shell reads it when its session
-  loads the appearance settings. Waiting on others:
+  added for the libc and `osh` to share). **Found on the way:** the `desktop`
+  binary never read the user's appearance at startup -- default theme, no
+  wallpaper, no widgets until something sent `ReloadAppearance`; it now starts
+  through `ShellSession::start_for_user`
+  (`TD-C-THE-DESKTOP-STARTED-WITHOUT-THE-USERS-APPEARANCE`). Waiting on others:
   the Settings page (lane E), the relay that makes a change reach a running
   shell (lane F), and the libc and `osh` adopting `tz_source` (lanes D, B).
 

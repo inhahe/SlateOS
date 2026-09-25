@@ -148,10 +148,14 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut session = match ShellSession::start(EventLoop::new(link)) {
+    // `start_for_user`, not `start`: the user's appearance, widgets and clock
+    // are read here or not at all -- `start` leaves them to its caller.
+    let mut session = match ShellSession::start_for_user(EventLoop::new(link)) {
         Ok(session) => session,
         Err(e) => {
-            eprintln!("desktop: the compositor refused a shell surface: {e}");
+            // A refused surface or a failed first paint: either way there is
+            // no desktop, and the error says which.
+            eprintln!("desktop: the session could not start: {e}");
             return ExitCode::from(1);
         }
     };

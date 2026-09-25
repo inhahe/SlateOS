@@ -22,6 +22,17 @@ when in truth it was never checked.  That is the first of three things that
 must be true before these four can be wired with `--may-skip` and unpinned
 from `scripts/check-gates-are-wired.py`; see `known-issues.md ->
 TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED` for the other two.
+As of 2026-09-25 a WSL that is *present* but does not run bash is declined
+too.  Every script `run` sends starts by printing `RAN_MARKER`, which is the
+positive proof bash ran it; without it -- wsl.exe's own error, which it writes
+to stdout in UTF-16 (`Catastrophic failure`, `Wsl/Service/E_UNEXPECTED`), an
+empty answer from a distro idling down, or no answer within `TIMEOUT_S` -- the
+oracle was never consulted, and it is `WslUnavailable`, a `NoBash`.  Before,
+that output was compared as bash's answer, failed, and was reported as an
+unfaithful transport: exit 1, a finding, and a refused build (2026-09-22 and
+2026-09-25; `requests/a-b-bashprobe-cannot-tell-a-quiet-wsl-from-a-broken-
+checker.md`).  One retry absorbs a distro that is only waking up.
+
 `bashprobe.py --self-test` proves all three transport outcomes on a host with
 no WSL at all, by stubbing the transport -- so the decline paths are exercised
 even on a machine (like the one this was written on) where WSL is present and
@@ -70,6 +81,42 @@ class NoBash(RuntimeError):
     """
 
 
+class WslUnavailable(NoBash):
+    """WSL is installed, but bash did not run: no answer, or wsl.exe's own error.
+
+    A `NoBash`, because it means the same thing to a caller -- the oracle was
+    never consulted -- and must be declined, not scored.  Told apart from an
+    absent WSL only so the reason says which, since they are fixed by
+    different people: an install, versus a `wsl --shutdown` by someone who
+    knows the VM holds nothing of anyone's.
+    """
+
+
+#: Printed by bash before anything else in every script `run` sends. Its
+#: presence is the positive proof that bash ran the script; see the module
+#: docstring. Letters and underscores only, so no transport fault that could
+#: mangle a probe could plausibly forge it.
+RAN_MARKER = b"__bashprobe_ran__"
+
+#: How long one `wsl.exe` call may take. A cold distro answers within a few
+#: seconds; a WSL that has stopped answering gives up on its own after about a
+#: minute (`HCS_E_CONNECTION_TIMEOUT`), which this outlasts rather than races.
+TIMEOUT_S = 120
+
+
+def describe_failure(out: bytes, err: bytes) -> str:
+    """One readable line from wsl.exe's output, for a decline's reason.
+
+    wsl.exe writes its own errors in UTF-16LE, a NUL after every ASCII
+    character; decoded as UTF-8 that is unreadable, and the reason is the
+    first line `run_checker` quotes. NULs are dropped and the rest folded to
+    printable ASCII on one line.
+    """
+    text = (err + b" " + out).replace(b"\0", b"").decode("utf-8", "replace")
+    text = "".join(ch if 32 <= ord(ch) < 127 else " " for ch in text)
+    return " ".join(text.split())[:160] or "no output"
+
+
 def _decline(reason: str) -> "None":
     """Exit 2 with a spoken reason, never a `usage:` line.
 
@@ -100,14 +147,55 @@ def run(script: bytes):
     than exiting here because `run` is stubbed out by this module's own
     self-checks, and a function that can exit the process is a poor thing to
     stub.
+
+    Raises `WslUnavailable` if bash did not demonstrably run the script:
+    see `RAN_MARKER`. The marker line is removed from the result, so callers
+    see exactly what their own script printed.
+    """
+    sent = b"printf '%s\\n' " + RAN_MARKER + b"\n" + script
+    last = None
+    # Twice: a distro idling down or starting up answers nothing once and is
+    # warm by the second call (the 2026-09-22 request's measurement). A
+    # timeout is not retried -- a WSL that hung once will hang again, and the
+    # wait is already TIMEOUT_S.
+    for _attempt in range(2):
+        try:
+            r = subprocess.run(WSL, input=sent, capture_output=True,
+                               timeout=TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            raise WslUnavailable(
+                f"`{' '.join(WSL)}` did not answer within {TIMEOUT_S}s"
+            ) from None
+        except OSError as exc:
+            # FileNotFoundError on a machine with no WSL at all; also covers
+            # the rarer permission and image-format failures, all of which
+            # mean the same thing to a caller: the oracle was not reached.
+            raise NoBash(f"{WSL[0]}: {exc}") from exc
+        head, sep, rest = r.stdout.partition(b"\n")
+        if sep and head == RAN_MARKER:
+            r.stdout = rest
+            return r
+        last = r
+    raise WslUnavailable(
+        f"`{' '.join(WSL)}` did not run bash (exit {last.returncode}: "
+        f"{describe_failure(last.stdout, last.stderr)})"
+    )
+
+
+def run_or_decline(script: bytes):
+    """`run`, for a caller already past `assert_transport_is_faithful`.
+
+    WSL can stop running bash part-way through a gate -- it did on
+    2026-09-25 -- and that is the same fact as never having reached it: a
+    decline (exit 2) with its reason, not a traceback, which `run_checker`
+    would take for a crash and refuse the build over. `run` itself keeps
+    raising, because the self-tests stub it.
     """
     try:
-        return subprocess.run(WSL, input=script, capture_output=True)
-    except OSError as exc:
-        # FileNotFoundError on a machine with no WSL at all; also covers the
-        # rarer permission and image-format failures, all of which mean the
-        # same thing to a caller: the oracle was not reached.
-        raise NoBash(f"{WSL[0]}: {exc}") from exc
+        return run(script)
+    except NoBash as exc:
+        _decline(f"bash stopped answering part-way through: {exc}. Nothing "
+                 f"from this point on was compared.")
 
 
 def assert_transport_is_faithful():
@@ -136,6 +224,10 @@ def assert_transport_is_faithful():
     probe = rb"""a\b a\\b a\\\b "x" 'y' $z `w` %s ~ {a,b}"""
     try:
         r = run(b"cat <<'PROBE_EOF'\n" + probe + b"\nPROBE_EOF\n")
+    except WslUnavailable as exc:
+        _decline(f"WSL is installed but did not run bash: {exc}. This gate "
+                 f"compares kshell's quoting against real bash, and no answer "
+                 f"came back, so nothing was compared.")
     except NoBash as exc:
         _decline(f"no bash to ask: {exc}. This gate compares kshell's quoting "
                  f"against real bash via `{' '.join(WSL)}`, and there is no "
@@ -337,7 +429,7 @@ def words(line: str, setup: str = "HOME=/root; USER=root; EMPTY=''"):
         f"{setup}\n"
         f"emit {line}\n"
     ).encode()
-    r = run(script)
+    r = run_or_decline(script)
     # The ONLY None in this function. bash was handed the line and declined
     # it; that is a fact about bash and the caller is right to record it.
     if r.returncode != 0:
@@ -638,6 +730,100 @@ def _selftest() -> int:
                 bad += 1
         finally:
             WSL = real_wsl
+
+        # ---- A WSL that is present but does not run bash (2026-09-25). ----
+        # The real run() again, against Python standing in for wsl.exe, so
+        # the marker, the retry and the timeout are exercised on a host with
+        # no WSL -- and on one whose WSL is healthy, where they never fire.
+        global TIMEOUT_S
+        real_timeout = TIMEOUT_S
+        import tempfile
+        py = [sys.executable, "-c"]
+
+        def real_run_says(fake: list, label: str, want_payload=None,
+                          want_in_reason=None) -> None:
+            """Run the real `run` with `fake` as WSL; grade what comes back."""
+            nonlocal bad
+            global WSL, run
+            WSL, run = fake, real_run
+            try:
+                r = run(b"true\n")
+            except WslUnavailable as exc:
+                if want_payload is not None:
+                    print(f"selftest FAIL: {label}: declined ({exc}), want "
+                          f"{want_payload!r}", file=sys.stderr)
+                    bad += 1
+                    return
+                check(f"{label} -> WslUnavailable", True)
+                if want_in_reason is not None:
+                    check(f"...and the reason reads {want_in_reason!r}",
+                          want_in_reason in str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001 -- any escape is a failure
+                print(f"selftest FAIL: {label}: escaped as "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                bad += 1
+                return
+            finally:
+                WSL = real_wsl
+            check(f"{label} -> {r.stdout!r}", r.stdout == want_payload)
+
+        drain = "import sys; sys.stdin.buffer.read(); "
+        marker = RAN_MARKER.decode()
+        try:
+            # wsl.exe's own error: UTF-16LE, on STDOUT, nonzero exit. This is
+            # the output that used to be compared as bash's answer.
+            real_run_says(
+                [*py, drain + "sys.stdout.buffer.write('Catastrophic failure"
+                 "\\r\\nError code: Wsl/Service/E_UNEXPECTED\\r\\n'"
+                 ".encode('utf-16-le')); sys.exit(1)"],
+                "wsl.exe's own UTF-16 error on stdout",
+                want_in_reason="Wsl/Service/E_UNEXPECTED")
+            real_run_says([*py, drain + "sys.exit(0)"],
+                          "an empty answer, twice")
+            TIMEOUT_S = 1
+            real_run_says([*py, "import time; time.sleep(30)"],
+                          "no answer within the timeout",
+                          want_in_reason="did not answer")
+            TIMEOUT_S = real_timeout
+            real_run_says(
+                [*py, drain + f"sys.stdout.buffer.write(b'{marker}\\npayload')"],
+                "a marked answer", want_payload=b"payload")
+            # The retry: unmarked once, then marked -- a distro waking up.
+            with tempfile.TemporaryDirectory() as tmp:
+                flag = tmp.replace("\\", "/") + "/woke"
+                real_run_says(
+                    [*py, drain + "import os\n"
+                     f"if not os.path.exists({flag!r}):\n"
+                     f"    open({flag!r}, 'w').close(); sys.exit(1)\n"
+                     f"sys.stdout.buffer.write(b'{marker}\\nwarm')"],
+                    "an empty first answer, then a marked one",
+                    want_payload=b"warm")
+
+            # And both production paths turn it into a decline, not a crash.
+            def _gone(_script):
+                raise WslUnavailable("stub: WSL went away")
+            said = case("a WSL that does not run bash is declined", 2, _gone)
+            check("...and the reason does not claim WSL is absent",
+                  "no WSL on this machine" not in said)
+            run = _gone
+            checks += 1
+            try:
+                run_or_decline(b"true\n")
+            except SystemExit as exc:
+                if exc.code == EXIT_COULD_NOT_LOOK:
+                    print("ok   run_or_decline turns a mid-run loss into exit 2")
+                else:
+                    print(f"selftest FAIL: run_or_decline exited {exc.code}",
+                          file=sys.stderr)
+                    bad += 1
+            else:
+                print("selftest FAIL: run_or_decline returned without bash",
+                      file=sys.stderr)
+                bad += 1
+            run = real_run
+        finally:
+            TIMEOUT_S = real_timeout
 
         # ---- score_cases: the branch three gates shipped and never ran. ----
         global words

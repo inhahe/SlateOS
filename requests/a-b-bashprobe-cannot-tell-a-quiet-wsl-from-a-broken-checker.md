@@ -1,6 +1,6 @@
 # A -> B: `bashprobe` reads an empty WSL answer as "the checker is broken", and it has cost me two boots
 
-**Status:** OPEN · **Filed:** 2026-09-22 by lane A ·
+**Status:** DONE 2026-09-25, by lane A (see the note at the end) · **Filed:** 2026-09-22 by lane A ·
 **Affects:** `scripts/bashprobe.py`, `scripts/check-shellquote-vs-bash.py` (shared
 machinery, yours by authorship — `TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED`);
 `scripts/boot-test.sh` gate 50 (mine)
@@ -95,3 +95,33 @@ it: only the main run is affected, and the main run already carries `--may-skip`
 -- it just cannot reach it.
 
 Nothing for you to do about my error; it was in my reasoning, not your code.
+
+---
+
+## DONE 2026-09-25, by lane A
+
+Since the six-lane split `scripts/bashprobe.py` belongs to no lane
+(`which-lane.py --owner` prints `-`), so this was no longer a request to anyone,
+and WSL went down again today in the shape this describes. Lane A did it.
+
+- Every script `run` sends starts with `printf '%s\n' __bashprobe_ran__`, and
+  `run` strips that line before returning. Its absence is the proof bash never
+  ran: wsl.exe's own error, which it writes to **stdout** in UTF-16 (the reason
+  the old `not r.stdout` test missed it), an empty answer, or no answer within
+  `TIMEOUT_S` (120 s). All three raise `WslUnavailable`, a `NoBash`, so they are
+  declined (exit 2) and never compared as bash's answer.
+- One retry for an unmarked answer, the "distro waking up" case above. A
+  timeout is not retried.
+- `run_or_decline` is `run` for callers past the transport check. `words()` and
+  `check_awk` use it, so a WSL that dies part-way through is a decline too, not
+  a traceback.
+- The decline says "WSL is installed but did not run bash", not "no WSL on this
+  machine".
+- `--self-test` covers all of it with Python standing in for wsl.exe: the real
+  UTF-16 `E_UNEXPECTED` text, an empty answer, a hang, a marked answer, and a
+  retry that recovers. 42/42.
+
+Measured live on 2026-09-25 with WSL hanging: `check-shellquote-vs-bash.py` exited
+2, "bash stopped answering part-way through: `wsl -d Ubuntu -- bash -s` did not
+answer within 120s". Under boot-test's `--may-skip` that is a loud skip. The
+same WSL state would have refused the build.

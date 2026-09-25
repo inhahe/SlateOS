@@ -383,41 +383,80 @@ pub unsafe fn resolve_path(path: *const u8, out: &mut [u8; PATH_MAX]) -> Option<
 /// Copies the absolute pathname of the CWD into `buf` (null-terminated).
 /// Returns `buf` on success, null on error with errno set.
 ///
+/// # A null `buf` allocates
+///
+/// `getcwd(NULL, size)` is the GNU "allocate for me" form, which glibc, musl
+/// and the BSDs all support, and which bash depends on: `builtins/common.c`
+/// asks for `getcwd (0, PATH_MAX)` and falls back to `getcwd (0, 0)`.  The
+/// result is a fresh `malloc` block that the caller must `free` — `size` bytes
+/// when `size > 0`, otherwise exactly the path's length plus its terminator.
+///
+/// This used to be refused with `EINVAL`, and bash said so on every boot
+/// (`shell-init: error retrieving current directory: getcwd: cannot access
+/// parent directories: Invalid argument`) while the rung that ran it stayed
+/// green, because it asserted bash's output and never its stderr
+/// (`requests/a-b-getcwd-rejects-the-null-buffer-form-that-bash-uses.md`).
+/// The one-branch cause was that a null `buf` and a zero `size` were rejected
+/// together, when only the pair "non-null `buf`, zero `size`" is an error.
+///
 /// # Errors
 ///
-/// - `EINVAL` — `buf` is null or `size` is 0.
-/// - `ERANGE` — `size` is too small for the CWD path plus its null
-///   terminator.
+/// - `EINVAL` — `buf` is non-null and `size` is 0 (POSIX).
+/// - `ERANGE` — `size` is non-zero and too small for the CWD path plus its
+///   null terminator, in either form.  With a null `buf` this is checked
+///   before allocating, so a refused call allocates nothing.
+/// - `ENOMEM` — `buf` is null and the allocation failed.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getcwd(buf: *mut u8, size: SizeT) -> *mut u8 {
-    if buf.is_null() || size == 0 {
-        errno::set_errno(errno::EINVAL);
-        return core::ptr::null_mut();
-    }
+    // SAFETY: Single-threaded per-process access to CWD state; the invariant on
+    // `cwd_buf_ptr` is that its first `*cwd_len_ptr()` bytes are the path.
+    let cwd = unsafe {
+        let cwd_len = (*cwd_len_ptr()).min(PATH_MAX);
+        core::slice::from_raw_parts(cwd_buf_ptr().cast::<u8>(), cwd_len)
+    };
 
-    // SAFETY: Single-threaded per-process access to CWD state.
-    let cwd_len = unsafe { *cwd_len_ptr() };
+    // Room for the path plus its terminator.  `cwd.len() <= PATH_MAX`, so this
+    // cannot overflow; `saturating_add` says so without a lint exemption.
+    let needed = cwd.len().saturating_add(1);
 
-    // Need room for the path string plus a null terminator.
-    let needed = cwd_len.wrapping_add(1);
-    if size < needed {
-        errno::set_errno(errno::ERANGE);
-        return core::ptr::null_mut();
-    }
-
-    // SAFETY: CWD buffer is valid for `cwd_len` bytes; `buf` is valid
-    // for at least `size` bytes (caller contract).
-    unsafe {
-        let cwd = core::slice::from_raw_parts(cwd_buf_ptr().cast::<u8>(), cwd_len);
-        for i in 0..cwd_len {
-            if let Some(&b) = cwd.get(i) {
-                *buf.add(i) = b;
-            }
+    let dst = if buf.is_null() {
+        let capacity = if size == 0 { needed } else { size };
+        if capacity < needed {
+            errno::set_errno(errno::ERANGE);
+            return core::ptr::null_mut();
         }
-        *buf.add(cwd_len) = 0;
+        let block = crate::malloc::malloc(capacity);
+        if block.is_null() {
+            errno::set_errno(errno::ENOMEM);
+            return core::ptr::null_mut();
+        }
+        block
+    } else {
+        if size == 0 {
+            errno::set_errno(errno::EINVAL);
+            return core::ptr::null_mut();
+        }
+        if size < needed {
+            errno::set_errno(errno::ERANGE);
+            return core::ptr::null_mut();
+        }
+        buf
+    };
+
+    // Raw writes rather than a `&mut [u8]` over `dst`: the caller's buffer may
+    // be uninitialised, and a reference to it would claim otherwise.
+    //
+    // SAFETY: `dst` is valid for at least `needed = cwd.len() + 1` bytes —
+    // either the caller's buffer (their contract: valid for `size` bytes, and
+    // `size >= needed` was checked) or the `malloc` block of
+    // `capacity >= needed` bytes just returned.  It cannot overlap `cwd`, which
+    // is this module's private storage.
+    unsafe {
+        core::ptr::copy_nonoverlapping(cwd.as_ptr(), dst, cwd.len());
+        dst.add(cwd.len()).write(0);
     }
 
-    buf
+    dst
 }
 
 /// Change the current working directory.
@@ -4423,37 +4462,21 @@ pub unsafe extern "C" fn tmpnam_r(s: *mut u8) -> *mut u8 {
 
 /// `get_current_dir_name` — get the current working directory.
 ///
-/// Like `getcwd`, but allocates the buffer with `malloc`.
-/// The caller must `free` the returned pointer.
+/// Like `getcwd`, but allocates the buffer with `malloc`; the caller must
+/// `free` the returned pointer.  It is exactly [`getcwd`]'s allocating form,
+/// `getcwd(NULL, 0)`, and delegates to it so the two cannot disagree.
 ///
-/// glibc extension.
+/// glibc extension.  glibc additionally returns `$PWD` when `stat` says it
+/// names the same inode as `.`, so that a directory reached through a symlink
+/// keeps the spelling the user typed.  That is not reproduced, for two
+/// reasons: this libc's working directory is already the path as the caller
+/// gave it (`chdir` normalises it lexically and never resolves symlinks), so
+/// the spelling is kept anyway; and the identity test glibc relies on cannot
+/// be made sound here, because `st_dev` is never filled and `st_ino` is 0 on
+/// filesystems without stable inode numbers — every stale `$PWD` would match.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn get_current_dir_name() -> *mut u8 {
-    let mut buf = [0u8; PATH_MAX];
-    let ret = getcwd(buf.as_mut_ptr(), PATH_MAX);
-    if ret.is_null() {
-        return core::ptr::null_mut();
-    }
-
-    // Find length.
-    let mut len: usize = 0;
-    // Loop guard `len < PATH_MAX == buf.len()` keeps `buf[len]` in bounds.
-    #[allow(clippy::indexing_slicing)]
-    while len < PATH_MAX && buf[len] != 0 {
-        len = len.wrapping_add(1);
-    }
-
-    // Allocate and copy.
-    let alloc_size = len.wrapping_add(1); // Include null terminator.
-    let ptr = crate::malloc::malloc(alloc_size);
-    if ptr.is_null() {
-        return core::ptr::null_mut();
-    }
-    // SAFETY: ptr is valid for alloc_size bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr, alloc_size);
-    }
-    ptr
+    getcwd(core::ptr::null_mut(), 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -8901,12 +8924,114 @@ mod tests {
     // getcwd
     // ------------------------------------------------------------------
 
+    /// Point this test thread's working directory at `path` without a
+    /// `chdir`, which needs a kernel to `stat` the target.  The CWD state is
+    /// a `process_global!`, so it is this thread's own copy.
+    fn set_test_cwd(path: &[u8]) {
+        assert!(path.len() <= PATH_MAX && path.first() == Some(&b'/'));
+        // SAFETY: the accessors return this thread's own storage, and `path`
+        // fits the `PATH_MAX` buffer (asserted above).
+        unsafe {
+            let buf = &mut *cwd_buf_ptr();
+            buf[..path.len()].copy_from_slice(path);
+            *cwd_len_ptr() = path.len();
+        }
+    }
+
+    /// Read back a NUL-terminated result and release it with `free`.
+    fn take_allocated(ptr: *mut u8) -> std::vec::Vec<u8> {
+        assert!(!ptr.is_null());
+        // SAFETY: `ptr` is a NUL-terminated block from this crate's `malloc`.
+        unsafe {
+            let len = crate::string::strlen(ptr);
+            let bytes = core::slice::from_raw_parts(ptr, len).to_vec();
+            crate::malloc::free(ptr);
+            bytes
+        }
+    }
+
+    /// The GNU allocate form bash uses first: `getcwd(NULL, PATH_MAX)`.  This
+    /// test asserted `EINVAL` until 2026-09-24, which is the bug it now pins.
     #[test]
-    fn test_getcwd_null_buf() {
+    fn test_getcwd_null_buf_with_size_allocates() {
+        set_test_cwd(b"/usr/local/lib");
         errno::set_errno(0);
-        let ret = getcwd(core::ptr::null_mut(), 100);
+        let ret = getcwd(core::ptr::null_mut(), PATH_MAX);
+        assert_eq!(take_allocated(ret), b"/usr/local/lib");
+        assert_eq!(errno::get_errno(), 0, "success must not touch errno");
+    }
+
+    /// bash's fallback, `getcwd(NULL, 0)`: allocate exactly what the path
+    /// needs.  The block must hold the path and its terminator and nothing is
+    /// assumed about its size beyond that.
+    #[test]
+    fn test_getcwd_null_buf_zero_size_allocates_exactly() {
+        set_test_cwd(b"/home/user");
+        let ret = getcwd(core::ptr::null_mut(), 0);
+        assert!(!ret.is_null());
+        // SAFETY: `ret` came from this crate's `malloc`.
+        let usable = unsafe { crate::malloc::malloc_usable_size(ret) };
+        assert!(usable >= b"/home/user".len() + 1, "usable {usable}");
+        assert_eq!(take_allocated(ret), b"/home/user");
+    }
+
+    /// `getcwd(NULL, n)` with `n` too small is `ERANGE`, as in glibc, and the
+    /// refusal must not leave a block behind — the size is checked first.
+    #[test]
+    fn test_getcwd_null_buf_too_small_is_erange_and_allocates_nothing() {
+        set_test_cwd(b"/usr/local/lib");
+        let before = crate::malloc::live_regions::count();
+        errno::set_errno(0);
+        // 14 bytes of path need 15 with the terminator.
+        let ret = getcwd(core::ptr::null_mut(), 14);
         assert!(ret.is_null());
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::ERANGE);
+        assert_eq!(
+            crate::malloc::live_regions::count(),
+            before,
+            "leaked a block"
+        );
+
+        // One byte more is enough.
+        let ret = getcwd(core::ptr::null_mut(), 15);
+        assert_eq!(take_allocated(ret), b"/usr/local/lib");
+        assert_eq!(crate::malloc::live_regions::count(), before);
+    }
+
+    /// The boundary on the caller-buffer form: exactly `len + 1` fits, `len`
+    /// does not, and a refusal leaves the buffer untouched.
+    #[test]
+    fn test_getcwd_caller_buffer_boundary() {
+        set_test_cwd(b"/tmp");
+        let mut buf = [0xAAu8; 5];
+        errno::set_errno(0);
+        assert!(getcwd(buf.as_mut_ptr(), 4).is_null());
+        assert_eq!(errno::get_errno(), errno::ERANGE);
+        assert_eq!(buf, [0xAA; 5], "a refused call must not write");
+
+        let ret = getcwd(buf.as_mut_ptr(), 5);
+        assert_eq!(ret, buf.as_mut_ptr());
+        assert_eq!(&buf, b"/tmp\0");
+    }
+
+    /// A path of the full `PATH_MAX - 1` bytes, the longest the buffer holds
+    /// with room for a terminator, round-trips through both forms.
+    #[test]
+    fn test_getcwd_longest_path() {
+        let mut path = std::vec![b'a'; PATH_MAX - 1];
+        path[0] = b'/';
+        set_test_cwd(&path);
+        assert_eq!(take_allocated(getcwd(core::ptr::null_mut(), 0)), path);
+        let mut buf = std::vec![0u8; PATH_MAX];
+        assert!(!getcwd(buf.as_mut_ptr(), PATH_MAX).is_null());
+        assert_eq!(&buf[..PATH_MAX - 1], &path[..]);
+        assert_eq!(buf[PATH_MAX - 1], 0);
+    }
+
+    #[test]
+    fn test_get_current_dir_name_matches_getcwd() {
+        set_test_cwd(b"/var/log");
+        assert_eq!(take_allocated(get_current_dir_name()), b"/var/log");
     }
 
     #[test]

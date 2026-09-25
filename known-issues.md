@@ -163909,7 +163909,7 @@ what the rungs found, rather than only the latter. Without (b) the next
 artifact added without a rung reproduces this exactly.
 
 ### [A] `getcwd(NULL, n)` returns EINVAL, so bash cannot learn its own directory -- on every boot, inside a rung that reports OK -- 2026-09-18
-**Status:** OPEN (root-caused; the fix is in `posix/**`, filed to lane B)
+**Status:** FIXED 2026-09-24 in `posix/**` (lane D, which owns `posix/` since the six-lane split): a NULL `buf` now allocates -- `size` bytes, or exactly the path's length plus one when `size == 0` -- with `ERANGE` checked before allocating, and `EINVAL` kept only for a non-NULL `buf` with `size == 0`. `get_current_dir_name` delegates to it; `__getcwd_chk` clamps to `buflen`. The tests that had pinned the bug (`test_getcwd_null_buf`, `test_getcwd_chk_null`) now pin the fix. **Still open, lane A's:** the bash rung asserting an empty stderr (option (b) in the request), which is what would have caught this on day one.
 
 **In short:** the shell prints an error at startup saying it cannot work out
 which directory it is in. It has done this on every boot for at least 20

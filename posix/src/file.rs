@@ -6787,8 +6787,19 @@ pub extern "C" fn __pread64_chk(
 }
 
 /// `__getcwd_chk` — fortified `getcwd`.
+///
+/// `buflen` is the compiler's view of how large `buf` really is.  glibc aborts
+/// when `size > buflen`; as [`__readlink_chk`] does, this clamps instead, so an
+/// overstated `size` becomes an `ERANGE` from `getcwd` rather than a write
+/// past the buffer.  A null `buf` has no object for `buflen` to describe — it
+/// is the allocating form, and `size` is passed through untouched.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __getcwd_chk(buf: *mut u8, size: SizeT, _buflen: SizeT) -> *mut u8 {
+pub extern "C" fn __getcwd_chk(buf: *mut u8, size: SizeT, buflen: SizeT) -> *mut u8 {
+    let size = if buf.is_null() {
+        size
+    } else {
+        size.min(buflen)
+    };
     crate::unistd::getcwd(buf, size)
 }
 
@@ -11514,12 +11525,32 @@ mod tests {
 
     // -- __getcwd_chk --
 
+    /// A null `buf` is `getcwd`'s allocating form, fortified or not.  This test
+    /// asserted `EINVAL` until 2026-09-24 — the bug in
+    /// `requests/a-b-getcwd-rejects-the-null-buffer-form-that-bash-uses.md`.
     #[test]
-    fn test_getcwd_chk_null() {
+    fn test_getcwd_chk_null_allocates() {
         crate::errno::set_errno(0);
         let ret = __getcwd_chk(core::ptr::null_mut(), 100, 100);
+        assert!(!ret.is_null());
+        // SAFETY: `ret` is a NUL-terminated block from this crate's `malloc`.
+        unsafe {
+            assert_eq!(*ret, b'/', "CWD should start with '/'");
+            crate::malloc::free(ret);
+        }
+    }
+
+    /// An overstated `size` is clamped to the real buffer, so the call fails
+    /// with `ERANGE` instead of writing past the end of it.
+    #[test]
+    fn test_getcwd_chk_clamps_to_buflen() {
+        // The host test thread's CWD is "/", which needs two bytes.
+        let mut buf = [0xAAu8; 4];
+        crate::errno::set_errno(0);
+        let ret = __getcwd_chk(buf.as_mut_ptr(), 4096, 1);
         assert!(ret.is_null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+        assert_eq!(buf, [0xAA; 4], "nothing may be written on refusal");
     }
 
     #[test]

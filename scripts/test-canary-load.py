@@ -499,8 +499,24 @@ with tempfile.TemporaryDirectory() as tmpdir:
         if os.path.exists(ready):
             break
         time.sleep(0.05)
-    with open(ready, encoding="utf-8") as handle:
-        pids = [int(p) for p in handle.read().split()]
+    # The controller publishes `ready` by write-then-rename, so once the name
+    # exists its content is complete -- but on Windows a file renamed into
+    # place a moment ago can still refuse to open for a few milliseconds
+    # (`PermissionError`, errno 13, while the rename's own handle or a
+    # scanner still holds it). Seen inside a boot test on 2026-09-25 with the
+    # host under load, after every earlier group had passed. Retrying that
+    # refusal is waiting for the file to settle, not hiding a failure: a file
+    # that never opens still raises, with the error it last gave.
+    open_deadline = time.monotonic() + 10
+    while True:
+        try:
+            with open(ready, encoding="utf-8") as handle:
+                pids = [int(p) for p in handle.read().split()]
+            break
+        except PermissionError:
+            if time.monotonic() > open_deadline:
+                raise
+            time.sleep(0.05)
     check("spinner pids were published", len(pids), 2)
     check_true("spinners are running", all(pid_alive(p) for p in pids),
                f"pids {pids}")

@@ -2,7 +2,9 @@
 //!
 //! Implements `malloc`, `free`, `calloc`, `realloc`, `reallocarray`,
 //! `posix_memalign`, `aligned_alloc`, `memalign`, `valloc`, `pvalloc`,
-//! `malloc_usable_size` and glibc's `__libc_*` aliases.
+//! `malloc_usable_size`, glibc's `__libc_*` aliases, and glibc's heap
+//! statistics and trimming: `mallinfo`, `mallinfo2`, `malloc_stats`,
+//! `malloc_trim`.
 //!
 //! ## The allocator is Doug Lea's
 //!
@@ -1442,10 +1444,18 @@ mod tests {
     #[test]
     fn a_large_block_is_counted_as_mapped_and_in_use() {
         const BIG: usize = 1 << 20;
+        // A block gets a mapping of its own only once the heap exists (C
+        // dlmalloc's rule): the very first allocation, however large, founds
+        // the heap's first segment instead. So found it first, whatever order
+        // the tests run in.
+        let small = malloc(16);
         let p = malloc(BIG);
-        assert!(!p.is_null());
+        assert!(!small.is_null() && !p.is_null());
         let m = mallinfo2();
-        unsafe { free(p) };
+        unsafe {
+            free(p);
+            free(small);
+        }
         assert!(m.hblkhd >= BIG, "hblkhd {} < {BIG}", m.hblkhd);
         assert!(m.uordblks >= BIG, "uordblks {} < {BIG}", m.uordblks);
     }
@@ -1475,9 +1485,23 @@ mod tests {
         );
         assert_eq!(narrow.hblkhd, i32::MAX);
         assert_eq!(narrow.uordblks, i32::MAX);
-        // And the real call agrees with its wide twin wherever nothing moved.
+        // And the real call reports a heap once there is one: before the
+        // first allocation of the process there is none, and every field is
+        // 0 -- which a test that happens to run first would see.
+        let p = malloc(16);
         let m = mallinfo();
-        assert!(m.ordblks >= 1 && m.arena > 0);
+        unsafe { free(p) };
+        assert!(m.ordblks >= 1 && m.arena > 0, "{m:?}");
+    }
+
+    /// Before the first allocation there is no heap to describe, and the
+    /// report says so with zeros rather than inventing a top chunk.
+    #[test]
+    fn an_empty_heap_reports_nothing() {
+        assert_eq!(
+            Mallinfo2::from(dlmalloc::HeapStats::default()),
+            Mallinfo2::default()
+        );
     }
 
     /// `malloc_trim` answers 0 or 1 and leaves a working heap behind.

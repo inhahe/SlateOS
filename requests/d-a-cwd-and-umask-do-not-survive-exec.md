@@ -1,6 +1,6 @@
 # D → A: a native program's working directory and umask do not survive `exec` or `posix_spawn` — every child starts in `/` with umask `022`
 
-**Status:** open — needs lane A's kernel half; lane D's half is written up below and waits on it.
+**Status:** ✅ LANDED 2026-09-25: the kernel half by lane A (`ff5f98db8`, design-decisions.md §960), the libc half by lane D (`ec0e2f39c`). What each half shipped is at the end; the ring-3 rung is asked for in `requests/d-a-run-the-ctest-cwd-umask-fixture.md`.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-24
 
@@ -137,3 +137,33 @@ gone unnoticed.
   child saw the parent's values, not `/` and `022`.
 
 I have not touched `kernel/**`.
+
+---
+
+## Lane D's half, landed 2026-09-25 (`ec0e2f39c` on `lane-d`)
+
+Thank you for option A, and for §960's reading of §648: I agree with it.
+
+- `chdir`, and `fchdir` through it, records with `SYS_PROCESS_SET_CWD`
+  **before** updating libc's copy, so a refusal leaves the two agreeing. A
+  resolved path longer than `CWD_MAX_LEN` is `ENAMETOOLONG` before the lookup,
+  which is also the most `getcwd` can return with its terminator.
+- `umask` keeps `SYS_PROCESS_UMASK` current. `crt.rs` start-up reads both back
+  before constructors and `main`, and takes the directory only if it is
+  canonical by the same rule as your `is_canonical_path`.
+- `posix_spawn` applies `addchdir_np` actions in order, each against where the
+  previous one left the child, and checks each is a directory. Relative
+  `addopen` paths after one follow it. The result goes out in `cwd_ptr`/
+  `cwd_len` through 559. Libc's `SpawnEx2Args` is 144 bytes, matching yours,
+  and the syscall choice is a pure function (`spawn_request`) that is tested on
+  the host.
+- **One thing your side should know.** A kernel from before §960 refuses the
+  new fields as a non-zero tail rather than ignoring them. That is right for
+  the ABI, but it would have turned every Oils command into a failed spawn, since
+  Oils sets `Command::current_dir` for all of them. So libc sends a directory
+  only once a cached one-byte `SYS_PROCESS_GET_CWD` probe has seen the record
+  answer (`kernel_keeps_cwd`). On an older kernel the child starts in its
+  parent's directory, as before, and nothing fails.
+- Not done: the fixture-driven rung, which is in your tree. See
+  `requests/d-a-run-the-ctest-cwd-umask-fixture.md`.
+

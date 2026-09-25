@@ -1800,7 +1800,10 @@ D's to act on once answered).
   between the fork and the exec. Wiring them into `apps/terminal` is lane E's;
   the kernel's read-time `^C` (`requests/d-a-ctrl-c-becomes-a-signal-only-when-someone-reads-the-terminal.md`)
   and the lost working directory (`TD-D-CWD-AND-UMASK-DO-NOT-SURVIVE-EXEC-OR-SPAWN`)
-  are what the terminal will meet next.
+  are what the terminal will meet next. **Both are fixed as of 2026-09-25**: the
+  `^C` by lane A (`d8385dc55`), and the directory, with the umask, by lane A's
+  kernel record (`ff5f98db8`, design-decisions.md §960) plus lane D's libc half
+  (`ec0e2f39c`). Each reaches `main` with its lane's next publish.
   The missing half was not obvious from here because it was *simulated*: a
   `ChildProcess` type whose `spawn` took a PID from a counter and whose `wait`
   returned success, with no caller outside its own tests. It is deleted, and

@@ -167681,7 +167681,7 @@ settled first is who owns keystrokes when both a session and the kernel shell
 are live, since today they simply race for each key.
 
 ### [A] `A-TWO-RUNGS-COULD-NOT-EXEC-FOR-WANT-OF-METADATA` — `ctest-coreutils-runs` (11) and `ctest-python-repl` (8) were spawned unable to stat -- 2026-09-24
-**Status:** FIXED 2026-09-24 (lane A, `kernel/src/proc/spawn.rs`); awaiting the boot that shows both green.
+**Status:** FIXED 2026-09-24 (lane A, `kernel/src/proc/spawn.rs`) — the exec now succeeds, as the addendum below shows, and `ctest-coreutils-runs` stays red on two link-level faults filed for lanes B and D.
 
 **In short:** two tests start a program that then starts another program. The
 second start failed every time, and weeks of investigation looked for the
@@ -167713,3 +167713,25 @@ same exit code 11 here (the image, the `/bin` vs `/mnt/bin` path, then this),
 and each fix was verified by the code *stopping* after the first cause — so
 the next cause looked like a failure to fix the previous one. The legend for
 11 now names all three.
+
+**Addendum, same day — the grant was the gate, and behind it are two more.**
+With METADATA granted, a direct QEMU boot exec'd `/mnt/bin/true`
+successfully, and `true` died at its first instructions: a page fault reading
+address 0x36, in `posix::tls::image`. Two faults, both in how `coreutils` is
+linked, neither in lane A's tree:
+
+1. `userspace/coreutils/linker.ld` (and `oils`, `shell`) put the ELF header
+   outside the only `PT_LOAD`, so lld leaves `__ehdr_start` at 0 and
+   `tls::image` reads `e_phentsize` from address 0x36.
+2. `coreutils`' binaries carry `EI_OSABI = GNU` (LLVM tags objects GNU when they
+   use a GNU extension; the slateos target is an LLVM linux-musl triple), so
+   the kernel ran them with the Linux syscall table, and the native
+   `SYS_SET_FS_BASE` (528) just before the fault was refused.
+
+Lane A's half of (2) landed the same day: the explicit SlateOS native marker of
+design-decisions §33 (`EI_OSABI = 255`, or a `"SlateOS"` / `NT_SLATEOS_ABI`
+note) now outranks every Linux signal in `detect_linux_abi`. Emitting the
+marker, and mapping the header, are lanes D's and B's:
+`requests/a-bd-coreutils-cannot-start-two-link-faults.md`. Measured scope:
+`true`, `false`, `echo`, `basename` have both faults; `kill`, `logger`, `cat`,
+`ls` and `python3` have neither.

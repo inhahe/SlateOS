@@ -110,9 +110,38 @@
 
 #define PASS 42
 
-/* Bounded spin for a non-blocking read.  Large enough that a working path
- * always wins, finite so a broken one fails instead of hanging. */
-#define SPIN 2000000L
+/* The bounds, and the one relationship between them that must hold.
+ *
+ * Every wait here is a count of `sched_yield()` rounds, and a working path
+ * needs a handful: each round hands the CPU to the other process, which is all
+ * either side is waiting for.  The counts are therefore a FAILURE budget, and
+ * they have to be sized for what a round costs under TCG, not for what it
+ * costs on hardware.
+ *
+ * They were 2,000,000 each until 2026-09-24, and on the boot of 2026-09-22 that
+ * was the whole problem: the kernel did not turn the ^C into a SIGINT, both
+ * processes spun, and ~1,190 s later the boot hit its overall deadline with the
+ * rung still running -- more than 0.5 ms per round with two processes trading
+ * the CPU.  A fixture that is supposed to fail with 47 ("the handler never
+ * ran") instead consumed the boot, and every rung after it went unrun.
+ *
+ *   SPIN         a read waiting on the other side.  Progress resets it, so
+ *                it bounds a stall, not a transfer.
+ *   SIGNAL_SPIN  how long the child waits for its SIGINT before exiting 78.
+ *   REAP_SPIN    how long the parent waits to reap the child after the ^C.
+ *
+ * REAP_SPIN MUST EXCEED SIGNAL_SPIN.  If the two are equal the processes
+ * finish their loops at about the same moment -- they alternate, one round
+ * each -- and whether the parent sees 78 (-> 47, the finding) or gives up
+ * first (-> 45, "never became reapable") is decided by scheduling rather than
+ * by the pty.  Four times the child's budget makes the verdict the child's,
+ * so 45 is left meaning only what it says: the child was not scheduled enough
+ * to finish a loop a quarter the length of ours.  (The boot of 2026-09-16
+ * returned 45 with equal budgets and with the scheduler reporting the child
+ * starved twice; which of the two it was, that run cannot say.) */
+#define SPIN 20000L
+#define SIGNAL_SPIN 5000L
+#define REAP_SPIN (4L * SIGNAL_SPIN)
 
 /* `sched_yield()` with no <sched.h> in the sysroot.
  *
@@ -226,7 +255,8 @@ static void on_sigint(int sig)
 static int child_verdict(pid_t kid, int alive)
 {
     int status = 0;
-    for (long i = 0; i < SPIN; i++) {
+    /* REAP_SPIN, not SPIN: the child may be inside its SIGNAL_SPIN wait. */
+    for (long i = 0; i < REAP_SPIN; i++) {
         pid_t w = waitpid(kid, &status, WNOHANG);
         if (w == kid) {
             if (!WIFEXITED(status)) {
@@ -439,7 +469,13 @@ int main(void)
         if (write(1, "R", 1) != 1) {
             _exit(72);
         }
-        for (long i = 0; i < SPIN; i++) {
+        /* Deliberately NOT a read.  The ^C must arrive as a signal while this
+         * process is busy with something else -- the state every foreground
+         * job is in while its shell waits for it -- and design-decisions.md
+         * §345 is explicit that a ^C reaches the foreground group "when it is
+         * typed rather than when somebody next calls read".  A child that
+         * read the slave here would let a read-time discipline pass. */
+        for (long i = 0; i < SIGNAL_SPIN; i++) {
             if (got_sigint) {
                 _exit(77);
             }
@@ -477,7 +513,7 @@ int main(void)
     {
         int status = 0;
         pid_t w = -1;
-        for (long i = 0; i < SPIN && w <= 0; i++) {
+        for (long i = 0; i < REAP_SPIN && w <= 0; i++) {
             w = waitpid(kid, &status, WNOHANG);
             if (w <= 0) {
                 /* WNOHANG means the child must run to exit, and it cannot

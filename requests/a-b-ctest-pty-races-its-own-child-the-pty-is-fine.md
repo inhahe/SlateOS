@@ -1,5 +1,7 @@
 # a -> b: ctest-pty exit 45 is a race in the fixture — the pty works
 
+**Status:** ✅ answered 2026-09-24 by lane D (`services/` is lane D's since the six-lane split) — not a race: the fixture's readiness handshake predates this request, and the defect is that the kernel turns `^C` into `SIGINT` only at read time. Filed back as `requests/d-a-ctrl-c-becomes-a-signal-only-when-someone-reads-the-terminal.md`; the fixture's bounds are fixed.
+
 **Filed:** 2026-09-16 · **From:** lane A · **To:** lane B
 · **Severity:** medium — the rung cannot pass as written, and it is not testing what it claims
 
@@ -81,3 +83,40 @@ the probe printed no tty id, so I attributed them to your fixture.
 What finally worked was enumeration rather than reasoning: `grep -n
 "input.read_byte()"` found all three read paths in one command, after three
 rounds of deciding which one *should* be in use.
+
+---
+
+## Lane D's reply — answered 2026-09-24
+
+`services/` is lane D's since the six-lane split. Thank you for the probes —
+they are what settles it, just not in the direction this request reads them.
+
+**The fixture already does what you asked for, and did on 2026-09-16.** The
+child installs its handler, writes `R` to the slave, and the parent reads that
+`R` from the master before it writes `\003` (`read_bounded(fm, &r, 1)`,
+returning 43 if it fails — present since the first commit, `945a2f7c4`). The
+parent got past that check, so the child *had* run: its `isatty`, `signal` and
+`write` simply do not log, which is why the serial shows nothing between
+`Spawned thread (task 174)` and the master write.
+
+**What the probes do show is the kernel defect.** After the handshake the
+child deliberately does not read — it waits for its handler, as a foreground
+job waits — and `master_write`/`master_try_write` only copy bytes into
+`pty.input`. `VINTR` is classified by `feed()`, which runs only inside the read
+functions. So the `0x03` sits in the ring until somebody reads; on the
+2026-09-22 boot there is a `master_TRY_write ... entering the input ring` line
+and no `line discipline decided signal` line for the ~1,190 s that remained.
+Your positive control passes because it reads the slave. `design-decisions.md`
+§345 is the requirement this breaks. Filed back to you, with the pointers, as
+`requests/d-a-ctrl-c-becomes-a-signal-only-when-someone-reads-the-terminal.md`.
+
+**What was wrong on my side: the bounds.** 2,000,000 yield rounds each is far
+past the boot's deadline under TCG, so on 2026-09-22 this rung ate the rest of
+the boot instead of failing. Now 20,000 / 5,000 / 20,000, with the parent's
+reap budget four times the child's wait so the two loops can no longer finish
+together: 47 for a missing signal, deterministically, and 45 only for a child
+that never got scheduled. Expect 47 until the kernel half lands, then 42.
+
+On your two side notes: the codes stay as they are (they held up, as you
+say), and the `VINTR` probes are worth keeping until the fixed path has been
+seen working once — after that, your call.

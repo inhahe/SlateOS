@@ -1230,17 +1230,61 @@ _NO_GNU: list[bool] = []
 def _gnu_userland_missing(root: str) -> bool:
     """Whether this host has no GNU utilities to compare against.
 
-    The checker exits 0 with a note in that case -- correctly; a comparison
-    that cannot be made has nothing to say -- but that makes both arms of every
-    case below agree for a reason that has nothing to do with `--head`. Rather
-    than let the group pass vacuously, it is detected and announced.
+    The checker exits 3 in that case -- run-checker.sh's "I could not run" --
+    which would make both arms of every case below agree for a reason that has
+    nothing to do with `--head`. Rather than let the group pass vacuously, it
+    is detected and announced. Read from the exit code, which is the contract,
+    not from the wording of the note, which is prose.
 
     Cached: the answer is a property of the host, and asking costs a WSL probe.
+    It can also go stale -- WSL stopped answering part-way through a run on
+    2026-09-25 -- which is why every case below checks for a decline again
+    after its own runs (`_g5_direct_declined`, `_g5_hook_declined`).
     """
     if not _NO_GNU:
         out = run_checker(root, "getopt-ambiguity-check.py", "yes")
-        _NO_GNU.append("no GNU userland available" in out.stdout + out.stderr)
+        _NO_GNU.append(out.returncode == 3)
     return _NO_GNU[0]
+
+
+def _g5_direct_declined(*procs: subprocess.CompletedProcess) -> bool:
+    """Whether any of these checker runs declined (exit 3), announced as a skip.
+
+    A decline is not either arm of a case: scored as one, it reads as the gate
+    passing a table it never compared, or failing one for want of WSL.
+    """
+    for proc in procs:
+        if proc.returncode == 3:
+            first = (proc.stdout + proc.stderr).strip().splitlines()[:1]
+            print(f"  SKIP gate 5: the checker could not reach GNU mid-run: "
+                  f"{first[0] if first else '(no reason given)'}")
+            return True
+    return False
+
+
+def _g5_hook_declined(verdict: str, blob: str) -> bool:
+    """Whether gate 5 declined inside the hook, announced as a skip.
+
+    The hook allows a push whose gate 5 could not ask GNU -- by design, and
+    loudly -- and lists the gate as skipped. Scoring that allowance as the
+    verdict under test is how this group failed on 2026-09-25: WSL went away
+    after `_gnu_userland_missing` had answered, the push was allowed, and
+    "the push is refused" failed over a gate that was never asked. The tally
+    tells the two apart. A refused push prints no tally, and needs none: a
+    decline never refuses.
+    """
+    if verdict != "allowed" or "getopt-table" not in _tally(blob)[1]:
+        return False
+    lines = blob.splitlines()
+    reason = ""
+    for i, line in enumerate(lines):
+        if "SKIPPED getopt-table" in line:
+            reason = next((l.strip() for l in lines[i + 1:i + 3]
+                           if "reason:" in l), "")
+            break
+    print(f"  SKIP gate 5 end to end: the checker could not reach GNU during "
+          f"the push{' -- ' + reason if reason else ''}")
+    return True
 
 
 def case_gate5_a_tidied_worktree_cannot_hide_a_committed_table(tmp: str) -> None:
@@ -1255,6 +1299,8 @@ def case_gate5_a_tidied_worktree_cannot_hide_a_committed_table(tmp: str) -> None
         return
     disk = run_checker(root, "getopt-ambiguity-check.py", "yes")
     rev = run_checker(root, "getopt-ambiguity-check.py", "yes", "--head", sha)
+    if _g5_direct_declined(disk, rev):
+        return
     check("gate 5: the disk sees nothing wrong", disk.returncode, 0)
     check("gate 5: ...and the commit is refused anyway", rev.returncode, 1)
     check("gate 5: ...naming the option the commit dropped",
@@ -1273,6 +1319,8 @@ def case_gate5_an_uncommitted_edit_does_not_block_a_clean_push(tmp: str) -> None
         return
     disk = run_checker(root, "getopt-ambiguity-check.py", "yes")
     rev = run_checker(root, "getopt-ambiguity-check.py", "yes", "--head", sha)
+    if _g5_direct_declined(disk, rev):
+        return
     check("gate 5: the disk refuses the uncommitted edit", disk.returncode, 1)
     check("gate 5: ...but the commit being pushed is clean", rev.returncode, 0)
 
@@ -1294,6 +1342,8 @@ def case_gate5_a_bin_absent_from_the_disk_is_still_judged(tmp: str) -> None:
         return
     disk = run_checker(root, "getopt-ambiguity-check.py", "yes")
     rev = run_checker(root, "getopt-ambiguity-check.py", "yes", "--head", sha)
+    if _g5_direct_declined(disk, rev):
+        return
     check("gate 5: a deleted bin leaves the disk with nothing to say",
           disk.returncode, 0)
     check("gate 5: ...but the revision still carries it", rev.returncode, 1)
@@ -2944,6 +2994,8 @@ def case_gate5_the_hook_refuses_a_commit_the_worktree_no_longer_shows(
         print("  SKIP gate 5 end to end: no GNU userland on this host")
         return
     verdict, blob = _push(work, marker=_G5_REFUSAL)
+    if _g5_hook_declined(verdict, blob):
+        return
     check("gate 5 end to end: the push is refused", verdict, "refused")
     check("gate 5 end to end: ...naming the option only the commit drops",
           "version" in blob, True)
@@ -2969,6 +3021,8 @@ def case_gate5_the_hook_allows_a_clean_commit_under_a_dirty_worktree(
         print("  SKIP gate 5 end to end: no GNU userland on this host")
         return
     verdict, blob = _push(work, marker=_G5_REFUSAL)
+    if _g5_hook_declined(verdict, blob):
+        return
     check("gate 5 end to end: an uncommitted table edit does not block",
           verdict, "allowed")
     check("gate 5 end to end: ...and the gate actually ran",
@@ -2994,6 +3048,8 @@ def case_gate5_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
         print("  SKIP gate 5 end to end: no GNU userland on this host")
         return
     verdict, blob = _push(work, "feature", marker=_G5_REFUSAL)
+    if _g5_hook_declined(verdict, blob):
+        return
     check("gate 5 end to end: a branch other than HEAD is still judged",
           verdict, "refused")
     check("gate 5 end to end: ...naming the option on that other branch",

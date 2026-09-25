@@ -1735,9 +1735,14 @@ fi
 # itself, whose resolution rules every table depends on, in which case it sweeps
 # all of them.
 #
-# A machine with no GNU userland (no WSL, not Linux) is a skip, not a failure:
-# the script exits 0 saying so. A check that cannot run has nothing to say, and
-# a hook that blocks pushing on such a machine is a hook that gets uninstalled.
+# A machine with no GNU userland to ask is a skip, not a failure -- a hook that
+# blocks pushing on such a machine is a hook that gets uninstalled -- but it is a
+# *loud* skip. The script exits 3 with the reason (run-checker.sh's "I could not
+# run"), and the tally below lists the gate as skipped. That covers no WSL, a WSL
+# that will not start a command, and one that stops answering mid-sweep. It
+# exited 0 until 2026-09-25, which the tally counted as a gate that ran and
+# passed: while WSL was down, every push went out unjudged and said it had been
+# judged. (Found by lane F; lane B saw the mid-sweep half.)
 #
 # Bypass: ALLOW_GETOPT_DRIFT=1 git push origin <branch>
 # ---------------------------------------------------------------------------
@@ -1815,6 +1820,9 @@ getopt_scope_for() {
 
 getopt_failed=0
 getopt_ran=0
+# Set when a run declined (exit 3: no GNU userland to ask). run_checker returns
+# 0 for that, so without this the tally would count the gate as having judged.
+getopt_declined=0
 if [ "$skip_getopt" != "1" ]; then
     # WHY IT JUDGES THE COMMIT, NOT THE WORKTREE. The scope is taken from the
     # pushed range -- `getopt_scope_for` names the bins this ref rewrites -- and
@@ -1869,6 +1877,9 @@ if [ "$skip_getopt" != "1" ]; then
             run_checker "getopt-table-$sha" "$py" "$gopt" \
                         --head "$sha" $gs_bins || getopt_failed=1
         fi
+        if [ -n "${RUN_CHECKER_SKIPPED:-}" ]; then
+            getopt_declined=1
+        fi
     done
 fi
 
@@ -1877,7 +1888,9 @@ fi
 # has been looked at -- and a tally that reports what actually ran cannot
 # disagree with what actually ran, which is the failure the guard above exists
 # to prevent, in the one place it could still occur.
-if [ "$getopt_ran" = "1" ]; then
+# A run that declined makes the whole gate "skipped": one ref judged and another
+# not is not a judged push, and "ran" is the word a reader takes on trust.
+if [ "$getopt_ran" = "1" ] && [ "$getopt_declined" = "0" ]; then
     note_gate getopt-table 0
 else
     note_gate getopt-table 1

@@ -69,8 +69,11 @@ use yamldoc::Document;
 const DEFAULT_GRID_WIDTH: u32 = 80;
 /// Default grid cell height in pixels.
 const DEFAULT_GRID_HEIGHT: u32 = 90;
-/// Icon glyph size (large character).
-const ICON_GLYPH_SIZE: f32 = 32.0;
+/// The icon size the layer starts at, in pixels: the smallest the icon-size
+/// setting offers, and the size every icon was drawn at before the layer read
+/// that setting. [`cell_for_glyph`] of this is exactly the default grid, so a
+/// layer nobody resizes lays out as it always did.
+const DEFAULT_GLYPH_PX: u32 = 32;
 /// Label font size.
 const LABEL_FONT_SIZE: f32 = 11.0;
 /// Maximum label width (for centering and truncation).
@@ -83,6 +86,33 @@ const DRAG_THRESHOLD_SQ: f32 = 25.0;
 const ICON_TOP_PADDING: f32 = 8.0;
 /// Padding from screen edges.
 const EDGE_PADDING: u32 = 8;
+
+/// The grid cell that holds a `px`-pixel icon and its two-line label.
+///
+/// Derived rather than tabulated, so that every size the setting offers -- and
+/// any it offers later -- gets a cell that fits it: a 96-pixel glyph in the
+/// 80-pixel default cell would overlap its neighbours. At the default 32 pixels
+/// this is exactly [`DEFAULT_GRID_WIDTH`] by [`DEFAULT_GRID_HEIGHT`]; above it,
+/// width grows one-for-one with the glyph (the label under it gets the room
+/// too) and height grows with the glyph alone, since the label is still two
+/// lines of the same text.
+#[must_use]
+pub fn cell_for_glyph(px: u32) -> (u32, u32) {
+    let grow = px.saturating_sub(DEFAULT_GLYPH_PX);
+    (
+        DEFAULT_GRID_WIDTH.saturating_add(grow),
+        DEFAULT_GRID_HEIGHT.saturating_add(grow),
+    )
+}
+
+/// A pixel count as a drawing coordinate.
+///
+/// One place for the cast, so its lint is argued once: an icon or a cell is at
+/// most a few hundred pixels, far inside `f32`'s exact-integer range.
+#[allow(clippy::cast_precision_loss)]
+fn px_f32(px: u32) -> f32 {
+    px as f32
+}
 
 // ============================================================================
 // Types
@@ -385,6 +415,10 @@ pub struct DesktopIconLayer {
     screen_height: u32,
     /// Taskbar height (icons must not overlap the taskbar).
     taskbar_height: u32,
+    /// How tall an icon is drawn, in pixels -- the user's icon-size setting.
+    /// Private, with [`set_icon_size`](Self::set_icon_size), because the grid
+    /// is derived from it and the two must change together.
+    glyph_px: u32,
 }
 
 impl DesktopIconLayer {
@@ -399,7 +433,86 @@ impl DesktopIconLayer {
             screen_width,
             screen_height,
             taskbar_height,
+            glyph_px: DEFAULT_GLYPH_PX,
         }
+    }
+
+    /// How tall icons are drawn, in pixels.
+    #[must_use]
+    pub fn icon_px(&self) -> u32 {
+        self.glyph_px
+    }
+
+    /// Draw icons `px` pixels tall -- the user's icon-size setting.
+    ///
+    /// The grid grows or shrinks with them, and every icon moves *with its
+    /// cell*: an icon in the third column, second row stays in the third
+    /// column, second row, at the new pitch. That keeps the user's arrangement,
+    /// which is the one thing a size change must not scramble. Under
+    /// [`ArrangementMode::AutoArrange`] the arrangement is derived rather than
+    /// kept, so it is simply derived again.
+    ///
+    /// An icon whose cell no longer fits on the desktop -- larger cells, fewer
+    /// of them -- moves to the next free cell rather than off the edge of the
+    /// screen, where it would still exist and could not be seen or clicked.
+    pub fn set_icon_size(&mut self, px: u32) {
+        let px = px.max(1);
+        if px == self.glyph_px {
+            return;
+        }
+        let old = self.grid;
+        self.glyph_px = px;
+        let (w, h) = cell_for_glyph(px);
+        self.grid = GridConfig::new(w, h);
+        if self.arrangement == ArrangementMode::AutoArrange {
+            self.auto_arrange();
+            return;
+        }
+        let (cols, rows) = self.grid_extent();
+        let cols = i32::try_from(cols).unwrap_or(i32::MAX);
+        let rows = i32::try_from(rows).unwrap_or(i32::MAX);
+        let mut homeless = Vec::new();
+        for index in 0..self.icons.len() {
+            let Some(icon) = self.icons.get(index) else {
+                break;
+            };
+            let (col, row) = old.to_cell(icon.x, icon.y);
+            // Where in its old cell the icon sat -- the edge padding an
+            // arranged icon carries -- so it sits the same way in the new one.
+            let (ox, oy) = old.from_cell(col, row);
+            let (dx, dy) = (icon.x.saturating_sub(ox), icon.y.saturating_sub(oy));
+            if (0..cols).contains(&col) && (0..rows).contains(&row) {
+                let (nx, ny) = self.grid.from_cell(col, row);
+                if let Some(icon) = self.icons.get_mut(index) {
+                    icon.x = nx.saturating_add(dx);
+                    icon.y = ny.saturating_add(dy);
+                }
+            } else {
+                homeless.push(index);
+            }
+        }
+        // Placed one at a time, after the icons that fit, so each takes a cell
+        // the others have not -- `next_free_cell` reads the positions as they
+        // stand.
+        for index in homeless {
+            // Parked out of the way first, so the icon's own stale position
+            // cannot make `next_free_cell` think a cell is taken.
+            if let Some(icon) = self.icons.get_mut(index) {
+                icon.x = i32::MIN;
+                icon.y = i32::MIN;
+            }
+            let (x, y) = self.next_free_cell();
+            if let Some(icon) = self.icons.get_mut(index) {
+                icon.x = x;
+                icon.y = y;
+            }
+        }
+    }
+
+    /// How wide an icon's label may be: its cell, less the same margin the
+    /// default cell leaves.
+    fn label_width(&self) -> f32 {
+        px_f32(self.grid.cell_width()) - (px_f32(DEFAULT_GRID_WIDTH) - LABEL_MAX_WIDTH)
     }
 
     /// Usable area height (excluding taskbar).
@@ -983,7 +1096,8 @@ impl DesktopIconLayer {
                     });
 
                     // Ghost glyph.
-                    let glyph_x = ghost_x + (self.grid.cell_width() as f32 - ICON_GLYPH_SIZE) / 2.0;
+                    let glyph = px_f32(self.glyph_px);
+                    let glyph_x = ghost_x + (self.grid.cell_width() as f32 - glyph) / 2.0;
                     let glyph_y = ghost_y + ICON_TOP_PADDING;
                     cmds.push(RenderCommand::Text {
                         x: glyph_x,
@@ -993,7 +1107,7 @@ impl DesktopIconLayer {
                             let c = p.ink(icon.icon_type.color(p));
                             Color::rgba(c.r, c.g, c.b, 120)
                         },
-                        font_size: ICON_GLYPH_SIZE,
+                        font_size: glyph,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -1083,7 +1197,8 @@ impl DesktopIconLayer {
         }
 
         // Icon glyph (centered horizontally within the cell).
-        let glyph_x = ix + (cw - ICON_GLYPH_SIZE) / 2.0;
+        let glyph = px_f32(self.glyph_px);
+        let glyph_x = ix + (cw - glyph) / 2.0;
         let glyph_y = iy + ICON_TOP_PADDING;
 
         cmds.push(RenderCommand::Text {
@@ -1091,34 +1206,43 @@ impl DesktopIconLayer {
             y: glyph_y,
             text: icon.icon_type.glyph().to_string(),
             color: p.ink(icon.icon_type.color(p)),
-            font_size: ICON_GLYPH_SIZE,
+            font_size: glyph,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
 
         // Label text below icon (centered, 2-line max with ellipsis).
-        let label_y = iy + ICON_TOP_PADDING + ICON_GLYPH_SIZE + 6.0;
-        let lines = wrap_label(&icon.label, LABEL_MAX_WIDTH, LABEL_MAX_LINES);
+        //
+        // Centred for real since 2026-09-24: the comment said so for as long
+        // as it has existed, and every line was drawn from the cell's left
+        // edge -- invisible while one width fitted every cell, and plain once
+        // the icon size started to change the cell.
+        let label_w = self.label_width();
+        let label_y = iy + ICON_TOP_PADDING + glyph + 6.0;
+        let lines = wrap_label(&icon.label, label_w, LABEL_MAX_LINES);
 
         for (line_idx, line) in lines.iter().enumerate() {
             let ly = label_y + line_idx as f32 * (LABEL_FONT_SIZE + 2.0);
+            let line_w =
+                guitk::text::measure(line, LABEL_FONT_SIZE, FontWeightHint::Regular).min(label_w);
+            let lx = ix + (cw - line_w) / 2.0;
 
             // Shadow for readability against varied backgrounds.
             cmds.push(RenderCommand::Text {
-                x: ix + 1.0,
+                x: lx + 1.0,
                 y: ly + 1.0,
                 text: line.clone(),
                 color: p.text_shadow(),
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(LABEL_MAX_WIDTH),
+                max_width: Some(label_w),
                 overflow: TextOverflow::Ellipsis,
             });
 
             // Actual label text.
             cmds.push(RenderCommand::Text {
-                x: ix,
+                x: lx,
                 y: ly,
                 text: line.clone(),
                 color: if icon.selected {
@@ -1132,7 +1256,7 @@ impl DesktopIconLayer {
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(LABEL_MAX_WIDTH),
+                max_width: Some(label_w),
                 overflow: TextOverflow::Ellipsis,
             });
         }
@@ -2432,6 +2556,142 @@ mod tests {
                     "icons",
                 );
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // The icon-size setting
+    // ------------------------------------------------------------------
+
+    fn custom(label: &str) -> IconAction {
+        IconAction::Custom(label.to_string())
+    }
+
+    #[test]
+    fn the_default_icon_size_lays_out_exactly_as_before() {
+        assert_eq!(
+            cell_for_glyph(DEFAULT_GLYPH_PX),
+            (DEFAULT_GRID_WIDTH, DEFAULT_GRID_HEIGHT)
+        );
+        let layer = DesktopIconLayer::new(1920, 1080, 40);
+        assert_eq!(layer.icon_px(), DEFAULT_GLYPH_PX);
+        assert_eq!(layer.grid, GridConfig::default());
+    }
+
+    #[test]
+    fn every_size_the_setting_offers_gets_a_cell_it_fits() {
+        for size in [
+            appearance::IconSize::Small,
+            appearance::IconSize::Medium,
+            appearance::IconSize::Large,
+            appearance::IconSize::ExtraLarge,
+        ] {
+            let px = size.pixels();
+            let (w, h) = cell_for_glyph(px);
+            assert!(w >= px && h > px, "{px}px in a {w}x{h} cell");
+        }
+    }
+
+    #[test]
+    fn a_size_change_keeps_every_icon_in_its_row_and_column() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let grid = layer.grid;
+        let (ax, ay) = grid.from_cell(2, 1);
+        let (bx, by) = grid.from_cell(0, 3);
+        let a = layer.add_icon("a", IconType::File, custom("a"), ax, ay);
+        let b = layer.add_icon("b", IconType::Folder, custom("b"), bx, by);
+
+        layer.set_icon_size(64);
+        assert_eq!(layer.icon_px(), 64);
+        let (w, h) = cell_for_glyph(64);
+        assert_eq!(layer.grid, GridConfig::new(w, h));
+        let at = |id| {
+            let icon = layer.icons.iter().find(|i| i.id == id).unwrap();
+            layer.grid.to_cell(icon.x, icon.y)
+        };
+        assert_eq!(at(a), (2, 1), "same column and row, at the new pitch");
+        assert_eq!(at(b), (0, 3));
+
+        // And back again: nothing drifted on the way.
+        layer.set_icon_size(DEFAULT_GLYPH_PX);
+        let icon = layer.icons.iter().find(|i| i.id == a).unwrap();
+        assert_eq!((icon.x, icon.y), (ax, ay));
+    }
+
+    #[test]
+    fn an_icon_whose_cell_no_longer_fits_moves_to_a_free_one() {
+        // A short desktop: at 32px there are rows below what fits at 96px.
+        let mut layer = DesktopIconLayer::new(800, 600, 40);
+        let (x, y) = layer.grid.from_cell(0, 5);
+        let low = layer.add_icon("low", IconType::File, custom("low"), x, y);
+        layer.set_icon_size(96);
+        let (cols, rows) = layer.grid_extent();
+        let icon = layer.icons.iter().find(|i| i.id == low).unwrap();
+        let (col, row) = layer.grid.to_cell(icon.x, icon.y);
+        assert!(
+            col < i32::try_from(cols).unwrap() && row < i32::try_from(rows).unwrap(),
+            "left at ({col}, {row}) on a {cols}x{rows} desktop"
+        );
+    }
+
+    #[test]
+    fn the_glyph_is_drawn_at_the_chosen_size_and_the_label_is_centred() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        let (x, y) = layer.grid.from_cell(0, 0);
+        layer.add_icon("Readme", IconType::File, custom("r"), x, y);
+        layer.set_icon_size(48);
+        let cmds = layer.render(&Palette::for_mode(false));
+        let glyph_sizes: Vec<f32> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { font_size, .. } if *font_size > LABEL_FONT_SIZE => {
+                    Some(*font_size)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(glyph_sizes, [48.0], "one glyph, at the setting's size");
+
+        // The last one: each line is drawn twice, its shadow first, one
+        // pixel right and down -- and the shadow is not what is centred.
+        let label_x = cmds
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, x, .. } if text == "Readme" => Some(*x),
+                _ => None,
+            })
+            .expect("the label is drawn");
+        let icon = &layer.icons[0];
+        let cell_w = px_f32(layer.grid.cell_width());
+        let line_w = guitk::text::measure("Readme", LABEL_FONT_SIZE, FontWeightHint::Regular);
+        let left = label_x - px_f32(u32::try_from(icon.x).unwrap());
+        let right = cell_w - (left + line_w);
+        assert!(
+            (left - right).abs() <= 1.0,
+            "centred: {left} on the left, {right} on the right"
+        );
+    }
+
+    #[test]
+    fn auto_arranged_icons_are_re_arranged_at_the_new_pitch() {
+        let mut layer = DesktopIconLayer::new(1920, 1080, 40);
+        layer.arrangement = ArrangementMode::AutoArrange;
+        for name in ["c", "a", "b"] {
+            let (x, y) = layer.next_free_cell();
+            layer.add_icon(name, IconType::File, custom(name), x, y);
+        }
+        layer.auto_arrange();
+        layer.set_icon_size(96);
+        let labels: Vec<&str> = layer.icons.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["a", "b", "c"]);
+        for (row, icon) in layer.icons.iter().enumerate() {
+            assert_eq!(
+                layer.grid.to_cell(icon.x, icon.y),
+                (0, i32::try_from(row).unwrap()),
+                "{} is not in its arranged cell",
+                icon.label
+            );
         }
     }
 }

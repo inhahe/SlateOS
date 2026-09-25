@@ -23742,6 +23742,16 @@ wire; expect blocked more often than not.**
 
 ## TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER
 
+**Status:** OPEN for the two cursor rows only (blocked on C-Q18: nothing draws
+a pointer). `icon_size` is FIXED 2026-09-24: the correction below -- "blocked
+on C-Q17" because the icon layer was never constructed -- stopped being true
+on 2026-09-14 when the shell began constructing and drawing it, and nobody
+came back to this row. The layer now takes the size from `set_appearance`,
+grows its grid to fit, keeps every icon in its row and column across a
+change, and moves one that no longer fits to a free cell rather than off the
+screen (`DesktopIconLayer::set_icon_size`). Its labels are centred, too: the
+comment always said so and the code drew them from the cell's left edge.
+
 **In short:** Open Settings, choose "Slow" animations, and the setting is
 saved, survives a restart, and changes nothing — because nothing in the system
 reads it. The same is true of desktop icon size and cursor scheme.
@@ -23780,7 +23790,7 @@ read by the panel that edits it is not a consumer.
 | `scaling_percent` | `guitk::scaling` via `set_appearance` | **works** |
 | `fonts` | — | out of scope here; see §400 and C-Q1 |
 | ~~`animation_speed`~~ | `AnimationManager`, via `ShellSession` | **fixed 2026-09-06** |
-| **`icon_size`** | **none** | **dead** |
+| ~~`icon_size`~~ | `DesktopIconLayer::set_icon_size`, via `set_appearance` | **fixed 2026-09-24** |
 | **`cursor_scheme`** | **none** | **dead** |
 | **`cursor_size`** | **none** — and three rival copies | **dead, four ways** |
 

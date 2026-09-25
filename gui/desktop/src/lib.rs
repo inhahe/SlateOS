@@ -1723,6 +1723,12 @@ impl DesktopShell {
             hotkeys: hotkeys::HotkeyRegistry::defaults(),
         };
         shell.sync_snap_area();
+        // The icon size the settings start with, not the layer's own starting
+        // size: a shell that has not loaded the user's appearance yet should
+        // still draw what the default settings say.
+        shell
+            .icons
+            .set_icon_size(shell.appearance.icon_size.pixels());
         shell
     }
 
@@ -1781,6 +1787,12 @@ impl DesktopShell {
         // as `sync_animation_speed`, and for the same reason -- a second door
         // the caller has to remember is a door somebody forgets.
         self.run_dialog.set_caret_width(appearance.caret_width());
+        // The icon size goes to the layer that draws icons, for the same
+        // reason: it was a setting with a working control and no reader --
+        // `known-issues.md` TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-
+        // AND-NO-READER -- chosen, saved, restored at login, and drawn by
+        // nothing.
+        self.icons.set_icon_size(appearance.icon_size.pixels());
         guitk::scaling::set_global_scale(appearance.scale_factor());
         self.appearance = appearance;
     }
@@ -7645,6 +7657,32 @@ impl DesktopShell {
 mod theme_tests {
     use super::*;
     use appearance::{AccentColor, ThemeMode};
+
+    /// **The icon-size setting reaches the icons.**
+    ///
+    /// It had a working control, was saved and restored at login, and nothing
+    /// drew icons at any size but 32 pixels -- `known-issues.md`
+    /// TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER.
+    #[test]
+    fn the_icon_size_setting_reaches_the_desktop_icons() {
+        let mut shell = DesktopShell::new(1920, 1080);
+        assert_eq!(
+            shell.icons.icon_px(),
+            AppearanceSettings::default().icon_size.pixels(),
+            "a new shell draws what the default settings say"
+        );
+        for size in [
+            appearance::IconSize::Small,
+            appearance::IconSize::Large,
+            appearance::IconSize::ExtraLarge,
+        ] {
+            shell.set_appearance(AppearanceSettings {
+                icon_size: size,
+                ..AppearanceSettings::default()
+            });
+            assert_eq!(shell.icons.icon_px(), size.pixels(), "{size:?}");
+        }
+    }
 
     /// Contrast ratio per WCAG 2.x, for asserting that text is readable rather
     /// than merely "a different colour".

@@ -99,6 +99,12 @@ MUTATIONS = [
         ["closing_the_window_with_unsaved_work_asks_first"],
     ),
     (
+        "the question is drawn into a window the loop has closed",
+        "                } else {\n                    Response::KeepOpen\n                }",
+        "                } else {\n                    Response::Redraw\n                }",
+        ["closing_the_window_with_unsaved_work_asks_first"],
+    ),
+    (
         "closing with auto-save on saves nothing on the way out",
         "        if self.autosave_enabled {\n            self.save_every_titled_document();\n        }\n",
         "",

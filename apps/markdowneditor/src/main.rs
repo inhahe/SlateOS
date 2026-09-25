@@ -6517,10 +6517,7 @@ impl App {
     pub fn request_quit(&mut self) -> bool {
         // With auto-save on, every document that has a file is saved first,
         // without asking: auto-save is the user having said "save for me",
-        // and closing the window is the last chance to. It also matters for
-        // as long as `oswindow` closes the window whatever this answers
-        // (`requests/e-f-let-an-application-decline-a-close-so-it-can-ask-about-unsaved-work.md`):
-        // until then, this is the only part of the close that is sure to run.
+        // and closing the window is the last chance to.
         if self.autosave_enabled {
             self.save_every_titled_document();
         }
@@ -7914,12 +7911,15 @@ impl oswindow::app::App for App {
         }
 
         let response = match event {
-            // Not `Exit` outright any more: see `App::request_quit`.
+            // Not `Exit` outright any more: see `App::request_quit`. And
+            // `KeepOpen`, not `Redraw`, while it asks: any other answer to a
+            // close request still closes the window, so the question would be
+            // drawn into a window already gone.
             GEvent::CloseRequested => {
                 if self.request_quit() {
                     Response::Exit
                 } else {
-                    Response::Redraw
+                    Response::KeepOpen
                 }
             }
             GEvent::Resize { width, height } => {
@@ -11532,10 +11532,10 @@ mod tests {
         app.autosave_enabled = false;
         app.open_file(&path).unwrap();
         app.active_document_mut().insert_char('!');
-        assert_ne!(
+        assert_eq!(
             app.on_event(&close),
-            Response::Exit,
-            "unsaved work was thrown away"
+            Response::KeepOpen,
+            "unsaved work was thrown away: any answer but KeepOpen closes the window"
         );
         assert_eq!(app.close_prompt, Some(CloseScope::Window));
         assert_ne!(
@@ -11567,9 +11567,7 @@ mod tests {
 
     /// **With auto-save on, closing the window saves what has a file** -- and
     /// asks only about what does not. Auto-save is the user having said "save
-    /// for me", and the close is the last chance to; it is also the one part
-    /// of a close that runs while `oswindow` closes the window whatever the
-    /// application answers.
+    /// for me", and the close is the last chance to.
     #[test]
     fn closing_with_auto_save_on_saves_titled_documents_and_asks_about_the_rest() {
         let (_scratch, path) = temp_path("md_quit_autosave");

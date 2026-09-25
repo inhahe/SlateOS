@@ -1,7 +1,11 @@
 # E → F: let an application decline a close, so it can ask about unsaved work — and synthesise double-clicks
 
 **From:** lane E · **To:** lane F · **Filed:** 2026-09-25
-**Status:** open — two asks in `gui/window`; the first matters most
+**Status:** ANSWERED 2026-09-25 — both asks, by lane F: `Response::KeepOpen`,
+and `oswindow` synthesises `MouseEventKind::DoubleClick`. Lane E: the markdown
+editor answers `KeepOpen` while it asks, and the text editor asks at all (a
+tab's close and the window's) as of 2026-09-25; the hex editor and the JSON
+viewer follow.
 
 ## In short
 

@@ -1571,6 +1571,31 @@ pub enum DialogPurpose {
     Open,
     /// Write the active document to the chosen path.
     SaveAs,
+    /// Write tab `usize` to the chosen path and then close it: the Save answer
+    /// to closing a document that has never been saved.
+    SaveThenClose(usize),
+    /// Write tab `usize` to the chosen path and carry on closing the window.
+    SaveThenQuit(usize),
+}
+
+/// What a pending close would close.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseScope {
+    /// One document's tab.
+    Tab(usize),
+    /// The whole window, with every document in it.
+    Window,
+}
+
+/// The answers to "this has unsaved changes".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseChoice {
+    /// Save, then close if the save worked.
+    Save,
+    /// Close without saving.
+    Discard,
+    /// Do not close.
+    Cancel,
 }
 
 /// Height of the tab strip along the top, in pixels.
@@ -1685,6 +1710,16 @@ pub struct EditorState {
     /// event, so a greyed Undo is greyed because there is nothing to undo now
     /// and not because there was nothing to undo a minute ago.
     pub menu_bar: menubar::MenuBar,
+    /// "Unsaved changes -- save them?", while it is being asked.
+    ///
+    /// Closing a modified tab was refused with a status message that offered
+    /// Ctrl+Shift+W to discard -- a key nothing bound -- and closing the window
+    /// went at once whatever it held, every unsaved change in every tab with
+    /// it. Both ask now. Modal, like the other two questions.
+    pub close_prompt: Option<CloseScope>,
+    /// Set when the window may close: the question was answered, or there
+    /// was nothing to ask. The next response is `Exit`.
+    pub quit: bool,
 }
 
 /// A pending prompt shown when the active document's file changed on disk.
@@ -1742,6 +1777,8 @@ impl EditorState {
             dialog: None,
             dialog_purpose: DialogPurpose::Open,
             menu_bar: menubar::MenuBar::new(Vec::new()),
+            close_prompt: None,
+            quit: false,
         };
         // The opening frame is drawn before any event arrives, so the bar's
         // top-level labels have to be in place already or the first thing the
@@ -1776,14 +1813,200 @@ impl EditorState {
         Ok(())
     }
 
-    /// Close the active tab.
+    /// Close the active tab if it holds nothing unsaved. `false` if it does
+    /// and so is still open.
     pub fn close_tab(&mut self) -> bool {
         if self.tabs.active().modified {
-            // Would need to prompt user — return false to indicate unsaved
             return false;
         }
         self.tabs.close_active();
         true
+    }
+
+    /// Close tab `idx`, or ask first if it has unsaved changes.
+    pub fn request_close_tab(&mut self, idx: usize) {
+        let modified = self.tabs.get(idx).map(|d| d.modified);
+        match modified {
+            Some(true) => {
+                self.tabs.set_active(idx);
+                self.close_prompt = Some(CloseScope::Tab(idx));
+            }
+            Some(false) => {
+                self.tabs.set_active(idx);
+                self.tabs.close_active();
+            }
+            None => {}
+        }
+    }
+
+    /// The window has been asked to close. Returns whether it may go now; if
+    /// not, the question is up.
+    pub fn request_quit(&mut self) -> bool {
+        if self.tabs.iter().any(|d| d.modified) {
+            self.close_prompt = Some(CloseScope::Window);
+            false
+        } else {
+            self.quit = true;
+            true
+        }
+    }
+
+    /// Answer the pending close.
+    pub fn answer_close(&mut self, choice: CloseChoice) {
+        let Some(scope) = self.close_prompt.take() else {
+            return;
+        };
+        match (scope, choice) {
+            (_, CloseChoice::Cancel) => {}
+            (CloseScope::Tab(idx), CloseChoice::Discard) => {
+                self.tabs.set_active(idx);
+                self.tabs.close_active();
+            }
+            (CloseScope::Tab(idx), CloseChoice::Save) => self.save_then_close(idx),
+            (CloseScope::Window, CloseChoice::Discard) => self.quit = true,
+            (CloseScope::Window, CloseChoice::Save) => self.continue_quitting(),
+        }
+    }
+
+    /// Save tab `idx` and close it -- through the dialog first if it has never
+    /// been saved. A save that fails leaves the tab open and says why.
+    fn save_then_close(&mut self, idx: usize) {
+        self.tabs.set_active(idx);
+        if self.active_document().path.is_none() {
+            self.ask_where_to_save(DialogPurpose::SaveThenClose(idx));
+            return;
+        }
+        match self.active_document_mut().save() {
+            Ok(()) => {
+                self.tabs.close_active();
+            }
+            Err(e) => self.status = Some(format!("Save failed, so it is still open: {e}")),
+        }
+    }
+
+    /// Carry on closing the window: save everything that has somewhere to go,
+    /// ask where to put the first thing that does not, and quit once nothing
+    /// is left unsaved.
+    ///
+    /// Stops at the first failure. Quitting past a document whose save just
+    /// failed is exactly the loss this exists to prevent.
+    pub(crate) fn continue_quitting(&mut self) {
+        let mut failed = None;
+        for doc in self.tabs.iter_mut() {
+            if doc.modified
+                && doc.path.is_some()
+                && let Err(e) = doc.save()
+            {
+                failed = Some(format!(
+                    "Could not save {}: {e}, so the window stays open",
+                    doc.name
+                ));
+                break;
+            }
+        }
+        if let Some(why) = failed {
+            self.status = Some(why);
+            return;
+        }
+        let unsaved = self.tabs.iter().position(|d| d.modified);
+        match unsaved {
+            Some(idx) => {
+                self.tabs.set_active(idx);
+                self.ask_where_to_save(DialogPurpose::SaveThenQuit(idx));
+            }
+            None => self.quit = true,
+        }
+    }
+
+    /// The Save As dialog, for a document that has never been saved and must
+    /// be before it can close.
+    fn ask_where_to_save(&mut self, purpose: DialogPurpose) {
+        self.open_dialog(purpose);
+        self.status = Some(format!(
+            "Choose where to save {} before it closes",
+            self.active_document().name
+        ));
+    }
+
+    /// Where the close question's three answers are drawn, and so where a
+    /// click answers them: one function for both, so the two cannot disagree.
+    pub fn close_prompt_buttons(&self) -> [(CloseChoice, f32, f32, f32, f32); 3] {
+        let (x, y, w, h) = self.close_prompt_card();
+        let bw = (w - 48.0) / 3.0;
+        let by = y + h - 44.0;
+        [
+            (CloseChoice::Save, x + 12.0, by, bw, 30.0),
+            (CloseChoice::Discard, x + 24.0 + bw, by, bw, 30.0),
+            (CloseChoice::Cancel, x + 36.0 + bw * 2.0, by, bw, 30.0),
+        ]
+    }
+
+    /// The close question's card: centred, as the other questions are.
+    fn close_prompt_card(&self) -> (f32, f32, f32, f32) {
+        let w = self.window_width as f32;
+        let h = self.window_height as f32;
+        let dw = 480.0_f32.min(w - 40.0).max(0.0);
+        let dh = 170.0_f32;
+        ((w - dw) / 2.0, (h - dh) / 2.0, dw, dh)
+    }
+
+    /// The close question, over everything but the file dialog it can lead to.
+    fn render_close_prompt(&self, tree: &mut RenderTree, scope: CloseScope) {
+        let w = self.window_width as f32;
+        let h = self.window_height as f32;
+        tree.fill_rect(0.0, 0.0, w, h, Color::rgba(0x11, 0x11, 0x1B, 0xB0));
+        let (dx, dy, dw, dh) = self.close_prompt_card();
+        tree.fill_rect(dx, dy, dw, dh, self.palette.base);
+        tree.fill_rect(dx, dy, dw, 32.0, self.palette.surface0);
+        tree.text(
+            dx + 12.0,
+            dy + 9.0,
+            "Unsaved changes",
+            self.palette.yellow,
+            13.0,
+        );
+        let body = match scope {
+            CloseScope::Tab(idx) => {
+                let name = self
+                    .tabs
+                    .get(idx)
+                    .map_or("This document", |d| d.name.as_str());
+                format!("\"{name}\" has changes that are not saved.")
+            }
+            CloseScope::Window => {
+                let names: Vec<&str> = self
+                    .tabs
+                    .iter()
+                    .filter(|d| d.modified)
+                    .map(|d| d.name.as_str())
+                    .collect();
+                match names.as_slice() {
+                    [one] => format!("\"{one}\" has changes that are not saved."),
+                    many => format!(
+                        "{} documents have changes that are not saved: {}.",
+                        many.len(),
+                        many.join(", ")
+                    ),
+                }
+            }
+        };
+        tree.text(dx + 12.0, dy + 48.0, &body, self.palette.text, 11.0);
+        let what = match scope {
+            CloseScope::Tab(_) => "Save them before the tab closes?",
+            CloseScope::Window => "Save them before the window closes?",
+        };
+        tree.text(dx + 12.0, dy + 70.0, what, self.palette.subtext0, 11.0);
+        for (choice, bx, by, bw, bh) in self.close_prompt_buttons() {
+            // Each one leads with the key that chooses it, as the disk prompt's
+            // do: the keyboard answers it as well as the pointer.
+            let label = match choice {
+                CloseChoice::Save => "S — Save",
+                CloseChoice::Discard => "D — Don't save",
+                CloseChoice::Cancel => "Esc — Cancel",
+            };
+            tree.fill_rect(bx, by, bw, bh, self.palette.surface1);
+            tree.text(bx + 10.0, by + 8.0, label, self.palette.text, 12.0);
+        }
     }
 
     /// Number of visible lines in the editor viewport.
@@ -1992,6 +2215,12 @@ impl EditorState {
         // external-change prompt, which is the one question that outranks it.
         if let Some(dialog) = self.dialog.as_ref() {
             tree.commands.extend(dialog.render(&self.palette, w, h));
+        }
+
+        // The close question. The file dialog it can lead to comes after it
+        // is answered, never with it.
+        if let Some(scope) = self.close_prompt {
+            self.render_close_prompt(&mut tree, scope);
         }
 
         // External-change prompt / merge review (modal overlay)
@@ -3423,19 +3652,24 @@ mod loop_tests {
             )]);
             desk.script
                 .push_back(vec![InputEvent::new(window, typed('a'))]);
+            // The document now holds a change, so closing asks -- and the
+            // window stays open, drawing the question, until it is answered.
             desk.script
                 .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
+            desk.script
+                .push_back(vec![InputEvent::new(window, typed('d'))]);
         }
 
         drive(&mut events, window, &mut editor).expect("the loopback connection cannot fail");
 
         assert_eq!(editor.active_document().lines[0], "a", "the key arrived");
+        assert!(editor.quit, "Don't save let the window go");
 
         let drawn = desktop.borrow_mut().drawn();
         assert_eq!(
             drawn.len(),
-            2,
-            "the initial frame and one for the keystroke, not one per event: {drawn:?}"
+            3,
+            "the initial frame, one for the keystroke and one for the question,              not one per event: {drawn:?}"
         );
         assert!(
             drawn.iter().all(|(w, count)| *w == window && *count > 0),

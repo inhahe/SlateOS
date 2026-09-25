@@ -228,9 +228,11 @@ impl EditorState {
         if !matches!(event, Event::Resize { .. })
             && let Some(response) = self.dialog_event(event)
         {
-            return response;
+            // The dialog can be the last answer a close was waiting for -- where
+            // to save the untitled document before the window goes.
+            return if self.quit { Response::Exit } else { response };
         }
-        match event {
+        let response = match event {
             Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Resize { width, height } => {
@@ -258,9 +260,20 @@ impl EditorState {
                 self.dragging = false;
                 Response::Idle
             }
-            Event::CloseRequested => Response::Exit,
+            // Not `Exit` outright: every unsaved change in every tab went with
+            // it. `KeepOpen` while the question is up -- any other answer to a
+            // close request closes the window, and the question with it.
+            Event::CloseRequested => {
+                if self.request_quit() {
+                    Response::Exit
+                } else {
+                    Response::KeepOpen
+                }
+            }
             _ => Response::Idle,
-        }
+        };
+        // An answer that lets the window go, from whichever event gave it.
+        if self.quit { Response::Exit } else { response }
     }
 
     /// Adopt a new window size; `true` if it was not the size already held.
@@ -318,6 +331,9 @@ impl EditorState {
         if self.external_prompt.is_some() {
             return self.prompt_key(key);
         }
+        if self.close_prompt.is_some() {
+            return self.close_prompt_key(key);
+        }
         // The bar sees the key after the modal prompt, which is asking a
         // question that has to be answered first, and before the typing tables,
         // which it cannot steal from: a closed bar claims Alt+mnemonic only.
@@ -370,6 +386,24 @@ impl EditorState {
             _ => return Response::Idle,
         };
         self.resolve_external(choice);
+        Response::Redraw
+    }
+
+    /// Keys while the close question is up: S or Enter saves, D does not,
+    /// Escape keeps the tab or the window open. Every other key is swallowed --
+    /// a keystroke typed into the document under the question would be a
+    /// change nobody was asked about.
+    fn close_prompt_key(&mut self, key: &KeyEvent) -> Response {
+        // The letter typed as well as the key: a key code is a place on the
+        // keyboard, and S is not where S is on every layout.
+        let typed = key.typed().next().map(|c| c.to_ascii_lowercase());
+        let choice = match (key.key, typed) {
+            (Key::Enter, _) | (Key::S, _) | (_, Some('s')) => crate::CloseChoice::Save,
+            (Key::D, _) | (_, Some('d')) => crate::CloseChoice::Discard,
+            (Key::Escape, _) => crate::CloseChoice::Cancel,
+            _ => return Response::Idle,
+        };
+        self.answer_close(choice);
         Response::Redraw
     }
 
@@ -610,7 +644,7 @@ impl EditorState {
     /// looking for a neighbouring file will look first; failing that, the home
     /// directory. A Save As is seeded with the current name so the common case
     /// -- same name, different folder -- is one click.
-    fn open_dialog(&mut self, purpose: crate::DialogPurpose) {
+    pub(crate) fn open_dialog(&mut self, purpose: crate::DialogPurpose) {
         let doc = self.active_document();
         let start = doc
             .path
@@ -619,7 +653,9 @@ impl EditorState {
             .map_or_else(std::env::temp_dir, std::path::Path::to_path_buf);
         let dialog = match purpose {
             crate::DialogPurpose::Open => FileDialog::open().with_initial_path(start),
-            crate::DialogPurpose::SaveAs => FileDialog::save()
+            crate::DialogPurpose::SaveAs
+            | crate::DialogPurpose::SaveThenClose(_)
+            | crate::DialogPurpose::SaveThenQuit(_) => FileDialog::save()
                 .with_initial_path(start)
                 .with_filename(doc.name.clone()),
         };
@@ -651,6 +687,34 @@ impl EditorState {
                 Ok(()) => format!("Saved as {}", path.display()),
                 Err(e) => format!("Could not save to {}: {e}", path.display()),
             },
+            // Saved where the user said, then the close it was asked for
+            // carries on. A save that fails leaves everything open.
+            crate::DialogPurpose::SaveThenClose(idx) => {
+                self.tabs.set_active(idx);
+                match self.active_document_mut().save_as(path) {
+                    Ok(()) => {
+                        self.tabs.close_active();
+                        format!("Saved as {} and closed", path.display())
+                    }
+                    Err(e) => format!(
+                        "Could not save to {}, so it is still open: {e}",
+                        path.display()
+                    ),
+                }
+            }
+            crate::DialogPurpose::SaveThenQuit(idx) => {
+                self.tabs.set_active(idx);
+                match self.active_document_mut().save_as(path) {
+                    Ok(()) => {
+                        self.continue_quitting();
+                        format!("Saved as {}", path.display())
+                    }
+                    Err(e) => format!(
+                        "Could not save to {}, so the window stays open: {e}",
+                        path.display()
+                    ),
+                }
+            }
         }
     }
 
@@ -727,11 +791,14 @@ impl EditorState {
     }
 
     /// Close the active tab, or say why it will not close.
+    /// Close the active tab, asking first if it has unsaved changes.
+    ///
+    /// It refused with a status message offering Ctrl+Shift+W to discard,
+    /// which nothing bound: the one way offered to close a modified tab
+    /// without saving it did not exist.
     fn close_active_tab(&mut self) {
-        if !self.close_tab() {
-            self.status =
-                Some("Unsaved changes — save with Ctrl+S, or Ctrl+Shift+W to discard".to_string());
-        }
+        let idx = self.tabs.active_index();
+        self.request_close_tab(idx);
     }
 
     // ======================================================================
@@ -1012,6 +1079,9 @@ impl EditorState {
         // extended past the top of the window must not be taken over by a menu
         // the pointer merely crossed on the way. And not while the modal prompt
         // is up, for the reason the keyboard does not reach it either.
+        if self.close_prompt.is_some() {
+            return self.close_prompt_mouse(mouse);
+        }
         if !self.dragging
             && self.external_prompt.is_none()
             && let Some(response) = self.menu_bar_mouse(mouse)
@@ -1091,11 +1161,33 @@ impl EditorState {
     }
 
     /// A left press: put the caret where the pointer is, or act on the tab bar.
+    /// The pointer while the close question is up: its three buttons, and
+    /// nothing else -- it is modal.
+    fn close_prompt_mouse(&mut self, mouse: &MouseEvent) -> Response {
+        if !matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) {
+            return Response::Idle;
+        }
+        let hit = self
+            .close_prompt_buttons()
+            .into_iter()
+            .find(|(_, x, y, w, h)| {
+                mouse.x >= *x && mouse.x < x + w && mouse.y >= *y && mouse.y < y + h
+            });
+        match hit {
+            Some((choice, ..)) => {
+                self.answer_close(choice);
+                Response::Redraw
+            }
+            None => Response::Idle,
+        }
+    }
+
     fn mouse_press(&mut self, x: f32, y: f32) -> Response {
         if let Some((index, on_close)) = self.tab_at(x, y) {
-            self.tabs.set_active(index);
-            if on_close && !self.close_tab() {
-                self.status = Some("Unsaved changes — save with Ctrl+S first".to_string());
+            if on_close {
+                self.request_close_tab(index);
+            } else {
+                self.tabs.set_active(index);
             }
             return Response::Redraw;
         }
@@ -2270,6 +2362,139 @@ mod tests {
     }
 
     #[test]
+    fn a_modified_tabs_close_box_asks_first() {
+        let mut editor = editor_with("first");
+        editor.tabs.open(Document::new());
+        editor.active_document_mut().modified = true;
+        editor.tabs.set_active(0);
+        let in_strip = crate::TAB_BAR_TOP + 10.0;
+        editor.handle_event(&Event::Mouse(MouseEvent {
+            x: TAB_WIDTH * 2.0 - 4.0,
+            y: in_strip,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert_eq!(editor.tabs.count(), 2, "the close box closed unsaved work");
+        assert_eq!(editor.close_prompt, Some(crate::CloseScope::Tab(1)));
+        assert_eq!(
+            editor.tabs.active_index(),
+            1,
+            "and shows what it is asking about"
+        );
+    }
+
+    // -- closing the window over unsaved work --
+
+    /// Every string the frame draws.
+    fn drawn_text(editor: &EditorState) -> Vec<String> {
+        editor
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn closing_the_window_over_unsaved_work_asks_and_each_answer_is_kept() {
+        // Nothing to lose: it goes.
+        let mut editor = editor_with("text");
+        assert_eq!(editor.handle_event(&Event::CloseRequested), Response::Exit);
+
+        // Something to lose: the window stays open, asking -- `KeepOpen`,
+        // since any other answer to a close request closes it anyway.
+        let mut editor = editor_with("text");
+        editor.active_document_mut().modified = true;
+        assert_eq!(
+            editor.handle_event(&Event::CloseRequested),
+            Response::KeepOpen
+        );
+        assert_eq!(editor.close_prompt, Some(crate::CloseScope::Window));
+        assert!(drawn_text(&editor).iter().any(|t| t == "Unsaved changes"));
+
+        // The question has the keyboard: nothing typed reaches the document.
+        editor.handle_event(&typed('x'));
+        assert_eq!(editor.active_document().lines[0], "text");
+
+        // Escape keeps the window.
+        assert_ne!(editor.handle_event(&plain(Key::Escape)), Response::Exit);
+        assert_eq!(editor.close_prompt, None);
+        assert!(!editor.quit);
+
+        // Don't save lets it go.
+        editor.handle_event(&Event::CloseRequested);
+        assert_eq!(editor.handle_event(&plain(Key::D)), Response::Exit);
+    }
+
+    #[test]
+    fn saving_on_close_writes_what_has_a_file_and_asks_where_for_the_rest() {
+        let dir = scratchdir::ScratchDir::new("editor_close_save");
+        let titled = dir.dir().join("titled.txt");
+        std::fs::write(&titled, "old").expect("write");
+        let mut editor = editor_with("");
+        editor.open_file(&titled).expect("open");
+        editor.active_document_mut().lines = vec!["new".to_string()];
+        editor.active_document_mut().modified = true;
+        editor.tabs.open(Document::new());
+        editor.active_document_mut().lines = vec!["untitled work".to_string()];
+        editor.active_document_mut().modified = true;
+
+        editor.handle_event(&Event::CloseRequested);
+        assert_ne!(editor.handle_event(&plain(Key::S)), Response::Exit);
+        assert_eq!(std::fs::read_to_string(&titled).unwrap().trim_end(), "new");
+        assert!(
+            editor.dialog.is_some(),
+            "the untitled document needs somewhere to go"
+        );
+        assert!(!editor.quit, "and the window waits for it");
+
+        let dialog = editor.dialog.as_mut().expect("no dialog");
+        dialog.set_filename("kept.txt");
+        dialog.navigate_to(dir.dir());
+        assert_eq!(editor.handle_event(&plain(Key::Enter)), Response::Exit);
+        let kept = std::fs::read_to_string(dir.dir().join("kept.txt"))
+            .unwrap_or_else(|e| panic!("not saved: {e}; status {:?}", editor.status));
+        assert!(kept.contains("untitled work"), "{kept:?}");
+    }
+
+    #[test]
+    fn the_questions_buttons_answer_the_pointer() {
+        let click = |editor: &mut EditorState, choice: crate::CloseChoice| {
+            let (_, x, y, w, h) = editor
+                .close_prompt_buttons()
+                .into_iter()
+                .find(|b| b.0 == choice)
+                .expect("the button");
+            editor.handle_event(&Event::Mouse(MouseEvent {
+                x: x + w / 2.0,
+                y: y + h / 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }))
+        };
+        let mut editor = editor_with("text");
+        editor.active_document_mut().modified = true;
+        editor.handle_event(&Event::CloseRequested);
+        click(&mut editor, crate::CloseChoice::Cancel);
+        assert_eq!(editor.close_prompt, None);
+        assert!(!editor.quit);
+
+        editor.handle_event(&Event::CloseRequested);
+        // A click beside the buttons answers nothing: the question is modal.
+        editor.handle_event(&Event::Mouse(MouseEvent {
+            x: 1.0,
+            y: 1.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(editor.close_prompt.is_some());
+        assert_eq!(
+            click(&mut editor, crate::CloseChoice::Discard),
+            Response::Exit
+        );
+    }
+
+    #[test]
     fn the_gap_between_tabs_belongs_to_neither() {
         let editor = editor_with("only");
         assert_eq!(
@@ -2306,26 +2531,28 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_modified_tab_is_refused_with_a_message() {
+    fn closing_a_modified_tab_asks_first() {
+        // It was refused with a message offering Ctrl+Shift+W to discard,
+        // which nothing bound.
         let mut editor = editor_with("text");
+        editor.tabs.open(Document::new());
         editor.active_document_mut().modified = true;
         editor.handle_event(&ctrl(Key::W));
-        assert_eq!(editor.tabs.count(), 1);
-        assert!(
-            editor
-                .status
-                .as_deref()
-                .is_some_and(|s| s.contains("Unsaved")),
-            "{:?}",
-            editor.status
-        );
+        assert_eq!(editor.tabs.count(), 2, "closed without asking");
+        assert_eq!(editor.close_prompt, Some(crate::CloseScope::Tab(1)));
+        editor.handle_event(&plain(Key::Escape));
+        assert_eq!(editor.tabs.count(), 2, "Escape keeps it");
+        assert_eq!(editor.close_prompt, None);
+
+        editor.handle_event(&ctrl(Key::W));
+        editor.handle_event(&plain(Key::D));
+        assert_eq!(editor.tabs.count(), 1, "Don't save closes it");
     }
 
     #[test]
     fn a_status_message_is_cleared_by_the_next_keystroke() {
         let mut editor = editor_with("text");
-        editor.active_document_mut().modified = true;
-        editor.handle_event(&ctrl(Key::W));
+        editor.status = Some("something happened".to_string());
         assert!(editor.status.is_some());
 
         // A key with no binding at all still clears it, and says so, because the

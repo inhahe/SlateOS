@@ -45,10 +45,32 @@ One more frame comes from **libvpx** (through ffmpeg), a different encoder with
 different habits: loop-filter deltas, the skip flag, its own probability
 updates.
 
+Animations
+----------
+
+Answers are Pillow's frames -- libwebp's animation decoder -- stacked top to
+bottom in one PNG, with a line of text giving the canvas, the loop count,
+Pillow's mode (`RGB` for a file shown without its alpha) and each frame's
+duration.
+
+Written two ways. **Pillow** (libwebp's `WebPAnimEncoder`) cuts each frame to
+the rectangle that changed and picks blending and disposal frame by frame, so
+its files use whichever of those it finds smallest: lossless, lossy (alpha in
+`ALPH` chunks), a mix of the two, key frames forced often, and an opaque file,
+which the encoder marks as having no alpha. **By hand**, for the rules no
+encoder is made to reach: every reason libwebp's decoder has for treating a
+frame as a key frame, blending over a rectangle the frame before cleared, a
+frame not blended whose clear pixels replace what they cover, an animation
+whose alpha flag is missing, and what the demuxer makes of chunks where an
+encoder would not put them.
+
 Usage
 -----
 
-    python gui/imagecodec/tests/data/generate_webp.py
+    python gui/imagecodec/tests/data/generate_webp.py [lossless|lossy|animation ...]
+
+With no argument, every section is written; the lossless and lossy ones come
+out byte for byte as they are checked in.
 
 Requires Pillow with WebP support, the `webp` package (`pip install webp`), and
 `ffmpeg` built with libvpx on the PATH.
@@ -481,9 +503,272 @@ def lossy_fixtures() -> None:
     keep("webp_lossy_libvpx", libvpx(photo(131, 97), "-qmin", "45", "-qmax", "50", "-b:v", "1M", "-slices", "4"))
 
 
+# ---------------------------------------------------------------------------
+# Animations
+# ---------------------------------------------------------------------------
+
+
+def keep_animation(name: str, data: bytes) -> None:
+    """An animated fixture, with Pillow's frames as its answer: the canvas
+    after each frame, stacked top to bottom in one PNG, and a line of text --
+    canvas width and height, loop count, Pillow's mode (`RGBA`, or `RGB` for
+    a file shown without its alpha), frame count, then each frame's duration
+    in milliseconds."""
+    (HERE / f"{name}.webp").write_bytes(data)
+    im = Image.open(io.BytesIO(data))
+    frames, durations = [], []
+    for i in range(im.n_frames):
+        im.seek(i)
+        im.load()
+        frames.append(im.convert("RGBA"))
+        durations.append(im.info["duration"])
+    w, h = im.size
+    strip = Image.new("RGBA", (w, h * len(frames)))
+    for i, frame in enumerate(frames):
+        strip.paste(frame, (0, h * i))
+    strip.save(HERE / f"{name}.png", optimize=True)
+    words = [w, h, im.info["loop"], im.mode, len(frames), *durations]
+    with open(HERE / f"{name}.txt", "w", encoding="ascii", newline="\n") as out:
+        out.write(" ".join(map(str, words)) + "\n")
+
+
+def animated(name: str, frames: list[Image.Image], **kw) -> None:
+    """An animation written by Pillow -- libwebp's `WebPAnimEncoder`, which
+    cuts each frame down to the rectangle that changed and picks, frame by
+    frame, whichever of blending and disposal makes the file smallest."""
+    buf = io.BytesIO()
+    frames[0].save(buf, "WEBP", save_all=True, append_images=frames[1:], **kw)
+    keep_animation(name, buf.getvalue())
+
+
+def ball(background: Image.Image, t: int, n: int, colour: tuple[int, int, int, int]) -> Image.Image:
+    """`background` with a disc on it, at step `t` of `n` of its path."""
+    w, h = background.size
+    disc = Image.new("RGBA", (w, h))
+    px = disc.load()
+    cx = 5 + t * (w - 10) / max(1, n - 1)
+    cy = h / 2 + (h / 4) * math.sin(t * 1.3)
+    for y in range(h):
+        for x in range(w):
+            if (x - cx) ** 2 + (y - cy) ** 2 < 4.5**2:
+                px[x, y] = colour
+    return Image.alpha_composite(background.convert("RGBA"), disc)
+
+
+def moving(background: Image.Image, n: int, colour: tuple[int, int, int, int]) -> list[Image.Image]:
+    return [ball(background, t, n, colour) for t in range(n)]
+
+
+def anmf(
+    x: int,
+    y: int,
+    frame: list[tuple[bytes, bytes]],
+    size: tuple[int, int],
+    duration: int = 100,
+    dispose: bool = False,
+    blend: bool = True,
+    trailing: list[tuple[bytes, bytes]] = (),
+) -> tuple[bytes, bytes]:
+    """An `ANMF` chunk: the frame's place, size, duration and flags (bit 0
+    dispose to background, bit 1 do not blend), then its picture's chunks and
+    anything `trailing` after them."""
+    assert x % 2 == 0 and y % 2 == 0, "frame offsets are stored halved"
+    w, h = size
+    head = b"".join(v.to_bytes(3, "little") for v in (x // 2, y // 2, w - 1, h - 1, duration))
+    head += bytes([(1 if dispose else 0) | (0 if blend else 2)])
+    body = head
+    for tag, payload in [*frame, *trailing]:
+        body += tag + struct.pack("<I", len(payload)) + payload + (b"\0" if len(payload) & 1 else b"")
+    return (b"ANMF", body)
+
+
+def anim(loop: int) -> tuple[bytes, bytes]:
+    """An `ANIM` chunk: a background colour (which decoders ignore) and the
+    loop count."""
+    return (b"ANIM", struct.pack("<IH", 0xFF336699, loop))
+
+
+ANIMATION_FLAG = 0x02
+
+
+def lossless_frame(img: Image.Image) -> tuple[list[tuple[bytes, bytes]], tuple[int, int]]:
+    """A picture's chunks as a lossless frame, colours under clear pixels
+    kept."""
+    buf = io.BytesIO()
+    img.save(buf, "WEBP", lossless=True, exact=True)
+    return [(b"VP8L", chunk(buf.getvalue(), b"VP8L"))], img.size
+
+
+def lossy_frame(img: Image.Image, quality: int = 70) -> tuple[list[tuple[bytes, bytes]], tuple[int, int]]:
+    """A picture's chunks as a lossy frame: `ALPH` then `VP8 `, or just
+    `VP8 ` if it is opaque."""
+    buf = io.BytesIO()
+    img.save(buf, "WEBP", quality=quality, exact=True)
+    return [(t, p) for t, p in chunks_of(buf.getvalue()) if t in (b"ALPH", b"VP8 ")], img.size
+
+
+def layers(w: int, h: int, seed: int) -> Image.Image:
+    """Every alpha from 0 to 255, over colours that differ pixel to pixel --
+    clear pixels included, whose colours only an exact encoder keeps -- so
+    blending one over another reaches every case of libwebp's arithmetic."""
+    rng = random.Random(seed)
+    img = Image.new("RGBA", (w, h))
+    img.putdata(
+        [
+            (rng.randrange(256), rng.randrange(256), rng.randrange(256), (i * 37 + seed * 11) % 256)
+            for i in range(w * h)
+        ]
+    )
+    return img
+
+
+def animation_fixtures() -> None:
+    # Written by libwebp's encoder: a disc crossing a picture, as a lossless
+    # file, a lossy one (its frames' alpha in ALPH chunks), one whose frames
+    # are each whichever of the two is smaller, and an opaque one -- which the
+    # encoder marks as having no alpha, so it is shown without it. The
+    # durations include the ones browsers stretch (10 ms or less).
+    backdrop = translucent(40, 26)
+    backdrop.putpixel((0, 0), (0, 0, 0, 0))
+    discs = moving(backdrop, 6, (30, 200, 90, 190))
+    animated(
+        "webp_anim_lossless",
+        discs,
+        lossless=True,
+        method=4,
+        exact=True,
+        loop=0,
+        duration=[80, 0, 10, 11, 120, 60],
+        minimize_size=True,
+    )
+    animated("webp_anim_lossy", discs, quality=60, loop=3, duration=70, minimize_size=True)
+    # Mixed: the encoder picks each frame's codec, and a photograph then a
+    # few flat colours make it pick both.
+    stripes = Image.new("RGBA", (40, 26), (30, 60, 200, 255))
+    for y in range(26):
+        for x in range(0, 40, 8):
+            stripes.putpixel((x, y), (250, 250, 250, 255))
+    animated(
+        "webp_anim_mixed",
+        discs[:3] + [ball(stripes, t, 6, (200, 30, 30, 255)) for t in range(3, 6)],
+        quality=50,
+        allow_mixed=True,
+        loop=1,
+        duration=[40, 50, 60, 70, 80, 90],
+    )
+    clear = Image.new("RGBA", (33, 21))
+    animated(
+        "webp_anim_clear",
+        moving(clear, 5, (220, 60, 40, 255)) + moving(clear, 4, (40, 60, 220, 128)),
+        lossless=True,
+        loop=0,
+        duration=50,
+        kmin=2,
+        kmax=3,
+    )
+    animated("webp_anim_opaque", moving(photo(37, 23), 5, (250, 250, 20, 255)), quality=80, loop=0, duration=100)
+
+    # Written by hand: the compositing rules in turn, on 16 x 12 canvases of
+    # pictures with every alpha, each frame's key-frame status noted.
+    w, h = 16, 12
+    base = layers(w, h, 1)
+    patch = layers(10, 8, 2)
+    strip = layers(16, 6, 3)
+    opaque = photo(16, 12).convert("RGBA")
+    keep_animation(
+        "webp_anim_rules",
+        riff(
+            [
+                vp8x(w, h, ANIMATION_FLAG | ALPHA_FLAG),
+                anim(2),
+                # Key (the first); covers the canvas; kept.
+                anmf(0, 0, *lossless_frame(base)),
+                # Blended over the one before, which was kept; then cleared.
+                anmf(2, 2, *lossless_frame(patch), dispose=True),
+                # Blended over the one before, which was cleared: rows above
+                # the cleared rectangle are blended whole, rows through it
+                # either side of it, and the part in it not at all.
+                anmf(0, 0, *lossless_frame(strip)),
+                # Key: opaque, covering the canvas; then cleared.
+                anmf(0, 0, *lossless_frame(opaque), dispose=True),
+                # Key: the one before covered the canvas and was cleared.
+                anmf(4, 2, *lossy_frame(patch)),
+                # Key: not blended, covering the canvas; then cleared.
+                anmf(0, 0, *lossy_frame(base), blend=False, dispose=True, duration=0),
+                # Key again, the one before having covered the canvas and
+                # been cleared -- but it is not blended anyway.
+                anmf(6, 0, *lossless_frame(patch), blend=False, duration=10),
+                # Not key: not blended, so its clear pixels replace what they
+                # cover, colours and all.
+                anmf(0, 2, *lossless_frame(strip), blend=False, duration=11),
+            ]
+        ),
+    )
+
+    # A first frame that does not cover the canvas, cleared: the next is a
+    # key frame because this one was, and the one after that because the one
+    # before it was, and so on until a frame is kept.
+    small = layers(6, 5, 4)
+    keep_animation(
+        "webp_anim_key_chain",
+        riff(
+            [
+                vp8x(12, 10, ANIMATION_FLAG | ALPHA_FLAG),
+                anim(0),
+                anmf(2, 2, *lossless_frame(small), dispose=True),
+                anmf(4, 4, *lossless_frame(small), dispose=True),
+                anmf(6, 2, *lossy_frame(small)),
+                anmf(2, 4, *lossless_frame(layers(8, 6, 5))),
+            ]
+        ),
+    )
+
+    # An animation whose VP8X chunk does not say it has alpha, whose frames
+    # have it all the same: composited with it, shown without it -- the canvas
+    # outside the first frame black.
+    keep_animation(
+        "webp_anim_unflagged",
+        riff(
+            [
+                vp8x(w, h, ANIMATION_FLAG),
+                anim(0),
+                anmf(2, 2, *lossless_frame(patch)),
+                anmf(0, 4, *lossy_frame(strip)),
+            ]
+        ),
+    )
+
+    # What the demuxer makes of an ANMF chunk's own size, which the picture's
+    # replaces; of a chunk after the picture inside an ANMF, which it reads
+    # as the next chunk of the file; and of an unknown chunk and metadata
+    # between frames.
+    frame, size = lossless_frame(small)
+    keep_animation(
+        "webp_anim_container",
+        riff(
+            [
+                vp8x(12, 10, ANIMATION_FLAG | ALPHA_FLAG | 0x08),
+                anim(5),
+                anmf(0, 0, frame, (12, 10), trailing=[(b"JUNK", b"12345")]),
+                (b"EXIF", b"Exif\x00\x00MM\x00*\x00\x00\x00\x08\x00\x00"),
+                anmf(4, 4, frame, (1, 1), duration=250),
+            ]
+        ),
+    )
+
+
+SECTIONS = {
+    "lossless": lossless_fixtures,
+    "lossy": lossy_fixtures,
+    "animation": animation_fixtures,
+}
+
+
 def main() -> None:
-    lossless_fixtures()
-    lossy_fixtures()
+    import sys
+
+    for name in sys.argv[1:] or SECTIONS:
+        SECTIONS[name]()
 
 
 if __name__ == "__main__":

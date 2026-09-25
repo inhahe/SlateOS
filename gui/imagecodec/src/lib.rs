@@ -90,10 +90,13 @@
 //! it does what browsers do, since that is how anyone has seen the file. See
 //! [`gif`].
 //!
-//! WebP, lossless (`VP8L`) and lossy (a VP8 key frame, with its `ALPH` plane),
-//! in the simple and the extended container, decoding to exactly the pixels
-//! libwebp -- the decoder in the browsers -- produces, damaged files included.
-//! Animated WebP is refused by name for now. See [`webp`].
+//! WebP, all of it, as libwebp -- the decoder in the browsers and in Pillow --
+//! reads it: lossless (`VP8L`) and lossy (a VP8 key frame, with its `ALPH`
+//! plane) pictures decoded to exactly libwebp's pixels, damaged files
+//! included; the container accepted or refused by ports of libwebp's own
+//! readers; and animations, where [`decode`] gives the first frame and
+//! [`webp::Animation`] composites each frame in turn exactly as libwebp's
+//! animation decoder does. See [`webp`].
 //!
 //! # Picture files for *other* crates' tests
 //!
@@ -424,8 +427,16 @@ mod tests {
             Err(ImageError::UnknownFormat)
         );
         // WebP it does: a RIFF header with no chunk after it is a truncated
-        // WebP, not an unknown format.
-        assert_eq!(dimensions(b"RIFF\0\0\0\0WEBP"), Err(ImageError::Truncated));
+        // WebP, not an unknown format -- unless the header's own size leaves
+        // no room for a chunk, which libwebp calls malformed.
+        assert_eq!(
+            dimensions(b"RIFF\x24\0\0\0WEBP"),
+            Err(ImageError::Truncated)
+        );
+        assert!(matches!(
+            dimensions(b"RIFF\0\0\0\0WEBP"),
+            Err(ImageError::Malformed(_))
+        ));
         // And one it does, too short to say anything: that is a truncated
         // GIF, not an unknown format.
         assert_eq!(dimensions(b"GIF89a"), Err(ImageError::Truncated));

@@ -165295,7 +165295,9 @@ lossless screenshots and artwork.
 **In short:** a large lossy WebP -- the common kind, a photograph -- takes
 about twice as long to open here as in a browser: 181 ms for a 2000x1500
 picture against libwebp's 97, 1.5 s for 4000x5333 against 0.86. The pixels
-are libwebp's to the bit; only the speed is behind.
+are libwebp's to the bit; only the speed is behind. Lossy animations inherit
+it: 6.0 ms a frame at 480x270 against libwebp's 3.0 (design-decisions.md
+§1313) -- well inside real time, but the same factor of two.
 
 **Where.** `gui/imagecodec/src/webp/lossy/` -- the conversion to RGB
 (`yuv.rs`), the loop filter (`filter.rs`), the token loop (`lossy.rs`).

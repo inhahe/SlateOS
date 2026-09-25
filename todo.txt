@@ -58719,6 +58719,20 @@ test of the fixture, not of the bound.
   what browsers show. Only streams no encoder writes are affected. Reversible
   in `Segmentation::read` and `FilterHeader::strengths`. design-decisions.md
   §1312.
+- 2026-09-25, animated WebP (`gui/imagecodec/src/webp.rs`, `Animation`):
+  a frame whose data is broken is an error, as it is in libwebp's animation
+  decoder and in Pillow -- unlike a broken GIF frame, which draws what it had
+  because browsers do. What browsers do with a broken WebP frame was not
+  checked (they decode WebP through libwebp's incremental decoder, not its
+  animation decoder). The canvas is left as the last good frame drew it, so
+  a viewer can show that and stop. Reversible in `Animation::next_frame`.
+  design-decisions.md §1313.
+- 2026-09-25, WebP alpha presentation (`gui/imagecodec/src/webp.rs`): whether
+  a picture is shown with its alpha is what `WebPGetFeatures` says of the
+  file, as in Pillow and Firefox -- so an animation whose `VP8X` chunk lacks
+  the alpha flag is shown opaque, its uncovered canvas black. Chrome decides
+  from the demuxer's flags instead; the two differ only on files no encoder
+  writes. Reversible in `File::read`. design-decisions.md §1313.
 - **JPEG colour is blended back to full resolution, not repeated**
   (`gui/imagecodec/src/jpeg/upsample.rs`, design-decisions §1306). This
   reverses the decoder's earlier call that interpolating "would be a better

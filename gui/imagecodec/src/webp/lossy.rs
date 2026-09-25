@@ -109,10 +109,11 @@ fn read_tag(data: &[u8], declared: usize) -> ImageResult<Tag> {
     })
 }
 
-/// A key frame's width and height, from its uncompressed header.
+/// A key frame's width and height, from its uncompressed header, checked as
+/// libwebp's `VP8GetInfo` checks it against the `declared` size of its chunk.
 #[allow(clippy::cast_possible_truncation, reason = "14-bit fields")]
-pub(super) fn dimensions(data: &[u8]) -> ImageResult<(u32, u32)> {
-    let tag = read_tag(data, data.len())?;
+pub(super) fn info(data: &[u8], declared: usize) -> ImageResult<(u32, u32)> {
+    let tag = read_tag(data, declared)?;
     Ok((tag.width as u32, tag.height as u32))
 }
 
@@ -1314,12 +1315,19 @@ mod tests {
         frame[3..6].copy_from_slice(&[0x9D, 0x01, 0x2A]);
         frame[6..8].copy_from_slice(&(17u16 | 0xC000).to_le_bytes());
         frame[8..10].copy_from_slice(&9u16.to_le_bytes());
-        assert_eq!(dimensions(&frame).unwrap(), (17, 9), "scale bits ignored");
+        assert_eq!(
+            info(&frame, frame.len()).unwrap(),
+            (17, 9),
+            "scale bits ignored"
+        );
+        // The first partition must be shorter than the chunk declares.
+        assert_eq!(info(&frame, 6).unwrap(), (17, 9));
+        assert!(matches!(info(&frame, 5), Err(ImageError::Malformed(_))));
 
         let broken = |f: &dyn Fn(&mut Vec<u8>)| {
             let mut copy = frame.clone();
             f(&mut copy);
-            dimensions(&copy)
+            info(&copy, copy.len())
         };
         assert!(
             matches!(broken(&|f| f[0] |= 1), Err(ImageError::Malformed(_))),
@@ -1345,7 +1353,7 @@ mod tests {
             matches!(broken(&|f| f[2] = 0xFF), Err(ImageError::Malformed(_))),
             "first partition past the end"
         );
-        assert_eq!(dimensions(&frame[..9]), Err(ImageError::Truncated));
+        assert_eq!(info(&frame[..9], 40), Err(ImageError::Truncated));
     }
 
     /// Every lossy fixture in `tests/data`, by name.
@@ -1545,14 +1553,26 @@ mod tests {
         }
     }
 
+    /// The payload of a file's `VP8 ` chunk, found by walking its chunks.
+    fn vp8_chunk(file: &[u8]) -> Option<&[u8]> {
+        let mut at = 12;
+        while let Some(header) = file.get(at..at + 8) {
+            let size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+            let payload = file.get(at + 8..at + 8 + size)?;
+            if &header[..4] == b"VP8 " {
+                return Some(payload);
+            }
+            at += 8 + size + (size & 1);
+        }
+        None
+    }
+
     #[test]
     fn the_fixtures_between_them_use_every_feature_the_format_has() {
         let mut census = Census::default();
         for (name, file) in FIXTURES {
-            let frame = crate::webp::chunks(file)
-                .find(|c| &c.fourcc == b"VP8 ")
-                .unwrap_or_else(|| panic!("{name}: no VP8 chunk"));
-            take_census(frame.payload, &mut census);
+            let frame = vp8_chunk(file).unwrap_or_else(|| panic!("{name}: no VP8 chunk"));
+            take_census(frame, &mut census);
         }
         let everything = |flags: &[bool]| flags.iter().all(|&f| f);
         assert!(census.segments_absolute, "{census:?}");

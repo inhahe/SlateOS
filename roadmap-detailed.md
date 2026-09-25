@@ -1641,7 +1641,7 @@ on `$PATH`, so a script that says `ps` gets `ps`._
 - [ ] OpenGL via Mesa port
 - [ ] 2D drawing library for application UI
 - [ ] OS-level image codec support (all common formats apps can decode/encode via system API):
-  - [-] *(Lane F 2026-09-25: PNG, JPEG baseline and progressive, GIF with its animations, and WebP -- lossless, lossy and lossy with alpha -- decode in `gui/imagecodec`; animated WebP next; the others do not yet.)* JPEG, PNG, GIF (animated), BMP, TIFF, WebP, AVIF, HEIC/HEIF, ICO, SVG
+  - [-] *(Lane F 2026-09-25: PNG, JPEG baseline and progressive, GIF with its animations, and WebP -- lossless, lossy, with alpha, and animated -- decode in `gui/imagecodec`; the others do not yet.)* JPEG, PNG, GIF (animated), BMP, TIFF, WebP, AVIF, HEIC/HEIF, ICO, SVG
   - [ ] RAW formats (CR2, NEF, ARW, DNG — via libraw or similar)
 - [ ] OS-level video codec support (via FFmpeg/libav):
   - [ ] H.264, H.265/HEVC, VP8, VP9, AV1, MPEG-4, WMV, MOV container, MKV container, WebM

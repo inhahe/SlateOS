@@ -1921,6 +1921,9 @@ impl DesktopShell {
         self.icons.set_icon_size(appearance.icon_size.pixels());
         guitk::scaling::set_global_scale(appearance.scale_factor());
         self.appearance = appearance;
+        // After the store: the taskbar's thickness follows the scale just
+        // set, and the icons must stay clear of the bar as it is drawn.
+        self.sync_icon_area();
     }
 
     /// Load the user's saved appearance settings from disk and apply them.
@@ -2295,6 +2298,27 @@ impl DesktopShell {
     #[must_use]
     pub fn taskbar_thickness(&self) -> f32 {
         self.scale(self.taskbar_height as f32)
+    }
+
+    /// Follow the display to a new size -- the shell's own idea of the
+    /// screen, and the icon layer's, which brings every icon back onto the
+    /// desktop that is now there.
+    ///
+    /// The session used to set the two fields directly, and the icon layer
+    /// kept the size it was built with for the rest of the session.
+    pub fn set_screen_size(&mut self, width: u32, height: u32) {
+        self.screen_width = width;
+        self.screen_height = height;
+        self.sync_icon_area();
+    }
+
+    /// Tell the icon layer how much of the screen is desktop: all of it but
+    /// the taskbar, at the thickness the bar is actually drawn -- which the
+    /// scale setting changes, so an appearance change calls this too.
+    fn sync_icon_area(&mut self) {
+        let bar = self.taskbar_thickness().round() as u32;
+        self.icons
+            .set_desktop_area(self.screen_width, self.screen_height, bar);
     }
 
     /// The start button at the left end of the taskbar.
@@ -18037,6 +18061,44 @@ mod carry_tests {
         });
     }
 
+    /// A click on one of two selected program icons, let go a pixel over
+    /// the taskbar, is still a click: it selects just that icon, and pins
+    /// nothing -- only a drag that got under way is a drop.
+    #[test]
+    fn a_click_let_go_just_over_the_taskbar_is_still_a_click() {
+        with_scratch_config("carry-icon-click-at-bar", |_root| {
+            let mut shell = shell();
+            shell.icons.set_arrangement(icons::ArrangementMode::Free);
+            let ((a, a_name), (b, b_name)) = (app(&shell, 0), app(&shell, 1));
+            let bar_top = shell.taskbar_rect().y;
+            let cell_h = shell.icons.grid().cell_height() as f32;
+            // Flush against the bar: its lowest pixel is the one above it.
+            let (low, _) = shell.icons.add_shortcut_at(
+                &a_name,
+                icons::IconType::Executable,
+                icons::IconAction::OpenPath(PathBuf::from(&a)),
+                600.0,
+                bar_top - cell_h / 2.0,
+            );
+            shell.icons.add_shortcut(
+                &b_name,
+                icons::IconType::Executable,
+                icons::IconAction::OpenPath(PathBuf::from(&b)),
+            );
+            shell.icons.select_all();
+            let x = icon_centre(&shell, low).0;
+
+            // Three pixels, under the drag threshold, and over the bar.
+            press(&mut shell, (x, bar_top - 1.0));
+            move_to(&mut shell, (x, bar_top + 2.0));
+            release(&mut shell, (x, bar_top + 2.0));
+
+            assert!(pinned(&shell).is_empty(), "a click was taken for a drop");
+            assert_eq!(shell.icons.selected_ids(), [low]);
+            assert!(!shell.icons.is_interacting());
+        });
+    }
+
     /// A press on an icon that never became a drag is the icon layer's,
     /// wherever it is let go -- even a pixel over the bar.
     #[test]
@@ -18576,5 +18638,87 @@ mod start_pin_tests {
         assert!(shell.pinned_apps().is_empty());
         let icon = shell.icons.get_icon(id).unwrap();
         assert_eq!((icon.x, icon.y), was, "the icon moved");
+    }
+}
+
+/// The icons keep clear of the taskbar as it is drawn, whatever the scale and
+/// whatever the display's size.
+#[cfg(test)]
+mod icon_area_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::cast_precision_loss,
+        clippy::cast_possible_wrap
+    )]
+
+    use super::{AppearanceSettings, DesktopShell, icons};
+
+    /// Where an icon's far corner is, in screen pixels.
+    fn far_corner(shell: &DesktopShell, id: icons::IconId) -> (f32, f32) {
+        let icon = shell.icons.get_icon(id).unwrap();
+        let grid = shell.icons.grid();
+        (
+            (icon.x + grid.cell_width() as i32) as f32,
+            (icon.y + grid.cell_height() as i32) as f32,
+        )
+    }
+
+    /// The layer was told the taskbar was 40 pixels and was never told
+    /// otherwise: at 150% the bar is drawn 60 tall, and an icon placed
+    /// against the bottom edge sat under its top third.
+    #[test]
+    fn an_icon_stays_clear_of_the_taskbar_at_every_scale() {
+        for percent in [100u16, 125, 150, 200] {
+            let mut shell = DesktopShell::new(1920, 1080);
+            let mut appearance = AppearanceSettings::default();
+            appearance.scaling_percent = percent;
+            shell.set_appearance(appearance);
+            shell.icons.set_arrangement(icons::ArrangementMode::Free);
+            let id = shell.icons.add_icon(
+                "low",
+                icons::IconType::File,
+                icons::IconAction::Custom("low".into()),
+                600,
+                5000,
+            );
+            let bar = shell.taskbar_rect();
+            let (_, bottom) = far_corner(&shell, id);
+            assert!(
+                bottom <= bar.y,
+                "at {percent}% the icon reaches {bottom}, under a bar from {}",
+                bar.y
+            );
+            // Flush against it, not merely somewhere above.
+            assert!(
+                bar.y - bottom < 1.0,
+                "at {percent}% the icon stops short at {bottom}"
+            );
+        }
+    }
+
+    /// A display that shrinks takes the icons with it: every one ends up on
+    /// the desktop that is now there, clear of the bar.
+    #[test]
+    fn a_smaller_display_brings_the_icons_onto_it() {
+        let mut shell = DesktopShell::new(1920, 1080);
+        shell.icons.set_arrangement(icons::ArrangementMode::Free);
+        let id = shell.icons.add_icon(
+            "far",
+            icons::IconType::File,
+            icons::IconAction::Custom("far".into()),
+            1800,
+            950,
+        );
+        shell.set_screen_size(1280, 720);
+
+        let (right, bottom) = far_corner(&shell, id);
+        assert!(right <= 1280.0, "off the right edge at {right}");
+        assert!(
+            bottom <= shell.taskbar_rect().y,
+            "under the bar at {bottom}"
+        );
     }
 }

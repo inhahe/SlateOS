@@ -2244,6 +2244,46 @@ fn a_clock_widget_is_woken_at_its_due_time_and_not_every_frame() {
 
 // ---- following the display ----
 
+/// A display that shrinks brings the desktop icons onto it: the icon layer
+/// used to keep the size it was built with for the whole session.
+#[test]
+fn a_display_that_changes_size_brings_the_icons_with_it() {
+    let (mut session, desktop, _turn) = session();
+    let id = {
+        let shell = session.shell_mut();
+        shell
+            .icons
+            .set_arrangement(crate::icons::ArrangementMode::Free);
+        shell.icons.add_icon(
+            "far",
+            crate::icons::IconType::File,
+            crate::icons::IconAction::Custom("far".into()),
+            1800,
+            950,
+        )
+    };
+    let background = session.background().window();
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        background,
+        guitk::event::Event::Resize {
+            width: 1280,
+            height: 720,
+        },
+    )]);
+    session.pump().expect("pump");
+
+    let shell = session.shell();
+    let icon = shell.icons.get_icon(id).expect("the icon exists");
+    let grid = shell.icons.grid();
+    let right = icon.x + i32::try_from(grid.cell_width()).expect("a small cell");
+    let bottom = icon.y + i32::try_from(grid.cell_height()).expect("a small cell");
+    assert!(right <= 1280, "off the right edge at {right}");
+    assert!(
+        bottom as f32 <= shell.taskbar_rect().y,
+        "under the bar at {bottom}"
+    );
+}
+
 #[test]
 fn a_display_that_changes_size_moves_the_panel_with_it() {
     let (mut session, desktop, _turn) = session();

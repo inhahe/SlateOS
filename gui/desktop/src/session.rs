@@ -2695,8 +2695,7 @@ impl<T: Transport> ShellSession<T> {
 
     /// Follow the display to a new size.
     fn resize_display(&mut self, width: u32, height: u32) -> Result<(), Error<T>> {
-        self.shell.screen_width = width;
-        self.shell.screen_height = height;
+        self.shell.set_screen_size(width, height);
 
         let bar = self.shell.taskbar_rect();
         if let Some(mut handle) = self.events.window_mut(self.panel.window) {

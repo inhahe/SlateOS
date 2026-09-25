@@ -350,6 +350,11 @@ enum InteractionState {
         anchor: IconId,
         /// Icons being considered for drag.
         icon_ids: Vec<IconId>,
+        /// Whether a release that ends this as a click -- no drag -- selects
+        /// `anchor` alone. True when the press landed, without Ctrl, on an
+        /// icon already selected among others: the others stayed selected
+        /// only in case they were about to be dragged along with it.
+        narrow: bool,
     },
     /// Dragging selected icons.
     Dragging {
@@ -1652,19 +1657,25 @@ impl DesktopIconLayer {
 
         if let Some(id) = self.icon_at(x, y) {
             // Clicked on an icon.
+            let was_selected = self.icons.iter().any(|i| i.id == id && i.selected);
             if ctrl_held {
                 self.toggle_selection(id);
-            } else if !self.icons.iter().any(|i| i.id == id && i.selected) {
+            } else if !was_selected {
                 self.select_single(id);
             }
 
-            // Begin pending drag.
+            // Begin pending drag. A press on one of several selected icons
+            // keeps them all, since it may be the start of dragging them
+            // together; if it turns out to be a click, the release narrows
+            // the selection to this one, as every desktop does.
             let selected = self.selected_ids();
+            let narrow = !ctrl_held && was_selected && selected.len() > 1;
             self.interaction = InteractionState::PendingDrag {
                 start_x: x,
                 start_y: y,
                 anchor: id,
                 icon_ids: selected,
+                narrow,
             };
         } else {
             // Clicked on empty desktop — start rubber-band.
@@ -1690,6 +1701,7 @@ impl DesktopIconLayer {
                 start_y,
                 anchor,
                 icon_ids,
+                ..
             } => {
                 let dx = x - *start_x;
                 let dy = y - *start_y;
@@ -1753,6 +1765,18 @@ impl DesktopIconLayer {
             return false;
         }
         // Whatever the gesture was, the release ends it.
+        let gesture = core::mem::replace(&mut self.interaction, InteractionState::Idle);
+        // A click on one of several selected icons: it was not the start of
+        // dragging them together after all, so it selects just this one.
+        if let InteractionState::PendingDrag {
+            anchor,
+            narrow: true,
+            ..
+        } = gesture
+        {
+            self.select_single(anchor);
+            return false;
+        }
         let InteractionState::Dragging {
             start_x,
             start_y,
@@ -1760,10 +1784,10 @@ impl DesktopIconLayer {
             current_y,
             anchor,
             originals,
-        } = core::mem::replace(&mut self.interaction, InteractionState::Idle)
+        } = gesture
         else {
-            // A press that never became a drag, or a rubber band: selection
-            // only, and nothing moved.
+            // Any other click, or a rubber band: selection only, and nothing
+            // moved.
             return false;
         };
         let before = self.positions();
@@ -2396,8 +2420,26 @@ impl DesktopIconLayer {
     /// dropped an icon could sit past the new edge with nothing able to click
     /// it until the next login's clamp brought it back.
     pub fn set_screen_size(&mut self, width: u32, height: u32) {
+        self.set_desktop_area(width, height, self.taskbar_height);
+    }
+
+    /// Say how much of the screen is desktop: all of `width` x `height` but
+    /// the `taskbar_height` pixels along the bottom. Refits once, however
+    /// many of the three changed.
+    ///
+    /// The shell calls this whenever any of them changes -- the display
+    /// resized, or the scale setting made the taskbar thicker. A layer told
+    /// the taskbar was 40 pixels while it was drawn 60 let icons sit under
+    /// the bottom third of it, where no click could reach them.
+    pub fn set_desktop_area(&mut self, width: u32, height: u32, taskbar_height: u32) {
+        if (width, height, taskbar_height)
+            == (self.screen_width, self.screen_height, self.taskbar_height)
+        {
+            return;
+        }
         self.screen_width = width;
         self.screen_height = height;
+        self.taskbar_height = taskbar_height;
         self.refit();
     }
 
@@ -4290,6 +4332,87 @@ mod tests {
         layer.handle_mouse_down(sx, sy, MouseButton::Left, false);
         layer.handle_mouse_move(sx + dx, sy + dy, false);
         layer.handle_mouse_up(sx + dx, sy + dy, MouseButton::Left)
+    }
+
+    fn selected(layer: &DesktopIconLayer) -> Vec<&str> {
+        layer
+            .icons
+            .iter()
+            .filter(|i| i.selected)
+            .map(|i| i.label.as_str())
+            .collect()
+    }
+
+    /// Press on the icon labelled `label` and let go without moving: a click.
+    fn click(layer: &mut DesktopIconLayer, label: &str, ctrl: bool) {
+        let (x, y) = at(layer, label);
+        let (x, y) = (x as f32 + 20.0, y as f32 + 20.0);
+        layer.handle_mouse_down(x, y, MouseButton::Left, ctrl);
+        assert!(
+            !layer.handle_mouse_up(x, y, MouseButton::Left),
+            "a click moved something"
+        );
+    }
+
+    /// **A click on one of several selected icons selects just that one** --
+    /// on the release, because until then the press may be the start of
+    /// dragging them all.
+    #[test]
+    fn a_click_on_one_of_several_selected_icons_selects_just_it() {
+        let mut layer = column_of(&["a", "b", "c"], ArrangementMode::SnapToGrid);
+        layer.select_all();
+        let (x, y) = at(&layer, "b");
+        layer.handle_mouse_down(x as f32 + 20.0, y as f32 + 20.0, MouseButton::Left, false);
+        assert_eq!(selected(&layer), ["a", "b", "c"], "the press narrowed it");
+        assert!(
+            !layer.handle_mouse_up(x as f32 + 20.0, y as f32 + 20.0, MouseButton::Left),
+            "a click moved something"
+        );
+        assert_eq!(selected(&layer), ["b"]);
+    }
+
+    /// ...and a drag of them keeps them all.
+    #[test]
+    fn a_drag_of_several_selected_icons_keeps_them_all_selected() {
+        let mut layer = column_of(&["a", "b", "c"], ArrangementMode::SnapToGrid);
+        layer.select_all();
+        drag(&mut layer, "b", (20.0, 20.0), (300.0, 0.0));
+        assert_eq!(selected(&layer), ["a", "b", "c"]);
+    }
+
+    /// A Ctrl+click toggles the one icon and leaves the rest alone; a click
+    /// on the only selected icon has nothing to narrow.
+    #[test]
+    fn a_ctrl_click_or_a_lone_selection_is_not_narrowed() {
+        let mut layer = column_of(&["a", "b", "c"], ArrangementMode::SnapToGrid);
+        layer.select_all();
+        click(&mut layer, "b", true);
+        assert_eq!(selected(&layer), ["a", "c"]);
+
+        click(&mut layer, "a", false);
+        assert_eq!(selected(&layer), ["a"]);
+        click(&mut layer, "a", false);
+        assert_eq!(selected(&layer), ["a"]);
+    }
+
+    /// Told the taskbar is thicker -- the scale setting went up -- the layer
+    /// moves an icon out from under it.
+    #[test]
+    fn a_thicker_taskbar_moves_icons_out_from_under_it() {
+        let mut layer = column_of(&["a"], ArrangementMode::Free);
+        drag(&mut layer, "a", (20.0, 20.0), (0.0, 5000.0));
+        let cell_h = i32::try_from(layer.grid.cell_height()).unwrap();
+        assert_eq!(
+            at(&layer, "a").1 + cell_h,
+            1080 - 40,
+            "not flush with the bar"
+        );
+
+        layer.set_desktop_area(1920, 1080, 60);
+        assert_eq!(at(&layer, "a").1 + cell_h, 1080 - 60);
+        // A smaller display, the same way.
+        layer.set_desktop_area(1280, 720, 60);
+        assert!(at(&layer, "a").1 + cell_h <= 720 - 60);
     }
 
     /// **Placing freely, an icon stays exactly where it is dropped.**

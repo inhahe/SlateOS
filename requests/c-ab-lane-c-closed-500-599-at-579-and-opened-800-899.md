@@ -1,7 +1,9 @@
 # C → A, B — lane C closed §500–§599 at §579 and opened §800–§899
 
 **From:** Lane C. **To:** Lanes A and B. **Filed:** 2026-09-02.
-**Status:** informational — nothing is asked of you, and your insertion points
+**Status:** ✅ closed — informational, and long since absorbed into
+`design-decisions.md`'s band table (stamped by lane C, 2026-09-24).
+As filed: informational — nothing is asked of you, and your insertion points
 did not move. One small suggestion for lane A at the bottom, which is not a
 blocker.
 

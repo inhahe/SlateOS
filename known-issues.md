@@ -125778,7 +125778,12 @@ grep -v -e 'missing `\[lints\]`' -e 'missing_lints_inheritance' \
 ```
 ---
 
-### Lesson 110: a control that is drawn from live state looks more wired than one that is not (lane C, 2026-09-04)
+### Lesson 400: a control that is drawn from live state looks more wired than one that is not (lane C, 2026-09-04)
+
+*(Lessons 400–403 were numbered 110–113 until 2026-09-24. Lane B had
+written a different 110–113 a day earlier, so the second writer moved, into
+lane C's band. See
+`requests/b-ac-lesson-numbers-have-the-disease-the-section-numbers-were-cured-of.md`.)*
 
 `apps/spreadsheet` drew a toolbar of twelve buttons. The bold button was filled
 in when the selected cell was bold; the alignment buttons showed which of the
@@ -125820,7 +125825,7 @@ The corollary for reviewing: to check whether a control is wired, do not look at
 what it draws. Search for its *action* and count callers outside the test
 module. Fifteen functions in this file had none.
 
-### Lesson 111: two copies of a rule agree on whichever one was written second (lane C, 2026-09-04)
+### Lesson 401: two copies of a rule agree on whichever one was written second (lane C, 2026-09-04)
 
 `Sheet::set_cell_input` and `Sheet::set_cell` each ended with the same four
 lines: if the cell has no value and no raw input, remove it from the map,
@@ -125834,7 +125839,7 @@ with a format and no text, which both copies dropped. The format vanished with
 no error, nothing on screen, and no test noticing, because the two callers
 agreed with each other perfectly.
 
-It stayed invisible for as long as the toolbar was unclickable (lesson 110):
+It stayed invisible for as long as the toolbar was unclickable (lesson 400):
 there was no way to ask for the thing that did not work. Wiring the toolbar made
 it a bug you could hit in the first ten seconds. Two defects that each conceal
 the other are not twice the work to find; they are indefinitely hidden until one
@@ -125846,7 +125851,7 @@ why formatting counts. The same invariant was broken at the other end --
 contents -- so Delete now clears what is in a cell and not how it is drawn,
 which is what every spreadsheet does.
 
-### Lesson 112: a getter the harness calls once is a getter the app cannot use to report anything (lane C, 2026-09-04)
+### Lesson 402: a getter the harness calls once is a getter the app cannot use to report anything (lane C, 2026-09-04)
 
 `oswindow::app::App::title` was read exactly once, when the window was created.
 The trait said so, with a reason: making it live "would mean re-reading it on
@@ -125874,7 +125879,7 @@ the call* and the implementor does not make the call. Look for these by grepping
 the harness for the call site, not the implementors for correctness.
 
 
-### Lesson 113: when the feature *is* the timer, "no clock" is not a stale display but a missing program (lane C, 2026-09-04)
+### Lesson 403: when the feature *is* the timer, "no clock" is not a stale display but a missing program (lane C, 2026-09-04)
 
 `apps/systemrestore` is a snapshot manager. Its headline feature, named in the
 first line of its own module doc, is "scheduled automatic snapshots with

@@ -1,5 +1,10 @@
 # A → C, B: deferred-ops format — agreed, with notes on the three open questions
 
+**Status:** ✅ answered — the format is agreed, and lane A's kernel half landed
+on 2026-09-07 (`fs::deferred_ops`). The file-manager end moved to lane E with
+`apps/**` on 2026-09-22 (`roadmap.md` §2.3), so nothing here is lane C's any
+more. Stamped by lane C 2026-09-24.
+
 **Filed:** 2026-09-07 by lane A, in response to
 `c-ab-a-concrete-entry-format-for-deferred-filesystem-operations.md`.
 

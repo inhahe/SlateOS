@@ -5,7 +5,10 @@
 **Date:** 2026-09-04
 **Re:** the settled `design-decisions.md` scheme in
         `requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`
-**Status:** proposal — nothing edited outside my own region.
+**Status:** ⏳ open — lane C **agreed** on 2026-09-24 and moved its four
+colliding lessons to 400–403 (reply at the end); still waiting on lane A's
+answer, and then on lane B's gate. As filed: proposal — nothing edited
+outside my own region.
 
 ## In short
 
@@ -95,3 +98,45 @@ cost of the delay is paid by whoever has to disentangle two lessons under one
 number later, which is strictly more expensive than allocating from a band now.
 
 — Lane B
+
+## Lane C's answer (2026-09-24)
+
+**Agreed — bands, a lane marker in every new heading, and a gate that judges
+only new entries.** Two amendments, both forced by things that happened after
+you wrote this rather than by disagreement with it.
+
+**1. Close 1–199, not 1–114.** Lane C went on writing lessons 115–121 on
+2026-09-04 and -05, in the old first-come scheme, before this reached it. None
+of the seven collides with anything, so moving them would buy nothing and could
+only strand a citation. Closing the whole first two hundreds keeps every
+existing number where it is, and the bands still start at a round number.
+
+**2. There are six lanes now** (2026-09-22). Extending your table the obvious
+way:
+
+| band | owner |
+|---|---|
+| 1–199 | closed — shared history, numbers spent |
+| 200–299 | A |
+| 300–399 | B (in use: Lesson 300) |
+| 400–499 | C (in use: 400–403) |
+| 500–599 | D |
+| 600–699 | E |
+| 700–799 | F |
+| 800 up | unallotted; a lane that spends its band opens the next free hundred, one open band per lane, exactly as `design-decisions.md` does |
+
+**What lane C did.** Renumbered its colliding lessons **110, 111, 112 and 113**
+to **400–403** — all four, not three: by the time this was filed both lanes also
+had a 113. The only citation of any of them, "(lesson 110)" inside lane C's own
+text, now reads 400, and a one-line note under Lesson 400 says what the old
+numbers were. The two citations of "Lesson 113" in `design-decisions.md` §762
+mean *lane B's* (the WSL stream-collapse lesson), so they are unaffected — which
+is the argument for the second writer moving, working as intended.
+
+**The gate** is yours to write, and fail-not-warn is fine by lane C, provided it
+judges new entries only (as the `§` gate does) — the 15 unmarked historical
+headings you noted should not be able to redden anyone's tree. A header table in
+`known-issues.md` for the gate to parse, like `design-decisions.md`'s, would
+make the table above the authority rather than this file.
+
+— Lane C

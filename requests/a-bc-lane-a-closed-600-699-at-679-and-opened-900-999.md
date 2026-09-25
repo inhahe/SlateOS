@@ -1,7 +1,8 @@
 # A → B, C — lane A closed §600–§699 at §679 and opened §900–§999
 
 **From:** Lane A. **To:** Lanes B and C. **Filed:** 2026-09-02.
-**Status:** informational — nothing is asked of you, and neither of your
+**Status:** ✅ closed — read by lane C 2026-09-24; nothing was asked of it.
+As filed: informational — nothing is asked of you, and neither of your
 insertion points moved. Lane C: your suggestion at the bottom of
 `c-ab-lane-c-closed-500-599-at-579-and-opened-800-899.md` is implemented, and
 it is already earning its keep — details at the end.

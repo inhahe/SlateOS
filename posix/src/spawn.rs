@@ -20,9 +20,11 @@
 //! Our kernel's `SYS_PROCESS_SPAWN_EX` and `SYS_PROCESS_EXEC` take raw
 //! ELF data in memory, not file paths.  This module bridges the gap:
 //!
-//! 1. Stat the file to determine its size
+//! 1. Open the file once, read-only (`SYS_FS_OPEN`), and `fstat` that
+//!    handle for its type and size — see `load_elf` for why one handle
+//!    rather than a `stat` and a read by path
 //! 2. Allocate a buffer via mmap
-//! 3. Read the ELF binary from the filesystem via `SYS_FS_READ_FILE`
+//! 3. Read the ELF binary through the same handle (`SYS_FS_READ`)
 //! 4. Pass the raw bytes to `SYS_PROCESS_SPAWN_EX` (with argv/envp)
 //!    or `SYS_PROCESS_EXEC`
 //! 5. Free the buffer via munmap
@@ -354,10 +356,17 @@ pub struct FdMapEntry {
     pub handle: u64,
 }
 
-/// Maximum number of fd mappings we can build.
+/// Maximum number of fd mappings we can build: one per slot of this libc's fd
+/// table, which is also what the kernel accepts (`FD_MAP_MAX`, 256).
 ///
-/// Covers three standard fds + the file actions limit (16).
-const MAX_FD_MAP: usize = 32;
+/// It was 32 until 2026-09-24 — "three standard fds + the file actions
+/// limit" — and every descriptor from 32 up was therefore dropped from every
+/// child, across `posix_spawn` and across `exec`, without a word: the loop
+/// that seeds the child's table simply stopped at 32. A shell holding a
+/// here-document or a saved descriptor at fd 40 lost it in every command it
+/// ran. The child's receiving buffer (`crt.rs`'s `MAX_INIT_FDS`) had the same
+/// number and was raised with it.
+pub(crate) const MAX_FD_MAP: usize = crate::fdtable::MAX_FDS;
 
 // ---------------------------------------------------------------------------
 // posix_spawn_file_actions
@@ -1370,14 +1379,16 @@ pub fn handle_type_to_kind_for(handle_type: u8, handle: u64) -> crate::fdtable::
     }
 }
 
-/// Tracks kernel handles opened by `build_fd_map` for open file_actions.
+/// Descriptors the parent opened in its own table to carry out `open` file
+/// actions, closed when this is dropped.
 ///
-/// The parent opens files on behalf of the child (so the kernel can dup
-/// them into the child's PCB).  These handles must be closed after the
-/// spawn syscall returns — whether it succeeded or failed.
+/// The kernel dups each one's handle into the child during the spawn, so the
+/// parent's copies must go afterwards — whether the spawn succeeded or failed,
+/// and on every path that gives up before it. That is why they are closed by
+/// `Drop` rather than by a call each return has to remember.
 struct OpenedHandles {
-    /// Kernel handle values that were opened by build_fd_map.
-    handles: [u64; MAX_FILE_ACTIONS],
+    /// Parent descriptors opened by `apply_file_actions`.
+    fds: [Fd; MAX_FILE_ACTIONS],
     /// Number of valid entries.
     count: usize,
 }
@@ -1385,72 +1396,66 @@ struct OpenedHandles {
 impl OpenedHandles {
     const fn new() -> Self {
         Self {
-            handles: [0; MAX_FILE_ACTIONS],
+            fds: [-1; MAX_FILE_ACTIONS],
             count: 0,
         }
     }
 
-    fn push(&mut self, handle: u64) {
+    /// Record a descriptor to close.  There is one slot per file action and
+    /// at most one open per action, so this cannot run out; if it ever did,
+    /// the descriptor is closed at once rather than leaked.
+    fn push(&mut self, fd: Fd) {
         if self.count < MAX_FILE_ACTIONS {
-            self.handles[self.count] = handle;
+            self.fds[self.count] = fd;
             self.count = self.count.wrapping_add(1);
-        }
-    }
-
-    /// Close all tracked handles.
-    fn close_all(&self) {
-        let mut i = 0usize;
-        while i < self.count {
-            let _ = syscall1(SYS_FS_CLOSE, self.handles[i]);
-            i = i.wrapping_add(1);
+        } else {
+            let _ = crate::file::close(fd);
         }
     }
 }
 
-/// Build an fd_map array from the parent's fd table and file_actions.
+impl Drop for OpenedHandles {
+    fn drop(&mut self) {
+        // `close` can overwrite errno, and a spawn's caller may be about to
+        // read the one that describes its failure.
+        let saved = errno::get_errno();
+        let mut i = 0usize;
+        while i < self.count {
+            // The child has its own reference by now, or never will; either
+            // way there is nothing to do with a failed close of ours.
+            let _ = crate::file::close(self.fds[i]);
+            i = i.wrapping_add(1);
+        }
+        self.count = 0;
+        errno::set_errno(saved);
+    }
+}
+
+/// The child's descriptors before any file action: the parent's inheritable
+/// ones, as `(wire handle type, kernel handle)` per fd number.
 ///
-/// Simulates what the child needs to see: starts with the parent's
-/// inheritable fds (non-`FD_CLOEXEC`), then applies file_actions in
-/// order:
-/// - **close**: removes the fd from the virtual table
-/// - **dup2**: copies a handle from one fd to another
-/// - **open**: opens the file in the parent's context (raw syscall, no
-///   fd allocation) and records the kernel handle.  The kernel will dup
-///   it into the child during spawn.  The raw handles are tracked in
-///   `opened` so the caller can close them after the spawn syscall.
-///
-/// Returns the number of valid entries written to `out`.
-///
-/// # Design
-///
-/// We build a "virtual fd table" that represents what the child's fd
-/// table should look like after applying all file_actions.  Each slot
-/// stores `Option<(u8, u64)>` — the handle type and parent handle.
-///
-/// After applying all actions, we flatten the non-empty slots into
-/// the output `FdMapEntry` array.
-fn build_fd_map(
-    file_actions: *const PosixSpawnFileActionsT,
-    out: &mut [FdMapEntry; MAX_FD_MAP],
-    opened: &mut OpenedHandles,
-) -> usize {
+/// The second array holds the descriptors that are open but *not*
+/// inheritable — `FD_CLOEXEC` — because one file action can still hand one of
+/// them over: POSIX specifies that `adddup2(fd, fd)` clears `FD_CLOEXEC` on
+/// `fd` in the child. It is a snapshot taken here, before any `open` action
+/// can put a temporary descriptor of the parent's at the same number.
+struct ChildFds {
+    virt: [Option<(u8, u64)>; MAX_FD_MAP],
+    cloexec: [Option<(u8, u64)>; MAX_FD_MAP],
+}
+
+fn inheritable_fds() -> ChildFds {
     use crate::fdtable;
 
-    // Virtual fd table: mirrors what the child should see.
-    // We only track fds 0..MAX_FD_MAP because that's the most we can
-    // pass to the kernel anyway.
-    let mut virt: [Option<(u8, u64)>; MAX_FD_MAP] = [None; MAX_FD_MAP];
-
-    // Step 1: Populate from parent's open fds that don't have FD_CLOEXEC.
-    // For the child's fd_map, we include all inheritable fds from the
-    // parent so the child starts with the same I/O handles.
+    let mut out = ChildFds {
+        virt: [None; MAX_FD_MAP],
+        cloexec: [None; MAX_FD_MAP],
+    };
     let mut idx = 0usize;
     while idx < MAX_FD_MAP {
         #[allow(clippy::cast_possible_wrap)]
         let fd = idx as i32;
         if let Some(entry) = fdtable::get_fd(fd) {
-            // Skip close-on-exec fds — they shouldn't be inherited.
-            //
             // Skip epoll/timerfd/inotify fds — the instance state lives
             // in the parent's userspace memory and cannot be transferred
             // to the child.  For those three the filter is honest: there
@@ -1468,99 +1473,129 @@ fn build_fd_map(
             // `CONSOLE`, which the kernel resolves through `current_tty()`, and
             // `login_tty` has already made the pty the child's controlling
             // terminal — so that mapping is exact rather than approximate.
-            if entry.flags & fdtable::FD_CLOEXEC == 0
-                && entry.kind != fdtable::HandleKind::Epoll
+            let transferable = entry.kind != fdtable::HandleKind::Epoll
                 && entry.kind != fdtable::HandleKind::Timerfd
-                && entry.kind != fdtable::HandleKind::Inotify
-            {
-                virt[idx] = Some((kind_to_handle_type(entry.kind), entry.handle));
+                && entry.kind != fdtable::HandleKind::Inotify;
+            if transferable {
+                let wire = Some((kind_to_handle_type(entry.kind), entry.handle));
+                // Close-on-exec fds are not inherited unless an action says so.
+                if entry.flags & fdtable::FD_CLOEXEC == 0 {
+                    out.virt[idx] = wire;
+                } else {
+                    out.cloexec[idx] = wire;
+                }
             }
         }
         idx = idx.wrapping_add(1);
     }
+    out
+}
 
-    // Step 2: Apply file_actions in order.
-    if !file_actions.is_null() {
-        // SAFETY: file_actions is non-null (checked above).  The caller
-        // guarantees it was initialized via posix_spawn_file_actions_init.
-        let acts = unsafe { &*file_actions };
-        let slots = acts.slots();
-        let mut action_idx = 0usize;
-        while action_idx < slots.len() {
-            if let Some(slot) = slots.get(action_idx) {
-                match slot.tag {
-                    1 => {
-                        // Close: remove this fd from the virtual table.
-                        #[allow(clippy::cast_sign_loss)]
-                        let fd_u = slot.fd as usize;
-                        if fd_u < MAX_FD_MAP {
-                            virt[fd_u] = None;
-                        }
-                    }
-                    2 => {
-                        // Dup2(fd → newfd): copy fd's entry to newfd.
-                        #[allow(clippy::cast_sign_loss)]
-                        let src_u = slot.fd as usize;
-                        #[allow(clippy::cast_sign_loss)]
-                        let dst_u = slot.newfd as usize;
-                        if dst_u < MAX_FD_MAP && src_u < MAX_FD_MAP {
-                            // Copy the entry from the virtual table (which
-                            // already reflects prior actions).
-                            virt[dst_u] = virt[src_u];
-                        }
-                    }
-                    3 => {
-                        // Open: open the file in the parent's context.
-                        // We use a raw syscall (no fd allocation) — we
-                        // just need the kernel handle to pass via fd_map.
-                        // The kernel will dup it into the child during spawn.
-                        #[allow(clippy::cast_sign_loss)]
-                        let target_fd = slot.fd as usize;
-                        if target_fd < MAX_FD_MAP && slot.path_len > 0 {
-                            // Resolve the path against CWD.
-                            let mut resolved = [0u8; crate::unistd::PATH_MAX];
-                            let resolved_len = unsafe {
-                                crate::unistd::resolve_path(slot.path.as_ptr(), &mut resolved)
-                            };
+/// An fd number as a slot in the child's table, or `EBADF`.
+///
+/// The actions were range-checked when they were added, against `OPEN_MAX`;
+/// this is the narrower range the kernel's fd map carries. Refusing a number
+/// past it is the honest answer — the old code skipped the action silently,
+/// so a `dup2` onto fd 40 simply did not happen.
+fn child_slot(fd: Fd) -> Result<usize, i32> {
+    usize::try_from(fd)
+        .ok()
+        .filter(|&n| n < MAX_FD_MAP)
+        .ok_or(errno::EBADF)
+}
 
-                            if let Some(rlen) = resolved_len {
-                                let native_flags = crate::file::translate_open_flags(slot.oflag);
-                                let ret = syscall3(
-                                    SYS_FS_OPEN,
-                                    resolved.as_ptr() as u64,
-                                    rlen as u64,
-                                    native_flags,
-                                );
-                                if ret >= 0 {
-                                    let handle = ret as u64;
-                                    virt[target_fd] = Some((fd_handle_type::FILE, handle));
-                                    opened.push(handle);
-                                }
-                                // If open fails, silently skip this action.
-                                // POSIX says posix_spawn should fail, but we
-                                // can't return an error from build_fd_map
-                                // without complicating the interface.  The
-                                // child will simply not have this fd.
-                            }
-                        }
-                    }
-                    _ => {} // Unknown tag — skip.
+/// Apply `acts` to the child's table in order, as the child would.
+///
+/// Every failure is reported, which is what POSIX requires of `posix_spawn`
+/// ("if … any of the file actions fail, `posix_spawn()` shall fail") and what
+/// glibc does. The old loop skipped a failed `open` with a comment saying so,
+/// ignored `closefrom` altogether (so descriptors the caller asked to close
+/// reached the child anyway), and turned a `dup2` from a closed descriptor
+/// into a silent close of the target.
+///
+/// `chdir` actions (tag 4) are still not applied: the child's working
+/// directory lives in its own libc, and nothing yet carries one across a spawn
+/// — `known-issues.md` → `TD-D-CWD-AND-UMASK-DO-NOT-SURVIVE-EXEC-OR-SPAWN`,
+/// which also says why refusing them would be worse than ignoring them today.
+fn apply_file_actions(
+    child: &mut ChildFds,
+    acts: &PosixSpawnFileActionsT,
+    opened: &mut OpenedHandles,
+) -> Result<(), i32> {
+    use crate::fdtable;
+
+    for slot in acts.slots() {
+        match slot.tag {
+            1 => {
+                // Close. A descriptor that is not open in the child has nothing
+                // to close, which glibc does not treat as an error either.
+                if let Ok(fd) = child_slot(slot.fd) {
+                    child.virt[fd] = None;
                 }
             }
-            action_idx = action_idx.wrapping_add(1);
+            2 => {
+                // Dup2(fd → newfd), against the table as the actions so far
+                // have left it.
+                let src = child_slot(slot.fd)?;
+                let dst = child_slot(slot.newfd)?;
+                let entry = if src == dst {
+                    // Same number: POSIX makes this the way to hand over a
+                    // close-on-exec descriptor, so look there as well.
+                    child.virt[src].or(child.cloexec[src])
+                } else {
+                    child.virt[src]
+                };
+                child.virt[dst] = Some(entry.ok_or(errno::EBADF)?);
+            }
+            3 => {
+                // Open, "as if `open(path, oflag, mode)`" — so it *is* `open`,
+                // in this process, with everything that brings: the umask on a
+                // create, `/dev/pts/<n>` and `/dev/ptmx`, the flag checks. The
+                // descriptor is closed again once the kernel has copied its
+                // handle into the child.
+                let target = child_slot(slot.fd)?;
+                if slot.path_len == 0 {
+                    return Err(errno::ENOENT);
+                }
+                let fd = crate::file::open(slot.path.as_ptr(), slot.oflag, slot.mode);
+                if fd < 0 {
+                    return Err(errno::get_errno());
+                }
+                opened.push(fd);
+                let entry = fdtable::get_fd(fd).ok_or(errno::EBADF)?;
+                // `O_CLOEXEC` on an action's open means the child's exec
+                // closes it at once, so the child never has it.
+                child.virt[target] = if slot.oflag & crate::fcntl::O_CLOEXEC != 0 {
+                    None
+                } else {
+                    Some((kind_to_handle_type(entry.kind), entry.handle))
+                };
+            }
+            4 => {} // chdir: see the note above.
+            5 => {
+                // closefrom(lowfd): every descriptor from lowfd up.
+                let low = usize::try_from(slot.fd).map_err(|_| errno::EBADF)?;
+                for entry in child.virt.iter_mut().skip(low) {
+                    *entry = None;
+                }
+            }
+            _ => return Err(errno::EINVAL),
         }
     }
+    Ok(())
+}
 
-    // Step 3: Flatten to FdMapEntry array.
+/// Flatten the child's table into the `FdMapEntry` array the kernel takes,
+/// returning how many entries were written.
+fn flatten_fd_map(child: &ChildFds, out: &mut [FdMapEntry; MAX_FD_MAP]) -> usize {
     let mut count = 0usize;
-    let mut flat_idx = 0usize;
-    while flat_idx < MAX_FD_MAP {
-        if let Some((handle_type, handle)) = virt[flat_idx]
-            && count < MAX_FD_MAP
+    for (idx, slot) in child.virt.iter().enumerate() {
+        if let Some((handle_type, handle)) = *slot
+            && let Some(dst) = out.get_mut(count)
         {
-            #[allow(clippy::cast_possible_wrap)]
-            let fd = flat_idx as i32;
-            out[count] = FdMapEntry {
+            #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+            let fd = idx as i32;
+            *dst = FdMapEntry {
                 fd,
                 handle_type,
                 _pad: [0; 3],
@@ -1568,10 +1603,31 @@ fn build_fd_map(
             };
             count = count.wrapping_add(1);
         }
-        flat_idx = flat_idx.wrapping_add(1);
     }
-
     count
+}
+
+/// Build the fd map a spawned child starts with: the parent's inheritable
+/// descriptors with `file_actions` applied, in order.
+///
+/// `open` actions leave parent descriptors in `opened`, which closes them when
+/// dropped — after the spawn syscall, since the kernel copies their handles.
+///
+/// # Errors
+///
+/// The first file action that fails, as its errno.
+fn build_fd_map(
+    file_actions: *const PosixSpawnFileActionsT,
+    out: &mut [FdMapEntry; MAX_FD_MAP],
+    opened: &mut OpenedHandles,
+) -> Result<usize, i32> {
+    let mut child = inheritable_fds();
+    if !file_actions.is_null() {
+        // SAFETY: non-null, and the caller's contract is that it was
+        // initialised by `posix_spawn_file_actions_init`.
+        apply_file_actions(&mut child, unsafe { &*file_actions }, opened)?;
+    }
+    Ok(flatten_fd_map(&child, out))
 }
 
 // ---------------------------------------------------------------------------
@@ -1731,12 +1787,65 @@ unsafe fn spawn_impl(
     if path.is_null() {
         return errno::EFAULT;
     }
+    // The program, following any `#!` chain, and its packed argument list.
+    // `E2BIG` for a list longer than `ARG_MAX`, which this used to answer by
+    // quietly dropping the arguments that did not fit.
+    let mut argv_buf = [0u8; EXEC_PACKED_MAX];
+    let (image, argv_len) = match load_program(path, argv, &[], &mut argv_buf) {
+        Ok(loaded) => loaded,
+        Err(err) => return err,
+    };
+    let argv_packed = argv_buf.get(..argv_len).unwrap_or(&[]);
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { spawn_loaded(pid, path, &image, argv_packed, file_actions, envp, caps) }
+}
 
-    // Build the fd_map from the parent's fd table + file_actions.
-    // This tells the kernel which handles the child should inherit.
-    // Open file_actions are executed here — the parent opens the files
-    // and the kernel dups the handles into the child.  We track the
-    // opened handles so we can close them after the spawn syscall.
+/// Spawn an already-loaded program: apply the file actions, pack the
+/// environment, make the syscall.
+///
+/// Split from [`spawn_impl`] so that `posix_spawnp` can search `PATH` by
+/// *loading* each candidate and apply the file actions exactly once, to the
+/// one it found. Applying them per candidate would repeat their side effects:
+/// an `addopen` with `O_CREAT | O_EXCL` succeeds for the first candidate and
+/// then fails with `EEXIST` for the second.
+///
+/// `name` is the path the caller named — the process's name, as Linux takes
+/// `comm` from the script and not from its interpreter.
+///
+/// # Safety
+///
+/// As [`spawn_impl`]; `name` must be a valid C string.
+#[allow(clippy::similar_names)]
+unsafe fn spawn_loaded(
+    pid: *mut PidT,
+    name: *const u8,
+    image: &ElfImage,
+    argv_packed: &[u8],
+    file_actions: *const PosixSpawnFileActionsT,
+    envp: *const *const u8,
+    caps: Option<&[CapEntryInfo]>,
+) -> i32 {
+    let mut envp_buf = [0u8; EXEC_PACKED_MAX];
+    let Some(envp_packed_len) = pack_cstring_array(envp, &mut envp_buf) else {
+        errno::set_errno(errno::E2BIG);
+        return errno::E2BIG;
+    };
+    let envc = count_cstring_array(envp);
+    let argv_packed_len = argv_packed.len();
+    let argc = crate::shebang::packed_count(argv_packed);
+
+    // The process name, resolved as `load_program` resolved the file. It has
+    // just been loaded through this path, so it resolves; the fallback is
+    // only there because the types cannot say so.
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    // SAFETY: `name` is a valid C string (this function's contract).
+    let resolved_len = unsafe { crate::unistd::resolve_path(name, &mut resolved) }.unwrap_or(0);
+
+    // Build the fd_map from the parent's fd table + file_actions.  `open`
+    // actions are carried out here, in this process, and the kernel dups
+    // their handles into the child; `opened` closes the parent's copies when
+    // it goes out of scope, after the syscall.  A failing action fails the
+    // spawn, as POSIX requires.
     let mut fd_map = [FdMapEntry {
         fd: 0,
         handle_type: 0,
@@ -1744,52 +1853,19 @@ unsafe fn spawn_impl(
         handle: 0,
     }; MAX_FD_MAP];
     let mut opened = OpenedHandles::new();
-    let fd_map_count = build_fd_map(file_actions, &mut fd_map, &mut opened);
-
-    // Resolve relative paths against CWD.
-    let mut resolved = [0u8; crate::unistd::PATH_MAX];
-    let Some(resolved_len) = (unsafe { crate::unistd::resolve_path(path, &mut resolved) }) else {
-        // POSIX: empty path → ENOENT; too-long → ENAMETOOLONG.
-        // SAFETY: path is non-null (checked above) and a valid C string.
-        opened.close_all(); // Clean up any handles opened by build_fd_map.
-        return if unsafe { *path } == 0 {
-            errno::ENOENT
-        } else {
-            errno::ENAMETOOLONG
-        };
-    };
-
-    // Load the ELF binary using the resolved absolute path.
-    let (buf_ptr, alloc_size, data_size) = match load_elf(resolved.as_ptr(), resolved_len) {
-        Ok(result) => result,
+    let fd_map_count = match build_fd_map(file_actions, &mut fd_map, &mut opened) {
+        Ok(count) => count,
         Err(err) => {
-            opened.close_all();
+            errno::set_errno(err);
             return err;
         }
     };
 
-    // Pack argv into a contiguous null-terminated buffer. `None` means the
-    // list is longer than `ARG_MAX`, which POSIX spells `E2BIG` for exec --
-    // "argument list too long" -- and which this used to answer by quietly
-    // dropping the arguments that did not fit.
-    let mut argv_buf = [0u8; EXEC_PACKED_MAX];
-    let mut envp_buf = [0u8; EXEC_PACKED_MAX];
-    let (Some(argv_packed_len), Some(envp_packed_len)) = (
-        pack_cstring_array(argv, &mut argv_buf),
-        pack_cstring_array(envp, &mut envp_buf),
-    ) else {
-        opened.close_all();
-        errno::set_errno(errno::E2BIG);
-        return errno::E2BIG;
-    };
-    let argc = count_cstring_array(argv);
-    let envc = count_cstring_array(envp);
-
     // The fields both syscalls share. Computed once and copied into whichever
     // struct we send, so the two paths cannot disagree about what is being
     // spawned -- only about who the child is allowed to be.
-    let elf_ptr = buf_ptr as u64;
-    let elf_len = data_size as u64;
+    let elf_ptr = image.ptr as u64;
+    let elf_len = image.len as u64;
     let name_ptr = resolved.as_ptr() as u64;
     let name_len = resolved_len as u64;
     let fd_map_ptr = if fd_map_count > 0 {
@@ -1798,7 +1874,7 @@ unsafe fn spawn_impl(
         0
     };
     let argv_ptr = if argv_packed_len > 0 {
-        argv_buf.as_ptr() as u64
+        argv_packed.as_ptr() as u64
     } else {
         0
     };
@@ -1849,14 +1925,10 @@ unsafe fn spawn_impl(
         }
     };
 
-    // Free the ELF buffer (must use alloc_size, not data_size, to
-    // unmap the entire mmap'd region and avoid memory leaks).
-    let _ = mman::munmap(buf_ptr.cast::<core::ffi::c_void>(), alloc_size);
-
-    // Close any file handles opened by build_fd_map for open file_actions.
-    // The kernel has already duped them into the child's PCB, so the
-    // parent's copies are no longer needed.
-    opened.close_all();
+    // The parent's copies of any descriptors opened for `open` actions: the
+    // kernel has duped their handles into the child's PCB, or failed to, and
+    // either way they are done with. (The image is the caller's to drop.)
+    drop(opened);
 
     if ret < 0 {
         // The delegation refusal must not arrive wearing the same errno as a
@@ -1899,6 +1971,13 @@ unsafe fn spawn_impl(
 /// listed in the `PATH` environment variable.  If `file` contains a
 /// `/`, it is used directly without PATH search.
 ///
+/// The search follows glibc's `posix_spawnp`: each candidate is *loaded*,
+/// failures in [`search_continues_after`]'s set move on to the next
+/// directory, `EACCES` is remembered and reported if nothing is found, and
+/// there is no shell fallback for a file that is not a program — that is
+/// `execvp`'s rule, not this one's. The file actions run once, against the
+/// program that was found (see [`spawn_loaded`] for why that matters).
+///
 /// Returns 0 on success, or an error number on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawnp(
@@ -1912,20 +1991,56 @@ pub extern "C" fn posix_spawnp(
     if file.is_null() {
         return errno::EFAULT;
     }
-
-    // If `file` contains a '/', use it directly (no PATH search).
+    // SAFETY: `file` is a valid C string (the caller's contract).
     let file_len = unsafe { crate::file::c_strlen_pub(file) };
-    if contains_slash(file, file_len) {
-        return posix_spawn(pid, file, file_actions, attrp, argv, envp);
-    }
-
-    // Search PATH for the executable.
-    let mut found = [0u8; crate::unistd::PATH_MAX];
-    if !search_path(file, file_len, &mut found) {
+    if file_len == 0 {
         return errno::ENOENT;
     }
+    // SAFETY: readable for `file_len` bytes, just measured.
+    let file_bytes = unsafe { core::slice::from_raw_parts(file, file_len) };
 
-    posix_spawn(pid, found.as_ptr(), file_actions, attrp, argv, envp)
+    // A name with a '/' is used as given (no PATH search).
+    if file_bytes.contains(&b'/') {
+        return posix_spawn(pid, file, file_actions, attrp, argv, envp);
+    }
+    if file_len > crate::linux_limits::NAME_MAX {
+        return errno::ENAMETOOLONG;
+    }
+
+    let mut argv_buf = [0u8; EXEC_PACKED_MAX];
+    let mut candidates = PathCandidates::new(search_path_value(), file_bytes);
+    let mut candidate = [0u8; crate::unistd::PATH_MAX];
+    let mut denied = false;
+    let mut last = errno::ENOENT;
+    while let Some(next) = candidates.next_into(&mut candidate) {
+        if let Err(err) = next {
+            return err;
+        }
+        match load_program(candidate.as_ptr(), argv, &[], &mut argv_buf) {
+            Ok((image, argv_len)) => {
+                let argv_packed = argv_buf.get(..argv_len).unwrap_or(&[]);
+                // SAFETY: `candidate` is the NUL-terminated path just loaded,
+                // and the rest is forwarded from this function's contract.
+                return unsafe {
+                    spawn_loaded(
+                        pid,
+                        candidate.as_ptr(),
+                        &image,
+                        argv_packed,
+                        file_actions,
+                        envp,
+                        None,
+                    )
+                };
+            }
+            Err(err) if search_continues_after(err) => {
+                denied |= err == errno::EACCES;
+                last = err;
+            }
+            Err(err) => return err,
+        }
+    }
+    if denied { errno::EACCES } else { last }
 }
 
 // ---------------------------------------------------------------------------
@@ -1937,9 +2052,13 @@ const EXEC_PACKED_MAX: usize = 128 * 1024;
 
 /// Replace the current process image with a new program.
 ///
-/// Reads the ELF binary at `path` and calls `SYS_PROCESS_EXEC` to
-/// replace the current process.  On success, this function does not
-/// return.  On failure, returns -1 with errno set.
+/// Reads the program at `path` and calls `SYS_PROCESS_EXEC` to replace the
+/// current process.  On success, this function does not return.  On
+/// failure, returns -1 with errno set.
+///
+/// A file beginning `#!` is run by the interpreter it names, as on Linux —
+/// see [`load_program`].  Anything that is neither that nor an ELF image is
+/// `ENOEXEC`; unlike `execvp`, `execve` never falls back to a shell.
 ///
 /// `argv` and `envp` are null-terminated arrays of null-terminated C
 /// strings.  They are packed into contiguous buffers and passed to the
@@ -1950,38 +2069,36 @@ pub extern "C" fn execve(path: *const u8, argv: *const *const u8, envp: *const *
         errno::set_errno(errno::EFAULT);
         return -1;
     }
+    let mut argv_buf = [0u8; EXEC_PACKED_MAX];
+    let mut envp_buf = [0u8; EXEC_PACKED_MAX];
+    exec_with(path, argv, envp, &[], &mut argv_buf, &mut envp_buf)
+}
 
-    // Resolve relative paths against CWD.
-    let mut resolved = [0u8; crate::unistd::PATH_MAX];
-    let Some(resolved_len) = (unsafe { crate::unistd::resolve_path(path, &mut resolved) }) else {
-        // POSIX: empty path → ENOENT; too-long → ENAMETOOLONG.
-        // SAFETY: path is non-null (checked above) and a valid C string.
-        errno::set_errno(if unsafe { *path } == 0 {
-            errno::ENOENT
-        } else {
-            errno::ENAMETOOLONG
-        });
-        return -1;
-    };
-
-    // Load the ELF binary using the resolved absolute path.
-    let (buf_ptr, alloc_size, data_size) = match load_elf(resolved.as_ptr(), resolved_len) {
-        Ok(result) => result,
+/// The body of [`execve`]. Returns only on failure: -1, with errno set.
+///
+/// Separate so that `execvpe`'s PATH search can try candidate after candidate
+/// with one pair of packing buffers — each 128 KiB, and on the stack — and so
+/// that its shell fallback can put `/bin/sh file` in front of the caller's
+/// arguments (`prefix`, empty for everyone else).
+fn exec_with(
+    path: *const u8,
+    argv: *const *const u8,
+    envp: *const *const u8,
+    prefix: &[&[u8]],
+    argv_buf: &mut [u8],
+    envp_buf: &mut [u8],
+) -> i32 {
+    // The program, following any `#!` chain, and its packed argument list.
+    // `E2BIG` rather than a silent truncation when either list is longer than
+    // `ARG_MAX`.
+    let (image, argv_len) = match load_program(path, argv, prefix, argv_buf) {
+        Ok(loaded) => loaded,
         Err(err) => {
             errno::set_errno(err);
             return -1;
         }
     };
-
-    // Pack argv and envp. `None` is a list longer than `ARG_MAX`: `E2BIG`,
-    // not a silent truncation. `execve` reports by returning -1 with errno
-    // set, since on success it does not return at all.
-    let mut argv_buf = [0u8; EXEC_PACKED_MAX];
-    let mut envp_buf = [0u8; EXEC_PACKED_MAX];
-    let (Some(argv_len), Some(envp_len)) = (
-        pack_cstring_array(argv, &mut argv_buf),
-        pack_cstring_array(envp, &mut envp_buf),
-    ) else {
+    let Some(envp_len) = pack_cstring_array(envp, envp_buf) else {
         errno::set_errno(errno::E2BIG);
         return -1;
     };
@@ -2009,10 +2126,9 @@ pub extern "C" fn execve(path: *const u8, argv: *const *const u8, envp: *const *
             _pad: [0; 3],
             handle: 0,
         }; MAX_FD_MAP];
-        let mut opened = OpenedHandles::new();
-        let fd_count = build_fd_map(core::ptr::null(), &mut fd_map, &mut opened);
-        // `build_fd_map` opens nothing when file_actions is null, so
-        // `opened` is empty — no handles to release here.
+        // No file actions, so nothing is opened and nothing can fail: the
+        // inheritable descriptors, flattened.
+        let fd_count = flatten_fd_map(&inheritable_fds(), &mut fd_map);
         let _ = syscall2(
             SYS_PROCESS_SET_EXEC_FDS,
             if fd_count > 0 {
@@ -2027,8 +2143,8 @@ pub extern "C" fn execve(path: *const u8, argv: *const *const u8, envp: *const *
     // Replace the current process image with argv/envp.
     let ret = syscall6(
         SYS_PROCESS_EXEC,
-        buf_ptr as u64,
-        data_size as u64,
+        image.ptr as u64,
+        image.len as u64,
         if argv_len > 0 {
             argv_buf.as_ptr() as u64
         } else {
@@ -2043,9 +2159,9 @@ pub extern "C" fn execve(path: *const u8, argv: *const *const u8, envp: *const *
         envp_len as u64,
     );
 
-    // If we get here, exec failed.  Free the buffer (must use
-    // alloc_size to unmap the entire mmap'd region).
-    let _ = mman::munmap(buf_ptr.cast::<core::ffi::c_void>(), alloc_size);
+    // If we get here, exec failed. Unmap the image before setting errno, so
+    // nothing the unmap does can disturb the value the caller will read.
+    drop(image);
     let _ = errno::translate(ret);
     -1
 }
@@ -2126,33 +2242,14 @@ fn count_cstring_array(array: *const *const u8) -> usize {
 
 /// Replace the current process image, searching PATH for the executable.
 ///
-/// Like `execve` but `file` is searched for in the directories listed
-/// in the `PATH` environment variable.  If `file` contains a `/`, it
-/// is used directly without PATH search.
+/// Exactly `execvpe(file, argv, environ)`, as glibc defines it: the new image
+/// gets the calling process's current environment — see [`execvpe`] for the
+/// search and for the shell fallback.
 ///
 /// On success, does not return.  On failure, returns -1 with errno set.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn execvp(file: *const u8, argv: *const *const u8) -> i32 {
-    if file.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
-    let file_len = unsafe { crate::file::c_strlen_pub(file) };
-
-    // If `file` contains a '/', use it directly.
-    if contains_slash(file, file_len) {
-        return execve(file, argv, core::ptr::null());
-    }
-
-    // Search PATH for the executable.
-    let mut found = [0u8; crate::unistd::PATH_MAX];
-    if !search_path(file, file_len, &mut found) {
-        errno::set_errno(errno::ENOENT);
-        return -1;
-    }
-
-    execve(found.as_ptr(), argv, core::ptr::null())
+    execvpe(file, argv, crate::environ::current_environ())
 }
 
 // ---------------------------------------------------------------------------
@@ -2161,13 +2258,16 @@ pub extern "C" fn execvp(file: *const u8, argv: *const *const u8) -> i32 {
 
 /// Replace the current process image with a new program.
 ///
-/// Like `execve` but inherits the current environment (the `envp`
-/// parameter is omitted).
+/// Like `execve` but inherits the current environment: POSIX says the new
+/// image's environment "shall be taken from the external variable `environ`
+/// in the calling process". It passed NULL until 2026-09-24, which the kernel
+/// faithfully stored as an empty environment — see
+/// [`crate::environ::current_environ`].
 ///
 /// On success, does not return.  On failure, returns -1 with errno set.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn execv(path: *const u8, argv: *const *const u8) -> i32 {
-    execve(path, argv, core::ptr::null())
+    execve(path, argv, crate::environ::current_environ())
 }
 
 // ---------------------------------------------------------------------------
@@ -2382,35 +2482,92 @@ va_trampoline!("execle", "vexecle", "8", "rsi");
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Load an ELF binary from the filesystem into an mmap'd buffer.
+/// A raw kernel file handle, closed when dropped.
 ///
-/// Returns `(buffer_ptr, alloc_size, data_size)` on success, or a POSIX
-/// error number on failure.  `alloc_size` is the mmap allocation size
-/// (must be used for munmap); `data_size` is the number of bytes
-/// actually read (pass to the kernel as the ELF size).
-fn load_elf(path: *const u8, path_len: usize) -> Result<(*mut u8, usize, usize), i32> {
-    // Stat the file to get its size.  SYS_FS_STAT writes a 16-byte
-    // FsStatResult, not a struct stat, so translate it.
-    let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
-    let stat_ret = syscall3(
-        SYS_FS_STAT,
+/// `load_elf` opens outside the fd table (it wants the bytes, not a
+/// descriptor), so nothing else would ever close it; every early return below
+/// must release it, and a guard makes that structural rather than a list of
+/// `close` calls to keep in step with the returns.
+struct KernelFileHandle(u64);
+
+impl Drop for KernelFileHandle {
+    fn drop(&mut self) {
+        // Nothing useful can be done with a failed close of a read-only handle
+        // on an error or success path that has already decided its result; the
+        // kernel also reclaims it at process exit.
+        let _ = syscall1(SYS_FS_CLOSE, self.0);
+    }
+}
+
+/// Read the file at `path` (absolute, `path_len` bytes, no NUL needed) into
+/// anonymous memory.
+///
+/// Returns the bytes as an [`ElfImage`], which unmaps itself when dropped, or a
+/// POSIX error number. Nothing here checks what the bytes *are* —
+/// [`load_program`] decides between an ELF image and a `#!` script.
+///
+/// # One handle, not two path lookups
+///
+/// The file is opened once, and its type, its size and its bytes are all read
+/// through that one handle.  Until 2026-09-24 this was a `SYS_FS_STAT` by path
+/// followed by a `SYS_FS_READ_FILE` by path, which had two defects:
+///
+/// * **It demanded a right that running a program does not need.**  Native
+///   `SYS_FS_STAT` is gated on `(File, METADATA)`, while `SYS_FS_OPEN` and
+///   `SYS_FS_READ` need `READ` and `SYS_FS_FSTAT` on a handle the caller owns
+///   needs nothing further.  So a process holding exactly `READ | EXECUTE`
+///   could not exec anything: `execve` failed in its first syscall, with
+///   `EACCES`, before the kernel's exec path — which is the one that logs —
+///   was ever reached.  That is `ctest-coreutils-runs`' exit 11 and
+///   `ctest-python-repl`'s exit 8, both of which were reported as `execl`
+///   losing its path (`requests/a-b-libc-execl-passes-a-null-path-to-execve.md`).
+/// * **It raced.**  Two lookups can name two files: replacing the binary
+///   between them sized the buffer from one file and filled it from the other.
+///
+/// # Errors
+///
+/// As `execve(2)` reports them: the open's own error (`ENOENT`, `EACCES`, …);
+/// `EACCES` for anything that is not a regular file, a directory included;
+/// `ENOEXEC` for an empty file; `ENOMEM` when the buffer cannot be mapped.
+fn load_elf(path: *const u8, path_len: usize) -> Result<ElfImage, i32> {
+    let opened = syscall3(
+        SYS_FS_OPEN,
         path as u64,
         path_len as u64,
-        raw.as_mut_ptr() as u64,
+        crate::file::translate_open_flags(crate::fcntl::O_RDONLY),
     );
-
-    if stat_ret < 0 {
-        return Err(native_to_posix_err(stat_ret));
+    if opened < 0 {
+        // Linux's `execve` says `EACCES`, not `EISDIR`, for a directory, and a
+        // kernel that refuses to open one read-only must not change the answer.
+        let err = native_to_posix_err(opened);
+        return Err(if err == errno::EISDIR {
+            errno::EACCES
+        } else {
+            err
+        });
     }
+    #[allow(clippy::cast_sign_loss)] // `opened >= 0` was checked just above.
+    let handle = KernelFileHandle(opened as u64);
 
+    // SYS_FS_FSTAT writes the kernel's 80-byte FsStatResult, not a
+    // `struct stat`, so translate it.
+    let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
+    let fstat_ret = syscall2(SYS_FS_FSTAT, handle.0, raw.as_mut_ptr() as u64);
+    if fstat_ret < 0 {
+        return Err(native_to_posix_err(fstat_ret));
+    }
     let mut stat_buf = crate::stat::Stat::zeroed();
     crate::stat::fill_from_fsstat(&mut stat_buf, &raw);
-    let file_size = stat_buf.st_size as usize;
+    if !stat_buf.is_file() {
+        return Err(errno::EACCES);
+    }
+    let Ok(file_size) = usize::try_from(stat_buf.st_size) else {
+        return Err(errno::ENOMEM);
+    };
     if file_size == 0 {
         return Err(errno::ENOEXEC);
     }
 
-    // Allocate a buffer via mmap.
     let buf = mman::mmap(
         core::ptr::null_mut(),
         file_size,
@@ -2419,34 +2576,187 @@ fn load_elf(path: *const u8, path_len: usize) -> Result<(*mut u8, usize, usize),
         -1,
         0,
     );
-
     if buf == mman::MAP_FAILED {
         return Err(errno::ENOMEM);
     }
+    // Owned from here: every return below unmaps it by dropping `image`.
+    let mut image = ElfImage {
+        ptr: buf.cast::<u8>(),
+        alloc: file_size,
+        len: 0,
+    };
 
-    let buf_ptr = buf.cast::<u8>();
-
-    // Read the ELF binary into the buffer.
-    let read_ret = syscall4(
-        SYS_FS_READ_FILE,
-        path as u64,
-        path_len as u64,
-        buf_ptr as u64,
-        file_size as u64,
-    );
-
-    if read_ret < 0 {
-        let _ = mman::munmap(buf, file_size);
-        return Err(native_to_posix_err(read_ret));
+    // A read may return fewer bytes than asked; keep going until the size
+    // `fstat` reported is filled or the file ends early (it shrank since).
+    while image.len < file_size {
+        let remaining = file_size.saturating_sub(image.len);
+        // SAFETY: `image.len < file_size`, so the offset stays inside the
+        // `file_size`-byte mapping made above.
+        let dst = unsafe { image.ptr.add(image.len) };
+        let got = syscall3(SYS_FS_READ, handle.0, dst as u64, remaining as u64);
+        if got < 0 {
+            return Err(native_to_posix_err(got));
+        }
+        if got == 0 {
+            break;
+        }
+        #[allow(clippy::cast_sign_loss)] // `got > 0` here.
+        let got = got as usize;
+        image.len = image.len.saturating_add(got.min(remaining));
     }
 
-    let bytes_read = read_ret as usize;
-    if bytes_read == 0 {
-        let _ = mman::munmap(buf, file_size);
+    if image.len == 0 {
         return Err(errno::ENOEXEC);
     }
+    Ok(image)
+}
 
-    Ok((buf_ptr, file_size, bytes_read))
+/// A program image read into anonymous memory by [`load_elf`], unmapped when
+/// dropped.
+///
+/// A guard rather than the `(ptr, alloc, len)` triple this used to be, because
+/// every caller had to `munmap` on each of its own failure paths with the
+/// *allocation* size rather than the data size, and following a `#!` chain
+/// adds more of those paths than it is reasonable to get right by hand. On a
+/// successful `exec` the guard is never dropped — the whole address space it
+/// lives in is replaced — which is correct: there is nothing left to free.
+struct ElfImage {
+    ptr: *mut u8,
+    /// The mapping's size, which `munmap` needs.
+    alloc: usize,
+    /// How many bytes were actually read, which is what the kernel is given.
+    len: usize,
+}
+
+impl ElfImage {
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: `ptr` is a live mapping of `alloc >= len` bytes owned by this
+        // guard, and the first `len` of them were written by `SYS_FS_READ`.
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl Drop for ElfImage {
+    fn drop(&mut self) {
+        // A failed unmap of our own private anonymous mapping has no remedy
+        // here; the region is reclaimed with the process in any case.
+        let _ = mman::munmap(self.ptr.cast::<core::ffi::c_void>(), self.alloc);
+    }
+}
+
+/// Load the program `path` names, following `#!` interpreter lines, and pack
+/// the argument list it will run with.
+///
+/// This is the part of `execve(2)` that Linux does in the kernel and ours has
+/// to do here, because the native exec takes bytes rather than a path: decide
+/// what the file *is*. An ELF image is returned as it is. A script names its
+/// interpreter, which is loaded in its place with the argument list rewritten
+/// to `interpreter [argument] script arg1 …` — see [`crate::shebang`] for the
+/// rules, all of them Linux's. Anything else is `ENOEXEC`, which is the error
+/// `execvp`'s shell fallback keys on, so it is decided here rather than left
+/// to whatever the kernel's loader happens to say.
+///
+/// `prefix`, when not empty, first replaces the caller's `argv[0]` — the
+/// shell fallback's `/bin/sh file`.
+///
+/// Errors come in Linux's order: the file's own (`ENOENT`, `EACCES`, …) before
+/// the argument list's `E2BIG`, and an interpreter's after both.
+///
+/// Returns the image and the packed length in `argv_buf`.
+fn load_program(
+    path: *const u8,
+    argv: *const *const u8,
+    prefix: &[&[u8]],
+    argv_buf: &mut [u8],
+) -> Result<(ElfImage, usize), i32> {
+    // The path of the file being loaded, as a C string: the caller's first,
+    // then each interpreter's as its script names it. Copied rather than
+    // borrowed, because from the second level on it would otherwise point into
+    // `argv_buf`, which the splice below rewrites.
+    let mut current = [0u8; crate::unistd::PATH_MAX];
+    // SAFETY: `path` is a valid C string (the callers' contract, and they
+    // reject null).
+    let path_len = unsafe { crate::file::c_strlen_pub(path) };
+    if path_len == 0 {
+        return Err(errno::ENOENT);
+    }
+    if path_len >= current.len() {
+        return Err(errno::ENAMETOOLONG);
+    }
+    // SAFETY: `path` is readable for `path_len` bytes, and `current` has room
+    // for them plus the NUL that is already there.
+    unsafe { core::ptr::copy_nonoverlapping(path, current.as_mut_ptr(), path_len) };
+    let mut current_len = path_len;
+
+    let mut image = load_by_name(&current)?;
+    let mut argv_len = pack_cstring_array(argv, argv_buf).ok_or(errno::E2BIG)?;
+    if !prefix.is_empty() {
+        argv_len = crate::shebang::splice_argv(argv_buf, argv_len, prefix).ok_or(errno::E2BIG)?;
+    }
+
+    for _ in 0..crate::shebang::MAX_INTERP_DEPTH {
+        let Some(parsed) = crate::shebang::parse(image.bytes()) else {
+            return if image.bytes().starts_with(&ELF_MAGIC) {
+                Ok((image, argv_len))
+            } else {
+                Err(errno::ENOEXEC)
+            };
+        };
+        let script = parsed?;
+        // The script's own bytes are not needed past this point, and the
+        // interpreter is about to be read beside them.
+        drop(image);
+
+        let script_path = current.get(..current_len).ok_or(errno::ENAMETOOLONG)?;
+        argv_len = match script.arg() {
+            Some(arg) => crate::shebang::splice_argv(
+                argv_buf,
+                argv_len,
+                &[script.interp(), arg, script_path],
+            ),
+            None => {
+                crate::shebang::splice_argv(argv_buf, argv_len, &[script.interp(), script_path])
+            }
+        }
+        .ok_or(errno::E2BIG)?;
+
+        let interp = script.interp();
+        let dst = current.get_mut(..interp.len()).ok_or(errno::ENAMETOOLONG)?;
+        dst.copy_from_slice(interp);
+        *current.get_mut(interp.len()).ok_or(errno::ENAMETOOLONG)? = 0;
+        current_len = interp.len();
+
+        image = load_by_name(&current)?;
+    }
+
+    // One load past the last permitted rewrite, as Linux's `depth > 5`: a
+    // chain that is still a script here is a loop, or near enough to one.
+    match crate::shebang::parse(image.bytes()) {
+        None if image.bytes().starts_with(&ELF_MAGIC) => Ok((image, argv_len)),
+        None => Err(errno::ENOEXEC),
+        Some(_) => Err(errno::ELOOP),
+    }
+}
+
+/// The four bytes every ELF image starts with.
+const ELF_MAGIC: [u8; 4] = [0x7f, b'E', b'L', b'F'];
+
+/// Resolve the NUL-terminated name in `name` against the working directory and
+/// load it.
+fn load_by_name(name: &[u8; crate::unistd::PATH_MAX]) -> Result<ElfImage, i32> {
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    // SAFETY: `name` holds a NUL within its `PATH_MAX` bytes — every writer
+    // above leaves one — so it is a valid C string.
+    let Some(resolved_len) = (unsafe { crate::unistd::resolve_path(name.as_ptr(), &mut resolved) })
+    else {
+        // POSIX: an empty path is ENOENT; the only other refusal is length.
+        return Err(if name.first() == Some(&0) {
+            errno::ENOENT
+        } else {
+            errno::ENAMETOOLONG
+        });
+    };
+    load_elf(resolved.as_ptr(), resolved_len)
 }
 
 /// Convert a native kernel error code to a POSIX errno value.
@@ -2462,160 +2772,202 @@ fn native_to_posix_err(ret: i64) -> i32 {
     errno::get_errno()
 }
 
-/// Check whether a byte string contains a `/` character.
+/// The directories a `PATH` search visits for `file`, as candidate paths.
 ///
-/// Used by `posix_spawnp` and `execvp` to decide whether to do a
-/// PATH search (no slash) or use the path directly (has slash).
-fn contains_slash(s: *const u8, len: usize) -> bool {
-    let mut i: usize = 0;
-    while i < len {
-        // SAFETY: Caller guarantees `s` is readable for `len` bytes.
-        if unsafe { *s.add(i) } == b'/' {
-            return true;
-        }
-        i = i.wrapping_add(1);
-    }
-    false
+/// POSIX's rules, which glibc and musl both follow: `PATH` is split on `:`;
+/// an empty element — leading, trailing or doubled `:` — names the current
+/// directory, so `PATH=":/bin"` searches `.` first ("a legacy feature", POSIX
+/// says, but a real one); and an unset `PATH` means `confstr(_CS_PATH)`. The
+/// old search skipped empty elements, so a program on a `PATH` that relied on
+/// one was not found.
+///
+/// Pure, so the splitting is testable on the host; the callers do the loading.
+struct PathCandidates<'a> {
+    path: &'a [u8],
+    file: &'a [u8],
+    /// Where the next element starts; `None` once the last has been produced.
+    next: Option<usize>,
 }
 
-/// Default PATH used when the PATH environment variable is not set.
-const DEFAULT_PATH: &[u8] = b"/bin:/usr/bin";
+impl<'a> PathCandidates<'a> {
+    fn new(path: &'a [u8], file: &'a [u8]) -> Self {
+        Self {
+            path,
+            file,
+            next: Some(0),
+        }
+    }
 
-/// Search the PATH environment variable for an executable file.
+    /// Write the next candidate, NUL-terminated, into `out`, and return its
+    /// length. `None` when the list is exhausted; `Some(Err(ENAMETOOLONG))`
+    /// for a candidate that does not fit, which ends a glibc search too.
+    fn next_into(&mut self, out: &mut [u8; crate::unistd::PATH_MAX]) -> Option<Result<usize, i32>> {
+        let start = self.next?;
+        let rest = self.path.get(start..).unwrap_or(&[]);
+        let (dir, more) = match rest.iter().position(|&b| b == b':') {
+            Some(colon) => (rest.get(..colon).unwrap_or(&[]), Some(start + colon + 1)),
+            None => (rest, None),
+        };
+        self.next = more;
+
+        // "dir/file", or just "file" for the current directory.
+        let sep = usize::from(!dir.is_empty());
+        let len = dir.len() + sep + self.file.len();
+        if len >= out.len() {
+            return Some(Err(errno::ENAMETOOLONG));
+        }
+        let (head, tail) = out.split_at_mut(dir.len());
+        head.copy_from_slice(dir);
+        if sep == 1 {
+            tail[0] = b'/';
+        }
+        tail[sep..sep + self.file.len()].copy_from_slice(self.file);
+        tail[sep + self.file.len()] = 0;
+        Some(Ok(len))
+    }
+}
+
+/// The errors that mean "not here, try the next directory" in a `PATH` search.
 ///
-/// Tries each directory in PATH with `file` appended.  Returns `true`
-/// if found, writing the full null-terminated path into `out`.
-///
-/// The search checks existence via `SYS_FS_STAT` — it does not check
-/// execute permission (our OS doesn't have a permission system yet).
-fn search_path(file: *const u8, file_len: usize, out: &mut [u8; crate::unistd::PATH_MAX]) -> bool {
-    // Get the PATH environment variable.
+/// glibc's list, and its reasoning: each says the file is missing or not
+/// usable *by us* at this path. Anything else means a program was found and
+/// could not be run, which is the caller's to hear about — `ENOEXEC` from a
+/// corrupt binary, `E2BIG`, `ENOMEM` — so the search stops there. `EACCES`
+/// continues but is remembered, so a search that finds nothing usable reports
+/// "permission denied" rather than "not found" when it did find something.
+fn search_continues_after(err: i32) -> bool {
+    matches!(
+        err,
+        errno::EACCES
+            | errno::ENOENT
+            | errno::ESTALE
+            | errno::ENOTDIR
+            | errno::ENODEV
+            | errno::ETIMEDOUT
+    )
+}
+
+/// The `PATH` a search uses: the variable, or `confstr(_CS_PATH)` without it.
+fn search_path_value() -> &'static [u8] {
     // SAFETY: "PATH\0" is a valid C string.
-    let path_env = unsafe { crate::environ::getenv(c"PATH".as_ptr().cast::<u8>()) };
-
-    // Determine the PATH string and its length.
-    let (path_ptr, path_total_len) = if path_env.is_null() {
-        (DEFAULT_PATH.as_ptr(), DEFAULT_PATH.len())
-    } else {
-        let len = unsafe { crate::string::strlen(path_env) };
-        (path_env, len)
-    };
-
-    // Iterate over ':'-delimited directory components.
-    let mut start: usize = 0;
-    while start <= path_total_len {
-        // Find the end of this component (next ':' or end of string).
-        let mut end = start;
-        while end < path_total_len {
-            // SAFETY: `end < path_total_len` guarantees readable.
-            if unsafe { *path_ptr.add(end) } == b':' {
-                break;
-            }
-            end = end.wrapping_add(1);
-        }
-
-        let dir_len = end.wrapping_sub(start);
-
-        // Skip empty components (e.g., leading/trailing/double ':').
-        if dir_len > 0 {
-            // Build "dir/file" in `out`.  Need: dir_len + 1 (slash) + file_len < PATH_MAX.
-            let total = dir_len.wrapping_add(1).wrapping_add(file_len);
-            if total < crate::unistd::PATH_MAX {
-                // Copy directory.
-                let mut pos: usize = 0;
-                let mut j: usize = 0;
-                while j < dir_len {
-                    if let Some(slot) = out.get_mut(pos) {
-                        // SAFETY: `start + j < path_total_len` guarantees readable.
-                        *slot = unsafe { *path_ptr.add(start.wrapping_add(j)) };
-                    }
-                    pos = pos.wrapping_add(1);
-                    j = j.wrapping_add(1);
-                }
-
-                // Add separator '/'.
-                if let Some(slot) = out.get_mut(pos) {
-                    *slot = b'/';
-                }
-                pos = pos.wrapping_add(1);
-
-                // Copy filename.
-                let mut k: usize = 0;
-                while k < file_len {
-                    if let Some(slot) = out.get_mut(pos) {
-                        // SAFETY: `k < file_len` and caller guarantees
-                        // `file` is readable for `file_len` bytes.
-                        *slot = unsafe { *file.add(k) };
-                    }
-                    pos = pos.wrapping_add(1);
-                    k = k.wrapping_add(1);
-                }
-
-                // Null-terminate.
-                if let Some(slot) = out.get_mut(pos) {
-                    *slot = 0;
-                }
-
-                // Check if this path exists via SYS_FS_STAT.
-                if file_exists(out.as_ptr(), pos) {
-                    return true;
-                }
-            }
-        }
-
-        // Advance past the ':' (or past end to terminate the loop).
-        start = end.wrapping_add(1);
+    let value = unsafe { crate::environ::getenv(c"PATH".as_ptr().cast::<u8>()) };
+    if value.is_null() {
+        return crate::unistd::CS_PATH;
     }
-
-    false
+    // SAFETY: `getenv` returned a NUL-terminated string that lives in the
+    // environment. `'static` is what the environment's lifetime is, as far as
+    // any single call can know; this slice is consumed before this call
+    // returns to a caller that could `setenv`.
+    unsafe {
+        let len = crate::string::strlen(value);
+        core::slice::from_raw_parts(value, len)
+    }
 }
 
-/// Check whether a file exists at the given path.
-///
-/// Uses `SYS_FS_STAT` to test existence.  Does not check file type
-/// or permissions — just whether stat succeeds.
-fn file_exists(path: *const u8, path_len: usize) -> bool {
-    let mut stat_buf = crate::stat::Stat::zeroed();
-    let ret = syscall3(
-        SYS_FS_STAT,
-        path as u64,
-        path_len as u64,
-        (&raw mut stat_buf) as u64,
-    );
-    ret >= 0
+/// `execve`, and on `ENOEXEC` the shell fallback that POSIX requires of
+/// `execvp` and `execlp`: "execute a command interpreter … as if the process
+/// invoked the sh utility using `execl(<shell path>, arg0, file, arg1, …)`".
+/// As glibc, `argv[0]` becomes the shell's own path. Returns only on failure,
+/// with errno set — the shell's errno if the fallback ran and failed.
+fn exec_or_shell(
+    path: *const u8,
+    path_bytes: &[u8],
+    argv: *const *const u8,
+    envp: *const *const u8,
+    argv_buf: &mut [u8],
+    envp_buf: &mut [u8],
+) {
+    let _ = exec_with(path, argv, envp, &[], argv_buf, envp_buf);
+    if errno::get_errno() == errno::ENOEXEC {
+        let shell = crate::paths::_PATH_BSHELL;
+        let shell_name = shell.get(..shell.len().saturating_sub(1)).unwrap_or(&[]);
+        let _ = exec_with(
+            shell.as_ptr(),
+            argv,
+            envp,
+            &[shell_name, path_bytes],
+            argv_buf,
+            envp_buf,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
 // execvpe — exec with PATH search + custom environment
 // ---------------------------------------------------------------------------
 
-/// Replace the current process image with a new program, searching PATH.
+/// Replace the current process image with a new program, searching `PATH`.
 ///
-/// Like `execvp` but accepts an explicit environment (`envp`).
-/// If `file` contains `/`, it is used directly.
-/// Otherwise, searches each directory in `PATH`.
+/// Like `execve`, with `file` looked for in each `PATH` directory in turn
+/// when it contains no `/` — see [`PathCandidates`] for the splitting and
+/// [`search_continues_after`] for which failures move on to the next
+/// directory. A file found but not in an executable format is run by
+/// `/bin/sh` (POSIX's rule for this family, not for `execve`).
+///
+/// The search *attempts* each candidate rather than checking that it exists
+/// first. The old code tested existence with `SYS_FS_STAT`, which needs a
+/// right (`METADATA`) that running a program does not, and then committed to
+/// the first name that existed — a directory, an unreadable file — where glibc
+/// would have moved on.
+///
+/// Returns -1 with errno set; on success it does not return.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn execvpe(file: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32 {
     if file.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-
+    // SAFETY: `file` is a valid C string (the caller's contract).
     let file_len = unsafe { crate::file::c_strlen_pub(file) };
-
-    // If `file` contains a '/', use it directly.
-    if contains_slash(file, file_len) {
-        return execve(file, argv, envp);
-    }
-
-    // Search PATH for the executable.
-    let mut found = [0u8; crate::unistd::PATH_MAX];
-    if !search_path(file, file_len, &mut found) {
+    if file_len == 0 {
         errno::set_errno(errno::ENOENT);
         return -1;
     }
+    // SAFETY: readable for `file_len` bytes, just measured.
+    let file_bytes = unsafe { core::slice::from_raw_parts(file, file_len) };
 
-    execve(found.as_ptr(), argv, envp)
+    let mut argv_buf = [0u8; EXEC_PACKED_MAX];
+    let mut envp_buf = [0u8; EXEC_PACKED_MAX];
+
+    if file_bytes.contains(&b'/') {
+        exec_or_shell(file, file_bytes, argv, envp, &mut argv_buf, &mut envp_buf);
+        return -1;
+    }
+    if file_len > crate::linux_limits::NAME_MAX {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return -1;
+    }
+
+    let mut candidates = PathCandidates::new(search_path_value(), file_bytes);
+    let mut candidate = [0u8; crate::unistd::PATH_MAX];
+    let mut denied = false;
+    while let Some(next) = candidates.next_into(&mut candidate) {
+        let len = match next {
+            Ok(len) => len,
+            Err(err) => {
+                errno::set_errno(err);
+                return -1;
+            }
+        };
+        let name = candidate.get(..len).unwrap_or(&[]);
+        exec_or_shell(
+            candidate.as_ptr(),
+            name,
+            argv,
+            envp,
+            &mut argv_buf,
+            &mut envp_buf,
+        );
+        let err = errno::get_errno();
+        if !search_continues_after(err) {
+            return -1;
+        }
+        denied |= err == errno::EACCES;
+    }
+    if denied {
+        errno::set_errno(errno::EACCES);
+    }
+    -1
 }
 
 // ---------------------------------------------------------------------------
@@ -3398,33 +3750,6 @@ mod tests {
         assert_eq!(ret, errno::EFAULT);
     }
 
-    // -- contains_slash --
-
-    #[test]
-    fn test_contains_slash_empty() {
-        assert!(!contains_slash(b"\0".as_ptr(), 0));
-    }
-
-    #[test]
-    fn test_contains_slash_no_slash() {
-        assert!(!contains_slash(b"hello\0".as_ptr(), 5));
-    }
-
-    #[test]
-    fn test_contains_slash_has_slash() {
-        assert!(contains_slash(b"/bin/sh\0".as_ptr(), 7));
-    }
-
-    #[test]
-    fn test_contains_slash_only_slash() {
-        assert!(contains_slash(b"/\0".as_ptr(), 1));
-    }
-
-    #[test]
-    fn test_contains_slash_trailing() {
-        assert!(contains_slash(b"foo/\0".as_ptr(), 4));
-    }
-
     // -- Spawn flag constants --
 
     #[test]
@@ -3745,7 +4070,8 @@ mod tests {
             handle: 0,
         }; MAX_FD_MAP];
         let mut opened = OpenedHandles::new();
-        let count = build_fd_map(core::ptr::null(), &mut out, &mut opened);
+        let count = build_fd_map(core::ptr::null(), &mut out, &mut opened)
+            .expect("no action here can fail");
 
         // Should have at least fds 0, 1, 2 (Console).
         assert!(count >= 3, "expected at least 3 fds, got {}", count);
@@ -3781,7 +4107,8 @@ mod tests {
             handle: 0,
         }; MAX_FD_MAP];
         let mut opened = OpenedHandles::new();
-        let count = build_fd_map(core::ptr::null(), &mut out, &mut opened);
+        let count = build_fd_map(core::ptr::null(), &mut out, &mut opened)
+            .expect("no action here can fail");
 
         let found = out
             .get(..count)
@@ -3821,7 +4148,8 @@ mod tests {
             handle: 0,
         }; MAX_FD_MAP];
         let mut opened = OpenedHandles::new();
-        let count = build_fd_map(&raw const acts, &mut out, &mut opened);
+        let count =
+            build_fd_map(&raw const acts, &mut out, &mut opened).expect("no action here can fail");
 
         // fd 1 should be gone.  We should have fd 0 and fd 2.
         let has_fd1 = out[..count].iter().any(|e| e.fd == 1);
@@ -3848,7 +4176,8 @@ mod tests {
             handle: 0,
         }; MAX_FD_MAP];
         let mut opened = OpenedHandles::new();
-        let count = build_fd_map(&raw const acts, &mut out, &mut opened);
+        let count =
+            build_fd_map(&raw const acts, &mut out, &mut opened).expect("no action here can fail");
 
         // fd 1 should now have the same handle as fd 2.
         let fd1 = out[..count].iter().find(|e| e.fd == 1);
@@ -3879,7 +4208,8 @@ mod tests {
             handle: 0,
         }; MAX_FD_MAP];
         let mut opened = OpenedHandles::new();
-        let count = build_fd_map(&raw const acts, &mut out, &mut opened);
+        let count =
+            build_fd_map(&raw const acts, &mut out, &mut opened).expect("no action here can fail");
 
         // fd 1 should exist (recreated by dup2) with fd 2's handle.
         let fd1 = out[..count].iter().find(|e| e.fd == 1);
@@ -3905,7 +4235,8 @@ mod tests {
             handle: 0,
         }; MAX_FD_MAP];
         let mut opened = OpenedHandles::new();
-        let count = build_fd_map(&raw const acts, &mut out, &mut opened);
+        let count =
+            build_fd_map(&raw const acts, &mut out, &mut opened).expect("no action here can fail");
 
         // No standard fds should remain.
         let has_0_1_2 = out[..count].iter().any(|e| e.fd <= 2);
@@ -3914,7 +4245,9 @@ mod tests {
 
     #[test]
     fn test_max_fd_map_constant() {
-        assert_eq!(MAX_FD_MAP, 32);
+        // One slot per fd-table entry, so no open descriptor is ever out of
+        // the child's reach. It was 32, which dropped fds 32..256 silently.
+        assert_eq!(MAX_FD_MAP, crate::fdtable::MAX_FDS);
         // Must be large enough for 3 standard fds + MAX_FILE_ACTIONS.
         assert!(MAX_FD_MAP >= 3 + MAX_FILE_ACTIONS);
     }
@@ -4578,5 +4911,210 @@ mod tests {
         };
         assert_eq!(r, errno::EINVAL);
         assert_eq!(SPAWN_CAP_MAX, 4096, "kernel CapTable::MAX_ENTRIES");
+    }
+
+    // -----------------------------------------------------------------------
+    // PATH search (execvpe / posix_spawnp)
+    // -----------------------------------------------------------------------
+
+    fn candidates(path: &[u8], file: &[u8]) -> std::vec::Vec<std::vec::Vec<u8>> {
+        let mut it = PathCandidates::new(path, file);
+        let mut out = std::vec::Vec::new();
+        let mut buf = [0u8; crate::unistd::PATH_MAX];
+        while let Some(next) = it.next_into(&mut buf) {
+            let len = next.expect("fits");
+            assert_eq!(buf[len], 0, "NUL-terminated");
+            out.push(buf[..len].to_vec());
+        }
+        out
+    }
+
+    #[test]
+    fn path_elements_are_tried_in_order() {
+        assert_eq!(
+            candidates(b"/bin:/usr/bin", b"ls"),
+            [b"/bin/ls".to_vec(), b"/usr/bin/ls".to_vec()]
+        );
+    }
+
+    /// POSIX: an empty element is the current directory. The old search
+    /// skipped it, so `PATH=":/bin"` never looked in `.` at all.
+    #[test]
+    fn an_empty_path_element_is_the_current_directory() {
+        assert_eq!(
+            candidates(b":/bin::/sbin:", b"x"),
+            [
+                b"x".to_vec(),
+                b"/bin/x".to_vec(),
+                b"x".to_vec(),
+                b"/sbin/x".to_vec(),
+                b"x".to_vec(),
+            ]
+        );
+        assert_eq!(candidates(b"", b"x"), [b"x".to_vec()], "PATH set but empty");
+    }
+
+    #[test]
+    fn a_candidate_that_does_not_fit_is_enametoolong() {
+        let long_dir = std::vec![b'd'; crate::unistd::PATH_MAX];
+        let mut it = PathCandidates::new(&long_dir, b"x");
+        let mut buf = [0u8; crate::unistd::PATH_MAX];
+        assert_eq!(it.next_into(&mut buf), Some(Err(errno::ENAMETOOLONG)));
+        assert_eq!(it.next_into(&mut buf), None);
+    }
+
+    #[test]
+    fn the_search_moves_on_only_for_not_here_errors() {
+        for e in [
+            errno::ENOENT,
+            errno::EACCES,
+            errno::ENOTDIR,
+            errno::ESTALE,
+            errno::ENODEV,
+            errno::ETIMEDOUT,
+        ] {
+            assert!(search_continues_after(e), "{e} should continue");
+        }
+        // A program that was found and could not run is the caller's news.
+        for e in [
+            errno::ENOEXEC,
+            errno::E2BIG,
+            errno::ENOMEM,
+            errno::ELOOP,
+            errno::ENAMETOOLONG,
+        ] {
+            assert!(!search_continues_after(e), "{e} should stop the search");
+        }
+    }
+
+    #[test]
+    fn the_default_search_path_is_confstr_cs_path() {
+        let mut buf = [0u8; 64];
+        let n = crate::unistd::confstr(crate::unistd::_CS_PATH, buf.as_mut_ptr(), buf.len());
+        assert_eq!(&buf[..n - 1], crate::unistd::CS_PATH);
+    }
+
+    // -----------------------------------------------------------------------
+    // File actions that used to fail silently
+    // -----------------------------------------------------------------------
+
+    fn empty_map() -> [FdMapEntry; MAX_FD_MAP] {
+        [FdMapEntry {
+            fd: 0,
+            handle_type: 0,
+            _pad: [0; 3],
+            handle: 0,
+        }; MAX_FD_MAP]
+    }
+
+    /// A `dup2` from a descriptor that is not open is `EBADF`, as in glibc.
+    /// It used to copy the empty slot over the target — a silent close.
+    #[test]
+    fn dup2_from_a_closed_descriptor_fails_the_spawn() {
+        ensure_std_fds();
+        let _ = crate::fdtable::close_fd(9);
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        assert_eq!(posix_spawn_file_actions_adddup2(&raw mut acts, 9, 1), 0);
+        let mut out = empty_map();
+        let mut opened = OpenedHandles::new();
+        assert_eq!(
+            build_fd_map(&raw const acts, &mut out, &mut opened),
+            Err(errno::EBADF)
+        );
+        posix_spawn_file_actions_destroy(&raw mut acts);
+    }
+
+    /// `closefrom` was recorded and never applied, so every descriptor the
+    /// caller asked to keep from the child reached it anyway.
+    #[test]
+    fn closefrom_removes_every_descriptor_from_its_floor() {
+        use crate::fdtable::{HandleKind, install_fd};
+        ensure_std_fds();
+        let _ = install_fd(5, HandleKind::File, 505);
+        let _ = install_fd(9, HandleKind::File, 509);
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        assert_eq!(
+            posix_spawn_file_actions_addclosefrom_np(&raw mut acts, 3),
+            0
+        );
+        let mut out = empty_map();
+        let mut opened = OpenedHandles::new();
+        let count =
+            build_fd_map(&raw const acts, &mut out, &mut opened).expect("closefrom cannot fail");
+        let fds: std::vec::Vec<i32> = out[..count].iter().map(|e| e.fd).collect();
+        let _ = crate::fdtable::close_fd(5);
+        let _ = crate::fdtable::close_fd(9);
+        posix_spawn_file_actions_destroy(&raw mut acts);
+        assert_eq!(fds, [0, 1, 2]);
+    }
+
+    /// Every descriptor from 32 up used to be dropped from every child.
+    #[test]
+    fn a_descriptor_above_32_reaches_the_child() {
+        use crate::fdtable::{HandleKind, install_fd};
+        ensure_std_fds();
+        let _ = install_fd(40, HandleKind::File, 4040);
+        let mut out = empty_map();
+        let count = flatten_fd_map(&inheritable_fds(), &mut out);
+        let found = out[..count].iter().find(|e| e.fd == 40).copied();
+        let _ = crate::fdtable::close_fd(40);
+        assert_eq!(found.map(|e| e.handle), Some(4040));
+    }
+
+    /// POSIX: `adddup2(fd, fd)` hands over a close-on-exec descriptor, with
+    /// `FD_CLOEXEC` cleared in the child.
+    #[test]
+    fn dup2_onto_itself_hands_over_a_close_on_exec_descriptor() {
+        use crate::fdtable::{FD_CLOEXEC, HandleKind, install_fd, set_fd_flags};
+        ensure_std_fds();
+        let _ = install_fd(6, HandleKind::File, 606);
+        assert!(set_fd_flags(6, FD_CLOEXEC));
+
+        // Without the action it is not inherited...
+        let mut out = empty_map();
+        let count = flatten_fd_map(&inheritable_fds(), &mut out);
+        assert!(!out[..count].iter().any(|e| e.fd == 6));
+
+        // ...and with it, it is.
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        assert_eq!(posix_spawn_file_actions_adddup2(&raw mut acts, 6, 6), 0);
+        let mut opened = OpenedHandles::new();
+        let count = build_fd_map(&raw const acts, &mut out, &mut opened).expect("fd 6 is open");
+        let found = out[..count].iter().find(|e| e.fd == 6).copied();
+        let _ = crate::fdtable::close_fd(6);
+        posix_spawn_file_actions_destroy(&raw mut acts);
+        assert_eq!(found.map(|e| e.handle), Some(606));
+    }
+
+    /// An `open` action that fails fails the spawn with the open's errno. It
+    /// used to be skipped, leaving the child without the descriptor and the
+    /// caller without an error. (On the host every native syscall is stubbed,
+    /// so any open fails; the point is that the failure is *reported*.)
+    #[test]
+    fn a_failing_open_action_fails_the_spawn() {
+        ensure_std_fds();
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        assert_eq!(
+            posix_spawn_file_actions_addopen(
+                &raw mut acts,
+                3,
+                c"/definitely/not/here".as_ptr().cast::<u8>(),
+                crate::fcntl::O_RDONLY,
+                0
+            ),
+            0
+        );
+        let mut out = empty_map();
+        let mut opened = OpenedHandles::new();
+        let r = build_fd_map(&raw const acts, &mut out, &mut opened);
+        posix_spawn_file_actions_destroy(&raw mut acts);
+        assert!(
+            r.is_err(),
+            "the open failed and the spawn must say so: {r:?}"
+        );
     }
 }

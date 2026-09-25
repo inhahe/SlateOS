@@ -347,9 +347,10 @@ static mut INIT_ENVP: [*const u8; MAX_INIT_PTRS + 1] = [core::ptr::null(); MAX_I
 
 /// Maximum number of inherited fd map entries we can receive.
 ///
-/// Matches [`crate::spawn::MAX_FD_MAP`] and covers the common case
-/// (3 standard fds + redirected pipes).
-const MAX_INIT_FDS: usize = 32;
+/// Exactly what the parent can send (`spawn::MAX_FD_MAP`, one per slot of
+/// the fd table). It was 32 on both sides until 2026-09-24, so descriptors
+/// from 32 up never reached a child at all.
+const MAX_INIT_FDS: usize = crate::spawn::MAX_FD_MAP;
 
 /// Static buffer for `SYS_PROCESS_GET_INITIAL_FDS` output.
 static mut INIT_FDS_BUF: [crate::spawn::FdMapEntry; MAX_INIT_FDS] = [crate::spawn::FdMapEntry {

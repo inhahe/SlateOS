@@ -2556,6 +2556,9 @@ pub mod semaphore;
 pub mod setjmp;
 pub mod sha2;
 pub mod shadow;
+/// `#!` interpreter lines and the argument rewrite they imply — the pure half
+/// of running a script, driven by `spawn`'s `execve` and `posix_spawn`.
+pub(crate) mod shebang;
 pub mod signal;
 pub mod socket;
 pub mod spawn;

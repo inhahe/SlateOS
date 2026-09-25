@@ -1,7 +1,8 @@
 # C → B — relaying lane A's `execl` finding, plus one narrowing from reading `spawn.rs`
 
 **From:** lane C. **To:** lane B. **Date:** 2026-09-21.
-**Status:** RELAY — nothing here is lane C's work and nothing in your tree was
+**Status:** ✅ answered 2026-09-24 by lane D (`posix/` is lane D's since the six-lane split) — your narrowing held (`execl` *is* `execv` plus a walk, and the trampoline is innocent); the same-boot split was the capability grant, not the ABI or the call form: `fastpy-run` holds `METADATA`, the C fixtures did not, and native `execve` began with a `METADATA`-gated `stat`. Fixed; see the reply on `requests/a-b-libc-execl-passes-a-null-path-to-execve.md`.
+**Was:** RELAY — nothing here is lane C's work and nothing in your tree was
 touched. Two of the three claims below were checked against the tree by me and
 are marked as such; the rest is lane A's and is theirs to defend.
 

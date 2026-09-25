@@ -486,6 +486,31 @@ pub fn init_environ() {
     rebuild_environ_ptrs();
 }
 
+/// The current value of `environ`, read at the moment of the call.
+///
+/// This is what the exec forms without an `envp` parameter — `execv`,
+/// `execvp`, `execl`, `execlp` — must hand the new image.  POSIX: "the
+/// environment for the new process image shall be taken from the external
+/// variable `environ` in the calling process."  *The variable*, not this
+/// module's store: `env -i`, privilege-dropping launchers and Rust's `std`
+/// assign `environ` to a fresh array and then call `execvp`, and they expect
+/// that array to be what the child sees.
+///
+/// Those four forms passed NULL until 2026-09-24, which the kernel stores
+/// faithfully as "no environment", so every program they started ran without
+/// `PATH`, `HOME` or anything else its parent had set.
+///
+/// NULL only before `__libc_start_main` has initialised `environ`, which
+/// exec's packing reads as an empty list.
+#[must_use]
+pub(crate) fn current_environ() -> *const *const u8 {
+    // SAFETY: a plain read of a pointer-sized `static mut` through a raw
+    // pointer; no reference to it is formed.  A concurrent writer is the
+    // caller's obligation, exactly as for `getenv` (POSIX leaves both unsafe
+    // against a racing `setenv`).
+    unsafe { core::ptr::addr_of!(environ).read() }.cast_const()
+}
+
 /// Rebuild the `ENVIRON_PTRS` array from `ENV_STORE`.
 fn rebuild_environ_ptrs() {
     // SAFETY: Single-threaded access.

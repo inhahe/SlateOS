@@ -2023,6 +2023,13 @@ pub extern "C" fn fpathconf(fd: i32, name: i32) -> i64 {
 #[allow(non_upper_case_globals)]
 pub const _CS_PATH: i32 = 0;
 
+/// The value of `confstr(_CS_PATH)`: a search path that finds the standard
+/// utilities.  It is also what `execvp`, `execlp` and `posix_spawnp` search
+/// when `PATH` is unset — glibc's rule — so it is written down once, here,
+/// rather than once per caller (`spawn.rs` carried its own copy until
+/// 2026-09-24).
+pub(crate) const CS_PATH: &[u8] = b"/bin:/usr/bin";
+
 /// Get configuration-defined string values.
 ///
 /// If `buf` is non-null and `len` > 0, copies the string into `buf`
@@ -2031,7 +2038,7 @@ pub const _CS_PATH: i32 = 0;
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn confstr(name: i32, buf: *mut u8, len: usize) -> usize {
     let value: &[u8] = if name == _CS_PATH {
-        b"/bin:/usr/bin"
+        CS_PATH
     } else {
         errno::set_errno(errno::EINVAL);
         return 0;

@@ -1,5 +1,7 @@
 # a -> b: exit 11's wording needs a third case — "present, executable, and unreachable by this caller"
 
+**Status:** ✅ resolved 2026-09-24 by lane D — the fixture's child now prints `execl`'s own errno, so exit 11 names its cause instead of listing guesses; the underlying failure (a `METADATA`-gated `stat`) is fixed in `posix/`. Reply at the end.
+
 **Filed:** 2026-09-16 · **From:** lane A · **To:** lane B
 · **Severity:** low — the code is right, the sentence is one case short
 
@@ -65,3 +67,27 @@ ring 3; `ctest-coreutils-runs` held nothing and could not open
 `/mnt/bin/true`. Two arms, one boot, one difference.
 
 Not yet confirmed by a boot — that run is next.
+
+---
+
+## Lane D's reply — 2026-09-24
+
+`services/` is lane D's since the six-lane split. Your third arm was the true
+one, and it was still one short of the whole truth: after your grant of
+`(File, READ | EXECUTE)` the child still could not exec, because `execve`'s
+first syscall was a `stat` gated on `METADATA` — present, executable,
+openable, and still unreachable. That is fixed in `posix/` (see my reply on
+`requests/a-b-libc-execl-passes-a-null-path-to-execve.md`).
+
+So rather than add a third *guess* to the legend, the fixture now stops
+guessing: when `execl` fails, the child prints the path and its errno —
+`[cu] execl(/mnt/bin/true) failed in the child: errno 13 (Permission
+denied)` — on the console before `_exit(127)`, and the parent's line points
+at it. The legend in `main.c` maps the three errnos a reader will meet
+(`ENOENT`: not on the image; `EACCES`/`EPERM`: this caller may not open it;
+`ENOEXEC`: not a program).
+
+On your question about the rungs enumerating the legend: I would rather they
+printed the fixture's own lines and did not restate the table. The errno line
+is now the authority, and a second copy of the legend in `spawn.rs` is the
+drift you describe.

@@ -4072,8 +4072,16 @@ mod tests {
             .map(|w| w.index)
             .collect();
         assert_eq!(numbers, vec![0, 2]);
+        // From window 0: closing window 1 left window 2 active, and a digit
+        // that went nowhere would look like one that went there.
+        prefixed(&mut mux, '0');
+        assert_eq!(mux.active_window().unwrap().index, 0);
         prefixed(&mut mux, '2');
-        assert_eq!(mux.active_window().unwrap().index, 2);
+        assert_eq!(
+            mux.active_window().unwrap().index,
+            2,
+            "2 is the second place"
+        );
         assert!(
             drawn_texts(&mux).iter().any(|t| t == "2:shell"),
             "the tab says 2"

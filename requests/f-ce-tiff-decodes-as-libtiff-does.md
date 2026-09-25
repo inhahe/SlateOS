@@ -8,11 +8,11 @@ follow-ups below are yours.
 **In short:** `imagecodec::decode`, `decode_scaled` and `dimensions` now read
 TIFF (design-decisions.md §1317): grey, palette, RGB, CMYK, `YCbCr` and
 CIE L*a*b* pictures of every depth libtiff's viewer path takes, in strips or tiles, uncompressed,
-PackBits, LZW, Deflate or CCITT fax (scanned documents), turned by the
-`Orientation` tag. The picture is
-exactly what a libtiff-based viewer shows. Some TIFFs are refused for now by
-name -- `ImageError::Unsupported` -- until the rest lands:
-JPEG-compressed TIFFs, which are next. Anything that decodes
+PackBits, LZW, Deflate, CCITT fax (scanned documents) or JPEG (photographs
+and colour scans), turned by the `Orientation` tag. The picture is
+exactly what a libtiff-based viewer shows. A few rare TIFFs are refused by
+name -- `ImageError::Unsupported` -- old-style JPEG and four vendor
+codecs. Anything that decodes
 through `imagecodec` needs no change; the few places that sniff formats
 themselves do.
 

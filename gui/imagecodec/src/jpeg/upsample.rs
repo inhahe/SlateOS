@@ -36,10 +36,11 @@ use alloc::vec::Vec;
 /// picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Shape {
-    /// Samples per row: the plane padded out to whole MCUs, so a block is
-    /// never clipped while it is written.
+    /// Samples per row: every block the component has, whole, so a block is
+    /// never clipped while it is written (libjpeg's `width_in_blocks *
+    /// DCT_scaled_size`).
     pub(super) stride: usize,
-    /// Rows, likewise padded.
+    /// Rows, likewise: whole iMCU rows.
     pub(super) rows: usize,
     /// How many samples of each row are picture rather than padding:
     /// libjpeg's `downsampled_width`, and the filter's right edge.
@@ -55,59 +56,32 @@ pub(super) struct Shape {
     pub(super) down: (usize, usize),
 }
 
-impl Shape {
-    /// The plane of a component sampled `h` x `v` times, in a `width` x
-    /// `height` frame whose largest factors are `max_h` x `max_v`, with the
-    /// component's 8x8 blocks reconstructed to `block` samples a side and the
-    /// picture's to `picture` -- the same, unless the component is chroma a
-    /// scaled decode reconstructs at twice the size (`component_block`).
-    pub(super) fn of(
-        (width, height): (usize, usize),
-        (h, v): (usize, usize),
-        (max_h, max_v): (usize, usize),
-        (block, picture): (usize, usize),
-    ) -> Self {
-        let mcus_x = width.div_ceil(max_h.saturating_mul(8).max(1));
-        let mcus_y = height.div_ceil(max_v.saturating_mul(8).max(1));
-        Self {
-            stride: mcus_x.saturating_mul(h).saturating_mul(block),
-            rows: mcus_y.saturating_mul(v).saturating_mul(block),
-            // `jdiv_round_up(image_width * h * scaled_size, max_h * DCTSIZE)`,
-            // exactly as `jdmaster.c` works it out.
-            width: width
-                .saturating_mul(h)
-                .saturating_mul(block)
-                .div_ceil(max_h.saturating_mul(8).max(1))
-                .max(1),
-            height: height
-                .saturating_mul(v)
-                .saturating_mul(block)
-                .div_ceil(max_v.saturating_mul(8).max(1))
-                .max(1),
-            across: (h.saturating_mul(block), max_h.saturating_mul(picture)),
-            down: (v.saturating_mul(block), max_v.saturating_mul(picture)),
-        }
-    }
-
-    /// Samples the padded plane holds.
-    pub(super) const fn len(&self) -> usize {
-        self.stride.saturating_mul(self.rows)
-    }
-}
 
 /// One component's reconstructed samples.
+///
+/// A plane grows as the decoder reconstructs it, a whole iMCU row at a time,
+/// so a decode that is asked for only its first rows -- a TIFF strip whose
+/// JPEG claims more rows than the strip has -- holds only those.
 pub(super) struct Samples {
     pub(super) shape: Shape,
-    /// `shape.len()` samples, row by row.
+    /// Up to `stride * rows` samples, row by row.
     pub(super) data: Vec<u8>,
 }
 
 impl Samples {
-    /// A plane of `shape`, every sample zero until a block is written over it.
-    pub(super) fn new(shape: Shape) -> Self {
+    /// A plane of `shape` with no rows reconstructed yet.
+    pub(super) const fn new(shape: Shape) -> Self {
         Self {
             shape,
-            data: vec![0u8; shape.len()],
+            data: Vec::new(),
+        }
+    }
+
+    /// Make room for the first `rows` rows, zero until written over.
+    pub(super) fn grow_to(&mut self, rows: usize) {
+        let len = rows.min(self.shape.rows).saturating_mul(self.shape.stride);
+        if len > self.data.len() {
+            self.data.resize(len, 0);
         }
     }
 
@@ -178,8 +152,7 @@ impl Filter {
 }
 
 /// One plane's rows at the picture's resolution, handed out one at a time.
-pub(super) struct Rows<'a> {
-    samples: &'a Samples,
+pub(super) struct Rows {
     filter: Filter,
     /// The picture's width: how many samples every row handed out has.
     width: usize,
@@ -194,16 +167,16 @@ pub(super) struct Rows<'a> {
     columns: Vec<usize>,
 }
 
-impl<'a> Rows<'a> {
-    /// Rows `width` samples long from `samples`, filtered if `fancy`.
-    pub(super) fn new(samples: &'a Samples, width: usize, fancy: bool) -> Self {
-        let filter = Filter::choose(&samples.shape, fancy);
-        let input = samples.shape.width;
+impl Rows {
+    /// Rows `width` samples long from a plane of `shape`, filtered if `fancy`.
+    pub(super) fn new(shape: &Shape, width: usize, fancy: bool) -> Self {
+        let filter = Filter::choose(shape, fancy);
+        let input = shape.width;
         let row_len = match filter {
             Filter::Across | Filter::Both => width.max(input.saturating_mul(2)),
             Filter::Same | Filter::Down | Filter::Repeat => width.max(input),
         };
-        let (h_in, h_out) = samples.shape.across;
+        let (h_in, h_out) = shape.across;
         let columns = if filter == Filter::Repeat {
             (0..width)
                 .map(|x| x.saturating_mul(h_in).checked_div(h_out).unwrap_or(0))
@@ -212,7 +185,6 @@ impl<'a> Rows<'a> {
             Vec::new()
         };
         Self {
-            samples,
             filter,
             width,
             row: vec![0u8; row_len],
@@ -225,10 +197,10 @@ impl<'a> Rows<'a> {
         }
     }
 
-    /// Output row `y`, exactly `width` samples; zeros where the plane has
-    /// nothing, which only a plane cut short by a truncated file can.
-    pub(super) fn row(&mut self, y: usize) -> &[u8] {
-        let samples = self.samples;
+    /// Output row `y` of `samples`, exactly `width` samples; zeros where the
+    /// plane has nothing, which only a plane not yet reconstructed that far
+    /// can.
+    pub(super) fn row<'s>(&'s mut self, samples: &'s Samples, y: usize) -> &'s [u8] {
         let shape = &samples.shape;
         // The two input rows a halved-down plane filters between: the one
         // output row `y` lies nearer, and the one beyond it -- above for the
@@ -420,7 +392,7 @@ mod tests {
             across,
             down,
         };
-        let mut data = vec![filler; shape.len()];
+        let mut data = vec![filler; shape.stride * shape.rows];
         for (r, line) in picture.chunks(width).enumerate() {
             data[r * shape.stride..r * shape.stride + width].copy_from_slice(line);
         }
@@ -429,8 +401,8 @@ mod tests {
 
     /// Every output row of `samples` at `out_w` x `out_h`.
     fn upsample(samples: &Samples, (out_w, out_h): (usize, usize), fancy: bool) -> Vec<Vec<u8>> {
-        let mut rows = Rows::new(samples, out_w, fancy);
-        (0..out_h).map(|y| rows.row(y).to_vec()).collect()
+        let mut rows = Rows::new(&samples.shape, out_w, fancy);
+        (0..out_h).map(|y| rows.row(samples, y).to_vec()).collect()
     }
 
     /// libjpeg-turbo's `h2v1_fancy_upsample`, `h1v2_fancy_upsample` and
@@ -756,9 +728,10 @@ mod tests {
 
     #[test]
     fn a_plane_shorter_than_its_shape_gives_what_it_has_then_zeros() {
-        // Not something a decode makes -- every plane is allocated whole --
-        // but the rows are handed out through `get` all the same, and a plane
-        // that fell short must cost a picture its missing samples, not panic.
+        // Not something a decode hands out -- a plane is grown to cover every
+        // row before any output row that reads it -- but the rows are read
+        // through `get` all the same, and a plane that fell short must cost a
+        // picture its missing samples, not panic.
         let samples = Samples {
             shape: Shape {
                 stride: 4,
@@ -778,36 +751,21 @@ mod tests {
     }
 
     #[test]
-    fn the_shape_is_libjpegs_downsampled_size() {
-        // 4:2:0, 61x37: MCUs of 16x16, so 4x3 of them.
-        let luma = Shape::of((61, 37), (2, 2), (2, 2), (8, 8));
-        assert_eq!(
-            (luma.stride, luma.rows, luma.width, luma.height),
-            (64, 48, 61, 37)
-        );
-        let chroma = Shape::of((61, 37), (1, 1), (2, 2), (8, 8));
-        assert_eq!(
-            (chroma.stride, chroma.rows, chroma.width, chroma.height),
-            (32, 24, 31, 19)
-        );
-        assert_eq!(Filter::choose(&chroma, true), Filter::Both);
-        // At quarter scale with chroma kept at the picture's block size:
-        // blocks of 2x2, and `ceil(61 * 1 * 2 / 16)` = 8.
-        let chroma = Shape::of((61, 37), (1, 1), (2, 2), (2, 2));
-        assert_eq!(
-            (chroma.stride, chroma.rows, chroma.width, chroma.height),
-            (8, 6, 8, 5)
-        );
-        // At half scale, where libjpeg reconstructs 4:2:0 chroma at twice the
-        // picture's block size: as many samples as the picture has, and so no
-        // upsampling at all.
-        let luma = Shape::of((61, 37), (2, 2), (2, 2), (4, 4));
-        let chroma = Shape::of((61, 37), (1, 1), (2, 2), (8, 4));
-        assert_eq!((luma.width, luma.height), (31, 19));
-        assert_eq!(
-            (chroma.stride, chroma.rows, chroma.width, chroma.height),
-            (32, 24, 31, 19)
-        );
-        assert_eq!(Filter::choose(&chroma, true), Filter::Same);
+    fn a_plane_grows_by_whole_rows_up_to_its_shape() {
+        let mut samples = Samples::new(Shape {
+            stride: 3,
+            rows: 4,
+            width: 3,
+            height: 4,
+            across: (1, 1),
+            down: (1, 1),
+        });
+        assert!(samples.data.is_empty());
+        samples.grow_to(2);
+        assert_eq!(samples.data.len(), 6);
+        samples.grow_to(1);
+        assert_eq!(samples.data.len(), 6);
+        samples.grow_to(9);
+        assert_eq!(samples.data.len(), 12);
     }
 }

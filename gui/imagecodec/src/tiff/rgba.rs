@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 use super::color::{self, Lab, YCbCr};
 use super::dir::{self, Directory, File, compression, extra, photometric};
 use super::read::Reader;
-use crate::{ImageError, ImageResult};
+use crate::{ImageError, ImageResult, Limits};
 
 /// How a raster's alpha relates to its colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,11 +137,11 @@ struct Image {
 ///
 /// Anything libtiff's RGBA reader refuses: a kind of sample it cannot
 /// convert, or a strip that will not read.
-pub(crate) fn read(file: File<'_>, dir: &Directory) -> ImageResult<Raster> {
+pub(crate) fn read(file: File<'_>, dir: &Directory, limits: &Limits) -> ImageResult<Raster> {
     check(dir)?;
     let img = begin(dir)?;
     let mut raster = vec![0u32; (img.width as usize).saturating_mul(img.height as usize)];
-    let mut reader = Reader::new(file, dir);
+    let mut reader = Reader::new(file, dir, *limits);
     match (img.contig, dir.tiled) {
         (true, false) => strips_contig(&img, dir, &mut reader, &mut raster)?,
         (true, true) => tiles_contig(&img, dir, &mut reader, &mut raster)?,
@@ -166,6 +166,19 @@ pub(crate) fn read(file: File<'_>, dir: &Directory) -> ImageResult<Raster> {
         pixels: raster,
         alpha,
     })
+}
+
+/// What `TIFFRGBAImageBegin` asks of the JPEG codec before anything is read:
+/// for contiguous `YCbCr` JPEG, RGB (`JPEGCOLORMODE_RGB`), which libjpeg makes
+/// by upsampling the chroma itself -- so the strips hand back three samples a
+/// pixel and every size counts them (`TIFF_UPSAMPLED`).
+pub(crate) fn jpeg_color_mode(dir: &mut Directory) {
+    if dir.compression == compression::JPEG
+        && dir.photometric == Some(photometric::YCBCR)
+        && dir.planar_config == 1
+    {
+        dir.upsampled = true;
+    }
 }
 
 /// `TIFFRGBAImageOK`.
@@ -300,6 +313,15 @@ fn begin(dir: &Directory) -> ImageResult<Image> {
         }
         _ => return Err(refuse("TIFF photometric interpretation")),
     }
+    // Contiguous `YCbCr` JPEG comes out of libjpeg as RGB.
+    let p = if p == photometric::YCBCR
+        && dir.planar_config == 1
+        && dir.compression == compression::JPEG
+    {
+        photometric::RGB
+    } else {
+        p
+    };
     let contig = !(dir.planar_config == 2 && samples > 1);
     let mut img = Image {
         width: dir.width,

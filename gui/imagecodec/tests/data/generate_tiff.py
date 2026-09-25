@@ -872,6 +872,186 @@ def fax_fixtures() -> dict[str, bytes]:
     return out
 
 
+JPEG_TABLES = 347
+
+
+def jpeg_of(img: Image.Image, **options) -> bytes:
+    """`img` as Pillow's encoder (libjpeg-turbo) writes it."""
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", **options)
+    return buf.getvalue()
+
+
+def jpeg_strips(img: Image.Image, rows: int, **options) -> list[bytes]:
+    """Each band of `rows` rows of `img` as a JPEG of its own."""
+    return [jpeg_of(img.crop((0, y, img.width, min(img.height, y + rows))), **options)
+            for y in range(0, img.height, rows)]
+
+
+def jpeg_tiff(img: Image.Image, photometric: int, strips: list[bytes], *, rows: int,
+              extra: list[tuple[int, int, object]] | None = None, **kw) -> bytes:
+    """A striped JPEG TIFF of `img` with the given strips' datastreams."""
+    spp = len(img.getbands())
+    entries = [(WIDTH, LONG, [img.width]), (LENGTH, LONG, [img.height]), (BITS, SHORT, [8] * spp),
+               (COMPRESSION, SHORT, [7]), (PHOTOMETRIC, SHORT, [photometric]), (SAMPLES, SHORT, [spp]),
+               (ROWS_PER_STRIP, LONG, [rows])]
+    ours = {tag for tag, _, _ in (extra or [])}
+    entries = [e for e in entries if e[0] not in ours] + list(extra or [])
+    return write_tiff(entries, strips, **kw)
+
+
+def jpeg_fixtures() -> dict[str, bytes]:
+    """JPEG-compressed TIFFs: every layout libtiff's JPEG codec takes, and the
+    checks it makes of each strip's datastream against the strip. The strips
+    are Pillow's JPEGs (libjpeg-turbo's encoder); the files are written here,
+    except the ones from Pillow's TIFF writer, which is libtiff's."""
+    rng = random.Random(1234)
+    base = Image.new("RGB", (29, 19))
+    base.putdata([((x * 9 + rng.randrange(40)) % 256, (y * 13) % 256, (x * y + rng.randrange(30)) % 256)
+                  for y in range(19) for x in range(29)])
+    grey = base.convert("L")
+    out: dict[str, bytes] = {}
+    sub = [(YCBCR_SUBSAMPLING, SHORT, [2, 2])]
+    # YCbCr at every subsampling a TIFF can say and Pillow can write.
+    for name, sampling, tag in (("420", 2, [2, 2]), ("422", 1, [2, 1]), ("444", 0, [1, 1])):
+        strips = jpeg_strips(base, 8, quality=85, subsampling=sampling)
+        out[f"jpeg_ycbcr{name}"] = jpeg_tiff(base, 6, strips, rows=8,
+                                             extra=[(YCBCR_SUBSAMPLING, SHORT, tag)])
+    # No YCbCrSubsampling: libtiff reads the first strip's frame for it.
+    out["jpeg_ycbcr420_no_subsampling_tag"] = jpeg_tiff(base, 6, jpeg_strips(base, 8, subsampling=2), rows=8)
+    out["jpeg_ycbcr444_no_subsampling_tag"] = jpeg_tiff(base, 6, jpeg_strips(base, 8, subsampling=0), rows=8)
+    out["jpeg_ycbcr422_no_subsampling_tag"] = jpeg_tiff(base, 6, jpeg_strips(base, 8, subsampling=1), rows=8)
+    # The tag says 2x2 but the strips are 4:4:4: each strip's sampling is
+    # checked against the tag, and refused.
+    out["jpeg_ycbcr_sampling_mismatch_refused"] = jpeg_tiff(
+        base, 6, jpeg_strips(base, 8, subsampling=0), rows=8, extra=sub)
+    # Rows per strip not a multiple of the chroma block.
+    out["jpeg_ycbcr420_odd_strips"] = jpeg_tiff(base, 6, jpeg_strips(base, 5, subsampling=2), rows=5, extra=sub)
+    # One strip.
+    out["jpeg_ycbcr420_one_strip"] = jpeg_tiff(base, 6, [jpeg_of(base, subsampling=2)], rows=19, extra=sub)
+    # Tables apart: JPEGTables, and strips of image data alone.
+    tables = jpeg_of(base, quality=70, subsampling=2, streamtype=1)
+    abbreviated = jpeg_strips(base, 8, quality=70, subsampling=2, streamtype=2)
+    out["jpeg_tables_abbreviated"] = jpeg_tiff(
+        base, 6, abbreviated, rows=8, extra=sub + [(JPEG_TABLES, UNDEFINED, tables)])
+    # Strips that need the tables, and no JPEGTables to give them.
+    out["jpeg_abbreviated_without_tables_refused"] = jpeg_tiff(base, 6, abbreviated, rows=8, extra=sub)
+    # JPEGTables holding a whole picture rather than tables alone.
+    out["jpeg_tables_with_an_image_refused"] = jpeg_tiff(
+        base, 6, abbreviated, rows=8, extra=sub + [(JPEG_TABLES, UNDEFINED, jpeg_of(base, subsampling=2))])
+    # A strip that redefines the tables leaves them for the strips after it:
+    # JPEGTables at quality 30, the first strip whole at quality 90, the rest
+    # abbreviated at quality 90 -- right only with the first strip's tables.
+    q90 = jpeg_strips(base, 8, quality=90, subsampling=2)
+    q90_abbreviated = jpeg_strips(base, 8, quality=90, subsampling=2, streamtype=2)
+    out["jpeg_tables_redefined_by_a_strip"] = jpeg_tiff(
+        base, 6, [q90[0]] + q90_abbreviated[1:], rows=8,
+        extra=sub + [(JPEG_TABLES, UNDEFINED, jpeg_of(base, quality=30, subsampling=2, streamtype=1))])
+    # Grey, RGB stored as RGB, RGB stored as YCbCr (shown unconverted, as
+    # libtiff shows it), and CMYK.
+    out["jpeg_grey"] = jpeg_tiff(grey, 1, jpeg_strips(grey, 8, quality=80), rows=8)
+    out["jpeg_grey_min_is_white"] = jpeg_tiff(grey, 0, jpeg_strips(grey, 8, quality=80), rows=8)
+    out["jpeg_rgb"] = jpeg_tiff(base, 2, jpeg_strips(base, 8, quality=90, subsampling=0, keep_rgb=True), rows=8)
+    out["jpeg_rgb_holding_ycbcr"] = jpeg_tiff(base, 2, jpeg_strips(base, 8, quality=90, subsampling=0), rows=8)
+    cmyk = base.convert("CMYK")
+    out["jpeg_cmyk"] = jpeg_tiff(cmyk, 5, jpeg_strips(cmyk, 8, quality=85), rows=8)
+    # Progressive strips, and restart markers.
+    out["jpeg_ycbcr420_progressive"] = jpeg_tiff(
+        base, 6, jpeg_strips(base, 8, subsampling=2, progressive=True), rows=8, extra=sub)
+    out["jpeg_ycbcr420_restarts"] = jpeg_tiff(
+        base, 6, jpeg_strips(base, 8, subsampling=2, restart_marker_blocks=1), rows=8, extra=sub)
+    # A last strip whose datastream keeps the full strip height: tolerated.
+    tall = jpeg_strips(base, 8, subsampling=2)
+    padded = Image.new("RGB", (29, 24))
+    padded.paste(base, (0, 0))
+    tall[-1] = jpeg_of(padded.crop((0, 16, 29, 24)), subsampling=2)
+    out["jpeg_ycbcr420_tall_last_strip"] = jpeg_tiff(base, 6, tall, rows=8, extra=sub)
+    # A middle strip that tall is not.
+    tall_middle = jpeg_strips(base, 8, subsampling=2)
+    tall_middle[0] = jpeg_of(padded.crop((0, 0, 29, 12)), subsampling=2)
+    out["jpeg_ycbcr420_tall_first_strip_refused"] = jpeg_tiff(base, 6, tall_middle, rows=8, extra=sub)
+    # A strip wider than the image.
+    wide = jpeg_strips(base, 8, subsampling=2)
+    wide[1] = jpeg_of(Image.new("RGB", (33, 8), (9, 99, 199)), subsampling=2)
+    out["jpeg_ycbcr420_wide_strip_refused"] = jpeg_tiff(base, 6, wide, rows=8, extra=sub)
+    # A strip shorter and narrower than its segment: what it has, and the
+    # rest of the strip buffer as the strip before left it.
+    short = jpeg_strips(base, 8, subsampling=2)
+    short[1] = jpeg_of(base.crop((0, 8, 21, 13)), subsampling=2)
+    out["jpeg_ycbcr420_short_strip"] = jpeg_tiff(base, 6, short, rows=8, extra=sub)
+    # The wrong number of components, and BitsPerSample the JPEG does not have.
+    out["jpeg_ycbcr_grey_strips_refused"] = jpeg_tiff(
+        base, 6, jpeg_strips(grey, 8), rows=8, extra=sub)
+    out["jpeg_ycbcr_16_bits_refused"] = jpeg_tiff(
+        base, 6, jpeg_strips(base, 8, subsampling=2), rows=8, extra=sub + [(BITS, SHORT, [16, 16, 16])])
+    # A datastream with a second scan after its only one: once every row is
+    # read jpeg_finish_decompress fails on it -- and libtiff reads the strip
+    # all the same, since it returns `rows_left || finish()` and a C `||` is
+    # 1 for finish's -1.
+    def second_scan(data: bytes) -> bytes:
+        at = data.rfind(b"\xff\xd9")
+        sos = data.find(b"\xff\xda")
+        header_len = int.from_bytes(data[sos + 2:sos + 4], "big")
+        return data[:at] + data[sos:sos + 2 + header_len] + b"\x00" * 4 + data[at:]
+    out["jpeg_ycbcr420_second_scan"] = jpeg_tiff(
+        base, 6, [second_scan(c) for c in jpeg_strips(base, 8, subsampling=2)], rows=8, extra=sub)
+    tiles = []
+    for ty in range(0, 19, 16):
+        for tx in range(0, 29, 16):
+            tile = Image.new("RGB", (16, 16), (0, 0, 0))
+            tile.paste(base.crop((tx, ty, min(29, tx + 16), min(19, ty + 16))), (0, 0))
+            tiles.append(jpeg_of(tile, quality=80, subsampling=2))
+    tile_entries = [(WIDTH, LONG, [29]), (LENGTH, LONG, [19]), (BITS, SHORT, [8, 8, 8]),
+                    (COMPRESSION, SHORT, [7]), (PHOTOMETRIC, SHORT, [6]), (SAMPLES, SHORT, [3]),
+                    (TILE_WIDTH, LONG, [16]), (TILE_LENGTH, LONG, [16])] + sub
+    tiled = {"offsets_tag": TILE_OFFSETS, "counts_tag": TILE_BYTE_COUNTS}
+    out["jpeg_ycbcr420_tiled"] = write_tiff(tile_entries, tiles, **tiled)
+    out["jpeg_ycbcr420_tiled_second_scan"] = write_tiff(tile_entries, [second_scan(t) for t in tiles], **tiled)
+    # Planes apart: RGB, and YCbCr at 1x1, each plane a greyscale JPEG.
+    planes = []
+    for band in base.split():
+        planes += jpeg_strips(band, 8, quality=85)
+    plane_entries = [(WIDTH, LONG, [29]), (LENGTH, LONG, [19]), (BITS, SHORT, [8, 8, 8]),
+                     (COMPRESSION, SHORT, [7]), (SAMPLES, SHORT, [3]), (ROWS_PER_STRIP, LONG, [8]),
+                     (PLANAR, SHORT, [2])]
+    out["jpeg_rgb_separate"] = write_tiff(plane_entries + [(PHOTOMETRIC, SHORT, [2])], planes)
+    ycc_planes = []
+    for band in base.convert("YCbCr").split():
+        ycc_planes += jpeg_strips(band, 8, quality=85)
+    out["jpeg_ycbcr_separate"] = write_tiff(
+        plane_entries + [(PHOTOMETRIC, SHORT, [6]), (YCBCR_SUBSAMPLING, SHORT, [1, 1])], ycc_planes)
+    # FillOrder 2 does not reverse a JPEG strip's bits.
+    out["jpeg_ycbcr420_fill_order_2"] = jpeg_tiff(
+        base, 6, jpeg_strips(base, 8, subsampling=2), rows=8, extra=sub + [(FILL_ORDER, SHORT, [2])])
+    # A strip cut short in its scan: libjpeg's grey for what did not arrive.
+    # Cut in its tables instead, it never reaches a scan and is refused.
+    cut = jpeg_strips(base, 8, subsampling=2)
+    scan = cut[1].find(b"\xff\xda")
+    cut[1] = cut[1][:scan + (len(cut[1]) - scan) // 2]
+    out["jpeg_ycbcr420_cut_strip"] = jpeg_tiff(base, 6, cut, rows=8, extra=sub)
+    cut_header = jpeg_strips(base, 8, subsampling=2)
+    cut_header[1] = cut_header[1][:cut_header[1].find(b"\xff\xda")]
+    out["jpeg_ycbcr420_strip_cut_before_its_scan_refused"] = jpeg_tiff(base, 6, cut_header, rows=8, extra=sub)
+    # Tables defined after a strip's scan, before its end: jpeg_finish_decompress
+    # reads them, and the next strip -- abbreviated -- is decoded with them.
+    # JPEGTables at quality 30; the first strip whole at quality 90, with the
+    # quality 60 tables after its scan; the rest abbreviated at quality 60.
+    q60_tables = jpeg_of(base, quality=60, subsampling=2, streamtype=1)
+    first = q90[0]
+    end = first.rfind(b"\xff\xd9")
+    first = first[:end] + q60_tables[2:-2] + first[end:]
+    q60_abbreviated = jpeg_strips(base, 8, quality=60, subsampling=2, streamtype=2)
+    out["jpeg_tables_after_a_scan"] = jpeg_tiff(
+        base, 6, [first] + q60_abbreviated[1:], rows=8,
+        extra=sub + [(JPEG_TABLES, UNDEFINED, jpeg_of(base, quality=30, subsampling=2, streamtype=1))])
+    # Pillow's writer: libtiff's own encoder, JPEGTables and abbreviated strips.
+    for mode in ("RGB", "L", "CMYK"):
+        buf = io.BytesIO()
+        base.convert(mode).save(buf, "TIFF", compression="jpeg")
+        out[f"pillow_{mode.lower()}_jpeg"] = buf.getvalue()
+    return out
+
+
 def pillow_fixtures() -> dict[str, bytes]:
     """Pictures written by Pillow's writer, which is libtiff's encoder."""
     rng = random.Random(99)
@@ -892,7 +1072,8 @@ def pillow_fixtures() -> dict[str, bytes]:
 
 def main() -> None:
     oracle = build_oracle()
-    made = {f"tiff_{name}": data for name, data in (fixtures() | pillow_fixtures() | fax_fixtures()).items()}
+    made = {f"tiff_{name}": data for name, data in
+            (fixtures() | pillow_fixtures() | fax_fixtures() | jpeg_fixtures()).items()}
     for old in HERE.glob("tiff_*.tif"):
         old.unlink()
     for old in HERE.glob("tiff_*.txt"):

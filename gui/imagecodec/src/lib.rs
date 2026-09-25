@@ -66,21 +66,14 @@
 //! to its first frame, which is what its own specification says a decoder that
 //! does not animate must show.
 //!
-//! JPEG (JFIF), baseline sequential: the format a photograph is almost always
-//! in, and the one a wallpaper is likely to be. Huffman-coded, any sampling
-//! factors, restart intervals, greyscale or YCbCr. Its colour is brought back
-//! to full resolution with libjpeg's own filter, and a scaled decode -- a
-//! thumbnail -- is libjpeg-turbo's scaled decode, so both can be checked
-//! against the decoder everything else uses: every colour layout, at full size
-//! and at a half, a quarter and an eighth, comes out within 3 levels of it and
-//! a mean well under a tenth of one, which is the difference between rounding
-//! the inverse DCT differently and decoding differently.
-//!
-//! **Progressive** JPEG too, every pass of it: the coefficients are gathered
-//! across the scans and reconstructed once they are all in, so a progressive
-//! file decodes to exactly the pixels a baseline file carrying the same
-//! coefficients does. Arithmetic coding and 12-bit samples are refused by name
-//! rather than half-read. See [`jpeg`].
+//! JPEG, as libjpeg-turbo -- the decoder in the browsers, in GNOME's image
+//! viewer and in Pillow -- decodes it, because the decoder is a port of
+//! libjpeg-turbo's: baseline, extended, progressive and arithmetic-coded,
+//! every sampling layout, greyscale, YCbCr, RGB, CMYK and YCCK, damaged files
+//! included, to exactly libjpeg-turbo's pixels, and a thumbnail by its own
+//! reduced-size decoding. The choices libjpeg leaves to its caller are made as
+//! Chrome makes them. Lossless and 12-bit JPEG are refused by name. See
+//! [`jpeg`].
 //!
 //! GIF (87a and 89a), animations included: [`decode`] gives the first frame,
 //! which is what a thumbnail or a still viewer shows, and [`gif::Animation`]
@@ -111,8 +104,8 @@
 //! TIFF, the first page, as libtiff's RGBA reader -- the one image viewers
 //! on free desktops use -- converts it: grey, palette, RGB, CMYK, `YCbCr`
 //! and CIE L*a*b* samples of every depth it takes, strips or tiles, planes
-//! together or apart, uncompressed or PackBits, LZW, Deflate or CCITT fax.
-//! See [`tiff`].
+//! together or apart, uncompressed or PackBits, LZW, Deflate, CCITT fax or
+//! JPEG. See [`tiff`].
 //!
 //! **EXIF orientation is applied**, as Chrome applies it: a JPEG's or PNG's
 //! EXIF saying the picture is on its side turns it, so [`decode`],

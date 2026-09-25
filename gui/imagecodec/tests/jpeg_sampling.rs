@@ -5,8 +5,9 @@
 //! "right" means in practice is what libjpeg-turbo does -- it is what nearly
 //! every browser, image library and desktop decodes with, so it is how anyone
 //! has ever seen the picture -- and each fixture here is compared against
-//! Pillow's decode of it (libjpeg-turbo underneath), to within the rounding
-//! two decoders' inverse DCTs and colour conversions may differ by.
+//! Pillow's decode of it (libjpeg-turbo underneath), exactly: the decoder is a
+//! port of libjpeg-turbo's, so the filter, the inverse DCT and the colour
+//! conversion all round as the reference rounds.
 //!
 //! | fixture | colour, against brightness | what libjpeg does with it |
 //! |---|---|---|
@@ -40,7 +41,7 @@
 
 mod common;
 
-use common::{answer, assert_agrees, read};
+use common::{answer, assert_exact, read};
 use imagecodec::{Limits, decode, decode_scaled, dimensions};
 
 /// Each fixture, and the answer file holding Pillow's decode of it.
@@ -68,7 +69,7 @@ fn every_colour_layout_decodes_as_libjpeg_decodes_it() {
     for &(file, reference) in FIXTURES {
         let image =
             decode(&read(file), Limits::default()).unwrap_or_else(|e| panic!("{file}: {e}"));
-        assert_agrees(file, &image, &answer(reference));
+        assert_exact(file, &image, &answer(reference));
     }
 }
 
@@ -84,7 +85,7 @@ fn every_colour_layout_decodes_at_every_scale_as_libjpeg_does() {
             let name = format!("{file} at 1/{factor}");
             let image = decode_scaled(&bytes, Limits::default(), w, h)
                 .unwrap_or_else(|e| panic!("{name}: {e}"));
-            assert_agrees(&name, &image, &answer(&format!("{reference}_s{factor}")));
+            assert_exact(&name, &image, &answer(&format!("{reference}_s{factor}")));
         }
     }
 }

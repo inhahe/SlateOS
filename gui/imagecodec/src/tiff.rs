@@ -48,9 +48,9 @@
 //!
 //! # What is not here yet
 //!
-//! JPEG and old-style JPEG, and the rarer codecs (NeXT, ThunderScan, SGI
-//! LogLuv, PixarLog) are refused by name. libtiff opens the first page only here too; the others
-//! are not reached.
+//! Old-style JPEG, and the rarer codecs (NeXT, ThunderScan, SGI LogLuv,
+//! PixarLog), are refused by name. The first page only is read, as libtiff's
+//! viewers read it; the others are not reached.
 
 mod color;
 mod dir;
@@ -199,7 +199,8 @@ pub fn decode_libtiff_raster(bytes: &[u8], limits: Limits) -> ImageResult<Image>
 /// The raster, stored orientation, and the orientation to turn it by.
 fn decode_raster(bytes: &[u8], limits: Limits) -> ImageResult<(rgba::Raster, Orientation)> {
     let (file, offset) = dir::header(bytes)?;
-    let d = dir::read(&file, offset)?;
+    let mut d = dir::read(&file, offset)?;
+    rgba::jpeg_color_mode(&mut d);
     let pixels = u64::from(d.width).saturating_mul(u64::from(d.length));
     if pixels > limits.max_pixels {
         return Err(ImageError::TooLarge {
@@ -222,7 +223,7 @@ fn decode_raster(bytes: &[u8], limits: Limits) -> ImageResult<(rgba::Raster, Ori
         });
     }
     let orientation = Orientation::from_value(d.orientation).unwrap_or(Orientation::TopLeft);
-    let raster = rgba::read(file, &d)?;
+    let raster = rgba::read(file, &d, &limits)?;
     Ok((raster, orientation))
 }
 

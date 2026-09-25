@@ -79,9 +79,13 @@ impl<'a> Source<'a> {
             self.refill();
         } else if real_left > 0 {
             // `count <= real_left`, so it fits a usize.
-            self.at = self.at.saturating_add(usize::try_from(count).unwrap_or(real_left));
+            self.at = self
+                .at
+                .saturating_add(usize::try_from(count).unwrap_or(real_left));
         } else {
-            self.fake_left = self.fake_left.saturating_sub(u8::try_from(count).unwrap_or(2));
+            self.fake_left = self
+                .fake_left
+                .saturating_sub(u8::try_from(count).unwrap_or(2));
         }
     }
 
@@ -106,7 +110,10 @@ mod tests {
     #[test]
     fn the_data_then_end_of_image_markers_for_ever() {
         let mut source = Source::new(&[1, 2, 3]);
-        assert_eq!(take(&mut source, 9), [1, 2, 3, 0xFF, 0xD9, 0xFF, 0xD9, 0xFF, 0xD9]);
+        assert_eq!(
+            take(&mut source, 9),
+            [1, 2, 3, 0xFF, 0xD9, 0xFF, 0xD9, 0xFF, 0xD9]
+        );
         assert_eq!(source.ran_out, 3);
     }
 

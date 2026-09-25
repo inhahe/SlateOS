@@ -305,10 +305,14 @@ impl<'d, 't> Decompress<'d, 't> {
         let (width, height) = (header.width, header.height);
         for component in &mut header.components {
             component.dct_scaled_size = unit;
-            component.width_in_blocks =
-                div_up(width.saturating_mul(component.h), max_h.saturating_mul(unit));
-            component.height_in_blocks =
-                div_up(height.saturating_mul(component.v), max_v.saturating_mul(unit));
+            component.width_in_blocks = div_up(
+                width.saturating_mul(component.h),
+                max_h.saturating_mul(unit),
+            );
+            component.height_in_blocks = div_up(
+                height.saturating_mul(component.v),
+                max_v.saturating_mul(unit),
+            );
             component.downsampled_width = div_up(width.saturating_mul(component.h), max_h);
             component.downsampled_height = div_up(height.saturating_mul(component.v), max_v);
             component.quant_table = None;
@@ -317,8 +321,7 @@ impl<'d, 't> Decompress<'d, 't> {
         self.max_v = max_v;
         self.min_dct = unit;
         self.total_imcu_rows = div_up(height, max_v.saturating_mul(unit));
-        self.has_multiple_scans =
-            header.scan.count < header.components.len() || header.progressive;
+        self.has_multiple_scans = header.scan.count < header.components.len() || header.progressive;
         Ok(())
     }
 
@@ -381,7 +384,11 @@ impl<'d, 't> Decompress<'d, 't> {
     /// `master_selection` does, start the first scan, and read a multi-scan
     /// image whole. `rows_wanted`, if the caller will read fewer rows than the
     /// image has, bounds the samples accounted against `limits`.
-    pub(crate) fn start(&mut self, limits: &Limits, rows_wanted: Option<usize>) -> Result<(), Error> {
+    pub(crate) fn start(
+        &mut self,
+        limits: &Limits,
+        rows_wanted: Option<usize>,
+    ) -> Result<(), Error> {
         if self.header.lossless {
             return Err(Error::Unsupported("JPEG: lossless (SOF3, SOF11)"));
         }
@@ -427,8 +434,8 @@ impl<'d, 't> Decompress<'d, 't> {
 
     /// `jpeg_calc_output_dimensions`, for the scales this decoder offers.
     #[allow(
-    clippy::arithmetic_side_effects,
-    reason = "frame geometry: dimensions are at most 65500 (initial_setup refuses more), sampling factors at most 4 and block sizes at most 8, so every product here is far below usize::MAX"
+        clippy::arithmetic_side_effects,
+        reason = "frame geometry: dimensions are at most 65500 (initial_setup refuses more), sampling factors at most 4 and block sizes at most 8, so every product here is far below usize::MAX"
     )]
     fn calc_output_dimensions(&mut self) {
         let min = self.block_size;
@@ -817,7 +824,8 @@ impl<'d, 't> Decompress<'d, 't> {
                                 let Some(block) = blocks.get(blkn + xindex) else {
                                     continue;
                                 };
-                                let at = (row0 + yindex * size) * stride + start_col + xindex * size;
+                                let at =
+                                    (row0 + yindex * size) * stride + start_col + xindex * size;
                                 idct::inverse(
                                     size,
                                     block,

@@ -214,8 +214,14 @@ pub(super) fn smooth_row(s: &Smoothing<'_>, plane: &mut [u8], stride: usize) {
     let bits = s.bits;
     let change_dc = bits.iter().skip(1).all(|&b| b == -1);
     let quant = |position: usize| i64::from(s.quant.get(position).copied().unwrap_or(0));
-    let (q00, q01, q10, q20, q11, q02) =
-        (quant(0), quant(Q01), quant(Q10), quant(Q20), quant(Q11), quant(Q02));
+    let (q00, q01, q10, q20, q11, q02) = (
+        quant(0),
+        quant(Q01),
+        quant(Q10),
+        quant(Q20),
+        quant(Q11),
+        quant(Q02),
+    );
     let (q03, q12, q21, q30) = if change_dc {
         (quant(Q03), quant(Q12), quant(Q21), quant(Q30))
     } else {
@@ -224,11 +230,22 @@ pub(super) fn smooth_row(s: &Smoothing<'_>, plane: &mut [u8], stride: usize) {
     let image_block_rows = s.block_rows.saturating_mul(s.total_imcu_rows);
     let first_row = s.imcu_row.saturating_mul(s.v);
     for block_row in 0..s.block_rows {
-        let image_block_row = s.imcu_row.saturating_mul(s.block_rows).saturating_add(block_row);
+        let image_block_row = s
+            .imcu_row
+            .saturating_mul(s.block_rows)
+            .saturating_add(block_row);
         // Block rows in the store, as libjpeg's row pointers pick them.
         let here = first_row.saturating_add(block_row);
-        let above = if image_block_row > 0 { here.wrapping_sub(1) } else { here };
-        let above2 = if image_block_row > 1 { here.wrapping_sub(2) } else { above };
+        let above = if image_block_row > 0 {
+            here.wrapping_sub(1)
+        } else {
+            here
+        };
+        let above2 = if image_block_row > 1 {
+            here.wrapping_sub(2)
+        } else {
+            above
+        };
         let below = if image_block_row.saturating_add(1) < image_block_rows {
             here.saturating_add(1)
         } else {
@@ -260,7 +277,15 @@ pub(super) fn smooth_row(s: &Smoothing<'_>, plane: &mut [u8], stride: usize) {
                     row[4] = dc(r, bx.saturating_add(2));
                 }
             }
-            smooth_block(&mut w, &d, bits, change_dc, q00, [q01, q10, q20, q11, q02], [q03, q12, q21, q30]);
+            smooth_block(
+                &mut w,
+                &d,
+                bits,
+                change_dc,
+                q00,
+                [q01, q10, q20, q11, q02],
+                [q03, q12, q21, q30],
+            );
             let at = here
                 .saturating_mul(s.size)
                 .saturating_mul(stride)
@@ -485,7 +510,11 @@ mod tests {
         let mut value = PLACEHOLDER;
         for al in (0..=13).rev() {
             let p1 = 1i16 << al;
-            value = if value >= 0 { value.wrapping_add(p1) } else { value.wrapping_sub(p1) };
+            value = if value >= 0 {
+                value.wrapping_add(p1)
+            } else {
+                value.wrapping_sub(p1)
+            };
             assert_ne!(value, 0);
         }
     }

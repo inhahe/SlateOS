@@ -337,7 +337,9 @@ impl Arith {
                 continue;
             };
             let dc = self.pass.is_none_or(|p| p == Pass::DcFirst);
-            let ac = self.pass.is_none_or(|p| matches!(p, Pass::AcFirst | Pass::AcRefine));
+            let ac = self
+                .pass
+                .is_none_or(|p| matches!(p, Pass::AcFirst | Pass::AcRefine));
             if dc {
                 if let Some(stats) = self.dc_stats.get_mut(usize::from(component.dc_tbl_no)) {
                     *stats = [0; DC_BINS];
@@ -561,7 +563,10 @@ impl Arith {
         for blkn in 0..self.blocks_in_mcu {
             let position = self.positions.get(blkn).copied().unwrap_or(0);
             let ci = scan.comps.get(position).copied().unwrap_or(0);
-            let table = header.components.get(ci).map_or(0, |c| usize::from(c.dc_tbl_no));
+            let table = header
+                .components
+                .get(ci)
+                .map_or(0, |c| usize::from(c.dc_tbl_no));
             let Some(diff) = self.dc_difference(input, header, position, table) else {
                 return;
             };
@@ -588,7 +593,10 @@ impl Arith {
         }
         let scan = &header.scan;
         let ci = scan.comps.first().copied().unwrap_or(0);
-        let table = header.components.get(ci).map_or(0, |c| usize::from(c.ac_tbl_no));
+        let table = header
+            .components
+            .get(ci)
+            .map_or(0, |c| usize::from(c.ac_tbl_no));
         let Some(block) = blocks.first_mut() else {
             return;
         };
@@ -639,7 +647,10 @@ impl Arith {
         }
         let scan = &header.scan;
         let ci = scan.comps.first().copied().unwrap_or(0);
-        let table = header.components.get(ci).map_or(0, |c| usize::from(c.ac_tbl_no));
+        let table = header
+            .components
+            .get(ci)
+            .map_or(0, |c| usize::from(c.ac_tbl_no));
         let Some(block) = blocks.first_mut() else {
             return;
         };

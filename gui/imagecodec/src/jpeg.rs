@@ -180,7 +180,14 @@ fn decode_at(bytes: &[u8], limits: Limits, block: usize) -> ImageResult<Image> {
         }
     };
     let space = jpeg.jpeg_color_space();
-    jpeg.set_color_spaces(space, if cmyk { ColorSpace::Cmyk } else { ColorSpace::Rgb });
+    jpeg.set_color_spaces(
+        space,
+        if cmyk {
+            ColorSpace::Cmyk
+        } else {
+            ColorSpace::Rgb
+        },
+    );
     jpeg.set_block_size(block);
     jpeg.set_max_scans(MAX_SCANS);
     jpeg.start(&limits, None)?;
@@ -208,8 +215,7 @@ fn decode_at(bytes: &[u8], limits: Limits, block: usize) -> ImageResult<Image> {
     }
     Ok(Image {
         width: u32::try_from(width).map_err(|_| ImageError::Malformed("an impossible width"))?,
-        height: u32::try_from(height)
-            .map_err(|_| ImageError::Malformed("an impossible height"))?,
+        height: u32::try_from(height).map_err(|_| ImageError::Malformed("an impossible height"))?,
         pixels,
     })
 }
@@ -437,11 +443,7 @@ mod tests {
         assert_eq!((image.width, image.height), (24, 16));
         for (index, &got) in image.pixels.iter().enumerate() {
             let (r, g, b) = expected_at(index);
-            assert_eq!(
-                got,
-                0xFF00_0000 | (r << 16) | (g << 8) | b,
-                "pixel {index}"
-            );
+            assert_eq!(got, 0xFF00_0000 | (r << 16) | (g << 8) | b, "pixel {index}");
         }
     }
 
@@ -449,9 +451,17 @@ mod tests {
     #[test]
     fn a_scaled_decode_shrinks_rather_than_refusing() {
         let small = decode_scaled(FIXTURE, Limits::default(), 8, 8).expect("decodes");
-        assert!(small.width <= 8 && small.height <= 8, "got {}x{}", small.width, small.height);
+        assert!(
+            small.width <= 8 && small.height <= 8,
+            "got {}x{}",
+            small.width,
+            small.height
+        );
         assert_eq!(small.pixels.len(), (small.width * small.height) as usize);
-        assert!(small.pixels.iter().all(|p| p >> 24 == 0xFF), "every pixel opaque");
+        assert!(
+            small.pixels.iter().all(|p| p >> 24 == 0xFF),
+            "every pixel opaque"
+        );
     }
 
     /// A picture already smaller than the bounds comes back at its own size.
@@ -472,14 +482,20 @@ mod tests {
             .iter()
             .filter(|p| (40..=215).contains(&(*p & 0xFF)))
             .count();
-        assert!(mid_tones > 0, "every pixel is at one extreme, which is what sampling gives");
+        assert!(
+            mid_tones > 0,
+            "every pixel is at one extreme, which is what sampling gives"
+        );
     }
 
     /// Every entry point on the crate dispatches to JPEG, not just `decode`.
     #[test]
     fn every_entry_point_knows_about_jpeg() {
         let limits = Limits::default();
-        assert_eq!(crate::dimensions(FIXTURE).expect("dimensions dispatches"), (24, 16));
+        assert_eq!(
+            crate::dimensions(FIXTURE).expect("dimensions dispatches"),
+            (24, 16)
+        );
         let whole = crate::decode(FIXTURE, limits).expect("decode dispatches");
         assert_eq!((whole.width, whole.height), (24, 16));
         let small = crate::decode_scaled(FIXTURE, limits, 8, 8).expect("decode_scaled dispatches");
@@ -532,7 +548,10 @@ mod tests {
     fn a_file_cut_before_its_scan_is_refused() {
         let start = FIXTURE.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
         for cut in [FIXTURE.len() / 3, start] {
-            assert!(decode(&FIXTURE[..cut], Limits::default()).is_err(), "cut at {cut}");
+            assert!(
+                decode(&FIXTURE[..cut], Limits::default()).is_err(),
+                "cut at {cut}"
+            );
         }
     }
 

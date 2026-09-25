@@ -325,9 +325,14 @@ impl<'a> Reader<'a> {
         let rows = if line == 0 {
             0
         } else {
-            out.len().checked_div(line).unwrap_or(0).min(stream.image_height())
+            out.len()
+                .checked_div(line)
+                .unwrap_or(0)
+                .min(stream.image_height())
         };
-        stream.start(&self.limits, Some(rows)).map_err(|_| fail.clone())?;
+        stream
+            .start(&self.limits, Some(rows))
+            .map_err(|_| fail.clone())?;
         if line == 0 {
             out.fill(0);
             return Err(fail);
@@ -339,7 +344,9 @@ impl<'a> Reader<'a> {
             };
             let at = r.saturating_mul(line);
             let end = at.saturating_add(samples.len()).min(out.len());
-            if let (Some(dest), Some(src)) = (out.get_mut(at..end), samples.get(..end.saturating_sub(at))) {
+            if let (Some(dest), Some(src)) =
+                (out.get_mut(at..end), samples.get(..end.saturating_sub(at)))
+            {
                 dest.copy_from_slice(src);
             }
         }

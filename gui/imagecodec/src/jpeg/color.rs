@@ -162,7 +162,13 @@ mod tests {
     fn neutral_chroma_is_grey_and_the_extremes_clamp() {
         let ycc = Ycc::new();
         let mut out = [0u8; 9];
-        ycc_rgb(&ycc, &[100, 0, 255], &[128, 255, 0], &[128, 255, 0], &mut out);
+        ycc_rgb(
+            &ycc,
+            &[100, 0, 255],
+            &[128, 255, 0],
+            &[128, 255, 0],
+            &mut out,
+        );
         assert_eq!(&out[..3], &[100, 100, 100]);
         // Full blue-difference and red-difference on black: red and blue
         // rise, green clamps at 0 -- and the reverse on white. The shifts

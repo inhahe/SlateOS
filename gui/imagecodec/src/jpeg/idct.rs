@@ -75,7 +75,11 @@ fn dequantize(coef: i16, quant: u16) -> i64 {
 #[inline]
 const fn limit(x: i64) -> u8 {
     let masked = (x & 1023) as i32;
-    let signed = if masked >= 512 { masked.wrapping_sub(1024) } else { masked };
+    let signed = if masked >= 512 {
+        masked.wrapping_sub(1024)
+    } else {
+        masked
+    };
     let shifted = signed.wrapping_add(128);
     if shifted < 0 {
         0
@@ -133,12 +137,18 @@ pub(super) const fn reads(size: usize, position: usize) -> bool {
 
 #[inline]
 fn at(values: &[i16; 64], row: usize, col: usize) -> i16 {
-    values.get(row.wrapping_mul(8).wrapping_add(col)).copied().unwrap_or(0)
+    values
+        .get(row.wrapping_mul(8).wrapping_add(col))
+        .copied()
+        .unwrap_or(0)
 }
 
 #[inline]
 fn q(values: &[u16; 64], row: usize, col: usize) -> u16 {
-    values.get(row.wrapping_mul(8).wrapping_add(col)).copied().unwrap_or(0)
+    values
+        .get(row.wrapping_mul(8).wrapping_add(col))
+        .copied()
+        .unwrap_or(0)
 }
 
 /// `jpeg_idct_islow`.

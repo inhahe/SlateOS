@@ -286,8 +286,7 @@ fn get_sos(input: &mut Input<'_>, header: &mut Header) -> Result<(), Error> {
     }
     let length = input.src.word();
     let n = input.src.byte();
-    if u32::from(length) != u32::from(n).wrapping_mul(2).wrapping_add(6) || !(1..=4).contains(&n)
-    {
+    if u32::from(length) != u32::from(n).wrapping_mul(2).wrapping_add(6) || !(1..=4).contains(&n) {
         return Err(jerr::BAD_LENGTH);
     }
     let count = usize::from(n);

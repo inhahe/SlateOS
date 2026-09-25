@@ -58,7 +58,8 @@ pub(super) mod jerr {
     pub(in crate::jpeg) const BAD_LENGTH: Error = Error::Malformed("JPEG: a bogus marker length");
     pub(in crate::jpeg) const BAD_COMPONENT_ID: Error =
         Error::Malformed("JPEG: a scan naming a component the frame lacks");
-    pub(in crate::jpeg) const BAD_HUFF_TABLE: Error = Error::Malformed("JPEG: a bogus Huffman table");
+    pub(in crate::jpeg) const BAD_HUFF_TABLE: Error =
+        Error::Malformed("JPEG: a bogus Huffman table");
     pub(in crate::jpeg) const DHT_INDEX: Error =
         Error::Malformed("JPEG: a Huffman table numbered past 3");
     pub(in crate::jpeg) const DQT_INDEX: Error =

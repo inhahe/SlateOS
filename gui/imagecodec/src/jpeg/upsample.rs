@@ -56,7 +56,6 @@ pub(super) struct Shape {
     pub(super) down: (usize, usize),
 }
 
-
 /// One component's reconstructed samples.
 ///
 /// A plane grows as the decoder reconstructs it, a whole iMCU row at a time,

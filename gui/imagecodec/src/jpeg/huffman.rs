@@ -337,17 +337,21 @@ impl Sequential {
         }
         if !self.bits.insufficient {
             let scan = &header.scan;
-            for (&(position, ac_wanted), block) in
-                self.blocks.iter().zip(blocks.iter_mut()).take(self.blocks_in_mcu)
+            for (&(position, ac_wanted), block) in self
+                .blocks
+                .iter()
+                .zip(blocks.iter_mut())
+                .take(self.blocks_in_mcu)
             {
                 let ci = scan.comps.get(position).copied().unwrap_or(0);
                 let (dc_no, ac_no) = header
                     .components
                     .get(ci)
                     .map_or((0, 0), |c| (c.dc_tbl_no, c.ac_tbl_no));
-                let (Some(Some(dc)), Some(Some(ac))) =
-                    (self.dc.get(usize::from(dc_no)), self.ac.get(usize::from(ac_no)))
-                else {
+                let (Some(Some(dc)), Some(Some(ac))) = (
+                    self.dc.get(usize::from(dc_no)),
+                    self.ac.get(usize::from(ac_no)),
+                ) else {
                     continue;
                 };
                 // F.2.2.1: the DC difference.
@@ -559,7 +563,9 @@ impl Progressive {
     }
 
     fn table(&self, number: u8) -> Option<&Derived> {
-        self.tables.get(usize::from(number)).and_then(Option::as_ref)
+        self.tables
+            .get(usize::from(number))
+            .and_then(Option::as_ref)
     }
 
     /// One MCU into `blocks`, which hold the coefficients so far.
@@ -596,11 +602,18 @@ impl Progressive {
             return Ok(());
         }
         let scan = &header.scan;
-        for (&position, block) in self.positions.iter().zip(blocks.iter_mut()).take(self.blocks_in_mcu)
+        for (&position, block) in self
+            .positions
+            .iter()
+            .zip(blocks.iter_mut())
+            .take(self.blocks_in_mcu)
         {
             let ci = scan.comps.get(position).copied().unwrap_or(0);
             let number = header.components.get(ci).map_or(0, |c| c.dc_tbl_no);
-            let Some(table) = self.tables.get(usize::from(number)).and_then(Option::as_ref)
+            let Some(table) = self
+                .tables
+                .get(usize::from(number))
+                .and_then(Option::as_ref)
             else {
                 continue;
             };
@@ -812,7 +825,10 @@ mod tests {
             values: [0; 256],
         });
         assert!(derive(&tables, true, 0, false).is_err());
-        assert_eq!(derive(&tables, true, 1, false).err(), Some(jerr::NO_HUFF_TABLE));
+        assert_eq!(
+            derive(&tables, true, 1, false).err(),
+            Some(jerr::NO_HUFF_TABLE)
+        );
     }
 
     #[test]

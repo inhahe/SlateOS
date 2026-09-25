@@ -490,7 +490,6 @@ mod imp {
                 res: *mut *mut AddrInfo,
             ) -> i32;
             fn freeaddrinfo(res: *mut AddrInfo);
-            fn strlen(s: *const u8) -> usize;
         }
 
         // A name with a NUL in it cannot be passed as a C string; `ut_host`
@@ -534,7 +533,11 @@ mod imp {
             let copied = if canon.is_null() {
                 None
             } else {
-                Some(std::slice::from_raw_parts(canon, strlen(canon)).to_vec())
+                // `CStr` rather than a declared `strlen`: rustc's
+                // `suspicious_runtime_symbol_definitions` rejects a
+                // redeclaration of a symbol the runtime itself links whose
+                // pointer type differs from the runtime's own.
+                Some(std::ffi::CStr::from_ptr(canon.cast()).to_bytes().to_vec())
             };
             freeaddrinfo(res);
             copied

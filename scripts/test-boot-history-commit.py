@@ -34,10 +34,13 @@ commit.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,6 +48,52 @@ BOOT = ROOT / "scripts" / "boot-test.sh"
 LEDGER = "bench/boot-history.jsonl"
 
 failures: list[str] = []
+
+
+def _remove_patiently(path: Path) -> None:
+    """Remove `path`, retrying while Windows still holds it; never raise.
+
+    A separate function rather than the body of `scratch_dir`'s `finally`, so
+    that its early `return`s cannot swallow an exception from the `with` body,
+    which a `return` inside `finally` would.
+    """
+    last: OSError | None = None
+    for delay in (0.0, 0.1, 0.2, 0.4, 0.8, 1.0, 1.5):
+        if delay:
+            time.sleep(delay)
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            last = exc
+    print(f"  note: left scratch dir {path} behind: {last}", file=sys.stderr)
+
+
+@contextlib.contextmanager
+def scratch_dir():
+    """A temporary directory whose removal outwaits Windows.
+
+    `tempfile.TemporaryDirectory()` removes its tree once, immediately. On
+    2026-09-25, in a boot test on a loaded machine, that removal failed with
+    WinError 32 ("being used by another process") on group 5's `notgit`
+    directory *after every assertion had passed*: the `bash` group 5 ran there
+    had exited, but Windows had not yet released the directory, and a directory
+    still open somewhere cannot be removed. Standalone, the suite passed five
+    runs in five. A suite that fails on its own cleanup reports the code under
+    test as broken when it is not, and inside the boot test that refuses the
+    build.
+
+    So removal is retried for about four seconds, and a directory still held
+    after that is reported and left to the OS's temp cleanup, not raised: a
+    leaked scratch directory is no finding about `commit_boot_history`.
+    """
+    path = Path(tempfile.mkdtemp())
+    try:
+        yield path
+    finally:
+        _remove_patiently(path)
 
 
 def check(label: str, got: object, want: object) -> None:
@@ -151,9 +200,7 @@ def append(repo: Path, row: str) -> None:
 def main() -> int:
     body = extract("commit_boot_history", BOOT.read_text(encoding="utf-8", errors="replace"))
 
-    with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td)
-
+    with scratch_dir() as tmp:
         print("group 1: the ordinary case")
         repo = make_repo(tmp)
         append(repo, '{"row": 2}')

@@ -90,9 +90,10 @@ def _load_detect_lane():
     Loaded by path rather than imported by name because the file has a hyphen
     in it, which is not a legal module name. Borrowed rather than reimplemented
     because there must be exactly one answer to "which lane am I": a second
-    copy of that mapping is a second thing to update when an account is
-    renamed, and the failure mode of getting it wrong here is deleting another
-    lane's build trees.
+    copy of that logic is a second thing to update when the lanes change (as
+    they did on 2026-09-22, when two lanes came to share each Claude account and
+    the account stopped identifying the lane at all), and the failure mode of
+    getting it wrong here is deleting another lane's build trees.
     """
     path = Path(__file__).resolve().parent / "which-lane.py"
     try:
@@ -122,6 +123,14 @@ SANCTIONED = {
     "A": {"target", "target-lint"},
     "B": {"target", "target-check", "target-test"},
     "C": {"target", "target-c", "target-clippy-c"},
+    # Lanes D-F date from the six-lane split (2026-09-22) and had no habits to
+    # record yet, so they get the working set described above and nothing
+    # more: `target` for the long run, and one foreground tree named for the
+    # lane (lane C's `target-c` pattern), because no two lanes may be told to
+    # use the same scratch name -- see test_the_lanes_do_not_share_a_scratch_tree.
+    "D": {"target", "target-d"},
+    "E": {"target", "target-e"},
+    "F": {"target", "target-f"},
 }
 
 
@@ -269,7 +278,7 @@ def main() -> int:
     parser.add_argument(
         "--lane",
         choices=sorted(SANCTIONED),
-        help="override lane detection (default: from CLAUDE_CONFIG_DIR)",
+        help="override lane detection (default: scripts/which-lane.py)",
     )
     parser.add_argument(
         "--stale-days",
@@ -297,7 +306,7 @@ def main() -> int:
     lane = args.lane or detect_lane()[0]
     if lane is None:
         print(
-            "lane: UNKNOWN -- pass --lane A|B|C. Guessing here would mean\n"
+            "lane: UNKNOWN -- pass --lane A-F. Guessing here would mean\n"
             "deleting another lane's build trees, so this script will not.",
             file=sys.stderr,
         )

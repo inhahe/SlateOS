@@ -39,8 +39,11 @@ request, because an issue you fixed but cannot mark stays open forever in the
 one file whose job is knowing what is open. Everything *else* about another
 lane's entry still needs a request. This file is lane-partitioned, not
 append-only: inside your own entries you may edit, restructure and archive
-freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
-`design-decisions.md` §437 for why.
+freely. See `roadmap.md` → "Six-Agent Parallel Execution" rule 3, and
+`design-decisions.md` §437 for why. With six lanes the letter in a new
+entry's heading is one of A–F; an entry written before 2026-09-22 keeps the
+letter of the lane that filed it, and whoever owns its code *now*
+(`python scripts/which-lane.py --owner <path>`) is who fixes it.
 
 ---
 
@@ -9533,6 +9536,48 @@ tolerance that `math.rs` cannot meet can't masquerade as an ABI break.
 **Related.** Anything else built against this sysroot before 2026-07-30 and
 still cached may hold the old soft-float `libc.a`; a full sysroot + fixture +
 rootfs rebuild is required to be sure.
+
+### [D] TD-D-THE-SYSROOT-FIX-RESTS-ON-A-FLAG-RUSTC-IS-PHASING-OUT — 2026-09-22 — OPEN
+
+**Status:** OPEN — found while provisioning `os-lane-f`; lane D's (`toolchain/build-sysroot.ps1`).
+
+**What.** The fix for BUG-SYSROOT-SOFT-FLOAT-ABI, directly above, builds `posix`
+and the stubs for `x86_64-unknown-none` with `-C
+target-feature=+sse,+sse2,-soft-float`: it switches the ABI feature off on a
+target whose ABI *is* soft-float. Current rustc accepts that with a warning,
+twice per crate, on every sysroot build:
+
+```
+warning: target feature `soft-float` cannot be disabled with `-Ctarget-feature`: use a soft-float target instead
+  = note: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+  = note: for more information, see issue #116344 <https://github.com/rust-lang/rust/issues/116344>
+warning: target feature `soft-float` must be enabled to ensure that the ABI of the current target can be implemented correctly
+```
+
+**Why it matters.** On the toolchain update that makes it a hard error,
+`build-sysroot.ps1` stops producing `libc.a`, and every C fixture, every
+`services/*/build.py` link and the rootfs image stop with it — the whole Path-Z
+pipeline breaks on a compiler update rather than on any change of ours, and it
+will read as a compiler regression on the day it happens. Nothing currently
+reads these warnings: they scroll past inside `bootstrap-worktree.sh`.
+
+**Reproduce.** `bash scripts/bootstrap-worktree.sh` in a fresh worktree (it runs
+`toolchain/build-sysroot.ps1`); the warnings are the first lines of the sysroot
+step. Seen 2026-09-22 provisioning the new lane worktrees.
+
+**The proper fix.** Build the sysroot for a target whose ABI is hard-float,
+rather than toggling the ABI feature on a soft-float one — a target spec (the
+repo already carries `toolchain/x86_64-slateos.json`, which is lane A's; check
+whether its float ABI fits, or add one for the sysroot) passed with
+`--target <spec> -Zbuild-std`. The kernel and the bare-metal `services/`
+binaries really are soft-float and keep `x86_64-unknown-none`; only the
+userspace libc needs the hard-float ABI. Then rebuild the fixtures and rootfs,
+and re-check the `strtod`/`printf("%f")` cases that BUG-SYSROOT-SOFT-FLOAT-ABI
+was about.
+
+**Why it is here and not at the end of the file:** it is the continuation of
+the entry above, and lane A had a 2,595-line append pending at end of file when
+this was written — the collision `open-questions.md` A-Q18 is about.
 
 ### TD-OILS-JOB-DEATH-LEARNED-EAGERLY. osh notices a background job's death sooner than bash, which makes the `$!`-sparing rule of an operand-less `wait` nondeterministic — 2026-07-31 — MOSTLY ADDRESSED 2026-08-01 (design-decisions.md §98); a 20 ms residue remains
 
@@ -147458,7 +147503,7 @@ The manifest deliberately omits the 13 names the promoted fastpy commands own
 `design-decisions.md` **§108 part 1**: fastpy stays *"additive only… No Rust
 coreutil is touched, shadowed or retired"*, and *"a silent swap is a
 user-visible policy change and is not Claude's to make."* Which implementation a
-stock install should prefer is `deferred-questions.md` **D-Q1**, whose trigger
+stock install should prefer is `deferred-questions.md` **DQ1**, whose trigger
 — a fastpy utility with a parity suite and a performance bar — has not been
 met, so it stays deferred and this change does not touch it. The manifest and
 the collision guard are two independent things that would both have to be wrong

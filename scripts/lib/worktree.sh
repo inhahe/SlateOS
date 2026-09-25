@@ -19,7 +19,7 @@
 # It exports:
 #
 #     SLATE_ROOT      the worktree root, as the running shell sees it
-#     SLATE_LANE      its directory name: os, os-lane-a, os-lane-b, os-lane-c
+#     SLATE_LANE      its directory name: os, or os-lane-a .. os-lane-f
 #     SLATE_SYSROOT   $SLATE_ROOT/toolchain/sysroot/lib
 #     SLATE_SPIKE     $SLATE_ROOT/build/spike   (created if absent)
 #     SLATE_ROOTFS    $SLATE_ROOT/rootfs.ext4   (may not exist yet)

@@ -58,7 +58,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 NL = chr(10)
 
-# Lane B's trees. A crate anywhere under these is ours to compile if it holds
+# (Since the six-lane split of 2026-09-22 these trees are lanes B and D --
+# userspace/ and init/ are B's; posix/, services/ and toolchain/ are D's.
+# The population is unchanged; a failure here now names one of two owners.)
+# Lane B's trees under three lanes. A crate anywhere under these is ours to compile if it holds
 # BOTH a Cargo.toml and its own `.cargo/config.toml` with a `[build] target` --
 # that pin is precisely the marker for "the configuration that ships is not the
 # one any workspace command builds".

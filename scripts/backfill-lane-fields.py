@@ -143,7 +143,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--file", default=DEFAULT_DOC)
     ap.add_argument(
-        "--lane", required=True, choices=("A", "B", "C"),
+        "--lane", required=True, choices=("A", "B", "C", "D", "E", "F"),
         help="only backfill entries this lane owns -- required, and there is "
              "no 'all' option on purpose: every lane's entries live in one "
              "shared file, and a lane that rewrites another's lines invites "

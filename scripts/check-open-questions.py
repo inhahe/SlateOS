@@ -67,12 +67,12 @@ ARCHIVE_SUB_RE = re.compile(r"^## Resolved\s+[—-]\s+")
 #: An identifier is the first token of the heading: `Q47`, `A-Q3`, `C-Q10`.
 #: The unprefixed series is pre-split and closed, but it is still a valid
 #: identifier for the entries that already carry one.
-IDENT_RE = re.compile(r"^##\s+((?:[ABC]-)?Q\d+)\b")
+IDENT_RE = re.compile(r"^##\s+((?:[A-F]-)?Q\d+)\b")
 
 #: The same identifier as it appears in the archive index, which is a list
 #: rather than headings: `- Q31 SlateOS native-ABI ...`.  Anchored to the list
 #: marker so that a `Q31` mentioned in running prose is not read as a filing.
-INDEX_IDENT_RE = re.compile(r"^-\s+((?:[ABC]-)?Q\d+)\b")
+INDEX_IDENT_RE = re.compile(r"^-\s+((?:[A-F]-)?Q\d+)\b")
 
 #: `— Status: OPEN`, in the heading.  Everything else -- `RESOLVED`, `FIXED`,
 #: `answered` -- means the entry belongs in the archive.  Optional: entries

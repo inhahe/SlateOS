@@ -145,7 +145,7 @@ HEADING_NUMBERISH_RE = re.compile(r"^##\s+\u00a7?\d")
 BAND_ROW_RE = re.compile(
     r"^\|\s*\u00a7(\d+)\s*[\u2013\u2014-]\s*\u00a7(\d+)\s*\|(.*)$"
 )
-BAND_LANE_RE = re.compile(r"lane\s+([ABC])\b", re.IGNORECASE)
+BAND_LANE_RE = re.compile(r"lane\s+([A-F])\b", re.IGNORECASE)
 
 # Deliberately NOT anchored to the start of a line. The header of an entry is
 # written both ways in practice --
@@ -164,7 +164,7 @@ BAND_LANE_RE = re.compile(r"lane\s+([ABC])\b", re.IGNORECASE)
 # to the heading**, and the inline form satisfies that exactly as well; the
 # line it sits on is house style, not the invariant. What still carries the
 # rationale is the *window* below, and that is unchanged.
-LANE_FIELD_RE = re.compile(r"\*\*Lane:\*\*\s*([ABC])\b")
+LANE_FIELD_RE = re.compile(r"\*\*Lane:\*\*\s*([A-F])\b")
 
 # How far below a heading the **Lane:** field may sit. The established shape is
 # Date / Decided by / Lane in the first four lines; 12 leaves room for a
@@ -173,6 +173,18 @@ LANE_FIELD_RE = re.compile(r"\*\*Lane:\*\*\s*([ABC])\b")
 LANE_FIELD_WINDOW = 12
 
 OCCUPANCY_WARN = 80
+
+# Where an EMPTY band's first entry goes, when its table row says so: the
+# region column of `| <sect>1100-<sect>1199 | **lane D** | **open** | immediately
+# after <sect>360 ... |`.  A lane opening a band after an earlier one of its own
+# does not need this -- the anchor is inferred from its previous band's tail --
+# but a lane with no entries at all has nothing to infer from.  That was a
+# curiosity while there were three lanes and all of them had history; the
+# six-lane split (2026-09-22) created three lanes with none, and without a
+# declared anchor all three would reasonably have picked end of file, which is
+# lane B's insertion point.  Requires the section sign, so prose like "after
+# C's 500s" is not mistaken for an anchor.
+ANCHOR_RE = re.compile(r"\bafter\s+§\s*(\d+)", re.IGNORECASE)
 
 
 class Heading:
@@ -191,13 +203,16 @@ class Heading:
 
 
 class Band:
-    __slots__ = ("lo", "hi", "lane", "is_open")
+    __slots__ = ("lo", "hi", "lane", "is_open", "text")
 
-    def __init__(self, lo, hi, lane, is_open):
+    def __init__(self, lo, hi, lane, is_open, text=""):
         self.lo = lo
         self.hi = hi
         self.lane = lane
         self.is_open = is_open
+        # The rest of the table row after the range -- owner, status, region --
+        # kept so an empty band can be anchored where its row says (ANCHOR_RE).
+        self.text = text
 
     @property
     def label(self):
@@ -242,7 +257,7 @@ def parse_bands(lines):
                 f"names no owning lane"
             )
             continue
-        bands.append(Band(lo, hi, lane, has_open))
+        bands.append(Band(lo, hi, lane, has_open, rest))
 
     if not bands:
         errors.append(
@@ -459,7 +474,7 @@ def write_baseline(path, headings, doc_rel):
             "Regenerate with: python scripts/check-design-decisions-bands.py "
             "--update-baseline -- and only when the change was deliberate. A "
             "count that DROPS means a section was deleted or renumbered in a "
-            "file that three lanes cite.",
+            "file that every lane cites.",
         ],
         "file": doc_rel,
         "total_headings": len(headings),
@@ -624,6 +639,31 @@ def check(lines, baseline):
         seq = [h for h in headings if band.contains(h.number)]
         owner = f"lane {band.lane}"
         if not seq:
+            # The band's own row can name the anchor ("immediately after
+            # <sect>360"), and when it does that wins: the header is the
+            # authority on the bands, and a lane with no earlier entries has no
+            # other anchor at all.  See ANCHOR_RE.
+            declared = ANCHOR_RE.search(band.text)
+            if declared:
+                wanted = int(declared.group(1))
+                named = [h for h in headings if h.number == wanted]
+                if not named:
+                    errors.append(
+                        f"design-decisions.md: band {band.label} ({owner}) is "
+                        f"empty, and its row places the first entry after "
+                        f"section {wanted}, which does not exist. Name a section "
+                        f"that does, or the band has no insertion point."
+                    )
+                    continue
+                anchor = max(named, key=lambda h: h.lineno)
+                info.append(
+                    f"{band.label:<10} {owner}  empty; first entry is "
+                    f"{band.lo}, insert after line "
+                    f"{insertion_line(lines, headings, anchor)} "
+                    f"(the END of section {wanted}, where the band's row puts "
+                    f"it -- not its heading)"
+                )
+                continue
             # An empty band is the one band with no last entry to anchor on --
             # and so, until now, the one band that got a number but no line,
             # which is precisely backwards: a fresh band is where the writer is

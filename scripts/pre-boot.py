@@ -82,7 +82,7 @@ workspace-wide compile check there would let any lane's red tree stop any other
 lane's boot test, the exact coupling `boot-test.sh` already refuses for clippy.
 Here, a failure outside lane A's own files is reported loudly and does not
 block, because lane A is forbidden from writing the fix.  The full argument is
-above `_LANE_BY_PREFIX` below.
+above `_lane_of` below.
 
 Usage
 -----
@@ -106,6 +106,7 @@ run (bad cwd, missing cargo, or a boot test appears to be in progress).
 """
 
 import argparse
+import importlib.util
 import pathlib
 import shutil
 import subprocess
@@ -179,44 +180,35 @@ def _boot_lock_held():
 # never meant to carry.
 #
 # Note that lane A owns *no* `cfg(unix)` code today: zero occurrences in
-# `kernel/**` and `bench/**` (checked 2026-08-26; all 515 in the tree are in
-# lane B's `userspace/**` or lane C's `apps/**`, `gui/**`, `randrange/**`).
-# That makes this gate almost entirely a service to the other two lanes right
+# `kernel/**` and `bench/**` (checked 2026-08-26; all 515 in the tree were in
+# lane B's `userspace/**` or what was then lane C's `apps/**`, `gui/**`,
+# `randrange/**` -- since the six-lane split, lanes B, C, E and F).
+# That makes this gate almost entirely a service to the other lanes right
 # now, which is a reason to keep it non-blocking, not a reason to omit it: the
 # kernel is bare-metal today and need not stay that way, and `bench/**` is
 # ordinary std code that could grow a unix arm at any time.
 UNIX_CHECK_TARGET = "x86_64-unknown-linux-gnu"
 
-# Path prefix -> owning lane.  Mirrors scripts/which-lane.py, which mirrors the
-# ownership table in roadmap.md; that table is the authority.  Anything not
-# listed (the root leaf crates -- crc32, deflate, sha2, ziparchive, ...) is
-# lane A's by default, which is the safe direction: it makes this gate stricter
-# on us rather than looser.
-_LANE_BY_PREFIX = (
-    ("posix/", "B"),
-    ("userspace/", "B"),
-    ("services/", "B"),
-    ("init/", "B"),
-    ("gui/", "C"),
-    ("apps/", "C"),
-    ("pkg/", "C"),
-    ("net/", "C"),
-    ("netipc/", "C"),
-    ("netproto/", "C"),
-    ("netring/", "C"),
-    ("net80211/", "C"),
-    ("randrange/", "C"),
-    # `aes` and `hmac` are root leaf crates and so would fall to lane A by the
-    # default above, but lane C wrote both and is their only caller so far --
-    # the WiFi group-key unwrap and the 802.11 key derivation.  Listed
-    # explicitly so the gate holds lane C to them rather than blaming lane A
-    # for files lane C touched.  `hmac` is expected to gain a lane-B caller
-    # once `userspace/wpa` drops its private HMAC-SHA1 (see the request filed
-    # with it); ownership can move then, and until it does lane C is the one
-    # that has to keep it green.
-    ("aes/", "C"),
-    ("hmac/", "C"),
-)
+# Which lane owns a path: `scripts/which-lane.py`'s ownership table, imported
+# rather than mirrored.  This file used to carry its own copy of that table, and
+# by the six-lane split (2026-09-22) the copy had drifted -- it held a `pkg/`
+# that does not exist and a `randrange/` the original lacked -- which is the
+# usual fate of a mirror.  Loaded by path because the name has a hyphen.
+#
+# Anything no lane owns (the root leaf crates -- crc32, deflate, sha2,
+# ziparchive, ...) is still lane A's *for the purposes of this gate*, which is
+# the safe direction: it makes the gate stricter on us rather than looser.
+def _load_owner_of():
+    here = pathlib.Path(__file__).resolve().parent / "which-lane.py"
+    spec = importlib.util.spec_from_file_location("which_lane", here)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {here}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.owner_of
+
+
+_OWNER_OF = _load_owner_of()
 
 
 def _lane_of(path: str) -> str:
@@ -231,7 +223,14 @@ def _lane_of(path: str) -> str:
     lane prefix and would otherwise fall through to "A" and block a commit over
     a crate nobody here can edit.
     """
-    p = path.replace("\\", "/").lstrip("./")
+    # Strip a leading `./` *prefix*.  This used to be `.lstrip("./")`, which
+    # strips *characters*: it turned `/abs/x.rs` into `abs/x.rs` -- so the
+    # `startswith("/")` test below could never fire -- and `.cargo/registry/...`
+    # into `cargo/registry/...`, which then dodged the registry test and was
+    # blamed on lane A.
+    p = path.replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
 
     # Not ours: an absolute path (rustc emits workspace-relative paths for
     # workspace members), or anything under a cargo/rustup cache.
@@ -244,10 +243,7 @@ def _lane_of(path: str) -> str:
     ):
         return "-"
 
-    for prefix, lane in _LANE_BY_PREFIX:
-        if p.startswith(prefix):
-            return lane
-    return "A"
+    return _OWNER_OF(p) or "A"
 
 
 def _unix_check_paths(out: str):
@@ -420,9 +416,9 @@ def main() -> int:
         skipped += verdict == "skip"
 
     # The one gate here that boot-test.sh does NOT run -- see the long note
-    # above _LANE_BY_PREFIX.  Deliberately not added to boot-test.sh: that is
-    # the shared blocking gate that also serialises QEMU across all three
-    # worktrees, and a workspace-wide compile check there would let one lane's
+    # above _lane_of.  Deliberately not added to boot-test.sh: that is
+    # the shared blocking gate that also serialises QEMU across every lane's
+    # worktree, and a workspace-wide compile check there would let one lane's
     # red tree stop another lane's boot test.  Here a non-lane-A failure is
     # advisory, so the detection happens without the veto.
     if not args.no_unix_check:

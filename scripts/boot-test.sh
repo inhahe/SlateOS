@@ -1525,6 +1525,73 @@ USB_IMG_WIN="$(to_win_path "$USB_IMG")"
 SERIAL_FILE_WIN="$(to_win_path "$SERIAL_FILE")"
 PIDFILE_WIN="$(to_win_path "$PIDFILE")"
 
+# Raise QEMU above normal priority once it is running.
+#
+# WHY. Six lanes share this machine, and their pre-boot gates and cargo builds
+# run at normal priority, often all at once -- on 2026-09-25 plain spinners got
+# 0.012 of a core. A QEMU at the same priority is one runnable thread among a
+# hundred: the guest gets a sliver of a core, misses its own heartbeats, and the
+# stall and wedge detectors report a wedge that is the host's, after an hour of
+# gates. Above normal, the one running boot -- QEMU runs are serialized across
+# lanes by the boot lock -- preempts throughput work without starving it: the
+# guest has one vCPU, so under TCG it keeps one or two threads busy -- at most
+# a third of this i7-8700K's six physical cores (twelve logical).
+# design-decisions.md §963.
+#
+# BOOT_QEMU_PRIORITY=normal leaves it alone. canary-load-test.sh sets that: its
+# experiments measure what host load does to the guest, which a boosted QEMU
+# would hide.
+#
+# Windows only (SetPriorityClass through ctypes; the harness already has
+# Python). Run in the background by the caller, so waiting for QEMU to write
+# its pidfile delays nothing. Every outcome is said aloud: a boot that ran at
+# normal priority on a loaded host is evidence someone reading the log needs.
+raise_qemu_priority() {
+    if [ "${BOOT_QEMU_PRIORITY:-abovenormal}" = "normal" ]; then
+        echo "=== QEMU priority: left as launched (BOOT_QEMU_PRIORITY=normal) ==="
+        return 0
+    fi
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) ;;
+        *) return 0 ;;
+    esac
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== QEMU priority: left as launched (no python to raise it with) ==="
+        return 0
+    fi
+    # The pidfile is removed before every launch, so what appears here is this
+    # run's QEMU and never a stale PID that Windows may have reused. The group
+    # redirect is kill_qemu's, for kill_qemu's reason.
+    local win_pid="" tries=0
+    while [ "$tries" -lt 150 ]; do
+        win_pid="$( { tr -cd '0-9' < "$PIDFILE"; } 2>/dev/null || true)"
+        [ -n "$win_pid" ] && break
+        tries=$((tries + 1))
+        sleep 0.2
+    done
+    if [ -z "$win_pid" ]; then
+        echo "=== QEMU priority: left as launched (no pidfile after 30 s) ==="
+        return 0
+    fi
+    # PROCESS_SET_INFORMATION = 0x0200, ABOVE_NORMAL_PRIORITY_CLASS = 0x8000.
+    if "$py" -c 'import ctypes, sys
+k = ctypes.windll.kernel32
+h = k.OpenProcess(0x0200, False, int(sys.argv[1]))
+ok = bool(h) and bool(k.SetPriorityClass(h, 0x8000))
+if h:
+    k.CloseHandle(h)
+sys.exit(0 if ok else 1)' "$win_pid" 2>/dev/null; then
+        echo "=== QEMU (pid $win_pid) raised to above-normal priority ==="
+    else
+        echo "=== QEMU priority: could not be raised (pid $win_pid); left as launched ==="
+    fi
+}
+
 # Reliably terminate the QEMU launched by this script.
 #
 # $1 = the MSYS/Cygwin PID from `$!` (used for the `wait` and a first,
@@ -8952,6 +9019,7 @@ QEMU_PID=$!
 # keeps the cleanup single even though bash runs both on a signal.
 trap 'on_boot_exit "$?" signal' INT TERM
 trap 'on_boot_exit "$?" exit' EXIT
+raise_qemu_priority &
 
 # Wait for BOOT_OK or timeout
 #

@@ -78287,3 +78287,60 @@ suite is wired up at all. That is dd-942's rule turned into a construction
 rule rather than a warning -- a corpus you cannot see is checked by
 including one member whose verdict you already know, and checking it is the
 one you expected.
+
+---
+
+## 963. The boot test runs QEMU above normal priority, so a boot is not starved by the gates and builds of the lanes sharing its machine
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A
+
+**In short:** six lanes share one computer, and much of the time they are
+all running their long pre-boot checks and builds at once. The virtual
+machine a boot test starts ran at the same priority as all of that, so it
+got a sliver of a processor, the operating system inside it fell behind its
+own clock, and the boot test reported the guest as hung -- a failure that
+was the machine's, not the code's, found only after an hour of checks. The
+boot test now asks Windows to run its virtual machine at "above normal"
+priority, so it runs ahead of that background work. Only one boot's virtual
+machine runs at a time, and it keeps one or two of the computer's six
+physical cores busy (twelve counting hyperthreads).
+
+**What was decided.** After launching QEMU, `boot-test.sh` reads QEMU's
+Windows PID from the pidfile it already writes and calls
+`SetPriorityClass(ABOVE_NORMAL_PRIORITY_CLASS)` on it, in the background so
+the wait for the pidfile delays nothing. Every outcome is printed: raised,
+left at normal (no pidfile, no Python), or refused. `BOOT_QEMU_PRIORITY=normal`
+skips it.
+
+**Measured, not guessed.** On 2026-09-25 the host ran at 100% CPU for hours
+-- 78 bash and 26 Python processes from other lanes' gates, four cargo
+builds -- and plain spinners measured 0.012 to 0.117 of a core. Earlier the
+same day a quick boot's heartbeats collapsed under the same kind of load.
+QEMU runs are already serialized across lanes by the boot lock, so at most
+one QEMU holds the boost at a time. And the starting point was lower than
+"normal": a process launched from the agents' environment inherits
+BELOW_NORMAL (0x4000, measured on a stand-in for QEMU), so every boot's QEMU
+has been competing at the same class as all the gate work around it. The
+boost takes it two classes up, to 0x8000.
+
+**Alternatives considered.**
+
+| option | why not |
+|---|---|
+| Lower everything else (gates, builds) to below normal | the same effect from the other side, but it has to be done by every lane's every heavy command, and one that is missed puts a boot back among a hundred equals |
+| A cross-lane lock on the gate phase, as for QEMU | serializes an hour of checks per lane across six lanes -- a boot would wait hours for its turn -- to protect the ten minutes that are timing-sensitive |
+| HIGH or REALTIME priority | no measured need, and HIGH can starve the desktop; above normal is enough to win against normal-priority throughput work |
+| Leave it, and let the harness decline starved runs | the harness's suites now do decline them honestly (`scripts/hostload.py`), but a declined boot is still a boot that verified nothing |
+
+**What it changes for measurement.** The kernel benchmarks inside a boot now
+run with less host interference, so their noise should drop from this date;
+a step in `bench/history.jsonl` around 2026-09-25 may be this, not the code.
+The load-canary experiments measure exactly that interference, so
+`canary-load-test.sh` sets `BOOT_QEMU_PRIORITY=normal`.
+
+**Revisit if** the guest ever runs more than one vCPU (the boost would then
+take several cores), or a lane needs its QEMU to compete with host load for a
+reason other than the canary.
+
+**Where this bites:** `scripts/boot-test.sh` (`raise_qemu_priority`, called
+after the QEMU traps are installed), `scripts/canary-load-test.sh`.

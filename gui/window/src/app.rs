@@ -90,6 +90,7 @@
 //! ```
 
 use std::process::ExitCode;
+use std::task::Waker;
 use std::time::Duration;
 
 use appearance::{AppearanceSettings, Palette};
@@ -120,6 +121,18 @@ pub enum Response {
     Redraw,
     /// Close down: the loop finishes after this event.
     Exit,
+    /// Keep the window open although it was asked to close, and redraw.
+    ///
+    /// The answer to [`Event::CloseRequested`] of an application that is
+    /// asking the user something first -- "Save changes?" -- whose dialog is
+    /// what the redraw shows, and which will answer [`Response::Exit`] itself
+    /// from whichever event brings the user's decision. To any other event it
+    /// is [`Response::Redraw`].
+    ///
+    /// Declining is an explicit act. A close request answered with anything
+    /// else still closes the window, so an application that has not thought
+    /// about closing cannot leave the user a title-bar X that does nothing.
+    KeepOpen,
 }
 
 /// Shared configuration files an application has rewritten and must announce.
@@ -439,6 +452,48 @@ pub trait App {
         Vec::new()
     }
 
+    /// Whether this application does work off the loop's thread and needs a
+    /// way to wake the loop when that work finishes.
+    ///
+    /// Asked once, before the first frame; `true` gets the application a
+    /// [`Waker`] through [`App::attach_waker`]. The default is `false`, so an
+    /// application that does everything on one thread — nearly all of them —
+    /// is not handed a pipe it would never write to.
+    fn wants_waker(&self) -> bool {
+        false
+    }
+
+    /// The handle for waking this application's loop from another thread,
+    /// given once, before the first frame, to an application whose
+    /// [`App::wants_waker`] says so.
+    ///
+    /// Give a clone to each worker and have it call [`Waker::wake`] when it has
+    /// something for the application — a decoded photograph, a file read.
+    /// [`App::on_wake`] then runs on the loop's thread, and a frame follows if
+    /// it asks for one. Without this, a finished result would sit unseen until
+    /// the user next moved the mouse: the loop is parked, and nothing on the
+    /// wire says anything happened.
+    ///
+    /// Not called when the link to the display cannot be woken (an in-process
+    /// test pipe), so an application must still work without one, if later: a
+    /// result that arrives unannounced is found the next time anything else
+    /// wakes the loop.
+    fn attach_waker(&mut self, _waker: Waker) {}
+
+    /// The loop was woken through the handle given to [`App::attach_waker`]:
+    /// work finished on another thread.
+    ///
+    /// Called on the loop's thread after the batch's events and before its
+    /// frame, so a result collected here is drawn at once. Wakes that land
+    /// together arrive as one call — collect everything that is ready, not one
+    /// item.
+    ///
+    /// The default asks for a frame, which is right for the simplest shape: a
+    /// worker that leaves its result where [`App::render`] looks for it.
+    fn on_wake(&mut self) -> Response {
+        Response::Redraw
+    }
+
     /// Draw the current state at the current window size.
     ///
     /// The size is the one the compositor last reported, so a frame drawn
@@ -539,8 +594,17 @@ pub fn drive<T: Transport, A: App + ?Sized>(
     // own watcher rather than a field of `ThemeWatch`, because the two files
     // change independently and a theme change must not re-read the pointer
     // configuration -- the reason `Reloads` has two flags rather than one.
-    let mut scroll = ScrollWatch::new();
-    scroll.deliver();
+    let mut scroll = PointerWatch::new();
+    scroll.deliver(events);
+    // Before the first frame, so that a worker the application starts while
+    // drawing it already has a way to say it has finished. A transport that
+    // cannot be woken leaves the application without one, which it is
+    // documented to survive; a failure to make one is an error like any other.
+    if app.wants_waker()
+        && let Some(waker) = events.waker()?
+    {
+        app.attach_waker(waker);
+    }
 
     // Nothing has happened yet, so no event is going to ask for the first
     // frame, and a window that has never been drawn is blank.
@@ -572,7 +636,7 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             // icon looks like a dead program rather than a lost event.
             if let guitk::event::Event::TrayIconClicked { id: icon, button } = *event {
                 let response = app.tray_icon_clicked(icon, button);
-                if matches!(response, Response::Redraw) {
+                if matches!(response, Response::Redraw | Response::KeepOpen) {
                     dirty = true;
                 }
                 if matches!(response, Response::Exit) {
@@ -603,8 +667,8 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             // so the drain must not sit behind the redraw decision.
             //
             // And a batch ending in `CloseRequested` never reaches `Settled`:
-            // the loop stops as soon as the close is dispatched (see
-            // `EventLoop::run_batched`). A notification held for the batch
+            // the loop stops as soon as the close is dispatched, unless the
+            // application declines it (see `EventLoop::run_batched`). A notification held for the batch
             // boundary would be a setting the user changed with their last
             // click before closing the window, saved to disk, and never
             // announced — visibly not applied until the next login.
@@ -615,6 +679,39 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             match response {
                 Response::Idle => EventResponse::Continue,
                 Response::Redraw => {
+                    dirty = true;
+                    EventResponse::Continue
+                }
+                Response::Exit => EventResponse::Exit,
+                // The window stays, and shows whatever the application is
+                // asking the user: the dialog is the redraw.
+                Response::KeepOpen => {
+                    dirty = true;
+                    EventResponse::KeepOpen
+                }
+            }
+        }
+        // The compositor's recovery: the whole window, drawn again, even if the
+        // application believes nothing in it has changed — that belief is what
+        // recovery suspects. Another window's request is not this one's.
+        Dispatch::Repaint { window: id } => {
+            if id == window {
+                dirty = true;
+            }
+            EventResponse::Continue
+        }
+        Dispatch::Woken => {
+            let response = app.on_wake();
+            // As after an event, and for the same reason: an application may
+            // write a shared file in answer to its own work finishing.
+            if let Err(e) = announce_reloads(events, app.take_reloads()) {
+                failure = Some(e);
+                return EventResponse::Exit;
+            }
+            match response {
+                Response::Idle => EventResponse::Continue,
+                // Nothing was asked to close, so declining is only a redraw.
+                Response::Redraw | Response::KeepOpen => {
                     dirty = true;
                     EventResponse::Continue
                 }
@@ -642,7 +739,7 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             if theme.poll(app) {
                 dirty = true;
             }
-            if scroll.poll() {
+            if scroll.poll(events) {
                 dirty = true;
             }
             if !std::mem::take(&mut dirty) {
@@ -731,13 +828,16 @@ fn apply_images<T: Transport>(
 /// Bring a window's wake-up into agreement with what the application now wants.
 fn sync_clock<T: Transport, A: App + ?Sized>(events: &mut EventLoop<T>, window: u64, app: &A) {
     match app.tick_interval() {
-        Some(interval) if !events.is_waking(window) => events.wake_after(window, interval),
-        // Already armed: leave the existing deadline alone. Re-arming here
-        // would push the next tick further away with every event, so an
-        // application would animate only while the pointer was still — the
+        // No later than one interval from now: arms an idle clock, and brings
+        // an armed one forward when the application has just sped up, but
+        // never pushes a deadline later. Pushing it later on every event would
+        // mean an application animated only while the pointer was still — the
         // frozen-clock defect wearing a subtler coat, since it would look
-        // correct in every test that does not move the mouse.
-        Some(_) => {}
+        // correct in every test that does not move the mouse — while leaving
+        // an armed deadline alone would make a clock that speeds up (a
+        // terminal waking from its idle rate on a keystroke) wait out the slow
+        // interval first. `requests/e-f-wake-an-application-for-its-own-descriptor.md`.
+        Some(interval) => events.wake_within(window, interval),
         None => events.cancel_wake(window),
     }
 }
@@ -890,43 +990,51 @@ pub fn launch<A: App + ?Sized>(program: &str, app: &mut A) -> ExitCode {
 /// through [`App::theme_changed`] rather than reading `appearance.yaml`
 /// themselves — 135 copies of that parse would be 135 places for the reload
 /// edge to be wrong, and most of them would simply never do it.
-/// The scroll half of `input.yaml`, watched the way the theme is.
+/// The client's half of `input.yaml`, watched the way the theme is: the scroll
+/// step and the double-click interval.
 ///
-/// **Only the scroll settings.** `input.yaml` also holds pointer acceleration,
-/// the button mapping and the keyboard layout, and an application has no
-/// business with any of them: those are the compositor's, applied to raw device
-/// events before anything reaches a client. What a client must know is how far
-/// one notch of the wheel should move its view, because the client is the only
-/// thing that knows what its rows are.
+/// **Only those two.** `input.yaml` also holds pointer acceleration, the button
+/// mapping and the keyboard layout, and an application has no business with
+/// any of them: those are the compositor's, applied to raw device events before
+/// anything reaches a client. What a client must know is how far one notch of
+/// the wheel should move its view, because the client is the only thing that
+/// knows what its rows are -- and how close two presses must be to be a double
+/// click, because the client's event loop is what recognises one (the
+/// compositor sends only presses; see `EventLoop::set_double_click_interval`).
 ///
 /// That is also why this sets a value in `guitk::wheel` rather than handing the
 /// settings to the application. There are about 68 conversion sites across the
 /// toolkit and the apps, none of which has settings in scope; see
 /// `wheel::ROWS_PER_NOTCH_SETTING`.
-struct ScrollWatch {
+struct PointerWatch {
     watcher: appearance::config::Watcher,
     lines: f32,
+    double_click: Duration,
 }
 
-impl ScrollWatch {
+impl PointerWatch {
     fn new() -> Self {
         Self {
             watcher: appearance::config::Watcher::new(inputsettings::CONFIG_NAME),
             lines: guitk::wheel::ROWS_PER_NOTCH,
+            double_click: Duration::from_millis(u64::from(inputsettings::DEFAULT_DOUBLE_CLICK_MS)),
         }
     }
 
-    /// Read the file if it changed and apply the scroll step.
+    /// Read the file if it changed, apply the scroll step, and hand the
+    /// double-click interval to `events`.
     ///
-    /// Answers whether anything changed, so the caller can mark the frame
-    /// dirty -- a view part-way down a list does not move when the step
+    /// Answers whether the scroll step changed, so the caller can mark the
+    /// frame dirty -- a view part-way down a list does not move when the step
     /// changes, but one that is mid-scroll should not finish the gesture at the
-    /// old rate.
-    fn poll(&mut self) -> bool {
+    /// old rate. The interval changes nothing anyone can see.
+    fn poll<T: Transport>(&mut self, events: &mut EventLoop<T>) -> bool {
         let Some(doc) = self.watcher.poll() else {
             return false;
         };
         let settings = inputsettings::InputSettings::read_from(&doc);
+        self.double_click = Duration::from_millis(u64::from(settings.mouse.double_click_ms));
+        events.set_double_click_interval(self.double_click);
         // `scroll_lines` is the step *in Lines mode*. Pages and Smooth are
         // different questions -- Pages means one viewport per notch, which only
         // the consumer knows the height of -- and neither is implemented, so
@@ -945,16 +1053,17 @@ impl ScrollWatch {
         guitk::wheel::set_rows_per_notch(wanted)
     }
 
-    /// Apply the opening value, whether or not a file exists.
+    /// Apply the opening values, whether or not a file exists.
     ///
     /// Unconditional for the same reason `ThemeWatch::deliver` is: on a machine
     /// with no `input.yaml` the poll reports no change because there is nothing
     /// to report, and the application would then scroll at whatever the last
     /// thread-local value happened to be.
-    fn deliver(&mut self) {
-        if !self.poll() {
+    fn deliver<T: Transport>(&mut self, events: &mut EventLoop<T>) {
+        if !self.poll(events) {
             guitk::wheel::set_rows_per_notch(self.lines);
         }
+        events.set_double_click_interval(self.double_click);
     }
 }
 
@@ -1079,7 +1188,8 @@ mod tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        clippy::indexing_slicing
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
     )]
 
     use std::cell::RefCell;
@@ -1274,6 +1384,64 @@ mod tests {
         let w = events.window(window).expect("the loop should know it");
         assert_eq!(w.app_id(), "slateos-editor");
         assert_eq!(w.title(), "Untitled 1");
+    }
+
+    /// An editor with unsaved work, as `apps/markdowneditor` is one: the first
+    /// close request is declined and a dialog drawn; the user's answer --
+    /// here, a focus event -- is what lets the window go.
+    struct Guarded {
+        asked: bool,
+        drawn: Rc<RefCell<Vec<(f32, f32)>>>,
+    }
+
+    impl App for Guarded {
+        fn title(&self) -> String {
+            "Guarded".to_string()
+        }
+
+        fn on_event(&mut self, event: &Event) -> Response {
+            match event {
+                Event::CloseRequested if !self.asked => {
+                    self.asked = true;
+                    Response::KeepOpen
+                }
+                Event::FocusIn if self.asked => Response::Exit,
+                _ => Response::Idle,
+            }
+        }
+
+        fn render(&mut self, width: f32, height: f32) -> RenderTree {
+            self.drawn.borrow_mut().push((width, height));
+            RenderTree::new()
+        }
+    }
+
+    #[test]
+    fn a_declined_close_keeps_the_window_and_draws_the_question() {
+        let drawn = Rc::new(RefCell::new(Vec::new()));
+        let mut app = Guarded {
+            asked: false,
+            drawn: Rc::clone(&drawn),
+        };
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+        desktop
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
+        desktop
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(window, Event::FocusIn)]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert!(app.asked, "the close request should have reached the app");
+        assert_eq!(
+            drawn.borrow().len(),
+            2,
+            "the first frame, and the one showing the question -- a close that \
+             ended the loop anyway would have drawn nothing after the first"
+        );
     }
 
     /// The first frame is the one no event asks for: nothing has happened yet,
@@ -1628,6 +1796,44 @@ mod tests {
             !events.is_waking(window),
             "the wake-up outlived the animation that wanted it"
         );
+    }
+
+    /// A clock that speeds up takes effect at once: the armed slow deadline
+    /// does not have to be waited out first. `requests/e-f-wake-an-application-for-its-own-descriptor.md`
+    /// ask 2 — a terminal dropping from its idle rate to its busy one on a
+    /// keystroke.
+    #[test]
+    fn a_clock_that_speeds_up_takes_effect_at_once() {
+        let mut app = Recorder::new(Response::Idle);
+        let (mut events, window) = opened(&app);
+        app.interval = Some(Duration::from_hours(1));
+        sync_clock(&mut events, window, &app);
+
+        app.interval = Some(Duration::from_millis(16));
+        sync_clock(&mut events, window, &app);
+        let after = std::time::Instant::now();
+        let next = events.next_wakeup().expect("still armed");
+        assert!(
+            next <= after + Duration::from_millis(16),
+            "the hour-long deadline was kept after the app asked for 16 ms"
+        );
+    }
+
+    /// And one that slows down, or merely stays the same across a burst of
+    /// events, never pushes the tick it has already been promised further
+    /// away.
+    #[test]
+    fn a_clock_that_slows_down_does_not_push_its_next_tick_away() {
+        let mut app = Recorder::new(Response::Idle);
+        let (mut events, window) = opened(&app);
+        app.interval = Some(Duration::from_millis(16));
+        sync_clock(&mut events, window, &app);
+        let promised = events.next_wakeup().expect("armed");
+
+        sync_clock(&mut events, window, &app);
+        app.interval = Some(Duration::from_hours(1));
+        sync_clock(&mut events, window, &app);
+        assert_eq!(events.next_wakeup(), Some(promised));
     }
 
     /// Re-arming on every event would push the deadline further away with each
@@ -2381,8 +2587,9 @@ mod tests {
     fn a_scroll_step_in_the_file_reaches_the_wheel() {
         appearance::config::testing::with_scratch_config("oswindow-scroll-step", |_| {
             let restore = guitk::wheel::rows_per_notch();
-            let mut watch = ScrollWatch::new();
-            watch.deliver();
+            let (mut events, _desktop) = desktop();
+            let mut watch = PointerWatch::new();
+            watch.deliver(&mut events);
             assert!(
                 (guitk::wheel::rows_per_notch() - guitk::wheel::ROWS_PER_NOTCH).abs() < 0.001,
                 "a machine with no input.yaml should scroll at the default"
@@ -2394,7 +2601,10 @@ mod tests {
             file.settings.mouse.scroll_lines = 7;
             file.save().unwrap();
 
-            assert!(watch.poll(), "the rewritten file did not reach the wheel");
+            assert!(
+                watch.poll(&mut events),
+                "the rewritten file did not reach the wheel"
+            );
             assert!(
                 (guitk::wheel::rows_per_notch() - 7.0).abs() < 0.001,
                 "the user asked for seven lines a notch"
@@ -2404,7 +2614,10 @@ mod tests {
             // theme watch gives: every window redrawing because a settings
             // window was saved is visible work in answer to nothing.
             file.save().unwrap();
-            assert!(!watch.poll(), "an unchanged file must not report a change");
+            assert!(
+                !watch.poll(&mut events),
+                "an unchanged file must not report a change"
+            );
 
             guitk::wheel::set_rows_per_notch(restore);
         });
@@ -2421,20 +2634,45 @@ mod tests {
     fn a_mode_that_is_not_lines_keeps_the_default_step() {
         appearance::config::testing::with_scratch_config("oswindow-scroll-mode", |_| {
             let restore = guitk::wheel::rows_per_notch();
-            let mut watch = ScrollWatch::new();
-            watch.deliver();
+            let (mut events, _desktop) = desktop();
+            let mut watch = PointerWatch::new();
+            watch.deliver(&mut events);
 
             let mut file = inputsettings::InputFile::load();
             file.settings.mouse.scroll_mode = inputsettings::ScrollMode::Pages;
             file.settings.mouse.scroll_lines = 7;
             file.save().unwrap();
-            watch.poll();
+            watch.poll(&mut events);
             assert!(
                 (guitk::wheel::rows_per_notch() - guitk::wheel::ROWS_PER_NOTCH).abs() < 0.001,
                 "Pages mode must not silently mean seven lines"
             );
 
             guitk::wheel::set_rows_per_notch(restore);
+        });
+    }
+
+    /// The double-click interval the user chose reaches the loop that times
+    /// clicks. The compositor's title bars honoured it already; every widget
+    /// in every window now does too, and from the same file.
+    #[test]
+    fn a_double_click_interval_in_the_file_reaches_the_loop() {
+        appearance::config::testing::with_scratch_config("oswindow-double-click", |_| {
+            let (mut events, _desktop) = desktop();
+            let mut watch = PointerWatch::new();
+            watch.deliver(&mut events);
+            assert_eq!(
+                events.double_click_interval(),
+                Duration::from_millis(u64::from(inputsettings::DEFAULT_DOUBLE_CLICK_MS)),
+                "a machine with no input.yaml times double clicks at the default"
+            );
+
+            // What the Mouse page does when the user drags the slider.
+            let mut file = inputsettings::InputFile::load();
+            file.settings.mouse.double_click_ms = 900;
+            file.save().unwrap();
+            watch.poll(&mut events);
+            assert_eq!(events.double_click_interval(), Duration::from_millis(900));
         });
     }
 
@@ -2505,5 +2743,137 @@ mod tests {
                 "no file meant no palette, so the first frame would be undrawn"
             );
         });
+    }
+
+    // ---- waking from another thread ---------------------------------------
+
+    /// An application that runs work on a worker and is woken when it ends.
+    /// Its worker here finishes instantly — it wakes the loop the moment it is
+    /// handed the waker — which is the case with the least room for a race.
+    struct Worker {
+        wants: bool,
+        attached: Rc<RefCell<u32>>,
+        woken: Rc<RefCell<u32>>,
+        drawn: Rc<RefCell<u32>>,
+        answer: Response,
+    }
+
+    impl Worker {
+        fn new(wants: bool, answer: Response) -> Self {
+            Self {
+                wants,
+                attached: Rc::new(RefCell::new(0)),
+                woken: Rc::new(RefCell::new(0)),
+                drawn: Rc::new(RefCell::new(0)),
+                answer,
+            }
+        }
+    }
+
+    impl App for Worker {
+        fn title(&self) -> String {
+            "Worker".to_string()
+        }
+
+        fn on_event(&mut self, _event: &Event) -> Response {
+            Response::Idle
+        }
+
+        fn wants_waker(&self) -> bool {
+            self.wants
+        }
+
+        fn attach_waker(&mut self, waker: Waker) {
+            *self.attached.borrow_mut() += 1;
+            // The work is done already; say so.
+            waker.wake();
+        }
+
+        fn on_wake(&mut self) -> Response {
+            *self.woken.borrow_mut() += 1;
+            self.answer
+        }
+
+        fn render(&mut self, _width: f32, _height: f32) -> RenderTree {
+            *self.drawn.borrow_mut() += 1;
+            RenderTree::new()
+        }
+    }
+
+    fn worker_opened(app: &Worker) -> (EventLoop<TestConnection>, u64) {
+        let (mut events, _desktop) = desktop();
+        let window = open(&mut events, app).expect("the compositor should have granted it");
+        (events, window)
+    }
+
+    #[test]
+    fn work_finished_off_the_loop_is_handed_back_and_drawn() {
+        let mut app = Worker::new(true, Response::Redraw);
+        let (mut events, window) = worker_opened(&app);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+        assert_eq!(*app.attached.borrow(), 1, "handed a waker exactly once");
+        assert_eq!(*app.woken.borrow(), 1, "the wake reached the application");
+        assert_eq!(
+            *app.drawn.borrow(),
+            2,
+            "the first frame, then one for what the worker finished"
+        );
+    }
+
+    #[test]
+    fn a_wake_the_application_answers_with_idle_draws_nothing() {
+        let mut app = Worker::new(true, Response::Idle);
+        let (mut events, window) = worker_opened(&app);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+        assert_eq!(*app.woken.borrow(), 1);
+        assert_eq!(*app.drawn.borrow(), 1, "only the first frame");
+    }
+
+    #[test]
+    fn a_wake_can_end_the_application() {
+        let mut app = Worker::new(true, Response::Exit);
+        let (mut events, window) = worker_opened(&app);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+        assert_eq!(*app.woken.borrow(), 1);
+        assert_eq!(
+            *app.drawn.borrow(),
+            1,
+            "an application on its way out draws nothing"
+        );
+    }
+
+    #[test]
+    fn an_application_that_wants_no_waker_is_given_none() {
+        let mut app = Worker::new(false, Response::Redraw);
+        let (mut events, window) = worker_opened(&app);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+        assert_eq!(*app.attached.borrow(), 0);
+        assert_eq!(*app.woken.borrow(), 0);
+    }
+
+    // ---- the compositor's repaint requests ---------------------------------
+
+    #[test]
+    fn a_repaint_request_draws_the_window_whole_again() {
+        let mut app = Recorder::new(Response::Idle);
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+        desktop.borrow_mut().send_repaint(&[window]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+        assert_eq!(
+            app.drawn.borrow().len(),
+            2,
+            "the first frame, then the whole window again for the compositor"
+        );
+    }
+
+    #[test]
+    fn a_repaint_request_for_another_window_draws_nothing_here() {
+        let mut app = Recorder::new(Response::Idle);
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+        desktop.borrow_mut().send_repaint(&[window + 1000]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+        assert_eq!(app.drawn.borrow().len(), 1, "only the first frame");
     }
 }

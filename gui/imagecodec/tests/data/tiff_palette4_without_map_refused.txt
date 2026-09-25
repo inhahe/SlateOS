@@ -1,0 +1,1 @@
+REFUSED open: TIFF directory is missing required "Colormap" field

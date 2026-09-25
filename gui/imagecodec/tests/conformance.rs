@@ -195,8 +195,10 @@ fn the_bytes_handed_to_the_compositor_are_four_per_pixel_and_little_endian() {
     let bytes = img.to_argb_bytes();
     assert_eq!(bytes.len(), img.pixels.len() * 4);
     assert_eq!(img.stride(), img.width * 4);
-    for (i, chunk) in bytes.chunks_exact(4).enumerate() {
-        let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    let (words, rest) = bytes.as_chunks::<4>();
+    assert!(rest.is_empty());
+    for (i, &chunk) in words.iter().enumerate() {
+        let word = u32::from_le_bytes(chunk);
         assert_eq!(
             word, img.pixels[i],
             "pixel {i} did not survive the round trip"

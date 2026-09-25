@@ -84,6 +84,53 @@ subsystem".)
 one: write it up in `design-decisions.md` as a `Decided by: Operator` entry,
 **delete the entry from here**, and add one line to the `
 
+## F-Q1 — [F] iPhone photos (HEIC) and many web pictures (AVIF) will not open. Bring in the video decoders they need? — Status: OPEN (raised 2026-09-25)
+
+**In short:** two common kinds of picture cannot be opened at all: HEIC, which
+is how an iPhone saves every photograph unless told otherwise, and AVIF, which
+more and more websites serve and which a browser saves when you "Save image
+as". Each stores the picture as one frame of a modern video format, so opening
+it means bringing in a video decoder -- someone else's code, tens of thousands
+of lines -- and for HEIC, a format under patent licensing. Everything else
+people commonly open now works (PNG, JPEG, GIF, WebP, BMP, icons). Should we
+take these on, and which?
+
+**The question.** `gui/imagecodec` (the one picture decoder every program
+here uses) would need:
+
+- for **AVIF**: an **AV1** decoder (AV1: a video format made royalty-free by
+  its designers) and the **HEIF** container (a file layout of nested boxes,
+  shared by both formats);
+- for **HEIC**: an **HEVC** decoder (HEVC, also "H.265": a video format whose
+  patents are licensed for a fee through patent pools) and the same container.
+
+| Option | *What changes:* |
+|---|---|
+| **A.** AVIF now, HEIC not yet | AVIF pictures open and get thumbnails; iPhone photos still say they cannot be displayed. |
+| **B.** Both now | iPhone photos open too. |
+| **C.** Neither yet | Both keep failing to open, with a message saying so. |
+
+- **AVIF** has a clean path: `rav1d`, a Rust translation of the AV1 decoder
+  Chrome and Firefox use (dav1d), under a permissive licence (BSD, no conditions
+  beyond keeping the notice). AV1 decoding is defined to the bit, so its
+  pixels are the browsers'. Cost: a large port to vendor and keep current.
+- **HEIC** is where the real decision is. The usable open decoder (libde265)
+  is **LGPL** (a licence that lets you ship it, but obliges you to let users
+  replace that library with their own build), and the HEVC **patents** are why
+  Windows sells HEVC support separately and Fedora ships without it. That is a
+  legal and policy call about what this system ships, not an engineering one.
+
+**If never answered:** safe. Nothing breaks; these files show an error saying
+they cannot be displayed. It gets more noticeable as AVIF spreads.
+
+**Claude's recommendation:** **A** -- AVIF through `rav1d` -- and HEIC held
+until you decide whether this system may ship an HEVC decoder (or offers one as
+a separate download, as Windows does). Meanwhile lane F is working on TIFF,
+which needs no such decision.
+
+**Where it bites:** `gui/imagecodec/src/lib.rs` (the format dispatch); a new
+`heif`/`avif` module; a `requests/` note to lanes C and E when it lands.
+
 ## A-Q14: When we keep a previous copy of a file, should it be the content from *before* that save, or *after* it?
 
 **In short:** the system can keep old copies of a file so you can go back to one.

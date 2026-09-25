@@ -77,6 +77,7 @@ pub mod uapi;
 
 use std::time::{Duration, Instant};
 
+use guiremote::WaitSet;
 use inputsettings::{AccelProfile, ButtonMapping, InputSettings, MouseConfig};
 
 use super::InputSource;
@@ -392,6 +393,15 @@ impl Keys {
         {
             self.repeat = None;
         }
+    }
+
+    /// When [`Self::tick`] next has a repeat to emit: the repeating key's due
+    /// time, or `None` if no key is repeating or repeat is switched off.
+    fn next_repeat(&self, config: &inputsettings::KeyboardConfig) -> Option<Instant> {
+        if !config.enabled {
+            return None;
+        }
+        self.repeat.map(|repeat| repeat.due)
     }
 
     /// Emit whatever repeats have come due, and schedule the next.
@@ -1039,6 +1049,25 @@ impl<S: EventSys> InputSource for EvdevInput<S> {
 
     fn reload_input(&mut self, settings: &InputSettings) {
         self.set_settings(settings.clone());
+    }
+
+    /// Every device still being read. A dead one is left out: it will never
+    /// produce another record, and a descriptor the kernel reports as failed
+    /// would wake the loop on every wait for ever.
+    fn wait_on(&self, set: &mut WaitSet) {
+        for stream in self.streams.iter().filter(|s| !s.dead) {
+            if let Some(handle) = stream.sys.wait_handle() {
+                set.add(handle);
+            }
+        }
+    }
+
+    /// The held key's next repeat. The kernel generates no repeats — they are
+    /// synthesised here from the clock — so no device becomes readable when
+    /// one is due, and without this a held key would repeat only when
+    /// something else happened to wake the loop.
+    fn deadline(&self) -> Option<Instant> {
+        self.keys.next_repeat(&self.settings.keyboard)
     }
 }
 

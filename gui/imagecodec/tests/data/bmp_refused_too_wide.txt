@@ -1,0 +1,1 @@
+REFUSED metadata: Format error decoding Bmp: Image too large (one of (65536, 1) > soft limit of 65535)

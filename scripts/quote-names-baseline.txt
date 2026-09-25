@@ -46,38 +46,5 @@
 # the half of that macro rustfmt had wrapped. An empty ratchet is a
 # claim about the detector as much as about the code.
 #
-# 74 sites across 33 files.
+# 0 sites across 0 files.
 
-init/servicebus/src/main.rs:1
-userspace/ar/src/main.rs:1
-userspace/at/src/main.rs:4
-userspace/capsh/src/main.rs:1
-userspace/chroot/src/main.rs:3
-userspace/cpio/src/main.rs:2
-userspace/crontab/src/main.rs:1
-userspace/curl/src/main.rs:4
-userspace/dbus/src/main.rs:5
-userspace/dig/src/main.rs:2
-userspace/fsck/src/main.rs:1
-userspace/ftp/src/main.rs:1
-userspace/ftpd/src/main.rs:6
-userspace/inetd/src/main.rs:1
-userspace/install/src/main.rs:1
-userspace/iptables/src/main.rs:4
-userspace/jq/src/main.rs:1
-userspace/lsmod/src/main.rs:2
-userspace/mkfs/src/main.rs:1
-userspace/mount/src/main.rs:1
-userspace/nftables/src/main.rs:1
-userspace/ping/src/main.rs:1
-userspace/pkg/src/main.rs:1
-userspace/polkit/src/main.rs:2
-userspace/rsync/src/main.rs:5
-userspace/sftp/src/main.rs:2
-userspace/ssh/src/lib.rs:1
-userspace/sudo/src/main.rs:4
-userspace/traceroute/src/main.rs:1
-userspace/useradd/src/main.rs:4
-userspace/wget/src/main.rs:1
-userspace/whois/src/main.rs:1
-userspace/zip/src/main.rs:7

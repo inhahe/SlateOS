@@ -431,8 +431,8 @@ fn cmd_edit(username: &str) -> Result<(), Error> {
                 // Editor exited with error — user probably wants to abort.
                 let _ = fs::remove_file(&tmp_path);
                 return Err(Error::Io(format!(
-                    "editor '{}' exited with {}",
-                    editor,
+                    "editor {} exited with {}",
+                    quoteaf_os(&editor),
                     s.code().map_or("signal".to_string(), |c| c.to_string())
                 )));
             }

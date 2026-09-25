@@ -729,7 +729,8 @@ fn parse_args() -> Result<Args, WhoisError> {
             }
             _ if arg.starts_with('-') => {
                 return Err(WhoisError::InvalidArgument(format!(
-                    "unknown option: '{arg}'"
+                    "unknown option: {}",
+                    quoteaf_os(arg)
                 )));
             }
             _ => {

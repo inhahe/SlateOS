@@ -845,8 +845,8 @@ fn run() -> Result<(), String> {
                 create_ancestors(td, args.verbose)?;
             } else {
                 return Err(format!(
-                    "target directory '{}' does not exist",
-                    td.display()
+                    "target directory {} does not exist",
+                    quoteaf_os(td)
                 ));
             }
         }

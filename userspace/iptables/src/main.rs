@@ -181,7 +181,8 @@ fn parse_ipv6_addr(s: &str) -> Result<[u8; 16], String> {
     let total = left_groups.len() + right_groups.len();
     if parts.len() == 1 && total != 8 {
         return Err(format!(
-            "invalid IPv6 address '{s}': expected 8 groups, got {total}"
+            "invalid IPv6 address {}: expected 8 groups, got {total}",
+            quoteaf_os(s)
         ));
     }
     if total > 8 {
@@ -468,8 +469,8 @@ impl LimitSpec {
             "d" | "day" => LimitUnit::Day,
             _ => {
                 return Err(format!(
-                    "unknown limit unit '{}' (use sec/min/hour/day)",
-                    parts[1]
+                    "unknown limit unit {} (use sec/min/hour/day)",
+                    quoteaf_os(parts[1])
                 ));
             }
         };
@@ -1940,8 +1941,9 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
                             && name == &cname
                         {
                             return Err(format!(
-                                "cannot delete chain '{cname}': referenced by chain '{}'",
-                                ch.name
+                                "cannot delete chain {}: referenced by chain {}",
+                                quoteaf_os(cname),
+                                quoteaf_os(&ch.name)
                             ));
                         }
                     }
@@ -2108,8 +2110,9 @@ fn restore_firewall(fw: &mut Firewall, input: &str) -> Result<(), String> {
             let parts: Vec<&str> = chain_def.split_whitespace().collect();
             if parts.len() < 2 {
                 return Err(format!(
-                    "line {}: invalid chain definition '{line}'",
-                    line_num + 1
+                    "line {}: invalid chain definition {}",
+                    line_num + 1,
+                    quoteaf_os(line)
                 ));
             }
             let chain_name = parts[0];

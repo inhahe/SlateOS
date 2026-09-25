@@ -1004,8 +1004,8 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, String> {
             }
             other => {
                 return Err(format!(
-                    "unexpected character in filter: '{}'",
-                    other as char
+                    "unexpected character in filter: {}",
+                    quoteaf(&[other])
                 ));
             }
         }

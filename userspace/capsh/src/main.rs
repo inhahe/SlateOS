@@ -586,8 +586,8 @@ fn find_operator(token: &str) -> Result<(CapSpecOp, usize), String> {
         }
     }
     Err(format!(
-        "no operator (=, +, -) found in cap spec '{}'",
-        token
+        "no operator (=, +, -) found in cap spec {}",
+        quoteaf_os(token)
     ))
 }
 

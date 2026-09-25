@@ -157,9 +157,10 @@ fn do_mount(
         Some(t) => t,
         None => {
             return Err(format!(
-                "mount: cannot determine filesystem type '{fstype}' \
+                "mount: cannot determine filesystem type {} \
                  (the kernel has no auto-detection; specify -t <type>: \
-                 ext4, vfat, iso9660, tmpfs, proc, sysfs, devfs)"
+                 ext4, vfat, iso9660, tmpfs, proc, sysfs, devfs)",
+                quoting::quoteaf_os(fstype)
             ));
         }
     };

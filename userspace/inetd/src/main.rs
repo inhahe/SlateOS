@@ -1101,8 +1101,8 @@ fn parse_config_line(
     match (socket_type, protocol.is_tcp()) {
         (SocketType::Stream, false) => {
             return Err(format!(
-                "stream socket with non-TCP protocol '{}'",
-                protocol
+                "stream socket with non-TCP protocol {}",
+                quoteaf_os(protocol.to_string())
             ));
         }
         (SocketType::Dgram, true) => {

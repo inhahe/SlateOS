@@ -30,7 +30,7 @@
 #![cfg_attr(not(test), no_main)]
 #![cfg_attr(test, allow(dead_code))]
 
-use quoting::quoteaf_os;
+use quoting::{quoteaf_os, quotef_os};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -381,9 +381,13 @@ fn refusal_before_prompting(auth: &mut authlib::Authenticator, record: &Record) 
         return Some(format!("account {} is locked", quoteaf_os(&username)));
     }
     if record.has_legacy_password() {
+        // The second name is a command to type, so it is quoted only if a
+        // shell needs it to be: `useradm passwd bob`, not `useradm passwd 'bob'`.
         return Some(format!(
-            "account '{username}' has a password stored in a format that predates \
-             this system's hashing; run `useradm passwd {username}` to reset it"
+            "account {} has a password stored in a format that predates \
+             this system's hashing; run `useradm passwd {}` to reset it",
+            quoteaf_os(&username),
+            quotef_os(&username)
         ));
     }
 
@@ -410,7 +414,8 @@ fn judge_password(
             Ok(())
         }
         Auth::NoPassword => Err(format!(
-            "account '{username}' has no password set and cannot authenticate"
+            "account {} has no password set and cannot authenticate",
+            quoteaf_os(username)
         )),
         // `Locked` and `Unusable` are refused by `refusal_before_prompting`
         // and cannot normally reach here; they are matched anyway so that the

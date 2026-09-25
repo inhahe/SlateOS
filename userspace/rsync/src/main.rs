@@ -472,8 +472,8 @@ fn set_file_mtime(path: &Path, mtime_secs: u64) -> Result<(), String> {
         let ret = unsafe { utimensat(-100, c_path.as_ptr(), times.as_ptr(), 0) };
         if ret != 0 {
             return Err(format!(
-                "set mtime on '{}': utimensat failed",
-                path.display()
+                "set mtime on {}: utimensat failed",
+                quoteaf_os(path)
             ));
         }
         Ok(())
@@ -544,9 +544,9 @@ fn scan_tree_inner(
             .strip_prefix(root)
             .map_err(|_| {
                 format!(
-                    "path '{}' not under root '{}'",
-                    path.display(),
-                    root.display()
+                    "path {} not under root {}",
+                    quoteaf_os(&path),
+                    quoteaf_os(root)
                 )
             })?
             .to_string_lossy()
@@ -1176,9 +1176,9 @@ fn copy_symlink(src: &Path, dst: &Path, dry_run: bool) -> Result<(), String> {
     }
     fs::copy(src, dst).map(|_| ()).map_err(|e| {
         format!(
-            "copy symlink '{}' -> '{}': {e}",
-            src.display(),
-            dst.display()
+            "copy symlink {} -> {}: {e}",
+            quoteaf_os(src),
+            quoteaf_os(dst)
         )
     })
 }
@@ -1335,15 +1335,15 @@ fn sync_one(
 
     if !src_meta.is_dir() {
         return Err(format!(
-            "'{}' is not a file or directory",
-            src_path.display()
+            "{} is not a file or directory",
+            quoteaf_os(src_path)
         ));
     }
 
     if !cfg.recursive {
         return Err(format!(
-            "skipping directory '{}' (use -r for recursive)",
-            src_path.display()
+            "skipping directory {} (use -r for recursive)",
+            quoteaf_os(src_path)
         ));
     }
 

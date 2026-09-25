@@ -555,8 +555,8 @@ fn validate_username(name: &str) -> Result<(), String> {
         if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-' || ch == '.')
         {
             return Err(format!(
-                "invalid character '{}' in username (allowed: a-z, 0-9, _, -, .)",
-                ch
+                "invalid character {} in username (allowed: a-z, 0-9, _, -, .)",
+                quoteaf_os(ch.to_string())
             ));
         }
     }
@@ -574,8 +574,8 @@ fn validate_groupname(name: &str) -> Result<(), String> {
         if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-' || ch == '.')
         {
             return Err(format!(
-                "invalid character '{}' in group name (allowed: a-z, 0-9, _, -, .)",
-                ch
+                "invalid character {} in group name (allowed: a-z, 0-9, _, -, .)",
+                quoteaf_os(ch.to_string())
             ));
         }
     }
@@ -1388,8 +1388,8 @@ fn cmd_usermod(argv: &[OsString]) -> i32 {
 
     let Some(record) = db.users.find_mut(&effective_username) else {
         write_stderr(&format!(
-            "usermod: user '{}' does not exist",
-            effective_username
+            "usermod: user {} does not exist",
+            quoteaf_os(effective_username)
         ));
         return 1;
     };
@@ -1624,8 +1624,8 @@ fn cmd_groupdel(argv: &[OsString]) -> i32 {
 
     if !primary_users.is_empty() {
         write_stderr(&format!(
-            "groupdel: cannot remove group '{}': primary group of user(s): {}",
-            groupname,
+            "groupdel: cannot remove group {}: primary group of user(s): {}",
+            quoteaf_os(groupname),
             primary_users.join(", ")
         ));
         return 1;

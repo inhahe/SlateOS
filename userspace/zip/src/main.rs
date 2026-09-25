@@ -371,8 +371,8 @@ fn zip_read_local_data<'a>(data: &'a [u8], entry: &ZipEntry) -> Result<&'a [u8],
     let offset = entry.local_header_offset as usize;
     if offset + 30 > data.len() {
         return Err(format!(
-            "zip: local header for '{}' at offset {offset:#x} exceeds file",
-            entry.name
+            "zip: local header for {} at offset {offset:#x} exceeds file",
+            quoteaf_os(&entry.name)
         ));
     }
 
@@ -384,8 +384,8 @@ fn zip_read_local_data<'a>(data: &'a [u8], entry: &ZipEntry) -> Result<&'a [u8],
     ]);
     if sig != SIG_LOCAL {
         return Err(format!(
-            "zip: expected local file header for '{}' at {offset:#x}, got {sig:#010x}",
-            entry.name
+            "zip: expected local file header for {} at {offset:#x}, got {sig:#010x}",
+            quoteaf_os(&entry.name)
         ));
     }
 
@@ -396,8 +396,8 @@ fn zip_read_local_data<'a>(data: &'a [u8], entry: &ZipEntry) -> Result<&'a [u8],
 
     if data_start + comp_size > data.len() {
         return Err(format!(
-            "zip: compressed data for '{}' at {data_start:#x}+{comp_size} exceeds file",
-            entry.name
+            "zip: compressed data for {} at {data_start:#x}+{comp_size} exceeds file",
+            quoteaf_os(&entry.name)
         ));
     }
 
@@ -427,17 +427,17 @@ fn zip_extract_entry(data: &[u8], entry: &ZipEntry) -> Result<Vec<u8>, String> {
                 // the user did not set and cannot see; what actually happened
                 // is that the archive contradicted itself.
                 deflate::Error::OutputTooLarge => format!(
-                    "zip: '{}': declares {declared} byte(s) but decompresses to more; \
+                    "zip: {}: declares {declared} byte(s) but decompresses to more; \
                      refusing to expand it",
-                    entry.name
+                    quoteaf_os(&entry.name)
                 ),
                 other => format!("zip: {}: {other}", quoteaf_os(&entry.name)),
             })?
         }
         other => {
             return Err(format!(
-                "zip: '{}': unsupported compression method {other}",
-                entry.name
+                "zip: {}: unsupported compression method {other}",
+                quoteaf_os(&entry.name)
             ));
         }
     };
@@ -447,8 +447,8 @@ fn zip_extract_entry(data: &[u8], entry: &ZipEntry) -> Result<Vec<u8>, String> {
     // declares -- which no output cap can see.
     if output.len() != declared {
         return Err(format!(
-            "zip: '{}': size mismatch: expected {}, got {}",
-            entry.name,
+            "zip: {}: size mismatch: expected {}, got {}",
+            quoteaf_os(&entry.name),
             declared,
             output.len()
         ));
@@ -458,8 +458,10 @@ fn zip_extract_entry(data: &[u8], entry: &ZipEntry) -> Result<Vec<u8>, String> {
     let computed = crc32(&output);
     if computed != entry.crc32 {
         return Err(format!(
-            "zip: '{}': CRC32 mismatch: expected {:#010x}, got {:#010x}",
-            entry.name, entry.crc32, computed
+            "zip: {}: CRC32 mismatch: expected {:#010x}, got {:#010x}",
+            quoteaf_os(&entry.name),
+            entry.crc32,
+            computed
         ));
     }
 

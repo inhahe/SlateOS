@@ -628,8 +628,8 @@ fn run() -> Result<(), String> {
         // Hostname: resolve via DNS syscall.
         ip_addr = dns_resolve(&opts.host).map_err(|e| {
             format!(
-                "cannot resolve '{}': {} (error {})",
-                opts.host,
+                "cannot resolve {}: {} (error {})",
+                quoteaf_os(&opts.host),
                 syscall_error_msg(e),
                 e
             )

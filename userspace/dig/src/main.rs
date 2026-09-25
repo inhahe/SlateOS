@@ -460,7 +460,8 @@ fn reverse_name_v4(ip_str: &str) -> Result<String, DigError> {
     let parts: Vec<&str> = ip_str.split('.').collect();
     if parts.len() != 4 {
         return Err(DigError::Usage(format!(
-            "'{ip_str}' is not a valid IPv4 address"
+            "{} is not a valid IPv4 address",
+            quoteaf_os(ip_str)
         )));
     }
     // Validate each octet.
@@ -1582,8 +1583,8 @@ fn run() -> Result<(), DigError> {
     // Resolve server name to IP.
     let server_ip = parse_ipv4(&args.server).ok_or_else(|| {
         DigError::Usage(format!(
-            "cannot parse server address '{}' (hostname resolution for servers not yet supported; use an IP)",
-            args.server
+            "cannot parse server address {} (hostname resolution for servers not yet supported; use an IP)",
+            quoteaf_os(&args.server)
         ))
     })?;
 

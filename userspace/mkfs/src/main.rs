@@ -1100,8 +1100,9 @@ fn do_format(dev_name: &str, fs_type: &str, label: &str) -> Result<(), String> {
         Some(s) => s,
         None => {
             return Err(format!(
-                "the kernel cannot format '{fs_type}' yet — only the FAT family \
+                "the kernel cannot format {} yet — only the FAT family \
                  (fat32/vfat) has an in-kernel mkfs backend",
+                quoteaf_os(fs_type)
             ));
         }
     };

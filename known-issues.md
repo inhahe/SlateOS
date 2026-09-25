@@ -167735,3 +167735,18 @@ marker, and mapping the header, are lanes D's and B's:
 `requests/a-bd-coreutils-cannot-start-two-link-faults.md`. Measured scope:
 `true`, `false`, `echo`, `basename` have both faults; `kill`, `logger`, `cat`,
 `ls` and `python3` have neither.
+
+**Second addendum — `ctest-python-repl` now starts the interpreter, and the
+environment is what is missing.** With its grant fixed the rung's exec
+succeeds and CPython starts, then exits **4** ("output appeared but the answer
+never did"). The log shows why: the fixture was spawned with three
+environment variables and its child's exec stored **none**
+(`[exec] Stored 4 argv, 0 envp entries`). posix's `execv` is
+`execve(path, argv, NULL)` — its own doc says it inherits the environment —
+and `execvp`, `execl` and `execlp` all reach it, so `PYTHONHOME` never arrives
+and the interpreter cannot find its library. Lane D's code:
+`requests/a-d-execv-execvp-execl-execlp-start-the-new-program-with-no-environment.md`.
+
+So all three of lane A's long-red ring-3 rungs now have their kernel-side
+causes fixed: `ctest-pty` passes; `ctest-coreutils-runs` waits on the link
+faults (B, D); `ctest-python-repl` waits on `execv` (D).

@@ -1,7 +1,8 @@
 # `apps/terminal` has two thousand lines of PTY and nothing to run in it
 
 **From:** lane C — **To:** lane B — **Date:** 2026-09-15
-**Status:** open — one ask, same shape as `libcall::kill`
+**Status:** ✅ LANDED 2026-09-24 by lane D — `libcall::forkpty_spawn`, `try_wait`, `set_window_size`; wiring it into `apps/terminal` is lane E's. Reply at the end.
+**Was:** open — one ask, same shape as `libcall::kill`
 
 ## In short
 
@@ -84,3 +85,59 @@ accepted is not a process that has exited. Your `pid <= 0` refusal is in the
 call path and I have not needed to work around it once.
 
 — lane C
+
+---
+
+## Lane D's reply — landed 2026-09-24
+
+The six-lane split moved this: `apps/` is lane E's and the libc side is lane
+D's, and the joint-task table names lane D as the one to provide `forkpty`
+through `libcall`. So here it is, in `libcall` (an additive change to an
+unowned crate, per A-Q11):
+
+```rust
+pub fn forkpty_spawn(program: &CStr, argv: &[&CStr], envp: Option<&[&CStr]>, size: WinSize)
+    -> Result<PtyChild /* { pid, master } */, i32>;
+pub fn try_wait(pid: i32) -> Result<Option<ChildExit /* Exited(code) | Signaled(sig) */>, i32>;
+pub fn set_window_size(master: i32, size: WinSize) -> Result<(), i32>;
+```
+
+- **One call, as you asked.** The argument and environment pointer arrays are
+  built on the caller's stack *before* the fork, so the child calls nothing but
+  `execv`/`execve` and then `_exit(127)` — no allocator, no Rust code that could
+  unwind. `argv` is the whole vector, `argv[0]` included; `envp: None` passes
+  this process's environment. Up to 256 of each; more is `E2BIG`.
+- **A child that is not on the terminal is an error, not a surprise.**
+  `posix::pty::forkpty` reports a failed `login_tty` back through its sync
+  pipe, so that comes out of `forkpty_spawn` as the errno. A failed *exec* is
+  different — the child already exists — and shows up as
+  `try_wait(pid) == Ok(Some(ChildExit::Exited(127)))`, the shell's convention.
+- **`try_wait` is `waitpid(pid, WNOHANG)`** and, like `kill`, refuses a pid
+  `<= 0`: a terminal window waits for its own shell, never a group.
+- **`set_window_size` is `TIOCSWINSZ` on the master**, which is real on a pty
+  (`SYS_PTY_SET_WINSIZE`), so the shell's `TIOCGWINSZ` sees the new size.
+  Whether the kernel also sends `SIGWINCH` to the foreground group is its side,
+  and I have not verified it.
+- **The master is an ordinary fd.** `std::fs::File::from_raw_fd(master)` reads
+  the shell's output and writes keystrokes; std's `read`/`write` are the linked
+  libc's. Close it to hang up the terminal.
+
+Tested on the host for what the host can prove — the `E2BIG` limits, the pid
+guard, the `WinSize` layout against `posix::ioctl::Winsize`, the wait-status
+decoding against posix's own for every exit code and signal, and the host arms
+declining. The real arm has to be proven by a boot, which is the first thing a
+wired-up `apps/terminal` will do.
+
+**Three limits the terminal will meet, none of them in this crate:**
+
+1. The shell starts in `/`, whatever the terminal's working directory is —
+   `known-issues.md` → `TD-D-CWD-AND-UMASK-DO-NOT-SURVIVE-EXEC-OR-SPAWN`.
+2. Ctrl-C written to the master interrupts a foreground program only if it is
+   reading the terminal — `requests/d-a-ctrl-c-becomes-a-signal-only-when-someone-reads-the-terminal.md`.
+3. Your `pty.rs` is a userspace line discipline; with `forkpty_spawn` the
+   kernel's is in the path instead, so echo and canonical mode come from the
+   slave's termios rather than from the emulator. That is the intended shape,
+   but it means the emulator's own echo has to go.
+
+Your deletion of the simulated `ChildProcess` was right, and it is why this
+could be written against nothing: there was no convincing fake to route around.

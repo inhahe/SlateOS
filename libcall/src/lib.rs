@@ -148,6 +148,20 @@ mod sys {
         pub fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32;
         pub fn kill(pid: i32, sig: i32) -> i32;
         pub fn __errno_location() -> *mut i32;
+        pub fn forkpty(
+            amaster: *mut i32,
+            name: *mut u8,
+            termp: *const u8,
+            winp: *const super::WinSize,
+        ) -> i32;
+        pub fn execv(path: *const u8, argv: *const *const u8) -> i32;
+        pub fn execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32;
+        pub fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+        // Variadic, as C declares it: glibc's `ioctl` walks a `va_list`, and
+        // our posix one takes three fixed arguments in the same registers,
+        // so the variadic call is correct against both.
+        pub fn ioctl(fd: i32, request: u64, ...) -> i32;
+        pub fn _exit(status: i32) -> !;
     }
 }
 
@@ -544,9 +558,269 @@ fn kill_one(_pid: i32, _sig: i32) -> Result<(), i32> {
     Err(ENOSYS)
 }
 
+// ---------------------------------------------------------------------------
+// A program on a pseudo-terminal
+// ---------------------------------------------------------------------------
+//
+// Requested in `requests/c-b-a-terminal-needs-a-shell-on-the-other-end-of-its-pty.md`
+// (now lane E's `apps/terminal`, with lane D answering): the emulator has a
+// working terminal and nothing to run in it. The call it needs is
+// `posix::pty::forkpty` followed by an exec, and both are stateful libc — the
+// reason this crate exists.
+//
+// One call rather than `fork` + `exec` separately, as the request asked,
+// because of what happens between the two: the child is a copy of a process
+// that may have other threads, and until it execs it may only make
+// async-signal-safe calls. Everything that could allocate — the argument and
+// environment pointer arrays — is built *before* the fork, on the parent's
+// stack, so the child does nothing but `execve` and, if that fails, `_exit`.
+
+/// Most arguments [`forkpty_spawn`] passes, and most environment entries.
+///
+/// The pointer arrays live on the caller's stack so that the child never
+/// allocates; 256 of each is far beyond a terminal's shell command line and
+/// costs 4 KiB. More is `E2BIG`, as for an over-long `execve`.
+pub const SPAWN_MAX_ARGS: usize = 256;
+
+/// Argument list too long.
+pub const E2BIG: i32 = 7;
+
+/// `waitpid`: return at once if the child has not changed state.
+pub const WNOHANG: i32 = 1;
+
+/// `ioctl` request: set a terminal's window size (`struct winsize`).
+pub const TIOCSWINSZ: u64 = 0x5414;
+
+/// A terminal's size, as `struct winsize`: character cells, and pixels when
+/// known (0 otherwise).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WinSize {
+    /// Rows of character cells.
+    pub rows: u16,
+    /// Columns of character cells.
+    pub cols: u16,
+    /// Width in pixels, or 0.
+    pub xpixel: u16,
+    /// Height in pixels, or 0.
+    pub ypixel: u16,
+}
+
+/// A program started by [`forkpty_spawn`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PtyChild {
+    /// The child's process id, for [`try_wait`] and [`kill`].
+    pub pid: i32,
+    /// This process's end of the terminal: read the program's output from it,
+    /// write keystrokes to it, resize it with [`set_window_size`]. The caller
+    /// closes it (dropping an `OwnedFd` built from it does).
+    pub master: i32,
+}
+
+/// How a child ended, decoded from its wait status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildExit {
+    /// It called `exit(code)` or returned `code` from `main`.
+    Exited(i32),
+    /// A signal ended it.
+    Signaled(i32),
+}
+
+impl ChildExit {
+    /// Decode a `waitpid` status word — the standard encoding, which
+    /// `posix::process`'s `wifexited`/`wexitstatus`/`wtermsig` implement and
+    /// `wait_status_agrees_with_posix` pins this to. `None` for a stopped or
+    /// continued child, which [`try_wait`] never asks about.
+    #[must_use]
+    pub fn from_status(status: i32) -> Option<Self> {
+        let low = status & 0x7f;
+        if low == 0 {
+            Some(Self::Exited((status >> 8) & 0xff))
+        } else if low != 0x7f {
+            Some(Self::Signaled(low))
+        } else {
+            None
+        }
+    }
+}
+
+/// Start `program` on a new pseudo-terminal of the given size.
+///
+/// `argv` is the whole argument vector, `argv[0]` included — conventionally the
+/// program's name. `envp` of `None` gives the child this process's
+/// environment; `Some` gives it exactly that list.
+///
+/// The child's standard input, output and error are the terminal, which is its
+/// controlling terminal, and it leads its own session — `forkpty`'s
+/// `login_tty` does all of that, and reports its own failure back to the
+/// parent rather than leaving a child that silently is not on a terminal.
+///
+/// # Errors
+///
+/// * [`E2BIG`] — more than [`SPAWN_MAX_ARGS`] arguments or environment entries.
+/// * The `errno` from `forkpty` — no pty, no process slot, or the child's own
+///   `login_tty` failing.
+/// * [`ENOSYS`] — built for a host, where there is no Slate kernel to ask.
+///
+/// A failed `exec` in the child is **not** an error here: the child is
+/// already a process by then, and it exits with status 127 — the shell's
+/// convention for "could not run" — which [`try_wait`] reports as
+/// `Exited(127)`.
+pub fn forkpty_spawn(
+    program: &CStr,
+    argv: &[&CStr],
+    envp: Option<&[&CStr]>,
+    size: WinSize,
+) -> Result<PtyChild, i32> {
+    // Both limits are checked on every build, so the host test binary proves
+    // them; the arrays themselves are built below, before the fork.
+    if argv.len() > SPAWN_MAX_ARGS || envp.is_some_and(|e| e.len() > SPAWN_MAX_ARGS) {
+        return Err(E2BIG);
+    }
+    forkpty_spawn_one(program, argv, envp, size)
+}
+
+/// Fill `slots` with `list`'s pointers and a terminating NULL.
+///
+/// Compiled where it is called — the unix arm — and for the test that pins it
+/// on the host, where the unix arm does not exist.
+#[cfg(any(unix, test))]
+fn fill_ptrs(slots: &mut [*const u8; SPAWN_MAX_ARGS + 1], list: &[&CStr]) {
+    for (slot, s) in slots.iter_mut().zip(list) {
+        *slot = s.as_ptr().cast::<u8>();
+    }
+    if let Some(end) = slots.get_mut(list.len()) {
+        *end = core::ptr::null();
+    }
+}
+
+#[cfg(unix)]
+fn forkpty_spawn_one(
+    program: &CStr,
+    argv: &[&CStr],
+    envp: Option<&[&CStr]>,
+    size: WinSize,
+) -> Result<PtyChild, i32> {
+    let mut argv_ptrs = [core::ptr::null::<u8>(); SPAWN_MAX_ARGS + 1];
+    fill_ptrs(&mut argv_ptrs, argv);
+    let mut envp_ptrs = [core::ptr::null::<u8>(); SPAWN_MAX_ARGS + 1];
+    if let Some(list) = envp {
+        fill_ptrs(&mut envp_ptrs, list);
+    }
+
+    let mut master: i32 = -1;
+    // SAFETY: `master` and `size` outlive the call; a NULL name and NULL
+    // termios are `forkpty`'s documented "do not report" and "default".
+    let pid = unsafe {
+        sys::forkpty(
+            &raw mut master,
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            &raw const size,
+        )
+    };
+    if pid < 0 {
+        return Err(last_errno());
+    }
+    if pid == 0 {
+        // The child. Only async-signal-safe calls from here: everything it
+        // needs was built above.
+        // SAFETY: `program` and every pointer in the arrays are C strings the
+        // caller's borrows keep alive, and both arrays are NULL-terminated.
+        unsafe {
+            match envp {
+                Some(_) => {
+                    sys::execve(
+                        program.as_ptr().cast::<u8>(),
+                        argv_ptrs.as_ptr(),
+                        envp_ptrs.as_ptr(),
+                    );
+                }
+                None => {
+                    sys::execv(program.as_ptr().cast::<u8>(), argv_ptrs.as_ptr());
+                }
+            }
+            sys::_exit(127)
+        }
+    }
+    Ok(PtyChild { pid, master })
+}
+
+#[cfg(not(unix))]
+fn forkpty_spawn_one(
+    _program: &CStr,
+    _argv: &[&CStr],
+    _envp: Option<&[&CStr]>,
+    _size: WinSize,
+) -> Result<PtyChild, i32> {
+    Err(ENOSYS)
+}
+
+/// Has the child `pid` finished? `Ok(None)` while it is still running.
+///
+/// A successful `Some` reaps it: the pid is released, and asking again is
+/// `ECHILD`. A terminal window calls this to learn that its shell exited.
+///
+/// # Errors
+///
+/// The `errno` from `waitpid(2)` — `ECHILD` for a pid that is not this
+/// process's child, or was already reaped — and [`ENOSYS`] on a host.
+pub fn try_wait(pid: i32) -> Result<Option<ChildExit>, i32> {
+    if pid <= 0 {
+        // As `kill`: one child, never a group.
+        return Err(EINVAL);
+    }
+    try_wait_one(pid)
+}
+
+#[cfg(unix)]
+fn try_wait_one(pid: i32) -> Result<Option<ChildExit>, i32> {
+    let mut status: i32 = 0;
+    // SAFETY: `status` outlives the call, which writes one `int` to it.
+    let rc = unsafe { sys::waitpid(pid, &raw mut status, WNOHANG) };
+    if rc < 0 {
+        return Err(last_errno());
+    }
+    if rc == 0 {
+        return Ok(None);
+    }
+    Ok(ChildExit::from_status(status))
+}
+
+#[cfg(not(unix))]
+fn try_wait_one(_pid: i32) -> Result<Option<ChildExit>, i32> {
+    Err(ENOSYS)
+}
+
+/// Tell the terminal behind `master` — and so the program on it — its new
+/// size. The kernel records it for the slave's `TIOCGWINSZ`.
+///
+/// # Errors
+///
+/// The `errno` from `ioctl(TIOCSWINSZ)`: `EBADF` or `ENOTTY` for a descriptor
+/// that is not a terminal, and [`ENOSYS`] on a host.
+pub fn set_window_size(master: i32, size: WinSize) -> Result<(), i32> {
+    set_window_size_one(master, size)
+}
+
+#[cfg(unix)]
+fn set_window_size_one(master: i32, size: WinSize) -> Result<(), i32> {
+    let mut ws = size;
+    // SAFETY: `ws` is a `struct winsize` that outlives the call; `TIOCSWINSZ`
+    // reads exactly that much from it.
+    let rc = unsafe { sys::ioctl(master, TIOCSWINSZ, (&raw mut ws).cast::<u8>()) };
+    if rc == 0 { Ok(()) } else { Err(last_errno()) }
+}
+
+#[cfg(not(unix))]
+fn set_window_size_one(_master: i32, _size: WinSize) -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate std;
 
     /// Every constant here equals `posix`'s.
     ///
@@ -583,6 +857,100 @@ mod tests {
             SYSLOG_ACTION_SIZE_BUFFER,
             posix::unistd::SYSLOG_ACTION_SIZE_BUFFER
         );
+        assert_eq!(E2BIG, posix::errno::E2BIG);
+        assert_eq!(WNOHANG, posix::wait::WNOHANG);
+        assert_eq!(TIOCSWINSZ, posix::ioctl::TIOCSWINSZ);
+    }
+
+    /// `WinSize` is `struct winsize` field for field, because it crosses the
+    /// C ABI by pointer into `forkpty` and `ioctl`.
+    #[test]
+    fn winsize_matches_posix_layout() {
+        use core::mem::{offset_of, size_of};
+        assert_eq!(size_of::<WinSize>(), size_of::<posix::ioctl::Winsize>());
+        assert_eq!(
+            offset_of!(WinSize, rows),
+            offset_of!(posix::ioctl::Winsize, ws_row)
+        );
+        assert_eq!(
+            offset_of!(WinSize, cols),
+            offset_of!(posix::ioctl::Winsize, ws_col)
+        );
+        assert_eq!(
+            offset_of!(WinSize, xpixel),
+            offset_of!(posix::ioctl::Winsize, ws_xpixel)
+        );
+        assert_eq!(
+            offset_of!(WinSize, ypixel),
+            offset_of!(posix::ioctl::Winsize, ws_ypixel)
+        );
+    }
+
+    /// The status decoding agrees with the libc's own, over every exit code,
+    /// every signal and the stopped shape it must not misread.
+    #[test]
+    fn wait_status_agrees_with_posix() {
+        use posix::process::{wexitstatus, wifexited, wifsignaled, wtermsig};
+        let mut statuses: std::vec::Vec<i32> = (0..=255).map(|code| code << 8).collect();
+        statuses.extend(1..=31);
+        statuses.extend((1..=31).map(|sig| sig | 0x80)); // core dumped
+        statuses.push(0x137f); // stopped by SIGSTOP
+        for status in statuses {
+            let want = if wifexited(status) {
+                Some(ChildExit::Exited(wexitstatus(status)))
+            } else if wifsignaled(status) {
+                Some(ChildExit::Signaled(wtermsig(status)))
+            } else {
+                None
+            };
+            assert_eq!(ChildExit::from_status(status), want, "status {status:#x}");
+        }
+    }
+
+    /// The limits are checked before the target split, so they hold on the
+    /// host too — and only past them does a call reach the host arm.
+    #[test]
+    fn forkpty_spawn_refuses_an_oversized_list_before_anything_else() {
+        let arg = c"x";
+        let too_many = [arg; SPAWN_MAX_ARGS + 1];
+        let ok = [arg; SPAWN_MAX_ARGS];
+        let size = WinSize {
+            rows: 24,
+            cols: 80,
+            ..WinSize::default()
+        };
+        assert_eq!(forkpty_spawn(c"/bin/sh", &too_many, None, size), Err(E2BIG));
+        assert_eq!(
+            forkpty_spawn(c"/bin/sh", &[arg], Some(&too_many[..]), size),
+            Err(E2BIG)
+        );
+        // At the limit it is accepted, and on the host declined only there.
+        #[cfg(not(unix))]
+        assert_eq!(
+            forkpty_spawn(c"/bin/sh", &ok, Some(&ok[..]), size),
+            Err(ENOSYS)
+        );
+        #[cfg(unix)]
+        let _ = ok;
+    }
+
+    #[test]
+    fn try_wait_is_for_one_child_only() {
+        assert_eq!(try_wait(0), Err(EINVAL));
+        assert_eq!(try_wait(-1), Err(EINVAL));
+    }
+
+    /// The argument arrays carry every pointer, in order, and end in NULL.
+    #[test]
+    fn fill_ptrs_terminates_the_array() {
+        let list = [c"a", c"bb", c"ccc"];
+        let mut slots = [core::ptr::null::<u8>(); SPAWN_MAX_ARGS + 1];
+        slots.fill(core::ptr::dangling::<u8>());
+        fill_ptrs(&mut slots, &list);
+        for (slot, s) in slots.iter().zip(&list) {
+            assert_eq!(*slot, s.as_ptr().cast::<u8>());
+        }
+        assert!(slots[list.len()].is_null());
     }
 
     /// A broadcast pid is refused before it can reach the libc.
@@ -662,6 +1030,10 @@ mod tests {
         assert_eq!(klog_size(), Err(ENOSYS));
         assert_eq!(klog_read_all(&mut [0u8; 8]), Err(ENOSYS));
         assert_eq!(klog_clear(), Err(ENOSYS));
+        let size = WinSize::default();
+        assert_eq!(forkpty_spawn(c"/bin/sh", &[c"sh"], None, size), Err(ENOSYS));
+        assert_eq!(try_wait(1), Err(ENOSYS));
+        assert_eq!(set_window_size(3, size), Err(ENOSYS));
         // `sync` has no failure to report on either arm; calling it here
         // asserts only that the host arm exists and does not panic.
         sync();

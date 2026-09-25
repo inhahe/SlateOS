@@ -7104,4 +7104,47 @@ mod tests {
             );
         });
     }
+    /// A press on the card turns it over, and so does a press on the button
+    /// under it -- two boxes, and a test that pressed only the one on top
+    /// could not tell the card's had gone.
+    #[test]
+    fn the_card_and_its_button_both_turn_it_over() {
+        let press_at = |app: &mut FlashcardsApp, x: f32, y: f32| {
+            app.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+        };
+        // The card's middle: well inside it, and nowhere near the button.
+        let mut app = app_in_deck();
+        app.start_study_all();
+        let (cx, cy) = (
+            app.width / 2.0,
+            FlashcardsApp::HEADER_H + FlashcardsApp::PADDING + 120.0,
+        );
+        assert_eq!(app.frame().hit_test(cx, cy), Some(Target::StudyCard));
+        press_at(&mut app, cx, cy);
+        assert!(
+            app.study_session.as_ref().unwrap().flipped,
+            "a press on the card did nothing"
+        );
+        // The button, by its own box.
+        let mut app = app_in_deck();
+        app.start_study_all();
+        let button = probe::rect_of(&app, Target::StudyCard).expect("the flip button");
+        assert!(
+            button.y > cy,
+            "the topmost box is not the button under the card"
+        );
+        press_at(
+            &mut app,
+            button.x + button.w / 2.0,
+            button.y + button.h / 2.0,
+        );
+        assert!(
+            app.study_session.as_ref().unwrap().flipped,
+            "the button did nothing"
+        );
+    }
 }

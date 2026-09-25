@@ -159863,6 +159863,25 @@ window bar; F5 presents, with each transition played -- in the export too, and
 lines there run in their own direction instead of flat. 146 tests;
 `apps/slides/mutate.py` has 61 rows. Eleven examined; ten to go.
 
+**`apps/flashcards`, 2026-09-25 -- a card editor nothing could type into,
+decks that could not be named, and a spaced-repetition program that forgot
+its reviews.** The card editor's keys were Enter and Escape, so no card could
+be made or changed (the tests set the strings directly); `n` made a deck
+called "New Deck" that nothing could rename; a delete took a deck or a card
+and its whole history at once. Nothing answered the pointer, the deck list
+had no scrolling, the card list showed eight rows at any height, the deck
+view's hint line advertised a `[D]ay+` key removed when the day came from the
+clock, a long answer was cut on the study card, and the notice was drawn
+under the header. Nothing was kept: Ctrl+S wrote one deck to a file the user
+had to open again at every start, and a review not saved that way was gone at
+close. Now the fields type (TextInput, Tab between them), decks are named and
+renamed, deletes ask, every button, row, field and rating answers the
+pointer, both lists scroll and fit the window, F1 lists the keys, answers
+wrap, and every deck and review is kept as it changes (one file per deck under
+the settings directory, opt-in so no test can write the developer's own).
+198 tests; `apps/flashcards/mutate.py` has 38 rows. Twelve examined; nine to
+go.
+
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 
 **In short:** a `cargo test --workspace` failed with exactly one failing test,
@@ -165481,6 +165500,8 @@ nothing, and only `from_settings` -- what `main` calls -- turns writing on. A
 test that forgets its scratch directory then writes nowhere, and
 `a_tracker_made_with_new_writes_nothing` pins that. It protects the one app
 that does it, not the next one written; the guard above is still the fix.
+`apps/flashcards` does the same since the same day
+(`an_app_made_with_new_keeps_nothing`).
 
 ### [E] The feed reader forgets its subscriptions, folders and marks at exit -- 2026-09-25
 **Status:** OPEN

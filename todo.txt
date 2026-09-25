@@ -58755,7 +58755,9 @@ test of the fixture, not of the bound.
   the record the same way. If the operator wants the split, the fix is a
   data-directory twin of `settingsfile` (lane C's crate) and a one-time move
   of those three files; `CONFIG_NAME`'s load and store are the only call
-  sites here.
+  sites here. The same goes for `apps/flashcards`, whose decks and review
+  history are a directory of deck files under the settings directory
+  (`library_dir`) -- a record of study, not a preference.
 
 - **A slide deck is a YAML file named `.slides`.** (2026-09-25,
   `apps/slides/src/main.rs` -> `deck_document`, `deck_from_document`,

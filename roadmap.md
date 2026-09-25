@@ -1846,8 +1846,10 @@ word; text inside them that says "lane C" is history.
   deletion that asks, and an archive and a table that scroll), `slides`
   (2026-09-25 — every control; every element selectable, editable, movable
   and resizable, undo, notes, all six layouts, decks saved and opened, and a
-  slide show with its transitions).
-  **Next:** flashcards — then the rest. (`reminders` was
+  slide show with its transitions), `flashcards` (2026-09-25 — every
+  control; cards and decks that can be written, deletes that ask, and every
+  deck and review kept as it changes).
+  **Next:** finance, qrcode, torrent — then the rest. (`reminders` was
   examined 2026-09-18: keyboard-driven by design, its two gaps fixed.)
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;

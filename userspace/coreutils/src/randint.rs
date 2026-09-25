@@ -66,6 +66,10 @@ const RANDREAD_BUFFER_SIZE: usize = 2048;
 impl RandRead {
     /// `randread_new (name, …)`: the named file, or the system when `None`.
     ///
+    /// The file is opened as upstream's `fopen_safer` opens it, never on
+    /// descriptor 0, 1 or 2 -- see [`crate::stdfd::fd_safer`] for what goes
+    /// wrong otherwise when a caller's standard output was closed.
+    ///
     /// # Errors
     ///
     /// The file cannot be opened; the caller reports it against its name.
@@ -74,7 +78,7 @@ impl RandRead {
             Some(name) => Source::File {
                 reader: BufReader::with_capacity(
                     RANDREAD_BUFFER_SIZE,
-                    File::open(os_from_bytes(name))?,
+                    File::open(os_from_bytes(name)).and_then(crate::stdfd::fd_safer)?,
                 ),
                 name: name.to_vec(),
             },

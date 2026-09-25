@@ -76,10 +76,16 @@ compare() {
       ( cd "$dir" && timeout -k 2 60 env PATH="$bindir/$side:$PATH" shred "$@" ) >"$out" 2>"$err"
       rc=$?
     fi
-    # The directory afterwards: every name, and every file's size and hash.
+    # The directory afterwards: every name, and every file's size, mode and
+    # hash. The mode is there because `-f` changes it -- upstream's answer to
+    # EACCES is `chmod (name, S_IWUSR)`, which leaves a write-only 0200 file --
+    # and a file that change made unreadable is reported as such rather than
+    # hashed, since reading it would only fail.
     local tree
     tree=$(cd "$dir" && find . -mindepth 1 | LC_ALL=C sort | while IFS= read -r f; do
-      if [ -f "$f" ]; then printf '%s %s %s\n' "$f" "$(stat -c %s "$f")" "$(sha256sum < "$f" | cut -c1-16)"
+      if [ -f "$f" ]; then
+        if [ -r "$f" ]; then h=$(sha256sum < "$f" | cut -c1-16); else h=unreadable; fi
+        printf '%s %s %s\n' "$f" "$(stat -c '%s %a' "$f")" "$h"
       else printf '%s\n' "$f"; fi
     done)
     if [ "$side" = ours ]; then

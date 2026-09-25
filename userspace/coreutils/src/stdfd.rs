@@ -269,6 +269,31 @@ mod imp {
         Ok(())
     }
 
+    /// `F_DUPFD_CLOEXEC`, for [`fd_safer`].
+    const F_DUPFD_CLOEXEC: i32 = 1030;
+
+    pub fn fd_safer(file: std::fs::File) -> io::Result<std::fs::File> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        let fd = file.as_raw_fd();
+        if !(0..=2).contains(&fd) {
+            return Ok(file);
+        }
+        // SAFETY: `file` keeps `fd` open across the call, and
+        // `F_DUPFD_CLOEXEC` only allocates a second descriptor for it -- the
+        // lowest free one at or above 3 -- reading and writing no memory.
+        let dup = unsafe { fcntl(fd, F_DUPFD_CLOEXEC, 3) };
+        if dup < 0 {
+            // The error is taken before `file` drops on the way out, closing
+            // the low descriptor as upstream's `fd_safer` closes it here too.
+            return Err(io::Error::last_os_error());
+        }
+        drop(file);
+        // SAFETY: `fcntl` returned a fresh descriptor that nothing else owns,
+        // so the `File` may take it and will close it exactly once.
+        Ok(unsafe { std::fs::File::from_raw_fd(dup) })
+    }
+
     pub fn read_fd(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             // SAFETY: `buf` is a live, writable slice, and `read` stores at
@@ -311,6 +336,13 @@ mod imp {
         // would stop a utility before it started. The lie this module exists to
         // undo is the target's, so is its undoing.
         Ok(())
+    }
+
+    /// Nothing to move: without [`restore`] no standard descriptor is ever
+    /// closed here, so no open can land on one.
+    #[allow(clippy::unnecessary_wraps)] // The signature is the Linux arm's.
+    pub fn fd_safer(file: std::fs::File) -> io::Result<std::fs::File> {
+        Ok(file)
     }
 
     /// The one place `io::stdout()`/`io::stderr()` are still used on purpose.
@@ -391,6 +423,32 @@ pub fn restore() {
 #[must_use]
 pub fn was_closed_at_startup(fd: i32) -> bool {
     imp::was_closed_at_startup(fd)
+}
+
+/// gnulib's `fd_safer`: keep a file a utility opened for its own purposes off
+/// descriptors 0, 1 and 2.
+///
+/// [`restore`] re-closes a standard descriptor the process was started
+/// without, and the kernel hands the next `open` the lowest free number -- so
+/// the next file opened *becomes* standard output as far as anything writing
+/// to descriptor 1 can tell. Upstream guards the opens where that matters with
+/// gnulib's `*_safer` family, and this is that family's core: a file on 0-2 is
+/// moved to the lowest free descriptor from 3 up (close-on-exec, as every
+/// `File` the standard library opens already is) and the low one is closed.
+/// Any other file comes back untouched.
+///
+/// Measured through `shred`, whose `--random-source` gnulib's `randread` opens
+/// with `fopen_safer`. GNU answers `shred --random-source=F - >&-` with
+/// `shred: -: fcntl failed: Bad file descriptor`; a plain open put `F` on
+/// descriptor 1, where `shred`'s check of standard output found it open, and
+/// `shred` went on to overwrite "standard output" -- which was `F`.
+///
+/// # Errors
+///
+/// The duplication failed (`EMFILE`). The file is closed, as upstream closes
+/// it.
+pub fn fd_safer(file: std::fs::File) -> io::Result<std::fs::File> {
+    imp::fd_safer(file)
 }
 
 /// Whether `fd` is a terminal — `isatty(3)`.
@@ -1507,5 +1565,29 @@ mod tests {
         // the test harness, which would take the rest of the suite with it.
         super::restore();
         assert!(!super::was_closed_at_startup(1));
+    }
+
+    /// The pass-through half of `fd_safer`. The other half needs a standard
+    /// descriptor closed, which a test cannot do in a process whose other
+    /// threads are opening files: one of them could take the number between
+    /// the close and the open. `scripts/shred-diff.sh` covers it end to end,
+    /// through `--random-source` with standard output closed.
+    #[test]
+    fn fd_safer_leaves_a_file_above_the_standard_three_alone() {
+        use std::io::Read;
+
+        let path = std::env::temp_dir().join(format!("stdfd-fd-safer-{}", std::process::id()));
+        std::fs::write(&path, b"kept").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        #[cfg(target_os = "linux")]
+        let before = std::os::fd::AsRawFd::as_raw_fd(&file);
+        let mut file = super::fd_safer(file).unwrap();
+        #[cfg(target_os = "linux")]
+        assert_eq!(std::os::fd::AsRawFd::as_raw_fd(&file), before);
+        let mut text = Vec::new();
+        file.read_to_end(&mut text).unwrap();
+        assert_eq!(text, b"kept");
+        drop(file);
+        std::fs::remove_file(&path).unwrap();
     }
 }

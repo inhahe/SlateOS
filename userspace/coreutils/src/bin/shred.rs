@@ -732,7 +732,8 @@ mod imp {
                     let mut sz = meta.len();
                     if !flags.exact {
                         let blk = st_blksize(&meta);
-                        let remainder = sz % blk;
+                        // `st_blksize` is never 0, so the fallback is unused.
+                        let remainder = sz.checked_rem(blk).unwrap_or(0);
                         if sz != 0 && sz < blk {
                             i_size = sz;
                         }
@@ -796,7 +797,7 @@ mod imp {
                     qname,
                     &mut pass_size,
                     pass,
-                    i as u64 + 1,
+                    (i as u64).saturating_add(1),
                     pn,
                 )?;
                 if err != 0 {
@@ -845,7 +846,7 @@ mod imp {
             NONPERIODIC_OUTPUT_SIZE
         };
         // `FILLPATTERN_SIZE`: a multiple of three at least `output_size`.
-        let fill_size = output_size.saturating_add(2) / 3 * 3;
+        let fill_size = (output_size.saturating_add(2) / 3).saturating_mul(3);
         let mut pbuf = vec![0u8; usize::try_from(fill_size).unwrap_or(0)];
 
         let mut write_error = false;
@@ -886,11 +887,11 @@ mod imp {
             // is negative there, which here is the explicit first test.
             let mut lim = output_size;
             if let Some(sz) = size {
-                if sz < offset {
+                let Some(left) = sz.checked_sub(offset) else {
                     break;
-                }
-                if sz - offset < output_size {
-                    lim = sz - offset;
+                };
+                if left < output_size {
+                    lim = left;
                     if lim == 0 {
                         break;
                     }
@@ -974,13 +975,17 @@ mod imp {
                             "{qname}: pass {k}/{n} ({pass_string})...{human_offset}"
                         )),
                         Some(sz) => {
-                            let percent = if sz == 0 {
-                                100
-                            } else if offset <= u64::MAX / 100 {
-                                offset.saturating_mul(100) / sz
+                            // Upstream's `size == 0 ? 100 : …`: the only
+                            // divisor that can be 0 is `sz`, and then (or if
+                            // `sz / 100` is, which needs an offset past the
+                            // size, where upstream divides by zero) the
+                            // answer is 100.
+                            let percent = if offset <= u64::MAX / 100 {
+                                offset.saturating_mul(100).checked_div(sz)
                             } else {
-                                offset / (sz / 100).max(1)
-                            };
+                                offset.checked_div(sz / 100)
+                            }
+                            .unwrap_or(100);
                             let human_size = human_readable(sz, Opts::CEILING | progress, 1, 1);
                             if done {
                                 human_offset.clone_from(&human_size);

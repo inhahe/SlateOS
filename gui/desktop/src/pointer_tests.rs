@@ -58,6 +58,23 @@ fn click_at(shell: &mut DesktopShell, rect: Rect) -> ShellAction {
     shell.handle_mouse(&click(x, y))
 }
 
+/// Press and let go in the middle of `rect`, answering what the *release*
+/// asked for -- for what acts on the release: a start-menu row, which does
+/// not know it was a click rather than the start of a drag until then.
+fn choose_at(shell: &mut DesktopShell, rect: Rect) -> ShellAction {
+    let (x, y) = centre(rect);
+    assert_eq!(
+        shell.handle_mouse(&click(x, y)),
+        ShellAction::Consumed,
+        "the press acted before the release could say whether it was a drag"
+    );
+    shell.handle_mouse(&MouseEvent {
+        x,
+        y,
+        kind: MouseEventKind::Release(MouseButton::Left),
+    })
+}
+
 /// An ordinary application window as the compositor would describe it. Nothing
 /// here has geometry: where a window is is not something the shell is told,
 /// because it is not something the shell decides.
@@ -151,7 +168,7 @@ fn clicking_settings_in_the_start_menu_asks_for_the_settings_program() {
     );
 
     let rect = shell.start_menu_row_rect(row);
-    let action = click_at(&mut shell, rect);
+    let action = choose_at(&mut shell, rect);
     assert_eq!(
         action,
         ShellAction::Launch(crate::hotkeys::Launch::program("/usr/bin/settings"))
@@ -195,7 +212,7 @@ fn every_visible_row_launches_the_program_named_on_it() {
         shell.toggle_start_menu();
         let expected = shell.start_menu_entries()[row].executable_path.clone();
         let rect = shell.start_menu_row_rect(row);
-        let action = click_at(&mut shell, rect);
+        let action = choose_at(&mut shell, rect);
         assert_eq!(
             action,
             ShellAction::Launch(crate::hotkeys::Launch::program(&expected)),
@@ -224,7 +241,7 @@ fn a_scrolled_row_launches_the_program_named_on_it() {
 
     let expected = shell.start_menu_entries()[3].executable_path.clone();
     let rect = shell.start_menu_row_rect(0);
-    let action = click_at(&mut shell, rect);
+    let action = choose_at(&mut shell, rect);
     assert_eq!(
         action,
         ShellAction::Launch(crate::hotkeys::Launch::program(&expected))
@@ -510,7 +527,7 @@ fn closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it() {
     // The first click dismisses the popup; the second launches.
     click_at(&mut by_launching, row);
     assert!(matches!(
-        click_at(&mut by_launching, row),
+        choose_at(&mut by_launching, row),
         ShellAction::Launch(_)
     ));
     assert!(!by_launching.power_menu_open, "launching a program");

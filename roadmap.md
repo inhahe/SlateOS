@@ -1657,11 +1657,26 @@ live.
   an icon in place -- Enter keeps the name, Escape the old one, a click away
   or the keyboard leaving for another program keeps it -- and a renamed
   default is saved as `labels` in the layout file, only if renamed, so a
-  later build's own names still reach everyone else. **Next, and open:**
-  dragging between the start menu, the taskbar and the desktop
-  (`design.txt` line 712) -- which wants lane F's implicit pointer grab
-  (`requests/c-f-a-drag-that-leaves-its-window-stops-being-told-where-the-pointer-is.md`)
-  to survive crossing a program's window.
+  later build's own names still reach everyone else.
+
+- `[C]` **Programs carried between the start menu, the taskbar and the
+  desktop** -- done 2026-09-25 (`design.txt` line 712: "anywhere between
+  pinned apps, desktop, and start menu entries"). Drag a start-menu row, a
+  pinned taskbar button or a program's desktop icon and let go on the
+  taskbar (pinned at the gap it was let go in), on the desktop (a shortcut
+  where it was let go), or on the start button or the start menu's pinned
+  rows (pinned to the top of the start menu -- a section new with this,
+  saved in `startmenu.yaml`, with "Pin to Start menu" on a row's and a
+  program icon's right-click menu). A drag copies; a drop over another
+  program's window does nothing; a label following the pointer says what
+  letting go will do (`design-decisions.md` §871). A start-menu row now
+  starts its program on the release, since the press cannot know it is not
+  a drag. **Open:** while the pointer is over another program's window the
+  label stops following it, because the compositor tells that window about
+  the motion instead
+  (`requests/c-f-a-drag-that-leaves-its-window-stops-being-told-where-the-pointer-is.md`);
+  the drop itself still lands, since the release goes to the shell surface
+  the press focused.
 
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
@@ -7387,13 +7402,13 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Z-order stacking and window focus tracking
 - [x] Desktop with draggable icons (snap-to-grid or free placement)
   - [x] Grid snapping (cells sized by the icon-size setting), free placement + auto-arrange modes, chosen from the desktop menu's View submenu and saved in `deskicons.yaml` — **really done 2026-09-25**: this line was ticked from the start while the only modes were a snap and an always-sorted arrange, with no way to choose; see lane C's entry above and `design-decisions.md` §869
-  - [x] Rubber-band selection, Ctrl+Click toggle, Ctrl+A select all
+  - [-] Rubber-band selection (done), Ctrl+A select all (done), Ctrl+Click toggle (**not reachable yet**: the icon layer implements it, but the desktop is never told that Ctrl is held -- `known-issues.md` → `TD-C-CTRL-CLICK-CANNOT-ADD-A-DESKTOP-ICON-TO-THE-SELECTION`. Corrected 2026-09-25)
   - [x] Drag-and-drop repositioning with ghost indicator, multi-select drag
   - [x] Default icons (This PC, Recycle Bin, Documents, Home), icon types (9 variants)
   - [x] Double-click activate, right-click context menu, F2 rename, Delete -- **really done 2026-09-25**: ticked from the start, when only the double-click reached anything, and it asked for a folder to be *executed* and did nothing for This PC or the Recycle Bin. Opening, the icon's own right-click menu (Open, Rename, Pin to taskbar, Remove from desktop), Delete and F2 rename in place are all real now.
 - [x] Taskbar enhancements:
   - [x] Pinned apps on left, running apps on right, divider between sections
-  - [-] Drag to reorder (done), drag to/from desktop and start menu (**not done**, ticked in error: a pinned button only reorders within the pinned run, and nothing can be dragged between the start menu, the taskbar and the desktop. "Add to desktop" on the start menu's and the taskbar's right-click menu is the non-drag way in, done 2026-09-25; the drag is lane C's next item. Corrected 2026-09-25)
+  - [x] Drag to reorder, drag to/from desktop and start menu -- **really done 2026-09-25** (it had been ticked in error: a pinned button only reordered within the pinned run). A start-menu row, a pinned button or a program's desktop icon can be carried to the taskbar, the desktop or the start menu's pinned rows; a drag copies. `design-decisions.md` §871.
   - [x] Optional app name alongside icon
   - [x] Aero-style blurry transparency (blur.rs: 3-pass box blur, 5 presets, BlurManager with dirty cache, rounded corners)
 - [x] System tray:

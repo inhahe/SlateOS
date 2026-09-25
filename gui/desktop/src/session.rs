@@ -434,6 +434,7 @@ impl<T: Transport> ShellSession<T> {
         // a key got their binding written to `shortcuts.yaml` and thrown away
         // at the next start.
         shell.load_pinned();
+        shell.load_start_pins();
         shell.load_shortcuts();
         shell.populate_icons();
         let bar = shell.taskbar_rect();
@@ -1424,18 +1425,25 @@ impl<T: Transport> ShellSession<T> {
         // The overlays, on their own surface and on their own schedule: an OSD
         // is not a popup and neither one's visibility implies anything about
         // the other's.
-        // The volume overlay and a tray tooltip share this surface: both are
-        // transient, both are above the menus, and both are here to be read
-        // rather than clicked. Merged rather than given two surfaces, because
-        // a second full-screen overlay window would have to be ordered against
-        // this one and there is no case where that ordering matters.
-        let overlays = match (self.shell.render_osd(), self.shell.render_tray_tooltip()) {
-            (Some(mut osd), Some(tip)) => {
-                osd.commands.extend(tip.commands);
-                Some(osd)
-            }
-            (some, None) | (None, some) => some,
-        };
+        // The volume overlay, a tray tooltip and the label that follows a
+        // program being carried share this surface: all are transient, all
+        // are above the menus, and all are here to be read rather than
+        // clicked. Merged rather than given surfaces of their own, because a
+        // second full-screen overlay window would have to be ordered against
+        // this one and there is no case where that ordering matters. The
+        // carried label goes last, on top: it follows the pointer, and is the
+        // one thing here the user is steering.
+        let overlays = [
+            self.shell.render_osd(),
+            self.shell.render_tray_tooltip(),
+            self.shell.render_carry(),
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(|mut all, part| {
+            all.commands.extend(part.commands);
+            all
+        });
         let showing = overlays.is_some();
         if showing != self.osd_shown {
             if let Some(mut handle) = self.events.window_mut(self.osd.window) {
@@ -1546,6 +1554,11 @@ impl<T: Transport> ShellSession<T> {
         // choice from the desktop's View menu.
         if self.shell.take_icons_dirty() {
             self.save_icon_layout();
+        }
+        // And the start menu's pins, dropped there or chosen from a menu.
+        if self.shell.take_start_pins_dirty() {
+            let saved = self.shell.save_start_pins();
+            self.report_save("The start menu's pinned programs", saved);
         }
 
         // The shell writes `appearance.yaml` itself for the quick toggles --

@@ -154,6 +154,20 @@ fn press_at(desktop: &Desktop, surface: Surface, x: f32, y: f32) {
     )]);
 }
 
+/// [`press_at`]'s other half: let go at a point in screen coordinates,
+/// through the surface that would really have received it.
+fn release_at(desktop: &Desktop, surface: Surface, x: f32, y: f32) {
+    let (ox, oy) = surface.origin();
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        surface.window(),
+        guitk::event::Event::Mouse(guitk::event::MouseEvent {
+            x: x - ox,
+            y: y - oy,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        }),
+    )]);
+}
+
 fn key(k: Key) -> guitk::event::Event {
     guitk::event::Event::Key(KeyEvent {
         key: k,
@@ -983,6 +997,12 @@ fn a_start_menu_row_comes_out_as_a_program_to_start() {
 
     let row = centre(session.shell().start_menu_row_rect(0));
     press_at(&desktop, session.popups(), row.0, row.1);
+    session.pump().expect("pump");
+    assert!(
+        session.take_launches().is_empty(),
+        "the press started it before the release could say it was not a drag"
+    );
+    release_at(&desktop, session.popups(), row.0, row.1);
     session.pump().expect("pump");
 
     let launched = session.take_launches();
@@ -4357,6 +4377,32 @@ fn an_icon_dragged_in_a_session_is_where_it_was_left_after_a_restart() {
 /// **What the View menu chooses survives a restart**: the arrangement in the
 /// icon layout, the size in `appearance.yaml`, and the icons' cells through
 /// both.
+/// A program pinned to the start menu is written by the pump that pinned it,
+/// and is there at the next login -- through `ShellSession::start`, for the
+/// reason `a_session_starts_with_what_was_saved` gives: a loader nothing calls
+/// passes every test of the loader.
+#[test]
+fn a_start_menu_pin_is_saved_and_comes_back_at_the_next_login() {
+    settingsfile::testing::with_scratch_config("session-start-pins", |_root| {
+        let (mut first, _desktop, _turn) = session();
+        let exec = first.shell().start_menu_entries()[2]
+            .executable_path
+            .clone();
+        first.shell_mut().pin_to_start(&exec);
+        first.pump().expect("pump");
+        drop(first);
+
+        let (restarted, _d2, _turn2) = session();
+        let pins: Vec<String> = restarted
+            .shell()
+            .start_pins()
+            .iter()
+            .map(|entry| entry.executable_path.clone())
+            .collect();
+        assert_eq!(pins, [exec]);
+    });
+}
+
 #[test]
 fn the_view_menu_choices_survive_a_restart() {
     settingsfile::testing::with_scratch_config("session-view-menu", |_root| {

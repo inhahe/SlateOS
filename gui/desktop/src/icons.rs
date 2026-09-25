@@ -1042,6 +1042,32 @@ impl DesktopIconLayer {
         icon_type: IconType,
         action: IconAction,
     ) -> (IconId, bool) {
+        self.put_shortcut(label, icon_type, action, None)
+    }
+
+    /// [`add_shortcut`](Self::add_shortcut), placed where it was dropped: the
+    /// icon is centred under `(x, y)`, then placed by the arrangement's rule
+    /// as any icon is -- exactly there when placing freely, the free cell
+    /// nearest there on the grid, the end of the order when auto-arranging.
+    pub fn add_shortcut_at(
+        &mut self,
+        label: &str,
+        icon_type: IconType,
+        action: IconAction,
+        x: f32,
+        y: f32,
+    ) -> (IconId, bool) {
+        self.put_shortcut(label, icon_type, action, Some((x, y)))
+    }
+
+    /// The two above: one rule for "is it already here", one for marking.
+    fn put_shortcut(
+        &mut self,
+        label: &str,
+        icon_type: IconType,
+        action: IconAction,
+        at: Option<(f32, f32)>,
+    ) -> (IconId, bool) {
         let key = Self::storage_key(&action);
         if let Some(existing) = self
             .icons
@@ -1052,7 +1078,20 @@ impl DesktopIconLayer {
             self.select_single(existing);
             return (existing, false);
         }
-        let id = self.add_icon_auto(label, icon_type, action);
+        let id = match at {
+            None => self.add_icon_auto(label, icon_type, action),
+            Some((x, y)) => {
+                let half_w = px_f32(self.grid.cell_width()) / 2.0;
+                let half_h = px_f32(self.grid.cell_height()) / 2.0;
+                self.add_icon(
+                    label,
+                    icon_type,
+                    action,
+                    whole_pixels(x - half_w),
+                    whole_pixels(y - half_h),
+                )
+            }
+        };
         if let Some(icon) = self.get_icon_mut(id) {
             icon.added = true;
         }
@@ -1900,6 +1939,40 @@ impl DesktopIconLayer {
         }
     }
 
+    /// End a drag without dropping anything: every icon stays where it was.
+    /// Answers the icons that were being dragged -- none for a press that
+    /// never became a drag, or a rubber band, which this ends too.
+    ///
+    /// For a drop somewhere this layer does not own: a program icon let go
+    /// over the taskbar is pinned there, and stays on the desktop.
+    pub fn cancel_drag(&mut self) -> Vec<IconId> {
+        match core::mem::replace(&mut self.interaction, InteractionState::Idle) {
+            InteractionState::Dragging { originals, .. } => {
+                originals.into_iter().map(|(id, _, _)| id).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Where the pointer is in a drag of icons, and which icons they are --
+    /// `None` unless a drag is under way (a press that has not yet moved far
+    /// enough is not one).
+    #[must_use]
+    pub fn drag_in_progress(&self) -> Option<((f32, f32), Vec<IconId>)> {
+        match &self.interaction {
+            InteractionState::Dragging {
+                current_x,
+                current_y,
+                originals,
+                ..
+            } => Some((
+                (*current_x, *current_y),
+                originals.iter().map(|&(id, _, _)| id).collect(),
+            )),
+            _ => None,
+        }
+    }
+
     /// Handle double-click at a position.
     pub fn handle_double_click(&mut self, x: f32, y: f32) -> IconEvent {
         if let Some(id) = self.icon_at(x, y)
@@ -2030,6 +2103,21 @@ impl DesktopIconLayer {
 
     /// Produce render commands for the entire icon layer.
     pub fn render(&self, p: &Palette) -> Vec<RenderCommand> {
+        self.render_layer(p, true)
+    }
+
+    /// [`render`](Self::render) for a drag the pointer has carried somewhere
+    /// this layer does not own -- over the taskbar, where letting go pins a
+    /// program instead of moving its icon. The ghosts still follow the
+    /// pointer; the outline of where the icons would land is left out,
+    /// because they would not land there.
+    #[must_use]
+    pub fn render_dropping_elsewhere(&self, p: &Palette) -> Vec<RenderCommand> {
+        self.render_layer(p, false)
+    }
+
+    /// The two above: `landing` says whether to draw where a drag would land.
+    fn render_layer(&self, p: &Palette, landing: bool) -> Vec<RenderCommand> {
         let mut cmds: Vec<RenderCommand> = Vec::new();
 
         // Render each icon.
@@ -2094,8 +2182,13 @@ impl DesktopIconLayer {
             // carries out. One outline per icon: it used to be one, for the
             // first icon only, at a snap the drop did not use once two icons
             // could not share a cell.
-            let plan = self.drop_plan(*anchor, originals, whole_pixels(dx), whole_pixels(dy));
-            for &(_, x, y) in &plan.targets {
+            let targets = if landing {
+                self.drop_plan(*anchor, originals, whole_pixels(dx), whole_pixels(dy))
+                    .targets
+            } else {
+                Vec::new()
+            };
+            for &(_, x, y) in &targets {
                 cmds.push(RenderCommand::StrokeRect {
                     x: x as f32,
                     y: y as f32,

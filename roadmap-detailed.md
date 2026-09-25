@@ -1701,7 +1701,7 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 
 #### Desktop
 - [x] Desktop icons: snap-to-grid or free placement (user option) — 2026-09-25. The desktop's right-click View submenu: Align icons to grid (snap) or not (free), Auto arrange icons, and the icon size; Sort by name beside it. Saved in `deskicons.yaml`. `gui/desktop/src/icons.rs`; `design-decisions.md` §869.
-- [ ] Drag and drop icons between pinned apps, desktop, and start menu
+- [x] Drag and drop icons between pinned apps, desktop, and start menu — 2026-09-25. A start-menu row, a pinned taskbar button or a program's desktop icon, carried to the taskbar, the desktop, or the start menu's pinned rows (new with this; `startmenu.yaml`); a drag copies, and a label following the pointer says what letting go will do. `gui/desktop/src/lib.rs` (`carry_target`); `design-decisions.md` §871.
 - [ ] Multi-monitor support
 
 #### Start Menu

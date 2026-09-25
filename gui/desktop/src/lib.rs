@@ -200,6 +200,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// The file the pinned applications live in.
 const TASKBAR_CONFIG_NAME: &str = "taskbar";
 
+/// The file the programs pinned to the start menu live in.
+const START_MENU_CONFIG_NAME: &str = "startmenu";
+
 /// The toolkit's rectangle, re-exported so the shell and its widgets share
 /// one. This crate declared an identical copy -- same four floats, same
 /// half-open `contains`, documented with the same reasoning -- until
@@ -494,6 +497,29 @@ enum PinTarget {
     Pinned(usize),
 }
 
+/// Where a program carried from the start menu, the taskbar or the desktop
+/// would go if it were let go at a point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CarryTarget {
+    /// Pinned to the taskbar, at the gap nearest the pointer.
+    Taskbar,
+    /// A shortcut to it on the desktop, where it was let go.
+    Desktop,
+    /// Pinned to the start menu: among its pinned rows where it was let go
+    /// on them, after them when it was let go on the start button.
+    StartMenu,
+}
+
+/// A start-menu row pressed and perhaps being dragged.
+struct StartDrag {
+    /// The press and its drag threshold, keyed by the program's path -- the
+    /// same source the pinned buttons and the tray use.
+    source: tray_dnd::DragSource<String>,
+    /// The program's name, as the start menu shows it: what a pin or a
+    /// desktop shortcut made from it is called.
+    name: String,
+}
+
 /// What one taskbar button stands for.
 ///
 /// The taskbar used to show one button per window and nothing else, so an
@@ -565,6 +591,15 @@ pub struct ManagedWindow {
     pub pid: u32,
     /// Icon ID (index into icon registry).
     pub icon_id: u32,
+    /// Where the window is, in screen pixels, decorations included, as the
+    /// compositor last reported it.
+    ///
+    /// Asked by [`window_at`](DesktopShell::window_at) alone, and for one
+    /// question: whether a program carried from the start menu was let go
+    /// over somebody's window rather than on the desktop. The compositor
+    /// routes presses by what is on top, so nothing else in the shell needs
+    /// to know where a window is -- and nothing here decides where one goes.
+    pub frame: Rect,
     /// Where in the stack the window sits: higher is nearer the front.
     ///
     /// Not a counter the shell keeps. It is the window's index in the list the
@@ -1147,6 +1182,30 @@ pub struct DesktopShell {
     /// the pointer as the drag proceeds, so an index taken at press time
     /// stops meaning the thing that was pressed.
     pin_drag: Option<tray_dnd::DragSource<String>>,
+    /// Whether the pinned button being dragged has been carried away from
+    /// the row of pins -- up off the bar towards the desktop, where letting
+    /// go puts a shortcut to it, or onto the start button, where letting go
+    /// pins it to the start menu. While it is, the row stops rearranging
+    /// under it.
+    pin_drag_off_bar: bool,
+    /// A start-menu row pressed and not yet let go: a click that starts the
+    /// program, or the start of a drag that carries it to the taskbar, the
+    /// desktop or the menu's own pinned rows. See
+    /// [`finish_start_press`](Self::finish_start_press).
+    start_drag: Option<StartDrag>,
+    /// Programs the user pinned to the top of the start menu, in their
+    /// order: dropped there, or chosen with "Pin to Start menu". Listed
+    /// above the launcher's programs, and a pinned program is still listed
+    /// among them too, as on every start menu that has pins.
+    start_pins: Vec<AppEntry>,
+    /// Whether [`start_pins`](Self::start_pins) changed since it was last
+    /// written. The session writes it -- see
+    /// [`take_start_pins_dirty`](Self::take_start_pins_dirty) -- so that a
+    /// write that fails can be reported rather than printed and forgotten.
+    start_pins_dirty: bool,
+    /// Where the pointer is in a drag that carries a program, for the label
+    /// that follows it.
+    carry_at: (f32, f32),
     /// A press that landed on a tray icon and has not been released.
     ///
     /// Held from press to release because until the release the shell does
@@ -1729,6 +1788,11 @@ impl DesktopShell {
             tray_overflow_menu: None,
             pin_menu: None,
             pin_drag: None,
+            pin_drag_off_bar: false,
+            start_drag: None,
+            start_pins: Vec::new(),
+            start_pins_dirty: false,
+            carry_at: (0.0, 0.0),
             tray_tooltip: None,
             alt_tab_active: false,
             alt_tab_index: 0,
@@ -2554,18 +2618,171 @@ impl DesktopShell {
         self.power_menu_open = !self.power_menu_open;
     }
 
-    /// The programs the start menu lists, in menu order.
+    /// The programs the start menu lists, in menu order: the ones the user
+    /// pinned first, then every program the launcher knows.
     ///
     /// System actions — shutdown, lock, log out — are deliberately excluded:
     /// they belong to the power options at the foot of the menu, not among the
     /// applications, and mixing them in would make "Shutdown" one mis-click
     /// away from "Screenshot".
+    ///
+    /// One list for the pins and the rest, rather than a second list drawn
+    /// above the first: every row -- its hit test, its scroll, its
+    /// right-click menu, a drag from it -- is then the same row, asked of
+    /// the same index.
     #[must_use]
     pub fn start_menu_entries(&self) -> Vec<&AppEntry> {
+        self.start_pins
+            .iter()
+            .chain(
+                self.apps.iter().filter(|app| {
+                    matches!(app.category, Category::Application | Category::Setting)
+                }),
+            )
+            .collect()
+    }
+
+    /// The programs pinned to the top of the start menu, in order.
+    #[must_use]
+    pub fn start_pins(&self) -> &[AppEntry] {
+        &self.start_pins
+    }
+
+    /// Whether `exec` is pinned to the start menu.
+    #[must_use]
+    pub fn is_pinned_to_start(&self, exec: &str) -> bool {
+        self.start_pins
+            .iter()
+            .any(|entry| entry.executable_path == exec)
+    }
+
+    /// Pin a program to the start menu, after the ones pinned already.
+    pub fn pin_to_start(&mut self, exec: &str) {
+        let end = self.start_pins.len();
+        self.start_pin_into_gap(exec, end);
+    }
+
+    /// Take a program off the top of the start menu. It is still listed
+    /// below if the launcher knows it.
+    pub fn unpin_from_start(&mut self, exec: &str) {
+        let before = self.start_pins.len();
+        self.start_pins
+            .retain(|entry| entry.executable_path != exec);
+        if self.start_pins.len() != before {
+            // The list is a row shorter, and a menu scrolled to its end
+            // would otherwise show a blank row past it.
+            self.start_menu_scroll = self.start_menu_scroll.min(self.start_menu_max_scroll());
+            self.start_pins_dirty = true;
+        }
+    }
+
+    /// Pin `exec` into gap `gap` of the start menu's pinned rows (`0..=len`,
+    /// before the pin of that index), or move it there if it is pinned
+    /// already. Answers the gap after where it ended up, as
+    /// [`pin_into_gap`](Self::pin_into_gap) does for the taskbar, so several
+    /// programs dropped together keep their order.
+    fn start_pin_into_gap(&mut self, exec: &str, gap: usize) -> usize {
+        if exec.is_empty() {
+            return gap;
+        }
+        let from = self
+            .start_pins
+            .iter()
+            .position(|entry| entry.executable_path == exec);
+        let entry = match from {
+            Some(from) => self.start_pins.remove(from),
+            None => self.start_entry_for(exec),
+        };
+        // Taking it out closed its own gap: a gap past it is one lower now,
+        // and the gaps either side of it are both where it already was.
+        let to = match from {
+            Some(from) if gap > from => gap.saturating_sub(1),
+            _ => gap,
+        }
+        .min(self.start_pins.len());
+        self.start_pins.insert(to, entry);
+        if from != Some(to) {
+            self.start_pins_dirty = true;
+        }
+        to.saturating_add(1)
+    }
+
+    /// What a program pinned to the start menu is listed as: the launcher's
+    /// entry when it knows the program, so the name matches the row below;
+    /// otherwise one made from the path and named for its file.
+    ///
+    /// Never the name it was dropped with -- a desktop icon the user renamed,
+    /// say. Names are not stored (see [`load_pinned`](Self::load_pinned)), so
+    /// a pin named any other way would change its name at the next login.
+    fn start_entry_for(&self, exec: &str) -> AppEntry {
         self.apps
             .iter()
-            .filter(|app| matches!(app.category, Category::Application | Category::Setting))
-            .collect()
+            .find(|app| app.executable_path == exec)
+            .cloned()
+            .unwrap_or_else(|| AppEntry {
+                name: self.app_name_for(exec),
+                description: String::new(),
+                executable_path: exec.to_string(),
+                keywords: Vec::new(),
+                category: Category::Application,
+                launch_count: 0,
+            })
+    }
+
+    /// Read the programs pinned to the start menu back from `startmenu.yaml`.
+    pub fn load_start_pins(&mut self) {
+        let doc = config::load(START_MENU_CONFIG_NAME);
+        let Some(execs) = doc.get_seq(&["pinned"]) else {
+            return;
+        };
+        for exec in execs {
+            if exec.is_empty() || self.is_pinned_to_start(&exec) {
+                continue;
+            }
+            let entry = self.start_entry_for(&exec);
+            self.start_pins.push(entry);
+        }
+    }
+
+    /// Whether the start menu's pins need writing, clearing the flag.
+    pub fn take_start_pins_dirty(&mut self) -> bool {
+        core::mem::take(&mut self.start_pins_dirty)
+    }
+
+    /// Write the programs pinned to the start menu to `startmenu.yaml`.
+    ///
+    /// # Errors
+    ///
+    /// The write's own error. The pins still apply to this session.
+    pub fn save_start_pins(&self) -> std::io::Result<()> {
+        let mut doc = config::load(START_MENU_CONFIG_NAME);
+        let execs: Vec<&str> = self
+            .start_pins
+            .iter()
+            .map(|entry| entry.executable_path.as_str())
+            .collect();
+        doc.set_seq(&["pinned"], &execs);
+        config::store(START_MENU_CONFIG_NAME, &doc)
+    }
+
+    /// The gap among the start menu's pinned rows a program let go at
+    /// `(x, y)` goes into: before the pinned row it was let go on when on
+    /// its upper half, after it when on its lower half, and after them all
+    /// when let go on the start button.
+    fn start_pin_insert_boundary(&self, x: f32, y: f32) -> usize {
+        let pins = self.start_pins.len();
+        if let Hit::StartMenuEntry(index) = self.hit_test(x, y)
+            && index < pins
+            && let Some(row) = index.checked_sub(self.start_menu_scroll)
+        {
+            let rect = self.start_menu_row_rect(row);
+            return if y < rect.y + rect.h / 2.0 {
+                index
+            } else {
+                index.saturating_add(1)
+            };
+        }
+        pins
     }
 
     /// Which entry the `row`-th drawn row shows, if any.
@@ -2633,6 +2850,8 @@ impl DesktopShell {
     pub fn close_start_menu(&mut self) {
         self.start_menu_open = false;
         self.power_menu_open = false;
+        // A drag from it has nothing left to drop from.
+        self.start_drag = None;
     }
 
     // ======================================================================
@@ -2911,13 +3130,33 @@ impl DesktopShell {
         // A pinned button owns the pointer until the button comes up, the
         // way a tray icon does and for the same reason: the press does not yet
         // know whether it is a click or a drag.
+        // A start-menu row, the same way: the press does not yet know whether
+        // it is a click or a carry. While the menu is open its surface covers
+        // the screen, so the drag reaches the shell wherever the pointer goes.
+        if self.start_drag.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    if let Some(drag) = self.start_drag.as_mut() {
+                        drag.source.on_move(event.x, event.y);
+                    }
+                    self.carry_at = (event.x, event.y);
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Release(_) => {
+                    return self.finish_start_press(event.x, event.y);
+                }
+                _ => {}
+            }
+        }
         if self.pin_drag.is_some() {
             match event.kind {
                 MouseEventKind::Move => {
                     self.drag_pinned_to(event.x, event.y);
                     return ShellAction::Consumed;
                 }
-                MouseEventKind::Release(_) => return self.finish_pinned_press(),
+                MouseEventKind::Release(_) => {
+                    return self.finish_pinned_press(event.x, event.y);
+                }
                 _ => {}
             }
         }
@@ -3063,6 +3302,46 @@ impl DesktopShell {
                 // press on an icon leaves it non-idle and *only* a release
                 // returns it, so a release routed anywhere else would strand
                 // the layer in `PendingDrag` for the rest of the session.
+                // A program icon let go over the taskbar is pinned there and
+                // stays where it was on the desktop: a drag between two
+                // places copies. Anything else let go there -- a folder, a
+                // document -- is refused by staying put, since a taskbar
+                // button can only start a program.
+                // Only a drag that got under way, and only the left button's
+                // release, which is the one that ends it: a press that never
+                // moved far enough is a click, and belongs to the icon layer
+                // wherever it is let go.
+                //
+                // On the start button, the same programs are pinned to the
+                // start menu instead, after the pins already there.
+                if button == MouseButton::Left
+                    && self.icons.drag_in_progress().is_some()
+                    && self.taskbar_rect().contains(event.x, event.y)
+                {
+                    let to_start = matches!(
+                        self.carry_target(event.x, event.y),
+                        Some(CarryTarget::StartMenu)
+                    );
+                    let mut gap = if to_start {
+                        self.start_pins.len()
+                    } else {
+                        self.pinned_insert_boundary(event.x)
+                    };
+                    for id in self.icons.cancel_drag() {
+                        if let Some(exec) = self.icon_program(id) {
+                            gap = if to_start {
+                                self.start_pin_into_gap(&exec, gap)
+                            } else {
+                                let name = self
+                                    .icons
+                                    .get_icon(id)
+                                    .map_or_else(|| exec.clone(), |icon| icon.label.clone());
+                                self.pin_into_gap(&exec, &name, gap)
+                            };
+                        }
+                    }
+                    return ShellAction::Consumed;
+                }
                 if self.icons.is_interacting() {
                     // Where the icons ended up is what the user just chose, so
                     // it is saved at the end of this pump rather than at some
@@ -3183,6 +3462,115 @@ impl DesktopShell {
         let mut tree = RenderTree::new();
         tree.commands
             .extend(tip.render(&Palette::from_settings(&self.appearance)));
+        Some(tree)
+    }
+
+    /// What is being carried, and where it would go if let go now: a label
+    /// that follows the pointer, naming the program and what letting go will
+    /// do -- "Pin to taskbar", "Add to desktop", or nothing when it would do
+    /// nothing. Drawn on the overlay surface, which takes no input, so the
+    /// label never stands between the pointer and what it is over.
+    ///
+    /// Also for a program icon dragged over the taskbar, where the icon
+    /// layer's own ghost is hidden under the bar.
+    #[must_use]
+    pub fn render_carry(&self) -> Option<RenderTree> {
+        let (name, at) = if let Some(drag) = self.start_drag.as_ref() {
+            if !drag.source.is_dragging() {
+                return None;
+            }
+            (drag.name.clone(), self.carry_at)
+        } else if let Some(drag) = self.pin_drag.as_ref() {
+            if !drag.is_dragging() || !self.pin_drag_off_bar {
+                return None;
+            }
+            let exec = drag.pressed_key()?;
+            (self.app_name_for(&exec), self.carry_at)
+        } else {
+            let (at, ids) = self.icons.drag_in_progress()?;
+            if !self.taskbar_rect().contains(at.0, at.1) {
+                return None;
+            }
+            let program = ids
+                .into_iter()
+                .find(|id| self.icon_program(*id).is_some())?;
+            (self.icons.get_icon(program)?.label.clone(), at)
+        };
+        let hint = match self.carry_target(at.0, at.1) {
+            Some(CarryTarget::Taskbar) => Some("Pin to taskbar"),
+            Some(CarryTarget::Desktop) => Some("Add to desktop"),
+            Some(CarryTarget::StartMenu) => Some("Pin to Start menu"),
+            None => None,
+        };
+        let p = Palette::from_settings(&self.appearance);
+        let size = self.font_size(TextRole::Body);
+        let (gap, pad) = (self.scale(2.0), self.scale(8.0));
+        let weight = guitk::render::FontWeightHint::Regular;
+        let line = text::line_height(size, weight);
+        let name_w = text::measure(&name, size, weight);
+        let hint_w = hint.map_or(0.0, |h| text::measure(h, size, weight));
+        let h = match hint {
+            Some(_) => line * 2.0 + gap + pad * 2.0,
+            None => line + pad * 2.0,
+        };
+        let w = name_w.max(hint_w) + pad * 2.0;
+        // Below and right of the pointer, so the pointer itself stays on
+        // what it is over -- and flipped to the other side where that would
+        // run off the screen, which over a taskbar along the bottom edge is
+        // every time: the label is there to be read exactly when the pointer
+        // is on the bar.
+        let off = self.scale(14.0);
+        let (screen_w, screen_h) = (self.screen_width as f32, self.screen_height as f32);
+        let x = if at.0 + off + w <= screen_w {
+            at.0 + off
+        } else {
+            (at.0 - off - w).max(0.0)
+        };
+        let y = if at.1 + off + h <= screen_h {
+            at.1 + off
+        } else {
+            (at.1 - off - h).max(0.0)
+        };
+        let mut tree = RenderTree::new();
+        tree.push(guitk::render::RenderCommand::FillRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: p.surface0,
+            corner_radii: CornerRadii::all(self.scale(6.0)),
+        });
+        tree.push(guitk::render::RenderCommand::StrokeRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: p.accent,
+            line_width: 1.0,
+            corner_radii: CornerRadii::all(self.scale(6.0)),
+        });
+        tree.push(guitk::render::RenderCommand::Text {
+            x: x + pad,
+            y: y + pad,
+            text: name,
+            color: p.text,
+            font_size: size,
+            font_weight: weight,
+            max_width: None,
+            overflow: guitk::render::TextOverflow::Clip,
+        });
+        if let Some(hint) = hint {
+            tree.push(guitk::render::RenderCommand::Text {
+                x: x + pad,
+                y: y + pad + line + gap,
+                text: hint.to_string(),
+                color: p.subtext0,
+                font_size: size,
+                font_weight: weight,
+                max_width: None,
+                overflow: guitk::render::TextOverflow::Clip,
+            });
+        }
         Some(tree)
     }
 
@@ -3343,18 +3731,20 @@ impl DesktopShell {
                 }
                 ShellAction::Consumed
             }
+            // The press only takes hold, as a pinned button's does: the
+            // release decides whether it was a click, which starts the
+            // program, or a drag, which carries it to the taskbar or the
+            // desktop (`design.txt` line 712). This used to start the program
+            // on the press, which is what made the row impossible to drag.
             Hit::StartMenuEntry(index) => {
-                let path = self
-                    .start_menu_entries()
-                    .get(index)
-                    .map(|entry| PathBuf::from(&entry.executable_path));
-                match path {
-                    Some(path) => {
-                        self.close_start_menu();
-                        ShellAction::Launch(hotkeys::Launch::program(path))
-                    }
-                    None => ShellAction::Consumed,
+                if let Some(entry) = self.start_menu_entries().get(index) {
+                    let (exec, name) = (entry.executable_path.clone(), entry.name.clone());
+                    let mut source = tray_dnd::DragSource::default();
+                    source.on_press(exec, x, y);
+                    self.start_drag = Some(StartDrag { source, name });
+                    self.carry_at = (x, y);
                 }
+                ShellAction::Consumed
             }
             Hit::PowerButton => {
                 self.toggle_power_menu();
@@ -3789,6 +4179,12 @@ impl DesktopShell {
                     // already outside anything the system can produce.
                     pid: u32::try_from(info.pid).unwrap_or(u32::MAX),
                     icon_id,
+                    frame: Rect::new(
+                        info.x as f32,
+                        info.y as f32,
+                        info.width as f32,
+                        info.height as f32,
+                    ),
                     z_order: u32::try_from(index).unwrap_or(u32::MAX),
                 },
             );
@@ -5471,6 +5867,20 @@ impl DesktopShell {
                 self.theme.start_menu_fg,
                 self.font_size(TextRole::Item),
             );
+            // A line along the top of the first row after the pins, so the
+            // user's own choices read as a group apart from the launcher's
+            // list -- which may name the same programs again below.
+            if index == self.start_pins.len() && index > 0 {
+                let inset = self.scale(16.0);
+                tree.push(guitk::render::RenderCommand::FillRect {
+                    x: rect.x + inset,
+                    y: rect.y,
+                    width: (rect.w - inset * 2.0).max(0.0),
+                    height: self.scale(1.0).max(1.0),
+                    color: self.theme.panel_border_color,
+                    corner_radii: CornerRadii::all(0.0),
+                });
+            }
         }
 
         // A scroll indicator, so a list that continues past the last row says
@@ -5864,10 +6274,23 @@ impl DesktopShell {
         } else {
             "Pin to taskbar"
         };
+        let start_label = if self.is_pinned_to_start(&exec) {
+            "Unpin from Start menu"
+        } else {
+            "Pin to Start menu"
+        };
         let items = vec![
             guitk::menu::MenuItem::Action {
                 id: Self::MENU_PIN_TOGGLE,
                 label: label.to_string(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            },
+            guitk::menu::MenuItem::Action {
+                id: Self::MENU_START_PIN_TOGGLE,
+                label: start_label.to_string(),
                 shortcut: None,
                 icon: None,
                 enabled: true,
@@ -5911,8 +6334,24 @@ impl DesktopShell {
     fn activate_pin_menu_item(&mut self, id: MenuItemId, target: PinTarget) {
         match id {
             Self::MENU_PIN_TOGGLE => self.toggle_pin(target),
+            Self::MENU_START_PIN_TOGGLE => {
+                if let Some(exec) = self.exec_of(target) {
+                    self.toggle_start_pin(&exec);
+                }
+            }
             Self::MENU_ADD_TO_DESKTOP => self.add_to_desktop(target),
             _ => {}
+        }
+    }
+
+    /// Pin `exec` to the start menu, or unpin it if it is pinned there
+    /// already -- "Pin to Start menu" on the pin menu and on a program
+    /// icon's own menu, whose label says which it will do.
+    fn toggle_start_pin(&mut self, exec: &str) {
+        if self.is_pinned_to_start(exec) {
+            self.unpin_from_start(exec);
+        } else {
+            self.pin_to_start(exec);
         }
     }
 
@@ -6098,11 +6537,21 @@ impl DesktopShell {
 
     /// Move a pinned button along the bar. Answers whether anything moved.
     fn drag_pinned_to(&mut self, x: f32, y: f32) -> bool {
+        let bar_top = self.taskbar_rect().y;
+        let on_start = self.start_button_rect().contains(x, y);
         let Some(drag) = self.pin_drag.as_mut() else {
             return false;
         };
         drag.on_move(x, y);
         if !drag.is_dragging() {
+            return false;
+        }
+        self.carry_at = (x, y);
+        // Carried up off the bar, the button is on its way to the desktop;
+        // on the start button, to the start menu. Either way the row stops
+        // rearranging under a pointer that is not on it.
+        self.pin_drag_off_bar = y < bar_top || on_start;
+        if self.pin_drag_off_bar {
             return false;
         }
         let Some(exec) = drag.pressed_key() else {
@@ -6151,7 +6600,8 @@ impl DesktopShell {
 
     /// Release a pressed pinned button: a reorder just ended, or the program
     /// is about to be started.
-    fn finish_pinned_press(&mut self) -> ShellAction {
+    fn finish_pinned_press(&mut self, x: f32, y: f32) -> ShellAction {
+        let off_bar = core::mem::take(&mut self.pin_drag_off_bar);
         let Some(mut drag) = self.pin_drag.take() else {
             return ShellAction::Consumed;
         };
@@ -6159,12 +6609,164 @@ impl DesktopShell {
         // Read before `on_release`, which resets the source.
         let was_drag = drag.on_release();
         if was_drag {
-            // The row already rearranged itself on the way here.
+            // Let go off the bar, on the desktop: a shortcut there, and the
+            // pin stays -- a drag between two places copies, as a drag from
+            // the start menu does. Back on the bar, the row already
+            // rearranged itself on the way here.
+            if off_bar && let Some(exec) = exec {
+                let name = self.app_name_for(&exec);
+                self.drop_program(&exec, &name, x, y);
+            }
             return ShellAction::Consumed;
         }
         exec.map_or(ShellAction::Consumed, |exec| {
             ShellAction::Launch(hotkeys::Launch::program(exec))
         })
+    }
+
+    /// Let go of a pressed start-menu row: a click starts the program; a drag
+    /// carries it to wherever it was let go -- the taskbar pins it at the gap
+    /// nearest the pointer, the desktop gets a shortcut to it there -- and
+    /// dropping it back on the menu asks for nothing.
+    fn finish_start_press(&mut self, x: f32, y: f32) -> ShellAction {
+        let Some(mut drag) = self.start_drag.take() else {
+            return ShellAction::Consumed;
+        };
+        let exec = drag.source.pressed_key();
+        // Read before `on_release`, which resets the source.
+        let was_drag = drag.source.on_release();
+        let Some(exec) = exec else {
+            return ShellAction::Consumed;
+        };
+        if !was_drag {
+            self.close_start_menu();
+            return ShellAction::Launch(hotkeys::Launch::program(PathBuf::from(exec)));
+        }
+        let on_menu = self.start_menu_rect().contains(x, y);
+        self.drop_program(&exec, &drag.name, x, y);
+        // Let go on the menu -- arranging its pinned rows, or back where it
+        // came from, which asks for nothing -- the menu stays up to be used.
+        // Anywhere else, the program has gone where it was carried.
+        if !on_menu {
+            self.close_start_menu();
+        }
+        ShellAction::Consumed
+    }
+
+    /// Put a program that was carried here where it was let go: over the
+    /// taskbar, pinned at the gap nearest the pointer -- moved there, if it
+    /// was pinned already; anywhere else, as a shortcut on the desktop,
+    /// centred where it was let go (or the one already there, selected).
+    fn drop_program(&mut self, exec: &str, name: &str, x: f32, y: f32) {
+        match self.carry_target(x, y) {
+            Some(CarryTarget::Taskbar) => {
+                let gap = self.pinned_insert_boundary(x);
+                self.pin_into_gap(exec, name, gap);
+            }
+            Some(CarryTarget::StartMenu) => {
+                let gap = self.start_pin_insert_boundary(x, y);
+                self.start_pin_into_gap(exec, gap);
+            }
+            Some(CarryTarget::Desktop) => {
+                let (_, added) = self.icons.add_shortcut_at(
+                    name,
+                    icons::IconType::Executable,
+                    icons::IconAction::OpenPath(PathBuf::from(exec)),
+                    x,
+                    y,
+                );
+                self.icons_dirty |= added;
+            }
+            // Over somebody's window, or a part of the shell that takes no
+            // programs: nothing. Nothing on this system can yet hand a
+            // program to another program by dropping it, and a shortcut
+            // made on the desktop behind the window instead would appear
+            // somewhere the user was not pointing.
+            None => {}
+        }
+    }
+
+    /// Where a program carried here would go if it were let go at `(x, y)`
+    /// -- `None` where letting go does nothing. One answer for the drop and
+    /// for the label that says beforehand what the drop will do, so the two
+    /// cannot disagree.
+    fn carry_target(&self, x: f32, y: f32) -> Option<CarryTarget> {
+        // The start button first: it is on the taskbar, and what it means
+        // there is the start menu, not a place in the row of pins.
+        if self.start_button_rect().contains(x, y) {
+            return Some(CarryTarget::StartMenu);
+        }
+        if self.taskbar_rect().contains(x, y) {
+            return Some(CarryTarget::Taskbar);
+        }
+        match self.hit_test(x, y) {
+            // Only the pinned rows take a drop: the rest of the list is the
+            // launcher's, in the launcher's order, and not the user's to
+            // arrange.
+            Hit::StartMenuEntry(index) if index < self.start_pins.len() => {
+                Some(CarryTarget::StartMenu)
+            }
+            Hit::Desktop if self.window_at(x, y).is_none() => Some(CarryTarget::Desktop),
+            _ => None,
+        }
+    }
+
+    /// The application window drawn at a point, if any: the topmost one on
+    /// the desktop being shown, not minimised, whose frame contains it.
+    #[must_use]
+    pub fn window_at(&self, x: f32, y: f32) -> Option<WindowId> {
+        self.windows
+            .values()
+            .filter(|w| w.on_glass() && w.desktop == self.current_desktop && w.frame.contains(x, y))
+            .max_by_key(|w| w.z_order)
+            .map(|w| w.id)
+    }
+
+    /// Pin `exec` into gap `gap` of the pinned run (`0..=len`, before the
+    /// button of that index), or move it there if it is pinned already.
+    /// Answers the gap just after where it ended up, which is where a second
+    /// program dropped in the same place belongs -- so several dropped
+    /// together keep their order instead of stacking up reversed.
+    fn pin_into_gap(&mut self, exec: &str, name: &str, gap: usize) -> usize {
+        let from = self.pinned_index_of(exec);
+        if from.is_none() {
+            // Written once, below, with the button already in its gap.
+            self.pin_app_without_saving(exec, name);
+        }
+        // Refused -- an empty path is not a program: nothing moved.
+        let Some(now) = self.pinned_index_of(exec) else {
+            return gap;
+        };
+        let len = self.taskbar.pinned_apps().len();
+        // Taking a button out of the run closes its own gap, so a gap past
+        // it is one lower by the time the button goes back in -- and the
+        // gaps either side of it are both where it already is.
+        let to = match from {
+            Some(from) if gap > from => gap.saturating_sub(1),
+            _ => gap,
+        }
+        .min(len.saturating_sub(1));
+        if to != now {
+            self.taskbar.reorder_pinned(now, to);
+        }
+        if from.is_none() || to != now {
+            self.save_pinned();
+        }
+        to.saturating_add(1)
+    }
+
+    /// The gap in the pinned run a new button dropped at `x` goes into,
+    /// `0..=len`: before the first button whose middle is right of `x`, or
+    /// after the last. Unlike [`pinned_drop_boundary`](Self::pinned_drop_boundary)
+    /// it can name the end, because a new button can go after the last one.
+    fn pinned_insert_boundary(&self, x: f32) -> usize {
+        let count = self.taskbar.pinned_apps().len();
+        (0..count)
+            .find(|&index| {
+                let button = self.taskbar_button_rect(index);
+                x < button.x + button.w / 2.0
+            })
+            .unwrap_or(count)
     }
 
     /// Release a pressed tray icon: either a reorder just ended, or the
@@ -6872,6 +7474,8 @@ impl DesktopShell {
     const MENU_PIN_TOGGLE: u64 = 900;
     /// The pin menu's "Add to desktop".
     const MENU_ADD_TO_DESKTOP: u64 = 901;
+    /// The pin menu's "Pin to Start menu" / "Unpin from Start menu".
+    const MENU_START_PIN_TOGGLE: u64 = 902;
 
     // The desktop menu's item ids. Stable numbers rather than positions, so
     // inserting an item cannot silently reassign what the ones below it do;
@@ -6891,6 +7495,7 @@ impl DesktopShell {
     const MENU_ICON_PIN: u64 = 301;
     const MENU_ICON_REMOVE: u64 = 302;
     const MENU_ICON_RENAME: u64 = 303;
+    const MENU_ICON_START_PIN: u64 = 304;
     /// The first icon size's id; the others follow in
     /// [`IconSize::ALL`](appearance::IconSize::ALL)'s order. A block of its
     /// own, far from the rest, so a size added to the setting cannot land on
@@ -7010,6 +7615,14 @@ impl DesktopShell {
                     "Unpin from taskbar"
                 } else {
                     "Pin to taskbar"
+                },
+            ));
+            more.push(item(
+                Self::MENU_ICON_START_PIN,
+                if self.is_pinned_to_start(&exec) {
+                    "Unpin from Start menu"
+                } else {
+                    "Pin to Start menu"
                 },
             ));
         }
@@ -7467,6 +8080,7 @@ impl DesktopShell {
             id,
             Self::MENU_ICON_OPEN
                 | Self::MENU_ICON_PIN
+                | Self::MENU_ICON_START_PIN
                 | Self::MENU_ICON_REMOVE
                 | Self::MENU_ICON_RENAME
         ) {
@@ -7503,6 +8117,13 @@ impl DesktopShell {
                             .map_or_else(|| exec.clone(), |i| i.label.clone());
                         self.pin_app(&exec, &name);
                     }
+                    ShellAction::Consumed
+                }
+                None => ShellAction::Pass,
+            },
+            Self::MENU_ICON_START_PIN => match self.icon_program(icon) {
+                Some(exec) => {
+                    self.toggle_start_pin(&exec);
                     ShellAction::Consumed
                 }
                 None => ShellAction::Pass,
@@ -7641,7 +8262,16 @@ impl DesktopShell {
     /// source of truth and a cached palette is a second one that goes stale
     /// the moment the user switches mode.
     pub fn render_icons(&self) -> Vec<guitk::render::RenderCommand> {
-        self.icons.render(&Palette::from_settings(&self.appearance))
+        let p = Palette::from_settings(&self.appearance);
+        match self.icons.drag_in_progress() {
+            // Let go over the taskbar, the icons stay where they are (and a
+            // program among them is pinned), so an outline of where they
+            // would land on the desktop would be a promise the drop breaks.
+            Some((at, _)) if self.taskbar_rect().contains(at.0, at.1) => {
+                self.icons.render_dropping_elsewhere(&p)
+            }
+            _ => self.icons.render(&p),
+        }
     }
 
     /// Put the default icons on the desktop and lay them out as they were
@@ -16723,5 +17353,1228 @@ mod rename_tests {
         shell.commit_icon_rename();
         assert_eq!(label(&shell, id), "Z");
         assert!(shell.take_icons_dirty());
+    }
+}
+
+/// Carrying a program between the start menu, the taskbar and the desktop --
+/// `design.txt` line 712, "drag and drop icons between pinned apps, desktop,
+/// and start menu".
+///
+/// Every test that can drop on the taskbar runs inside `with_scratch_config`:
+/// a pin writes `taskbar.yaml`, and a test that wrote the developer's own is
+/// what `scripts/check-scratch-config.py` exists to refuse.
+#[cfg(test)]
+mod carry_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::cast_precision_loss
+    )]
+
+    use super::{
+        DesktopShell, MouseButton, MouseEvent, MouseEventKind, ShellAction, WindowId, WindowInfo,
+        WindowList, icons,
+    };
+    use appearance::config::testing::with_scratch_config;
+    use guitk::render::RenderCommand;
+    use std::path::PathBuf;
+
+    fn shell() -> DesktopShell {
+        DesktopShell::new(1920, 1080)
+    }
+
+    fn ev(x: f32, y: f32, kind: MouseEventKind) -> MouseEvent {
+        MouseEvent { x, y, kind }
+    }
+
+    fn press(shell: &mut DesktopShell, at: (f32, f32)) -> ShellAction {
+        shell.handle_mouse(&ev(at.0, at.1, MouseEventKind::Press(MouseButton::Left)))
+    }
+
+    fn move_to(shell: &mut DesktopShell, at: (f32, f32)) {
+        shell.handle_mouse(&ev(at.0, at.1, MouseEventKind::Move));
+    }
+
+    fn release(shell: &mut DesktopShell, at: (f32, f32)) -> ShellAction {
+        shell.handle_mouse(&ev(at.0, at.1, MouseEventKind::Release(MouseButton::Left)))
+    }
+
+    /// Press at `from`, move to `to` in four steps -- the first already past
+    /// the drag threshold, as a real pointer's would be over this distance --
+    /// and let go there. Answers what the release asked for.
+    fn carry(shell: &mut DesktopShell, from: (f32, f32), to: (f32, f32)) -> ShellAction {
+        assert_eq!(
+            press(shell, from),
+            ShellAction::Consumed,
+            "the press was not taken"
+        );
+        for step in 1..=4 {
+            let t = step as f32 / 4.0;
+            move_to(
+                shell,
+                (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t),
+            );
+        }
+        release(shell, to)
+    }
+
+    fn row_centre(shell: &DesktopShell, row: usize) -> (f32, f32) {
+        let r = shell.start_menu_row_rect(row);
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// The program on a start-menu row, and its name.
+    fn app(shell: &DesktopShell, row: usize) -> (String, String) {
+        let entry = shell.start_menu_entries()[row];
+        (entry.executable_path.clone(), entry.name.clone())
+    }
+
+    fn pinned(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .pinned_apps()
+            .iter()
+            .map(|app| app.exec_path.clone())
+            .collect()
+    }
+
+    fn button_centre(shell: &DesktopShell, index: usize) -> (f32, f32) {
+        let r = shell.taskbar_button_rect(index);
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// The desktop's shortcut to `exec`, if it has one.
+    fn shortcut_to(shell: &DesktopShell, exec: &str) -> Option<icons::IconId> {
+        let action = icons::IconAction::OpenPath(PathBuf::from(exec));
+        shell
+            .icons
+            .icon_ids()
+            .into_iter()
+            .find(|&id| shell.icons.get_icon(id).is_some_and(|i| i.action == action))
+    }
+
+    /// The middle of an icon's cell, where a press picks it up.
+    fn icon_centre(shell: &DesktopShell, id: icons::IconId) -> (f32, f32) {
+        let icon = shell.icons.get_icon(id).unwrap();
+        let grid = shell.icons.grid();
+        (
+            icon.x as f32 + grid.cell_width() as f32 / 2.0,
+            icon.y as f32 + grid.cell_height() as f32 / 2.0,
+        )
+    }
+
+    fn position(shell: &DesktopShell, id: icons::IconId) -> (i32, i32) {
+        let icon = shell.icons.get_icon(id).unwrap();
+        (icon.x, icon.y)
+    }
+
+    /// What the label that follows a carried program says, line by line --
+    /// `None` when there is no label.
+    fn carried(shell: &DesktopShell) -> Option<Vec<String>> {
+        let tree = shell.render_carry()?;
+        Some(
+            tree.commands
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
+    /// An application window on the desktop being shown.
+    fn window(id: u64, rect: (i32, i32, u32, u32)) -> WindowInfo {
+        WindowInfo::new(id, 1, format!("window {id}")).at(rect.0, rect.1, rect.2, rect.3)
+    }
+
+    // ---- a click is still a click -----------------------------------------------------
+
+    /// The press only takes hold: whether it was a click or the start of a
+    /// drag is not known until the release, so starting the program on the
+    /// press -- as the row used to -- made it impossible to drag.
+    #[test]
+    fn a_start_menu_row_starts_its_program_on_the_release() {
+        let mut shell = shell();
+        shell.toggle_start_menu();
+        let (exec, _) = app(&shell, 0);
+        let at = row_centre(&shell, 0);
+
+        assert_eq!(press(&mut shell, at), ShellAction::Consumed);
+        assert!(
+            shell.start_menu_open,
+            "the menu closed under a press that may yet be a drag"
+        );
+        assert_eq!(
+            release(&mut shell, at),
+            ShellAction::Launch(crate::hotkeys::Launch::program(&exec))
+        );
+        assert!(
+            !shell.start_menu_open,
+            "picking a program leaves the menu up"
+        );
+    }
+
+    /// A hand is not perfectly still: a press that moves less than the drag
+    /// threshold before it is let go is a click.
+    #[test]
+    fn a_press_that_wobbles_is_still_a_click() {
+        let mut shell = shell();
+        shell.toggle_start_menu();
+        let (exec, _) = app(&shell, 0);
+        let (x, y) = row_centre(&shell, 0);
+
+        press(&mut shell, (x, y));
+        move_to(&mut shell, (x + 2.0, y + 1.0));
+        assert!(carried(&shell).is_none(), "a wobble drew a carried label");
+        assert_eq!(
+            release(&mut shell, (x + 2.0, y + 1.0)),
+            ShellAction::Launch(crate::hotkeys::Launch::program(&exec))
+        );
+    }
+
+    // ---- from the start menu --------------------------------------------------------
+
+    /// Dropped on the taskbar, the program is pinned in the gap it was let go
+    /// in -- here between the two pins already there.
+    #[test]
+    fn a_row_dropped_on_the_taskbar_is_pinned_in_the_gap_it_was_let_go_in() {
+        with_scratch_config("carry-row-to-bar", |_root| {
+            let mut shell = shell();
+            let ((a, a_name), (b, b_name), (c, _)) =
+                (app(&shell, 0), app(&shell, 1), app(&shell, 2));
+            shell.pin_app(&a, &a_name);
+            shell.pin_app(&b, &b_name);
+            shell.toggle_start_menu();
+
+            // The left quarter of the second button: before it.
+            let second = shell.taskbar_button_rect(1);
+            let to = (second.x + second.w / 4.0, second.y + second.h / 2.0);
+            let from = row_centre(&shell, 2);
+            assert_eq!(
+                carry(&mut shell, from, to),
+                ShellAction::Consumed,
+                "a drag started the program"
+            );
+
+            assert_eq!(pinned(&shell), [a.clone(), c, b]);
+            assert!(!shell.start_menu_open, "the menu stayed up after the drop");
+            assert!(
+                shortcut_to(&shell, &a).is_none(),
+                "the taskbar drop made a shortcut"
+            );
+
+            // And written down: a new login sees the same bar.
+            let mut restarted = DesktopShell::new(1920, 1080);
+            restarted.load_pinned();
+            assert_eq!(pinned(&restarted), pinned(&shell));
+        });
+    }
+
+    /// Past the last pin, and anywhere else on the bar that is not a pin, is
+    /// the end of the run.
+    #[test]
+    fn a_row_dropped_past_the_last_pin_goes_at_the_end() {
+        with_scratch_config("carry-row-to-bar-end", |_root| {
+            let mut shell = shell();
+            let ((a, a_name), (b, _)) = (app(&shell, 0), app(&shell, 1));
+            shell.pin_app(&a, &a_name);
+            shell.toggle_start_menu();
+
+            let last = shell.taskbar_button_rect(0);
+            let to = (last.x + last.w * 3.0, last.y + last.h / 2.0);
+            let from = row_centre(&shell, 1);
+            carry(&mut shell, from, to);
+
+            assert_eq!(pinned(&shell), [a, b]);
+        });
+    }
+
+    /// A program that is pinned already moves to where it was dropped, and
+    /// is not pinned twice.
+    #[test]
+    fn a_row_already_pinned_moves_its_pin_rather_than_adding_one() {
+        with_scratch_config("carry-row-moves-pin", |_root| {
+            let mut shell = shell();
+            let ((a, a_name), (b, b_name)) = (app(&shell, 0), app(&shell, 1));
+            shell.pin_app(&a, &a_name);
+            shell.pin_app(&b, &b_name);
+            shell.toggle_start_menu();
+
+            let second = shell.taskbar_button_rect(1);
+            let to = (second.x + second.w * 0.75, second.y + second.h / 2.0);
+            let from = row_centre(&shell, 0);
+            carry(&mut shell, from, to);
+            assert_eq!(pinned(&shell), [b.clone(), a.clone()]);
+
+            // Dropped into its own gap, either side of it, nothing moves.
+            shell.toggle_start_menu();
+            let own = shell.taskbar_button_rect(1);
+            let to = (own.x + own.w * 0.25, own.y + own.h / 2.0);
+            let from = row_centre(&shell, 0);
+            carry(&mut shell, from, to);
+            assert_eq!(pinned(&shell), [b, a]);
+        });
+    }
+
+    /// A program already pinned, carried into the gap between two other pins:
+    /// the case where its own old place changes which gap is meant.
+    #[test]
+    fn a_pinned_program_carried_into_a_middle_gap_lands_there() {
+        with_scratch_config("carry-row-middle-gap", |_root| {
+            let mut shell = shell();
+            let apps: Vec<(String, String)> = (0..3).map(|row| app(&shell, row)).collect();
+            for (exec, name) in &apps {
+                shell.pin_app(exec, name);
+            }
+            shell.toggle_start_menu();
+
+            // Row 0's program is the first pin. The left quarter of the
+            // third button: after the second, before the third.
+            let third = shell.taskbar_button_rect(2);
+            let to = (third.x + third.w / 4.0, third.y + third.h / 2.0);
+            let from = row_centre(&shell, 0);
+            carry(&mut shell, from, to);
+            assert_eq!(
+                pinned(&shell),
+                [apps[1].0.clone(), apps[0].0.clone(), apps[2].0.clone()]
+            );
+        });
+    }
+
+    /// Dropped on the desktop, a shortcut to the program appears where it was
+    /// let go, and is saved.
+    #[test]
+    fn a_row_dropped_on_the_desktop_puts_a_shortcut_where_it_was_let_go() {
+        with_scratch_config("carry-row-to-desktop", |_root| {
+            let mut shell = shell();
+            shell.toggle_start_menu();
+            let (exec, name) = app(&shell, 0);
+            let to = (1200.0, 400.0);
+            let from = row_centre(&shell, 0);
+            assert_eq!(carry(&mut shell, from, to), ShellAction::Consumed);
+
+            let id = shortcut_to(&shell, &exec).expect("no shortcut appeared");
+            let icon = shell.icons.get_icon(id).unwrap();
+            assert_eq!(icon.label, name);
+            assert_eq!(icon.icon_type, icons::IconType::Executable);
+            assert!(icon.added, "a shortcut the user made must be removable");
+            // On the grid, in the cell under the pointer: that cell was free.
+            let grid = shell.icons.grid();
+            let (x, y) = (icon.x as f32, icon.y as f32);
+            assert!(
+                (x..x + grid.cell_width() as f32).contains(&to.0)
+                    && (y..y + grid.cell_height() as f32).contains(&to.1),
+                "the shortcut is at ({x}, {y}), not under where it was let go"
+            );
+            assert!(shell.take_icons_dirty(), "the new shortcut is not saved");
+            assert!(pinned(&shell).is_empty(), "a desktop drop pinned it");
+            assert!(!shell.start_menu_open);
+        });
+    }
+
+    /// Dropping it where there is a shortcut to it already selects that one
+    /// rather than making a second.
+    #[test]
+    fn a_row_dropped_on_the_desktop_twice_leaves_one_shortcut() {
+        with_scratch_config("carry-row-to-desktop-twice", |_root| {
+            let mut shell = shell();
+            let (exec, _) = app(&shell, 0);
+            for to in [(1200.0, 400.0), (600.0, 700.0)] {
+                shell.toggle_start_menu();
+                let from = row_centre(&shell, 0);
+                carry(&mut shell, from, to);
+            }
+            let action = icons::IconAction::OpenPath(PathBuf::from(&exec));
+            let count = shell
+                .icons
+                .icon_ids()
+                .into_iter()
+                .filter(|&id| shell.icons.get_icon(id).is_some_and(|i| i.action == action))
+                .count();
+            assert_eq!(count, 1);
+            assert_eq!(
+                shell.icons.selected_ids(),
+                [shortcut_to(&shell, &exec).unwrap()]
+            );
+        });
+    }
+
+    /// Carried and brought back to the menu, nothing is asked for: the menu
+    /// stays up to be used, nothing starts, and nothing is pinned or added.
+    #[test]
+    fn a_row_let_go_back_on_the_menu_does_nothing() {
+        with_scratch_config("carry-row-back", |_root| {
+            let mut shell = shell();
+            shell.toggle_start_menu();
+            let (exec, _) = app(&shell, 0);
+            let (from, to) = (row_centre(&shell, 0), row_centre(&shell, 3));
+            assert_eq!(carry(&mut shell, from, to), ShellAction::Consumed);
+
+            assert!(shell.start_menu_open);
+            assert!(pinned(&shell).is_empty());
+            assert!(shortcut_to(&shell, &exec).is_none());
+            assert!(!shell.take_icons_dirty());
+            assert!(carried(&shell).is_none(), "the label outlived the drag");
+        });
+    }
+
+    /// Let go over somebody's window, it goes nowhere: nothing here can hand a
+    /// program to another program yet, and a shortcut made behind the window
+    /// would turn up somewhere the user was not pointing.
+    #[test]
+    fn a_row_let_go_over_a_window_does_nothing() {
+        with_scratch_config("carry-row-over-window", |_root| {
+            let mut shell = shell();
+            shell.apply_window_list(&WindowList::new(0, vec![window(1, (800, 200, 600, 400))]));
+            shell.toggle_start_menu();
+            let (exec, _) = app(&shell, 0);
+            let from = row_centre(&shell, 0);
+            assert_eq!(
+                carry(&mut shell, from, (1000.0, 400.0)),
+                ShellAction::Consumed
+            );
+
+            assert!(shortcut_to(&shell, &exec).is_none());
+            assert!(pinned(&shell).is_empty());
+            // Beside the window, the same drop works.
+            shell.toggle_start_menu();
+            let from = row_centre(&shell, 0);
+            carry(&mut shell, from, (1600.0, 400.0));
+            assert!(shortcut_to(&shell, &exec).is_some());
+        });
+    }
+
+    /// Closing the menu mid-drag -- a key, a hotkey, anything that closes it --
+    /// ends the drag: the release has nothing left to drop.
+    #[test]
+    fn closing_the_menu_ends_a_drag_from_it() {
+        with_scratch_config("carry-row-menu-closed", |_root| {
+            let mut shell = shell();
+            shell.toggle_start_menu();
+            let (exec, _) = app(&shell, 0);
+            let from = row_centre(&shell, 0);
+            press(&mut shell, from);
+            move_to(&mut shell, (1200.0, 400.0));
+            shell.close_start_menu();
+            assert!(carried(&shell).is_none());
+            release(&mut shell, (1200.0, 400.0));
+            assert!(shortcut_to(&shell, &exec).is_none());
+        });
+    }
+
+    // ---- what the carried label says ----------------------------------------------------
+
+    /// The label names the program and says what letting go will do, and says
+    /// nothing where letting go does nothing.
+    #[test]
+    fn the_carried_label_says_what_letting_go_will_do() {
+        with_scratch_config("carry-label", |_root| {
+            let mut shell = shell();
+            shell.apply_window_list(&WindowList::new(0, vec![window(1, (800, 200, 600, 400))]));
+            shell.toggle_start_menu();
+            let (_, name) = app(&shell, 0);
+            let from = row_centre(&shell, 0);
+            press(&mut shell, from);
+            assert!(carried(&shell).is_none(), "a label before any drag");
+
+            move_to(&mut shell, (1600.0, 400.0));
+            assert_eq!(
+                carried(&shell).unwrap(),
+                [name.clone(), "Add to desktop".into()]
+            );
+
+            let bar = shell.taskbar_rect();
+            move_to(&mut shell, (bar.x + bar.w / 2.0, bar.y + bar.h / 2.0));
+            assert_eq!(
+                carried(&shell).unwrap(),
+                [name.clone(), "Pin to taskbar".into()]
+            );
+
+            move_to(&mut shell, (1000.0, 400.0));
+            assert_eq!(
+                carried(&shell).unwrap(),
+                std::slice::from_ref(&name),
+                "over a window"
+            );
+
+            let menu = row_centre(&shell, 2);
+            move_to(&mut shell, menu);
+            assert_eq!(carried(&shell).unwrap(), [name], "back on the menu");
+
+            release(&mut shell, menu);
+            assert!(carried(&shell).is_none());
+        });
+    }
+
+    /// Over a taskbar along the bottom edge -- exactly where the label has
+    /// something to say -- it flips above the pointer instead of running off
+    /// the screen, and left of it in the corner.
+    #[test]
+    fn the_carried_label_stays_on_the_screen() {
+        let mut shell = shell();
+        shell.toggle_start_menu();
+        let from = row_centre(&shell, 0);
+        press(&mut shell, from);
+        let bar = shell.taskbar_rect();
+        for x in [bar.x + bar.w / 2.0, bar.x + bar.w - 2.0] {
+            move_to(&mut shell, (x, bar.y + bar.h - 2.0));
+            let tree = shell.render_carry().expect("no label over the taskbar");
+            for cmd in &tree.commands {
+                if let RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } = cmd
+                {
+                    assert!(*x >= 0.0 && *y >= 0.0, "off the top or left");
+                    assert!(x + width <= 1920.0, "off the right edge at {x}");
+                    assert!(y + height <= 1080.0, "off the bottom edge at {y}");
+                }
+            }
+        }
+    }
+
+    // ---- from the taskbar ------------------------------------------------------------------
+
+    /// A pinned button carried up onto the desktop leaves a shortcut there,
+    /// and the pin stays: a drag between two places copies.
+    #[test]
+    fn a_pin_carried_onto_the_desktop_makes_a_shortcut_and_stays_pinned() {
+        with_scratch_config("carry-pin-to-desktop", |_root| {
+            let mut shell = shell();
+            let ((a, a_name), (b, b_name)) = (app(&shell, 0), app(&shell, 1));
+            shell.pin_app(&a, &a_name);
+            shell.pin_app(&b, &b_name);
+
+            let from = button_centre(&shell, 0);
+            press(&mut shell, from);
+            move_to(&mut shell, (1200.0, 400.0));
+            assert_eq!(
+                carried(&shell).unwrap(),
+                [a_name.clone(), "Add to desktop".into()]
+            );
+            assert_eq!(
+                release(&mut shell, (1200.0, 400.0)),
+                ShellAction::Consumed,
+                "a drag started the program"
+            );
+
+            assert_eq!(pinned(&shell), [a.clone(), b]);
+            let id = shortcut_to(&shell, &a).expect("no shortcut appeared");
+            assert_eq!(shell.icons.get_icon(id).unwrap().label, a_name);
+            assert!(shell.take_icons_dirty());
+        });
+    }
+
+    /// Up off the bar and back down onto it, the drag is a reorder again.
+    #[test]
+    fn a_pin_carried_off_the_bar_and_back_still_reorders() {
+        with_scratch_config("carry-pin-off-and-back", |_root| {
+            let mut shell = shell();
+            let ((a, a_name), (b, b_name)) = (app(&shell, 0), app(&shell, 1));
+            shell.pin_app(&a, &a_name);
+            shell.pin_app(&b, &b_name);
+
+            let from = button_centre(&shell, 0);
+            let second = shell.taskbar_button_rect(1);
+            let back = (second.x + second.w * 0.75, second.y + second.h / 2.0);
+            press(&mut shell, from);
+            move_to(&mut shell, (from.0, 500.0));
+            assert!(carried(&shell).is_some(), "no label off the bar");
+            move_to(&mut shell, back);
+            assert!(
+                carried(&shell).is_none(),
+                "a label on the bar, where it rearranges"
+            );
+            assert_eq!(release(&mut shell, back), ShellAction::Consumed);
+
+            assert_eq!(pinned(&shell), [b, a.clone()]);
+            assert!(shortcut_to(&shell, &a).is_none());
+        });
+    }
+
+    /// A pin carried off the bar and let go over a window goes nowhere, and
+    /// the pin is where it was.
+    #[test]
+    fn a_pin_let_go_over_a_window_does_nothing() {
+        with_scratch_config("carry-pin-over-window", |_root| {
+            let mut shell = shell();
+            shell.apply_window_list(&WindowList::new(0, vec![window(1, (800, 200, 600, 400))]));
+            let (a, a_name) = app(&shell, 0);
+            shell.pin_app(&a, &a_name);
+            // The window has a button of its own now, after the pin.
+            let from = button_centre(&shell, 0);
+            assert_eq!(
+                carry(&mut shell, from, (1000.0, 400.0)),
+                ShellAction::Consumed
+            );
+
+            assert_eq!(pinned(&shell), std::slice::from_ref(&a));
+            assert!(shortcut_to(&shell, &a).is_none());
+        });
+    }
+
+    // ---- from the desktop --------------------------------------------------------------------
+
+    /// A program's icon carried onto the taskbar is pinned there, and the icon
+    /// stays where it was.
+    #[test]
+    fn a_program_icon_dropped_on_the_taskbar_is_pinned_and_stays_put() {
+        with_scratch_config("carry-icon-to-bar", |_root| {
+            let mut shell = shell();
+            let ((a, a_name), (b, b_name)) = (app(&shell, 0), app(&shell, 1));
+            shell.pin_app(&a, &a_name);
+            let (id, _) = shell.icons.add_shortcut(
+                &b_name,
+                icons::IconType::Executable,
+                icons::IconAction::OpenPath(PathBuf::from(&b)),
+            );
+            let was = position(&shell, id);
+            let from = icon_centre(&shell, id);
+
+            // Before the pin already there.
+            let first = shell.taskbar_button_rect(0);
+            let to = (first.x + first.w / 4.0, first.y + first.h / 2.0);
+            press(&mut shell, from);
+            move_to(&mut shell, (from.0 + 40.0, from.1));
+            move_to(&mut shell, to);
+            assert_eq!(
+                carried(&shell).unwrap(),
+                [b_name, "Pin to taskbar".into()],
+                "the icon's own ghost is under the bar; the label is what shows"
+            );
+            assert_eq!(release(&mut shell, to), ShellAction::Consumed);
+
+            assert_eq!(pinned(&shell), [b, a]);
+            assert_eq!(position(&shell, id), was, "the icon moved");
+            assert!(!shell.take_icons_dirty(), "nothing on the desktop changed");
+            assert!(!shell.icons.is_interacting(), "the drag was left open");
+        });
+    }
+
+    /// Several program icons dropped together are pinned in their order, not
+    /// stacked up reversed in the one gap.
+    #[test]
+    fn program_icons_dropped_together_keep_their_order() {
+        with_scratch_config("carry-icons-to-bar", |_root| {
+            let mut shell = shell();
+            let ((a, a_name), (b, b_name)) = (app(&shell, 0), app(&shell, 1));
+            let (first, _) = shell.icons.add_shortcut(
+                &a_name,
+                icons::IconType::Executable,
+                icons::IconAction::OpenPath(PathBuf::from(&a)),
+            );
+            shell.icons.add_shortcut(
+                &b_name,
+                icons::IconType::Executable,
+                icons::IconAction::OpenPath(PathBuf::from(&b)),
+            );
+            shell.icons.select_all();
+            let from = icon_centre(&shell, first);
+            let bar = shell.taskbar_rect();
+            let to = (bar.x + bar.w / 2.0, bar.y + bar.h / 2.0);
+            // Not `carry`: a press on an icon that is already selected
+            // changes nothing anyone can see, so the shell answers it `Pass`
+            // -- and the drag is under way all the same.
+            press(&mut shell, from);
+            move_to(&mut shell, (from.0 + 40.0, from.1));
+            move_to(&mut shell, to);
+            assert_eq!(release(&mut shell, to), ShellAction::Consumed);
+
+            assert_eq!(pinned(&shell), [a, b]);
+        });
+    }
+
+    /// A folder is not something a taskbar button can start: dropped on the
+    /// taskbar it pins nothing and stays where it was -- and the outline of
+    /// where it would land on the desktop is not drawn while it is over the
+    /// bar, because it would not land there.
+    #[test]
+    fn a_folder_dropped_on_the_taskbar_pins_nothing_and_stays_put() {
+        with_scratch_config("carry-folder-to-bar", |_root| {
+            let mut shell = shell();
+            let (id, _) = shell.icons.add_shortcut(
+                "Projects",
+                icons::IconType::Folder,
+                icons::IconAction::OpenPath(PathBuf::from("/home/user/projects")),
+            );
+            let was = position(&shell, id);
+            let from = icon_centre(&shell, id);
+            let bar = shell.taskbar_rect();
+            let to = (bar.x + bar.w / 2.0, bar.y + bar.h / 2.0);
+
+            // Compared as text: a render command has no equality of its own.
+            let drawn = |cmds: Vec<RenderCommand>| format!("{cmds:?}");
+            press(&mut shell, from);
+            move_to(&mut shell, (from.0 + 40.0, from.1 + 40.0));
+            let palette = crate::Palette::from_settings(&shell.appearance);
+            assert_eq!(
+                drawn(shell.render_icons()),
+                drawn(shell.icons.render(&palette)),
+                "over the desktop the outline is drawn"
+            );
+            move_to(&mut shell, to);
+            assert_eq!(
+                drawn(shell.render_icons()),
+                drawn(shell.icons.render_dropping_elsewhere(&palette)),
+                "over the taskbar the outline promises a landing the drop breaks"
+            );
+            assert_ne!(
+                drawn(shell.icons.render(&palette)),
+                drawn(shell.icons.render_dropping_elsewhere(&palette))
+            );
+            assert!(carried(&shell).is_none(), "a label for a folder");
+            release(&mut shell, to);
+
+            assert!(pinned(&shell).is_empty());
+            assert_eq!(position(&shell, id), was);
+            assert!(!shell.icons.is_interacting());
+        });
+    }
+
+    /// A press on an icon that never became a drag is the icon layer's,
+    /// wherever it is let go -- even a pixel over the bar.
+    #[test]
+    fn a_click_on_an_icon_is_not_a_drop() {
+        with_scratch_config("carry-icon-click", |_root| {
+            let mut shell = shell();
+            let (a, a_name) = app(&shell, 0);
+            let (id, _) = shell.icons.add_shortcut(
+                &a_name,
+                icons::IconType::Executable,
+                icons::IconAction::OpenPath(PathBuf::from(&a)),
+            );
+            let from = icon_centre(&shell, id);
+            press(&mut shell, from);
+            release(&mut shell, from);
+            assert!(pinned(&shell).is_empty());
+            assert_eq!(shell.icons.selected_ids(), [id]);
+        });
+    }
+
+    // ---- what is under a point -------------------------------------------------------------
+
+    /// The topmost window on the shown desktop that is on the glass.
+    #[test]
+    fn window_at_finds_the_topmost_window_drawn_there() {
+        let mut shell = shell();
+        let mut hidden = window(3, (0, 0, 1920, 1080));
+        hidden.minimized = true;
+        let mut elsewhere = window(4, (0, 0, 1920, 1080));
+        elsewhere.workspace = 1;
+        shell.apply_window_list(&WindowList::new(
+            0,
+            vec![
+                window(1, (100, 100, 400, 300)),
+                window(2, (300, 200, 400, 300)),
+                hidden,
+                elsewhere,
+            ],
+        ));
+
+        assert_eq!(shell.window_at(150.0, 150.0), Some(WindowId(1)));
+        // Where they overlap, the one later in the list is on top.
+        assert_eq!(shell.window_at(350.0, 250.0), Some(WindowId(2)));
+        // Minimised, or on another desktop, is not drawn.
+        assert_eq!(shell.window_at(1500.0, 900.0), None);
+    }
+}
+
+/// Programs pinned to the top of the start menu, and the drops that put them
+/// there -- the start menu's part in `design.txt` line 712.
+///
+/// Only the tests that also pin to the *taskbar* need a scratch configuration
+/// directory: the start menu's pins are written by the session
+/// (`take_start_pins_dirty`), never by the shell, and the one test that writes
+/// them itself asks for one.
+#[cfg(test)]
+mod start_pin_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::cast_precision_loss,
+        clippy::float_cmp
+    )]
+
+    use super::{
+        DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+        ShellAction, icons,
+    };
+    use appearance::config::testing::with_scratch_config;
+    use guitk::menu::MenuItem;
+    use guitk::render::RenderCommand;
+    use std::path::PathBuf;
+
+    const UNKNOWN: &str = "/opt/tools/bin/frobnicate";
+
+    fn shell() -> DesktopShell {
+        DesktopShell::new(1920, 1080)
+    }
+
+    fn key(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    fn ev(at: (f32, f32), kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            x: at.0,
+            y: at.1,
+            kind,
+        }
+    }
+
+    fn press(shell: &mut DesktopShell, at: (f32, f32)) -> ShellAction {
+        shell.handle_mouse(&ev(at, MouseEventKind::Press(MouseButton::Left)))
+    }
+
+    fn move_to(shell: &mut DesktopShell, at: (f32, f32)) {
+        shell.handle_mouse(&ev(at, MouseEventKind::Move));
+    }
+
+    fn release(shell: &mut DesktopShell, at: (f32, f32)) -> ShellAction {
+        shell.handle_mouse(&ev(at, MouseEventKind::Release(MouseButton::Left)))
+    }
+
+    /// Press, move there in four steps, let go.
+    fn carry(shell: &mut DesktopShell, from: (f32, f32), to: (f32, f32)) -> ShellAction {
+        press(shell, from);
+        for step in 1..=4 {
+            let t = step as f32 / 4.0;
+            move_to(
+                shell,
+                (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t),
+            );
+        }
+        release(shell, to)
+    }
+
+    fn row_centre(shell: &DesktopShell, row: usize) -> (f32, f32) {
+        let r = shell.start_menu_row_rect(row);
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// A point on the lower or upper half of a row: which half decides
+    /// whether a drop goes after the row or before it.
+    fn row_half(shell: &DesktopShell, row: usize, lower: bool) -> (f32, f32) {
+        let r = shell.start_menu_row_rect(row);
+        let y = if lower {
+            r.y + r.h * 0.75
+        } else {
+            r.y + r.h * 0.25
+        };
+        (r.x + r.w / 2.0, y)
+    }
+
+    fn start_button(shell: &DesktopShell) -> (f32, f32) {
+        let r = shell.start_button_rect();
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// Every row's program, in menu order.
+    fn execs(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .start_menu_entries()
+            .iter()
+            .map(|entry| entry.executable_path.clone())
+            .collect()
+    }
+
+    fn pins(shell: &DesktopShell) -> Vec<String> {
+        shell
+            .start_pins()
+            .iter()
+            .map(|entry| entry.executable_path.clone())
+            .collect()
+    }
+
+    fn labels(items: &[MenuItem]) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Action { label, .. } => Some(label.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // ---- the list ----------------------------------------------------------------------
+
+    /// A pinned program heads the list, and the launcher's list below is
+    /// untouched -- the program is still in it, in its own place.
+    #[test]
+    fn a_pinned_program_heads_the_list_and_is_still_listed_below() {
+        let mut shell = shell();
+        let before = execs(&shell);
+        shell.pin_to_start(&before[3]);
+
+        let after = execs(&shell);
+        assert_eq!(after[0], before[3]);
+        assert_eq!(after[1..], before[..]);
+        assert!(shell.is_pinned_to_start(&before[3]));
+        assert!(shell.take_start_pins_dirty(), "a pin nobody will save");
+        assert!(!shell.take_start_pins_dirty(), "the flag outlived the save");
+    }
+
+    /// Pinning twice leaves one pin; unpinning takes it off, and unpinning
+    /// what is not pinned changes nothing.
+    #[test]
+    fn a_program_is_pinned_once_and_unpinned_once() {
+        let mut shell = shell();
+        let before = execs(&shell);
+        shell.pin_to_start(&before[1]);
+        shell.pin_to_start(&before[1]);
+        assert_eq!(pins(&shell), [before[1].clone()]);
+        let _ = shell.take_start_pins_dirty();
+
+        shell.unpin_from_start(&before[1]);
+        assert!(pins(&shell).is_empty());
+        assert_eq!(execs(&shell), before);
+        assert!(shell.take_start_pins_dirty());
+
+        shell.unpin_from_start(&before[1]);
+        assert!(!shell.take_start_pins_dirty(), "nothing changed");
+    }
+
+    /// A program the launcher has never heard of can be pinned by its path,
+    /// is named for its file, and starts when its row is clicked.
+    #[test]
+    fn a_program_the_launcher_does_not_know_is_pinned_by_path() {
+        let mut shell = shell();
+        shell.pin_to_start(UNKNOWN);
+        assert_eq!(shell.start_pins()[0].name, "frobnicate");
+
+        shell.toggle_start_menu();
+        let at = row_centre(&shell, 0);
+        press(&mut shell, at);
+        assert_eq!(
+            release(&mut shell, at),
+            ShellAction::Launch(crate::hotkeys::Launch::program(UNKNOWN))
+        );
+    }
+
+    /// Unpinning shortens the list; a menu scrolled to its end must not be
+    /// left showing a blank row past it.
+    #[test]
+    fn unpinning_while_scrolled_to_the_end_leaves_no_blank_row() {
+        let mut shell = shell();
+        shell.pin_to_start(UNKNOWN);
+        shell.toggle_start_menu();
+        shell.scroll_start_menu(10_000);
+        shell.unpin_from_start(UNKNOWN);
+
+        assert_eq!(shell.start_menu_scroll, shell.start_menu_max_scroll());
+        let last_row = shell.start_menu_visible_rows() - 1;
+        assert_eq!(
+            shell.start_menu_entry_at(last_row),
+            Some(shell.start_menu_entries().len() - 1)
+        );
+    }
+
+    /// A line sets the pins apart from the launcher's list, at the top of the
+    /// first row after them -- and there is no line with nothing pinned.
+    #[test]
+    fn a_line_sets_the_pins_apart_from_the_list() {
+        let mut shell = shell();
+        shell.toggle_start_menu();
+        let line_at = |shell: &DesktopShell| {
+            let menu = shell.render_start_menu().expect("the menu is open");
+            menu.commands
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    RenderCommand::FillRect { y, height, .. } if *height <= 1.0 => Some(*y),
+                    _ => None,
+                })
+                .collect::<Vec<f32>>()
+        };
+        assert!(line_at(&shell).is_empty(), "a line with nothing pinned");
+
+        let first = execs(&shell)[0].clone();
+        shell.pin_to_start(&first);
+        shell.pin_to_start(UNKNOWN);
+        assert_eq!(line_at(&shell), [shell.start_menu_row_rect(2).y]);
+    }
+
+    /// Written by the session and read back at the next login, names and all.
+    #[test]
+    fn start_pins_survive_a_restart() {
+        with_scratch_config("start-pins-restart", |_root| {
+            let mut shell = shell();
+            let known = execs(&shell)[2].clone();
+            shell.pin_to_start(&known);
+            shell.pin_to_start(UNKNOWN);
+            shell.save_start_pins().unwrap();
+
+            let mut restarted = DesktopShell::new(1920, 1080);
+            assert!(restarted.start_pins().is_empty(), "read before loading");
+            restarted.load_start_pins();
+            assert_eq!(pins(&restarted), [known, UNKNOWN.to_string()]);
+            assert_eq!(restarted.start_pins()[1].name, "frobnicate");
+            assert!(
+                !restarted.take_start_pins_dirty(),
+                "loading is not a change"
+            );
+        });
+    }
+
+    // ---- the menus ---------------------------------------------------------------------
+
+    /// A row's right-click menu pins it to the start menu, and the pinned
+    /// row's menu takes it off again -- the label says which it will do.
+    #[test]
+    fn a_rows_menu_pins_it_to_the_start_menu_and_back() {
+        let mut shell = shell();
+        shell.toggle_start_menu();
+        let exec = execs(&shell)[1].clone();
+
+        let at = row_centre(&shell, 1);
+        shell.handle_press(at.0, at.1, MouseButton::Right);
+        let drawn = format!("{:?}", shell.render_pin_menu().expect("no menu"));
+        assert!(drawn.contains("Pin to Start menu"), "wrong offer: {drawn}");
+        // The second row, taken with the keyboard.
+        for k in [Key::Down, Key::Down, Key::Enter] {
+            drop(shell.handle_hotkey(&key(k)));
+        }
+        assert_eq!(pins(&shell), [exec]);
+
+        // The pin is row 0 now, and its menu offers the reverse.
+        let at = row_centre(&shell, 0);
+        shell.handle_press(at.0, at.1, MouseButton::Right);
+        let drawn = format!("{:?}", shell.render_pin_menu().expect("no menu"));
+        assert!(
+            drawn.contains("Unpin from Start menu"),
+            "wrong offer: {drawn}"
+        );
+        for k in [Key::Down, Key::Down, Key::Enter] {
+            drop(shell.handle_hotkey(&key(k)));
+        }
+        assert!(pins(&shell).is_empty());
+    }
+
+    /// A program icon's own menu offers the start menu too; a folder's does
+    /// not, since a start-menu row starts a program.
+    #[test]
+    fn a_program_icons_menu_pins_it_to_the_start_menu() {
+        let mut shell = shell();
+        let entry = shell.start_menu_entries()[0];
+        let (exec, name) = (entry.executable_path.clone(), entry.name.clone());
+        let (program, _) = shell.icons.add_shortcut(
+            &name,
+            icons::IconType::Executable,
+            icons::IconAction::OpenPath(PathBuf::from(&exec)),
+        );
+        let (folder, _) = shell.icons.add_shortcut(
+            "Projects",
+            icons::IconType::Folder,
+            icons::IconAction::OpenPath(PathBuf::from("/home/user/projects")),
+        );
+        assert!(labels(&shell.icon_menu_items(program)).contains(&"Pin to Start menu".into()));
+        assert!(
+            !labels(&shell.icon_menu_items(folder))
+                .iter()
+                .any(|l| l.contains("Start menu"))
+        );
+
+        shell.menu_icon = Some(program);
+        assert_eq!(
+            shell.activate_icon_context_item(DesktopShell::MENU_ICON_START_PIN),
+            Some(ShellAction::Consumed)
+        );
+        assert_eq!(pins(&shell), [exec]);
+        assert!(labels(&shell.icon_menu_items(program)).contains(&"Unpin from Start menu".into()));
+    }
+
+    // ---- dropping on the start menu -------------------------------------------------------
+
+    /// A row from the launcher's list dropped on the pinned rows is pinned
+    /// where it was let go -- here after the first pin -- and the menu stays
+    /// up, since the user is arranging it.
+    #[test]
+    fn a_row_dropped_on_the_pinned_rows_is_pinned_where_it_was_let_go() {
+        let mut shell = shell();
+        let list = execs(&shell);
+        shell.pin_to_start(&list[5]);
+        shell.pin_to_start(&list[6]);
+        let _ = shell.take_start_pins_dirty();
+        shell.toggle_start_menu();
+
+        // Row 2 is the first of the launcher's list.
+        let (from, to) = (row_centre(&shell, 2), row_half(&shell, 0, true));
+        assert_eq!(carry(&mut shell, from, to), ShellAction::Consumed);
+
+        assert_eq!(
+            pins(&shell),
+            [list[5].clone(), list[0].clone(), list[6].clone()]
+        );
+        assert!(shell.start_menu_open, "the menu closed under the user");
+        assert!(shell.take_start_pins_dirty());
+    }
+
+    /// A pinned row dragged along the pins moves.
+    #[test]
+    fn a_pinned_row_dragged_along_the_pins_moves() {
+        let mut shell = shell();
+        let list = execs(&shell);
+        for exec in &list[5..8] {
+            shell.pin_to_start(exec);
+        }
+        shell.toggle_start_menu();
+
+        let (from, to) = (row_centre(&shell, 0), row_half(&shell, 2, true));
+        carry(&mut shell, from, to);
+        assert_eq!(
+            pins(&shell),
+            [list[6].clone(), list[7].clone(), list[5].clone()]
+        );
+
+        // Onto its own upper half, nowhere: it is where it already is.
+        let _ = shell.take_start_pins_dirty();
+        let (from, to) = (row_centre(&shell, 2), row_half(&shell, 2, false));
+        carry(&mut shell, from, (to.0 + 40.0, to.1));
+        assert_eq!(
+            pins(&shell),
+            [list[6].clone(), list[7].clone(), list[5].clone()]
+        );
+        assert!(!shell.take_start_pins_dirty(), "a no-op drop was saved");
+    }
+
+    /// Into the gap between two other pins: the one case where taking the
+    /// dragged pin out first changes which gap is meant. A move to the end
+    /// cannot show it -- clamped to the end, both readings agree.
+    #[test]
+    fn a_pin_dragged_into_a_middle_gap_lands_there() {
+        let mut shell = shell();
+        let list = execs(&shell);
+        for exec in &list[5..8] {
+            shell.pin_to_start(exec);
+        }
+        shell.toggle_start_menu();
+
+        // Row 0 onto the lower half of row 1: after the second pin, before
+        // the third.
+        let (from, to) = (row_centre(&shell, 0), row_half(&shell, 1, true));
+        carry(&mut shell, from, to);
+        assert_eq!(
+            pins(&shell),
+            [list[6].clone(), list[5].clone(), list[7].clone()]
+        );
+    }
+
+    /// The launcher's own list is not the user's to arrange: a row let go on
+    /// it does nothing.
+    #[test]
+    fn a_row_let_go_on_the_launchers_list_does_nothing() {
+        let mut shell = shell();
+        let list = execs(&shell);
+        shell.pin_to_start(&list[5]);
+        let _ = shell.take_start_pins_dirty();
+        shell.toggle_start_menu();
+
+        let (from, to) = (row_centre(&shell, 2), row_centre(&shell, 4));
+        assert_eq!(carry(&mut shell, from, to), ShellAction::Consumed);
+        assert_eq!(pins(&shell), [list[5].clone()]);
+        assert!(!shell.take_start_pins_dirty());
+        assert!(shell.start_menu_open);
+    }
+
+    /// Let go on the start button, a row is pinned after the pins already
+    /// there.
+    #[test]
+    fn a_row_dropped_on_the_start_button_is_pinned_after_the_rest() {
+        let mut shell = shell();
+        let list = execs(&shell);
+        shell.pin_to_start(&list[5]);
+        shell.toggle_start_menu();
+
+        let (from, to) = (row_centre(&shell, 3), start_button(&shell));
+        press(&mut shell, from);
+        move_to(&mut shell, (from.0, from.1 + 40.0));
+        move_to(&mut shell, to);
+        let label = format!("{:?}", shell.render_carry().expect("no label"));
+        assert!(label.contains("Pin to Start menu"), "wrong hint: {label}");
+        release(&mut shell, to);
+
+        // Row 3 was the launcher's third program, below the one pin.
+        assert_eq!(pins(&shell), [list[5].clone(), list[2].clone()]);
+        assert!(
+            shell.pinned_apps().is_empty(),
+            "the start button is not the taskbar's row"
+        );
+    }
+
+    /// A pinned taskbar button carried to the start button is pinned to the
+    /// start menu as well, and the taskbar is as it was.
+    #[test]
+    fn a_taskbar_pin_dropped_on_the_start_button_is_pinned_there_too() {
+        with_scratch_config("start-pin-from-bar", |_root| {
+            let mut shell = shell();
+            let list = execs(&shell);
+            shell.pin_app(&list[0], "a");
+            shell.pin_app(&list[1], "b");
+
+            let r = shell.taskbar_button_rect(1);
+            let from = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            press(&mut shell, from);
+            // Up off the bar first, so the row of pins is not crossed.
+            move_to(&mut shell, (from.0, 500.0));
+            let to = start_button(&shell);
+            move_to(&mut shell, to);
+            assert_eq!(release(&mut shell, to), ShellAction::Consumed);
+
+            assert_eq!(pins(&shell), [list[1].clone()]);
+            let bar: Vec<String> = shell
+                .pinned_apps()
+                .iter()
+                .map(|a| a.exec_path.clone())
+                .collect();
+            assert_eq!(bar, [list[0].clone(), list[1].clone()]);
+        });
+    }
+
+    /// A program icon let go on the start button is pinned to the start menu,
+    /// and stays on the desktop.
+    #[test]
+    fn a_program_icon_dropped_on_the_start_button_is_pinned_there() {
+        let mut shell = shell();
+        let entry = shell.start_menu_entries()[0];
+        let (exec, name) = (entry.executable_path.clone(), entry.name.clone());
+        let (id, _) = shell.icons.add_shortcut(
+            &name,
+            icons::IconType::Executable,
+            icons::IconAction::OpenPath(PathBuf::from(&exec)),
+        );
+        let was = {
+            let icon = shell.icons.get_icon(id).unwrap();
+            (icon.x, icon.y)
+        };
+        let grid = shell.icons.grid();
+        let from = (
+            was.0 as f32 + grid.cell_width() as f32 / 2.0,
+            was.1 as f32 + grid.cell_height() as f32 / 2.0,
+        );
+        let to = start_button(&shell);
+        press(&mut shell, from);
+        move_to(&mut shell, (from.0 + 40.0, from.1));
+        move_to(&mut shell, to);
+        let label = format!("{:?}", shell.render_carry().expect("no label"));
+        assert!(label.contains("Pin to Start menu"), "wrong hint: {label}");
+        assert_eq!(release(&mut shell, to), ShellAction::Consumed);
+
+        assert_eq!(pins(&shell), [exec]);
+        assert!(shell.pinned_apps().is_empty());
+        let icon = shell.icons.get_icon(id).unwrap();
+        assert_eq!((icon.x, icon.y), was, "the icon moved");
     }
 }

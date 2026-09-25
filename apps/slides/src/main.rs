@@ -829,9 +829,23 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Shift+T", "Name the deck"),
     ("N / B", "Type / show or hide the speaker notes"),
     ("1 / 2", "Edit view / sorter view"),
+    ("Ctrl+O / Ctrl+S", "Open a deck / save this one"),
+    ("Ctrl+Shift+S", "Save this deck under another name"),
     ("Ctrl+E", "Export a web page"),
     ("F1 / ?", "This list"),
 ];
+
+/// A deck file's format, written under `slateos-slides` so that a file from
+/// a later format is recognised and refused rather than half-read.
+const DECK_FORMAT: i64 = 1;
+
+/// What the file picker was opened for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickerFor {
+    Export,
+    Save,
+    Open,
+}
 
 /// The colours an element steps through with `C`, after the theme's own four.
 const EXTRA_COLOURS: [Color; 6] = [
@@ -890,6 +904,13 @@ pub enum Target {
     /// The sorter's grid, which scrolls.
     SorterGrid,
     SorterThumb(usize),
+    /// The question before Open throws away unsaved changes.
+    OpenAnyway,
+    KeepDeck,
+    /// Around the question: a press keeps the deck, as any key but Y does.
+    QuestionBackdrop,
+    /// The question's card, where a press does nothing.
+    QuestionCard,
     HelpCard,
 }
 
@@ -898,6 +919,8 @@ pub enum Target {
 pub enum Tool {
     /// The deck's name: a press starts naming it.
     Title,
+    Open,
+    Save,
     NewSlide,
     Duplicate,
     DeleteSlide,
@@ -1050,6 +1073,14 @@ pub struct SlidesApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Where the deck was last opened from or saved to.
+    deck_path: Option<std::path::PathBuf>,
+    /// Whether the deck has changed since it was opened or saved.
+    dirty: bool,
+    /// What the file picker is up for.
+    picker_for: PickerFor,
+    /// Asking before Open throws away unsaved changes.
+    confirm_open: bool,
     /// The new-slide menu, with the layout its keys have reached.
     layout_menu: Option<usize>,
     /// What a press held down is doing.
@@ -1093,6 +1124,10 @@ impl SlidesApp {
             show_help: false,
             editing: None,
             title: String::from("Untitled Presentation"),
+            deck_path: None,
+            dirty: false,
+            picker_for: PickerFor::Export,
+            confirm_open: false,
             layout_menu: None,
             drag: None,
             sidebar_scroll: 0.0,
@@ -1319,14 +1354,17 @@ impl SlidesApp {
         }
     }
 
-    /// Remember the deck before a change, so it can be undone.
+    /// Remember the deck before a change, so it can be undone -- and note
+    /// that it has changed since it was saved.
     fn checkpoint(&mut self) {
         let now = self.snapshot();
         self.undo_mgr.save(now);
+        self.dirty = true;
     }
 
     /// Put a remembered deck back.
     fn restore(&mut self, snap: Snapshot) {
+        self.dirty = true;
         self.slides = snap.slides;
         self.theme = snap.theme;
         self.current_index = snap.current_index.min(self.slides.len().saturating_sub(1));
@@ -1504,8 +1542,9 @@ impl SlidesApp {
             EditTarget::DeckTitle => {
                 // An empty name would leave the window bar blank and every
                 // export called ".pptx"; refusing keeps whatever it had.
-                if !buf.trim().is_empty() {
+                if !buf.trim().is_empty() && buf.trim() != self.title {
                     self.title = buf.trim().to_owned();
+                    self.dirty = true;
                 }
             }
             EditTarget::Notes => {
@@ -2139,8 +2178,197 @@ impl SlidesApp {
 
     /// Route a compositor event into the app.
     /// Ask where to put the exported presentation.
+    ///
+    /// Named after the deck: it was always `presentation.html`, while the
+    /// comment on naming the deck said the export took its name from it.
     pub fn export_as(&mut self) {
-        self.picker.open_to_write("presentation.html");
+        self.picker_for = PickerFor::Export;
+        self.picker.open_to_write(self.file_name("html"));
+    }
+
+    /// The deck's name as a file name with `extension`: a character no file
+    /// name may hold becomes a hyphen.
+    fn file_name(&self, extension: &str) -> String {
+        let stem: String = self
+            .title
+            .trim()
+            .chars()
+            .map(|c| if c == '/' || c.is_control() { '-' } else { c })
+            .collect();
+        let stem = if stem.is_empty() {
+            String::from("presentation")
+        } else {
+            stem
+        };
+        format!("{stem}.{extension}")
+    }
+
+    /// What the picker chose, done with: an export, a save or an open.
+    fn picked(&mut self, path: &std::path::Path) -> String {
+        match self.picker_for {
+            PickerFor::Export => self.write_html(path),
+            PickerFor::Save => self.write_deck(path),
+            PickerFor::Open => self.read_deck(path),
+        }
+    }
+
+    // ---- Decks on disk ------------------------------------------------------
+
+    /// Open a deck: ask which, after asking whether to lose unsaved changes.
+    ///
+    /// A deck lived exactly as long as the window did: the HTML export went
+    /// one way, and nothing read a deck back.
+    fn open_deck(&mut self) -> EventResult {
+        if self.dirty {
+            self.confirm_open = true;
+            return EventResult::Consumed;
+        }
+        self.picker_for = PickerFor::Open;
+        self.picker.open_to_read();
+        EventResult::Consumed
+    }
+
+    /// Save the deck where it was last saved or opened, or ask where.
+    fn save_deck(&mut self) -> EventResult {
+        match self.deck_path.clone() {
+            Some(path) => {
+                self.status_message = Some(self.write_deck(&path));
+                EventResult::Consumed
+            }
+            None => self.save_deck_as(),
+        }
+    }
+
+    /// Ask where to save the deck.
+    fn save_deck_as(&mut self) -> EventResult {
+        self.picker_for = PickerFor::Save;
+        self.picker.open_to_write(self.file_name("slides"));
+        EventResult::Consumed
+    }
+
+    /// Write the deck to `path`, and say what happened.
+    pub fn write_deck(&mut self, path: &std::path::Path) -> String {
+        let text = self.deck_document().to_text();
+        match safeio::write_str_atomically(path, &text) {
+            Ok(()) => {
+                self.deck_path = Some(path.to_path_buf());
+                self.dirty = false;
+                format!("Saved {}", path.display())
+            }
+            Err(err) => format!("Could not save {}: {err}", path.display()),
+        }
+    }
+
+    /// Replace the deck with the one in `path`, and say what happened. A deck
+    /// that cannot be read leaves this one as it was.
+    pub fn read_deck(&mut self, path: &std::path::Path) -> String {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) => return format!("Could not open {}: {err}", path.display()),
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            return format!("Could not open {}: it is not a text file", path.display());
+        };
+        let doc = yamldoc::Document::parse(&text);
+        match deck_from_document(&doc, &self.palette, &mut self.id_gen) {
+            Ok((title, theme, slides)) => {
+                self.title = title;
+                self.theme = theme;
+                self.slides = slides;
+                self.current_index = 0;
+                self.selected_element = None;
+                self.editing = None;
+                self.undo_mgr = UndoManager::new(MAX_UNDO);
+                self.deck_path = Some(path.to_path_buf());
+                self.dirty = false;
+                self.view = ViewMode::Edit;
+                self.sidebar_scroll = 0.0;
+                self.sorter_scroll = 0.0;
+                format!("Opened {}", path.display())
+            }
+            Err(why) => format!("Could not open {}: {why}", path.display()),
+        }
+    }
+
+    /// The deck as a document: its name, its theme, and each slide under its
+    /// position with each of its elements under theirs.
+    fn deck_document(&self) -> yamldoc::Document {
+        let mut doc = yamldoc::Document::new();
+        doc.set_i64(&["slateos-slides"], DECK_FORMAT);
+        doc.set_str(&["title"], &self.title);
+        doc.set_str(&["theme"], &self.theme.name);
+        for (i, slide) in self.slides.iter().enumerate() {
+            let s = i.saturating_add(1).to_string();
+            let s = s.as_str();
+            doc.set_str(&["slides", s, "layout"], layout_name(slide.layout));
+            doc.set_str(
+                &["slides", s, "transition"],
+                transition_name(slide.transition),
+            );
+            if let Some(bg) = slide.background {
+                doc.set_str(&["slides", s, "background"], &colour_hex(bg));
+            }
+            if !slide.notes.is_empty() {
+                doc.set_str(&["slides", s, "notes"], &slide.notes);
+            }
+            for (j, element) in slide.elements.iter().enumerate() {
+                let e = j.saturating_add(1).to_string();
+                let at = |field: &'static str| ["slides", s, "elements", e.as_str(), field];
+                let (x, y, w, h) = element.bounds();
+                doc.set_f64(&at("x"), f64::from(x));
+                doc.set_f64(&at("y"), f64::from(y));
+                doc.set_f64(&at("width"), f64::from(w));
+                doc.set_f64(&at("height"), f64::from(h));
+                match element {
+                    SlideElement::TextBox {
+                        text,
+                        font_size,
+                        color,
+                        bold,
+                        centered,
+                        ..
+                    } => {
+                        doc.set_str(&at("kind"), "text");
+                        doc.set_str(&at("text"), text);
+                        doc.set_f64(&at("size"), f64::from(*font_size));
+                        doc.set_str(&at("colour"), &colour_hex(*color));
+                        doc.set_bool(&at("bold"), *bold);
+                        doc.set_bool(&at("centred"), *centered);
+                    }
+                    SlideElement::BulletList {
+                        items,
+                        font_size,
+                        color,
+                        ..
+                    } => {
+                        doc.set_str(&at("kind"), "bullets");
+                        let items: Vec<&str> = items.iter().map(String::as_str).collect();
+                        doc.set_seq(&at("items"), &items);
+                        doc.set_f64(&at("size"), f64::from(*font_size));
+                        doc.set_str(&at("colour"), &colour_hex(*color));
+                    }
+                    SlideElement::Shape {
+                        kind,
+                        fill_color,
+                        stroke_color,
+                        stroke_width,
+                        ..
+                    } => {
+                        doc.set_str(&at("kind"), shape_name(*kind));
+                        doc.set_str(&at("fill"), &colour_hex(*fill_color));
+                        doc.set_str(&at("stroke"), &colour_hex(*stroke_color));
+                        doc.set_f64(&at("outline"), f64::from(*stroke_width));
+                    }
+                    SlideElement::Image {
+                        placeholder_label, ..
+                    } => {
+                        doc.set_str(&at("kind"), "image");
+                        doc.set_str(&at("label"), placeholder_label);
+                    }
+                }
+            }
+        }
+        doc
     }
 
     /// Write the presentation to `path`, and say what happened.
@@ -2164,7 +2392,7 @@ impl SlidesApp {
             .handle(event, self.window_width, self.window_height)
         {
             Picked::Chose(path) => {
-                self.status_message = Some(self.write_html(&path));
+                self.status_message = Some(self.picked(&path));
                 return EventResult::Consumed;
             }
             Picked::Handled | Picked::Cancelled => return EventResult::Consumed,
@@ -2220,7 +2448,25 @@ impl SlidesApp {
         if let Some(reached) = self.layout_menu {
             return self.handle_layout_menu_key(key, reached);
         }
+        // Open waiting on its answer takes the next key, and only Y goes on:
+        // the unsaved changes are lost if it does.
+        if self.confirm_open {
+            self.confirm_open = false;
+            if key.key == Key::Y {
+                self.picker_for = PickerFor::Open;
+                self.picker.open_to_read();
+            }
+            return EventResult::Consumed;
+        }
+        // What the last save, open or export said stays up until the next
+        // thing is done.
+        let had_message = self.status_message.take().is_some();
         let result = self.handle_command_key(key, ctrl, shift);
+        let result = if had_message {
+            EventResult::Consumed
+        } else {
+            result
+        };
         if result == EventResult::Consumed {
             self.keep_current_visible();
         }
@@ -2249,6 +2495,10 @@ impl SlidesApp {
                 self.export_as();
                 EventResult::Consumed
             }
+            // Before the plain `S` and `O`, which add shapes.
+            Key::S if ctrl && shift => self.save_deck_as(),
+            Key::S if ctrl => self.save_deck(),
+            Key::O if ctrl => self.open_deck(),
             // Undo and redo. The undo stack was kept by every change and read
             // by nothing: no key reached `undo` or `redo`, and the toolbar's
             // two words lit up and could not be pressed.
@@ -2516,6 +2766,9 @@ impl SlidesApp {
         if let Some(reached) = self.layout_menu {
             self.render_layout_menu(&mut f, reached);
         }
+        if self.confirm_open {
+            self.render_open_question(&mut f);
+        }
 
         // The picker over the slide rather than under it.
         f.extend(self.picker.render(&self.palette, w, h));
@@ -2626,32 +2879,59 @@ impl SlidesApp {
         });
         f.hit(Target::Tool(Tool::Title), title);
 
+        for (tool, rect, label, enabled) in self.tool_rects() {
+            self.button(f, rect, &label, Target::Tool(tool), enabled);
+        }
+    }
+
+    /// The toolbar's buttons: each one's box, label, and whether it has
+    /// anything to do.
+    fn tool_rects(&self) -> Vec<(Tool, Rect, String, bool)> {
         let other_view = match self.view {
             ViewMode::Edit => "Sorter",
             ViewMode::Sorter => "Edit",
         };
-        let theme = format!("Theme: {}", self.theme.name);
         let tools = [
-            (Tool::NewSlide, "+ Slide", 66.0, true),
-            (Tool::Duplicate, "Duplicate", 80.0, true),
-            (Tool::DeleteSlide, "Delete", 62.0, self.slides.len() > 1),
-            (Tool::ToggleView, other_view, 62.0, true),
-            (Tool::Undo, "Undo", 54.0, self.undo_mgr.can_undo()),
-            (Tool::Redo, "Redo", 54.0, self.undo_mgr.can_redo()),
-            (Tool::Export, "Export", 62.0, true),
-            (Tool::Theme, theme.as_str(), 128.0, true),
+            (Tool::Open, String::from("Open"), 54.0, true),
+            (Tool::Save, String::from("Save"), 50.0, true),
+            (Tool::NewSlide, String::from("+ Slide"), 66.0, true),
+            (Tool::Duplicate, String::from("Duplicate"), 80.0, true),
+            (
+                Tool::DeleteSlide,
+                String::from("Delete"),
+                62.0,
+                self.slides.len() > 1,
+            ),
+            (Tool::ToggleView, String::from(other_view), 62.0, true),
+            (
+                Tool::Undo,
+                String::from("Undo"),
+                54.0,
+                self.undo_mgr.can_undo(),
+            ),
+            (
+                Tool::Redo,
+                String::from("Redo"),
+                54.0,
+                self.undo_mgr.can_redo(),
+            ),
+            (Tool::Export, String::from("Export"), 62.0, true),
+            (
+                Tool::Theme,
+                format!("Theme: {}", self.theme.name),
+                128.0,
+                true,
+            ),
         ];
         let mut x = TOOLS_X;
-        for (tool, label, w, enabled) in tools {
-            self.button(
-                f,
-                Rect::new(x, 6.0, w, 28.0),
-                label,
-                Target::Tool(tool),
-                enabled,
-            );
-            x += w + 6.0;
-        }
+        tools
+            .into_iter()
+            .map(|(tool, label, w, enabled)| {
+                let rect = Rect::new(x, 6.0, w, 28.0);
+                x += w + 6.0;
+                (tool, rect, label, enabled)
+            })
+            .collect()
     }
 
     /// Render the status bar at the bottom.
@@ -2706,7 +2986,22 @@ impl SlidesApp {
             overflow: TextOverflow::Ellipsis,
         });
 
+        // What the last save, open or export did. It was kept and never
+        // drawn, so a failed export failed in silence.
         if self.editing.is_none()
+            && let Some(message) = &self.status_message
+        {
+            f.push(RenderCommand::Text {
+                x: 200.0,
+                y: y + 5.0,
+                text: message.clone(),
+                color: self.palette.text,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((self.window_width - 340.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        } else if self.editing.is_none()
             && let Some(slide) = self.slides.get(self.current_index)
         {
             let trans = format!("Transition: {} (Ctrl+R)", slide.transition.label());
@@ -3712,6 +4007,55 @@ impl SlidesApp {
         f.hit(Target::Notes, panel);
     }
 
+    /// The question before Open loses unsaved changes.
+    fn render_open_question(&self, f: &mut Frame<Target>) {
+        let (w, h) = (self.window_width, self.window_height);
+        f.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: w,
+            height: h,
+            color: Color::rgba(0, 0, 0, 160),
+            corner_radii: CornerRadii::ZERO,
+        });
+        f.hit(Target::QuestionBackdrop, Rect::new(0.0, 0.0, w, h));
+        let card = Rect::new((w - 440.0) / 2.0, (h - 140.0) / 2.0, 440.0, 140.0);
+        self.palette
+            .push_surface(f, card.x, card.y, card.w, card.h, 12.0, Surface::Card);
+        f.hit(Target::QuestionCard, card);
+        f.push(RenderCommand::Text {
+            x: card.x + 20.0,
+            y: card.y + 20.0,
+            text: String::from("This deck has changes that are not saved."),
+            color: self.palette.text,
+            font_size: 14.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(card.w - 40.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        f.push(RenderCommand::Text {
+            x: card.x + 20.0,
+            y: card.y + 46.0,
+            text: String::from(
+                "Open another deck and lose them? Y opens; any other key keeps them.",
+            ),
+            color: self.palette.subtext0,
+            font_size: 12.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(card.w - 40.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let open = Rect::new(
+            card.right() - 20.0 - 230.0,
+            card.bottom() - 48.0,
+            140.0,
+            30.0,
+        );
+        let keep = Rect::new(card.right() - 20.0 - 80.0, card.bottom() - 48.0, 80.0, 30.0);
+        self.button(f, open, "Open anyway (Y)", Target::OpenAnyway, true);
+        self.button(f, keep, "Keep", Target::KeepDeck, true);
+    }
+
     /// The new-slide menu: every layout, under the + Slide button.
     fn render_layout_menu(&self, f: &mut Frame<Target>, reached: usize) {
         // A press anywhere but on the menu closes it.
@@ -3720,8 +4064,14 @@ impl SlidesApp {
             Rect::new(0.0, 0.0, self.window_width, self.window_height),
         );
         let row_h = 28.0;
+        // Under the + Slide button.
+        let left = self
+            .tool_rects()
+            .into_iter()
+            .find(|(tool, ..)| *tool == Tool::NewSlide)
+            .map_or(TOOLS_X, |(_, rect, ..)| rect.x);
         let menu = Rect::new(
-            TOOLS_X,
+            left,
             TOOLBAR_HEIGHT + 2.0,
             240.0,
             36.0 + SlideLayout::all().len() as f32 * row_h,
@@ -3997,7 +4347,19 @@ impl SlidesApp {
 
     /// A left press on `target`.
     fn press(&mut self, target: Target, x: f32, y: f32) -> EventResult {
+        let had_message = self.status_message.take().is_some();
         let result = match target {
+            Target::OpenAnyway => {
+                self.confirm_open = false;
+                self.picker_for = PickerFor::Open;
+                self.picker.open_to_read();
+                EventResult::Consumed
+            }
+            Target::KeepDeck | Target::QuestionBackdrop => {
+                self.confirm_open = false;
+                EventResult::Consumed
+            }
+            Target::QuestionCard => EventResult::Ignored,
             Target::HelpCard => {
                 self.show_help = false;
                 EventResult::Consumed
@@ -4067,13 +4429,19 @@ impl SlidesApp {
         if result == EventResult::Consumed {
             self.keep_current_visible();
         }
-        result
+        if had_message {
+            EventResult::Consumed
+        } else {
+            result
+        }
     }
 
     /// A toolbar button.
     fn use_tool(&mut self, tool: Tool) -> EventResult {
         match tool {
             Tool::Title => self.begin_deck_title(),
+            Tool::Open => self.open_deck(),
+            Tool::Save => self.save_deck(),
             Tool::NewSlide => {
                 self.layout_menu = Some(1);
                 EventResult::Consumed
@@ -4314,6 +4682,214 @@ struct SorterGeometry {
     pitch: f32,
 }
 
+/// The word a deck file uses for a layout.
+fn layout_name(layout: SlideLayout) -> &'static str {
+    match layout {
+        SlideLayout::TitleSlide => "title",
+        SlideLayout::TitleContent => "title-content",
+        SlideLayout::SectionHeader => "section",
+        SlideLayout::Blank => "blank",
+        SlideLayout::TwoColumn => "two-column",
+        SlideLayout::ImageCaption => "image-caption",
+    }
+}
+
+/// The word a deck file uses for a transition.
+fn transition_name(transition: Transition) -> &'static str {
+    match transition {
+        Transition::None => "none",
+        Transition::Fade => "fade",
+        Transition::SlideLeft => "slide-left",
+        Transition::SlideRight => "slide-right",
+        Transition::Wipe => "wipe",
+        Transition::Dissolve => "dissolve",
+    }
+}
+
+/// The word a deck file uses for a shape.
+fn shape_name(kind: ShapeKind) -> &'static str {
+    match kind {
+        ShapeKind::Rectangle => "rectangle",
+        ShapeKind::Ellipse => "ellipse",
+        ShapeKind::Line => "line",
+        ShapeKind::Arrow => "arrow",
+    }
+}
+
+/// A colour as `#RRGGBB`, or `#RRGGBBAA` when it is not opaque.
+fn colour_hex(c: Color) -> String {
+    if c.a == 255 {
+        format!("#{:02X}{:02X}{:02X}", c.r, c.g, c.b)
+    } else {
+        format!("#{:02X}{:02X}{:02X}{:02X}", c.r, c.g, c.b, c.a)
+    }
+}
+
+/// A colour read back from `#RRGGBB` or `#RRGGBBAA`.
+fn parse_colour(text: &str) -> Option<Color> {
+    let hex = text.trim().strip_prefix('#')?;
+    if !hex.is_ascii() || !(hex.len() == 6 || hex.len() == 8) {
+        return None;
+    }
+    let byte = |at: usize| {
+        hex.get(at..at.saturating_add(2))
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+    };
+    let a = if hex.len() == 8 { byte(6)? } else { 255 };
+    Some(Color::rgba(byte(0)?, byte(2)?, byte(4)?, a))
+}
+
+/// The keys under `path` that are positions, in order.
+fn positions(doc: &yamldoc::Document, path: &[&str]) -> Vec<String> {
+    let mut keys: Vec<(u64, String)> = doc
+        .keys(path)
+        .into_iter()
+        .filter_map(|k| k.parse::<u64>().ok().map(|n| (n, k)))
+        .collect();
+    keys.sort_unstable();
+    keys.into_iter().map(|(_, k)| k).collect()
+}
+
+/// A deck read back from its document: its name, theme and slides, or why it
+/// could not be. Values that cannot be read fall back to a default; an
+/// element of a kind this does not know is left out.
+fn deck_from_document(
+    doc: &yamldoc::Document,
+    palette: &Palette,
+    id_gen: &mut IdGen,
+) -> Result<(String, SlideTheme, Vec<Slide>), String> {
+    match doc.get_i64(&["slateos-slides"]) {
+        Some(DECK_FORMAT) => {}
+        Some(later) if later > DECK_FORMAT => {
+            return Err(format!("it was written in a later format ({later})"));
+        }
+        _ => return Err(String::from("it is not a SlateOS slide deck")),
+    }
+    let title = doc
+        .get_str(&["title"])
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| String::from("Untitled Presentation"));
+    let theme = match doc.get_str(&["theme"]).as_deref() {
+        Some("Light") => SlideTheme::light(),
+        Some("Vibrant") => SlideTheme::vibrant(),
+        _ => SlideTheme::mocha(palette),
+    };
+    let number = |path: &[&str], default: f32| {
+        doc.get_f64(path)
+            .map(|v| v as f32)
+            .filter(|v| v.is_finite())
+            .unwrap_or(default)
+    };
+    let colour = |path: &[&str], default: Color| {
+        doc.get_str(path)
+            .and_then(|c| parse_colour(&c))
+            .unwrap_or(default)
+    };
+    let mut slides = Vec::new();
+    for s in positions(doc, &["slides"]) {
+        let s = s.as_str();
+        let layout = doc
+            .get_str(&["slides", s, "layout"])
+            .and_then(|name| {
+                SlideLayout::all()
+                    .iter()
+                    .copied()
+                    .find(|l| layout_name(*l) == name)
+            })
+            .unwrap_or(SlideLayout::Blank);
+        let transition = doc
+            .get_str(&["slides", s, "transition"])
+            .and_then(|name| {
+                Transition::all()
+                    .iter()
+                    .copied()
+                    .find(|t| transition_name(*t) == name)
+            })
+            .unwrap_or(Transition::None);
+        let mut slide = Slide {
+            id: id_gen.next_id(),
+            layout,
+            background: doc
+                .get_str(&["slides", s, "background"])
+                .and_then(|c| parse_colour(&c)),
+            title: String::new(),
+            subtitle: String::new(),
+            elements: Vec::new(),
+            transition,
+            notes: doc.get_str(&["slides", s, "notes"]).unwrap_or_default(),
+        };
+        for e in positions(doc, &["slides", s, "elements"]) {
+            let at = |field: &'static str| ["slides", s, "elements", e.as_str(), field];
+            let id = id_gen.next_id();
+            let (x, y) = (number(&at("x"), 0.0), number(&at("y"), 0.0));
+            let width = number(&at("width"), 100.0).max(0.0);
+            let height = number(&at("height"), 100.0).max(0.0);
+            let kind = doc.get_str(&at("kind")).unwrap_or_default();
+            let element = match kind.as_str() {
+                "text" => SlideElement::TextBox {
+                    id,
+                    x,
+                    y,
+                    width,
+                    height,
+                    text: doc.get_str(&at("text")).unwrap_or_default(),
+                    font_size: number(&at("size"), theme.body_size).clamp(8.0, 120.0),
+                    color: colour(&at("colour"), theme.body_color),
+                    bold: doc.get_bool(&at("bold")).unwrap_or(false),
+                    centered: doc.get_bool(&at("centred")).unwrap_or(false),
+                },
+                "bullets" => SlideElement::BulletList {
+                    id,
+                    x,
+                    y,
+                    width,
+                    height,
+                    items: doc.get_seq(&at("items")).unwrap_or_default(),
+                    font_size: number(&at("size"), theme.bullet_size).clamp(8.0, 120.0),
+                    color: colour(&at("colour"), theme.body_color),
+                },
+                "image" => SlideElement::Image {
+                    id,
+                    x,
+                    y,
+                    width,
+                    height,
+                    placeholder_label: doc.get_str(&at("label")).unwrap_or_default(),
+                },
+                other => {
+                    let Some(shape) = [
+                        ShapeKind::Rectangle,
+                        ShapeKind::Ellipse,
+                        ShapeKind::Line,
+                        ShapeKind::Arrow,
+                    ]
+                    .into_iter()
+                    .find(|k| shape_name(*k) == other) else {
+                        continue;
+                    };
+                    SlideElement::Shape {
+                        id,
+                        kind: shape,
+                        x,
+                        y,
+                        width,
+                        height,
+                        fill_color: colour(&at("fill"), theme.accent),
+                        stroke_color: colour(&at("stroke"), theme.accent),
+                        stroke_width: number(&at("outline"), 2.0).clamp(0.0, 20.0),
+                    }
+                }
+            };
+            slide.elements.push(element);
+        }
+        slides.push(slide);
+    }
+    if slides.is_empty() {
+        return Err(String::from("it holds no slides"));
+    }
+    Ok((title, theme, slides))
+}
+
 /// The smallest an element may be resized to: none for a line or an arrow,
 /// which may be flat.
 fn min_size(element: &SlideElement) -> f32 {
@@ -4453,9 +5029,11 @@ impl App for SlidesApp {
         self.palette = *palette;
     }
 
+    /// A leading `*` while there are changes that are not saved.
     fn title(&self) -> String {
         format!(
-            "{} — slide {} of {}",
+            "{}{} — slide {} of {}",
+            if self.dirty { "*" } else { "" },
             self.title,
             self.current_index.saturating_add(1),
             self.slides.len()
@@ -4681,8 +5259,9 @@ mod tests {
         app.handle_event(&press(Key::Enter));
 
         assert_eq!(app.title, "Q3", "the deck was not renamed");
+        // A rename is a change that is not saved yet, which the bar marks.
         assert!(
-            app.title().starts_with("Q3"),
+            app.title().starts_with("*Q3"),
             "the window bar still says {:?}",
             app.title()
         );
@@ -6928,5 +7507,278 @@ mod tests {
             .collect();
         assert_eq!(heads.len(), 2, "{heads:?}");
         assert!((heads[0] + heads[1]).abs() < 0.01, "{heads:?}");
+    }
+    // ── Decks on disk ───────────────────────────────────────────────
+
+    /// A scratch directory for one test, empty.
+    fn scratch_dir(line: u32) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("slides-deck-{}-{line}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// Everything a deck holds, with the ids -- which are this session's --
+    /// left out.
+    fn describe(app: &SlidesApp) -> String {
+        let mut out = format!("{} | {} |", app.title, app.theme.name);
+        for slide in &app.slides {
+            out.push_str(&format!(
+                "\n{:?} {:?} {:?} {:?}",
+                slide.layout, slide.transition, slide.background, slide.notes
+            ));
+            for element in &slide.elements {
+                let mut e = element.clone();
+                match &mut e {
+                    SlideElement::TextBox { id, .. }
+                    | SlideElement::Shape { id, .. }
+                    | SlideElement::Image { id, .. }
+                    | SlideElement::BulletList { id, .. } => *id = 0,
+                }
+                out.push_str(&format!("\n  {e:?}"));
+            }
+        }
+        out
+    }
+
+    /// A deck survives being saved and opened: its name, theme, every
+    /// slide's layout, transition, background and notes, and every element.
+    /// A deck lived exactly as long as the window did.
+    #[test]
+    fn a_deck_survives_being_saved_and_opened() {
+        let dir = scratch_dir(line!());
+        let path = dir.join("talk.slides");
+        let mut app = seeded();
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&press(Key::Tab));
+        app.handle_event(&press(Key::Enter));
+        app.handle_event(&types("Q3"));
+        app.handle_event(&press_shift(Key::Enter));
+        app.handle_event(&types("plans: \"all of them\" # really"));
+        app.handle_event(&press(Key::Escape));
+        app.handle_event(&press_ctrl(Key::B));
+        app.handle_event(&press(Key::G));
+        app.handle_event(&press_ctrl(Key::R));
+        app.handle_event(&press(Key::N));
+        app.handle_event(&types("Open with the numbers"));
+        app.handle_event(&press_shift(Key::Enter));
+        app.handle_event(&types("then the plan"));
+        app.handle_event(&press(Key::Escape));
+        app.handle_event(&press(Key::A));
+        let arrow = app.selected_element.unwrap();
+        let from = centre(&app, Target::Element(arrow));
+        drag(&mut app, from, (from.0 + 33.0, from.1 + 17.0));
+        app.handle_event(&press_ctrl(Key::T));
+        app.handle_event(&press_ctrl_shift(Key::T));
+        app.handle_event(&types("Quarterly"));
+        app.handle_event(&press(Key::Enter));
+
+        let said = app.write_deck(&path);
+        assert!(said.starts_with("Saved"), "{said}");
+        assert!(!app.dirty);
+
+        let mut other = fresh();
+        let said = other.read_deck(&path);
+        assert!(said.starts_with("Opened"), "{said}");
+        assert_eq!(describe(&other), describe(&app));
+        assert!(!other.dirty);
+        assert_eq!(other.current_index, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ctrl+S asks where the first time and saves in place after.
+    #[test]
+    fn ctrl_s_asks_the_first_time_and_saves_in_place_after() {
+        let dir = scratch_dir(line!());
+        let path = dir.join("deck.slides");
+        let mut app = fresh();
+        assert_eq!(app.handle_event(&press_ctrl(Key::S)), EventResult::Consumed);
+        assert!(app.picker.is_open(), "the first save did not ask where");
+        assert_eq!(app.picker_for, PickerFor::Save);
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.picker.is_open());
+        let said = app.picked(&path);
+        assert!(said.starts_with("Saved"), "{said}");
+
+        app.handle_event(&press(Key::T));
+        assert!(app.dirty);
+        app.handle_event(&press_ctrl(Key::S));
+        assert!(!app.picker.is_open(), "a deck with a place asked again");
+        assert!(!app.dirty);
+        let mut other = fresh();
+        other.read_deck(&path);
+        assert_eq!(element_count(&other), element_count(&app));
+
+        // Ctrl+Shift+S always asks.
+        app.handle_event(&press_ctrl_shift(Key::S));
+        assert!(app.picker.is_open());
+        assert_eq!(app.picker_for, PickerFor::Save);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The picker's answer goes where it was asked for.
+    #[test]
+    fn the_pickers_answer_goes_where_it_was_asked_for() {
+        let mut app = fresh();
+        app.handle_event(&press_ctrl(Key::E));
+        assert_eq!(app.picker_for, PickerFor::Export);
+        app.handle_event(&press(Key::Escape));
+        app.handle_event(&press_ctrl(Key::O));
+        assert_eq!(app.picker_for, PickerFor::Open);
+        assert!(app.picker.is_open());
+        app.handle_event(&press(Key::Escape));
+        probe::click(&mut app, Target::Tool(Tool::Save));
+        assert_eq!(app.picker_for, PickerFor::Save);
+        app.handle_event(&press(Key::Escape));
+        probe::click(&mut app, Target::Tool(Tool::Open));
+        assert_eq!(app.picker_for, PickerFor::Open);
+    }
+
+    /// A file that is not a deck is reported, and the deck open stays as it
+    /// was.
+    #[test]
+    fn a_file_that_is_not_a_deck_is_refused() {
+        let dir = scratch_dir(line!());
+        let mut app = seeded();
+        let before = describe(&app);
+        let cases: [(&str, &[u8], &str); 3] = [
+            (
+                "settings.yaml",
+                b"fonts:\n  size: 13\n",
+                "it is not a SlateOS slide deck",
+            ),
+            (
+                "binary.slides",
+                b"\xff\xfe\x00junk",
+                "it is not a text file",
+            ),
+            (
+                "later.slides",
+                b"slateos-slides: 2\nslides:\n",
+                "later format",
+            ),
+        ];
+        for (name, bytes, why) in cases {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let said = app.read_deck(&path);
+            assert!(
+                said.starts_with("Could not open") && said.contains(why),
+                "{name}: {said}"
+            );
+            assert_eq!(describe(&app), before, "{name} changed the deck");
+        }
+        let said = app.read_deck(&dir.join("absent.slides"));
+        assert!(said.starts_with("Could not open"), "{said}");
+        let empty = dir.join("empty.slides");
+        std::fs::write(&empty, "slateos-slides: 1\ntitle: Nothing\n").unwrap();
+        assert!(app.read_deck(&empty).contains("holds no slides"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An element of a kind this does not know is left out, and the rest of
+    /// its slide is read.
+    #[test]
+    fn an_element_of_an_unknown_kind_is_left_out() {
+        let dir = scratch_dir(line!());
+        let path = dir.join("future.slides");
+        let mut doc = yamldoc::Document::new();
+        doc.set_i64(&["slateos-slides"], DECK_FORMAT);
+        doc.set_str(&["slides", "1", "layout"], "blank");
+        doc.set_str(&["slides", "1", "elements", "1", "kind"], "hologram");
+        doc.set_str(&["slides", "1", "elements", "2", "kind"], "text");
+        doc.set_str(&["slides", "1", "elements", "2", "text"], "Kept");
+        std::fs::write(&path, doc.to_text()).unwrap();
+        let mut app = fresh();
+        let said = app.read_deck(&path);
+        assert!(said.starts_with("Opened"), "{said}");
+        assert_eq!(element_count(&app), 1);
+        assert!(
+            matches!(&app.slides[0].elements[0], SlideElement::TextBox { text, .. } if text == "Kept")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Open asks before it throws unsaved changes away, and only Y (or its
+    /// button) goes on.
+    #[test]
+    fn open_asks_before_losing_unsaved_changes() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::T));
+        app.handle_event(&press_ctrl(Key::O));
+        assert!(app.confirm_open);
+        assert!(!app.picker.is_open());
+        app.handle_event(&press(Key::N));
+        assert!(!app.confirm_open);
+        assert!(!app.picker.is_open(), "any key but Y went on to open");
+        app.handle_event(&press_ctrl(Key::O));
+        app.handle_event(&press(Key::Y));
+        assert!(app.picker.is_open());
+        app.handle_event(&press(Key::Escape));
+
+        app.handle_event(&press_ctrl(Key::O));
+        probe::click(&mut app, Target::KeepDeck);
+        assert!(!app.confirm_open && !app.picker.is_open());
+        app.handle_event(&press_ctrl(Key::O));
+        assert_eq!(
+            probe::click(&mut app, Target::QuestionCard),
+            EventResult::Ignored
+        );
+        assert!(app.confirm_open);
+        probe::click(&mut app, Target::OpenAnyway);
+        assert!(app.picker.is_open());
+    }
+
+    /// The window bar marks unsaved changes, and a save clears the mark.
+    #[test]
+    fn the_window_bar_marks_unsaved_changes() {
+        let dir = scratch_dir(line!());
+        let mut app = fresh();
+        assert!(!app.title().starts_with('*'));
+        app.handle_event(&press(Key::T));
+        assert!(app.title().starts_with('*'));
+        app.write_deck(&dir.join("d.slides"));
+        assert!(!app.title().starts_with('*'));
+        app.handle_event(&press_ctrl(Key::Z));
+        assert!(
+            app.title().starts_with('*'),
+            "an undo after a save is a change"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a save, an open or an export did is shown, until the next thing
+    /// is done. It was kept and drawn nowhere, so an export that failed
+    /// failed in silence.
+    #[test]
+    fn what_a_save_or_an_export_did_is_shown() {
+        let mut app = fresh();
+        app.status_message = Some(String::from("Could not write /nowhere/deck.html: denied"));
+        assert!(drawn_text(&app).contains("Could not write /nowhere/deck.html"));
+        assert_eq!(app.handle_event(&press(Key::F9)), EventResult::Consumed);
+        assert!(!drawn_text(&app).contains("Could not write"));
+    }
+
+    /// A failed save is reported, and the deck stays marked unsaved.
+    #[test]
+    fn a_failed_save_is_reported() {
+        let dir = scratch_dir(line!());
+        let mut app = fresh();
+        app.handle_event(&press(Key::T));
+        let said = app.write_deck(&dir.join("missing").join("deck.slides"));
+        assert!(said.starts_with("Could not save"), "{said}");
+        assert!(app.dirty);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A deck's file is named after the deck.
+    #[test]
+    fn a_decks_file_is_named_after_it() {
+        let mut app = fresh();
+        assert_eq!(app.file_name("slides"), "Untitled Presentation.slides");
+        app.title = String::from("Q3/plans\tdraft");
+        assert_eq!(app.file_name("slides"), "Q3-plans-draft.slides");
+        app.title = String::from("  ");
+        assert_eq!(app.file_name("html"), "presentation.html");
     }
 }

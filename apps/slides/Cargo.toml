@@ -16,5 +16,9 @@ oswindow = { path = "../../gui/window" }
 # the target before writing it.
 safeio = { path = "../safeio" }
 
+# A deck is kept as YAML, like everything else here a person might open in an
+# editor, and read back through the same library.
+yamldoc = { path = "../../yamldoc" }
+
 [lints]
 workspace = true

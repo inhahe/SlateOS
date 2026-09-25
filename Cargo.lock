@@ -2668,6 +2668,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "safeio",
+ "yamldoc",
 ]
 
 [[package]]

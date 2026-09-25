@@ -34,6 +34,18 @@ The narrow fixtures are the edge of libjpeg's filter: a colour plane two
 samples wide is repeated rather than interpolated (`downsampled_width > 2` in
 `jinit_upsampler`), and three is the narrowest it filters.
 
+Scaled decodes
+--------------
+
+A thumbnail is decoded at a half, a quarter or an eighth of the picture's size
+directly, and libjpeg-turbo's way of doing that is as much a de facto standard
+as its full decode. So every fixture also has `<answer>_s2.txt`, `_s4.txt` and
+`_s8.txt`: TurboJPEG's own scaled decode (through `simplejpeg`, whose full
+decode is Pillow's to the bit), which `tests/jpeg_sampling.rs` holds
+`decode_scaled` to. For a progressive pair the script checks that TurboJPEG
+decodes both twins to the same pixels at each scale, so again one answer
+serves both.
+
 Usage
 -----
 
@@ -88,8 +100,8 @@ def decoded(path: pathlib.Path) -> tuple[tuple[int, int], list[tuple[int, int, i
     return rgb.size, [tuple(raw[i : i + 3]) for i in range(0, len(raw), 3)]
 
 
-def write_answer(name: str, path: pathlib.Path) -> None:
-    (w, h), pixels = decoded(path)
+def write_pixels(name: str, size: tuple[int, int], pixels) -> None:
+    (w, h) = size
     words = [str(w), str(h)]
     for (r, g, b) in pixels:
         words.append(f"FF{r:02X}{g:02X}{b:02X}")
@@ -97,6 +109,47 @@ def write_answer(name: str, path: pathlib.Path) -> None:
     # text mode would otherwise write CRLF into them.
     with open(HERE / f"{name}.txt", "w", encoding="ascii", newline="\n") as out:
         out.write(" ".join(words) + "\n")
+
+
+def write_answer(name: str, path: pathlib.Path) -> None:
+    size, pixels = decoded(path)
+    write_pixels(name, size, pixels)
+
+
+SCALES = (2, 4, 8)
+
+
+def scaled(path: pathlib.Path, factor: int) -> tuple[tuple[int, int], list[tuple[int, int, int]]]:
+    """TurboJPEG's decode of a file at `1 / factor` of its size."""
+    data = path.read_bytes()
+    height, width, colorspace, _ = simplejpeg.decode_jpeg_header(data)
+    want = (-(-height // factor), -(-width // factor))
+    grey = colorspace == "Gray"
+    out = simplejpeg.decode_jpeg(
+        data,
+        colorspace="GRAY" if grey else "RGB",
+        min_height=want[0],
+        min_width=want[1],
+        min_factor=factor,
+    )
+    assert out.shape[:2] == want, f"{path.name} at 1/{factor}: {out.shape} is not {want}"
+    rows = out.reshape(want[0], want[1], -1)
+    pixels = [
+        (int(p[0]), int(p[0]), int(p[0])) if grey else (int(p[0]), int(p[1]), int(p[2]))
+        for row in rows
+        for p in row
+    ]
+    return (want[1], want[0]), pixels
+
+
+def write_scaled_answers(name: str, path: pathlib.Path, twin: pathlib.Path | None = None) -> None:
+    for factor in SCALES:
+        size, pixels = scaled(path, factor)
+        if twin is not None:
+            assert scaled(twin, factor) == (size, pixels), (
+                f"{name}: TurboJPEG decodes the twins differently at 1/{factor}"
+            )
+        write_pixels(f"{name}_s{factor}", size, pixels)
 
 
 def save(img: Image.Image, name: str, **kw) -> pathlib.Path:
@@ -111,6 +164,7 @@ def pair(img: Image.Image, name: str, **kw) -> None:
     prog = save(img, f"{name}_progressive", progressive=True, **kw)
     assert decoded(base) == decoded(prog), f"{name}: libjpeg decodes the twins differently"
     write_answer(f"{name}_progressive", prog)
+    write_scaled_answers(f"{name}_progressive", prog, twin=base)
 
 
 def turbojpeg(img: Image.Image, name: str, subsampling: str) -> None:
@@ -121,6 +175,7 @@ def turbojpeg(img: Image.Image, name: str, subsampling: str) -> None:
     path = HERE / f"{name}.jpg"
     path.write_bytes(data)
     write_answer(name, path)
+    write_scaled_answers(name, path)
 
 
 def main() -> None:
@@ -142,9 +197,13 @@ def main() -> None:
 
     # Four pixels across is two colour samples: repeated, not filtered.
     for name, subsampling in [("jpegnarrow420", 2), ("jpegnarrow422", 1)]:
-        write_answer(name, save(photo(4, 9), name, quality=85, subsampling=subsampling))
+        path = save(photo(4, 9), name, quality=85, subsampling=subsampling)
+        write_answer(name, path)
+        write_scaled_answers(name, path)
     # Five is three: the narrowest plane the filter runs over.
-    write_answer("jpegslim420", save(photo(5, 9), "jpegslim420", quality=85, subsampling=2))
+    path = save(photo(5, 9), "jpegslim420", quality=85, subsampling=2)
+    write_answer("jpegslim420", path)
+    write_scaled_answers("jpegslim420", path)
 
 
 if __name__ == "__main__":

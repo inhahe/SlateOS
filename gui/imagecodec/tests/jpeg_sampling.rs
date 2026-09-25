@@ -19,6 +19,13 @@
 //! | `jpegslim420` | three samples across | the narrowest plane it filters |
 //! | `jpeggrey` | none | nothing |
 //!
+//! A thumbnail is the same question at a smaller size: `decode_scaled`
+//! reconstructs a picture at a half, a quarter or an eighth of its size inside
+//! the inverse DCT, and libjpeg-turbo's way of doing that -- the mean of each
+//! square of the full picture, with 4:2:0 chroma reconstructed straight at the
+//! output's resolution -- is what every decoder built on it shows. Every
+//! fixture is held to TurboJPEG's own scaled decode at all three.
+//!
 //! Written by `tests/data/generate_jpeg.py`, which says where each came from.
 
 #![allow(
@@ -34,7 +41,7 @@
 mod common;
 
 use common::{answer, assert_agrees, read};
-use imagecodec::{Limits, decode};
+use imagecodec::{Limits, decode, decode_scaled, dimensions};
 
 /// Each fixture, and the answer file holding Pillow's decode of it.
 const FIXTURES: &[(&str, &str)] = &[
@@ -62,5 +69,22 @@ fn every_colour_layout_decodes_as_libjpeg_decodes_it() {
         let image =
             decode(&read(file), Limits::default()).unwrap_or_else(|e| panic!("{file}: {e}"));
         assert_agrees(file, &image, &answer(reference));
+    }
+}
+
+#[test]
+fn every_colour_layout_decodes_at_every_scale_as_libjpeg_does() {
+    for &(file, reference) in FIXTURES {
+        let bytes = read(file);
+        let (width, height) = dimensions(&bytes).unwrap();
+        for factor in [2u32, 4, 8] {
+            // The picture's own size at that scale, which `decode_scaled`
+            // reconstructs directly and has no call to shrink further.
+            let (w, h) = (width.div_ceil(factor), height.div_ceil(factor));
+            let name = format!("{file} at 1/{factor}");
+            let image = decode_scaled(&bytes, Limits::default(), w, h)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_agrees(&name, &image, &answer(&format!("{reference}_s{factor}")));
+        }
     }
 }

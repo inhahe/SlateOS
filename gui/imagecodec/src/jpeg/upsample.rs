@@ -46,8 +46,10 @@ pub(super) struct Shape {
     pub(super) width: usize,
     /// How many rows are picture: the filter's bottom edge.
     pub(super) height: usize,
-    /// The plane's samples across an MCU against the picture's, as a ratio:
-    /// `(1, 2)` for colour halved across.
+    /// The plane's samples across an MCU against the picture's, as a ratio
+    /// not necessarily in lowest terms: `(8, 16)` for colour halved across at
+    /// full size. libjpeg's `h_in_group` and `h_out_group`, both multiplied by
+    /// the picture's block size so that they stay whole.
     pub(super) across: (usize, usize),
     /// The same, down.
     pub(super) down: (usize, usize),
@@ -55,13 +57,15 @@ pub(super) struct Shape {
 
 impl Shape {
     /// The plane of a component sampled `h` x `v` times, in a `width` x
-    /// `height` frame whose largest factors are `max_h` x `max_v`, with every
-    /// 8x8 block reconstructed to `block` x `block` samples.
+    /// `height` frame whose largest factors are `max_h` x `max_v`, with the
+    /// component's 8x8 blocks reconstructed to `block` samples a side and the
+    /// picture's to `picture` -- the same, unless the component is chroma a
+    /// scaled decode reconstructs at twice the size (`component_block`).
     pub(super) fn of(
         (width, height): (usize, usize),
         (h, v): (usize, usize),
         (max_h, max_v): (usize, usize),
-        block: usize,
+        (block, picture): (usize, usize),
     ) -> Self {
         let mcus_x = width.div_ceil(max_h.saturating_mul(8).max(1));
         let mcus_y = height.div_ceil(max_v.saturating_mul(8).max(1));
@@ -80,8 +84,8 @@ impl Shape {
                 .saturating_mul(block)
                 .div_ceil(max_v.saturating_mul(8).max(1))
                 .max(1),
-            across: (h, max_h),
-            down: (v, max_v),
+            across: (h.saturating_mul(block), max_h.saturating_mul(picture)),
+            down: (v.saturating_mul(block), max_v.saturating_mul(picture)),
         }
     }
 
@@ -776,21 +780,34 @@ mod tests {
     #[test]
     fn the_shape_is_libjpegs_downsampled_size() {
         // 4:2:0, 61x37: MCUs of 16x16, so 4x3 of them.
-        let luma = Shape::of((61, 37), (2, 2), (2, 2), 8);
+        let luma = Shape::of((61, 37), (2, 2), (2, 2), (8, 8));
         assert_eq!(
             (luma.stride, luma.rows, luma.width, luma.height),
             (64, 48, 61, 37)
         );
-        let chroma = Shape::of((61, 37), (1, 1), (2, 2), 8);
+        let chroma = Shape::of((61, 37), (1, 1), (2, 2), (8, 8));
         assert_eq!(
             (chroma.stride, chroma.rows, chroma.width, chroma.height),
             (32, 24, 31, 19)
         );
-        // At quarter scale: blocks of 2x2, and `ceil(61 * 1 * 2 / 16)` = 8.
-        let chroma = Shape::of((61, 37), (1, 1), (2, 2), 2);
+        assert_eq!(Filter::choose(&chroma, true), Filter::Both);
+        // At quarter scale with chroma kept at the picture's block size:
+        // blocks of 2x2, and `ceil(61 * 1 * 2 / 16)` = 8.
+        let chroma = Shape::of((61, 37), (1, 1), (2, 2), (2, 2));
         assert_eq!(
             (chroma.stride, chroma.rows, chroma.width, chroma.height),
             (8, 6, 8, 5)
         );
+        // At half scale, where libjpeg reconstructs 4:2:0 chroma at twice the
+        // picture's block size: as many samples as the picture has, and so no
+        // upsampling at all.
+        let luma = Shape::of((61, 37), (2, 2), (2, 2), (4, 4));
+        let chroma = Shape::of((61, 37), (1, 1), (2, 2), (8, 4));
+        assert_eq!((luma.width, luma.height), (31, 19));
+        assert_eq!(
+            (chroma.stride, chroma.rows, chroma.width, chroma.height),
+            (32, 24, 31, 19)
+        );
+        assert_eq!(Filter::choose(&chroma, true), Filter::Same);
     }
 }

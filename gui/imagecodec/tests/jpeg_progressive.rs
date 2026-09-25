@@ -210,25 +210,22 @@ fn no_truncation_or_bit_flip_of_a_progressive_file_panics() {
 
 #[test]
 fn a_progressive_file_past_the_byte_budget_is_refused_before_it_is_decoded() {
+    // 203x149 at 4:2:0: 520 luma blocks and 130 of each chroma.
     let file = read("jpegbig420_progressive");
     let tight = Limits {
-        max_decompressed_bytes: 10_000,
+        max_decompressed_bytes: 25_000,
         ..Limits::default()
     };
+    // Whole, the luma alone is 520 blocks of 136 bytes and 64 samples:
+    // 104,000 bytes before the chroma is counted.
     assert!(
         decode(&file, tight).is_err(),
         "the coefficient store was allocated past the caller's budget"
     );
-    // The same file thumbnails within it: an eighth-scale decode keeps the DC
-    // alone, ten bytes a block rather than 136.
-    let thumb = decode_scaled(
-        &file,
-        Limits {
-            max_decompressed_bytes: 10_000,
-            ..Limits::default()
-        },
-        26,
-        19,
-    );
+    // The same file thumbnails within it. At an eighth of the size a luma
+    // block keeps its DC alone, ten bytes; chroma, which libjpeg reconstructs
+    // at twice that size, keeps the 25 coefficients its 2x2 transform reads,
+    // 58 bytes a block: 21,840 bytes in all with the samples.
+    let thumb = decode_scaled(&file, tight, 26, 19);
     assert!(thumb.is_ok(), "{thumb:?}");
 }

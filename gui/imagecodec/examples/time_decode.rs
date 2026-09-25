@@ -32,7 +32,15 @@ fn main() {
     if let Some(p) = &prefix {
         dump(p, "full", &img);
     }
-    for (w, h) in [(128u32, 128u32), (400, 300), (97, 61)] {
+    // Eighth scale (for a large photograph, the first three), then a quarter and
+    // a half of a 4000x5333 one: each of the reduced transforms.
+    for (w, h) in [
+        (128u32, 128u32),
+        (400, 300),
+        (97, 61),
+        (1000, 1334),
+        (2000, 2667),
+    ] {
         let t = std::time::Instant::now();
         let img = imagecodec::decode_scaled(&bytes, limits, w, h).expect("scaled");
         println!(

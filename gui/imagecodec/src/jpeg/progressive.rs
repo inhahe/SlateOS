@@ -37,12 +37,16 @@
 //!
 //! The coefficients have to be held for the whole picture: for a 21-megapixel
 //! 4:2:0 photograph that is some 64 MB at 64 coefficients a block. A scaled
-//! decode — a thumbnail — needs far fewer: its inverse transform reads only the
-//! top-left `n x n` of each block (`jpeg::idct_scaled`), so only those are
-//! kept. The rest are still parsed, since a bit stream cannot be skipped, and
-//! remembered only as whether they are non-zero — one bit each, which is all a
-//! refinement pass needs to read the stream correctly. An eighth-scale
-//! thumbnail keeps the DC alone: ten bytes a block instead of 136.
+//! decode — a thumbnail — needs fewer: its reduced transform gives no weight
+//! at all to some frequencies (`jpeg::idct_scaled`, `jpeg::kept_frequency`),
+//! so only the others are kept — 7 a side at half scale, 5 at a quarter, the
+//! DC alone at an eighth ([`Kept`]). The rest are still parsed, since a bit
+//! stream cannot be skipped, and remembered only as whether they are non-zero
+//! — one bit each, which is all a refinement pass needs to read the stream
+//! correctly. An eighth-scale thumbnail keeps ten bytes a luma block instead
+//! of 136; a 4:2:0 file's chroma, which libjpeg reconstructs at twice the
+//! picture's block size (`jpeg::component_block`), keeps the 25 coefficients
+//! its 2x2 transform reads.
 //!
 //! # Hostile input
 //!
@@ -56,8 +60,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{
-    Basis, BitReader, Component, Samples, Shape, Tables, ZIGZAG, flat_block, idct_8x8, idct_scaled,
-    store_block, to_pixels,
+    Basis, BitReader, Component, Samples, Shape, Tables, ZIGZAG, component_block, flat_block,
+    idct_8x8, idct_scaled, kept_frequency, scale_block, store_block, to_pixels,
 };
 use crate::{Image, ImageError, ImageResult, Limits};
 
@@ -71,8 +75,14 @@ struct Plane {
     /// a *non-interleaved* scan visits, which is not padded to MCUs.
     scan_w: usize,
     scan_h: usize,
-    /// `keep * keep` coefficients per block, natural order within the kept
-    /// square, already shifted into place by each scan's `Al`.
+    /// How many samples a side each block is reconstructed to: the picture's
+    /// block size, or twice it for chroma a scaled decode reconstructs at the
+    /// output's resolution.
+    size: usize,
+    /// Which coefficients that reconstruction reads, and so which are kept.
+    kept: Kept,
+    /// `kept.per_block()` coefficients per block, in natural order among the
+    /// kept ones, already shifted into place by each scan's `Al`.
     values: Vec<i16>,
     /// Per block, one bit per zig-zag position: whether that coefficient is
     /// non-zero. Kept for all 64 whether or not the value is, because a
@@ -96,9 +106,9 @@ pub(super) struct Coefficients {
     max_v: usize,
     mcus_x: usize,
     mcus_y: usize,
-    /// How many pixels each block becomes, and so how many coefficients a side
-    /// are kept: 8 for a full decode, fewer for a scaled one.
-    keep: usize,
+    /// How many pixels each of the picture's blocks becomes: 8 for a full
+    /// decode, 4, 2 or 1 for a scaled one.
+    block: usize,
     /// Whether any scan has been read. A file cut off before its first scan
     /// has no picture to reconstruct.
     scanned: bool,
@@ -138,15 +148,48 @@ impl Restarts {
     }
 }
 
-/// Where a coefficient at zig-zag position `k` lives in a block's kept square,
-/// or `None` if the square does not keep it.
-fn kept_slot(k: usize, keep: usize) -> Option<usize> {
-    let natural = *ZIGZAG.get(k)?;
-    let (u, v) = (natural % 8, natural / 8);
-    if u < keep && v < keep {
-        Some(v.saturating_mul(keep).saturating_add(u))
-    } else {
-        None
+/// Which of a block's coefficients a plane keeps: those its reconstruction
+/// gives a weight to, which are the frequencies [`kept_frequency`] names in
+/// each direction.
+#[derive(Clone, Copy)]
+struct Kept {
+    /// How many frequencies a side: 8, 7, 5 or 1 for blocks reconstructed to
+    /// 8, 4, 2 or 1 samples.
+    side: usize,
+    /// Each frequency's place among the kept ones, or `None` if it is not.
+    rank: [Option<u8>; 8],
+}
+
+impl Kept {
+    /// What a block reconstructed to `size` samples a side reads.
+    fn for_size(size: usize) -> Self {
+        let mut rank = [None; 8];
+        let mut side = 0usize;
+        for (k, slot) in rank.iter_mut().enumerate() {
+            if kept_frequency(k, size) {
+                *slot = u8::try_from(side).ok();
+                side = side.saturating_add(1);
+            }
+        }
+        Self { side, rank }
+    }
+
+    /// Coefficients kept per block.
+    const fn per_block(&self) -> usize {
+        self.side.saturating_mul(self.side)
+    }
+
+    /// Where the coefficient at natural (row-major) position `natural` lives
+    /// among a block's kept ones, or `None` if it is not kept.
+    fn slot(&self, natural: usize) -> Option<usize> {
+        let u = usize::from(self.rank.get(natural % 8).copied().flatten()?);
+        let v = usize::from(self.rank.get(natural / 8).copied().flatten()?);
+        Some(v.saturating_mul(self.side).saturating_add(u))
+    }
+
+    /// The same for zig-zag position `k`.
+    fn zigzag_slot(&self, k: usize) -> Option<usize> {
+        self.slot(*ZIGZAG.get(k)?)
     }
 }
 
@@ -158,13 +201,13 @@ fn bit_value(bit: u32) -> i32 {
 
 impl Plane {
     /// The kept value at zig-zag position `k` of block `block`, or zero.
-    fn value(&self, block: usize, k: usize, keep: usize) -> i32 {
-        kept_slot(k, keep)
+    fn value(&self, block: usize, k: usize) -> i32 {
+        self.kept
+            .zigzag_slot(k)
             .and_then(|slot| {
                 self.values.get(
                     block
-                        .saturating_mul(keep)
-                        .saturating_mul(keep)
+                        .saturating_mul(self.kept.per_block())
                         .saturating_add(slot),
                 )
             })
@@ -173,7 +216,7 @@ impl Plane {
 
     /// Store `value` at zig-zag position `k` of block `block`, keeping the
     /// non-zero mask true whether or not the value itself is kept.
-    fn set(&mut self, block: usize, k: usize, keep: usize, value: i32) {
+    fn set(&mut self, block: usize, k: usize, value: i32) {
         if let Some(mask) = self.nonzero.get_mut(block) {
             let bit = 1u64
                 .checked_shl(u32::try_from(k).unwrap_or(64))
@@ -184,10 +227,9 @@ impl Plane {
                 *mask |= bit;
             }
         }
-        if let Some(slot) = kept_slot(k, keep) {
+        if let Some(slot) = self.kept.zigzag_slot(k) {
             let at = block
-                .saturating_mul(keep)
-                .saturating_mul(keep)
+                .saturating_mul(self.kept.per_block())
                 .saturating_add(slot);
             if let Some(cell) = self.values.get_mut(at) {
                 // A coefficient of an 8-bit sample fits in twelve bits; a value
@@ -233,26 +275,25 @@ impl Coefficients {
                 limit: limits.max_pixels,
             });
         }
-        let keep = block.clamp(1, 8);
+        let block = scale_block(block);
         let max_h = components.iter().map(|c| c.h).max().unwrap_or(1);
         let max_v = components.iter().map(|c| c.v).max().unwrap_or(1);
         let mcus_x = width.div_ceil(max_h.saturating_mul(8));
         let mcus_y = height.div_ceil(max_v.saturating_mul(8));
 
-        // Per block: the kept coefficients at two bytes each, and the mask.
-        let per_block = keep
-            .saturating_mul(keep)
-            .saturating_mul(2)
-            .saturating_add(8);
         let mut total = 0usize;
         let mut planes = Vec::with_capacity(components.len());
         for component in &components {
+            let size = component_block(block, (component.h, component.v), (max_h, max_v));
+            let kept = Kept::for_size(size);
+            // Per block: the kept coefficients at two bytes each, and the mask.
+            let per_block = kept.per_block().saturating_mul(2).saturating_add(8);
             let blocks_w = mcus_x.saturating_mul(component.h);
             let blocks_h = mcus_y.saturating_mul(component.v);
             let blocks = blocks_w.saturating_mul(blocks_h);
             // Plus the samples reconstruction writes for this component, which
             // exist beside the coefficients for a while.
-            let samples = blocks.saturating_mul(keep).saturating_mul(keep);
+            let samples = blocks.saturating_mul(size).saturating_mul(size);
             total = total
                 .saturating_add(blocks.saturating_mul(per_block))
                 .saturating_add(samples);
@@ -271,7 +312,9 @@ impl Coefficients {
                 blocks_h,
                 scan_w: comp_w.div_ceil(8).min(blocks_w),
                 scan_h: comp_h.div_ceil(8).min(blocks_h),
-                values: vec![0i16; blocks.saturating_mul(keep).saturating_mul(keep)],
+                size,
+                kept,
+                values: vec![0i16; blocks.saturating_mul(kept.per_block())],
                 nonzero: vec![0u64; blocks],
                 quant: None,
             });
@@ -285,7 +328,7 @@ impl Coefficients {
             max_v,
             mcus_x,
             mcus_y,
-            keep,
+            block,
             scanned: false,
         })
     }
@@ -497,7 +540,6 @@ impl Coefficients {
         let Some(block) = self.block_at(index, row, col) else {
             return true;
         };
-        let keep = self.keep;
         let Some(plane) = self.planes.get_mut(index) else {
             return true;
         };
@@ -511,14 +553,14 @@ impl Coefficients {
             let diff = bits.receive_extend(u32::from(length)).unwrap_or(0);
             component.dc_prediction = component.dc_prediction.saturating_add(diff);
             let value = component.dc_prediction.saturating_mul(bit_value(al));
-            plane.set(block, 0, keep, value);
+            plane.set(block, 0, value);
         } else {
             let Some(bit) = bits.bit() else {
                 return false;
             };
             if bit != 0 {
-                let value = plane.value(block, 0, keep).saturating_add(bit_value(al));
-                plane.set(block, 0, keep, value);
+                let value = plane.value(block, 0).saturating_add(bit_value(al));
+                plane.set(block, 0, value);
             }
         }
         true
@@ -543,7 +585,6 @@ impl Coefficients {
         let Some(block) = self.block_at(index, row, col) else {
             return true;
         };
-        let keep = self.keep;
         let Some(table) = tables.ac.get(component.ac_table) else {
             return false;
         };
@@ -578,7 +619,7 @@ impl Coefficients {
                 break;
             }
             let value = bits.receive_extend(size).unwrap_or(0);
-            plane.set(block, k, keep, value.saturating_mul(bit_value(al)));
+            plane.set(block, k, value.saturating_mul(bit_value(al)));
             k = k.saturating_add(1);
         }
         true
@@ -604,7 +645,6 @@ impl Coefficients {
         let Some(block) = self.block_at(index, row, col) else {
             return true;
         };
-        let keep = self.keep;
         let Some(table) = tables.ac.get(component.ac_table) else {
             return false;
         };
@@ -620,14 +660,14 @@ impl Coefficients {
                 return false;
             };
             if bit != 0 {
-                let value = plane.value(block, k, keep);
+                let value = plane.value(block, k);
                 if value & p1 == 0 {
                     let moved = if value >= 0 {
                         value.saturating_add(p1)
                     } else {
                         value.saturating_sub(p1)
                     };
-                    plane.set(block, k, keep, moved);
+                    plane.set(block, k, moved);
                 }
             }
             true
@@ -672,7 +712,7 @@ impl Coefficients {
                     } else {
                         if run == 0 {
                             if value != 0 {
-                                plane.set(block, k, keep, value);
+                                plane.set(block, k, value);
                             }
                             k = k.saturating_add(1);
                             break;
@@ -703,65 +743,72 @@ impl Coefficients {
     ///
     /// [`ImageError::Malformed`] only for a size that cannot be represented.
     pub(super) fn finish(mut self) -> ImageResult<Image> {
-        let keep = self.keep;
-        let out_width = self.width.saturating_mul(keep).div_ceil(8).max(1);
-        let out_height = self.height.saturating_mul(keep).div_ceil(8).max(1);
+        let block = self.block;
+        let out_width = self.width.saturating_mul(block).div_ceil(8).max(1);
+        let out_height = self.height.saturating_mul(block).div_ceil(8).max(1);
         let basis = Basis::new();
         let mut samples: Vec<Samples> = Vec::with_capacity(self.planes.len());
         for (plane, component) in self.planes.iter_mut().zip(&self.components) {
+            let size = plane.size;
             // The same plane a baseline decode of this frame writes: padded to
-            // whole MCUs, `blocks_w * keep` across.
+            // whole MCUs, `blocks_w * size` across.
             let mut out = Samples::new(Shape::of(
                 (self.width, self.height),
                 (component.h, component.v),
                 (self.max_h, self.max_v),
-                keep,
+                (size, block),
             ));
             let quant = plane.quant.unwrap_or([1u16; 64]);
+            let per_block = plane.kept.per_block();
             for row in 0..plane.blocks_h {
                 for col in 0..plane.blocks_w {
-                    let block = row.saturating_mul(plane.blocks_w).saturating_add(col);
-                    let mut coefficients = [0.0f32; 64];
+                    let index = row.saturating_mul(plane.blocks_w).saturating_add(col);
                     // Decided over all 63, kept or not, exactly as a baseline
-                    // scan decides it: a block whose only AC coefficients lie
-                    // outside a thumbnail's square is still transformed rather
-                    // than filled, so the two decodes stay bit for bit alike.
-                    let any_ac = plane.nonzero.get(block).is_some_and(|mask| mask & !1 != 0);
-                    for v in 0..keep {
-                        for u in 0..keep {
-                            let at = block
-                                .saturating_mul(keep)
-                                .saturating_mul(keep)
-                                .saturating_add(v.saturating_mul(keep))
-                                .saturating_add(u);
-                            let value = i32::from(plane.values.get(at).copied().unwrap_or(0));
-                            let natural = v.saturating_mul(8).saturating_add(u);
-                            let q = i32::from(quant.get(natural).copied().unwrap_or(1));
-                            #[allow(clippy::cast_precision_loss, reason = "coefficients are small")]
-                            let dequantised = value.saturating_mul(q) as f32;
-                            if let Some(cell) = coefficients.get_mut(natural) {
-                                *cell = dequantised;
-                            }
-                        }
+                    // scan decides it: a block whose only AC coefficients are
+                    // ones a thumbnail's transform ignores is still transformed
+                    // rather than filled, so the two decodes stay bit for bit
+                    // alike.
+                    let any_ac = plane.nonzero.get(index).is_some_and(|mask| mask & !1 != 0);
+                    // Each kept coefficient dequantised into its natural place.
+                    // The rest stay zero, which the transform weighs at zero
+                    // anyway.
+                    let mut coefficients = [0.0f32; 64];
+                    let first = index.saturating_mul(per_block);
+                    for (natural, cell) in coefficients.iter_mut().enumerate() {
+                        let Some(slot) = plane.kept.slot(natural) else {
+                            continue;
+                        };
+                        let value = i32::from(
+                            plane
+                                .values
+                                .get(first.saturating_add(slot))
+                                .copied()
+                                .unwrap_or(0),
+                        );
+                        let q = i32::from(quant.get(natural).copied().unwrap_or(1));
+                        #[allow(clippy::cast_precision_loss, reason = "coefficients are small")]
+                        let dequantised = value.saturating_mul(q) as f32;
+                        *cell = dequantised;
                     }
-                    let pixels = if !any_ac {
+                    let pixels = if !any_ac || size == 1 {
                         // Every output of the transform is the same one
-                        // number; see `flat_block`.
+                        // number -- for a block of one sample, whatever else
+                        // it carries; see `flat_block`.
                         [flat_block(coefficients[0], &basis); 64]
-                    } else if keep == 8 {
+                    } else if size == 8 {
                         idct_8x8(&mut coefficients, &basis);
                         coefficients
                     } else {
                         let mut scaled = [0.0f32; 64];
-                        idct_scaled(&coefficients, &basis, keep, &mut scaled);
+                        idct_scaled(&coefficients, &basis, size, &mut scaled);
                         scaled
                     };
                     store_block(
                         &pixels,
-                        keep,
+                        size,
                         &mut out,
-                        col.saturating_mul(keep),
-                        row.saturating_mul(keep),
+                        col.saturating_mul(size),
+                        row.saturating_mul(size),
                     );
                 }
             }
@@ -776,7 +823,7 @@ impl Coefficients {
                 .map_err(|_| ImageError::Malformed("an impossible width"))?,
             height: u32::try_from(out_height)
                 .map_err(|_| ImageError::Malformed("an impossible height"))?,
-            pixels: to_pixels(out_width, out_height, &samples, keep > 1),
+            pixels: to_pixels(out_width, out_height, &samples, block > 1),
         })
     }
 }

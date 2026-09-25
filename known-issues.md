@@ -165120,9 +165120,14 @@ workaround is in place; `a_listener_the_platform_cannot_vouch_for_is_asked_every
 holds the workaround's two halves. The kernel side is visible directly: `poll`
 a listening socket with a connection pending and `revents` comes back 0.
 
-### [F] A JPEG thumbnail is not the picture libjpeg makes at that scale, and sits half a source pixel off -- 2026-09-25
+### [F] A JPEG thumbnail is not the picture libjpeg makes at that scale, and sits half a source pixel off -- 2026-09-25 -- **fixed 2026-09-25**
 
-**Status:** OPEN — lane F's, and the next thing it takes up.
+**Status:** ✅ FIXED 2026-09-25 (lane F) — design-decisions §1307. The reduced
+transforms now average as libjpeg-turbo's do, and each component is
+reconstructed at the block size libjpeg gives it; every fixture at 1/2, 1/4
+and 1/8 is within 2 levels of TurboJPEG's own scaled decode
+(`tests/jpeg_sampling.rs`), where it was up to 157. The entry below is kept as
+the record of what was wrong.
 
 **In short:** a JPEG thumbnail is made by decoding the photograph directly at a
 half, a quarter or an eighth of its size, which is far cheaper than decoding it

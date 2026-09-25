@@ -58720,6 +58720,13 @@ test of the fixture, not of the bound.
   decode (a thumbnail, box-filtered after), which is libjpeg's implementation
   limit rather than a quality choice. To go back to repetition, make
   `Filter::choose` return `Repeat` for every plane that is not `Same`.
+- **A JPEG thumbnail averages, as libjpeg-turbo's does, rather than
+  truncating the transform** (`gui/imagecodec/src/jpeg.rs` `idct_scaled`,
+  design-decisions §1307). IJG libjpeg 9 truncates instead, which is sharper
+  with some ringing; averaging was chosen because libjpeg-turbo is what users'
+  other programs show, and because it gives the scaled path a reference to be
+  tested against. The cost is that a progressive thumbnail keeps 7x7 or 5x5
+  coefficients a block at half or quarter scale rather than 4x4 or 2x2.
 - **The pointer is drawn over fullscreen direct-scanout frames**
   (`POINTER_OVER_DIRECT_SCANOUT = true`, `gui/compositor/src/server.rs`;
   design-decisions §1301). C-Q18 put the fullscreen case to the operator as a

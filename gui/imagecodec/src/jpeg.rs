@@ -436,6 +436,57 @@ struct Basis {
     /// The same numbers by output position: `columns[x][u]` is `table[u][x]`,
     /// so the row pass can walk one output's weights in order.
     columns: [[f32; 8]; 8],
+    /// The half-size transform's weights: `pairs[m][j]` is the mean of
+    /// `table[PAIRS[j]][x]` over the two positions `x` that output `m` stands
+    /// for. See [`idct_scaled`].
+    pairs: [[f32; 7]; 4],
+    /// The quarter-size transform's, over fours: `fours[m][j]` for
+    /// frequency `FOURS[j]`.
+    fours: [[f32; 5]; 2],
+}
+
+/// The frequencies a half-size reduced transform weighs, in increasing order:
+/// every one but the fourth, whose mean over each pair is zero
+/// ([`kept_frequency`]).
+const PAIRS: [usize; 7] = [0, 1, 2, 3, 5, 6, 7];
+
+/// The frequencies a quarter-size one weighs: the DC and the odd ones.
+const FOURS: [usize; 5] = [0, 1, 3, 5, 7];
+
+/// The weights of the `N`-sample reduced transform over the frequencies
+/// `kept`: each the mean of a basis function over the `8 / N` positions an
+/// output stands for.
+///
+/// In f64, so that the mean of the DC's equal weights is that weight exactly
+/// and [`flat_block`] stays the transform's answer at every scale.
+// `m * group` and `8 / N` are under 8 by construction, N being 2 or 4.
+#[allow(clippy::arithmetic_side_effects, reason = "0..8 by construction")]
+fn averaged<const N: usize, const K: usize>(
+    table: &[[f32; 8]; 8],
+    kept: [usize; K],
+) -> [[f32; K]; N] {
+    let group = 8 / N.max(1);
+    let mut weights = [[0.0f32; K]; N];
+    for (m, output) in weights.iter_mut().enumerate() {
+        for (cell, u) in output.iter_mut().zip(kept) {
+            let sum: f64 = table
+                .get(u)
+                .map_or(&[][..], |row| row.as_slice())
+                .iter()
+                .skip(m * group)
+                .take(group)
+                .map(|&w| f64::from(w))
+                .sum();
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_precision_loss,
+                reason = "the mean of two or four f32 weights"
+            )]
+            let mean = (sum / group as f64) as f32;
+            *cell = mean;
+        }
+    }
+    weights
 }
 
 impl Basis {
@@ -468,7 +519,12 @@ impl Basis {
                 }
             }
         }
-        Self { table, columns }
+        Self {
+            pairs: averaged::<4, 7>(&table, PAIRS),
+            fours: averaged::<2, 5>(&table, FOURS),
+            table,
+            columns,
+        }
     }
 
     fn at(&self, u: usize, x: usize) -> f32 {
@@ -480,85 +536,198 @@ impl Basis {
     }
 }
 
-/// The inverse DCT at a reduced size, using only the coefficients that matter.
+/// The inverse DCT at a reduced size: each output sample the mean of the
+/// `8 / n` x `8 / n` samples the full transform would make where it stands.
 ///
-/// A block's top-left `n` x `n` coefficients are its low frequencies, and
-/// transforming just those yields an `n` x `n` image of the block directly --
-/// a scaled decode that costs less than a full one rather than more. At `n =
-/// 1` that is the DC coefficient alone: the block's average, which is exactly
-/// what a one-pixel-per-block thumbnail wants.
+/// That is libjpeg-turbo's scaled decode (`jidctred.c`), and so a thumbnail
+/// here is the picture every other decoder makes at that size: a scaled decode
+/// *is* the full decode box-filtered, done inside the transform. The mean of a
+/// basis function over a group of samples is a number, so each reduced
+/// transform is the full one with averaged weights ([`averaged`]), and
+/// it needs only the frequencies whose averages are not all zero: over pairs,
+/// every one but the fourth; over fours, the DC and the odd ones; over the
+/// whole block the DC alone, which is exactly what a one-pixel-per-block
+/// thumbnail wants. That is why a JPEG thumbnail need never hold the full
+/// picture: decoding a 4000x5333 photograph whole to make a 128-pixel preview
+/// allocates about 85 MB on the way, and at `n = 1` a sixty-fourth of that --
+/// `apps/explorer`'s own comment records paying that cost down for PNG.
 ///
-/// This is why a JPEG thumbnail need never hold the full picture. Decoding a
-/// 4000x5333 photograph whole to make a 128-pixel preview allocates about 85
-/// MB on the way; at `n = 1` it allocates a sixty-fourth of that, and
-/// `apps/explorer`'s own comment records paying that cost down for PNG for the
-/// same reason.
-// The same bounded float arithmetic as the full transform, over `0..n` where
-// `n` is `1..=8`; the one index expression is `y * 8 + x` with both under 8,
-// and every access through it is a `get`.
-#[allow(
-    clippy::arithmetic_side_effects,
-    reason = "bounded coefficients and 0..8 indices"
-)]
+/// Only those frequencies are read at all ([`kept_frequency`]). Leaving the
+/// others out changes no bit of any sample: they are the ones the averaged
+/// weights are zero for, a zero weight adds `+0.0` to a sum that is never
+/// `-0.0`, and the rest are added in the same increasing order either way.
+/// That is also what lets a progressive thumbnail not keep them and still
+/// decode bit for bit what a baseline one does. Walking only them is most of
+/// what makes a thumbnail cheap: at an eighth of the size the transform is the
+/// DC alone, [`flat_block`]'s arithmetic, and over fours it is five
+/// frequencies a side rather than eight.
+///
+/// An earlier version transformed only the top-left `n` x `n` coefficients and
+/// sampled the basis at whole positions: a reduced picture half a source pixel
+/// off the full one, which no reference decoder makes. The one before that
+/// normalised by `n/8`, which made every block an eighth of its value and the
+/// picture flat grey.
+///
+/// `n` is 1, 2, 4 or 8, the sizes [`scale_block`] rounds a request to; any
+/// other is transformed at full size.
 fn idct_scaled(block: &[f32; 64], basis: &Basis, n: usize, out: &mut [f32; 64]) {
-    let n = n.clamp(1, 8);
-    if n == 8 {
-        let mut full = *block;
-        idct_8x8(&mut full, basis);
-        *out = full;
-        return;
-    }
-    // Rows first, into the top-left n x n of the scratch, then columns. The
-    // normalisation is the same 1/4 as the full transform and does *not*
-    // depend on how many terms are summed -- it is fixed by the definition.
-    //
-    // The first version scaled by `n/8` on the reasoning that fewer basis
-    // functions carry less amplitude. That is wrong, and wrong in a way no
-    // test caught: at `n = 1` it made every block an eighth of its true
-    // value, so every sample collapsed toward the 128 that centres the range
-    // and the picture came out as flat mid-grey. Comparing the mean colour of
-    // a scaled decode against a full one showed it at once -- (124, 127, 131)
-    // against (103, 128, 158), every channel pulled to the middle.
-    let mut scratch = [0.0f32; 64];
-    for y in 0..n {
-        for x in 0..n {
-            let mut sum = 0.0f32;
-            for u in 0..n {
-                sum += basis.at(u, scaled_position(x, n))
-                    * block.get(y * 8 + u).copied().unwrap_or(0.0);
+    match n {
+        4 => reduced_transform(block, &PAIRS, &basis.pairs, out),
+        2 => reduced_transform(block, &FOURS, &basis.fours, out),
+        1 => {
+            // The DC alone: every row but the first sums to zero and the
+            // first to the DC times its weight, which is `flat_block`'s
+            // arithmetic exactly.
+            if let Some(slot) = out.first_mut() {
+                *slot = flat_block(block.first().copied().unwrap_or(0.0), basis);
             }
-            if let Some(slot) = scratch.get_mut(y * 8 + x) {
-                *slot = sum / 2.0;
+        }
+        _ => {
+            let mut full = *block;
+            idct_8x8(&mut full, basis);
+            *out = full;
+        }
+    }
+}
+
+/// [`idct_scaled`] at `N` samples a side, over the `K` frequencies `kept`
+/// with `weights[m][j]` for output `m` and frequency `kept[j]`.
+///
+/// Generic over both so that each size is its own fully unrolled loop: the
+/// first version, one routine walking a runtime list of frequencies, made an
+/// eighth-scale 4:2:0 thumbnail -- whose chroma this transform reconstructs at
+/// 2x2 -- measurably slower than the rest of its decode.
+///
+/// **Mirrored outputs share their sums.** A basis function is symmetric about
+/// the block's centre if its frequency is even and antisymmetric if it is
+/// odd, so the output `N - 1 - m` has output `m`'s weights with the odd ones'
+/// signs flipped. Each pair is therefore one even sum `E` and one odd sum `O`,
+/// giving `E + O` and `E - O`: half the multiplications, which is what keeps a
+/// quarter-scale decode, whose averages weigh five frequencies a side where
+/// the old truncated transform weighed two, from costing more than it did.
+/// Only the first `N / 2` rows of `weights` are read.
+fn reduced_transform<const N: usize, const K: usize>(
+    block: &[f32; 64],
+    kept: &[usize; K],
+    weights: &[[f32; K]; N],
+    out: &mut [f32; 64],
+) {
+    let odd = kept.map(|u| u % 2 == 1);
+    let half = N / 2;
+    // One output pair from `values` (one per kept frequency): the even sum
+    // and the odd sum under output `m`'s weights, each in increasing
+    // frequency.
+    let sums = |m: &[f32; K], values: &[f32; K]| {
+        let (mut even, mut odd_sum) = (0.0f32, 0.0f32);
+        for ((&w, &c), &is_odd) in m.iter().zip(values).zip(&odd) {
+            if is_odd {
+                odd_sum += w * c;
+            } else {
+                even += w * c;
+            }
+        }
+        (even, odd_sum)
+    };
+    // Rows: each weighed coefficient row, its weighed coefficients gathered
+    // side by side, to `N` samples. Scratch row `j` is frequency `kept[j]`'s.
+    let rows = block.as_chunks::<8>().0;
+    let mut scratch = [[0.0f32; N]; K];
+    let mut live = [false; K];
+    for ((&v, reduced), alive) in kept.iter().zip(scratch.iter_mut()).zip(live.iter_mut()) {
+        let Some(row) = rows.get(v) else {
+            continue;
+        };
+        let gathered = kept.map(|u| row.get(u).copied().unwrap_or(0.0));
+        if gathered.iter().all(|&c| c == 0.0) {
+            continue;
+        }
+        *alive = true;
+        for (m, output) in weights.iter().enumerate().take(half) {
+            let (even, odd_sum) = sums(output, &gathered);
+            // Halved as the full transform's sums are: its normalisation, not
+            // a mean of the two halves, which is why it is not `midpoint`.
+            let (near, far) = (even + odd_sum, even - odd_sum);
+            if let Some(slot) = reduced.get_mut(m) {
+                *slot = near / 2.0;
+            }
+            if let Some(slot) = reduced.get_mut(N.saturating_sub(1).saturating_sub(m)) {
+                *slot = far / 2.0;
             }
         }
     }
-    for x in 0..n {
-        for y in 0..n {
-            let mut sum = 0.0f32;
-            for v in 0..n {
-                sum += basis.at(v, scaled_position(y, n))
-                    * scratch.get(v * 8 + x).copied().unwrap_or(0.0);
+    // Columns: for each output row pair, the even and odd sums down every
+    // column at once, from the live rows in increasing frequency.
+    let out_rows = out.as_chunks_mut::<8>().0;
+    for (m, output) in weights.iter().enumerate().take(half) {
+        let mut even = [0.0f32; N];
+        let mut odd_sum = [0.0f32; N];
+        for (((reduced, &w), &alive), &is_odd) in scratch.iter().zip(output).zip(&live).zip(&odd) {
+            if alive {
+                let acc = if is_odd { &mut odd_sum } else { &mut even };
+                for (a, &s) in acc.iter_mut().zip(reduced) {
+                    *a += w * s;
+                }
             }
-            if let Some(slot) = out.get_mut(y * 8 + x) {
-                *slot = sum / 2.0;
+        }
+        if let Some(row) = out_rows.get_mut(m) {
+            for ((slot, &e), &o) in row.iter_mut().zip(&even).zip(&odd_sum) {
+                let near = e + o;
+                *slot = near / 2.0;
+            }
+        }
+        if let Some(row) = out_rows.get_mut(N.saturating_sub(1).saturating_sub(m)) {
+            for ((slot, &e), &o) in row.iter_mut().zip(&even).zip(&odd_sum) {
+                *slot = (e - o) / 2.0;
             }
         }
     }
 }
 
-/// Where an output sample of an `n`-point transform sits among the 8.
+/// Whether frequency `k` (of 0 to 7) counts in an `n`-sample reduced
+/// transform: the DC always, and any other frequency whose mean over a group
+/// of `8 / n` samples is not zero everywhere -- which is every frequency not a
+/// multiple of `n`. Over pairs (`n = 4`) only the fourth cancels; over fours
+/// (`n = 2`), the even ones; over the whole block, all but the DC.
+fn kept_frequency(k: usize, n: usize) -> bool {
+    k == 0 || n == 0 || !k.is_multiple_of(n)
+}
+
+/// The block size a scaled decode reconstructs at, for a request of
+/// `requested` samples a block: 1, 2, 4 or 8, rounded down, because a reduced
+/// transform averages whole groups of samples.
+const fn scale_block(requested: usize) -> usize {
+    match requested {
+        0..=1 => 1,
+        2..=3 => 2,
+        4..=7 => 4,
+        _ => 8,
+    }
+}
+
+/// The size libjpeg-turbo reconstructs a component's blocks at when the
+/// picture's are `block` samples a side (`jdmaster.c`'s `DCT_scaled_size`).
 ///
-/// The basis table is built for eight positions; an `n`-point transform wants
-/// the sample at the centre of the `8/n` it stands for, which keeps the
-/// reduced image aligned with the full one instead of shifted a fraction of a
-/// block to one side.
-const fn scaled_position(index: usize, n: usize) -> usize {
-    // `n` is clamped to 1..=8 by the caller, so the divisor is never zero and
-    // the step is 1..=8; `index` is below `n`, so the product is under 64 and
-    // the result is clamped to a valid position regardless.
-    let step = 8usize.saturating_div(if n == 0 { 1 } else { n });
-    let centre = index.saturating_mul(step).saturating_add(step / 2);
-    if centre > 7 { 7 } else { centre }
+/// The picture's size, doubled while the component is sampled coarsely enough
+/// in *both* directions that a doubled block still covers no more of the
+/// output than one of the picture's own. So in a scaled decode chroma halved
+/// both ways (4:2:0) is reconstructed by the transform straight at the
+/// output's resolution, which is a better picture than transforming it small
+/// and upsampling -- and is what every decoder built on libjpeg shows. Halved
+/// one way only (4:2:2, 4:4:0) it cannot be, and is upsampled as at full
+/// size.
+fn component_block(block: usize, (h, v): (usize, usize), (max_h, max_v): (usize, usize)) -> usize {
+    let mut size = block.max(1);
+    while size < 8
+        && max_h
+            .saturating_mul(block)
+            .is_multiple_of(h.saturating_mul(size).saturating_mul(2))
+        && max_v
+            .saturating_mul(block)
+            .is_multiple_of(v.saturating_mul(size).saturating_mul(2))
+    {
+        size = size.saturating_mul(2);
+    }
+    size
 }
 
 /// The inverse discrete cosine transform, 8x8, separable.
@@ -1081,9 +1250,9 @@ fn decode_scan(
     }
 
     // How many pixels each 8x8 block becomes. Eight is a full decode; less is
-    // a scaled one, done by transforming fewer coefficients rather than by
-    // decoding everything and throwing most of it away.
-    let block_size = block_size.clamp(1, 8);
+    // a scaled one, done inside the transform rather than by decoding
+    // everything and throwing most of it away.
+    let block_size = scale_block(block_size);
     let max_h = components.iter().map(|c| c.h).max().unwrap_or(1);
     let max_v = components.iter().map(|c| c.v).max().unwrap_or(1);
     // MCU geometry is in source pixels and does not change with the scale; only
@@ -1095,14 +1264,20 @@ fn decode_scan(
 
     // One plane per component, padded out to whole MCUs so a block never has
     // to be clipped while it is being written.
+    // Each component's own block size: the picture's, or twice it for chroma a
+    // scaled decode reconstructs at the output's resolution.
+    let sizes: Vec<usize> = components
+        .iter()
+        .map(|c| component_block(block_size, (c.h, c.v), (max_h, max_v)))
+        .collect();
     let mut planes: Vec<Samples> = Vec::with_capacity(components.len());
     let mut plane_bytes = 0usize;
-    for component in &components {
+    for (component, &size) in components.iter().zip(&sizes) {
         let shape = Shape::of(
             (width, height),
             (component.h, component.v),
             (max_h, max_v),
-            block_size,
+            (size, block_size),
         );
         let size = shape.len();
         // Four times the pixel budget: the planes are padded out to whole MCUs
@@ -1146,19 +1321,21 @@ fn decode_scan(
                 since_restart = 0;
             }
             for (index, component) in components.iter_mut().enumerate() {
+                let size = sizes.get(index).copied().unwrap_or(block_size);
                 for by in 0..component.v {
                     for bx in 0..component.h {
                         let mut block = [0.0f32; 64];
                         let any_ac = decode_block(&mut bits, component, tables, &mut block)?;
-                        if !any_ac {
+                        if !any_ac || size == 1 {
                             // Every output of the transform is the same one
-                            // number; see `flat_block`.
+                            // number -- for a block of one sample, whatever
+                            // else it carries; see `flat_block`.
                             block = [flat_block(block[0], &basis); 64];
-                        } else if block_size == 8 {
+                        } else if size == 8 {
                             idct_8x8(&mut block, &basis);
                         } else {
                             let mut scaled = [0.0f32; 64];
-                            idct_scaled(&block, &basis, block_size, &mut scaled);
+                            idct_scaled(&block, &basis, size, &mut scaled);
                             block = scaled;
                         }
                         let Some(plane) = planes.get_mut(index) else {
@@ -1167,12 +1344,12 @@ fn decode_scan(
                         let origin_x = mcu_x
                             .saturating_mul(component.h)
                             .saturating_add(bx)
-                            .saturating_mul(block_size);
+                            .saturating_mul(size);
                         let origin_y = mcu_y
                             .saturating_mul(component.v)
                             .saturating_add(by)
-                            .saturating_mul(block_size);
-                        store_block(&block, block_size, plane, origin_x, origin_y);
+                            .saturating_mul(size);
+                        store_block(&block, size, plane, origin_x, origin_y);
                     }
                 }
             }
@@ -1502,9 +1679,12 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
 /// photograph, to produce 64 KB of preview" -- and a JPEG path that decoded
 /// whole would have handed it straight back.
 ///
-/// The block size is a power of two because that is what transforming a
-/// prefix of the coefficients gives; the caller's exact box is fitted by
-/// averaging what remains, which is at most a 2x reduction.
+/// The block size is a power of two because a reduced transform averages
+/// whole groups of samples (`idct_scaled`); the caller's exact box is fitted by
+/// averaging what remains, which is at most a 2x reduction. So the whole path
+/// is a box filter, its first part done inside the transform exactly as
+/// libjpeg-turbo does it -- and a thumbnail here is the one every decoder
+/// built on libjpeg makes at the same size, to within rounding.
 ///
 /// **Measured**, release build, a 4000x5333 photograph (7.5 MB, quality 90,
 /// 4:2:0): a 128-pixel thumbnail in about 0.34 s and the whole picture in about
@@ -1959,7 +2139,7 @@ mod tests {
                 "DC {dc}: {flat} against {:?}",
                 &full[..4]
             );
-            for n in 1..8 {
+            for n in [1, 2, 4] {
                 let mut scaled = [0.0f32; 64];
                 idct_scaled(&block, &basis, n, &mut scaled);
                 for y in 0..n {
@@ -1973,6 +2153,125 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// What a scaled decode promises: each reduced sample is the mean of the
+    /// full transform's samples over the square it stands for.
+    #[test]
+    fn a_reduced_transform_is_the_mean_of_the_full_one() {
+        let basis = Basis::new();
+        let mut dice = Dice(0xB0C5_F117);
+        for case in 0..2000 {
+            let mut block = [0.0f32; 64];
+            let reach = if case % 2 == 0 {
+                64
+            } else {
+                1 + dice.below(20) as usize
+            };
+            for &slot in ZIGZAG.iter().take(reach) {
+                if dice.below(3) != 0 {
+                    block[slot] = (dice.below(2048) as i32 - 1024) as f32;
+                }
+            }
+            let mut full = block;
+            idct_8x8_reference(&mut full, &basis);
+            for n in [4usize, 2, 1] {
+                let group = 8 / n;
+                let mut reduced = [0.0f32; 64];
+                idct_scaled(&block, &basis, n, &mut reduced);
+                for y in 0..n {
+                    for x in 0..n {
+                        let mut mean = 0.0f64;
+                        for dy in 0..group {
+                            for dx in 0..group {
+                                mean += f64::from(full[(y * group + dy) * 8 + x * group + dx]);
+                            }
+                        }
+                        mean /= (group * group) as f64;
+                        let got = f64::from(reduced[y * 8 + x]);
+                        assert!(
+                            (got - mean).abs() < 1e-2,
+                            "case {case}, n {n}, ({x}, {y}): {got} against the mean {mean}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The coefficients a reduced transform gives no weight to change none of
+    /// its samples, not even in the last bit: what lets a progressive
+    /// thumbnail drop them and still be the baseline one bit for bit.
+    #[test]
+    fn a_frequency_that_cancels_changes_no_sample_at_all() {
+        let basis = Basis::new();
+        let mut dice = Dice(0x0DD5_EED5);
+        for n in [4usize, 2, 1] {
+            for _ in 0..300 {
+                let mut block = [0.0f32; 64];
+                for cell in &mut block {
+                    if dice.below(2) == 0 {
+                        *cell = (dice.below(2048) as i32 - 1024) as f32;
+                    }
+                }
+                let mut dropped = block;
+                for (natural, cell) in dropped.iter_mut().enumerate() {
+                    if !kept_frequency(natural % 8, n) || !kept_frequency(natural / 8, n) {
+                        *cell = 0.0;
+                    }
+                }
+                let (mut whole, mut kept) = ([0.0f32; 64], [0.0f32; 64]);
+                idct_scaled(&block, &basis, n, &mut whole);
+                idct_scaled(&dropped, &basis, n, &mut kept);
+                for i in 0..64 {
+                    assert_eq!(whole[i].to_bits(), kept[i].to_bits(), "n {n}, sample {i}");
+                }
+            }
+        }
+        // And how many a side that leaves: every one, all but the fourth, the
+        // DC and the odd ones, the DC -- the lists the transforms walk.
+        for (n, side) in [(8, 8), (4, 7), (2, 5), (1, 1)] {
+            assert_eq!(
+                (0..8).filter(|&k| kept_frequency(k, n)).count(),
+                side,
+                "n {n}"
+            );
+        }
+        let list = |n| {
+            (0..8)
+                .filter(|&k| kept_frequency(k, n))
+                .collect::<alloc::vec::Vec<_>>()
+        };
+        assert_eq!(list(4), PAIRS);
+        assert_eq!(list(2), FOURS);
+    }
+
+    #[test]
+    fn each_component_is_reconstructed_at_the_size_libjpeg_gives_it() {
+        // (picture's block, sampling, largest sampling, the component's block)
+        let cases = [
+            (8, (1, 1), (2, 2), 8), // full size: never more than 8
+            (4, (1, 1), (2, 2), 8), // 4:2:0 chroma at half scale: a full transform
+            (2, (1, 1), (2, 2), 4), // ... at a quarter
+            (1, (1, 1), (2, 2), 2), // ... at an eighth
+            (4, (2, 2), (2, 2), 4), // its luma: the picture's own
+            (4, (1, 1), (2, 1), 4), // 4:2:2 chroma: halved one way only
+            (4, (1, 1), (1, 2), 4), // 4:4:0 chroma: likewise
+            (2, (1, 1), (4, 1), 2), // 4:1:1 chroma: likewise
+            (1, (1, 1), (4, 4), 4), // quartered both ways: doubled twice
+            (1, (1, 1), (1, 1), 1), // 4:4:4
+        ];
+        for (block, sampling, max, want) in cases {
+            assert_eq!(
+                component_block(block, sampling, max),
+                want,
+                "{block} {sampling:?} {max:?}"
+            );
+        }
+        assert_eq!(
+            [0, 1, 2, 3, 4, 5, 7, 8, 9].map(scale_block),
+            [1, 1, 2, 2, 4, 4, 4, 8, 8]
+        );
     }
 
     /// The chroma tables give what the formula gives, for every one of the

@@ -11264,8 +11264,10 @@ of TIFF are not read yet (listed below) and are refused by name.
   palette made grey or RGB).
 - `read.rs`: `TIFFFillStrip`/`TIFFFillTile` and the codecs -- none,
   PackBits, Deflate, LZW in `lzw.rs` (both the TIFF 6.0 codes and the
-  old-style ones libtiff still reads) -- with the horizontal predictor,
-  `FillOrder`, and big-endian 16-bit samples.
+  old-style ones libtiff still reads), and CCITT fax in `fax.rs` (Group 3 1-D
+  and 2-D, Group 4, Modified Huffman byte- and word-aligned: `tif_fax3.c`'s
+  macros written out, its code tables built as `mkg3states` builds them) --
+  with the horizontal predictor, `FillOrder`, and big-endian 16-bit samples.
 - `rgba.rs`: `tif_getimage.c` -- `TIFFRGBAImageOK`, `TIFFRGBAImageBegin`, the
   strip and tile readers and their pixel routines: grey of 1 to 16 bits,
   palettes, RGB of 8 and 16 with each kind of alpha, CMYK, `YCbCr` (all seven
@@ -11313,26 +11315,35 @@ of TIFF are not read yet (listed below) and are refused by name.
 
 ### Not yet read
 
-CCITT (fax) compression, JPEG and old-style JPEG compression, and NeXT,
-ThunderScan, SGI LogLuv and PixarLog: libtiff reads them, and this refuses
-them by name, for now. (`YCbCr` and CIE L*a*b* samples followed on the same
-day, held the same way: 23 more fixtures, and 12,000 mutants of them without
-a disagreement.) Only the first page of a
-multi-page TIFF is read -- as gdk-pixbuf reads it.
+JPEG and old-style JPEG compression, and NeXT, ThunderScan, SGI LogLuv and
+PixarLog: libtiff reads them, and this refuses them by name, for now.
+(`YCbCr` and CIE L*a*b* samples followed on the same day, held the same way:
+23 more fixtures, and 12,000 mutants of them without a disagreement. So did
+fax, whose leniency is kept whole -- a bad code word ends only its row, a
+Group 4 strip cut short keeps the rows it has, and a Group 3 strip whose data
+runs out is decoded again from its start without end-of-line codes, into the
+rows still to fill, which can show a cut file whole and wrong; and a fax
+tile that fails is shown as far as it decoded, because libtiff tests a
+tile's decode for truth where it tests a strip's for success, and fax fails
+with -1: 25 fixtures, from libtiff's own encoder, and 12,000 mutants.) Only
+the first page of a multi-page TIFF is read -- as gdk-pixbuf reads it.
 
 ### How it is held
 
-`tests/tiff.rs` against 137 fixtures (`tests/data/generate_tiff.py`: a
+`tests/tiff.rs` against 186 fixtures (`tests/data/generate_tiff.py`: a
 small TIFF writer for every layout, plus Pillow's libtiff-backed writer for
 real encoder output), each answered by libtiff 4.7.1 built from pinned
-sources: 115 decoded to exactly libtiff's raster, 22 refused where libtiff
+sources: 157 decoded to exactly libtiff's raster, 29 refused where libtiff
 refuses. Separate tests hold the straight-alpha conversion to libtiff's
 premultiplied raster, the eight orientations to the stored picture turned,
 limits, and every bit flip of eight fixtures to not panicking. A mutation
 fuzzer against the same libtiff -- bit flips, entry types, counts and values
 changed, entries dropped and duplicated, files cut short -- found no
 disagreement in 30,000 files without Deflate data, and in 8,000 with it only
-the nine Deflate cases above.
+the nine Deflate cases above; the rounds for `YCbCr`, CIELab and fax (12,000
+each) found none once the two port errors the fax round turned up were
+fixed -- `RowsPerStrip` also sets the tile size while no tile tags have
+been read, and the tile truth test above.
 
 ## §200 — The B-KNULLJUMP hunt runs the *uninstrumented* kernel first (E), and escalates to the optimized KASAN build (A) only if that fails to settle it
 

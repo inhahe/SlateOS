@@ -589,6 +589,9 @@ pub(super) struct Directory {
     pub(super) white_point: Option<[f32; 2]>,
     pub(super) ink_set: u16,
     pub(super) predictor: u16,
+    /// `Group3Options`, of a Group 3 fax image; bit 0 says rows may be
+    /// coded against the row before.
+    pub(super) group3_options: u32,
     /// Whether a codec hands back this `YCbCr` image's chroma already
     /// upsampled (`TIFF_UPSAMPLED`, which the JPEG codec sets when asked for
     /// RGB), so sizes count every pixel's three samples.
@@ -627,6 +630,7 @@ impl Directory {
             white_point: None,
             ink_set: 1,
             predictor: 1,
+            group3_options: 0,
             upsampled: false,
             strips: 0,
             strips_per_image: 0,
@@ -940,6 +944,13 @@ pub(super) fn read(file: &File<'_>, offset: u64) -> ImageResult<Directory> {
                     return Err(bad("TIFF RowsPerStrip"));
                 }
                 dir.rows_per_strip = v;
+                // Until a tile tag has been read, rows per strip is also the
+                // tile height, and the tile the width of the image so far: a
+                // TileWidth later with no TileLength makes tiles this tall.
+                if !tile_dimensions_set {
+                    dir.tile_length = v;
+                    dir.tile_width = dir.width;
+                }
                 rows_per_strip_set = true;
                 entry.ignore = true;
             }
@@ -1319,6 +1330,11 @@ fn second_pass_field(file: &File<'_>, entry: &Entry, dir: &mut Directory) {
         tag::WHITE_POINT => {
             if let Some([x, y]) = file.floats(entry, 2).as_deref() {
                 dir.white_point = Some([*x, *y]);
+            }
+        }
+        tag::GROUP3_OPTIONS => {
+            if let Ok(v) = file.long(entry) {
+                dir.group3_options = v;
             }
         }
         tag::YCBCR_SUBSAMPLING => {

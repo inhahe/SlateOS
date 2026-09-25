@@ -17,7 +17,8 @@
 //!   `StripByteCounts`, colour channels that should have been extra
 //!   samples, a palette image with no palette).
 //! - **Strips and tiles** ([`read`]): where the bytes are, `FillOrder`, and
-//!   the codecs -- none, PackBits, LZW (both styles), Deflate -- with the
+//!   the codecs -- none, PackBits, LZW (both styles), Deflate, and CCITT fax
+//!   ([`fax`]: Group 3 1-D and 2-D, Group 4, Modified Huffman) -- with the
 //!   horizontal predictor and big-endian 16-bit samples.
 //! - **Samples to pixels** ([`rgba`]): grey of 1 to 16 bits, palettes, RGB
 //!   of 8 and 16 bits with or without alpha, CMYK, `YCbCr` at every
@@ -47,12 +48,13 @@
 //!
 //! # What is not here yet
 //!
-//! CCITT fax compression, JPEG and old-style JPEG, and the rarer codecs
-//! (NeXT, ThunderScan, SGI LogLuv, PixarLog) are refused by name. libtiff opens the first page only here too; the others
+//! JPEG and old-style JPEG, and the rarer codecs (NeXT, ThunderScan, SGI
+//! LogLuv, PixarLog) are refused by name. libtiff opens the first page only here too; the others
 //! are not reached.
 
 mod color;
 mod dir;
+mod fax;
 mod lzw;
 mod read;
 mod rgba;

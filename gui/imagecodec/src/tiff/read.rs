@@ -13,6 +13,7 @@
 use alloc::vec::Vec;
 
 use super::dir::{self, Directory, File, compression};
+use super::fax::{self, Fax};
 use super::lzw::Lzw;
 use crate::{ImageError, ImageResult};
 
@@ -31,6 +32,7 @@ pub(super) struct Reader<'a> {
     /// A bit-reversed copy of the current strip, for `FillOrder` 2.
     reversed: Vec<u8>,
     lzw: Option<Lzw>,
+    fax: Option<Fax>,
     /// The codec's one-time setup (`tif_setupdecode`), once it has run.
     setup: Option<bool>,
 }
@@ -44,6 +46,7 @@ impl<'a> Reader<'a> {
             raw_in_file: false,
             reversed: Vec::new(),
             lzw: None,
+            fax: None,
             setup: None,
         }
     }
@@ -91,7 +94,7 @@ impl<'a> Reader<'a> {
         let dest = out
             .get_mut(..size)
             .ok_or(ImageError::Malformed("TIFF strip larger than its buffer"))?;
-        self.run_codec(raw, dest)?;
+        self.run_codec(raw, dest, dir::strip_offset(self.dir, index))?;
         self.after(dest)
     }
 
@@ -145,19 +148,59 @@ impl<'a> Reader<'a> {
         Ok(Raw::Reversed)
     }
 
-    /// The codec's one-time setup: for the codecs with a predictor, whether
-    /// the predictor can apply to these samples (`PredictorSetup`). A setup
+    /// The codec's one-time setup (`tif_setupdecode`): for the codecs
+    /// with a predictor, whether it can apply to these samples
+    /// (`PredictorSetup`); for fax, its state (`Fax3SetupState`). A setup
     /// that fails fails every strip.
     fn setup(&mut self) -> ImageResult<()> {
-        let ok = *self.setup.get_or_insert_with(|| predictor_valid(self.dir));
-        if ok {
+        if self.setup.is_none() {
+            let ok = predictor_valid(self.dir) && self.setup_fax();
+            self.setup = Some(ok);
+        }
+        if self.setup == Some(true) {
             Ok(())
         } else {
-            Err(ImageError::Unsupported("TIFF predictor for these samples"))
+            Err(ImageError::Unsupported(
+                "TIFF compression for these samples",
+            ))
         }
     }
 
-    fn run_codec(&mut self, raw: Raw, out: &mut [u8]) -> ImageResult<()> {
+    /// `Fax3SetupState`, for the fax schemes: true for any other.
+    fn setup_fax(&mut self) -> bool {
+        let dir = self.dir;
+        let kind = match dir.compression {
+            compression::CCITT_RLE => fax::Kind::Rle {
+                word_aligned: false,
+            },
+            compression::CCITT_RLEW => fax::Kind::Rle { word_aligned: true },
+            compression::CCITT_FAX3 => fax::Kind::Group3 {
+                two_d: dir.group3_options & 1 != 0,
+            },
+            compression::CCITT_FAX4 => fax::Kind::Group4,
+            _ => return true,
+        };
+        let (row_bytes, row_pixels) = if dir.tiled {
+            (dir.tile_row_size(), dir.tile_width)
+        } else {
+            (dir.scanline_size(), dir.width)
+        };
+        let Some(row_bytes) = row_bytes else {
+            return false;
+        };
+        self.fax = Fax::new(
+            kind,
+            dir.bits_per_sample,
+            dir.samples_per_pixel,
+            dir.planar_config == 2,
+            row_bytes,
+            row_pixels,
+            dir.fill_order,
+        );
+        self.fax.is_some()
+    }
+
+    fn run_codec(&mut self, raw: Raw, out: &mut [u8], offset: u64) -> ImageResult<()> {
         let bytes: &[u8] = match raw {
             Raw::File { start, len } => self
                 .file
@@ -175,6 +218,20 @@ impl<'a> Reader<'a> {
             }
             compression::PACKBITS => packbits(bytes, out),
             compression::LZW => self.lzw.get_or_insert_with(Lzw::new).decode(bytes, out),
+            compression::CCITT_RLE
+            | compression::CCITT_RLEW
+            | compression::CCITT_FAX3
+            | compression::CCITT_FAX4 => {
+                let fax = self
+                    .fax
+                    .as_mut()
+                    .ok_or(ImageError::Unsupported("TIFF fax"))?;
+                let decoded = fax.decode(bytes, out, offset);
+                // libtiff's fax decoders fail with -1, and it tests a
+                // strip's decode with `<= 0` but a tile's for truth: a
+                // fax tile that fails is shown as far as it decoded.
+                if self.dir.tiled { Ok(()) } else { decoded }
+            }
             compression::DEFLATE | compression::ADOBE_DEFLATE => {
                 let full = if self.dir.tiled {
                     self.dir.tile_size()

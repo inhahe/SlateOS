@@ -42,7 +42,7 @@ import subprocess
 import sys
 import zlib
 
-from PIL import Image
+from PIL import Image, TiffImagePlugin
 
 HERE = pathlib.Path(__file__).parent
 
@@ -262,7 +262,7 @@ def count_of(kind: int, values) -> int:
 def write_tiff(entries: list[tuple[int, int, object]], chunks: list[bytes], *, big_endian: bool = False,
                bigtiff: bool = False, offsets_tag: int = STRIP_OFFSETS, counts_tag: int | None = STRIP_BYTE_COUNTS,
                counts: list[int] | None = None, offsets_kind: int = LONG, counts_kind: int = LONG,
-               truncate: int | None = None, magic: bytes | None = None) -> bytes:
+               truncate: int | None = None, magic: bytes | None = None, align: bool = True) -> bytes:
     """A TIFF of one directory: `entries` as (tag, type, values), and the
     strips or tiles in `chunks`, whose offsets and byte counts are added as
     `offsets_tag` and `counts_tag` (`counts` overriding the true sizes, and
@@ -271,8 +271,11 @@ def write_tiff(entries: list[tuple[int, int, object]], chunks: list[bytes], *, b
     head_size = 16 if bigtiff else 8
     out = bytearray(head_size)
     offsets = []
+    if not align:
+        # One byte, so the strips start at an odd offset.
+        out += b"\0"
     for chunk in chunks:
-        if len(out) % 2:
+        if align and len(out) % 2:
             out += b"\0"
         offsets.append(len(out))
         out += chunk
@@ -660,6 +663,10 @@ def fixtures() -> dict[str, bytes]:
                                    extra=[colour_map(4)])
     f["rgb8_tile_wider_than_picture"] = tiff(picture(9, 7, 3, 8, 25), 8, 2, Layout(tile=(16, 16)))
     f["rgb8_odd_tile_width"] = tiff(big, 8, 2, Layout(tile=(10, 16)))
+    # TileWidth and no TileLength: libtiff takes the tile height from
+    # RowsPerStrip, read first, and the file is one row of 16x21 tiles.
+    f["rgb8_tile_length_from_rows_per_strip"] = tiff(big, 8, 2, Layout(tile=(16, 21)),
+                                                     extra=[(ROWS_PER_STRIP, LONG, [21])], drop=(TILE_LENGTH,))
     f["grey1_odd_tile_width"] = tiff(picture(37, 21, 1, 1, 26), 1, 1, Layout(tile=(10, 16)))
     # Compression.
     for name, scheme in (("packbits", PACKBITS), ("lzw", LZW), ("deflate", ADOBE_DEFLATE), ("zip", DEFLATE)):
@@ -761,6 +768,110 @@ def premultiplied(pixels: list[list[list[int]]]) -> list[list[list[int]]]:
     return [[[(c * px[-1] + 127) // 255 for c in px[:-1]] + [px[-1]] for px in row] for row in pixels]
 
 
+def read_tiff(data: bytes) -> tuple[list[tuple[int, int, object]], list[bytes]]:
+    """A little-endian classic TIFF's first directory, as (tag, type, values)
+    entries without the strip arrays, and its strips' bytes."""
+    e = "<"
+    ifd = struct.unpack(e + "I", data[4:8])[0]
+    n = struct.unpack(e + "H", data[ifd:ifd + 2])[0]
+    entries, offsets, counts = [], [], []
+    for i in range(n):
+        tag, kind, count, raw = struct.unpack(e + "HHI4s", data[ifd + 2 + 12 * i:ifd + 14 + 12 * i])
+        width = WIDTHS.get(kind, 1)
+        at = struct.unpack(e + "I", raw)[0] if count * width > 4 else None
+        blob = data[at:at + count * width] if at is not None else raw[:count * width]
+        if kind in (ASCII, UNDEFINED):
+            values = blob
+        elif kind in (RATIONAL, SRATIONAL):
+            values = [struct.unpack(e + "II", blob[k:k + 8]) for k in range(0, len(blob), 8)]
+        else:
+            values = list(struct.unpack(e + FORMATS[kind] * count, blob))
+        if tag == STRIP_OFFSETS:
+            offsets = values
+        elif tag == STRIP_BYTE_COUNTS:
+            counts = values
+        else:
+            entries.append((tag, kind, values))
+    return entries, [data[o:o + c] for o, c in zip(offsets, counts)]
+
+
+def pillow_fax(img: Image.Image, compression: str, info: dict[int, int] | None = None) -> bytes:
+    """A bilevel picture as Pillow's writer -- libtiff's -- encodes it."""
+    ti = TiffImagePlugin.ImageFileDirectory_v2()
+    for k, v in (info or {}).items():
+        ti[k] = v
+    buf = io.BytesIO()
+    img.save(buf, "TIFF", compression=compression, tiffinfo=ti)
+    return buf.getvalue()
+
+
+def rewrap(data: bytes, *, extra: list[tuple[int, int, object]] | None = None, drop: tuple[int, ...] = (),
+           strips=None, **kw) -> bytes:
+    """The same strips under different tags: `extra` replacing or adding,
+    `drop` removing, `strips` transforming the strips' bytes."""
+    entries, chunks = read_tiff(data)
+    ours = {tag for tag, _, _ in (extra or [])}
+    entries = [x for x in entries if x[0] not in ours and x[0] not in drop] + list(extra or [])
+    if strips is not None:
+        chunks = strips(chunks)
+    return write_tiff(entries, chunks, **kw)
+
+
+def fax_fixtures() -> dict[str, bytes]:
+    """Bilevel pictures in every fax scheme, from libtiff's own encoder."""
+    rng = random.Random(77)
+    out: dict[str, bytes] = {}
+    for (w, h) in ((37, 21), (1, 5), (130, 9)):
+        img = Image.new("1", (w, h))
+        img.putdata([1 if ((x * 7 + y * 3) % 11 < 4) ^ (rng.random() < 0.15) else 0
+                     for y in range(h) for x in range(w)])
+        tag = f"{w}x{h}"
+        out[f"fax_g3_1d_{tag}"] = pillow_fax(img, "group3")
+        out[f"fax_g3_2d_{tag}"] = pillow_fax(img, "group3", {292: 1})
+        out[f"fax_g4_{tag}"] = pillow_fax(img, "group4")
+        out[f"fax_rle_{tag}"] = pillow_fax(img, "tiff_ccitt")
+        # libtiff refuses the 1x5 one, which its own encoder wrote: its
+        # word-aligned decoder loses step on rows of one pixel.
+        out[f"fax_rlew_{tag}"] = pillow_fax(img, "tiff_raw_16")
+    img = Image.new("1", (61, 40))
+    img.putdata([1 if (x // 5 + y // 4) % 2 else 0 for y in range(40) for x in range(61)])
+    base = pillow_fax(img, "group4")
+    # No PhotometricInterpretation: fax is min-is-white by default.
+    out["fax_g4_no_photometric"] = rewrap(base, drop=(PHOTOMETRIC,))
+    out["fax_g4_min_is_white"] = rewrap(base, extra=[(PHOTOMETRIC, SHORT, [0])])
+    reverse = lambda chunks: [bytes(int(f"{b:08b}"[::-1], 2) for b in c) for c in chunks]  # noqa: E731
+    out["fax_g4_fill_order_2"] = rewrap(base, extra=[(FILL_ORDER, SHORT, [2])], strips=reverse)
+    out["fax_g3_2d_fill_order_2"] = rewrap(pillow_fax(img, "group3", {292: 1}), extra=[(FILL_ORDER, SHORT, [2])],
+                                           strips=reverse)
+    # A strip cut short. Group 4 keeps the rows that decoded. Group 3 1-D is
+    # shown too, and wrongly: at the cut, zero padding reads as an
+    # end-of-line code with no end, so libtiff decodes the strip again from
+    # its start, without end-of-line codes, into the rows still to fill.
+    cut = lambda chunks: [c[: len(c) * 2 // 3] for c in chunks]  # noqa: E731
+    out["fax_g3_1d_cut"] = rewrap(pillow_fax(img, "group3"), strips=cut)
+    out["fax_g4_cut"] = rewrap(base, strips=cut)
+    # A word-aligned stream whose strip starts at an odd offset.
+    out["fax_rlew_odd_offset"] = rewrap(pillow_fax(img, "tiff_raw_16"), align=False)
+    out["fax_g4_two_bits_refused"] = rewrap(base, extra=[(BITS, SHORT, [2])])
+    # Tiles, each encoded by libtiff as a picture of its own. A tile whose
+    # data runs out is shown as far as it decoded: libtiff's fax decoders
+    # fail with -1, which a tile's read takes for success (a strip's does
+    # not).
+    tiles = []
+    for ty in range(0, 40, 16):
+        for tx in range(0, 61, 16):
+            tile = Image.new("1", (16, 16), 1)
+            tile.paste(img.crop((tx, ty, min(61, tx + 16), min(40, ty + 16))), (0, 0))
+            tiles.append(read_tiff(pillow_fax(tile, "group4"))[1][0])
+    entries = [(WIDTH, LONG, [61]), (LENGTH, LONG, [40]), (BITS, SHORT, [1]), (COMPRESSION, SHORT, [4]),
+               (PHOTOMETRIC, SHORT, [1]), (SAMPLES, SHORT, [1]), (TILE_WIDTH, LONG, [16]),
+               (TILE_LENGTH, LONG, [16])]
+    tiled = {"offsets_tag": TILE_OFFSETS, "counts_tag": TILE_BYTE_COUNTS}
+    out["fax_g4_tiled"] = write_tiff(entries, tiles, **tiled)
+    out["fax_g4_tiled_cut"] = write_tiff(entries, [t[: len(t) // 2] for t in tiles], **tiled)
+    return out
+
+
 def pillow_fixtures() -> dict[str, bytes]:
     """Pictures written by Pillow's writer, which is libtiff's encoder."""
     rng = random.Random(99)
@@ -781,7 +892,7 @@ def pillow_fixtures() -> dict[str, bytes]:
 
 def main() -> None:
     oracle = build_oracle()
-    made = {f"tiff_{name}": data for name, data in (fixtures() | pillow_fixtures()).items()}
+    made = {f"tiff_{name}": data for name, data in (fixtures() | pillow_fixtures() | fax_fixtures()).items()}
     for old in HERE.glob("tiff_*.tif"):
         old.unlink()
     for old in HERE.glob("tiff_*.txt"):

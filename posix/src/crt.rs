@@ -760,12 +760,16 @@ pub(crate) unsafe fn retrieve_initial_args_from<S: InitArgSource>(
         *envp_ptrs.add(env_idx) = core::ptr::null();
     }
 
-    // Load environment variables into the environ store so that
-    // getenv()/setenv() work.  This must happen before init_environ().
-    if envc > 0 && envp_data_len > 0 {
-        unsafe {
-            crate::environ::load_packed_envp(envp_start, envp_data_len, envc);
-        }
+    // The environment *is* this array: `environ` points at it from here on,
+    // with no copy and no per-entry or count limit. The loader this replaced
+    // copied into a 128-slot table of 256-byte entries and silently dropped
+    // whatever did not fit, so a child whose parent had a long `PATH` simply
+    // did not have one. This must happen before `init_environ()`.
+    if env_idx > 0 {
+        // SAFETY: `envp_ptrs` was NULL-terminated just above, and both it and
+        // the strings it points into are statics or `grow`n memory that live
+        // for the whole process.
+        unsafe { crate::environ::adopt_initial_envp(envp_ptrs) };
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -899,14 +903,11 @@ pub unsafe extern "C" fn __libc_start_main(
         }
     }
 
-    // Ensure `environ` points at a valid (empty) null-terminated array.
-    // POSIX requires environ to be non-NULL so programs can safely
-    // iterate it without checking for NULL first.
-    //
-    // Note: if the kernel provided envp, load_packed_envp() was already
-    // called by retrieve_initial_args() to populate ENV_STORE.  This
-    // call to init_environ() rebuilds the pointer array, which will
-    // include those entries.
+    // Ensure `environ` is never NULL, so programs can iterate it without
+    // checking. If the kernel provided an environment,
+    // `retrieve_initial_args()` has already pointed `environ` at it
+    // (`environ::adopt_initial_envp`); otherwise this leaves it at the
+    // shared empty list.
     crate::environ::init_environ();
 
     // Register the signal trampoline so the kernel can deliver
@@ -943,9 +944,7 @@ pub unsafe extern "C" fn __libc_start_main(
     }
 
     // Call main.
-    let ret = main(actual_argc, actual_argv, unsafe {
-        crate::environ::environ.cast()
-    });
+    let ret = main(actual_argc, actual_argv, crate::environ::current_environ());
 
     // Exit with main's return value.
     exit(ret);
@@ -2340,7 +2339,10 @@ mod tests {
 
     #[test]
     fn test_max_init_fds() {
-        assert_eq!(MAX_INIT_FDS, 32);
+        // Exactly what a parent can send: one entry per fd-table slot. It was
+        // 32, so a child never received descriptors 32..256.
+        assert_eq!(MAX_INIT_FDS, crate::spawn::MAX_FD_MAP);
+        assert_eq!(MAX_INIT_FDS, crate::fdtable::MAX_FDS);
     }
 
     #[test]

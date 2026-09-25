@@ -159804,6 +159804,23 @@ refresh -- is absent until something refreshes, as
 `TD-C-WEATHER-HAS-A-REFRESH-INTERVAL-AND-NOTHING-TO-REFRESH` said it should be.
 Eight examined; thirteen to go.
 
+**`apps/rssreader`, 2026-09-25 -- a pointer layer, three panes that could not
+scroll, and a notice nobody could see.** The reader is keyboard-rich and
+honest about not fetching -- but its "cannot fetch" lines were drawn at the
+top of the window before the title bar, which painted over them, while the
+title bar offered a "Refresh All" button for a refresh nothing here can do.
+None of the three panes scrolled (`article_scroll_offset` and
+`sidebar_scroll_offset` were read and never written, and the article's offset
+only ever reset), so the selection walked off the list after nine articles and
+a long article was cut. Feed discovery (`discover_feeds`) was written, tested
+and called by nothing. Now the notice is where the articles would be and names
+the one way to get some (open a downloaded feed file); Open… and Export…
+replace the dead button; every row, dot, star, badge, button and prompt
+answers the pointer; the panes scroll under the wheel and follow the
+selection, and Page Down reads on; a saved web page opened with Open…
+subscribes to the feeds it links to. The reader still forgets everything at
+exit -- its own entry below. Nine examined; twelve to go.
+
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 
 **In short:** a `cargo test --workspace` failed with exactly one failing test,
@@ -165409,3 +165426,30 @@ the first time it forgot, instead of writing somebody's home. Not filed as a
 request yet: whether a feature-gated panic in a shared crate is acceptable is
 lane C's call, and the six files above should be looked at by whoever owns
 the apps that wrote them first.
+
+### [E] The feed reader forgets its subscriptions, folders and marks at exit -- 2026-09-25
+**Status:** OPEN
+
+**In short:** the feed reader keeps nothing between sessions. Feeds added by
+address or by an OPML list, the folders they are filed in, the articles read
+from feed files, and which articles are read or starred all go when the window
+closes; the next start is empty. Only Export… (OPML) saves anything, and only
+the subscription list.
+
+**Where.** `apps/rssreader/src/main.rs`: `RssReaderApp` holds `feeds`,
+`folders` and `articles` in memory and nothing reads or writes them at start
+or exit (the crate does not depend on `settingsfile`).
+
+**The proper fix** keeps two things, in two shapes: the subscriptions and
+folders as an OPML file in the user's configuration directory (the format the
+program already reads and writes, and one a person can take elsewhere), read
+at start; and each article's read and starred marks keyed by the article's
+link -- or title, where a feed gives none -- in a small settings document, so
+reopening a feed file restores them. The articles themselves need no copy:
+they come from files the user keeps, and `read_any_file` already merges a
+re-read feed into the one it came from.
+
+**Not urgent, and it does not get worse.** Nothing a user has is lost that
+they did not just type or open this session. Not done with the pointer pass
+because it is a feature with its own shape to settle (above), not a way of
+reaching one the program already had.

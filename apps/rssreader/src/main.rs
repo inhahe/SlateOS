@@ -1,25 +1,23 @@
 //! Slate OS RSS/Atom Feed Reader Application
 //!
-//! A full-featured feed reader providing:
-//! - RSS 2.0 and Atom 1.0 XML parsing (built-in, no external crates)
-//! - Feed management: add/remove/rename feeds, organize into folders
-//! - Three-pane layout: sidebar (folders/feeds), article list, content view
-//! - Article states: read/unread, starred/favorited with counters
-//! - Refresh: per-feed and refresh-all, configurable auto-refresh interval
-//! - Article list: title, date, source feed, read/unread indicator, star toggle
-//! - Content view: rendered article with title, date, author, body text
-//! - Search across all articles
-//! - Sort by date, title, or feed name
-//! - Filter: all, unread only, starred only
-//! - Feed health status (last successful refresh, error tracking)
-//! - OPML import/export for feed lists
-//! - Keyboard shortcuts
-//! - Offline reading cache
-//! - Feed auto-discovery from URL
-//! - Dark theme (Catppuccin Mocha) throughout
+//! **It cannot fetch feeds** -- it has no network access -- and says so where
+//! the articles would be (`CANNOT_FETCH_LINES`). What it reads comes from
+//! files: Open… (Ctrl+O) takes a downloaded feed (its articles), an OPML list
+//! (its subscriptions) or a saved web page (the feeds it links to).
 //!
-//! All data is simulated locally (no network required).
-//! Uses the guitk library for rendering.
+//! - RSS 2.0 and Atom 1.0 XML parsing (built in, no external crates)
+//! - Feed management: add, remove and rename feeds, and file them in folders
+//! - Three panes: sidebar (folders and feeds), article list, the article
+//! - Read and unread, starred, with counts
+//! - Search across all articles; sort by date, title or feed; filter to
+//!   unread or starred
+//! - Each feed's health, as far as reading its files has gone
+//! - OPML export of the subscriptions
+//! - An offline cache of what has been read
+//!
+//! Every control answers the pointer -- the renderer records a hit box where
+//! it draws each one (`guitk::frame::Frame`) -- and every key is on the F1
+//! card.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -30,7 +28,8 @@ use std::collections::HashMap;
 
 use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
-use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
 use guitk::render::RenderTree;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -47,6 +46,7 @@ use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textfind;
+use guitk::wheel;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -166,17 +166,28 @@ impl XmlElement {
 /// hundred levels of.
 const MAX_XML_DEPTH: usize = 100;
 
-/// What the window says instead of listing articles.
+/// What the article list says while there is nothing in it at all.
 ///
-/// Three lines. The third is about refresh, because this app advertises F5
-/// and Shift+F5 in its own key list as "Refresh current feed" and "Refresh all
-/// feeds", and nothing dispatches either. A key that is documented and does
-/// nothing is read as a broken key, so the window says which it is.
+/// Three lines, and the third is the way out: a feed file the user has
+/// downloaded is the one way articles arrive, since nothing here fetches. The
+/// third line used to say that F5 could not help -- after F5 had been taken
+/// off the key list for doing nothing -- and all three were drawn at the top
+/// of the window *before* the title bar, which then painted over them: the
+/// notice was on no screen.
 const CANNOT_FETCH_LINES: [&str; 3] = [
     "This reader cannot fetch feeds.",
     "It has no network access, so no feed has been retrieved and no article is real.",
-    "Refresh (F5) cannot help -- there is nothing to refresh from.",
+    "Open a feed file you have downloaded -- Open… or Ctrl+O -- to read it here.",
 ];
+
+/// How tall an article row is.
+const ARTICLE_ROW_HEIGHT: f32 = 72.0;
+/// How tall a sidebar row is.
+const SIDEBAR_ROW_HEIGHT: f32 = 28.0;
+/// How tall the title bar, the toolbar and the status bar are.
+const TITLE_BAR_HEIGHT: f32 = 40.0;
+const TOOLBAR_HEIGHT: f32 = 36.0;
+const STATUS_BAR_HEIGHT: f32 = 28.0;
 
 /// XML parser state.
 struct XmlParser<'a> {
@@ -2187,6 +2198,19 @@ pub struct RssReaderApp {
     // Auto-refresh
     pub global_auto_refresh_seconds: u64,
     pub last_global_refresh: u64,
+    /// What the pointer is over, so it can be drawn lit.
+    hover: Option<Target>,
+    /// Every box the last paint recorded, for hover and the wheel.
+    last_hits: Vec<(Target, Rect)>,
+    /// The wheel's remainder.
+    wheel: wheel::Accumulator,
+    /// The selected article's body as last wrapped, and what for: see
+    /// [`RssReaderApp::body_lines`].
+    #[allow(
+        clippy::type_complexity,
+        reason = "a one-entry cache: the key, and the lines it was made for"
+    )]
+    wrapped: std::cell::RefCell<Option<((ArticleId, u32, u64), std::rc::Rc<Vec<String>>)>>,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -2233,6 +2257,10 @@ impl RssReaderApp {
             cache: OfflineCache::new(10 * 1024 * 1024), // 10 MB
             global_auto_refresh_seconds: 1800,
             last_global_refresh: 0,
+            hover: None,
+            last_hits: Vec::new(),
+            wheel: wheel::Accumulator::default(),
+            wrapped: std::cell::RefCell::new(None),
         };
         // No articles. `populate_sample_data` built folders, feeds and
         // articles from `SAMPLE_RSS`, a constant fed through the real parser
@@ -2470,6 +2498,7 @@ impl RssReaderApp {
         if next < count {
             self.selected_article_index = next;
             self.content_scroll_offset = 0.0;
+            self.keep_article_visible();
         }
     }
 
@@ -2478,6 +2507,76 @@ impl RssReaderApp {
         if self.selected_article_index > 0 {
             self.selected_article_index = self.selected_article_index.saturating_sub(1);
             self.content_scroll_offset = 0.0;
+            self.keep_article_visible();
+        }
+    }
+
+    /// Scroll the article list so the selected article is in it.
+    ///
+    /// `article_scroll_offset` was read by the list and written by nothing,
+    /// so the selection walked off the bottom of the pane after nine
+    /// articles and the article being read was one nobody could see listed.
+    fn keep_article_visible(&mut self) {
+        let room = (self.list_rect().h - 8.0).max(ARTICLE_ROW_HEIGHT);
+        #[expect(clippy::cast_precision_loss, reason = "a list position")]
+        let top = self.selected_article_index as f32 * ARTICLE_ROW_HEIGHT;
+        if top < self.article_scroll_offset {
+            self.article_scroll_offset = top;
+        } else if top + ARTICLE_ROW_HEIGHT > self.article_scroll_offset + room {
+            self.article_scroll_offset = top + ARTICLE_ROW_HEIGHT - room;
+        }
+    }
+
+    /// Where each sidebar row is drawn, from the top of the sidebar's list
+    /// with nothing scrolled: the same steps `render_sidebar` takes, pinned to
+    /// it by `every_sidebar_row_is_drawn_where_the_scrolling_thinks_it_is`.
+    fn sidebar_row_tops(&self) -> Vec<(SidebarSelection, f32)> {
+        let step = SIDEBAR_ROW_HEIGHT;
+        let mut tops = vec![(SidebarSelection::AllFeeds, 8.0)];
+        let mut cy = 8.0 + step + 2.0;
+        tops.push((SidebarSelection::Starred, cy));
+        cy += step + 8.0 + 8.0;
+        for folder in &self.folders {
+            tops.push((SidebarSelection::Folder(folder.id), cy));
+            cy += step;
+            if folder.is_expanded {
+                for feed in self.feeds.iter().filter(|f| f.folder_id == Some(folder.id)) {
+                    tops.push((SidebarSelection::Feed(feed.id), cy));
+                    cy += step;
+                }
+            }
+            cy += 2.0;
+        }
+        let ungrouped: Vec<&Feed> = self
+            .feeds
+            .iter()
+            .filter(|f| f.folder_id.is_none())
+            .collect();
+        if !ungrouped.is_empty() {
+            cy += 4.0 + 8.0;
+            for feed in ungrouped {
+                tops.push((SidebarSelection::Feed(feed.id), cy));
+                cy += step;
+            }
+        }
+        tops
+    }
+
+    /// Scroll the sidebar so the selected row is in it.
+    fn keep_sidebar_visible(&mut self) {
+        let Some(top) = self
+            .sidebar_row_tops()
+            .iter()
+            .find(|(sel, _)| *sel == self.sidebar_selection)
+            .map(|(_, y)| *y)
+        else {
+            return;
+        };
+        let room = self.pane_height();
+        if top < self.sidebar_scroll_offset {
+            self.sidebar_scroll_offset = (top - 8.0).max(0.0);
+        } else if top + SIDEBAR_ROW_HEIGHT > self.sidebar_scroll_offset + room {
+            self.sidebar_scroll_offset = top + SIDEBAR_ROW_HEIGHT + 8.0 - room;
         }
     }
 
@@ -2534,6 +2633,8 @@ impl RssReaderApp {
         // previous list points at an unrelated article in the new one.
         self.selected_article_index = 0;
         self.content_scroll_offset = 0.0;
+        self.article_scroll_offset = 0.0;
+        self.keep_sidebar_visible();
     }
 
     /// Move the sidebar selection to the next or previous feed, passing over
@@ -2567,6 +2668,8 @@ impl RssReaderApp {
         self.sidebar_selection = selection;
         self.selected_article_index = 0;
         self.content_scroll_offset = 0.0;
+        self.article_scroll_offset = 0.0;
+        self.keep_sidebar_visible();
     }
 
     /// Open or close the folder the selection is in. Reports whether it did.
@@ -2729,8 +2832,10 @@ impl RssReaderApp {
                     self.width = *width as f32;
                     self.height = *height as f32;
                 }
+                self.keep_article_visible();
                 EventResult::Consumed
             }
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => EventResult::Ignored,
         }
     }
@@ -2805,12 +2910,36 @@ impl RssReaderApp {
             String::new()
         };
 
-        if body
-            .get(..4096)
-            .unwrap_or(&body)
-            .to_ascii_lowercase()
-            .contains("<opml")
-        {
+        let head = body.get(..4096).unwrap_or(&body).to_ascii_lowercase();
+
+        // A saved web page: the feeds it links to, as subscriptions. This is
+        // where "feed auto-discovery" can happen at all in a reader that
+        // cannot fetch -- `discover_feeds` was written, tested and called by
+        // nothing.
+        if head.contains("<html") {
+            let found = discover_feeds(&body);
+            if found.is_empty() {
+                return format!(
+                    "{cut_note}{} is a web page that links to no feed",
+                    path.display()
+                );
+            }
+            let mut added = 0usize;
+            for feed in found {
+                if self.feeds.iter().any(|f| f.url == feed.url) {
+                    continue;
+                }
+                self.add_feed(&feed.title, &feed.url, None);
+                added = added.saturating_add(1);
+            }
+            return format!(
+                "{cut_note}Subscribed to {added} feed(s) {} links to. No articles came with \
+                 them -- nothing here can fetch one.",
+                path.display()
+            );
+        }
+
+        if head.contains("<opml") {
             return match self.import_opml(&body) {
                 Ok(added) => format!(
                     "{cut_note}Subscribed to {added} feed(s) from {}. \
@@ -2932,6 +3061,24 @@ impl RssReaderApp {
             // all: the sidebar highlighted "All Feeds" forever, its Feed,
             // Folder and Starred arms were unreachable, and tabbing to it
             // changed only which pane was outlined.
+            // A page of the article being read. The content view's offset
+            // had no writer, so an article longer than the pane was cut off.
+            Key::PageDown | Key::PageUp if self.active_pane == ActivePane::ContentView => {
+                let page = (self.pane_height() - 44.0).max(22.0);
+                let limit = (self.content_height() - self.pane_height()).max(0.0);
+                let delta = if key.key == Key::PageDown {
+                    page
+                } else {
+                    -page
+                };
+                let before = self.content_scroll_offset;
+                self.content_scroll_offset = (before + delta).clamp(0.0, limit);
+                if (self.content_scroll_offset - before).abs() < f32::EPSILON {
+                    EventResult::Ignored
+                } else {
+                    EventResult::Consumed
+                }
+            }
             Key::Down | Key::J => {
                 if self.active_pane == ActivePane::Sidebar {
                     self.step_sidebar(1);
@@ -3191,7 +3338,7 @@ impl RssReaderApp {
             }
             Prompt::MoveFeed(id) => {
                 let targets = self.move_targets();
-                let choice = match key.key {
+                let choice: Option<Option<FolderId>> = match key.key {
                     Key::Num0 => Some(None),
                     Key::Num1 => targets.first().map(|(f, _)| Some(*f)),
                     Key::Num2 => targets.get(1).map(|(f, _)| Some(*f)),
@@ -3205,15 +3352,31 @@ impl RssReaderApp {
                     _ => None,
                 };
                 if let Some(folder) = choice {
-                    self.move_feed_to_folder(id, folder);
-                    self.status_message = match folder {
-                        Some(_) => "Feed moved".to_string(),
-                        None => "Feed moved out of its folder".to_string(),
-                    };
+                    self.finish_move(id, folder);
                 }
                 EventResult::Consumed
             }
         }
+    }
+
+    /// File feed `id` under `folder`, or under none.
+    fn finish_move(&mut self, id: FeedId, folder: Option<FolderId>) {
+        self.move_feed_to_folder(id, folder);
+        self.status_message = match folder {
+            Some(_) => "Feed moved".to_string(),
+            None => "Feed moved out of its folder".to_string(),
+        };
+    }
+
+    /// Answer the question that is up with the key that means `yes`.
+    fn answer_yes(&mut self) -> EventResult {
+        let yes = KeyEvent {
+            key: Key::Y,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: "y".to_string(),
+        };
+        self.handle_prompt_key(&yes)
     }
 
     /// Point the sidebar somewhere that still exists.
@@ -3721,8 +3884,17 @@ impl RssReaderApp {
     ///
     /// Not `render`: [`App::render`] is the one the window calls, and an
     /// inherent method of the same name shadows a trait method at equal arity.
+    #[cfg(test)]
     pub fn render_commands(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+        let mut commands = self.frame().into_tree().commands;
+        commands.extend(self.picker.render(&self.palette, self.width, self.height));
+        commands
+    }
+
+    /// Draw the window, recording every control where it is drawn: both the
+    /// picture and the hit test. The picker is drawn over it by the caller.
+    fn frame(&self) -> Frame<Target> {
+        let mut cmds = Frame::new(self.width, self.height);
 
         // Background fill
         cmds.push(RenderCommand::FillRect {
@@ -3734,41 +3906,18 @@ impl RssReaderApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // After the background, or it would be painted over.
-        for (i, line) in CANNOT_FETCH_LINES.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: 8.0,
-                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                y: 1.0 + i as f32 * 12.0,
-                text: (*line).to_string(),
-                color: if i == 0 {
-                    self.palette.ink(self.palette.yellow)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: if i == 0 { 11.0 } else { 9.0 },
-                font_weight: if i == 0 {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(self.width - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
         // Title bar
-        let title_bar_height = 40.0;
+        let title_bar_height = TITLE_BAR_HEIGHT;
         self.render_title_bar(&mut cmds, title_bar_height);
 
         // Toolbar (filter/sort/search)
         let toolbar_y = title_bar_height;
-        let toolbar_height = 36.0;
+        let toolbar_height = TOOLBAR_HEIGHT;
         self.render_toolbar(&mut cmds, toolbar_y, toolbar_height);
 
         // Main content area
         let content_y = toolbar_y + toolbar_height;
-        let content_height = self.height - content_y - 28.0; // leave room for status bar
+        let content_height = self.pane_height();
 
         if self.sidebar_visible {
             // Three-pane layout
@@ -3853,26 +4002,90 @@ impl RssReaderApp {
         }
 
         // Status bar
-        let status_y = self.height - 28.0;
-        self.render_status_bar(&mut cmds, status_y, 28.0);
+        let status_y = self.height - STATUS_BAR_HEIGHT;
+        self.render_status_bar(&mut cmds, status_y, STATUS_BAR_HEIGHT);
 
-        // Overlays
+        // Overlays: modal, so each takes every press while it is up.
         if self.show_help {
             self.render_help_overlay(&mut cmds);
+            cmds.hit(
+                Target::HelpCard,
+                Rect::new(0.0, 0.0, self.width, self.height),
+            );
         }
 
         if self.show_feed_health {
             self.render_feed_health_overlay(&mut cmds);
+            cmds.hit(
+                Target::HealthOverlay,
+                Rect::new(0.0, 0.0, self.width, self.height),
+            );
         }
-
-        // Last, so it is above everything.
-        cmds.extend(self.picker.render(&self.palette, self.width, self.height));
 
         cmds
     }
 
+    /// How tall the three panes are: between the toolbar and the status bar.
+    fn pane_height(&self) -> f32 {
+        (self.height - TITLE_BAR_HEIGHT - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT).max(0.0)
+    }
+
+    /// Where the article list is drawn.
+    fn list_rect(&self) -> Rect {
+        let x = if self.sidebar_visible {
+            self.sidebar_width
+        } else {
+            0.0
+        };
+        Rect::new(
+            x,
+            TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT,
+            self.article_list_width,
+            self.pane_height(),
+        )
+    }
+
+    /// Where the article is drawn.
+    fn content_rect(&self) -> Rect {
+        let list = self.list_rect();
+        Rect::new(
+            list.right(),
+            list.y,
+            (self.width - list.right()).max(0.0),
+            list.h,
+        )
+    }
+
+    /// A small button, lit while the pointer is on it.
+    fn button(&self, cmds: &mut Frame<Target>, rect: Rect, label: &str, target: Target) {
+        self.palette.push_surface(
+            cmds,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            4.0,
+            if self.hover == Some(target) {
+                Surface::Selected
+            } else {
+                Surface::Card
+            },
+        );
+        cmds.push(RenderCommand::Text {
+            x: rect.x + 10.0,
+            y: rect.y + (rect.h - 12.0) / 2.0,
+            text: label.to_string(),
+            font_size: 12.0,
+            color: self.palette.ink(self.palette.blue),
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((rect.w - 12.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cmds.hit(target, rect);
+    }
+
     /// Render the title bar with app name and quick actions.
-    fn render_title_bar(&self, cmds: &mut Vec<RenderCommand>, height: f32) {
+    fn render_title_bar(&self, cmds: &mut Frame<Target>, height: f32) {
         // Title bar background
         self.palette.push_surface(
             cmds,
@@ -3924,20 +4137,16 @@ impl RssReaderApp {
             overflow: TextOverflow::Clip,
         });
 
-        // Right side: refresh all button area
-        let refresh_x = self.width - 120.0;
-        self.palette
-            .push_surface(cmds, refresh_x, 8.0, 100.0, 24.0, 4.0, Surface::Card);
-        cmds.push(RenderCommand::Text {
-            x: refresh_x + 10.0,
-            y: 12.0,
-            text: "Refresh All".to_string(),
-            font_size: 12.0,
-            color: self.palette.ink(self.palette.blue),
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        // Right side: what can be done from here. "Refresh All" stood here,
+        // for a refresh nothing in this reader can do (`CANNOT_FETCH_LINES`),
+        // and a press on it did nothing, as nothing could.
+        let mut right = self.width - 12.0;
+        for (label, target) in [("Export…", Target::ExportOpml), ("Open…", Target::OpenFile)] {
+            let w = text::measure(label, 12.0, FontWeightHint::Regular) + 20.0;
+            let rect = Rect::new(right - w, 8.0, w, 24.0);
+            self.button(cmds, rect, label, target);
+            right = rect.x - 8.0;
+        }
 
         // Bottom border
         cmds.push(RenderCommand::Line {
@@ -3951,7 +4160,7 @@ impl RssReaderApp {
     }
 
     /// Render the toolbar with filter, sort, and search controls.
-    fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
+    fn render_toolbar(&self, cmds: &mut Frame<Target>, y: f32, height: f32) {
         // Toolbar background
         self.palette.push_surface(
             cmds,
@@ -3972,6 +4181,10 @@ impl RssReaderApp {
         };
         self.palette
             .push_surface(cmds, filter_x, y + 6.0, 110.0, 24.0, 4.0, Surface::Card);
+        cmds.hit(
+            Target::FilterButton,
+            Rect::new(filter_x, y + 6.0, 110.0, 24.0),
+        );
         cmds.push(RenderCommand::Text {
             x: filter_x + 8.0,
             y: y + 10.0,
@@ -3987,6 +4200,7 @@ impl RssReaderApp {
         let sort_x = 132.0;
         self.palette
             .push_surface(cmds, sort_x, y + 6.0, 160.0, 24.0, 4.0, Surface::Card);
+        cmds.hit(Target::SortButton, Rect::new(sort_x, y + 6.0, 160.0, 24.0));
         cmds.push(RenderCommand::Text {
             x: sort_x + 8.0,
             y: y + 10.0,
@@ -4013,6 +4227,7 @@ impl RssReaderApp {
             CornerRadii::all(4.0),
             paint,
         );
+        cmds.hit(Target::SearchBox, Rect::new(search_x, y + 6.0, 240.0, 24.0));
 
         let search_display = if self.search_query.is_empty() {
             "Search articles... (Ctrl+F)".to_string()
@@ -4049,7 +4264,7 @@ impl RssReaderApp {
     /// Render the sidebar with folders and feeds.
     fn render_sidebar(
         &self,
-        cmds: &mut Vec<RenderCommand>,
+        cmds: &mut Frame<Target>,
         x: f32,
         y: f32,
         panel_width: f32,
@@ -4059,15 +4274,13 @@ impl RssReaderApp {
         self.palette
             .push_surface(cmds, x, y, panel_width, panel_height, 0.0, Surface::Sidebar);
 
-        // Clip to sidebar area
-        cmds.push(RenderCommand::PushClip {
-            x,
-            y,
-            width: panel_width,
-            height: panel_height,
-        });
+        // The pane itself, which the wheel scrolls; and a clip the rows'
+        // boxes obey too, so a row scrolled out of it cannot be pressed.
+        let pane = Rect::new(x, y, panel_width, panel_height);
+        cmds.hit(Target::Sidebar, pane);
+        cmds.clip(pane);
 
-        let item_height: f32 = 28.0;
+        let item_height: f32 = SIDEBAR_ROW_HEIGHT;
         let mut cy = y + 8.0 - self.sidebar_scroll_offset;
 
         // "All Feeds" entry
@@ -4102,6 +4315,10 @@ impl RssReaderApp {
             max_width: Some(panel_width - 60.0),
             overflow: TextOverflow::Ellipsis,
         });
+        cmds.hit(
+            Target::SidebarItem(SidebarSelection::AllFeeds),
+            Rect::new(x + 4.0, cy, panel_width - 8.0, item_height),
+        );
         // Unread count badge
         let total_unread = self.total_unread();
         if total_unread > 0 {
@@ -4159,6 +4376,10 @@ impl RssReaderApp {
             max_width: Some(panel_width - 60.0),
             overflow: TextOverflow::Ellipsis,
         });
+        cmds.hit(
+            Target::SidebarItem(SidebarSelection::Starred),
+            Rect::new(x + 4.0, cy, panel_width - 8.0, item_height),
+        );
         let starred_count = self.total_starred();
         if starred_count > 0 {
             cmds.push(RenderCommand::FillRect {
@@ -4242,6 +4463,16 @@ impl RssReaderApp {
                 overflow: TextOverflow::Ellipsis,
             });
 
+            cmds.hit(
+                Target::SidebarItem(SidebarSelection::Folder(folder.id)),
+                Rect::new(x + 4.0, cy, panel_width - 8.0, item_height),
+            );
+            // The disclosure mark opens and closes the folder; the rest of
+            // the row selects it.
+            cmds.hit(
+                Target::FolderToggle(folder.id),
+                Rect::new(x + 4.0, cy, 18.0, item_height),
+            );
             // Folder unread count
             let folder_unread = self.unread_count_for_folder(folder.id);
             if folder_unread > 0 {
@@ -4314,6 +4545,10 @@ impl RssReaderApp {
                         overflow: TextOverflow::Ellipsis,
                     });
 
+                    cmds.hit(
+                        Target::SidebarItem(SidebarSelection::Feed(feed.id)),
+                        Rect::new(x + 4.0, cy, panel_width - 8.0, item_height),
+                    );
                     // Feed unread count
                     let feed_unread = self.unread_count_for_feed(feed.id);
                     if feed_unread > 0 {
@@ -4401,6 +4636,10 @@ impl RssReaderApp {
                     overflow: TextOverflow::Ellipsis,
                 });
 
+                cmds.hit(
+                    Target::SidebarItem(SidebarSelection::Feed(feed.id)),
+                    Rect::new(x + 4.0, cy, panel_width - 8.0, item_height),
+                );
                 let feed_unread = self.unread_count_for_feed(feed.id);
                 if feed_unread > 0 {
                     cmds.push(RenderCommand::Text {
@@ -4418,13 +4657,13 @@ impl RssReaderApp {
             }
         }
 
-        cmds.push(RenderCommand::PopClip);
+        cmds.unclip();
     }
 
     /// Render the article list pane.
     fn render_article_list(
         &self,
-        cmds: &mut Vec<RenderCommand>,
+        cmds: &mut Frame<Target>,
         x: f32,
         y: f32,
         panel_width: f32,
@@ -4434,18 +4673,43 @@ impl RssReaderApp {
         self.palette
             .push_surface(cmds, x, y, panel_width, panel_height, 0.0, Surface::Card);
 
-        cmds.push(RenderCommand::PushClip {
-            x,
-            y,
-            width: panel_width,
-            height: panel_height,
-        });
+        let pane = Rect::new(x, y, panel_width, panel_height);
+        cmds.hit(Target::ArticleList, pane);
+        cmds.clip(pane);
 
         let filtered = self.filtered_article_indices();
-        let item_height: f32 = 72.0;
+        let item_height: f32 = ARTICLE_ROW_HEIGHT;
         let mut cy = y + 4.0 - self.article_scroll_offset;
 
-        if filtered.is_empty() {
+        if self.articles.is_empty() {
+            // Nothing at all to read: say why, and the one way to change it.
+            let mut ty = y + 24.0;
+            for (i, line) in CANNOT_FETCH_LINES.iter().enumerate() {
+                let (size, colour, weight) = if i == 0 {
+                    (
+                        14.0,
+                        self.palette.ink(self.palette.yellow),
+                        FontWeightHint::Bold,
+                    )
+                } else {
+                    (12.0, self.palette.subtext0, FontWeightHint::Regular)
+                };
+                for piece in text::wrap(line, (panel_width - 32.0).max(0.0), size, weight) {
+                    cmds.push(RenderCommand::Text {
+                        x: x + 16.0,
+                        y: ty,
+                        text: piece,
+                        font_size: size,
+                        color: colour,
+                        font_weight: weight,
+                        max_width: Some((panel_width - 32.0).max(0.0)),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                    ty += size + 6.0;
+                }
+                ty += 8.0;
+            }
+        } else if filtered.is_empty() {
             // Empty state
             cmds.push(RenderCommand::Text {
                 x: x + 16.0,
@@ -4505,6 +4769,21 @@ impl RssReaderApp {
                 );
             }
 
+            // The row selects its article; the dot marks it read or unread;
+            // the star stars it. Named by the article, not by the row: the
+            // filter and the sort renumber rows and not articles.
+            cmds.hit(
+                Target::Article(article_idx),
+                Rect::new(x + 4.0, cy, panel_width - 8.0, item_height - 4.0),
+            );
+            cmds.hit(
+                Target::ArticleRead(article_idx),
+                Rect::new(x + 4.0, cy + 2.0, 20.0, 24.0),
+            );
+            cmds.hit(
+                Target::ArticleStar(article_idx),
+                Rect::new(x + panel_width - 30.0, cy + 2.0, 26.0, 26.0),
+            );
             // Unread indicator dot
             if !article.is_read {
                 cmds.push(RenderCommand::FillRect {
@@ -4517,19 +4796,24 @@ impl RssReaderApp {
                 });
             }
 
-            // Star indicator
-            if article.is_starred {
-                cmds.push(RenderCommand::Text {
-                    x: x + panel_width - 24.0,
-                    y: cy + 6.0,
-                    text: "*".to_string(),
-                    font_size: 16.0,
-                    color: self.palette.ink(self.palette.yellow),
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
+            // Star: bright when starred, faint when not -- drawn either way,
+            // because it is also where a press stars the article.
+            cmds.push(RenderCommand::Text {
+                x: x + panel_width - 24.0,
+                y: cy + 6.0,
+                text: "*".to_string(),
+                font_size: 16.0,
+                color: if article.is_starred {
+                    self.palette.ink(self.palette.yellow)
+                } else if self.hover == Some(Target::ArticleStar(article_idx)) {
+                    self.palette.subtext0
+                } else {
+                    self.palette.surface1
+                },
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
 
             // Title
             let title_color = if article.is_read {
@@ -4607,13 +4891,13 @@ impl RssReaderApp {
             cy += item_height;
         }
 
-        cmds.push(RenderCommand::PopClip);
+        cmds.unclip();
     }
 
     /// Render the article content view pane.
     fn render_content_view(
         &self,
-        cmds: &mut Vec<RenderCommand>,
+        cmds: &mut Frame<Target>,
         x: f32,
         y: f32,
         panel_width: f32,
@@ -4629,12 +4913,9 @@ impl RssReaderApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        cmds.push(RenderCommand::PushClip {
-            x,
-            y,
-            width: panel_width,
-            height: panel_height,
-        });
+        let pane = Rect::new(x, y, panel_width, panel_height);
+        cmds.hit(Target::Content, pane);
+        cmds.clip(pane);
 
         let article = self.selected_article();
 
@@ -4677,15 +4958,27 @@ impl RssReaderApp {
             });
             cy += 24.0;
 
-            // Status badges (read/unread, starred)
+            // Status badges, which are also the buttons that change them.
             let status_text = if article.is_read { "Read" } else { "Unread" };
             let status_color = if article.is_read {
                 self.palette.overlay0
             } else {
                 self.palette.blue
             };
-            self.palette
-                .push_surface(cmds, x + padding, cy, 60.0, 22.0, 4.0, Surface::Card);
+            let read_badge = Rect::new(x + padding, cy, 60.0, 22.0);
+            self.palette.push_surface(
+                cmds,
+                read_badge.x,
+                read_badge.y,
+                read_badge.w,
+                read_badge.h,
+                4.0,
+                if self.hover == Some(Target::ContentRead) {
+                    Surface::Selected
+                } else {
+                    Surface::Card
+                },
+            );
             cmds.push(RenderCommand::Text {
                 x: x + padding + 8.0,
                 y: cy + 4.0,
@@ -4696,36 +4989,46 @@ impl RssReaderApp {
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
+            cmds.hit(Target::ContentRead, read_badge);
 
-            if article.is_starred {
-                self.palette.push_surface(
-                    cmds,
-                    x + padding + 68.0,
-                    cy,
-                    70.0,
-                    22.0,
-                    4.0,
-                    Surface::Card,
-                );
-                cmds.push(RenderCommand::Text {
-                    x: x + padding + 76.0,
-                    y: cy + 4.0,
-                    text: "* Starred".to_string(),
-                    font_size: 11.0,
-                    color: self.palette.ink(self.palette.yellow),
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
+            let star_badge = Rect::new(x + padding + 68.0, cy, 70.0, 22.0);
+            self.palette.push_surface(
+                cmds,
+                star_badge.x,
+                star_badge.y,
+                star_badge.w,
+                star_badge.h,
+                4.0,
+                if self.hover == Some(Target::ContentStar) {
+                    Surface::Selected
+                } else {
+                    Surface::Card
+                },
+            );
+            cmds.push(RenderCommand::Text {
+                x: x + padding + 76.0,
+                y: cy + 4.0,
+                text: if article.is_starred {
+                    "* Starred"
+                } else {
+                    "Star"
+                }
+                .to_string(),
+                font_size: 11.0,
+                color: if article.is_starred {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+            cmds.hit(Target::ContentStar, star_badge);
 
             // Cached indicator
             if self.cache.is_cached(article.id) {
-                let cache_x = if article.is_starred {
-                    x + padding + 146.0
-                } else {
-                    x + padding + 68.0
-                };
+                let cache_x = x + padding + 146.0;
                 self.palette
                     .push_surface(cmds, cache_x, cy, 62.0, 22.0, 4.0, Surface::Card);
                 cmds.push(RenderCommand::Text {
@@ -4769,11 +5072,10 @@ impl RssReaderApp {
             }
 
             // Article body text (wrapped into lines)
-            let body = article.display_content();
-            let lines = wrap_text(body, content_width, 14.0);
+            let lines = self.body_lines(article, content_width);
             let line_height: f32 = 22.0;
 
-            for line in &lines {
+            for line in lines.iter() {
                 if cy + line_height < y {
                     cy += line_height;
                     continue;
@@ -4817,11 +5119,49 @@ impl RssReaderApp {
             });
         }
 
-        cmds.push(RenderCommand::PopClip);
+        cmds.unclip();
+    }
+
+    /// `article`'s body wrapped to `width`, from the copy kept while the
+    /// article, its text and the width are the ones it was wrapped for.
+    ///
+    /// A long article is thousands of characters to wrap, and the frame, the
+    /// wheel and Page Down all need its lines: each paid for the whole wrap,
+    /// every time, and Page Down twice.
+    fn body_lines(&self, article: &Article, width: f32) -> std::rc::Rc<Vec<String>> {
+        use std::hash::{Hash as _, Hasher as _};
+        let body = article.display_content();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        body.hash(&mut hasher);
+        let key = (article.id, width.to_bits(), hasher.finish());
+        if let Some((kept, lines)) = self.wrapped.borrow().as_ref()
+            && *kept == key
+        {
+            return std::rc::Rc::clone(lines);
+        }
+        let lines = std::rc::Rc::new(wrap_text(body, width, 14.0));
+        *self.wrapped.borrow_mut() = Some((key, std::rc::Rc::clone(&lines)));
+        lines
+    }
+
+    /// How tall the selected article is, laid out at the content pane's
+    /// width: what the wheel and Page Down scroll through. The same steps the
+    /// drawing takes, from the same lines.
+    fn content_height(&self) -> f32 {
+        let Some(article) = self.selected_article() else {
+            return 0.0;
+        };
+        let padding = 20.0;
+        let width = (self.content_rect().w - padding * 2.0).max(0.0);
+        let link = if article.link.is_empty() { 0.0 } else { 20.0 };
+        let lines = self.body_lines(article, width).len();
+        #[expect(clippy::cast_precision_loss, reason = "an article's line count")]
+        let body = lines as f32 * 22.0;
+        padding + 32.0 + 24.0 + 32.0 + 16.0 + link + body + padding
     }
 
     /// Render the status bar at the bottom of the window.
-    fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
+    fn render_status_bar(&self, cmds: &mut Frame<Target>, y: f32, height: f32) {
         self.palette.push_surface(
             cmds,
             0.0,
@@ -4896,6 +5236,43 @@ impl RssReaderApp {
                     parts.join("   ")
                 }
             };
+            // The answers, as buttons from the right edge in.
+            let answers: Vec<(String, Target)> = match prompt {
+                Prompt::RemoveFeed(_) | Prompt::RemoveFolder(_) => vec![
+                    ("Keep".to_string(), Target::PromptNo),
+                    ("Remove".to_string(), Target::PromptYes),
+                ],
+                Prompt::MoveFeed(_) => {
+                    let mut chips: Vec<(String, Target)> = self
+                        .move_targets()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (id, name))| {
+                            (
+                                format!("{} {name}", i.saturating_add(1)),
+                                Target::MoveTo(Some(*id)),
+                            )
+                        })
+                        .rev()
+                        .collect();
+                    chips.push(("0 No folder".to_string(), Target::MoveTo(None)));
+                    chips
+                }
+            };
+            let mut right = self.width - 8.0;
+            for (label, target) in &answers {
+                let w = (text::measure(label, 11.0, FontWeightHint::Regular) + 20.0).min(160.0);
+                let rect = Rect::new(right - w, y + 4.0, w, height - 8.0);
+                if rect.x < self.width / 2.0 {
+                    break;
+                }
+                self.button(cmds, rect, label, *target);
+                right = rect.x - 6.0;
+            }
+            let text = match prompt {
+                Prompt::MoveFeed(_) => "Move the feed to:".to_string(),
+                _ => text,
+            };
             cmds.push(RenderCommand::Text {
                 x: 12.0,
                 y: y + 7.0,
@@ -4903,15 +5280,23 @@ impl RssReaderApp {
                 font_size: 11.0,
                 color: self.palette.ink(self.palette.yellow),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(self.width - 24.0),
+                max_width: Some((right - 24.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
+            return;
         } else if let Some(entry) = &self.text_entry {
             let label = match entry {
                 TextEntry::RenameFeed(_) => "Rename feed",
                 TextEntry::NewFolder => "New folder",
                 TextEntry::AddFeed => "Add feed (address)",
             };
+            let mut right = self.width - 8.0;
+            for (label, target) in [("Cancel", Target::EntryCancel), ("OK", Target::EntryAccept)] {
+                let w = text::measure(label, 11.0, FontWeightHint::Regular) + 20.0;
+                let rect = Rect::new(right - w, y + 4.0, w, height - 8.0);
+                self.button(cmds, rect, label, target);
+                right = rect.x - 6.0;
+            }
             cmds.push(RenderCommand::Text {
                 x: self.width / 2.0,
                 y: y + 7.0,
@@ -4922,9 +5307,10 @@ impl RssReaderApp {
                 font_size: 11.0,
                 color: self.palette.ink(self.palette.blue),
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(self.width / 2.0 - 120.0),
+                max_width: Some((right - self.width / 2.0 - 8.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
+            return;
         } else if !self.status_message.is_empty() {
             cmds.push(RenderCommand::Text {
                 x: self.width / 2.0,
@@ -4955,17 +5341,25 @@ impl RssReaderApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Help hint
+        // Help hint, which is also where a press raises the list.
         cmds.push(RenderCommand::Text {
             x: self.width - 40.0,
             y: y + 7.0,
             text: "? Help".to_string(),
             font_size: 10.0,
-            color: self.palette.surface2,
+            color: if self.hover == Some(Target::HelpHint) {
+                self.palette.text
+            } else {
+                self.palette.surface2
+            },
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+        cmds.hit(
+            Target::HelpHint,
+            Rect::new(self.width - 44.0, y + 2.0, 40.0, height - 4.0),
+        );
     }
 
     /// Render the keyboard shortcuts help overlay.
@@ -4981,7 +5375,7 @@ impl RssReaderApp {
     /// key handler and both were right; the overlay's own height was the third
     /// thing, agreeing with neither. `every_row_of_the_overlay_reaches_the_window`
     /// is the check that was missing, and it reads the screen.
-    fn render_help_overlay(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_help_overlay(&self, cmds: &mut Frame<Target>) {
         // Dimmed behind it, which is this app's own idea and worth keeping:
         // the card is a modal thing and the dimming says so.
         cmds.push(RenderCommand::FillRect {
@@ -5007,7 +5401,7 @@ impl RssReaderApp {
         );
     }
 
-    fn render_feed_health_overlay(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_feed_health_overlay(&self, cmds: &mut Frame<Target>) {
         // Dimmed background
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
@@ -5177,6 +5571,278 @@ impl RssReaderApp {
 }
 
 // ============================================================================
+// Pointer targets
+// ============================================================================
+
+/// Everything in the window a pointer can press, as the renderer records it.
+///
+/// The reader drew a sidebar of folders and feeds, a list of articles, an
+/// article, a filter button, a sort button, a search box and a "Refresh All"
+/// button, and handled no pointer event (`known-issues.md` →
+/// `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`). An
+/// article is named by its index in `articles`, not by its row: the filter
+/// and the sort renumber rows and not articles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// Open a feed file or a subscription list (Ctrl+O).
+    OpenFile,
+    /// Write the subscriptions out as OPML (Ctrl+S).
+    ExportOpml,
+    FilterButton,
+    SortButton,
+    SearchBox,
+    /// The sidebar, which scrolls.
+    Sidebar,
+    SidebarItem(SidebarSelection),
+    /// A folder's disclosure mark: opens or closes it.
+    FolderToggle(FolderId),
+    /// The article list, which scrolls.
+    ArticleList,
+    Article(usize),
+    /// An article's read mark.
+    ArticleRead(usize),
+    /// An article's star.
+    ArticleStar(usize),
+    /// The article being read, which scrolls.
+    Content,
+    ContentRead,
+    ContentStar,
+    PromptYes,
+    PromptNo,
+    /// File the feed the question is about under a folder, or under none.
+    MoveTo(Option<FolderId>),
+    EntryAccept,
+    EntryCancel,
+    /// "? Help" in the status bar.
+    HelpHint,
+    HelpCard,
+    HealthOverlay,
+}
+
+impl RssReaderApp {
+    /// What is under `(x, y)` in the frame last shown.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self.frame().hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    /// Route a pointer event.
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                let target = self.frame().hit_test(event.x, event.y);
+                self.press(target)
+            }
+            MouseEventKind::Move => {
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return EventResult::Ignored;
+                }
+                self.hover = over;
+                EventResult::Consumed
+            }
+            MouseEventKind::Leave => {
+                if self.hover.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            MouseEventKind::Scroll { dy, .. } => {
+                let Some(over) = self.target_at(event.x, event.y) else {
+                    return EventResult::Ignored;
+                };
+                self.scroll(over, dy)
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Turn the wheel `dy` over `over`.
+    ///
+    /// Nothing scrolled: the three offsets were read by the drawing and
+    /// written by nothing, so the tenth article, the end of a long article
+    /// and a long sidebar's lower half were out of reach.
+    fn scroll(&mut self, over: Target, dy: f32) -> EventResult {
+        let rows = self.wheel.rows(dy);
+        if rows == 0 {
+            return EventResult::Ignored;
+        }
+        #[expect(clippy::cast_precision_loss, reason = "a few notches of wheel")]
+        let px = rows as f32 * 60.0;
+        let (limit, offset) = match over {
+            Target::Sidebar | Target::SidebarItem(_) | Target::FolderToggle(_) => {
+                let bottom = self
+                    .sidebar_row_tops()
+                    .last()
+                    .map_or(0.0, |(_, y)| *y + SIDEBAR_ROW_HEIGHT + 8.0);
+                (
+                    (bottom - self.pane_height()).max(0.0),
+                    &mut self.sidebar_scroll_offset,
+                )
+            }
+            Target::ArticleList
+            | Target::Article(_)
+            | Target::ArticleRead(_)
+            | Target::ArticleStar(_) => {
+                #[expect(clippy::cast_precision_loss, reason = "an article count")]
+                let rows = self.filtered_article_indices().len() as f32;
+                (
+                    (rows * ARTICLE_ROW_HEIGHT + 8.0 - self.pane_height()).max(0.0),
+                    &mut self.article_scroll_offset,
+                )
+            }
+            Target::Content | Target::ContentRead | Target::ContentStar => (
+                (self.content_height() - self.pane_height()).max(0.0),
+                &mut self.content_scroll_offset,
+            ),
+            _ => return EventResult::Ignored,
+        };
+        let before = *offset;
+        *offset = (*offset + px).clamp(0.0, limit);
+        if (*offset - before).abs() < f32::EPSILON {
+            EventResult::Ignored
+        } else {
+            EventResult::Consumed
+        }
+    }
+
+    /// Do what a press on `target` means.
+    fn press(&mut self, target: Option<Target>) -> EventResult {
+        // The overlays are modal: a press anywhere puts them away.
+        if self.show_help {
+            self.show_help = false;
+            return EventResult::Consumed;
+        }
+        if self.show_feed_health {
+            self.show_feed_health = false;
+            return EventResult::Consumed;
+        }
+        // A question or a prompt waiting: only its own buttons answer, so a
+        // stray press cannot act behind it.
+        if self.prompt.is_some() || self.text_entry.is_some() {
+            return match target {
+                Some(Target::PromptYes) => self.answer_yes(),
+                Some(Target::PromptNo) => {
+                    self.prompt = None;
+                    EventResult::Consumed
+                }
+                Some(Target::MoveTo(folder)) => {
+                    if let Some(Prompt::MoveFeed(id)) = self.prompt.take() {
+                        self.finish_move(id, folder);
+                    }
+                    EventResult::Consumed
+                }
+                Some(Target::EntryAccept) => {
+                    self.commit_text_entry();
+                    EventResult::Consumed
+                }
+                Some(Target::EntryCancel) => {
+                    self.text_entry = None;
+                    self.text_buffer.clear();
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+        // A press anywhere but the search box takes the keyboard from it.
+        let unfocused =
+            target != Some(Target::SearchBox) && std::mem::take(&mut self.search_active);
+        let result = target.map_or(EventResult::Ignored, |t| self.activate(t));
+        if unfocused {
+            EventResult::Consumed
+        } else {
+            result
+        }
+    }
+
+    /// Select article `index` (in `articles`), wherever it is in the list.
+    fn select_article(&mut self, index: usize) -> bool {
+        let Some(position) = self
+            .filtered_article_indices()
+            .iter()
+            .position(|i| *i == index)
+        else {
+            return false;
+        };
+        let changed = position != self.selected_article_index;
+        self.selected_article_index = position;
+        self.active_pane = ActivePane::ArticleList;
+        if changed {
+            self.content_scroll_offset = 0.0;
+        }
+        self.keep_article_visible();
+        true
+    }
+
+    fn activate(&mut self, target: Target) -> EventResult {
+        match target {
+            Target::OpenFile => self.open_file_dialog(false),
+            Target::ExportOpml => self.open_file_dialog(true),
+            Target::FilterButton => {
+                self.filter_mode = self.filter_mode.next();
+                self.clamp_selection();
+            }
+            Target::SortButton => self.sort_order = self.sort_order.next(),
+            Target::SearchBox => self.search_active = true,
+            Target::SidebarItem(selection) => {
+                self.active_pane = ActivePane::Sidebar;
+                if self.sidebar_selection != selection {
+                    self.sidebar_selection = selection;
+                    self.selected_article_index = 0;
+                    self.content_scroll_offset = 0.0;
+                    self.article_scroll_offset = 0.0;
+                }
+            }
+            Target::FolderToggle(id) => {
+                let Some(folder) = self.folders.iter_mut().find(|f| f.id == id) else {
+                    return EventResult::Ignored;
+                };
+                folder.is_expanded = !folder.is_expanded;
+            }
+            Target::Article(index) => {
+                if !self.select_article(index) {
+                    return EventResult::Ignored;
+                }
+            }
+            Target::ArticleRead(index) => {
+                if !self.select_article(index) {
+                    return EventResult::Ignored;
+                }
+                self.toggle_read();
+            }
+            Target::ArticleStar(index) => {
+                if !self.select_article(index) {
+                    return EventResult::Ignored;
+                }
+                self.toggle_star();
+            }
+            Target::ContentRead => self.toggle_read(),
+            Target::ContentStar => self.toggle_star(),
+            Target::HelpHint => self.show_help = true,
+            Target::Sidebar => self.active_pane = ActivePane::Sidebar,
+            Target::ArticleList => self.active_pane = ActivePane::ArticleList,
+            Target::Content => self.active_pane = ActivePane::ContentView,
+            // Taken by `press` while their question is up, and drawn only then.
+            Target::PromptYes
+            | Target::PromptNo
+            | Target::MoveTo(_)
+            | Target::EntryAccept
+            | Target::EntryCancel
+            | Target::HelpCard
+            | Target::HealthOverlay => return EventResult::Ignored,
+        }
+        EventResult::Consumed
+    }
+}
+
+// ============================================================================
 // Text wrapping utility
 // ============================================================================
 
@@ -5275,9 +5941,13 @@ impl App for RssReaderApp {
         // before any `Resize` arrives.
         self.width = width;
         self.height = height;
-        RenderTree {
-            commands: self.render_commands(),
-        }
+        let frame = self.frame();
+        self.last_hits = frame.hits().to_vec();
+        let mut tree = frame.into_tree();
+        // Last, so it is above everything.
+        tree.commands
+            .extend(self.picker.render(&self.palette, width, height));
+        tree
     }
 }
 
@@ -5519,32 +6189,33 @@ mod tests {
         );
     }
 
-    /// And the window says why, including about the refresh keys.
-    ///
-    /// This app advertises F5 and Shift+F5 in its own key list as "Refresh
-    /// current feed" and "Refresh all feeds", and nothing dispatches either. A
-    /// key that is documented and does nothing reads as a broken key, so the
-    /// banner says which it is rather than leaving the user to guess.
+    /// And the window says why, and the one way articles arrive -- where the
+    /// articles would be. The notice used to be drawn under the title bar,
+    /// which painted over it.
     #[test]
     fn the_window_says_it_cannot_fetch() {
         let app = RssReaderApp::new(1200.0, 800.0);
-        let texts: Vec<String> = app
-            .render_commands()
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::Text { text, .. } => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
+        let list = app.list_rect();
+        // The notice is wrapped to the list's width; its pieces, joined,
+        // are its lines -- and every piece is inside the list.
+        let mut pieces = Vec::new();
+        for c in app.render_commands() {
+            if let RenderCommand::Text { text, x, y, .. } = c
+                && list.contains(x + 1.0, y + 1.0)
+            {
+                pieces.push(text);
+            }
+        }
+        let shown = pieces.join(" ");
         for line in CANNOT_FETCH_LINES {
             assert!(
-                texts.iter().any(|t| t == line),
-                "the window never said {line:?}"
+                shown.contains(line),
+                "the list never said {line:?}: {shown}"
             );
         }
         assert!(
-            CANNOT_FETCH_LINES.iter().any(|l| l.contains("F5")),
-            "the advertised refresh keys are not accounted for",
+            CANNOT_FETCH_LINES.iter().any(|l| l.contains("Ctrl+O")),
+            "the notice does not say how to get anything to read",
         );
     }
 
@@ -8599,9 +9270,9 @@ mod tests {
             article.summary = summary.clone();
             app.articles.push(article);
         }
-        let mut cmds = Vec::new();
-        app.render_article_list(&mut cmds, 0.0, 0.0, panel_width, 4000.0);
-        cmds
+        let mut frame = Frame::new(panel_width, 4000.0);
+        app.render_article_list(&mut frame, 0.0, 0.0, panel_width, 4000.0);
+        frame.into_tree().commands
     }
 
     #[test]
@@ -8738,5 +9409,529 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // The pointer, and the scrolling it needed
+    //
+    // `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`.
+    // ------------------------------------------------------------------
+
+    use guitk::probe::{self, Probe};
+
+    impl Probe for RssReaderApp {
+        type Target = Target;
+        type Outcome = EventResult;
+        const SIZE: (f32, f32) = (1200.0, 800.0);
+
+        /// Drawn at the app's own size, which these tests leave at `SIZE`.
+        fn draw(&self, _size: (f32, f32)) -> Frame<Target> {
+            self.frame()
+        }
+
+        fn click_at(
+            &mut self,
+            x: f32,
+            y: f32,
+            button: MouseButton,
+            _size: (f32, f32),
+        ) -> EventResult {
+            self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> EventResult {
+            self.handle_event(&Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, _size: (f32, f32)) -> Option<EventResult> {
+            Some(self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })))
+        }
+    }
+
+    fn sample() -> RssReaderApp {
+        RssReaderApp::with_sample_data(1200.0, 800.0)
+    }
+
+    fn texts_of(app: &RssReaderApp) -> Vec<String> {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The index in `articles` of the article selected in the list.
+    fn selected(app: &RssReaderApp) -> Option<usize> {
+        app.filtered_article_indices()
+            .get(app.selected_article_index)
+            .copied()
+    }
+
+    /// A reader with `n` articles in one feed, none in any folder.
+    fn many_articles(n: usize) -> RssReaderApp {
+        let mut app = RssReaderApp::new(1200.0, 800.0);
+        let feed = app.add_feed("Plenty", "file:///plenty.xml", None);
+        for i in 0..n {
+            let id = app.next_article_id;
+            app.next_article_id += 1;
+            let mut article = Article::new(id, feed, &format!("Article {i}"));
+            article.published = 1_700_000_000 - i as u64 * 60;
+            app.articles.push(article);
+        }
+        app
+    }
+
+    /// **Every control drawn is the one a press on it reaches**, and between
+    /// them the states draw every kind of control there is.
+    #[test]
+    fn every_control_drawn_is_the_one_a_press_on_it_reaches() {
+        let reading = sample();
+        let mut removing = sample();
+        let feed = removing.feeds[0].id;
+        removing.sidebar_selection = SidebarSelection::Feed(feed);
+        removing.prompt = Some(Prompt::RemoveFeed(feed));
+        let mut moving = sample();
+        moving.prompt = Some(Prompt::MoveFeed(feed));
+        let mut naming = sample();
+        naming.text_entry = Some(TextEntry::NewFolder);
+        let mut kinds = std::collections::BTreeSet::new();
+        for (what, app) in [
+            ("reading", reading),
+            ("a removal", removing),
+            ("a move", moving),
+            ("a name", naming),
+        ] {
+            let frame = app.frame();
+            for (target, rect) in frame.hits() {
+                kinds.insert(probe::variant_name(*target));
+                // The panes hold rows, and a row holds its dot and its star.
+                if matches!(
+                    target,
+                    Target::Sidebar
+                        | Target::ArticleList
+                        | Target::Content
+                        | Target::Article(_)
+                        | Target::SidebarItem(SidebarSelection::Folder(_))
+                ) {
+                    continue;
+                }
+                let (x, y) = rect.centre();
+                assert_eq!(
+                    frame.hit_test(x, y),
+                    Some(*target),
+                    "{target:?} in {what} is covered by something else"
+                );
+            }
+        }
+        for flag in ["help", "health"] {
+            let mut app = sample();
+            if flag == "help" {
+                app.show_help = true;
+            } else {
+                app.show_feed_health = true;
+            }
+            for (target, _) in app.frame().hits() {
+                kinds.insert(probe::variant_name(*target));
+            }
+        }
+        for kind in [
+            "OpenFile",
+            "ExportOpml",
+            "FilterButton",
+            "SortButton",
+            "SearchBox",
+            "Sidebar",
+            "SidebarItem",
+            "FolderToggle",
+            "ArticleList",
+            "Article",
+            "ArticleRead",
+            "ArticleStar",
+            "Content",
+            "ContentRead",
+            "ContentStar",
+            "PromptYes",
+            "PromptNo",
+            "MoveTo",
+            "EntryAccept",
+            "EntryCancel",
+            "HelpHint",
+            "HelpCard",
+            "HealthOverlay",
+        ] {
+            assert!(kinds.contains(kind), "no state draws a {kind}: {kinds:?}");
+        }
+    }
+
+    /// "Refresh All" was a button for a refresh nothing here can do.
+    #[test]
+    fn refresh_is_not_offered_and_open_and_export_are() {
+        let mut app = sample();
+        assert!(!texts_of(&app).iter().any(|t| t.contains("Refresh")));
+        assert_eq!(
+            probe::click(&mut app, Target::OpenFile),
+            EventResult::Consumed
+        );
+        assert!(app.picker.is_open());
+        assert!(!app.picker.is_saving());
+        app.picker.close();
+        assert_eq!(
+            probe::click(&mut app, Target::ExportOpml),
+            EventResult::Consumed
+        );
+        assert!(app.picker.is_saving());
+    }
+
+    #[test]
+    fn the_filter_and_sort_buttons_step_through_their_choices() {
+        let mut app = sample();
+        let (filter, sort) = (app.filter_mode, app.sort_order);
+        probe::click(&mut app, Target::FilterButton);
+        assert_eq!(app.filter_mode, filter.next());
+        probe::click(&mut app, Target::SortButton);
+        assert_eq!(app.sort_order, sort.next());
+    }
+
+    #[test]
+    fn the_search_box_takes_the_keyboard_and_a_press_elsewhere_gives_it_back() {
+        let mut app = sample();
+        probe::click(&mut app, Target::SearchBox);
+        assert!(app.search_active);
+        probe::type_str(&mut app, "rust");
+        assert_eq!(app.search_query, "rust");
+        assert_eq!(
+            probe::click(&mut app, Target::SortButton),
+            EventResult::Consumed
+        );
+        assert!(!app.search_active);
+        assert_eq!(
+            app.search_query, "rust",
+            "the query stays; only the keyboard moves"
+        );
+    }
+
+    #[test]
+    fn a_sidebar_row_selects_and_a_folder_mark_opens_and_closes_it() {
+        let mut app = sample();
+        let folder = app.folders[0].id;
+        let feed = app
+            .feeds
+            .iter()
+            .find(|f| f.folder_id == Some(folder))
+            .unwrap()
+            .id;
+        probe::click(&mut app, Target::SidebarItem(SidebarSelection::Feed(feed)));
+        assert_eq!(app.sidebar_selection, SidebarSelection::Feed(feed));
+        assert_eq!(app.active_pane, ActivePane::Sidebar);
+        probe::click(&mut app, Target::SidebarItem(SidebarSelection::Starred));
+        assert_eq!(app.sidebar_selection, SidebarSelection::Starred);
+        let open = app.folders[0].is_expanded;
+        probe::click(&mut app, Target::FolderToggle(folder));
+        assert_eq!(app.folders[0].is_expanded, !open);
+        assert_eq!(
+            app.sidebar_selection,
+            SidebarSelection::Starred,
+            "the mark opens the folder without selecting it"
+        );
+        if open {
+            assert!(
+                !probe::is_visible(&app, Target::SidebarItem(SidebarSelection::Feed(feed))),
+                "a closed folder's feeds are still drawn"
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_selects_its_article_whatever_row_it_is_on() {
+        let mut app = sample();
+        probe::click(&mut app, Target::SortButton);
+        let third = app.filtered_article_indices()[2];
+        assert_eq!(
+            probe::click(&mut app, Target::Article(third)),
+            EventResult::Consumed
+        );
+        assert_eq!(selected(&app), Some(third));
+        assert_eq!(app.active_pane, ActivePane::ArticleList);
+        assert!(texts_of(&app).contains(&app.articles[third].title));
+    }
+
+    #[test]
+    fn the_dot_and_the_star_mark_their_article() {
+        let mut app = sample();
+        let second = app.filtered_article_indices()[1];
+        let (read, starred) = (
+            app.articles[second].is_read,
+            app.articles[second].is_starred,
+        );
+        probe::click(&mut app, Target::ArticleRead(second));
+        assert_eq!(app.articles[second].is_read, !read);
+        probe::click(&mut app, Target::ArticleStar(second));
+        assert_eq!(app.articles[second].is_starred, !starred);
+        assert_eq!(selected(&app), Some(second));
+    }
+
+    #[test]
+    fn the_badges_on_the_article_mark_it_too() {
+        let mut app = sample();
+        let article = selected(&app).unwrap();
+        let (read, starred) = (
+            app.articles[article].is_read,
+            app.articles[article].is_starred,
+        );
+        probe::click(&mut app, Target::ContentRead);
+        assert_eq!(app.articles[article].is_read, !read);
+        probe::click(&mut app, Target::ContentStar);
+        assert_eq!(app.articles[article].is_starred, !starred);
+    }
+
+    /// The selection walked off the bottom of the list after nine articles.
+    #[test]
+    fn the_article_list_follows_the_selection_and_scrolls_under_the_wheel() {
+        let mut app = many_articles(40);
+        for _ in 0..25 {
+            app.next_article();
+        }
+        let current = selected(&app).unwrap();
+        assert!(
+            probe::is_visible(&app, Target::Article(current)),
+            "the selected article is not in the list"
+        );
+        let first = app.filtered_article_indices()[0];
+        assert!(!probe::is_visible(&app, Target::Article(first)));
+        let before = app.article_scroll_offset;
+        assert_eq!(
+            probe::scroll_at_point(&mut app, Target::ArticleList, 2.0),
+            EventResult::Consumed
+        );
+        assert!(app.article_scroll_offset < before);
+        for _ in 0..40 {
+            probe::scroll_at_point(&mut app, Target::ArticleList, -1.0);
+        }
+        let last = *app.filtered_article_indices().last().unwrap();
+        assert!(
+            probe::is_visible(&app, Target::Article(last)),
+            "the end is out of reach"
+        );
+    }
+
+    /// An article longer than the pane was cut off: the content view's offset
+    /// had no writer.
+    #[test]
+    fn a_long_article_scrolls_by_the_wheel_and_by_page_down() {
+        let mut app = many_articles(1);
+        app.articles[0].content = "A line of an article that goes on. ".repeat(400);
+        assert!(app.content_height() > app.pane_height());
+        assert_eq!(
+            probe::scroll_at_point(&mut app, Target::Content, -1.0),
+            EventResult::Consumed
+        );
+        assert!(app.content_scroll_offset > 0.0);
+        app.content_scroll_offset = 0.0;
+        app.active_pane = ActivePane::ContentView;
+        assert_eq!(
+            app.handle_event(&key_ev(Key::PageDown, false, false)),
+            EventResult::Consumed
+        );
+        assert!(app.content_scroll_offset > 0.0);
+        for _ in 0..100 {
+            app.handle_event(&key_ev(Key::PageDown, false, false));
+        }
+        let limit = app.content_height() - app.pane_height();
+        assert!(
+            (app.content_scroll_offset - limit).abs() < 0.5,
+            "scrolled past the end"
+        );
+        assert_eq!(
+            app.handle_event(&key_ev(Key::PageDown, false, false)),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn the_sidebar_scrolls_and_follows_its_selection() {
+        let mut app = RssReaderApp::new(1200.0, 800.0);
+        for i in 0..40 {
+            app.add_feed(&format!("Feed {i}"), &format!("file:///{i}.xml"), None);
+        }
+        app.active_pane = ActivePane::Sidebar;
+        for _ in 0..38 {
+            app.step_sidebar(1);
+        }
+        let SidebarSelection::Feed(id) = app.sidebar_selection else {
+            panic!("the selection is not on a feed");
+        };
+        assert!(
+            probe::is_visible(&app, Target::SidebarItem(SidebarSelection::Feed(id))),
+            "the selected feed is not in the sidebar"
+        );
+        let before = app.sidebar_scroll_offset;
+        assert_eq!(
+            probe::scroll_at_point(&mut app, Target::Sidebar, 1.0),
+            EventResult::Consumed
+        );
+        assert!(app.sidebar_scroll_offset < before);
+    }
+
+    /// The scrolling's idea of where each sidebar row is has to be the
+    /// drawing's: they are two statements of one layout.
+    #[test]
+    fn every_sidebar_row_is_drawn_where_the_scrolling_thinks_it_is() {
+        let mut app = sample();
+        app.folders[1].is_expanded = false;
+        app.add_feed("Loose", "file:///loose.xml", None);
+        let frame = app.frame();
+        let top = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
+        for (selection, y) in app.sidebar_row_tops() {
+            let rect = frame
+                .rect_of(|t| *t == Target::SidebarItem(selection))
+                .unwrap_or_else(|| panic!("{selection:?} is not drawn"));
+            assert!(
+                (rect.y - (top + y)).abs() < 0.5,
+                "{selection:?} is drawn at {} and thought to be at {}",
+                rect.y,
+                top + y
+            );
+        }
+    }
+
+    #[test]
+    fn a_removal_is_answered_by_its_buttons_and_nothing_else() {
+        let mut app = sample();
+        let feed = app.feeds[0].id;
+        app.sidebar_selection = SidebarSelection::Feed(feed);
+        app.handle_event(&key_ev(Key::D, false, false));
+        assert!(app.prompt.is_some());
+        let row = app.filtered_article_indices()[0];
+        assert_eq!(
+            probe::click(&mut app, Target::Article(row)),
+            EventResult::Ignored,
+            "a press behind the question acted"
+        );
+        assert!(app.prompt.is_some());
+        probe::click(&mut app, Target::PromptNo);
+        assert!(app.prompt.is_none());
+        assert!(app.feeds.iter().any(|f| f.id == feed));
+        app.handle_event(&key_ev(Key::D, false, false));
+        probe::click(&mut app, Target::PromptYes);
+        assert!(!app.feeds.iter().any(|f| f.id == feed));
+    }
+
+    #[test]
+    fn a_feed_is_filed_by_pressing_a_folder() {
+        let mut app = sample();
+        let feed = app.feeds[0].id;
+        let target_folder = app.folders[2].id;
+        app.sidebar_selection = SidebarSelection::Feed(feed);
+        app.handle_event(&key_ev(Key::V, false, false));
+        probe::click(&mut app, Target::MoveTo(Some(target_folder)));
+        assert!(app.prompt.is_none());
+        let folder_of =
+            |app: &RssReaderApp| app.feeds.iter().find(|f| f.id == feed).unwrap().folder_id;
+        assert_eq!(folder_of(&app), Some(target_folder));
+        app.handle_event(&key_ev(Key::V, false, false));
+        probe::click(&mut app, Target::MoveTo(None));
+        assert_eq!(folder_of(&app), None);
+    }
+
+    #[test]
+    fn a_typed_name_is_accepted_or_cancelled_by_its_buttons() {
+        let mut app = sample();
+        let folders = app.folders.len();
+        app.handle_event(&key_ev(Key::N, true, false));
+        probe::type_str(&mut app, "Weekend");
+        probe::click(&mut app, Target::EntryAccept);
+        assert_eq!(app.folders.len(), folders + 1);
+        assert!(app.folders.iter().any(|f| f.name == "Weekend"));
+        app.handle_event(&key_ev(Key::N, true, false));
+        probe::type_str(&mut app, "Never");
+        probe::click(&mut app, Target::EntryCancel);
+        assert!(app.text_entry.is_none());
+        assert!(!app.folders.iter().any(|f| f.name == "Never"));
+    }
+
+    #[test]
+    fn the_help_hint_raises_the_list_and_a_press_puts_either_overlay_away() {
+        let mut app = sample();
+        probe::click(&mut app, Target::HelpHint);
+        assert!(app.show_help);
+        probe::click(&mut app, Target::HelpCard);
+        assert!(!app.show_help);
+        app.handle_event(&key_ev(Key::H, false, false));
+        assert!(app.show_feed_health);
+        probe::click(&mut app, Target::HealthOverlay);
+        assert!(!app.show_feed_health);
+    }
+
+    #[test]
+    fn the_pointer_lights_the_button_it_is_over() {
+        let mut app = sample();
+        let (x, y) = probe::rect_of(&app, Target::OpenFile).unwrap().centre();
+        let over = Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        });
+        assert_eq!(app.handle_event(&over), EventResult::Consumed);
+        assert_eq!(app.hover, Some(Target::OpenFile));
+        assert_eq!(app.handle_event(&over), EventResult::Ignored);
+        let leave = Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Leave,
+        });
+        assert_eq!(app.handle_event(&leave), EventResult::Consumed);
+        assert_eq!(app.hover, None);
+    }
+
+    /// A saved web page subscribes to the feeds it links to: the one place
+    /// feed discovery can happen in a reader that cannot fetch.
+    #[test]
+    fn a_saved_web_page_subscribes_to_the_feeds_it_links_to() {
+        let dir = std::env::temp_dir().join(format!("slateos-rss-page-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let page = dir.join("blog.html");
+        std::fs::write(
+            &page,
+            concat!(
+                "<html><head><title>A blog</title>",
+                "<link rel=\"alternate\" type=\"application/rss+xml\" title=\"Posts\" href=\"https://example.org/rss\">",
+                "<link rel=\"alternate\" type=\"application/atom+xml\" href=\"https://example.org/atom\">",
+                "</head><body>hello</body></html>"
+            ),
+        )
+        .unwrap();
+        let mut app = RssReaderApp::new(1200.0, 800.0);
+        let said = app.read_any_file(&page);
+        assert!(said.starts_with("Subscribed to 2 feed(s)"), "{said}");
+        assert!(
+            app.feeds
+                .iter()
+                .any(|f| f.title == "Posts" && f.url == "https://example.org/rss")
+        );
+        assert!(
+            app.feeds
+                .iter()
+                .any(|f| f.url == "https://example.org/atom")
+        );
+        // Opened again, it adds nothing twice.
+        let again = app.read_any_file(&page);
+        assert!(again.starts_with("Subscribed to 0 feed(s)"), "{again}");
+        assert_eq!(app.feeds.len(), 2);
+        // A page with no feed links says so.
+        let plain = dir.join("plain.html");
+        std::fs::write(&plain, "<html><body>nothing here</body></html>").unwrap();
+        assert!(app.read_any_file(&plain).contains("links to no feed"));
+        // Best effort: under the temporary directory.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

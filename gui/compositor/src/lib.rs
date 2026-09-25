@@ -3719,6 +3719,11 @@ fn wire_event(n: EventNotification) -> guiremote::InputEvent {
 /// compositor does not know where a client's widgets are, and double-click
 /// timing belongs with the widget that has to honour it. Synthesising them here
 /// would be guessing at layout the compositor cannot see.
+///
+/// What the compositor does supply is *when*: every event is stamped with its
+/// clock as it is routed (`InputEvent::time`), and the client's event loop
+/// pairs presses by those stamps into double clicks (`oswindow`'s `Clicks`),
+/// so a client busy while the user clicked still times the clicks as made.
 const fn wire_mouse_kind(kind: MouseEventKind) -> ClientMouseKind {
     match kind {
         MouseEventKind::Enter => ClientMouseKind::Enter,
@@ -5374,6 +5379,9 @@ pub struct Compositor {
     layout: &'static keylayout::Layout,
     /// Outbound event notifications for clients (stub queue).
     pending_notifications: VecDeque<EventNotification>,
+    /// When this compositor started: the zero of the clock input events are
+    /// stamped with ([`Self::input_clock_ms`]).
+    input_epoch: Instant,
     /// Reused encoding buffer for
     /// [`route_window_list`](Self::route_window_list), so that a shell polling
     /// an unchanged desktop at 60 Hz allocates nothing.
@@ -5662,6 +5670,7 @@ impl Compositor {
             input: None,
             layout: keylayout::default_layout(),
             pending_notifications: VecDeque::new(),
+            input_epoch: Instant::now(),
             window_list_scratch: Vec::new(),
             tray_icons: Vec::new(),
             tray_list_scratch: Vec::new(),
@@ -10438,12 +10447,29 @@ impl Compositor {
         if self.pending_notifications.is_empty() {
             return None;
         }
+        let now = self.input_clock_ms();
         let events: Vec<guiremote::InputEvent> = self
             .pending_notifications
             .drain(..)
-            .map(wire_event)
+            .map(|note| wire_event(note).at(now))
             .collect();
         Some(guiremote::encode_input_frame(&events))
+    }
+
+    /// The clock input events are stamped with: milliseconds since this
+    /// compositor started, wrapping at `u32` (see `guiremote::InputEvent::time`
+    /// for why a client needs it). Read when events are routed to their
+    /// clients, which the server does in the same pass as it handles the input
+    /// that caused them -- so a stamp is within a tick of the event, and no
+    /// client's delay in reading it can move it.
+    #[must_use]
+    pub fn input_clock_ms(&self) -> u32 {
+        // Wrapping by design: only differences between stamps mean anything,
+        // and the low 32 bits of the milliseconds are those differences for
+        // any two events less than 49 days apart.
+        #[allow(clippy::cast_possible_truncation, reason = "wraps on purpose")]
+        let low = self.input_epoch.elapsed().as_millis() as u32;
+        low
     }
 
     // -----------------------------------------------------------------------

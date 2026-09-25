@@ -1071,9 +1071,12 @@ impl Compositor {
                 true
             }
         });
+        // One stamp for the batch: the server routes in the same pass as it
+        // handled the input, so this is within a tick of every event in it.
+        let now = self.input_clock_ms();
         for note in self.pending_notifications.drain(..) {
             if link.owns(note.window_id()) {
-                mine.push(crate::wire_event(note));
+                mine.push(crate::wire_event(note).at(now));
             } else {
                 theirs.push_back(note);
             }
@@ -1534,6 +1537,31 @@ mod tests {
         // And the compositor's queue is empty afterwards, not doubly delivered.
         assert_eq!(comp.discard_unrouted_input(), 0);
         assert_ne!(mine, theirs);
+    }
+
+    #[test]
+    fn every_routed_event_carries_the_compositors_clock() {
+        // What lets a client time a double click by when the clicks happened
+        // rather than by when it got round to reading them.
+        let (mut comp, mut link) = wired();
+        let _window = open(&mut comp, &mut link, "Timed");
+        comp.route_input(&mut link);
+        drop(link.take_outgoing());
+
+        let stamp_of = |comp: &mut Compositor, link: &mut ClientLink| {
+            comp.handle_key(0x1E, true, Some('a'));
+            assert_eq!(comp.route_input(link), 1);
+            let (events, _) = decode_input_frame(&link.take_outgoing()).expect("decodes");
+            events[0].time.expect("a routed event is stamped")
+        };
+        let first = stamp_of(&mut comp, &mut link);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let second = stamp_of(&mut comp, &mut link);
+        // Bounded from below only: a sleep can overrun, never fall short.
+        assert!(
+            second.wrapping_sub(first) >= 30,
+            "30 ms apart, stamped {first} and {second}"
+        );
     }
 
     #[test]

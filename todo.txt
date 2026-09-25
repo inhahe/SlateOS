@@ -58711,6 +58711,15 @@ test of the fixture, not of the bound.
 
 ### Judgment Calls
 
+- **JPEG colour is blended back to full resolution, not repeated**
+  (`gui/imagecodec/src/jpeg/upsample.rs`, design-decisions §1306). This
+  reverses the decoder's earlier call that interpolating "would be a better
+  picture than the file contains": libjpeg's triangle filter is what every
+  browser and image library shows, so a photograph now looks here as it does
+  everywhere else. It also follows libjpeg in *not* filtering an eighth-scale
+  decode (a thumbnail, box-filtered after), which is libjpeg's implementation
+  limit rather than a quality choice. To go back to repetition, make
+  `Filter::choose` return `Repeat` for every plane that is not `Same`.
 - **The pointer is drawn over fullscreen direct-scanout frames**
   (`POINTER_OVER_DIRECT_SCANOUT = true`, `gui/compositor/src/server.rs`;
   design-decisions §1301). C-Q18 put the fullscreen case to the operator as a

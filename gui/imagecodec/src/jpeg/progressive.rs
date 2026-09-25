@@ -56,8 +56,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{
-    Basis, BitReader, Component, Tables, ZIGZAG, flat_block, idct_8x8, idct_scaled, store_block,
-    to_pixels,
+    Basis, BitReader, Component, Samples, Shape, Tables, ZIGZAG, flat_block, idct_8x8, idct_scaled,
+    store_block, to_pixels,
 };
 use crate::{Image, ImageError, ImageResult, Limits};
 
@@ -707,11 +707,16 @@ impl Coefficients {
         let out_width = self.width.saturating_mul(keep).div_ceil(8).max(1);
         let out_height = self.height.saturating_mul(keep).div_ceil(8).max(1);
         let basis = Basis::new();
-        let mut samples: Vec<(usize, usize, Vec<u8>)> = Vec::with_capacity(self.planes.len());
-        for plane in &mut self.planes {
-            let plane_w = plane.blocks_w.saturating_mul(keep);
-            let plane_h = plane.blocks_h.saturating_mul(keep);
-            let mut out = vec![0u8; plane_w.saturating_mul(plane_h)];
+        let mut samples: Vec<Samples> = Vec::with_capacity(self.planes.len());
+        for (plane, component) in self.planes.iter_mut().zip(&self.components) {
+            // The same plane a baseline decode of this frame writes: padded to
+            // whole MCUs, `blocks_w * keep` across.
+            let mut out = Samples::new(Shape::of(
+                (self.width, self.height),
+                (component.h, component.v),
+                (self.max_h, self.max_v),
+                keep,
+            ));
             let quant = plane.quant.unwrap_or([1u16; 64]);
             for row in 0..plane.blocks_h {
                 for col in 0..plane.blocks_w {
@@ -755,8 +760,6 @@ impl Coefficients {
                         &pixels,
                         keep,
                         &mut out,
-                        plane_w,
-                        plane_h,
                         col.saturating_mul(keep),
                         row.saturating_mul(keep),
                     );
@@ -766,21 +769,14 @@ impl Coefficients {
             // component's samples are allocated.
             plane.values = Vec::new();
             plane.nonzero = Vec::new();
-            samples.push((plane_w, plane_h, out));
+            samples.push(out);
         }
         Ok(Image {
             width: u32::try_from(out_width)
                 .map_err(|_| ImageError::Malformed("an impossible width"))?,
             height: u32::try_from(out_height)
                 .map_err(|_| ImageError::Malformed("an impossible height"))?,
-            pixels: to_pixels(
-                out_width,
-                out_height,
-                &self.components,
-                &samples,
-                self.max_h,
-                self.max_v,
-            ),
+            pixels: to_pixels(out_width, out_height, &samples, keep > 1),
         })
     }
 }

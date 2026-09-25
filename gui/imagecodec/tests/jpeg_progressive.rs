@@ -11,7 +11,7 @@
 //!
 //! That comparison cannot catch a mistake the two decoders share, so each
 //! progressive file is also checked against Pillow's own decode of it, to within
-//! the inverse-DCT rounding two decoders may differ by.
+//! the rounding two decoders may differ by.
 //!
 //! The scan script in every colour fixture is libjpeg's standard progression:
 //! an interleaved DC pass with one bit held back, spectral-selection AC passes
@@ -31,6 +31,9 @@
     clippy::cast_precision_loss
 )]
 
+mod common;
+
+use common::{answer, assert_agrees, read};
 use imagecodec::{Image, Limits, decode, decode_scaled, dimensions};
 
 /// Every fixture pair, and what makes it worth having.
@@ -54,27 +57,6 @@ const CASES: &[(&str, &str)] = &[
         "a restart marker every three MCUs inside every pass",
     ),
 ];
-
-fn read(name: &str) -> Vec<u8> {
-    let path = format!("{}/tests/data/{name}.jpg", env!("CARGO_MANIFEST_DIR"));
-    std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
-}
-
-/// Pillow's decode of a fixture: width, height, then `AARRGGBB` per pixel.
-fn answer(name: &str) -> (u32, u32, Vec<u32>) {
-    let path = format!("{}/tests/data/{name}.txt", env!("CARGO_MANIFEST_DIR"));
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    let mut words = text.split_whitespace();
-    let width: u32 = words.next().unwrap().parse().unwrap();
-    let height: u32 = words.next().unwrap().parse().unwrap();
-    let pixels: Vec<u32> = words.map(|w| u32::from_str_radix(w, 16).unwrap()).collect();
-    assert_eq!(
-        pixels.len(),
-        (width * height) as usize,
-        "{path}: wrong count"
-    );
-    (width, height, pixels)
-}
 
 fn decoded(name: &str) -> Image {
     decode(&read(name), Limits::default()).unwrap_or_else(|e| panic!("{name}: {e}"))
@@ -103,46 +85,14 @@ fn a_progressive_file_decodes_to_exactly_what_its_baseline_twin_does() {
     }
 }
 
-/// Fixtures whose chroma is not subsampled, so that no upsampling stands
-/// between this decoder and the reference.
-///
-/// The subsampled ones are not compared here yet: libjpeg interpolates chroma
-/// back up (its "fancy" triangle filter) where this crate repeats each sample,
-/// and at a sharp colour edge the two differ by far more than rounding. That is
-/// a baseline matter, shared by both twins and so invisible to the test above,
-/// and it is being fixed on its own.
-const NOT_SUBSAMPLED: &[&str] = &["jpeg444", "jpeggrey"];
-
 #[test]
 fn a_progressive_file_agrees_with_a_reference_decoder() {
-    for (name, why) in CASES
-        .iter()
-        .filter(|(name, _)| NOT_SUBSAMPLED.contains(name))
-    {
+    // Subsampled ones included: the colour is brought back up with libjpeg's
+    // own filter (`tests/jpeg_sampling.rs` holds every layout to it), so
+    // nothing stands between this decoder and the reference but rounding.
+    for (name, why) in CASES {
         let file = format!("{name}_progressive");
-        let image = decoded(&file);
-        let (width, height, want) = answer(&file);
-        assert_eq!((image.width, image.height), (width, height), "{name}");
-        let mut total = 0i64;
-        for (index, (got, want)) in image.pixels.iter().zip(&want).enumerate() {
-            assert_eq!(got >> 24, 0xFF, "{name}: pixel {index} is not opaque");
-            for shift in [16u32, 8, 0] {
-                let mine = ((got >> shift) & 0xFF) as i32;
-                let theirs = ((want >> shift) & 0xFF) as i32;
-                let difference = (mine - theirs).abs();
-                assert!(
-                    difference <= 2,
-                    "{name} ({why}): pixel {index} ({got:08X} against {want:08X}) differs by {difference}: \
-                     that is a decode, not a rounding"
-                );
-                total += i64::from(difference);
-            }
-        }
-        let mean = total as f64 / (image.pixels.len() * 3) as f64;
-        assert!(
-            mean < 0.15,
-            "{name} ({why}): mean channel error {mean:.3} is a bias, not rounding"
-        );
+        assert_agrees(&format!("{file} ({why})"), &decoded(&file), &answer(&file));
     }
 }
 
@@ -175,8 +125,12 @@ fn a_scaled_progressive_decode_is_the_scaled_baseline_decode() {
 fn the_size_of_a_progressive_file_is_read_from_its_header() {
     for (name, _) in CASES {
         let file = format!("{name}_progressive");
-        let (width, height, _) = answer(&file);
-        assert_eq!(dimensions(&read(&file)).unwrap(), (width, height), "{name}");
+        let want = answer(&file);
+        assert_eq!(
+            dimensions(&read(&file)).unwrap(),
+            (want.width, want.height),
+            "{name}"
+        );
     }
 }
 

@@ -24,7 +24,10 @@
 //!    stream may be cut at intervals by restart markers that reset the
 //!    predictors.
 //! 6. **Reconstruction**: dequantise, inverse-DCT each 8x8 block, upsample the
-//!    chroma back to full resolution, and convert YCbCr to RGB.
+//!    chroma back to full resolution, and convert YCbCr to RGB. The
+//!    upsampling is libjpeg's triangle filter, rounding and all, so that a
+//!    subsampled photograph comes out as every other decoder shows it rather
+//!    than with its colour edges stepped; see `jpeg/upsample.rs`.
 //!
 //! **Progressive** files (`SOF2`) send the whole picture several times, each
 //! pass adding frequencies or precision, so their coefficients are gathered
@@ -54,6 +57,9 @@ use alloc::vec::Vec;
 use crate::{Image, ImageError, ImageResult, Limits};
 
 mod progressive;
+mod upsample;
+
+use upsample::{Rows, Samples, Shape};
 
 /// Zig-zag order: the sequence a block's 64 coefficients are stored in.
 ///
@@ -1089,16 +1095,16 @@ fn decode_scan(
 
     // One plane per component, padded out to whole MCUs so a block never has
     // to be clipped while it is being written.
-    let mut planes: Vec<(usize, usize, Vec<u8>)> = Vec::with_capacity(components.len());
+    let mut planes: Vec<Samples> = Vec::with_capacity(components.len());
     let mut plane_bytes = 0usize;
     for component in &components {
-        let plane_w = mcus_x
-            .saturating_mul(component.h)
-            .saturating_mul(block_size);
-        let plane_h = mcus_y
-            .saturating_mul(component.v)
-            .saturating_mul(block_size);
-        let size = plane_w.saturating_mul(plane_h);
+        let shape = Shape::of(
+            (width, height),
+            (component.h, component.v),
+            (max_h, max_v),
+            block_size,
+        );
+        let size = shape.len();
         // Four times the pixel budget: the planes are padded out to whole MCUs
         // and a 4:2:0 file carries a plane per component, so a little slack is
         // ordinary while a lot is a file claiming a size it does not have.
@@ -1122,7 +1128,7 @@ fn decode_scan(
                 limit: limits.max_decompressed_bytes as u64,
             });
         }
-        planes.push((plane_w, plane_h, vec![0u8; size]));
+        planes.push(Samples::new(shape));
     }
 
     let basis = Basis::new();
@@ -1155,7 +1161,7 @@ fn decode_scan(
                             idct_scaled(&block, &basis, block_size, &mut scaled);
                             block = scaled;
                         }
-                        let Some((plane_w, plane_h, plane)) = planes.get_mut(index) else {
+                        let Some(plane) = planes.get_mut(index) else {
                             continue;
                         };
                         let origin_x = mcu_x
@@ -1166,9 +1172,7 @@ fn decode_scan(
                             .saturating_mul(component.v)
                             .saturating_add(by)
                             .saturating_mul(block_size);
-                        store_block(
-                            &block, block_size, plane, *plane_w, *plane_h, origin_x, origin_y,
-                        );
+                        store_block(&block, block_size, plane, origin_x, origin_y);
                     }
                 }
             }
@@ -1181,7 +1185,7 @@ fn decode_scan(
             .map_err(|_| ImageError::Malformed("an impossible width"))?,
         height: u32::try_from(out_height)
             .map_err(|_| ImageError::Malformed("an impossible height"))?,
-        pixels: to_pixels(out_width, out_height, &components, &planes, max_h, max_v),
+        pixels: to_pixels(out_width, out_height, &planes, block_size > 1),
     })
 }
 
@@ -1194,12 +1198,11 @@ fn decode_scan(
 fn store_block(
     block: &[f32; 64],
     block_size: usize,
-    plane: &mut [u8],
-    plane_w: usize,
-    plane_h: usize,
+    plane: &mut Samples,
     origin_x: usize,
     origin_y: usize,
 ) {
+    let (plane_w, plane_h) = (plane.shape.stride, plane.shape.rows);
     if origin_x >= plane_w {
         return;
     }
@@ -1210,7 +1213,7 @@ fn store_block(
             break;
         }
         let start = py.saturating_mul(plane_w).saturating_add(origin_x);
-        let Some(row) = plane.get_mut(start..start.saturating_add(cols)) else {
+        let Some(row) = plane.data.get_mut(start..start.saturating_add(cols)) else {
             continue;
         };
         for (slot, &sample) in row.iter_mut().zip(samples) {
@@ -1304,79 +1307,40 @@ fn decode_block(
     Ok(any_ac)
 }
 
-/// Upsample the planes and convert to `0xAARRGGBB`.
+/// Bring every plane up to the picture's resolution and convert to
+/// `0xAARRGGBB`.
 ///
-/// Nearest-neighbour upsampling. A photograph's chroma is already
-/// half-resolution and the eye is poor at it, which is why the format throws
-/// it away; interpolating would be a better picture than the file contains.
+/// The upsampling is libjpeg's, filter and rounding alike (see [`upsample`]):
+/// a photograph's colour is usually stored at half resolution, and restoring
+/// it with the filter every other decoder uses is what makes a subsampled
+/// picture come out as it does everywhere else. `fancy` is false only for an
+/// eighth-scale decode, which libjpeg does not filter either.
 ///
-/// Where each output pixel samples each plane is worked out once per column and
-/// once per row, not once per pixel: `x * h / max_h` is a division, and it was
-/// three per pixel for every pixel of the picture.
-fn to_pixels(
-    width: usize,
-    height: usize,
-    components: &[Component],
-    planes: &[(usize, usize, Vec<u8>)],
-    max_h: usize,
-    max_v: usize,
-) -> Vec<u32> {
+/// A row at a time: every plane hands over its row already at the picture's
+/// width, so converting it is a walk along three slices.
+fn to_pixels(width: usize, height: usize, planes: &[Samples], fancy: bool) -> Vec<u32> {
     let mut out = vec![0u32; width.saturating_mul(height)];
-    // Per component: which plane column each output column reads. A column
-    // past the plane's edge reads `usize::MAX`, which no row has, and so
-    // samples 0 through the same `get` as every other column.
-    let columns: Vec<Vec<usize>> = components
+    let mut rows: Vec<Rows<'_>> = planes
         .iter()
-        .zip(planes)
-        .map(|(component, (plane_w, _, _))| {
-            (0..width)
-                .map(|x| {
-                    let sx = x
-                        .saturating_mul(component.h)
-                        .checked_div(max_h)
-                        .unwrap_or(0);
-                    if sx < *plane_w { sx } else { usize::MAX }
-                })
-                .collect()
-        })
+        .map(|plane| Rows::new(plane, width, fancy))
         .collect();
-    let colour = components.len() >= 3;
     let chroma = Chroma::new();
-    // The plane row output row `y` reads, for one component; an empty row past
-    // the plane's bottom edge, which samples 0 everywhere.
-    let row_of = |index: usize, y: usize| -> &[u8] {
-        let (Some(component), Some((plane_w, plane_h, plane))) =
-            (components.get(index), planes.get(index))
-        else {
-            return &[];
-        };
-        let sy = y
-            .saturating_mul(component.v)
-            .checked_div(max_v)
-            .unwrap_or(0);
-        if sy >= *plane_h {
-            return &[];
-        }
-        let start = sy.saturating_mul(*plane_w);
-        plane
-            .get(start..start.saturating_add(*plane_w))
-            .unwrap_or(&[])
-    };
-    let map = |index: usize| columns.get(index).map_or(&[][..], Vec::as_slice);
-    let at = |row: &[u8], sx: usize| row.get(sx).copied().unwrap_or(0);
     for (y, out_row) in out.chunks_exact_mut(width.max(1)).enumerate() {
-        if colour {
-            let (luma, blue, red) = (row_of(0, y), row_of(1, y), row_of(2, y));
-            for (((slot, &cy), &cb), &cr) in out_row.iter_mut().zip(map(0)).zip(map(1)).zip(map(2))
-            {
-                *slot = chroma.rgb(at(luma, cy), at(blue, cb), at(red, cr));
+        match rows.as_mut_slice() {
+            [luma, blue, red, ..] => {
+                let (luma, blue, red) = (luma.row(y), blue.row(y), red.row(y));
+                for (((slot, &cy), &cb), &cr) in out_row.iter_mut().zip(luma).zip(blue).zip(red) {
+                    *slot = chroma.rgb(cy, cb, cr);
+                }
             }
-        } else {
-            let grey_row = row_of(0, y);
-            for (slot, &cg) in out_row.iter_mut().zip(map(0)) {
-                let grey = u32::from(at(grey_row, cg));
-                *slot = 0xFF00_0000 | (grey << 16) | (grey << 8) | grey;
+            // One component, or two, of which only the first is a picture.
+            [grey, ..] => {
+                for (slot, &sample) in out_row.iter_mut().zip(grey.row(y)) {
+                    let grey = u32::from(sample);
+                    *slot = 0xFF00_0000 | (grey << 16) | (grey << 8) | grey;
+                }
             }
+            [] => {}
         }
     }
     out

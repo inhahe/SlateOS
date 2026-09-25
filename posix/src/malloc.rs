@@ -574,6 +574,194 @@ pub unsafe extern "C" fn malloc_usable_size(ptr: *mut u8) -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// Heap statistics and trimming (glibc's malloc.h extensions)
+// ---------------------------------------------------------------------------
+
+/// glibc's `struct mallinfo`: ten `int`s, 40 bytes.
+///
+/// The fields are C `int`s, so a heap past 2 GiB cannot be described in them;
+/// glibc lets the values wrap, and this saturates at `i32::MAX` instead, so a
+/// large heap reads as large rather than as some unrelated smaller number.
+/// [`Mallinfo2`] has the same fields at full width.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Mallinfo {
+    /// Bytes in the heap's segments, the top chunk included.
+    pub arena: i32,
+    /// Free chunks.
+    pub ordblks: i32,
+    /// Free fastbin blocks: always 0, dlmalloc has no fastbins.
+    pub smblks: i32,
+    /// Separately mapped blocks: 0, as C dlmalloc reports (it does not count them).
+    pub hblks: i32,
+    /// Bytes in separately mapped blocks.
+    pub hblkhd: i32,
+    /// The largest the heap has been, in bytes.
+    pub usmblks: i32,
+    /// Bytes in free fastbin blocks: always 0.
+    pub fsmblks: i32,
+    /// Bytes in use.
+    pub uordblks: i32,
+    /// Bytes free.
+    pub fordblks: i32,
+    /// Bytes `malloc_trim` could release from the top of the heap.
+    pub keepcost: i32,
+}
+
+/// glibc 2.33's `struct mallinfo2`: [`Mallinfo`]'s fields as `size_t`, 80 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Mallinfo2 {
+    /// Bytes in the heap's segments, the top chunk included.
+    pub arena: usize,
+    /// Free chunks.
+    pub ordblks: usize,
+    /// Free fastbin blocks: always 0.
+    pub smblks: usize,
+    /// Separately mapped blocks: 0, as C dlmalloc reports.
+    pub hblks: usize,
+    /// Bytes in separately mapped blocks.
+    pub hblkhd: usize,
+    /// The largest the heap has been, in bytes.
+    pub usmblks: usize,
+    /// Bytes in free fastbin blocks: always 0.
+    pub fsmblks: usize,
+    /// Bytes in use.
+    pub uordblks: usize,
+    /// Bytes free.
+    pub fordblks: usize,
+    /// Bytes `malloc_trim` could release from the top of the heap.
+    pub keepcost: usize,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<Mallinfo>() == 40);
+    assert!(core::mem::size_of::<Mallinfo2>() == 80);
+};
+
+impl From<dlmalloc::HeapStats> for Mallinfo2 {
+    fn from(st: dlmalloc::HeapStats) -> Self {
+        Self {
+            arena: st.arena,
+            ordblks: st.ordblks,
+            smblks: 0,
+            hblks: 0,
+            hblkhd: st.hblkhd,
+            usmblks: st.usmblks,
+            fsmblks: 0,
+            uordblks: st.uordblks,
+            fordblks: st.fordblks,
+            keepcost: st.keepcost,
+        }
+    }
+}
+
+impl From<Mallinfo2> for Mallinfo {
+    fn from(m: Mallinfo2) -> Self {
+        let narrow = |v: usize| i32::try_from(v).unwrap_or(i32::MAX);
+        Self {
+            arena: narrow(m.arena),
+            ordblks: narrow(m.ordblks),
+            smblks: narrow(m.smblks),
+            hblks: narrow(m.hblks),
+            hblkhd: narrow(m.hblkhd),
+            usmblks: narrow(m.usmblks),
+            fsmblks: narrow(m.fsmblks),
+            uordblks: narrow(m.uordblks),
+            fordblks: narrow(m.fordblks),
+            keepcost: narrow(m.keepcost),
+        }
+    }
+}
+
+/// A snapshot of the heap, taken under its lock so the fields agree.
+fn heap_stats() -> dlmalloc::HeapStats {
+    let mut guard = HeapGuard::lock();
+    // SAFETY: the guard gives exclusive use of the heap; `stats` only reads it.
+    unsafe { guard.heap().stats() }
+}
+
+/// `mallinfo2()` — the heap's statistics at full width (glibc 2.33+).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn mallinfo2() -> Mallinfo2 {
+    Mallinfo2::from(heap_stats())
+}
+
+/// `mallinfo()` — [`mallinfo2`] in C `int`s, saturating rather than wrapping.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn mallinfo() -> Mallinfo {
+    Mallinfo::from(mallinfo2())
+}
+
+/// `malloc_trim(pad)` — give free memory back to the system, keeping `pad`
+/// bytes at the top of the heap. Returns 1 if anything was released, 0 if not.
+///
+/// What can go back is what `SlateSystem` can unmap: a whole segment none of
+/// whose chunks is in use. The top of a segment still in use cannot be cut
+/// off (`free_part` refuses, since native `munmap` releases whole mappings),
+/// so glibc's partial release is not available here, and neither is its
+/// `madvise` of free pages in the middle of the heap.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn malloc_trim(pad: usize) -> i32 {
+    let mut guard = HeapGuard::lock();
+    // SAFETY: the guard gives exclusive use of the heap.
+    i32::from(unsafe { guard.heap().trim(pad) })
+}
+
+/// Format [`malloc_stats`]'s report into `out`, returning its length.
+///
+/// glibc's layout, without the two lines it ends with ("max mmap regions" and
+/// "max mmap bytes"): dlmalloc does not keep those numbers, and a report that
+/// printed zero for them would be wrong rather than incomplete.
+fn format_malloc_stats(m: &Mallinfo2, out: &mut [u8; 256]) -> usize {
+    struct Cursor<'a> {
+        buf: &'a mut [u8; 256],
+        len: usize,
+    }
+    impl core::fmt::Write for Cursor<'_> {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let end = self.len.checked_add(s.len()).ok_or(core::fmt::Error)?;
+            let dst = self.buf.get_mut(self.len..end).ok_or(core::fmt::Error)?;
+            dst.copy_from_slice(s.as_bytes());
+            self.len = end;
+            Ok(())
+        }
+    }
+    let mut c = Cursor { buf: out, len: 0 };
+    let in_segments = m.arena.saturating_sub(m.fordblks);
+    // A report that does not fit is cut short, never allowed to overrun; five
+    // lines of at most 30 bytes fit 256 with room to spare.
+    let _ = core::fmt::write(
+        &mut c,
+        format_args!(
+            concat!(
+                "Arena 0:\n",
+                "system bytes     = {:>10}\n",
+                "in use bytes     = {:>10}\n",
+                "Total (incl. mmap):\n",
+                "system bytes     = {:>10}\n",
+                "in use bytes     = {:>10}\n",
+            ),
+            m.arena,
+            in_segments,
+            m.arena.saturating_add(m.hblkhd),
+            m.uordblks,
+        ),
+    );
+    c.len
+}
+
+/// `malloc_stats()` — print the heap's use to standard error, in glibc's
+/// layout (see [`format_malloc_stats`] for the two lines it omits).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn malloc_stats() {
+    let mut buf = [0u8; 256];
+    let n = format_malloc_stats(&mallinfo2(), &mut buf);
+    // Diagnostic output with nowhere to report its own failure, as in glibc.
+    let _ = crate::file::write(2, buf.as_ptr(), n);
+}
+
+// ---------------------------------------------------------------------------
 // Aligned allocation
 // ---------------------------------------------------------------------------
 
@@ -1215,5 +1403,119 @@ mod tests {
         let p = malloc(8);
         assert!(!p.is_null());
         unsafe { free(p) };
+    }
+
+    // -- mallinfo, mallinfo2, malloc_trim, malloc_stats --
+    //
+    // The heap is shared by the whole test suite, so these assert what holds of
+    // one snapshot whatever other tests are doing: identities between the
+    // fields, and lower bounds set by a block this test is holding.
+
+    /// Every byte obtained from the system is counted once either way: by
+    /// where it lives (segments + separate mappings) and by whether it is in
+    /// use (used + free). Both sums are the footprint.
+    #[test]
+    fn mallinfo2_fields_account_for_the_footprint_both_ways() {
+        let p = malloc(100);
+        assert!(!p.is_null());
+        let m = mallinfo2();
+        unsafe { free(p) };
+        assert_eq!(m.arena + m.hblkhd, m.uordblks + m.fordblks);
+        assert!(m.ordblks >= 1, "the top chunk is always free");
+        assert!(
+            m.keepcost <= m.fordblks,
+            "the top chunk is part of the free bytes"
+        );
+        assert!(
+            m.usmblks >= m.arena + m.hblkhd,
+            "the peak is at least the present"
+        );
+        assert_eq!(
+            (m.smblks, m.hblks, m.fsmblks),
+            (0, 0, 0),
+            "dlmalloc keeps none"
+        );
+    }
+
+    /// A block past the mapping threshold lives in a mapping of its own, and
+    /// is counted there and as in use while it is held.
+    #[test]
+    fn a_large_block_is_counted_as_mapped_and_in_use() {
+        const BIG: usize = 1 << 20;
+        let p = malloc(BIG);
+        assert!(!p.is_null());
+        let m = mallinfo2();
+        unsafe { free(p) };
+        assert!(m.hblkhd >= BIG, "hblkhd {} < {BIG}", m.hblkhd);
+        assert!(m.uordblks >= BIG, "uordblks {} < {BIG}", m.uordblks);
+    }
+
+    /// `mallinfo` is `mallinfo2` in `int`s: equal while the values fit,
+    /// `i32::MAX` -- not a wrapped value -- once they do not.
+    #[test]
+    fn mallinfo_narrows_by_saturating() {
+        let wide = Mallinfo2 {
+            arena: 5,
+            ordblks: 1,
+            hblkhd: usize::MAX,
+            uordblks: (1 << 31) + 7,
+            fordblks: 3,
+            keepcost: 2,
+            ..Mallinfo2::default()
+        };
+        let narrow = Mallinfo::from(wide);
+        assert_eq!(
+            (
+                narrow.arena,
+                narrow.ordblks,
+                narrow.fordblks,
+                narrow.keepcost
+            ),
+            (5, 1, 3, 2)
+        );
+        assert_eq!(narrow.hblkhd, i32::MAX);
+        assert_eq!(narrow.uordblks, i32::MAX);
+        // And the real call agrees with its wide twin wherever nothing moved.
+        let m = mallinfo();
+        assert!(m.ordblks >= 1 && m.arena > 0);
+    }
+
+    /// `malloc_trim` answers 0 or 1 and leaves a working heap behind.
+    #[test]
+    fn malloc_trim_leaves_a_working_heap() {
+        let blocks: std::vec::Vec<*mut u8> = (0..64).map(|i| malloc(1 + i * 97)).collect();
+        for &b in &blocks {
+            unsafe { free(b) };
+        }
+        let r = malloc_trim(0);
+        assert!(r == 0 || r == 1, "{r}");
+        let p = malloc(4096);
+        assert!(!p.is_null());
+        unsafe { free(p) };
+        assert!(matches!(malloc_trim(1 << 20), 0 | 1));
+    }
+
+    #[test]
+    fn malloc_stats_reports_in_glibcs_layout() {
+        let m = Mallinfo2 {
+            arena: 135_168,
+            fordblks: 133_104,
+            hblkhd: 1_052_672,
+            uordblks: 1_054_736,
+            ..Mallinfo2::default()
+        };
+        let mut buf = [0u8; 256];
+        let n = format_malloc_stats(&m, &mut buf);
+        assert_eq!(
+            core::str::from_utf8(&buf[..n]).expect("ASCII"),
+            concat!(
+                "Arena 0:\n",
+                "system bytes     =     135168\n",
+                "in use bytes     =       2064\n",
+                "Total (incl. mmap):\n",
+                "system bytes     =    1187840\n",
+                "in use bytes     =    1054736\n",
+            )
+        );
     }
 }

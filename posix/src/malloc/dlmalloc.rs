@@ -1851,13 +1851,53 @@ impl<A: Allocator> Dlmalloc<A> {
         0
     }
 
-    // LOCAL CHANGE (SlateOS): upstream API with no caller in this libc (`trim`
-    // would back a `malloc_trim`, which known-issues
-    // TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA lists as missing). Kept so the
-    // file stays comparable with upstream (VENDORED.md).
-    #[allow(dead_code)]
     pub unsafe fn trim(&mut self, pad: usize) -> bool {
         self.sys_trim(pad)
+    }
+
+    // LOCAL ADDITION (SlateOS): C dlmalloc's `internal_mallinfo`, which the
+    // Rust port omits; it backs `mallinfo`, `mallinfo2` and `malloc_stats`
+    // (VENDORED.md, local change 7). The walk is C's: every chunk of every
+    // segment up to the top chunk or a fencepost, counting the free ones; the
+    // top chunk is free and counted separately. Chunks mapped on their own
+    // (`mmap_alloc`) are in no segment, so they appear only as the difference
+    // between the footprint and what the walk found -- which is how C reports
+    // them, as `hblkhd`.
+    pub unsafe fn stats(&self) -> HeapStats {
+        let mut st = HeapStats::default();
+        // C's `is_initialized(m)`: nothing has been allocated yet.
+        if self.top.is_null() {
+            return st;
+        }
+        let mut nfree = 1; // the top chunk is always free
+        let mut mfree = self.topsize + self.top_foot_size();
+        let mut sum = mfree;
+        let mut s: *const Segment = &self.seg;
+        while !s.is_null() {
+            let mut q = self.align_as_chunk((*s).base);
+            while Segment::holds(s as *mut Segment, q.cast())
+                && q != self.top
+                && (*q).head != Chunk::fencepost_head()
+            {
+                let sz = Chunk::size(q);
+                sum += sz;
+                if !Chunk::inuse(q) {
+                    mfree += sz;
+                    nfree += 1;
+                }
+                q = Chunk::next(q);
+            }
+            s = (*s).next;
+        }
+        st.arena = sum;
+        st.ordblks = nfree;
+        st.hblkhd = self.footprint - sum;
+        st.usmblks = self.max_footprint;
+        st.uordblks = self.footprint - mfree;
+        st.fordblks = mfree;
+        st.keepcost = self.topsize;
+        st.footprint = self.footprint;
+        st
     }
 
     // LOCAL CHANGE (SlateOS): upstream API with no caller in this libc (`trim`
@@ -1880,6 +1920,28 @@ impl<A: Allocator> Dlmalloc<A> {
         }
         freed
     }
+}
+
+// LOCAL ADDITION (SlateOS): what `Dlmalloc::stats` reports, in C's
+// `struct mallinfo` terms (VENDORED.md, local change 7).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeapStats {
+    /// Bytes in segments: every chunk the walk visited, top included.
+    pub arena: usize,
+    /// Free chunks, the top chunk included.
+    pub ordblks: usize,
+    /// Bytes in chunks mapped on their own: the footprint the walk did not see.
+    pub hblkhd: usize,
+    /// The largest the footprint has been.
+    pub usmblks: usize,
+    /// Bytes in use: the footprint less every free byte.
+    pub uordblks: usize,
+    /// Free bytes, the top chunk included.
+    pub fordblks: usize,
+    /// Bytes `trim` could release from the top chunk.
+    pub keepcost: usize,
+    /// Everything obtained from the system and not yet returned.
+    pub footprint: usize,
 }
 
 const PINUSE: usize = 1 << 0;

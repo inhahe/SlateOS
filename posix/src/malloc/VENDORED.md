@@ -70,10 +70,16 @@ upstream's `src/dlmalloc.rs` at the version above.
    `System`, through a three-line shim at its top. The tests themselves are
    upstream's, unchanged.
 
+7. **`stats` and `HeapStats`** added: C dlmalloc's `internal_mallinfo` — the
+   walk over every segment's chunks up to the top chunk or a fencepost — which
+   the Rust port omits. `../malloc.rs` builds `mallinfo`, `mallinfo2` and
+   `malloc_stats` on it, and `malloc_trim` on upstream's `trim`, which
+   therefore lost its `#[allow(dead_code)]`.
+
 The file is also exempt from this workspace's lints (the `#![allow]` at its top
 says which and why): it is upstream's code, and restyling it would make every
 future comparison with upstream a diff of noise. `dead_code` is not in that
-list: the ten items this libc never calls — upstream's configuration API,
+list: the nine items this libc never calls — upstream's configuration API,
 upstream API with no caller here, and two helpers of the merging that change 2
 removed — each carry their own `#[allow(dead_code)]` with the reason, because a
 blanket allow cannot tell a kept-for-fidelity function from a forgotten one
@@ -82,6 +88,6 @@ blanket allow cannot tell a kept-for-fidelity function from a forgotten one
 ## Updating
 
 Download the new `.crate`, check its SHA-256 against crates.io's, replace this
-file with its `src/dlmalloc.rs`, and re-apply the six changes above. Run
+file with its `src/dlmalloc.rs`, and re-apply the seven changes above. Run
 `cargo test -p posix --lib --target x86_64-pc-windows-gnu`: the upstream tests
 and `malloc.rs`'s own run the new core on the host. Update the table above.

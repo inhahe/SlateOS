@@ -562,10 +562,32 @@ impl Progressive {
         }
     }
 
-    fn table(&self, number: u8) -> Option<&Derived> {
-        self.tables
-            .get(usize::from(number))
-            .and_then(Option::as_ref)
+    /// Decode the next MCU here and now, without its block, if it leaves the
+    /// block as it is: a first AC pass inside an end-of-band run, or past
+    /// the end of the data. Returns whether it did. Exactly what
+    /// [`Self::decode_mcu`] would do for the MCU, restart marker included;
+    /// what it saves is the caller loading and storing a block for nothing,
+    /// which in a progressive file's high-frequency bands is most of them.
+    pub(super) fn skip_untouched(&mut self, input: &mut Input<'_>, header: &Header) -> bool {
+        if self.pass != Pass::AcFirst {
+            return false;
+        }
+        let interval = header.restart_interval;
+        if interval != 0 && self.restarts_to_go == 0 {
+            // `decode_mcu` would read it first; it will not read it again,
+            // the count being restored.
+            self.restart(input, interval);
+        }
+        if !self.bits.insufficient && self.eobrun == 0 {
+            return false;
+        }
+        if !self.bits.insufficient {
+            self.eobrun = self.eobrun.wrapping_sub(1);
+        }
+        if interval != 0 {
+            self.restarts_to_go = self.restarts_to_go.wrapping_sub(1);
+        }
+        true
     }
 
     /// One MCU into `blocks`, which hold the coefficients so far.
@@ -644,7 +666,15 @@ impl Progressive {
         let scan = &header.scan;
         let ci = scan.comps.first().copied().unwrap_or(0);
         let number = header.components.get(ci).map_or(0, |c| c.ac_tbl_no);
-        let Some(table) = self.table(number).cloned() else {
+        // Borrowed from its field rather than through a method on `self`, so
+        // the bit reader can be borrowed beside it: a table is a kilobyte,
+        // and copying it for every block of every AC scan cost a large
+        // progressive photograph gigabytes of copying.
+        let Some(table) = self
+            .tables
+            .get(usize::from(number))
+            .and_then(Option::as_ref)
+        else {
             return;
         };
         let Some(block) = blocks.first_mut() else {
@@ -653,7 +683,7 @@ impl Progressive {
         let mut k = usize::from(scan.ss);
         let se = usize::from(scan.se);
         while k <= se {
-            let symbol = self.bits.decode(input, &table);
+            let symbol = self.bits.decode(input, table);
             let run = symbol >> 4;
             let size = symbol & 15;
             if size != 0 {
@@ -698,7 +728,12 @@ impl Progressive {
         let m1 = -1i32 << scan.al;
         let ci = scan.comps.first().copied().unwrap_or(0);
         let number = header.components.get(ci).map_or(0, |c| c.ac_tbl_no);
-        let Some(table) = self.table(number).cloned() else {
+        // Borrowed from its field, beside the bit reader, as in `ac_first`.
+        let Some(table) = self
+            .tables
+            .get(usize::from(number))
+            .and_then(Option::as_ref)
+        else {
             return;
         };
         let Some(block) = blocks.first_mut() else {
@@ -709,7 +744,7 @@ impl Progressive {
         let mut eobrun = self.eobrun;
         if eobrun == 0 {
             while k <= se {
-                let symbol = self.bits.decode(input, &table);
+                let symbol = self.bits.decode(input, table);
                 let mut run = symbol >> 4;
                 let size = symbol & 15;
                 let mut value = 0i32;

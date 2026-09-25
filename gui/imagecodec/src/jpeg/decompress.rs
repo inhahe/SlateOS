@@ -31,7 +31,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::arith::Arith;
-use super::coef::{self, SAVED, Smoothing, Store};
+use super::coef::{self, Band, SAVED, Smoothing, Store};
 use super::color::{self, ColorSpace, Ycc};
 use super::error::{Error, jerr};
 use super::huffman::{Pass, Progression, Progressive, Sequential};
@@ -62,6 +62,14 @@ enum Entropy {
 }
 
 impl Entropy {
+    /// [`Progressive::skip_untouched`] for the decoders that have it.
+    fn skip_untouched(&mut self, input: &mut Input<'_>, header: &Header) -> bool {
+        match self {
+            Self::Progressive(d) => d.skip_untouched(input, header),
+            _ => false,
+        }
+    }
+
     fn insufficient(&self) -> bool {
         match self {
             Self::Sequential(d) => d.bits.insufficient,
@@ -117,6 +125,8 @@ pub(crate) struct Decompress<'d, 't> {
     mcus_per_row: usize,
     /// For each block of an MCU, its component's position in the scan.
     membership: Vec<usize>,
+    /// The coefficients the current scan's decoder touches.
+    band: Band,
     input_imcu_row: usize,
     mcu_rows_per_imcu_row: usize,
     last_good_imcu_row: usize,
@@ -167,6 +177,7 @@ impl<'d, 't> Decompress<'d, 't> {
             total_imcu_rows: 0,
             mcus_per_row: 0,
             membership: Vec::new(),
+            band: Band::all(),
             input_imcu_row: 0,
             mcu_rows_per_imcu_row: 1,
             last_good_imcu_row: 0,
@@ -633,6 +644,24 @@ impl<'d, 't> Decompress<'d, 't> {
             return Ok(());
         }
         self.latch_quant_tables()?;
+        // A progressive scan touches its band (DC scans only the DC); a
+        // sequential one every coefficient, whatever its header says.
+        self.band = if self.header.progressive {
+            let scan = &self.header.scan;
+            // How far past `Se` the pass can write (see [`Band`]): a DC scan
+            // touches the DC alone, a first AC pass up to 15 further, a
+            // refinement one further.
+            let reach = if scan.ss == 0 {
+                0
+            } else if scan.ah == 0 {
+                15
+            } else {
+                1
+            };
+            Band::zigzag(scan.ss, scan.se.saturating_add(reach))
+        } else {
+            Band::all()
+        };
         let entropy = if self.header.arith {
             let pass = if self.header.progressive {
                 let pass = Pass::of(&self.header)?;
@@ -801,6 +830,14 @@ impl<'d, 't> Decompress<'d, 't> {
         let mut places = [(0usize, 0usize, 0usize); 10];
         for yoffset in 0..self.mcu_rows_per_imcu_row {
             for mcu_col in 0..self.mcus_per_row {
+                if let Some(entropy) = self.entropy.as_mut() {
+                    if !entropy.insufficient() {
+                        self.last_good_imcu_row = self.input_imcu_row;
+                    }
+                    if entropy.skip_untouched(&mut self.input, &self.header) {
+                        continue;
+                    }
+                }
                 let mut count = 0usize;
                 for &ci in scan.components() {
                     let Some(component) = self.header.components.get(ci) else {
@@ -817,7 +854,7 @@ impl<'d, 't> Decompress<'d, 't> {
                             if let (Some(block), Some(place)) =
                                 (blocks.get_mut(count), places.get_mut(count))
                             {
-                                *block = store.load(bx, by);
+                                store.load_band(bx, by, &self.band, block);
                                 *place = (ci, bx, by);
                             }
                             count += 1;
@@ -827,15 +864,12 @@ impl<'d, 't> Decompress<'d, 't> {
                 let Some(entropy) = self.entropy.as_mut() else {
                     return Ok(());
                 };
-                if !entropy.insufficient() {
-                    self.last_good_imcu_row = self.input_imcu_row;
-                }
                 let count = count.min(10);
                 let mcu = blocks.get_mut(..count).unwrap_or_default();
                 entropy.decode_mcu(&mut self.input, &self.header, mcu)?;
                 for (block, &(ci, bx, by)) in blocks.iter().zip(&places).take(count) {
                     if let Some(store) = self.stores.get_mut(ci) {
-                        store.save(bx, by, block);
+                        store.save_band(bx, by, &self.band, block);
                     }
                 }
             }

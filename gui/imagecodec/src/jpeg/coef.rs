@@ -24,12 +24,76 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::idct::{self, Target};
+use super::tables::natural;
 
 /// What a nonzero coefficient that is not kept reads as. Nonzero, positive,
 /// and with no bit below 14 set, so a refinement adding or subtracting a
 /// power of two up to 2^13 never makes it zero -- which is all that is ever
 /// asked of it.
 const PLACEHOLDER: i16 = 0x4000;
+
+/// The coefficients a scan's decoder reads and writes, in natural order: a
+/// progressive scan's band, zig-zag `Ss` to `Se`, or all 64 for a
+/// sequential one. A block is loaded from the store and saved back through
+/// its scan's band alone -- nothing outside it is touched, and a DC scan so
+/// moves one coefficient a block rather than sixty-four.
+///
+/// A progressive scan's band is what its decoder can touch, which on a
+/// corrupt stream is more than `Ss` to `Se`: libjpeg's Huffman first AC pass
+/// adds a zero run to its position before it checks it against `Se`, so it
+/// can write up to 15 past it (the natural-order table repeats 63 for the
+/// purpose), and its refinement pass can place a new coefficient one past
+/// `Se`. Those land in libjpeg's coefficient array, so they are loaded and
+/// saved here too.
+///
+/// One decoder reads outside its band: the arithmetic refinement scan looks
+/// for the previous stage's last nonzero coefficient from `Se` down to 1.
+/// What it finds below `Ss` does not matter -- any such position is before
+/// every coefficient the scan decodes, which is all the search is for -- so
+/// whatever the unloaded positions hold changes nothing.
+#[derive(Debug, Clone)]
+pub(super) struct Band {
+    positions: [u8; 64],
+    count: usize,
+    /// The band's positions as bits.
+    mask: u64,
+}
+
+impl Band {
+    /// Every coefficient: a sequential scan's decoder writes them all.
+    pub(super) fn all() -> Self {
+        Self::zigzag(0, 63)
+    }
+
+    /// Zig-zag coefficients `ss` to `se`. `se` may run past 63, into the
+    /// extra entries of libjpeg's natural-order table, which are all 63.
+    pub(super) fn zigzag(ss: u8, se: u8) -> Self {
+        let mut positions = [0u8; 64];
+        let mut count = 0usize;
+        let mut mask = 0u64;
+        for k in usize::from(ss.min(79))..=usize::from(se.min(79)) {
+            let at = natural(k) & 63;
+            if mask & (1u64 << at) != 0 {
+                continue;
+            }
+            if let Some(slot) = positions.get_mut(count) {
+                // A natural-order position is below 64.
+                *slot = u8::try_from(at).unwrap_or(0);
+                count = count.saturating_add(1);
+                mask |= 1u64 << at;
+            }
+        }
+        Self {
+            positions,
+            count,
+            mask,
+        }
+    }
+
+    fn positions(&self) -> &[u8] {
+        self.positions.get(..self.count).unwrap_or(&[])
+    }
+}
 
 /// A component's coefficients for the whole image.
 #[derive(Debug, Clone)]
@@ -92,8 +156,15 @@ impl Store {
         let Some(index) = self.index(bx, by) else {
             return block;
         };
-        let mask = self.masks.get(index).copied().unwrap_or(0);
         let base = index.saturating_mul(self.kept);
+        // At full size every coefficient is kept, in natural order: a copy.
+        if self.kept == 64 {
+            if let Some(values) = self.values.get(base..base.saturating_add(64)) {
+                block.copy_from_slice(values);
+            }
+            return block;
+        }
+        let mask = self.masks.get(index).copied().unwrap_or(0);
         for (position, (cell, &slot)) in block.iter_mut().zip(&self.slot).enumerate() {
             *cell = if slot == u8::MAX {
                 if mask & (1u64 << position) != 0 {
@@ -111,7 +182,70 @@ impl Store {
         block
     }
 
+    /// Block `(bx, by)`'s coefficients in `band` into `block`, as [`load`]
+    /// would give them; the rest of `block` is left as it is.
+    ///
+    /// [`load`]: Self::load
+    pub(super) fn load_band(&self, bx: usize, by: usize, band: &Band, block: &mut [i16; 64]) {
+        let Some(index) = self.index(bx, by) else {
+            for &position in band.positions() {
+                if let Some(cell) = block.get_mut(usize::from(position)) {
+                    *cell = 0;
+                }
+            }
+            return;
+        };
+        let mask = self.masks.get(index).copied().unwrap_or(0);
+        let base = index.saturating_mul(self.kept);
+        for &position in band.positions() {
+            let position = usize::from(position);
+            let slot = self.slot.get(position).copied().unwrap_or(u8::MAX);
+            let value = if slot == u8::MAX {
+                if mask & (1u64 << position) != 0 {
+                    PLACEHOLDER
+                } else {
+                    0
+                }
+            } else {
+                self.values
+                    .get(base.saturating_add(usize::from(slot)))
+                    .copied()
+                    .unwrap_or(0)
+            };
+            if let Some(cell) = block.get_mut(position) {
+                *cell = value;
+            }
+        }
+    }
+
+    /// Block `(bx, by)`'s coefficients in `band` back from `block`; the rest
+    /// of the stored block is left as it is.
+    pub(super) fn save_band(&mut self, bx: usize, by: usize, band: &Band, block: &[i16; 64]) {
+        let Some(index) = self.index(bx, by) else {
+            return;
+        };
+        let mut nonzero = 0u64;
+        let base = index.saturating_mul(self.kept);
+        for &position in band.positions() {
+            let position = usize::from(position);
+            let value = block.get(position).copied().unwrap_or(0);
+            if value != 0 {
+                nonzero |= 1u64 << position;
+            }
+            let slot = self.slot.get(position).copied().unwrap_or(u8::MAX);
+            if slot != u8::MAX {
+                if let Some(cell) = self.values.get_mut(base.saturating_add(usize::from(slot))) {
+                    *cell = value;
+                }
+            }
+        }
+        if let Some(cell) = self.masks.get_mut(index) {
+            *cell = (*cell & !band.mask) | nonzero;
+        }
+    }
+
     /// Store block `(bx, by)` back.
+    #[cfg(test)]
     pub(super) fn save(&mut self, bx: usize, by: usize, block: &[i16; 64]) {
         let Some(index) = self.index(bx, by) else {
             return;
@@ -485,6 +619,31 @@ mod tests {
         }
         store.save(1, 1, &block);
         assert_eq!(store.load(1, 1), block);
+        // Through a band, only the band moves.
+        let band = Band::zigzag(3, 20);
+        let mut through = [7i16; 64];
+        store.load_band(1, 1, &band, &mut through);
+        let full = store.load(1, 1);
+        for k in 0..64 {
+            let at = natural(k);
+            if (3..=20).contains(&k) {
+                assert_eq!(through[at], full[at], "zig-zag {k}");
+            } else {
+                assert_eq!(through[at], 7, "zig-zag {k} outside the band");
+            }
+        }
+        let mut changed = full;
+        for k in 3..=20 {
+            changed[natural(k)] = 0;
+        }
+        changed[natural(2)] = 99; // Outside the band: must not be saved.
+        store.save_band(1, 1, &band, &changed);
+        let after = store.load(1, 1);
+        for k in 0..64 {
+            let at = natural(k);
+            let want = if (3..=20).contains(&k) { 0 } else { full[at] };
+            assert_eq!(after[at], want, "zig-zag {k} after a band save");
+        }
         assert_eq!(store.dc(1, 1), -30);
         assert_eq!(store.load(0, 0), [0; 64]);
     }

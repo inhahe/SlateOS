@@ -149595,6 +149595,8 @@ the boot's verdict meaningless.
 
 ## TD-A-THE-HEAD-OF-LINE-WITNESS-CANNOT-RED-THE-BOOT (lane A, 2026-09-14)
 
+**Status:** FIXED (stamped 2026-09-25) -- `proc::spawn::run_persistent_netstack` now routes the witness's `Err` through `selftest::dispatch_debug("net::socket head-of-line", Severity::Diagnostic, ..)`, which prints the `self-test failed` marker the harness fails a run on, exactly as proposed below. Whether the witness *runs* rather than declines is a separate question its `Ok(None)` arm answers on every boot.
+
 **In short:** the concurrency witness written today for `D-NETSOCK-SYNC` -- the
 second witness 932 requires -- reports a failure into a channel nothing reads.
 If the head-of-line bug came back, the boot would print a warning and pass.
@@ -166022,7 +166024,7 @@ that way it is answerable, and the answer might still be no.
 decide. Promoted to `open-questions.md` if it survives one more day red.
 
 ### [A] ROOT CAUSE: `SYS_PROCESS_EXEC` cannot read the caller's ELF, and its own self-test reports OK because a crashed process is a zombie -- 2026-09-21
-**Status:** OPEN -- root cause found, fix not written. This is lane A's, and it ends a seven-round hunt
+**Status:** FIXED (stamped 2026-09-25) -- both halves are in: `SYS_PROCESS_EXEC` reads the caller's ELF (the 2026-09-25 boot logs `[exec] Process 131 exec successful`), and `test_exec_process` now also asserts the target's exit code is `Some(0)`, so a crashed exec can no longer pass as a zombie. The ring-3 exit-11/8 failures this entry blamed on it turned out to have their own cause (a missing METADATA right in the rungs; see `A-TWO-RUNGS-COULD-NOT-EXEC-FOR-WANT-OF-METADATA`)
 
 **In short:** the kernel's native "replace this program with another one"
 call is broken -- it cannot read the new program's bytes out of the calling
@@ -166090,7 +166092,7 @@ Without the second, the same fix could regress and the rung would go on
 saying OK.
 
 ### [A] `netdiag`'s DNS lookup is simulated and cannot fail, so the tool a person runs to diagnose name resolution always says it works -- 2026-09-21
-**Status:** OPEN (fix scoped below; deliberately not bundled into an unverified batch of 22)
+**Status:** HALF DONE (stamped 2026-09-25) -- the honest half is in: `ping`, `traceroute` and `dns_lookup` in `kernel/src/fs/netdiag.rs` return `NotSupported` instead of inventing answers. Real lookups through `fs::nameservice`, and a writer for `connectivity`, are still open
 
 **In short:** the kernel has a network-diagnostics tool with a `dns_lookup`
 command. It does not look anything up. It returns `127.0.0.1` for the name
@@ -166491,7 +166493,7 @@ reaches a stateful module should re-run it, or simply follow
 open by calling their module's `init_defaults` for exactly this reason.
 
 ### [A] Addendum: three of `netdiag`'s diagnostics invent their answers, not just `dns_lookup` -- 2026-09-21
-**Status:** OPEN · supersedes the scope (not the content) of the `netdiag` entry above
+**Status:** HALF DONE (stamped 2026-09-25) -- the three inventing functions now refuse with `NotSupported`; see the entry above for what is still open
 
 **In short:** I reported this afternoon that one command in the network
 diagnostics tool invents its answer. Reading the rest: the ping command

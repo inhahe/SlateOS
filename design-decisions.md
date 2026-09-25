@@ -11238,6 +11238,97 @@ shown. Unit tests hold the parser to Skia's rules (byte order, entry types,
 the sub-directory pointer, directories cut short) and each turn to its
 definition.
 
+## 1317. TIFF: libtiff's RGBA reader, ported
+
+**Date:** 2026-09-25
+**Lane:** F
+**Decided by:** Claude (autonomous).
+
+**In short:** TIFF pictures -- scans, print and photo exports, screenshots
+from scientific tools -- now open. No browser shows a TIFF, so the picture a
+TIFF "should" look like is the one the image viewers on free desktops show,
+and they all get it from libtiff. `imagecodec` now reads a TIFF the way
+libtiff does, line for line, and agrees with a real libtiff on every test
+file to the last bit -- including which damaged files it refuses. Some kinds
+of TIFF are not read yet (listed below) and are refused by name.
+
+### What it is
+
+`gui/imagecodec/src/tiff/`: a port of libtiff 4.7.1 --
+
+- `dir.rs`: the header (classic, BigTIFF, and Microsoft's "EP" variant) and
+  `TIFFReadDirectory`: which tags must read cleanly for the file to open,
+  which are dropped with a warning, how every entry type converts, and the
+  repairs libtiff makes (missing or implausible `StripByteCounts` estimated,
+  surplus colour channels made extra samples, a palette image without a
+  palette made grey or RGB).
+- `read.rs`: `TIFFFillStrip`/`TIFFFillTile` and the codecs -- none,
+  PackBits, Deflate, LZW in `lzw.rs` (both the TIFF 6.0 codes and the
+  old-style ones libtiff still reads) -- with the horizontal predictor,
+  `FillOrder`, and big-endian 16-bit samples.
+- `rgba.rs`: `tif_getimage.c` -- `TIFFRGBAImageOK`, `TIFFRGBAImageBegin`, the
+  strip and tile readers and their pixel routines: grey of 1 to 16 bits,
+  palettes, RGB of 8 and 16 with each kind of alpha, CMYK, planes together or
+  apart.
+
+### The choices with two sides
+
+1. **libtiff's RGBA interface as the reference.** It is what gdk-pixbuf
+   (GNOME's viewer, and most GTK programs) calls. *Against:* macOS's ImageIO
+   and Windows' WIC decode differently in places, but they are closed; Qt's
+   handler uses libtiff too, through other paths for some layouts. libtiff is
+   open, the most used, and can be run: every fixture's answer is a real
+   libtiff's, built with the codecs a distribution builds it with.
+2. **Its conversions kept, crude ones included.** CMYK becomes RGB by
+   `(255-K)(255-C)/255` with no colour profile; 16-bit grey keeps its high
+   byte while 16-bit RGB rounds; `FillOrder` 2 reverses the bits of 8-bit data
+   too; an uncompressed first tile whose bit-reversed read buffer (rounded up
+   to 1024 bytes) is not its size is refused. Each is what the user of a
+   libtiff viewer sees, and "better" guesses would be a third behaviour
+   agreeing with nobody.
+3. **Refused on the first strip that will not read.** gdk-pixbuf asks libtiff
+   to stop at the first error and then shows nothing; the alternative, a
+   partial picture, would need rules libtiff does not have (its
+   carry-on mode leaves stale rows).
+4. **Turned truly by `Orientation`.** libtiff's reader only flips (5-8 are
+   read as 1-4); gdk-pixbuf then applies the rest. The picture that reaches
+   the screen is the tag's, all eight values, which is what `decode` returns;
+   `decode_libtiff_raster` gives libtiff's flipped raster for the tests.
+5. **Straight alpha, as the file holds it.** libtiff premultiplies
+   unassociated alpha into its raster and passes associated alpha through;
+   the compositor wants straight alpha, so unassociated alpha is kept exactly
+   and associated alpha divided back out (to the value that premultiplies
+   back to libtiff's, exhaustively checked). Grey with alpha libtiff passes
+   through unpremultiplied either way; that is kept.
+6. **Deflate through the shared `deflate` crate, not a second inflater.**
+   libtiff decompresses with libdeflate, which stops at the first piece of
+   the stream that will not fit the strip; `deflate` decodes a block at a
+   time. The two agree on every well-formed file; on some damaged ones they
+   do not (`known-issues.md`), and the exact behaviour is asked of lane A
+   (`requests/f-a-deflate-decode-into-a-fixed-buffer-as-libdeflate-does.md`)
+   rather than written a second time here.
+
+### Not yet read
+
+`YCbCr` and CIELab samples, CCITT (fax) compression, JPEG and old-style JPEG
+compression, and NeXT, ThunderScan, SGI LogLuv and PixarLog: libtiff reads
+them, and this refuses them by name, for now. Only the first page of a
+multi-page TIFF is read -- as gdk-pixbuf reads it.
+
+### How it is held
+
+`tests/tiff.rs` against 137 fixtures (`tests/data/generate_tiff.py`: a
+small TIFF writer for every layout, plus Pillow's libtiff-backed writer for
+real encoder output), each answered by libtiff 4.7.1 built from pinned
+sources: 115 decoded to exactly libtiff's raster, 22 refused where libtiff
+refuses. Separate tests hold the straight-alpha conversion to libtiff's
+premultiplied raster, the eight orientations to the stored picture turned,
+limits, and every bit flip of eight fixtures to not panicking. A mutation
+fuzzer against the same libtiff -- bit flips, entry types, counts and values
+changed, entries dropped and duplicated, files cut short -- found no
+disagreement in 30,000 files without Deflate data, and in 8,000 with it only
+the nine Deflate cases above.
+
 ## §200 — The B-KNULLJUMP hunt runs the *uninstrumented* kernel first (E), and escalates to the optimized KASAN build (A) only if that fails to settle it
 
 **Date:** 2026-08-15

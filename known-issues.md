@@ -165366,3 +165366,49 @@ not parse, and apply it when it does. Parsing it only to refuse it, before
 anything uses profiles, would mean an ICC parser whose one job is to agree
 with skcms on what is malformed -- a second port for a file nobody has.
 
+### [F] A damaged Deflate TIFF strip can decode otherwise than in libtiff -- 2026-09-25
+
+**Status:** OPEN — waiting on lane A
+(`requests/f-a-deflate-decode-into-a-fixed-buffer-as-libdeflate-does.md`).
+
+**In short:** a TIFF whose Deflate-compressed data is longer than its strip,
+or damaged after the part the strip needs, can be refused here where libtiff
+shows it, or shown with different pixels in its last strip. Undamaged files
+decode identically; it takes a damaged or hand-made file.
+
+**Where.** `gui/imagecodec/src/tiff/read.rs`, `inflate`. libtiff decompresses a
+strip with libdeflate, which fills the strip and stops at the first piece of
+the stream that will not fit -- writing none of a match or stored block that
+does not, and never looking at what follows. The shared `deflate` crate
+decodes a block at a time, so it copies the part of a stored block that fits
+(where libdeflate leaves the strip's buffer as it was), sees damage later in
+the block, stops with `OutputTooLarge` when a block holds far more than the
+strip, and cannot say where its input ended, so the checksum of a stream that
+ends exactly with the strip is read from the input's last four bytes.
+
+**How to see it.** The lane F TIFF fuzzer (mutated copies of
+`tests/data/tiff_*deflate*` and `*zip*`, answered by libtiff 4.7.1): about
+one mutant in a thousand, every one of them a strip cut shorter than its
+stream or a stream damaged past the strip's end.
+
+**The proper fix.** An additive `deflate` function with libdeflate's
+semantics (the request above spells them out); `inflate` becomes a call to it.
+Not a second inflater in `imagecodec`: design-decisions §555.
+
+### [F] Some TIFFs are refused that libtiff shows -- 2026-09-25
+
+**Status:** OPEN — lane F's, in progress.
+
+**In short:** TIFFs whose samples are `YCbCr` or CIELab, or compressed with
+CCITT fax, JPEG or old-style JPEG, NeXT, ThunderScan, SGI LogLuv or
+PixarLog, are refused (`ImageError::Unsupported`) though libtiff reads them.
+Fax (scanned documents) and JPEG (photographs) are the ones in real use.
+
+**Where.** `gui/imagecodec/src/tiff/read.rs` (`run_codec`) and `rgba.rs`
+(`pick_contig`, `pick_separate`, `begin`).
+
+**The proper fix.** Port the rest of libtiff's reader, as the first stage was
+(design-decisions §1317): `tif_color.c`'s `YCbCr` and CIELab conversions and
+`tif_getimage.c`'s `YCbCr` routines; `tif_fax3.c`; JPEG through this crate's
+JPEG decoder with the file's `JPEGTables`; then the rare codecs. Fixtures from
+the same libtiff oracle.

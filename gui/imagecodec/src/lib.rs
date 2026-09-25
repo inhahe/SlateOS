@@ -108,6 +108,11 @@
 //! an icon's images -- PNG, or BMP with its transparency mask -- by Chrome's
 //! own rules for which is best and for when the mask applies. See [`ico`].
 //!
+//! TIFF, the first page, as libtiff's RGBA reader -- the one image viewers
+//! on free desktops use -- converts it: grey, palette, RGB and CMYK samples
+//! of every depth it takes, strips or tiles, planes together or apart,
+//! uncompressed or PackBits, LZW or Deflate. See [`tiff`].
+//!
 //! **EXIF orientation is applied**, as Chrome applies it: a JPEG's or PNG's
 //! EXIF saying the picture is on its side turns it, so [`decode`],
 //! [`decode_scaled`] and [`dimensions`] all describe the picture as it is shown.
@@ -136,6 +141,7 @@ pub mod orientation;
 pub mod png;
 mod scale;
 pub mod testing;
+pub mod tiff;
 pub mod webp;
 
 /// A decoded picture: densely packed `0xAARRGGBB`, row-major, no padding.
@@ -343,6 +349,9 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
     if ico::is_ico(bytes) {
         return ico::decode(bytes, limits);
     }
+    if tiff::is_tiff(bytes) {
+        return tiff::decode(bytes, limits);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -386,6 +395,9 @@ pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> Im
     if ico::is_ico(bytes) {
         return ico::decode_scaled(bytes, limits, max_w, max_h);
     }
+    if tiff::is_tiff(bytes) {
+        return tiff::decode_scaled(bytes, limits, max_w, max_h);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -417,6 +429,9 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     }
     if ico::is_ico(bytes) {
         return ico::dimensions(bytes);
+    }
+    if tiff::is_tiff(bytes) {
+        return tiff::dimensions(bytes);
     }
     Err(ImageError::UnknownFormat)
 }
@@ -457,11 +472,14 @@ mod tests {
             decode(&[], Limits::default()),
             Err(ImageError::UnknownFormat)
         );
-        // A format this crate does not read yet.
+        // A format this crate does not read yet: AVIF's `ftyp` box.
         assert_eq!(
-            dimensions(b"II*\0\x08\0\0\0"),
+            dimensions(b"\0\0\0\x1cftypavif\0\0\0\0avifmif1miaf"),
             Err(ImageError::UnknownFormat)
         );
+        // TIFF it does: a header whose directory is past the end is a
+        // truncated TIFF.
+        assert_eq!(dimensions(b"II*\0\x08\0\0\0"), Err(ImageError::Truncated));
         // WebP it does: a RIFF header with no chunk after it is a truncated
         // WebP, not an unknown format -- unless the header's own size leaves
         // no room for a chunk, which libwebp calls malformed.

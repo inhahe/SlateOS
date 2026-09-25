@@ -58711,6 +58711,12 @@ test of the fixture, not of the bound.
 
 ### Judgment Calls
 
+- **TIFF is read as libtiff's RGBA interface reads it** (2026-09-25,
+  design-decisions §1317): no browser shows TIFF, so the reference is what
+  libtiff-based viewers (gdk-pixbuf) show -- including its crude CMYK
+  conversion and its quirks -- and a file is refused on its first bad strip,
+  as they refuse it. Alternatives: the TIFF 6.0 spec directly, or macOS/Windows
+  behaviour (closed). Reversible by replacing `tiff/rgba.rs`'s conversions.
 - 2026-09-25, lossy WebP (`gui/imagecodec/src/webp/lossy.rs`): where libwebp
   and RFC 6386's reference decoder disagree -- segmentation with no values
   (libwebp: absolute zeros; dixie and libvpx: deltas), when the loop-filter

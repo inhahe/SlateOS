@@ -1,0 +1,1 @@
+REFUSED not OK: Sorry, can not handle contiguous data with PhotometricInterpretation=1, and Samples/pixel=2 and Bits/Sample=4

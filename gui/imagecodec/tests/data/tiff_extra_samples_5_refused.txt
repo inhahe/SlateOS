@@ -1,0 +1,1 @@
+REFUSED open: /mnt/e/visual studio projects/os-lane-f/gui/imagecodec/tests/data/tiff_extra_samples_5_refused.tif: Bad value 1 for "ExtraSamples" tag

@@ -1,0 +1,716 @@
+#!/usr/bin/env python3
+"""Regenerate the TIFF fixtures next to this script, and their answers.
+
+Every answer is libtiff's: libtiff 4.7.1, built as distributions build it
+(zlib, libdeflate, libjpeg-turbo), asked for each picture through the RGBA
+interface image viewers use -- `TIFFReadRGBAImageOriented` with top-left
+orientation and stop-on-error set, which is what gdk-pixbuf calls. An answer
+is width, height, then `AARRGGBB` per pixel exactly as libtiff returns them
+(premultiplied where libtiff premultiplies, flipped as libtiff flips), or
+`REFUSED` and why.
+
+The oracle is built once, the first time this runs, from sources downloaded
+and checked against the SHA-256 sums below, into a cache directory: under
+WSL's home on Windows (it needs a WSL distribution with `cmake` and `gcc`),
+or the user's cache directory on Linux.
+
+The fixtures are made two ways:
+
+- by the small TIFF writer below, which can produce every layout libtiff
+  reads -- every sample depth and photometric interpretation, strips and
+  tiles, planes together and apart, both byte orders, BigTIFF, the
+  predictor, `FillOrder`, old-style LZW -- and the damaged and odd files
+  whose treatment is the point of porting libtiff rather than the spec;
+- by Pillow's writer, which is libtiff's own encoder, so some fixtures are
+  exactly what a real program writes.
+
+Usage
+-----
+
+    python gui/imagecodec/tests/data/generate_tiff.py
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import os
+import pathlib
+import random
+import struct
+import subprocess
+import sys
+import zlib
+
+from PIL import Image
+
+HERE = pathlib.Path(__file__).parent
+
+# ---------------------------------------------------------------------------
+# The oracle: libtiff 4.7.1's RGBA reader
+# ---------------------------------------------------------------------------
+
+SOURCES = {
+    "tiff-4.7.1.tar.gz": (
+        "https://download.osgeo.org/libtiff/tiff-4.7.1.tar.gz",
+        "f698d94f3103da8ca7438d84e0344e453fe0ba3b7486e04c5bf7a9a3fabe9b69",
+    ),
+    "libdeflate-1.24.tar.gz": (
+        "https://github.com/ebiggers/libdeflate/archive/refs/tags/v1.24.tar.gz",
+        "ad8d3723d0065c4723ab738be9723f2ff1cb0f1571e8bfcf0301ff9661f475e8",
+    ),
+    "libjpeg-turbo-3.1.1.tar.gz": (
+        "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.1.1/libjpeg-turbo-3.1.1.tar.gz",
+        "aadc97ea91f6ef078b0ae3a62bba69e008d9a7db19b34e4ac973b19b71b4217c",
+    ),
+}
+
+ORACLE_C = r"""
+/* Each TIFF named on the command line through libtiff's RGBA interface
+ * (TIFFReadRGBAImageOriented, top-left, stop on error): what gdk-pixbuf
+ * shows. Writes <file>.txt beside it: "REFUSED <why>", or width, height and
+ * AARRGGBB per pixel -- premultiplied where libtiff premultiplies. */
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "tiffio.h"
+
+static char last_error[512];
+
+static void on_error(const char *module, const char *fmt, va_list ap) {
+    (void)module;
+    vsnprintf(last_error, sizeof last_error, fmt, ap);
+}
+
+static void on_warning(const char *module, const char *fmt, va_list ap) {
+    (void)module; (void)fmt; (void)ap;
+}
+
+int main(int argc, char **argv) {
+    TIFFSetErrorHandler(on_error);
+    TIFFSetWarningHandler(on_warning);
+    for (int i = 1; i < argc; i++) {
+        char out_path[4096];
+        snprintf(out_path, sizeof out_path, "%s", argv[i]);
+        char *dot = strrchr(out_path, '.');
+        if (dot) strcpy(dot, ".txt"); else strcat(out_path, ".txt");
+        FILE *out = fopen(out_path, "w");
+        if (!out) { perror(out_path); return 1; }
+        last_error[0] = 0;
+        TIFF *tif = TIFFOpen(argv[i], "r");
+        uint32_t w = 0, h = 0;
+        if (!tif) {
+            fprintf(out, "REFUSED open: %s\n", last_error);
+            fclose(out);
+            continue;
+        }
+        TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &w);
+        TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &h);
+        if ((uint64_t)w * h > 64u * 1024 * 1024 || w == 0 || h == 0) {
+            fprintf(out, "REFUSED size %ux%u\n", w, h);
+            TIFFClose(tif);
+            fclose(out);
+            continue;
+        }
+        uint32_t *raster = (uint32_t *)_TIFFmalloc((tmsize_t)w * h * sizeof(uint32_t));
+        char emsg[1024] = "";
+        if (!TIFFRGBAImageOK(tif, emsg)) {
+            fprintf(out, "REFUSED not OK: %s\n", emsg);
+        } else if (!TIFFReadRGBAImageOriented(tif, w, h, raster, ORIENTATION_TOPLEFT, 1)) {
+            fprintf(out, "REFUSED read: %s\n", last_error);
+        } else {
+            fprintf(out, "%u %u", w, h);
+            for (uint64_t p = 0; p < (uint64_t)w * h; p++) {
+                uint32_t v = raster[p];
+                fprintf(out, " %02X%02X%02X%02X", TIFFGetA(v), TIFFGetR(v), TIFFGetG(v), TIFFGetB(v));
+            }
+            fprintf(out, "\n");
+        }
+        _TIFFfree(raster);
+        TIFFClose(tif);
+        fclose(out);
+    }
+    return 0;
+}
+"""
+
+BUILD_SH = r"""
+set -euo pipefail
+SRC="$1"
+ROOT="$2"
+P="$ROOT/prefix"
+mkdir -p "$ROOT"
+cd "$ROOT"
+for t in tiff-4.7.1 libdeflate-1.24 libjpeg-turbo-3.1.1; do
+  rm -rf "$t"
+  tar xzf "$SRC/$t.tar.gz"
+done
+cmake -S libdeflate-1.24 -B build-deflate -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$P" \
+  -DLIBDEFLATE_BUILD_SHARED_LIB=OFF -DLIBDEFLATE_BUILD_GZIP=OFF > /dev/null
+cmake --build build-deflate -j 2 > /dev/null
+cmake --install build-deflate > /dev/null
+cmake -S libjpeg-turbo-3.1.1 -B build-jpeg -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$P" \
+  -DENABLE_SHARED=OFF -DWITH_SIMD=OFF -DWITH_TURBOJPEG=OFF > /dev/null
+cmake --build build-jpeg -j 2 > /dev/null
+cmake --install build-jpeg > /dev/null
+cmake -S tiff-4.7.1 -B build-tiff -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+  -Dtiff-tools=OFF -Dtiff-tests=OFF -Dtiff-contrib=OFF -Dtiff-docs=OFF -Dcxx=OFF \
+  -Dzlib=ON -Dlibdeflate=ON -Djpeg=ON -Djpeg12=OFF -Dold-jpeg=ON \
+  -Djbig=OFF -Dlerc=OFF -Dlzma=OFF -Dzstd=OFF -Dwebp=OFF \
+  -DDeflate_ROOT="$P" -DJPEG_ROOT="$P" -DCMAKE_PREFIX_PATH="$P" > /dev/null
+cmake --build build-tiff -j 2 > /dev/null
+cp "$SRC/tiffrgba.c" .
+gcc -O2 -Itiff-4.7.1/libtiff -Ibuild-tiff/libtiff -o tiffrgba tiffrgba.c \
+  build-tiff/libtiff/libtiff.a "$P/lib/libdeflate.a" "$P/lib/libjpeg.a" -lz -lm
+"""
+
+ORACLE_TAG = "tiff471-deflate124-jpeg311-1"
+
+
+def on_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def to_wsl(path: pathlib.Path) -> str:
+    """A Windows path as WSL sees it."""
+    p = str(path.resolve()).replace("\\", "/")
+    return f"/mnt/{p[0].lower()}{p[2:]}"
+
+
+def run(args: list[str]) -> subprocess.CompletedProcess:
+    if on_windows():
+        return subprocess.run(["wsl", "-e"] + args, check=True, capture_output=True)
+    return subprocess.run(args, check=True, capture_output=True)
+
+
+def fetch(url: str, sha256: str) -> bytes:
+    import urllib.request
+
+    with urllib.request.urlopen(url) as response:
+        data = response.read()
+    got = hashlib.sha256(data).hexdigest()
+    if got != sha256:
+        sys.exit(f"{url}: SHA-256 {got}, expected {sha256}")
+    return data
+
+
+def build_oracle() -> str:
+    """libtiff's RGBA reader as a program, built once; its path where it
+    runs (in WSL on Windows)."""
+    home = run(["sh", "-c", "echo $HOME"]).stdout.decode().strip()
+    root = f"{home}/.cache/slateos-tiff-oracle-{ORACLE_TAG}"
+    exe = f"{root}/tiffrgba"
+    if run(["sh", "-c", f"test -x '{exe}' && echo yes || echo no"]).stdout.decode().strip() == "yes":
+        return exe
+    staging = pathlib.Path(os.environ.get("TEMP", "/tmp")) / f"slateos-tiff-oracle-src-{ORACLE_TAG}"
+    staging.mkdir(parents=True, exist_ok=True)
+    for name, (url, sha256) in SOURCES.items():
+        target = staging / name
+        if not target.exists() or hashlib.sha256(target.read_bytes()).hexdigest() != sha256:
+            target.write_bytes(fetch(url, sha256))
+    (staging / "tiffrgba.c").write_text(ORACLE_C, newline="\n")
+    (staging / "build.sh").write_text(BUILD_SH, newline="\n")
+    src = to_wsl(staging) if on_windows() else str(staging)
+    run(["bash", f"{src}/build.sh", src, root])
+    return exe
+
+
+def answer(oracle: str, files: list[pathlib.Path]) -> None:
+    paths = [to_wsl(f) if on_windows() else str(f) for f in files]
+    for i in range(0, len(paths), 200):
+        run([oracle] + paths[i : i + 200])
+
+
+# ---------------------------------------------------------------------------
+# Writing TIFFs
+# ---------------------------------------------------------------------------
+
+BYTE, ASCII, SHORT, LONG, RATIONAL = 1, 2, 3, 4, 5
+SBYTE, UNDEFINED, SSHORT, SLONG, SRATIONAL, FLOAT, DOUBLE = 6, 7, 8, 9, 10, 11, 12
+LONG8 = 16
+WIDTHS = {BYTE: 1, ASCII: 1, SHORT: 2, LONG: 4, RATIONAL: 8, SBYTE: 1, UNDEFINED: 1,
+          SSHORT: 2, SLONG: 4, SRATIONAL: 8, FLOAT: 4, DOUBLE: 8, LONG8: 8}
+FORMATS = {BYTE: "B", SHORT: "H", LONG: "I", SBYTE: "b", SSHORT: "h", SLONG: "i",
+           FLOAT: "f", DOUBLE: "d", LONG8: "Q"}
+
+(WIDTH, LENGTH, BITS, COMPRESSION, PHOTOMETRIC, FILL_ORDER, STRIP_OFFSETS, ORIENTATION,
+ SAMPLES, ROWS_PER_STRIP, STRIP_BYTE_COUNTS, PLANAR, PREDICTOR, COLOR_MAP, TILE_WIDTH,
+ TILE_LENGTH, TILE_OFFSETS, TILE_BYTE_COUNTS, INK_SET, EXTRA_SAMPLES, SAMPLE_FORMAT,
+ YCBCR_SUBSAMPLING) = (256, 257, 258, 259, 262, 266, 273, 274, 277, 278, 279, 284, 317, 320,
+                       322, 323, 324, 325, 332, 338, 339, 530)
+
+NONE, LZW, ADOBE_DEFLATE, PACKBITS, DEFLATE = 1, 5, 8, 32773, 32946
+
+
+def values_bytes(e: str, kind: int, values) -> bytes:
+    if kind in (ASCII, UNDEFINED) and isinstance(values, (bytes, bytearray)):
+        return bytes(values)
+    if kind in (RATIONAL, SRATIONAL):
+        f = "I" if kind == RATIONAL else "i"
+        return b"".join(struct.pack(e + f + f, n, d) for n, d in values)
+    return b"".join(struct.pack(e + FORMATS[kind], v) for v in values)
+
+
+def count_of(kind: int, values) -> int:
+    if kind in (ASCII, UNDEFINED) and isinstance(values, (bytes, bytearray)):
+        return len(values)
+    return len(values)
+
+
+def write_tiff(entries: list[tuple[int, int, object]], chunks: list[bytes], *, big_endian: bool = False,
+               bigtiff: bool = False, offsets_tag: int = STRIP_OFFSETS, counts_tag: int | None = STRIP_BYTE_COUNTS,
+               counts: list[int] | None = None, offsets_kind: int = LONG, counts_kind: int = LONG,
+               truncate: int | None = None, magic: bytes | None = None) -> bytes:
+    """A TIFF of one directory: `entries` as (tag, type, values), and the
+    strips or tiles in `chunks`, whose offsets and byte counts are added as
+    `offsets_tag` and `counts_tag` (`counts` overriding the true sizes, and
+    `counts_tag` None leaving the counts out)."""
+    e = ">" if big_endian else "<"
+    head_size = 16 if bigtiff else 8
+    out = bytearray(head_size)
+    offsets = []
+    for chunk in chunks:
+        if len(out) % 2:
+            out += b"\0"
+        offsets.append(len(out))
+        out += chunk
+    if len(out) % 2:
+        out += b"\0"
+    sizes = counts if counts is not None else [len(c) for c in chunks]
+    all_entries = list(entries) + [(offsets_tag, offsets_kind, offsets)]
+    if counts_tag is not None:
+        all_entries.append((counts_tag, counts_kind, sizes))
+    all_entries.sort(key=lambda t: t[0])
+    ifd = len(out)
+    entry_size, count_fmt, inline = (20, "Q", 8) if bigtiff else (12, "I", 4)
+    table_size = (8 if bigtiff else 2) + entry_size * len(all_entries) + (8 if bigtiff else 4)
+    extra = bytearray()
+    extra_base = ifd + table_size
+    table = struct.pack(e + ("Q" if bigtiff else "H"), len(all_entries))
+    for tag, kind, values in all_entries:
+        data = values_bytes(e, kind, values)
+        count = count_of(kind, values) if kind not in (RATIONAL, SRATIONAL) else len(values)
+        if len(data) <= inline:
+            field = data.ljust(inline, b"\0")
+        else:
+            if (extra_base + len(extra)) % 2:
+                extra += b"\0"
+            field = struct.pack(e + ("Q" if bigtiff else "I"), extra_base + len(extra))
+            extra += data
+        table += struct.pack(e + "HH" + count_fmt, tag, kind, count) + field
+    table += struct.pack(e + ("Q" if bigtiff else "I"), 0)
+    out += table + extra
+    if bigtiff:
+        out[0:16] = (b"MM" if big_endian else b"II") + struct.pack(e + "HHHQ", 43, 8, 0, ifd)
+    else:
+        out[0:8] = (b"MM" if big_endian else b"II") + struct.pack(e + "HI", 42, ifd)
+    if magic is not None:
+        out[0:2] = magic
+    data = bytes(out)
+    return data[:truncate] if truncate is not None else data
+
+
+def picture(w: int, h: int, spp: int, bits: int, seed: int) -> list[list[list[int]]]:
+    """Rows of pixels of `spp` samples of `bits` bits: gradients crossed with
+    noise, so that a swapped channel, a shifted row or a wrong bit shows."""
+    rng = random.Random(seed)
+    top = (1 << bits) - 1
+    rows = []
+    for y in range(h):
+        row = []
+        for x in range(w):
+            px = []
+            for s in range(spp):
+                gradient = ((x * 37 * (s + 3) + y * 53 * (s + 1)) % 997) / 996
+                level = gradient * 0.75 + rng.random() * 0.25
+                px.append(min(top, int(level * top + 0.5)))
+            row.append(px)
+        rows.append(row)
+    return rows
+
+
+def pack_samples(samples: list[int], bits: int, e: str) -> bytes:
+    if bits == 8:
+        return bytes(samples)
+    if bits == 16:
+        return b"".join(struct.pack(e + "H", s) for s in samples)
+    out = bytearray()
+    acc = n = 0
+    for s in samples:
+        acc = (acc << bits) | s
+        n += bits
+        while n >= 8:
+            n -= 8
+            out.append((acc >> n) & 0xFF)
+    if n:
+        out.append((acc << (8 - n)) & 0xFF)
+    return bytes(out)
+
+
+def difference(samples: list[int], stride: int, bits: int) -> list[int]:
+    top = 1 << bits
+    return [samples[i] if i < stride else (samples[i] - samples[i - stride]) % top for i in range(len(samples))]
+
+
+def packbits(data: bytes) -> bytes:
+    out = bytearray()
+    i = 0
+    while i < len(data):
+        run = 1
+        while i + run < len(data) and run < 128 and data[i + run] == data[i]:
+            run += 1
+        if run >= 2:
+            out += bytes([(257 - run) & 0xFF, data[i]])
+            i += run
+            continue
+        j = i
+        while j < len(data) and j - i < 128 and not (j + 1 < len(data) and data[j + 1] == data[j]):
+            j += 1
+        j = max(j, i + 1)
+        out += bytes([j - i - 1]) + data[i:j]
+        i = j
+    return bytes(out)
+
+
+def lzw(data: bytes, old_style: bool = False) -> bytes:
+    """TIFF LZW as libtiff writes it -- codes most significant bit first,
+    widening one code early -- or the pre-6.0 style: least significant bit
+    first, widening on time."""
+    out = bytearray()
+    acc = nacc = 0
+
+    def put(code: int, bits: int) -> None:
+        nonlocal acc, nacc
+        if old_style:
+            acc |= code << nacc
+            nacc += bits
+            while nacc >= 8:
+                out.append(acc & 0xFF)
+                acc >>= 8
+                nacc -= 8
+        else:
+            acc = (acc << bits) | code
+            nacc += bits
+            while nacc >= 8:
+                nacc -= 8
+                out.append((acc >> nacc) & 0xFF)
+
+    def grow_at(bits: int) -> int:
+        return (1 << bits) - 1 + (1 if old_style else 0)
+
+    table = {bytes([i]): i for i in range(256)}
+    free, nbits = 258, 9
+    put(256, nbits)
+    if data:
+        w = data[:1]
+        for b in data[1:]:
+            wb = w + bytes([b])
+            if wb in table:
+                w = wb
+                continue
+            put(table[w], nbits)
+            table[wb] = free
+            free += 1
+            w = bytes([b])
+            if free == 4094:
+                put(256, nbits)
+                table = {bytes([i]): i for i in range(256)}
+                free, nbits = 258, 9
+            elif free > grow_at(nbits):
+                nbits += 1
+        put(table[w], nbits)
+        free += 1
+        if free > grow_at(nbits) and nbits < 12:
+            nbits += 1
+    put(257, nbits)
+    if nacc:
+        out.append(((acc << (8 - nacc)) if not old_style else acc) & 0xFF)
+    return bytes(out)
+
+
+def compress(data: bytes, scheme: int, old_lzw: bool = False) -> bytes:
+    if scheme == NONE:
+        return data
+    if scheme == PACKBITS:
+        return packbits(data)
+    if scheme == LZW:
+        return lzw(data, old_lzw)
+    return zlib.compress(data)
+
+
+class Layout:
+    """How a picture is cut up and stored."""
+
+    def __init__(self, *, rows_per_strip: int = 3, tile: tuple[int, int] | None = None, planar: int = 1,
+                 scheme: int = NONE, predictor: int = 1, big_endian: bool = False, bigtiff: bool = False,
+                 fill_order: int = 1, old_lzw: bool = False):
+        self.rows_per_strip = rows_per_strip
+        self.tile = tile
+        self.planar = planar
+        self.scheme = scheme
+        self.predictor = predictor
+        self.big_endian = big_endian
+        self.bigtiff = bigtiff
+        self.fill_order = fill_order
+        self.old_lzw = old_lzw
+
+
+def encode(pixels: list[list[list[int]]], bits: int, layout: Layout) -> list[bytes]:
+    """The chunks -- strips or tiles, plane by plane -- of a picture."""
+    h, w, spp = len(pixels), len(pixels[0]), len(pixels[0][0])
+    e = ">" if layout.big_endian else "<"
+    planes = [None] if layout.planar == 1 else list(range(spp))
+
+    def row_samples(y: int, x0: int, x1: int, plane) -> list[int]:
+        out = []
+        for x in range(x0, x1):
+            px = pixels[y][x] if (y < h and x < w) else [0] * spp
+            out += px if plane is None else [px[plane]]
+        return out
+
+    def finish(raw_rows: list[list[int]]) -> bytes:
+        stride = spp if layout.planar == 1 else 1
+        body = b""
+        for samples in raw_rows:
+            if layout.predictor == 2:
+                samples = difference(samples, stride, bits)
+            body += pack_samples(samples, bits, e)
+        # FillOrder 2 reverses the bits of the stored -- compressed -- bytes.
+        stored = compress(body, layout.scheme, layout.old_lzw)
+        if layout.fill_order == 2:
+            stored = bytes(int(f"{b:08b}"[::-1], 2) for b in stored)
+        return stored
+
+    chunks = []
+    for plane in planes:
+        if layout.tile:
+            tw, th = layout.tile
+            for ty in range(0, h, th):
+                for tx in range(0, w, tw):
+                    chunks.append(finish([row_samples(y, tx, tx + tw, plane) for y in range(ty, ty + th)]))
+        else:
+            rps = layout.rows_per_strip
+            for y0 in range(0, h, rps):
+                chunks.append(finish([row_samples(y, 0, w, plane) for y in range(y0, min(h, y0 + rps))]))
+    return chunks
+
+
+def tiff(pixels: list[list[list[int]]], bits: int, photometric: int | None, layout: Layout = Layout(),
+         extra: list[tuple[int, int, object]] | None = None, drop: tuple[int, ...] = (), **kw) -> bytes:
+    h, w, spp = len(pixels), len(pixels[0]), len(pixels[0][0])
+    entries = [(WIDTH, LONG, [w]), (LENGTH, LONG, [h]), (BITS, SHORT, [bits] * spp),
+               (COMPRESSION, SHORT, [layout.scheme]), (SAMPLES, SHORT, [spp])]
+    if photometric is not None:
+        entries.append((PHOTOMETRIC, SHORT, [photometric]))
+    if layout.planar != 1:
+        entries.append((PLANAR, SHORT, [layout.planar]))
+    if layout.predictor != 1:
+        entries.append((PREDICTOR, SHORT, [layout.predictor]))
+    if layout.fill_order != 1:
+        entries.append((FILL_ORDER, SHORT, [layout.fill_order]))
+    if layout.tile:
+        entries += [(TILE_WIDTH, LONG, [layout.tile[0]]), (TILE_LENGTH, LONG, [layout.tile[1]])]
+        kw.setdefault("offsets_tag", TILE_OFFSETS)
+        kw.setdefault("counts_tag", TILE_BYTE_COUNTS)
+    else:
+        entries.append((ROWS_PER_STRIP, LONG, [layout.rows_per_strip]))
+    ours = {tag for tag, _, _ in (extra or [])}
+    entries = [x for x in entries if x[0] not in ours and x[0] not in drop] + list(extra or [])
+    return write_tiff(entries, encode(pixels, bits, layout), big_endian=layout.big_endian,
+                      bigtiff=layout.bigtiff, **kw)
+
+
+def colour_map(bits: int, wide: bool = True, seed: int = 5) -> tuple[int, int, object]:
+    rng = random.Random(seed)
+    n = 1 << bits
+    top = 65535 if wide else 255
+    values = [rng.randrange(top + 1) for _ in range(3 * n)]
+    return (COLOR_MAP, SHORT, values)
+
+
+# ---------------------------------------------------------------------------
+# The fixtures
+# ---------------------------------------------------------------------------
+
+
+def fixtures() -> dict[str, bytes]:
+    W, H = 13, 11
+    f: dict[str, bytes] = {}
+    rgb = picture(W, H, 3, 8, 1)
+    rgba = picture(W, H, 4, 8, 2)
+
+    # Grey, every depth, both senses.
+    for bits in (1, 2, 4, 8, 16):
+        f[f"grey{bits}"] = tiff(picture(W, H, 1, bits, 10 + bits), bits, 1)
+    for bits in (1, 4, 8, 16):
+        f[f"white{bits}"] = tiff(picture(W, H, 1, bits, 20 + bits), bits, 0)
+    f["grey16_big_endian"] = tiff(picture(W, H, 1, 16, 31), 16, 1, Layout(big_endian=True))
+    # Palettes, of 16-bit and of old 8-bit colour maps.
+    for bits in (1, 2, 4, 8):
+        f[f"palette{bits}"] = tiff(picture(W, H, 1, bits, 40 + bits), bits, 3, extra=[colour_map(bits)])
+    f["palette8_narrow_map"] = tiff(picture(W, H, 1, 8, 49), 8, 3, extra=[colour_map(8, wide=False)])
+    f["palette8_with_extra_sample"] = tiff(picture(W, H, 2, 8, 50), 8, 3,
+                                           extra=[colour_map(8), (EXTRA_SAMPLES, SHORT, [2])])
+    # RGB, with and without alpha of each kind.
+    f["rgb8"] = tiff(rgb, 8, 2)
+    f["rgb16"] = tiff(picture(W, H, 3, 16, 3), 16, 2)
+    f["rgb16_big_endian"] = tiff(picture(W, H, 3, 16, 4), 16, 2, Layout(big_endian=True))
+    f["rgba8_unassociated"] = tiff(rgba, 8, 2, extra=[(EXTRA_SAMPLES, SHORT, [2])])
+    f["rgba8_associated"] = tiff(premultiplied(rgba), 8, 2, extra=[(EXTRA_SAMPLES, SHORT, [1])])
+    f["rgba8_unspecified"] = tiff(rgba, 8, 2, extra=[(EXTRA_SAMPLES, SHORT, [0])])
+    f["rgba8_no_extra_samples_tag"] = tiff(rgba, 8, 2)
+    f["rgba16_unassociated"] = tiff(picture(W, H, 4, 16, 5), 16, 2, extra=[(EXTRA_SAMPLES, SHORT, [2])])
+    f["rgba16_associated"] = tiff(picture(W, H, 4, 16, 6), 16, 2, extra=[(EXTRA_SAMPLES, SHORT, [1])])
+    f["rgb8_two_extra_samples"] = tiff(picture(W, H, 5, 8, 7), 8, 2, extra=[(EXTRA_SAMPLES, SHORT, [0, 2])])
+    f["grey_alpha8_unassociated"] = tiff(picture(W, H, 2, 8, 8), 8, 1, extra=[(EXTRA_SAMPLES, SHORT, [2])])
+    f["grey_alpha8_associated"] = tiff(picture(W, H, 2, 8, 9), 8, 1, extra=[(EXTRA_SAMPLES, SHORT, [1])])
+    f["grey_alpha16"] = tiff(picture(W, H, 2, 16, 11), 16, 1, extra=[(EXTRA_SAMPLES, SHORT, [2])])
+    f["corel_alpha_999"] = tiff(rgba, 8, 2, extra=[(EXTRA_SAMPLES, SHORT, [999])])
+    # CMYK.
+    f["cmyk8"] = tiff(picture(W, H, 4, 8, 12), 8, 5)
+    f["cmyk8_five_samples"] = tiff(picture(W, H, 5, 8, 13), 8, 5, extra=[(EXTRA_SAMPLES, SHORT, [2])])
+    f["cmyk8_separate"] = tiff(picture(W, H, 4, 8, 14), 8, 5, Layout(planar=2))
+    f["cmyk16_refused"] = tiff(picture(W, H, 4, 16, 15), 16, 5)
+    f["cmyk_other_inks_refused"] = tiff(picture(W, H, 4, 8, 16), 8, 5, extra=[(INK_SET, SHORT, [2])])
+    # Separate planes.
+    f["rgb8_separate"] = tiff(rgb, 8, 2, Layout(planar=2))
+    f["rgb16_separate_big_endian"] = tiff(picture(W, H, 3, 16, 17), 16, 2, Layout(planar=2, big_endian=True))
+    f["rgba8_separate_unassociated"] = tiff(rgba, 8, 2, Layout(planar=2), extra=[(EXTRA_SAMPLES, SHORT, [2])])
+    f["rgba8_separate_associated"] = tiff(premultiplied(rgba), 8, 2, Layout(planar=2),
+                                          extra=[(EXTRA_SAMPLES, SHORT, [1])])
+    f["grey_alpha8_separate"] = tiff(picture(W, H, 2, 8, 18), 8, 1, Layout(planar=2),
+                                     extra=[(EXTRA_SAMPLES, SHORT, [2])])
+    f["white8_separate"] = tiff(picture(W, H, 2, 8, 19), 8, 0, Layout(planar=2),
+                                extra=[(EXTRA_SAMPLES, SHORT, [0])])
+    # Tiles, cut at the right and bottom edges.
+    big = picture(37, 21, 3, 8, 20)
+    f["rgb8_tiled"] = tiff(big, 8, 2, Layout(tile=(16, 16)))
+    f["rgb8_tiled_separate"] = tiff(big, 8, 2, Layout(tile=(16, 16), planar=2))
+    f["grey8_tiled"] = tiff(picture(37, 21, 1, 8, 21), 8, 1, Layout(tile=(16, 16)))
+    f["grey1_tiled"] = tiff(picture(37, 21, 1, 1, 22), 1, 1, Layout(tile=(16, 16)))
+    f["rgba16_tiled"] = tiff(picture(37, 21, 4, 16, 23), 16, 2, Layout(tile=(16, 16)),
+                             extra=[(EXTRA_SAMPLES, SHORT, [2])])
+    f["palette4_tiled_lzw"] = tiff(picture(37, 21, 1, 4, 24), 4, 3, Layout(tile=(16, 16), scheme=LZW),
+                                   extra=[colour_map(4)])
+    f["rgb8_tile_wider_than_picture"] = tiff(picture(9, 7, 3, 8, 25), 8, 2, Layout(tile=(16, 16)))
+    f["rgb8_odd_tile_width"] = tiff(big, 8, 2, Layout(tile=(10, 16)))
+    f["grey1_odd_tile_width"] = tiff(picture(37, 21, 1, 1, 26), 1, 1, Layout(tile=(10, 16)))
+    # Compression.
+    for name, scheme in (("packbits", PACKBITS), ("lzw", LZW), ("deflate", ADOBE_DEFLATE), ("zip", DEFLATE)):
+        f[f"rgb8_{name}"] = tiff(rgb, 8, 2, Layout(scheme=scheme))
+        f[f"grey1_{name}"] = tiff(picture(W, H, 1, 1, 27), 1, 1, Layout(scheme=scheme))
+    f["rgb8_lzw_predictor"] = tiff(rgb, 8, 2, Layout(scheme=LZW, predictor=2))
+    f["rgba16_lzw_predictor_big_endian"] = tiff(picture(W, H, 4, 16, 28), 16, 2,
+                                                Layout(scheme=LZW, predictor=2, big_endian=True),
+                                                extra=[(EXTRA_SAMPLES, SHORT, [2])])
+    f["grey16_deflate_predictor"] = tiff(picture(W, H, 1, 16, 29), 16, 1, Layout(scheme=DEFLATE, predictor=2))
+    f["rgb8_separate_deflate_predictor"] = tiff(rgb, 8, 2, Layout(planar=2, scheme=DEFLATE, predictor=2))
+    f["rgb8_tiled_lzw_predictor"] = tiff(big, 8, 2, Layout(tile=(16, 16), scheme=LZW, predictor=2))
+    f["rgb8_old_style_lzw"] = tiff(rgb, 8, 2, Layout(scheme=LZW, old_lzw=True))
+    f["grey4_predictor_refused"] = tiff(picture(W, H, 1, 4, 30), 4, 1, Layout(scheme=LZW, predictor=2))
+    f["rgb8_predictor_3_refused"] = tiff(rgb, 8, 2, Layout(scheme=LZW, predictor=3))
+    f["rgb8_uncompressed_predictor_ignored"] = tiff(rgb, 8, 2, extra=[(PREDICTOR, SHORT, [2])])
+    # Byte orders and BigTIFF.
+    f["rgb8_big_endian"] = tiff(rgb, 8, 2, Layout(big_endian=True))
+    f["rgb8_bigtiff"] = tiff(rgb, 8, 2, Layout(bigtiff=True), offsets_kind=LONG8, counts_kind=LONG8)
+    f["rgb16_bigtiff_big_endian_lzw"] = tiff(picture(W, H, 3, 16, 32), 16, 2,
+                                             Layout(bigtiff=True, big_endian=True, scheme=LZW))
+    f["rgb8_mdi_magic"] = tiff(rgb, 8, 2, magic=b"EP")
+    # Fill order: bits reversed in every byte, whatever the depth.
+    f["grey1_fill_order_2"] = tiff(picture(W, H, 1, 1, 33), 1, 1, Layout(fill_order=2))
+    f["rgb8_fill_order_2"] = tiff(rgb, 8, 2, Layout(fill_order=2))
+    f["rgb8_fill_order_2_lzw"] = tiff(rgb, 8, 2, Layout(fill_order=2, scheme=LZW))
+    # libtiff checks an uncompressed first tile's size against its read
+    # buffer, which bit reversal rounds up to a multiple of 1024 bytes: a
+    # 16x16 RGB tile (768 bytes) is refused, a 32x32 grey one (1024) is not.
+    f["rgb8_tiled_fill_order_2_refused"] = tiff(big, 8, 2, Layout(tile=(16, 16), fill_order=2))
+    f["grey8_tiled_fill_order_2"] = tiff(picture(37, 21, 1, 8, 42), 8, 1, Layout(tile=(32, 32), fill_order=2))
+    # Orientation, all eight.
+    for value in range(1, 9):
+        f[f"orientation{value}"] = tiff(rgb, 8, 2, extra=[(ORIENTATION, SHORT, [value])])
+    f["orientation9_ignored"] = tiff(rgb, 8, 2, extra=[(ORIENTATION, SHORT, [9])])
+    # What libtiff mends.
+    f["no_byte_counts"] = tiff(rgb, 8, 2, Layout(rows_per_strip=H), counts_tag=None)
+    f["no_byte_counts_many_strips_refused"] = tiff(rgb, 8, 2, counts_tag=None)
+    f["no_rows_per_strip"] = tiff(rgb, 8, 2, Layout(rows_per_strip=H), drop=(ROWS_PER_STRIP,))
+    f["zero_byte_count"] = tiff(rgb, 8, 2, Layout(rows_per_strip=H), counts=[0])
+    f["short_byte_count"] = tiff(rgb, 8, 2, Layout(rows_per_strip=H), counts=[10])
+    f["no_photometric_rgb"] = tiff(rgb, 8, None)
+    f["no_photometric_grey"] = tiff(picture(W, H, 1, 8, 34), 8, None)
+    # No photometric reads as min-is-white's one channel, so the second is
+    # an extra sample, and the picture is grey.
+    f["no_photometric_two_channels"] = tiff(picture(W, H, 2, 8, 35), 8, None)
+    # A palette's one channel makes the other two extra samples before the
+    # missing map turns it to RGB -- of one channel, which is refused.
+    f["palette_without_map_rgb_refused"] = tiff(rgb, 8, 3)
+    f["palette_without_map_grey"] = tiff(picture(W, H, 1, 8, 36), 8, 3)
+    f["palette4_without_map_refused"] = tiff(picture(W, H, 1, 4, 37), 4, 3)
+    f["bits_per_sample_once"] = tiff(rgb, 8, 2, extra=[(BITS, SHORT, [8])])
+    f["short_typed_offsets"] = tiff(rgb, 8, 2, offsets_kind=SHORT, counts_kind=SHORT)
+    f["rgb_with_one_colour_refused"] = tiff(picture(W, H, 2, 8, 38), 8, 2)
+    f["grey4_two_samples_refused"] = tiff(picture(W, H, 2, 4, 39), 4, 1)
+    # Refused outright.
+    f["bits3_refused"] = tiff(picture(W, H, 1, 3, 40), 3, 1)
+    f["float_refused"] = tiff(picture(W, H, 1, 16, 41), 16, 1, extra=[(SAMPLE_FORMAT, SHORT, [3])])
+    f["bits_differ_refused"] = tiff(rgb, 8, 2, extra=[(BITS, SHORT, [8, 8, 16])])
+    f["planar_3_refused"] = tiff(rgb, 8, 2, extra=[(PLANAR, SHORT, [3])])
+    f["rows_per_strip_0_refused"] = tiff(rgb, 8, 2, extra=[(ROWS_PER_STRIP, LONG, [0])])
+    f["extra_samples_5_refused"] = tiff(rgba, 8, 2, extra=[(EXTRA_SAMPLES, SHORT, [5])])
+    f["unknown_compression_refused"] = tiff(rgb, 8, 2, extra=[(COMPRESSION, SHORT, [12345])])
+    f["lzma_refused"] = tiff(rgb, 8, 2, extra=[(COMPRESSION, SHORT, [34925])])
+    f["truncated_refused"] = tiff(rgb, 8, 2, truncate=60)
+    whole = tiff(rgb, 8, 2, Layout(scheme=LZW))
+    f["lzw_garbage_refused"] = whole[:20] + bytes(b ^ 0x5A for b in whole[20:40]) + whole[40:]
+    f["zero_width_refused"] = tiff(rgb, 8, 2, extra=[(WIDTH, LONG, [0])])
+    f["ycbcr_subsampling_0_refused"] = tiff(rgb, 8, 2, extra=[(YCBCR_SUBSAMPLING, SHORT, [1, 0])])
+    return f
+
+
+def premultiplied(pixels: list[list[list[int]]]) -> list[list[list[int]]]:
+    """Colour at most its alpha, as associated alpha must be."""
+    return [[[(c * px[-1] + 127) // 255 for c in px[:-1]] + [px[-1]] for px in row] for row in pixels]
+
+
+def pillow_fixtures() -> dict[str, bytes]:
+    """Pictures written by Pillow's writer, which is libtiff's encoder."""
+    rng = random.Random(99)
+    base = Image.new("RGB", (29, 19))
+    base.putdata([(rng.randrange(256), (x * 9) % 256, (y * 13) % 256) for y in range(19) for x in range(29)])
+    out: dict[str, bytes] = {}
+    modes = {"1": base.convert("1"), "L": base.convert("L"), "P": base.convert("P"), "RGB": base,
+             "RGBA": base.convert("RGBA"), "CMYK": base.convert("CMYK"), "LA": base.convert("LA")}
+    for mode, img in modes.items():
+        for compression in ("raw", "packbits", "tiff_lzw", "tiff_adobe_deflate"):
+            if mode == "LA" and compression != "raw":
+                continue
+            buf = io.BytesIO()
+            img.save(buf, "TIFF", compression=compression)
+            out[f"pillow_{mode.lower()}_{compression.replace('tiff_', '')}"] = buf.getvalue()
+    return out
+
+
+def main() -> None:
+    oracle = build_oracle()
+    made = {f"tiff_{name}": data for name, data in (fixtures() | pillow_fixtures()).items()}
+    for old in HERE.glob("tiff_*.tif"):
+        old.unlink()
+    for old in HERE.glob("tiff_*.txt"):
+        old.unlink()
+    files = []
+    for name, data in made.items():
+        path = HERE / f"{name}.tif"
+        path.write_bytes(data)
+        files.append(path)
+    answer(oracle, files)
+    refused = sum(1 for f in files if f.with_suffix(".txt").read_text().startswith("REFUSED"))
+    print(f"{len(files)} fixtures, {refused} refused by libtiff")
+    for f in files:
+        text = f.with_suffix(".txt").read_text()
+        wants_refusal = "refused" in f.stem
+        if text.startswith("REFUSED") != wants_refusal:
+            print(f"  note: {f.stem}: {text[:160].strip()}")
+
+
+if __name__ == "__main__":
+    main()

@@ -363,7 +363,11 @@ rm -f "$SERIAL_FILE"
 # `boot-history.py list` would otherwise see an unexplained slow boot and have
 # no way to know it was sabotage.  (Only displayed, never used as a baseline,
 # so this is a legibility fix and not a correctness one.)
-BOOT_LABEL="p22-loaded" python "$SCRIPT_DIR/run-timeout.py" --poll 60 1800 \
+# BOOT_QEMU_PRIORITY=normal: this experiment measures what host load does to
+# the guest, and boot-test.sh otherwise raises QEMU above the load
+# (design-decisions.md §963).
+BOOT_QEMU_PRIORITY=normal BOOT_LABEL="p22-loaded" \
+python "$SCRIPT_DIR/run-timeout.py" --poll 60 1800 \
     "$SCRIPT_DIR/boot-test.sh" --bench > "$LOG" 2>&1 &
 BOOT_PID=$!
 

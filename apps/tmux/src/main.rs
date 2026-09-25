@@ -1,23 +1,33 @@
-//! `Slate OS` Terminal Multiplexer (tmux)
+//! `Slate OS` terminal multiplexer (tmux)
 //!
-//! A graphical terminal multiplexer that allows splitting a terminal window
-//! into multiple panes, creating tabbed windows, and detaching/reattaching
-//! sessions. Based on the design spec's requirement for tmux-like functionality
-//! built into the OS's terminal infrastructure.
+//! One window of many terminals: panes split side by side or one above the
+//! other, windows of panes shown as tabs, and sessions of windows that can be
+//! detached and attached again. Driven the way tmux is -- Ctrl+B, then a key
+//! (F1 lists them) -- and by the pointer: the tabs, the panes, the status
+//! bar's session and window names, the choosers and the detached screen all
+//! answer a click, and the wheel scrolls the pane under it.
 //!
-//! Features:
-//! - Split panes (horizontal and vertical) with configurable ratios
-//! - Multiple windows (tabs) per session
-//! - Session detach/reattach (sessions persist in background)
-//! - Pane navigation with keyboard shortcuts (Ctrl+B prefix)
-//! - Pane resize with arrow keys
-//! - Configurable layouts (even-horizontal, even-vertical, main-horizontal, etc.)
-//! - Status bar with window list, clock, and session name
-//! - Copy mode for scrollback buffer selection
-//! - VT100/ANSI sequence passthrough per pane
-//! - Visual bell indicator
+//! **Every pane is a terminal with a shell in it.** A pane is an
+//! `apps/terminal` [`TerminalState`] -- the same emulator the terminal app
+//! runs, with its scroll regions, alternate screen, cursor-key modes and
+//! replies -- attached to the user's shell on a kernel pseudo-terminal through
+//! [`terminal::child::spawn_shell`]. Keys go to the active pane's shell; its
+//! output is read on the tick; a pane's size reaches its shell as `TIOCSWINSZ`
+//! whenever the layout changes; a shell that exits takes its pane with it, as
+//! in tmux, unless it failed, when the pane stays to say how. Where there are
+//! no pseudo-terminals, each pane says so.
 //!
-//! Uses the guitk library for UI rendering.
+//! Until 2026-09-25 no pane had anything behind it. The multiplexer -- splits,
+//! windows, sessions, the prompt -- was real, and every pane held a banner
+//! saying the system had no PTY layer, long after `apps/terminal` had one.
+//! Typing went nowhere; the pane's own ANSI parser could not have drawn a
+//! full-screen program; and nothing answered the pointer. See
+//! `known-issues.md` ->
+//! `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`.
+//!
+//! What it is not is a server. Sessions last as long as this window does:
+//! detaching hides a session and leaves its shells running, and closing the
+//! window ends every one of them -- which the detached screen says.
 
 #![deny(clippy::all, clippy::pedantic)]
 #![allow(clippy::too_many_lines)]
@@ -39,18 +49,19 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
-use guitk::event::{Event, EventResult, Key, KeyEvent};
-use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-use guitk::scroll_window;
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::wheel;
+use libcall::pty::WinSize;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
-use std::time::Duration;
-
-// ============================================================================
-// Catppuccin Mocha theme
-// ============================================================================
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use terminal::child::{Link, SpawnError};
+use terminal::{Selection, Target as TermTarget, TerminalConfig, TerminalState};
 
 // ============================================================================
 // Layout constants
@@ -60,62 +71,15 @@ const WINDOW_WIDTH: f32 = 1200.0;
 const WINDOW_HEIGHT: f32 = 800.0;
 const STATUS_BAR_HEIGHT: f32 = 22.0;
 const TAB_BAR_HEIGHT: f32 = 28.0;
-#[allow(
-    dead_code,
-    reason = "panes draw with PANE_BORDER_WIDTH; this is the thinner rule the \
-              status and tab bars would use if they were given borders"
-)]
-const BORDER_WIDTH: f32 = 1.0;
 const PANE_BORDER_WIDTH: f32 = 1.0;
-/// Font size of one terminal cell.
-const CELL_FONT_SIZE: f32 = 14.0;
-
-/// Width of one terminal cell.
+/// The strip along a pane's top edge that carries its name.
 ///
-/// A terminal really is a grid — the whole point is that column 40 of row 3
-/// sits above column 40 of row 4 — so the cell is a single number rather than
-/// a per-string measurement. Two things have to be true for that to work, and
-/// each was wrong here in turn:
-///
-/// * The number must be *the face's*, not a constant. It was a hardcoded 8.0,
-///   which matched the built-in bitmap face at 14 px and nothing else.
-/// * The face must be **fixed-pitch**, or there is no single number to take.
-///   It was then `text::digit_advance`, a digit's advance in the proportional
-///   UI face — under which a `W` measured 13.1 px in a 7.5 px cell, so every
-///   wide glyph overhung its neighbour's background and the block cursor
-///   landed beside the character it marks.
-///
-/// [`text::cell_advance`] asks for [`FontFamily::Mono`], where one character's
-/// advance is every character's. The pane's glyphs are drawn inside a matching
-/// [`RenderCommand::PushFont`] scope, so what is measured here is what the
-/// compositor puts on the screen.
-fn char_width() -> f32 {
-    text::cell_advance(CELL_FONT_SIZE, FontWeightHint::Regular)
-}
-
-/// Height of one terminal cell, likewise taken from the fixed-pitch face
-/// rather than assumed, so tall faces do not overlap into the row below.
-fn char_height() -> f32 {
-    text::line_height_in(CELL_FONT_SIZE, FontWeightHint::Regular, FontFamily::Mono)
-}
-
-/// Distance between a pane's edge and the first cell of its grid, on every
-/// side. Named rather than written out at each use because the number appears
-/// in two places that must agree — where the content is *drawn* from, and how
-/// many cells are reckoned to fit — and a pane that draws from one inset and
-/// counts by another is off by a cell at the far edge.
-const PANE_CONTENT_INSET: f32 = 2.0;
-
-/// The grid a pane is created with, before the layout pass tells it the size
-/// it is actually drawn at.
-///
-/// A terminal has to have *some* grid between being created and being
-/// measured, and 80x24 is the one every terminal has defaulted to since the
-/// VT100. It should never be observed in a drawn frame:
-/// [`Multiplexer::relayout`] replaces it with the pane's real size before
-/// anything is painted.
-const INITIAL_COLS: usize = 80;
-const INITIAL_ROWS: usize = 24;
+/// Inside the pane rather than on its border, where the name used to be drawn
+/// half over the tab bar: a split window's panes are told apart by these, and
+/// a label cut in two by the chrome above it is not much of one.
+const PANE_TITLE_HEIGHT: f32 = 17.0;
+/// Between a pane's border and its terminal, on the other three sides.
+const PANE_INSET: f32 = 2.0;
 
 const PADDING: f32 = 4.0;
 const SMALL_TEXT: f32 = 11.0;
@@ -123,6 +87,8 @@ const NORMAL_TEXT: f32 = 13.0;
 const HEADER_TEXT: f32 = 14.0;
 const MIN_PANE_SIZE: f32 = 40.0;
 const RESIZE_STEP: f32 = 20.0;
+/// How much of its split `prefix +` gives a pane at a time.
+const GROW_STEP: f32 = 0.05;
 
 /// How small a share of a split one side may be squeezed to.
 ///
@@ -134,1007 +100,170 @@ const MIN_SPLIT_RATIO: f32 = 0.1;
 const MAX_SESSIONS: usize = 64;
 const MAX_WINDOWS: usize = 32;
 const MAX_PANES: usize = 32;
-const MAX_SCROLLBACK: usize = 10_000;
-const MAX_COLS: usize = 400;
-const MAX_ROWS: usize = 200;
 
-/// The terminal grid held by a pane drawn `width` x `height` pixels, as
-/// `(cols, rows)`.
+/// How long a message stays on the status bar before the clock returns.
+const STATUS_MESSAGE_MS: u64 = 5_000;
+
+/// The choosers: a box this wide, rows this tall, the first row this far down.
+const CHOOSER_WIDTH: f32 = 320.0;
+const CHOOSER_ROW: f32 = 24.0;
+const CHOOSER_TOP: f32 = 36.0;
+const CHOOSER_MAX_HEIGHT: f32 = 400.0;
+
+/// The gap between two tabs.
+const TAB_GAP: f32 = 2.0;
+
+// ============================================================================
+// Panes
+// ============================================================================
+
+/// How a split divides a pane.
 ///
-/// The **only** conversion from a pane's pixel rectangle to a cell count.
-/// Two things read it and they must not be allowed to disagree: the layout
-/// pass ([`Multiplexer::relayout`]), which tells each terminal how big it is,
-/// and the paint ([`Multiplexer::render_pane`]), which draws that many cells.
-/// A grid that wraps at 80 columns inside a pane that shows 142 is a terminal
-/// whose output is cut off with blank space beside it — that is the defect
-/// this function exists to make unrepresentable, and a second copy of the
-/// arithmetic is exactly how it comes back.
-fn pane_grid(width: f32, height: f32) -> (usize, usize) {
-    let inset = PANE_CONTENT_INSET * 2.0;
-    (
-        cells_across(width - inset, char_width(), MAX_COLS),
-        cells_across(height - inset, char_height(), MAX_ROWS),
-    )
-}
-
-/// How many whole cells of `cell` pixels fit in `span` pixels, at least one
-/// and at most `max`.
-///
-/// Whole cells only: a pane with room for two and a half columns has two, and
-/// the remainder is padding. Never zero, because a pane too small to hold a
-/// character is still a terminal, and a zero-column grid would divide the
-/// cursor arithmetic by nothing and swallow every key that pages by a
-/// screenful.
-fn cells_across(span: f32, cell: f32, max: usize) -> usize {
-    // A cell size that is not a positive finite number names no grid at all.
-    // This cannot happen with a loaded font, but the width comes from font
-    // metrics rather than a constant, so it is checked rather than assumed.
-    if !cell.is_finite() || cell <= 0.0 {
-        return 1;
-    }
-    let count = (span / cell).floor();
-    // `f32::clamp` propagates NaN rather than resolving it to a bound, so a
-    // width that is not a number has to be caught here or it would reach the
-    // cast below and come out as a zero-column grid.
-    if count.is_nan() {
-        return 1;
-    }
-    #[allow(clippy::cast_precision_loss)]
-    let upper = max as f32;
-    let count = count.clamp(1.0, upper);
-    // The clamp has excluded negatives and anything past `max`, and NaN was
-    // rejected above, so the cast can neither wrap nor saturate.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    {
-        count as usize
-    }
-}
-
-// ============================================================================
-// Terminal cell
-// ============================================================================
-
-/// A single character cell in the terminal grid.
-#[derive(Debug, Clone, Copy)]
-struct Cell {
-    /// The character displayed in this cell.
-    ch: char,
-    /// Foreground color.
-    fg: Color,
-    /// Background color.
-    bg: Color,
-    /// Whether the cell is bold.
-    bold: bool,
-    /// Whether the cell is dimmed.
-    dim: bool,
-    /// Whether the cell is underlined.
-    underline: bool,
-    /// Whether the cell is in reverse video.
-    reverse: bool,
-}
-
-impl Cell {
-    fn blank() -> Self {
-        Self {
-            ch: ' ',
-            fg: Color::from_hex(0xCDD6F4),
-            bg: Color::from_hex(0x1E1E2E),
-            bold: false,
-            dim: false,
-            underline: false,
-            reverse: false,
-        }
-    }
-}
-
-// ============================================================================
-// Terminal buffer
-// ============================================================================
-
-/// The terminal screen buffer for a single pane.
-#[derive(Debug, Clone)]
-struct TerminalBuffer {
-    /// Grid of cells (rows × cols).
-    cells: Vec<Vec<Cell>>,
-    /// Number of columns.
-    cols: usize,
-    /// Number of rows.
-    rows: usize,
-    /// Cursor position (col, row), 0-indexed.
-    cursor_col: usize,
-    cursor_row: usize,
-    /// Whether the cursor is visible.
-    cursor_visible: bool,
-    /// Scrollback buffer (older lines scrolled off the top).
-    scrollback: Vec<Vec<Cell>>,
-    // There is deliberately no scroll position here. How far back a *view* is
-    // looking is a property of the view, not of the buffer: two panes showing
-    // one buffer would have to disagree about it, and a buffer that owned the
-    // number would be the second place to keep it in step. It lives on
-    // [`Pane::copy_scroll`], and the buffer only answers questions about lines
-    // ([`TerminalBuffer::visible_lines`]).
-    /// SGR state for new characters.
-    current_fg: Color,
-    current_bg: Color,
-    current_bold: bool,
-    current_dim: bool,
-    current_underline: bool,
-    current_reverse: bool,
-    /// Title set via OSC escape.
-    title: String,
-    /// Whether the visual bell was triggered.
-    bell: bool,
-}
-
-impl TerminalBuffer {
-    fn new(cols: usize, rows: usize) -> Self {
-        let cells = vec![vec![Cell::blank(); cols]; rows];
-        Self {
-            cells,
-            cols,
-            rows,
-            cursor_col: 0,
-            cursor_row: 0,
-            cursor_visible: true,
-            scrollback: Vec::new(),
-            current_fg: Color::from_hex(0xCDD6F4),
-            current_bg: Color::from_hex(0x1E1E2E),
-            current_bold: false,
-            current_dim: false,
-            current_underline: false,
-            current_reverse: false,
-            title: String::new(),
-            bell: false,
-        }
-    }
-
-    /// Resize the buffer to new dimensions.
-    fn resize(&mut self, new_cols: usize, new_rows: usize) {
-        let new_cols = new_cols.clamp(1, MAX_COLS);
-        let new_rows = new_rows.clamp(1, MAX_ROWS);
-
-        // Resize existing rows
-        for row in &mut self.cells {
-            row.resize(new_cols, Cell::blank());
-        }
-        // Add or remove rows
-        self.cells.resize(new_rows, vec![Cell::blank(); new_cols]);
-
-        self.cols = new_cols;
-        self.rows = new_rows;
-
-        // Clamp cursor
-        if self.cursor_col >= new_cols {
-            self.cursor_col = new_cols.saturating_sub(1);
-        }
-        if self.cursor_row >= new_rows {
-            self.cursor_row = new_rows.saturating_sub(1);
-        }
-    }
-
-    /// Write a character at the current cursor position and advance.
-    fn write_char(&mut self, ch: char) {
-        if ch == '\n' {
-            self.newline();
-            return;
-        }
-        if ch == '\r' {
-            self.cursor_col = 0;
-            return;
-        }
-        if ch == '\x08' {
-            // Backspace
-            self.cursor_col = self.cursor_col.saturating_sub(1);
-            return;
-        }
-        if ch == '\x07' {
-            // Bell
-            self.bell = true;
-            return;
-        }
-        if ch == '\t' {
-            // Tab: advance to next 8-column stop
-            // Saturating: `cursor_col` is bounded by `cols` in every path
-            // that writes it, but a tab stop computed by overflowing to zero
-            // would move the cursor backwards, which no tab does.
-            let next_tab = (self.cursor_col / 8).saturating_add(1).saturating_mul(8);
-            self.cursor_col = next_tab.min(self.cols.saturating_sub(1));
-            return;
-        }
-
-        if self.cursor_col >= self.cols {
-            self.newline();
-        }
-
-        if let Some(row) = self.cells.get_mut(self.cursor_row)
-            && let Some(cell) = row.get_mut(self.cursor_col)
-        {
-            cell.ch = ch;
-            cell.fg = self.current_fg;
-            cell.bg = self.current_bg;
-            cell.bold = self.current_bold;
-            cell.dim = self.current_dim;
-            cell.underline = self.current_underline;
-            cell.reverse = self.current_reverse;
-        }
-        self.cursor_col = self.cursor_col.saturating_add(1);
-    }
-
-    /// Move to the next line, scrolling if necessary.
-    fn newline(&mut self) {
-        self.cursor_col = 0;
-        if self.cursor_row.saturating_add(1) >= self.rows {
-            self.scroll_up();
-        } else {
-            self.cursor_row = self.cursor_row.saturating_add(1);
-        }
-    }
-
-    /// Scroll the buffer up by one line, pushing the top line to scrollback.
-    fn scroll_up(&mut self) {
-        if !self.cells.is_empty() {
-            let top_line = self.cells.remove(0);
-            self.scrollback.push(top_line);
-            // Cap scrollback
-            if self.scrollback.len() > MAX_SCROLLBACK {
-                self.scrollback.remove(0);
-            }
-            self.cells.push(vec![Cell::blank(); self.cols]);
-        }
-    }
-
-    /// The lines a pane `capacity` rows tall shows when looking `back` lines
-    /// above the live view.
-    ///
-    /// `back == 0` is the live screen, which is what a pane not browsing its
-    /// scrollback always shows; larger values walk up into
-    /// [`Self::scrollback`]. Treats the scrollback and the live grid as one
-    /// sequence, because that is what the user sees: scrolling up by one line
-    /// from the live view should reveal the line that most recently left it,
-    /// not jump to a separate buffer.
-    ///
-    /// `back` is not an error when it exceeds the scrollback — it pins to the
-    /// oldest line kept, so holding Page Up stops at the top rather than
-    /// emptying the pane.
-    fn visible_lines(&self, capacity: usize, back: usize) -> Vec<&[Cell]> {
-        let rows = self.view_rows(capacity, back);
-        (rows.start..rows.end())
-            .filter_map(|i| self.line(i))
-            .collect()
-    }
-
-    /// One line's characters, with the trailing blanks removed.
-    ///
-    /// Trailing blanks are dropped because a terminal line is `cols` cells wide
-    /// whether or not anything was written to the end of it, and pasting 80
-    /// characters where 12 were typed is not what was copied.
-    fn line_text(&self, index: usize) -> Option<String> {
-        let line = self.line(index)?;
-        let mut text: String = line.iter().map(|cell| cell.ch).collect();
-        text.truncate(text.trim_end().len());
-        Some(text)
-    }
-
-    /// Which lines — numbered across the scrollback and the live grid as one
-    /// sequence — a view of `capacity` rows looking `back` lines up is showing.
-    ///
-    /// Split out from [`Self::visible_lines`] so that anything drawn *into*
-    /// that window can be positioned in the same coordinates the lines were:
-    /// the cursor sits at a live-grid row, and its position on screen is only
-    /// meaningful relative to whichever line ended up at the top.
-    fn view_rows(&self, capacity: usize, back: usize) -> scroll_window::Rows {
-        let total = self.scrollback.len().saturating_add(self.cells.len());
-        // `visible_count` counts an offset from the *top*; `back` counts from
-        // the bottom, so convert through the last-page position -- which is
-        // also the position `back == 0` must land on.
-        let live = total.saturating_sub(capacity);
-        scroll_window::visible_count(total, capacity, live.saturating_sub(back))
-    }
-
-    /// One line by its combined scrollback-then-live-grid index.
-    fn line(&self, index: usize) -> Option<&[Cell]> {
-        match self.scrollback.get(index) {
-            Some(line) => Some(line.as_slice()),
-            None => self
-                .cells
-                .get(index.saturating_sub(self.scrollback.len()))
-                .map(Vec::as_slice),
-        }
-    }
-
-    /// How far back this buffer can usefully be scrolled by a view `capacity`
-    /// rows tall: far enough to put the oldest line kept at the top, and no
-    /// further. Clamping here rather than letting the number grow without
-    /// bound is what makes scrolling back down responsive — an offset that ran
-    /// past the top would need those same keystrokes back before the view
-    /// moved at all.
-    fn max_scroll_back(&self, capacity: usize) -> usize {
-        let total = self.scrollback.len().saturating_add(self.cells.len());
-        total.saturating_sub(capacity)
-    }
-
-    /// Clear the entire screen.
-    fn clear(&mut self) {
-        for row in &mut self.cells {
-            for cell in row.iter_mut() {
-                *cell = Cell::blank();
-            }
-        }
-        self.cursor_col = 0;
-        self.cursor_row = 0;
-    }
-
-    /// Clear from cursor to end of screen.
-    fn clear_to_end(&mut self) {
-        // Clear rest of current line
-        if let Some(row) = self.cells.get_mut(self.cursor_row) {
-            for col in self.cursor_col..self.cols {
-                if let Some(cell) = row.get_mut(col) {
-                    *cell = Cell::blank();
-                }
-            }
-        }
-        // Clear all lines below
-        for r in self.cursor_row.saturating_add(1)..self.rows {
-            if let Some(row) = self.cells.get_mut(r) {
-                for cell in row.iter_mut() {
-                    *cell = Cell::blank();
-                }
-            }
-        }
-    }
-
-    /// Clear from start of screen to cursor.
-    fn clear_to_start(&mut self) {
-        // Clear lines above current
-        for r in 0..self.cursor_row {
-            if let Some(row) = self.cells.get_mut(r) {
-                for cell in row.iter_mut() {
-                    *cell = Cell::blank();
-                }
-            }
-        }
-        // Clear current line up to cursor
-        if let Some(row) = self.cells.get_mut(self.cursor_row) {
-            for col in 0..=self.cursor_col.min(self.cols.saturating_sub(1)) {
-                if let Some(cell) = row.get_mut(col) {
-                    *cell = Cell::blank();
-                }
-            }
-        }
-    }
-
-    /// Clear current line.
-    fn clear_line(&mut self) {
-        if let Some(row) = self.cells.get_mut(self.cursor_row) {
-            for cell in row.iter_mut() {
-                *cell = Cell::blank();
-            }
-        }
-    }
-
-    /// Erase from cursor to end of line.
-    fn clear_line_to_end(&mut self) {
-        if let Some(row) = self.cells.get_mut(self.cursor_row) {
-            for col in self.cursor_col..self.cols {
-                if let Some(cell) = row.get_mut(col) {
-                    *cell = Cell::blank();
-                }
-            }
-        }
-    }
-
-    /// Set cursor position (1-indexed input, stored 0-indexed).
-    fn set_cursor(&mut self, row: usize, col: usize) {
-        self.cursor_row = row.saturating_sub(1).min(self.rows.saturating_sub(1));
-        self.cursor_col = col.saturating_sub(1).min(self.cols.saturating_sub(1));
-    }
-
-    /// Reset SGR attributes.
-    fn reset_attrs(&mut self) {
-        self.current_fg = Color::from_hex(0xCDD6F4);
-        self.current_bg = Color::from_hex(0x1E1E2E);
-        self.current_bold = false;
-        self.current_dim = false;
-        self.current_underline = false;
-        self.current_reverse = false;
-    }
-
-    /// Write a string to the buffer, handling basic control characters.
-    #[allow(
-        dead_code,
-        reason = "the buffer's own convenience for a run of characters. The \
-                  program writes through `Pane::feed`, which parses escape \
-                  sequences first and then calls `write_char` per character, \
-                  so this stays as the direct path for the twelve tests that \
-                  exercise wrapping and control characters without a parser \
-                  in the way"
-    )]
-    fn write_str(&mut self, s: &str) {
-        for ch in s.chars() {
-            self.write_char(ch);
-        }
-    }
-
-    /// Get the effective foreground/background for a cell, applying reverse video.
-    fn effective_colors(cell: &Cell) -> (Color, Color) {
-        if cell.reverse {
-            (cell.bg, cell.fg)
-        } else {
-            (cell.fg, cell.bg)
-        }
-    }
-}
-
-// ============================================================================
-// ANSI/CSI parser
-// ============================================================================
-
-/// Parse state for ANSI escape sequences.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ParseState {
-    /// Normal character output.
-    Normal,
-    /// Received ESC, waiting for '[' or other.
-    Escape,
-    /// Inside a CSI sequence (ESC [), collecting parameters.
-    Csi,
-    /// Inside an OSC sequence (ESC ]).
-    Osc,
-}
-
-/// ANSI sequence parser that processes byte streams and applies effects
-/// to a `TerminalBuffer`.
-#[derive(Debug, Clone)]
-struct AnsiParser {
-    state: ParseState,
-    /// CSI parameter accumulator.
-    params: Vec<u16>,
-    /// Current param being built.
-    current_param: u16,
-    /// Whether we've started building a param digit.
-    has_param: bool,
-    /// Intermediate bytes (e.g., '?' for private modes).
-    intermediate: Option<char>,
-    /// OSC string accumulator.
-    osc_string: String,
-}
-
-impl AnsiParser {
-    fn new() -> Self {
-        Self {
-            state: ParseState::Normal,
-            params: Vec::new(),
-            current_param: 0,
-            has_param: false,
-            intermediate: None,
-            osc_string: String::new(),
-        }
-    }
-
-    /// Feed a string into the parser, applying effects to the buffer.
-    fn feed(&mut self, input: &str, buf: &mut TerminalBuffer) {
-        for ch in input.chars() {
-            match self.state {
-                ParseState::Normal => {
-                    if ch == '\x1B' {
-                        self.state = ParseState::Escape;
-                    } else {
-                        buf.write_char(ch);
-                    }
-                }
-                ParseState::Escape => {
-                    match ch {
-                        '[' => {
-                            self.state = ParseState::Csi;
-                            self.params.clear();
-                            self.current_param = 0;
-                            self.has_param = false;
-                            self.intermediate = None;
-                        }
-                        ']' => {
-                            self.state = ParseState::Osc;
-                            self.osc_string.clear();
-                        }
-                        'c' => {
-                            // Full reset
-                            buf.clear();
-                            buf.reset_attrs();
-                            self.state = ParseState::Normal;
-                        }
-                        _ => {
-                            self.state = ParseState::Normal;
-                        }
-                    }
-                }
-                ParseState::Csi => {
-                    self.process_csi_char(ch, buf);
-                }
-                ParseState::Osc => {
-                    if ch == '\x07' || ch == '\x1B' {
-                        // OSC terminated by BEL or ESC
-                        self.process_osc(buf);
-                        self.state = ParseState::Normal;
-                    } else {
-                        self.osc_string.push(ch);
-                    }
-                }
-            }
-        }
-    }
-
-    fn process_csi_char(&mut self, ch: char, buf: &mut TerminalBuffer) {
-        match ch {
-            '0'..='9' => {
-                self.current_param = self
-                    .current_param
-                    .saturating_mul(10)
-                    .saturating_add(u16::from(ch as u8).saturating_sub(u16::from(b'0')));
-                self.has_param = true;
-            }
-            ';' => {
-                self.params.push(if self.has_param {
-                    self.current_param
-                } else {
-                    0
-                });
-                self.current_param = 0;
-                self.has_param = false;
-            }
-            '?' | '>' | '!' => {
-                self.intermediate = Some(ch);
-            }
-            _ => {
-                // Final byte — push last param and dispatch
-                if self.has_param || !self.params.is_empty() {
-                    self.params.push(if self.has_param {
-                        self.current_param
-                    } else {
-                        0
-                    });
-                }
-                self.dispatch_csi(ch, buf);
-                self.state = ParseState::Normal;
-            }
-        }
-    }
-
-    fn dispatch_csi(&self, final_ch: char, buf: &mut TerminalBuffer) {
-        let p = &self.params;
-        let p0 = p.first().copied().unwrap_or(0);
-        let p1 = p.get(1).copied().unwrap_or(0);
-
-        match final_ch {
-            // Cursor movement
-            'A' => {
-                // Cursor Up
-                let n = (p0.max(1)) as usize;
-                buf.cursor_row = buf.cursor_row.saturating_sub(n);
-            }
-            'B' => {
-                // Cursor Down
-                let n = (p0.max(1)) as usize;
-                buf.cursor_row = (buf.cursor_row.saturating_add(n)).min(buf.rows.saturating_sub(1));
-            }
-            'C' => {
-                // Cursor Forward
-                let n = (p0.max(1)) as usize;
-                buf.cursor_col = (buf.cursor_col.saturating_add(n)).min(buf.cols.saturating_sub(1));
-            }
-            'D' => {
-                // Cursor Back
-                let n = (p0.max(1)) as usize;
-                buf.cursor_col = buf.cursor_col.saturating_sub(n);
-            }
-            'H' | 'f' => {
-                // Cursor Position
-                let row = p0.max(1) as usize;
-                let col = p1.max(1) as usize;
-                buf.set_cursor(row, col);
-            }
-            'J' => {
-                // Erase in Display
-                match p0 {
-                    0 => buf.clear_to_end(),
-                    1 => buf.clear_to_start(),
-                    2 | 3 => buf.clear(),
-                    _ => {}
-                }
-            }
-            'K' => {
-                // Erase in Line
-                match p0 {
-                    0 => buf.clear_line_to_end(),
-                    1 => {
-                        // Erase to start of line
-                        if let Some(row) = buf.cells.get_mut(buf.cursor_row) {
-                            for col in 0..=buf.cursor_col.min(buf.cols.saturating_sub(1)) {
-                                if let Some(cell) = row.get_mut(col) {
-                                    *cell = Cell::blank();
-                                }
-                            }
-                        }
-                    }
-                    2 => buf.clear_line(),
-                    _ => {}
-                }
-            }
-            'm' => {
-                // SGR — Select Graphic Rendition
-                if p.is_empty() {
-                    buf.reset_attrs();
-                } else {
-                    self.apply_sgr(p, buf);
-                }
-            }
-            'h' | 'l' if self.intermediate == Some('?') && p0 == 25 => {
-                // Set/Reset Mode (DECTCEM cursor visibility)
-                buf.cursor_visible = final_ch == 'h';
-            }
-            'r' => {
-                // Set scrolling region (simplified — just reset cursor)
-                buf.cursor_col = 0;
-                buf.cursor_row = 0;
-            }
-            _ => {
-                // Unknown CSI sequence — ignore
-            }
-        }
-    }
-
-    #[allow(clippy::unused_self)] // kept as method for symmetry with other CSI handlers
-    fn apply_sgr(&self, params: &[u16], buf: &mut TerminalBuffer) {
-        let mut i = 0;
-        while i < params.len() {
-            let Some(&param) = params.get(i) else {
-                break;
-            };
-            match param {
-                0 => buf.reset_attrs(),
-                1 => buf.current_bold = true,
-                2 => buf.current_dim = true,
-                4 => buf.current_underline = true,
-                7 => buf.current_reverse = true,
-                22 => {
-                    buf.current_bold = false;
-                    buf.current_dim = false;
-                }
-                24 => buf.current_underline = false,
-                27 => buf.current_reverse = false,
-                // Standard foreground colors
-                30 => buf.current_fg = Color::from_hex(0x45475A), // Black → Surface1
-                31 => buf.current_fg = Color::from_hex(0xF38BA8),
-                32 => buf.current_fg = Color::from_hex(0xA6E3A1),
-                33 => buf.current_fg = Color::from_hex(0xF9E2AF),
-                34 => buf.current_fg = Color::from_hex(0x89B4FA),
-                35 => buf.current_fg = Color::from_hex(0xCBA6F7),
-                36 => buf.current_fg = Color::from_hex(0x94E2D5),
-                37 => buf.current_fg = Color::from_hex(0xCDD6F4),
-                39 => buf.current_fg = Color::from_hex(0xCDD6F4), // Default fg
-                // Standard background colors
-                40 => buf.current_bg = Color::from_hex(0x11111B),
-                41 => buf.current_bg = Color::from_hex(0xF38BA8),
-                42 => buf.current_bg = Color::from_hex(0xA6E3A1),
-                43 => buf.current_bg = Color::from_hex(0xF9E2AF),
-                44 => buf.current_bg = Color::from_hex(0x89B4FA),
-                45 => buf.current_bg = Color::from_hex(0xCBA6F7),
-                46 => buf.current_bg = Color::from_hex(0x94E2D5),
-                47 => buf.current_bg = Color::from_hex(0xCDD6F4),
-                49 => buf.current_bg = Color::from_hex(0x1E1E2E), // Default bg
-                // Bright foreground
-                90 => buf.current_fg = Color::from_hex(0x6C7086),
-                91 => buf.current_fg = Color::from_hex(0xF38BA8),
-                92 => buf.current_fg = Color::from_hex(0xA6E3A1),
-                93 => buf.current_fg = Color::from_hex(0xF9E2AF),
-                94 => buf.current_fg = Color::from_hex(0x89B4FA),
-                95 => buf.current_fg = Color::from_hex(0xCBA6F7),
-                96 => buf.current_fg = Color::from_hex(0x94E2D5),
-                97 => buf.current_fg = Color::from_hex(0xCDD6F4),
-                // 256-color and truecolor
-                38 => {
-                    if let Some(&2) = params.get(i.saturating_add(1)) {
-                        // Truecolor: `38;2;r;g;b`. Read through `get`, so a
-                        // sequence cut short by the sender is a colour not set
-                        // rather than a panic on someone else's bytes -- the
-                        // bound was two lines above the three reads that
-                        // depended on it.
-                        if let (Some(&r), Some(&g_val), Some(&b)) = (
-                            params.get(i.saturating_add(2)),
-                            params.get(i.saturating_add(3)),
-                            params.get(i.saturating_add(4)),
-                        ) {
-                            buf.current_fg = Color::rgb(r as u8, g_val as u8, b as u8);
-                            i = i.saturating_add(4);
-                        }
-                    } else if let Some(&5) = params.get(i.saturating_add(1)) {
-                        // 256-color: 38;5;n — simplified mapping
-                        if let Some(&n) = params.get(i.saturating_add(2)) {
-                            buf.current_fg = color_256(n);
-                            i = i.saturating_add(2);
-                        }
-                    }
-                }
-                48 => {
-                    if let Some(&2) = params.get(i.saturating_add(1)) {
-                        // Truecolor: `48;2;r;g;b`. Read through `get`, so a
-                        // sequence cut short by the sender is a colour not set
-                        // rather than a panic on someone else's bytes -- the
-                        // bound was two lines above the three reads that
-                        // depended on it.
-                        if let (Some(&r), Some(&g_val), Some(&b)) = (
-                            params.get(i.saturating_add(2)),
-                            params.get(i.saturating_add(3)),
-                            params.get(i.saturating_add(4)),
-                        ) {
-                            buf.current_bg = Color::rgb(r as u8, g_val as u8, b as u8);
-                            i = i.saturating_add(4);
-                        }
-                    } else if let Some(&5) = params.get(i.saturating_add(1))
-                        && let Some(&n) = params.get(i.saturating_add(2))
-                    {
-                        buf.current_bg = color_256(n);
-                        i = i.saturating_add(2);
-                    }
-                }
-                _ => {}
-            }
-            i = i.saturating_add(1);
-        }
-    }
-
-    fn process_osc(&self, buf: &mut TerminalBuffer) {
-        // OSC 0 or 2: set title
-        if let Some(rest) = self.osc_string.strip_prefix("0;") {
-            buf.title = rest.to_string();
-        } else if let Some(rest) = self.osc_string.strip_prefix("2;") {
-            buf.title = rest.to_string();
-        }
-    }
-}
-
-/// Map 256-color index to a Color (simplified).
-fn color_256(n: u16) -> Color {
-    match n {
-        0 => Color::from_hex(0x11111B),
-        1 => Color::from_hex(0xF38BA8),
-        2 => Color::from_hex(0xA6E3A1),
-        3 => Color::from_hex(0xF9E2AF),
-        4 => Color::from_hex(0x89B4FA),
-        5 => Color::from_hex(0xCBA6F7),
-        6 => Color::from_hex(0x94E2D5),
-        7 => Color::from_hex(0xBAC2DE),
-        8 => Color::from_hex(0x6C7086),
-        9 => Color::from_hex(0xF38BA8),
-        10 => Color::from_hex(0xA6E3A1),
-        11 => Color::from_hex(0xF9E2AF),
-        12 => Color::from_hex(0x89B4FA),
-        13 => Color::from_hex(0xCBA6F7),
-        14 => Color::from_hex(0x94E2D5),
-        15 => Color::from_hex(0xCDD6F4),
-        // 16-231: 6x6x6 color cube
-        16..=231 => {
-            let idx = n.saturating_sub(16);
-            let b = (idx % 6) as u8;
-            let g_val = ((idx / 6) % 6) as u8;
-            let r = (idx / 36) as u8;
-            Color::rgb(
-                if r == 0 {
-                    0
-                } else {
-                    r.saturating_mul(40).saturating_add(55)
-                },
-                if g_val == 0 {
-                    0
-                } else {
-                    g_val.saturating_mul(40).saturating_add(55)
-                },
-                if b == 0 {
-                    0
-                } else {
-                    b.saturating_mul(40).saturating_add(55)
-                },
-            )
-        }
-        // 232-255: grayscale ramp
-        232..=255 => {
-            let v = ((n.saturating_sub(232)).saturating_mul(10).saturating_add(8)) as u8;
-            Color::rgb(v, v, v)
-        }
-        _ => Color::from_hex(0xCDD6F4),
-    }
-}
-
-// ============================================================================
-// Split direction
-// ============================================================================
-
+/// Named for what the user sees. These were `Horizontal` and `Vertical`, and
+/// both readings of those words -- the direction of the divider, and the
+/// arrangement of the panes -- had been used in different places, so
+/// `:split-window -h` and the `even-horizontal` layout each did the opposite of
+/// tmux's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SplitDir {
-    Horizontal,
-    Vertical,
+    /// One pane above the other: tmux's `split-window -v`, `prefix "`.
+    Stacked,
+    /// Side by side: tmux's `split-window -h`, `prefix %`.
+    SideBySide,
 }
 
-// ============================================================================
-// Pane
-// ============================================================================
-
-/// A unique identifier for a pane.
+/// A pane's identity, for as long as the multiplexer runs.
+///
+/// Never reused: a closed pane's number is not given to the next one, so a
+/// click or a queued exit aimed at a pane that has gone cannot land on a new
+/// pane that happens to have its number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct PaneId(usize);
 
-/// A single terminal pane within a window.
-#[derive(Debug, Clone)]
+/// One pane: a terminal, and what the multiplexer knows about it.
 struct Pane {
     id: PaneId,
-    /// Terminal buffer for this pane.
-    buffer: TerminalBuffer,
-    /// ANSI parser state.
-    parser: AnsiParser,
-    /// Process ID running in this pane (0 if none).
-    ///
-    /// Always zero: there is no PTY layer in this tree, so no pane has a
-    /// process behind it. Kept because it is the field a real one goes in, and
-    /// because the pane banner says so out loud rather than leaving a blank
-    /// rectangle. See `known-issues.md` ->
-    /// `TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES`.
-    #[allow(dead_code, reason = "written at construction; read when a PTY exists")]
-    pid: u64,
-    /// Command that was launched in this pane.
+    /// The terminal -- emulator, scrollback, and the link to its shell.
+    term: TerminalState,
+    /// What was started in it: its name until the program running there
+    /// names itself.
     command: String,
-    /// Whether the pane is active/alive.
-    alive: bool,
-    /// Pane title (from OSC or command).
-    title: String,
-    /// Whether this pane is in copy mode (scrollback browsing).
+    /// Copy mode, tmux's `prefix [`: the keys move through the scrollback
+    /// instead of going to the program.
     copy_mode: bool,
-    /// Copy mode selection start (col, row in scrollback).
-    copy_start: Option<(usize, usize)>,
-    /// Copy mode selection end.
-    copy_end: Option<(usize, usize)>,
-    /// How many lines above the live view this pane is looking, while in copy
-    /// mode. Zero is the live screen. Only consulted when `copy_mode` is set,
-    /// so leaving copy mode returns to the live view.
-    copy_scroll: usize,
+    /// Whether `v` has started a selection that the copy-mode keys extend.
+    marking: bool,
 }
 
 impl Pane {
-    fn new(id: PaneId, cols: usize, rows: usize) -> Self {
+    fn new(id: PaneId, palette: &Palette) -> Self {
+        let mut term = TerminalState::new(TerminalConfig::default());
+        term.theme_changed(palette);
+        // The terminal calls itself "Terminal" until a program says otherwise,
+        // and a pane is better named by what it runs.
+        term.title.clear();
         Self {
             id,
-            buffer: TerminalBuffer::new(cols, rows),
-            parser: AnsiParser::new(),
-            pid: 0,
+            term,
             command: "shell".into(),
-            alive: true,
-            title: String::new(),
             copy_mode: false,
-            copy_start: None,
-            copy_end: None,
-            copy_scroll: 0,
+            marking: false,
         }
     }
 
-    /// Feed input data to this pane's terminal.
-    fn feed(&mut self, data: &str) {
-        self.parser.feed(data, &mut self.buffer);
-        if !self.buffer.title.is_empty() {
-            self.title = self.buffer.title.clone();
-        }
-    }
-
-    /// Get effective title (pane title, buffer title, or command).
-    fn effective_title(&self) -> &str {
-        if !self.title.is_empty() {
-            &self.title
-        } else if !self.buffer.title.is_empty() {
-            &self.buffer.title
-        } else {
+    /// The pane's name: what the program in it calls itself, or what was
+    /// started there.
+    fn title(&self) -> &str {
+        if self.term.title.is_empty() {
             &self.command
+        } else {
+            &self.term.title
         }
     }
 
-    /// The line at the top of what copy mode is currently showing.
-    ///
-    /// Copy mode's position is stored as a distance *back* from the live
-    /// screen, and a selection has to be stored in coordinates that do not move
-    /// when the view scrolls -- so the mark is a line number across the
-    /// scrollback and the grid together, which is what `view_rows` counts in.
-    fn copy_view_top(&self) -> usize {
-        self.buffer
-            .view_rows(self.buffer.rows, self.copy_scroll)
-            .start
-    }
-
-    /// Mark the top visible line as one end of a selection.
-    fn set_copy_mark(&mut self) {
-        self.copy_start = Some((self.copy_view_top(), 0));
-    }
-
-    /// The text between the mark and the current position, or `None` if
-    /// nothing is marked.
-    ///
-    /// Line-wise, which is tmux's own default and the only kind that is
-    /// unambiguous here: a terminal line is a fixed number of cells and a
-    /// column-wise selection across a wrapped line copies padding.
-    ///
-    /// `copy_start` was written to `None` in two places and never to anything
-    /// else, and `Multiplexer::clipboard` was read by nothing -- so copy mode
-    /// could scroll the scrollback and could not copy from it, which is the one
-    /// thing it is named for.
-    fn copy_selection(&self) -> Option<String> {
-        let (mark, _) = self.copy_start?;
-        let here = self.copy_view_top();
-        let (from, to) = if mark <= here {
-            (mark, here)
-        } else {
-            (here, mark)
-        };
-        let text = (from..=to)
-            .filter_map(|i| self.buffer.line_text(i))
-            .collect::<Vec<_>>()
-            .join("\n");
-        Some(text)
-    }
-
-    /// Enter copy mode for scrollback browsing.
     fn enter_copy_mode(&mut self) {
         self.copy_mode = true;
-        self.copy_scroll = 0;
-        self.copy_start = None;
-        self.copy_end = None;
     }
 
-    /// Exit copy mode.
+    /// Leave copy mode, back to the live screen, dropping a selection the
+    /// copy-mode keys were making.
     fn exit_copy_mode(&mut self) {
         self.copy_mode = false;
-        self.copy_start = None;
-        self.copy_end = None;
+        self.term.scroll_offset = 0;
+        if self.marking {
+            self.term.clear_selection();
+        }
+        self.marking = false;
     }
 
-    /// How far back copy mode may look: far enough to bring the oldest line
-    /// kept to the top of the pane.
-    ///
-    /// Measured against the terminal's own row count rather than the pane's
-    /// drawn height, because the pane does not know its height here — key
-    /// handling runs nowhere near layout. That is correct precisely because
-    /// [`Multiplexer::relayout`] keeps the grid equal to the drawn height: the
-    /// buffer's row count *is* the pane's height, asked of the one place that
-    /// stores it. Before that pass existed the two could differ, and a pane
-    /// drawn shorter than its grid stopped that many lines short of the top.
-    fn max_scroll_back(&self) -> usize {
-        self.buffer.max_scroll_back(self.buffer.rows)
+    /// One screenful, for the page keys. At least one line, so a pane squeezed
+    /// to nothing still scrolls rather than ignoring the key.
+    fn page(&self) -> usize {
+        self.term.rows().max(1)
     }
 
-    /// Move the copy-mode view `lines` lines further back, stopping at the
-    /// oldest line kept.
     fn scroll_back(&mut self, lines: usize) {
-        self.copy_scroll = self
-            .copy_scroll
-            .saturating_add(lines)
-            .min(self.max_scroll_back());
+        self.term.scroll_viewport_up(lines);
+        self.extend_mark();
     }
 
-    /// Move the copy-mode view `lines` lines towards the live screen, stopping
-    /// at it.
     fn scroll_forward(&mut self, lines: usize) {
-        self.copy_scroll = self.copy_scroll.saturating_sub(lines);
+        self.term.scroll_viewport_down(lines);
+        self.extend_mark();
     }
 
-    /// Jump to the oldest line kept.
     fn scroll_to_top(&mut self) {
-        self.copy_scroll = self.max_scroll_back();
+        self.term.scroll_viewport_up(self.term.buffer_len());
+        self.extend_mark();
     }
 
-    /// Jump back to the live screen, without leaving copy mode — the selection
-    /// keys stay available, which is why this is not `exit_copy_mode`.
     fn scroll_to_bottom(&mut self) {
-        self.copy_scroll = 0;
+        self.term.scroll_offset = 0;
+        self.extend_mark();
     }
 
-    /// One screenful, for the page keys. At least one line, so a degenerate
-    /// zero-row grid still scrolls rather than silently ignoring the key.
-    fn page_lines(&self) -> usize {
-        self.buffer.rows.max(1)
+    /// `v` in copy mode: the top line of the view is one end of a selection,
+    /// whole lines, and the view's top line as it moves is the other.
+    ///
+    /// Kept in the terminal's own selection rather than beside it, for two
+    /// reasons: the terminal draws its selection, so the user sees what `y`
+    /// will copy; and the terminal renumbers its selection when the oldest
+    /// line falls off the scrollback, which a mark kept here would not know
+    /// had happened.
+    fn set_mark(&mut self) {
+        let top = self.term.viewport_top();
+        let last = self.term.cols().saturating_sub(1);
+        self.term.selection = Some(Selection {
+            start_row: top,
+            start_col: 0,
+            end_row: top,
+            end_col: last,
+            active: false,
+        });
+        self.marking = true;
+    }
+
+    /// Move the moving end of a `v` selection to the view's top line.
+    ///
+    /// Whole lines in either direction: the columns are set so that, once the
+    /// terminal orders the two ends, the upper line starts at its first column
+    /// and the lower one ends at its last.
+    fn extend_mark(&mut self) {
+        if !self.marking {
+            return;
+        }
+        let here = self.term.viewport_top();
+        let last = self.term.cols().saturating_sub(1);
+        if let Some(sel) = self.term.selection.as_mut() {
+            let (start_col, end_col) = if here >= sel.start_row {
+                (0, last)
+            } else {
+                (last, 0)
+            };
+            sel.start_col = start_col;
+            sel.end_row = here;
+            sel.end_col = end_col;
+        }
     }
 }
 
@@ -1149,7 +278,7 @@ enum LayoutNode {
     Leaf(PaneId),
     Split {
         direction: SplitDir,
-        /// Ratio of first child (0.0-1.0).
+        /// The first child's share, `0.0`-`1.0`.
         ratio: f32,
         first: Box<LayoutNode>,
         second: Box<LayoutNode>,
@@ -1157,7 +286,7 @@ enum LayoutNode {
 }
 
 impl LayoutNode {
-    /// Change the ratio of the innermost split containing `target`.
+    /// Move the divider of the innermost split containing `target`.
     ///
     /// `true` if a split was found and adjusted. A layout that is a single leaf
     /// has no ratio to change, which is why this reports whether it did
@@ -1195,10 +324,39 @@ impl LayoutNode {
         if !first.contains(target) && !second.contains(target) {
             return false;
         }
-        let signed = delta;
         // Clamped well inside 0 and 1: a ratio of zero is a pane with no
         // pixels, which `compute_bounds` then floors at `MIN_PANE_SIZE`,
         // leaving the divider stuck against an edge it cannot come back from.
+        *ratio = (*ratio + delta).clamp(MIN_SPLIT_RATIO, 1.0 - MIN_SPLIT_RATIO);
+        true
+    }
+
+    /// Give `target` a larger share of the innermost split holding it -- or,
+    /// with a negative `delta`, a smaller one.
+    ///
+    /// This replaced `adjust_ratio`, which moved the *outermost* split's ratio
+    /// and always in the first child's favour: `prefix +`, "grow the pane",
+    /// shrank every pane on the right or at the bottom.
+    fn grow(&mut self, target: PaneId, delta: f32) -> bool {
+        let Self::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        if first.grow(target, delta) || second.grow(target, delta) {
+            return true;
+        }
+        let signed = if first.contains(target) {
+            delta
+        } else if second.contains(target) {
+            -delta
+        } else {
+            return false;
+        };
         *ratio = (*ratio + signed).clamp(MIN_SPLIT_RATIO, 1.0 - MIN_SPLIT_RATIO);
         true
     }
@@ -1211,16 +369,10 @@ impl LayoutNode {
         }
     }
 
-    /// Compute the absolute bounds for each pane in this layout tree.
-    fn compute_bounds(
-        &self,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    ) -> Vec<(PaneId, f32, f32, f32, f32)> {
+    /// Where each pane of this subtree sits, given the rectangle it fills.
+    fn compute_bounds(&self, area: Rect) -> Vec<(PaneId, Rect)> {
         match self {
-            Self::Leaf(id) => vec![(*id, x, y, width, height)],
+            Self::Leaf(id) => vec![(*id, area)],
             Self::Split {
                 direction,
                 ratio,
@@ -1229,27 +381,31 @@ impl LayoutNode {
             } => {
                 let mut result = Vec::new();
                 match direction {
-                    SplitDir::Horizontal => {
-                        let first_h = (height * ratio).max(MIN_PANE_SIZE);
-                        let second_h = (height - first_h - PANE_BORDER_WIDTH).max(MIN_PANE_SIZE);
-                        result.extend(first.compute_bounds(x, y, width, first_h));
-                        result.extend(second.compute_bounds(
-                            x,
-                            y + first_h + PANE_BORDER_WIDTH,
-                            width,
+                    SplitDir::Stacked => {
+                        let first_h = (area.h * ratio).max(MIN_PANE_SIZE);
+                        let second_h = (area.h - first_h - PANE_BORDER_WIDTH).max(MIN_PANE_SIZE);
+                        result.extend(
+                            first.compute_bounds(Rect::new(area.x, area.y, area.w, first_h)),
+                        );
+                        result.extend(second.compute_bounds(Rect::new(
+                            area.x,
+                            area.y + first_h + PANE_BORDER_WIDTH,
+                            area.w,
                             second_h,
-                        ));
+                        )));
                     }
-                    SplitDir::Vertical => {
-                        let first_w = (width * ratio).max(MIN_PANE_SIZE);
-                        let second_w = (width - first_w - PANE_BORDER_WIDTH).max(MIN_PANE_SIZE);
-                        result.extend(first.compute_bounds(x, y, first_w, height));
-                        result.extend(second.compute_bounds(
-                            x + first_w + PANE_BORDER_WIDTH,
-                            y,
+                    SplitDir::SideBySide => {
+                        let first_w = (area.w * ratio).max(MIN_PANE_SIZE);
+                        let second_w = (area.w - first_w - PANE_BORDER_WIDTH).max(MIN_PANE_SIZE);
+                        result.extend(
+                            first.compute_bounds(Rect::new(area.x, area.y, first_w, area.h)),
+                        );
+                        result.extend(second.compute_bounds(Rect::new(
+                            area.x + first_w + PANE_BORDER_WIDTH,
+                            area.y,
                             second_w,
-                            height,
-                        ));
+                            area.h,
+                        )));
                     }
                 }
                 result
@@ -1279,44 +435,21 @@ impl LayoutNode {
         }
     }
 
-    /// Find the split containing the given pane ID and adjust its ratio.
-    fn adjust_ratio(&mut self, pane: PaneId, delta: f32) -> bool {
-        match self {
-            Self::Leaf(_) => false,
-            Self::Split {
-                ratio,
-                first,
-                second,
-                ..
-            } => {
-                let first_ids = first.pane_ids();
-                let second_ids = second.pane_ids();
-                if first_ids.contains(&pane) || second_ids.contains(&pane) {
-                    *ratio = (*ratio + delta).clamp(0.15, 0.85);
-                    return true;
-                }
-                first.adjust_ratio(pane, delta) || second.adjust_ratio(pane, delta)
-            }
-        }
-    }
-
-    /// Remove a pane from the layout tree. Returns the replacement node if the
-    /// pane was found, or None if not found.
+    /// Remove a pane from the layout tree, its sibling taking its place.
+    ///
+    /// `false` if the pane is not here -- and for a tree that is only this
+    /// pane, which cannot be removed from itself: the caller closes the window
+    /// instead.
     fn remove_pane(&mut self, target: PaneId) -> bool {
         match self {
-            Self::Leaf(id) => *id == target,
+            Self::Leaf(_) => false,
             Self::Split { first, second, .. } => {
-                let first_ids = first.pane_ids();
-                let second_ids = second.pane_ids();
-
-                if first_ids.first() == Some(&target) && first_ids.len() == 1 {
-                    // Replace self with second child
-                    *self = *second.clone();
+                if matches!(**first, Self::Leaf(id) if id == target) {
+                    *self = (**second).clone();
                     return true;
                 }
-                if second_ids.first() == Some(&target) && second_ids.len() == 1 {
-                    // Replace self with first child
-                    *self = *first.clone();
+                if matches!(**second, Self::Leaf(id) if id == target) {
+                    *self = (**first).clone();
                     return true;
                 }
                 first.remove_pane(target) || second.remove_pane(target)
@@ -1344,140 +477,148 @@ impl LayoutNode {
             }
         }
     }
+
+    /// Exchange two panes' places, leaving the shape of the tree alone.
+    ///
+    /// What `prefix }` promised. It was bound to "cycle the active pane
+    /// forward" under a comment calling a real swap too complex -- and the
+    /// card the user reads said "Swap this pane with the next".
+    fn swap(&mut self, a: PaneId, b: PaneId) {
+        match self {
+            Self::Leaf(id) => {
+                if *id == a {
+                    *id = b;
+                } else if *id == b {
+                    *id = a;
+                }
+            }
+            Self::Split { first, second, .. } => {
+                first.swap(a, b);
+                second.swap(a, b);
+            }
+        }
+    }
 }
 
 // ============================================================================
 // Layout presets
 // ============================================================================
 
+/// tmux's five layouts, by tmux's names and with tmux's meanings.
+///
+/// `even-horizontal` spreads the panes *horizontally* -- left to right -- and
+/// `main-horizontal` puts the main pane on top with the rest in a row beneath
+/// it. The two `even` layouts were the other way round here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LayoutPreset {
-    /// All panes arranged horizontally (stacked top-to-bottom).
+    /// All panes side by side, left to right.
     EvenHorizontal,
-    /// All panes arranged vertically (side by side).
+    /// All panes one above the other.
     EvenVertical,
-    /// One main pane on top, rest below in a row.
+    /// One main pane on top, the rest side by side below it.
     MainHorizontal,
-    /// One main pane on left, rest on right in a column.
+    /// One main pane on the left, the rest one above the other beside it.
     MainVertical,
-    /// Tiled (alternating splits).
+    /// Rows of side-by-side panes.
     Tiled,
 }
 
 impl LayoutPreset {
-    #[allow(
-        dead_code,
-        reason = "the presets themselves are reachable -- Ctrl+B Space cycles                   them and `apply_layout` rebuilds the tree -- but no screen                   writes their names. The status bar has room for one when it                   is worth showing"
-    )]
-    fn label(self) -> &'static str {
+    const ALL: [Self; 5] = [
+        Self::EvenHorizontal,
+        Self::EvenVertical,
+        Self::MainHorizontal,
+        Self::MainVertical,
+        Self::Tiled,
+    ];
+
+    /// tmux's name for the layout, which `:select-layout` takes and the status
+    /// bar reports when `prefix Space` changes it.
+    fn name(self) -> &'static str {
         match self {
-            Self::EvenHorizontal => "Even Horizontal",
-            Self::EvenVertical => "Even Vertical",
-            Self::MainHorizontal => "Main Horizontal",
-            Self::MainVertical => "Main Vertical",
-            Self::Tiled => "Tiled",
+            Self::EvenHorizontal => "even-horizontal",
+            Self::EvenVertical => "even-vertical",
+            Self::MainHorizontal => "main-horizontal",
+            Self::MainVertical => "main-vertical",
+            Self::Tiled => "tiled",
         }
     }
 
-    /// Build a layout tree from a preset and a list of pane IDs.
-    fn build(self, panes: &[PaneId]) -> LayoutNode {
-        if panes.is_empty() {
-            return LayoutNode::Leaf(PaneId(0));
-        }
-        if panes.len() == 1 {
-            // `first`, not `panes[0]`: the length check is on the line
-            // above, and a bound stated one line from the read it protects is
-            // a bound the next edit moves.
-            if let Some(&only) = panes.first() {
-                return LayoutNode::Leaf(only);
-            }
-        }
+    fn by_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.name() == name)
+    }
 
+    /// The layout after this one, for `prefix Space`.
+    fn next(self) -> Self {
         match self {
-            Self::EvenHorizontal => Self::build_even(panes, SplitDir::Horizontal),
-            Self::EvenVertical => Self::build_even(panes, SplitDir::Vertical),
-            Self::MainHorizontal => {
-                let Some((&main_pane, rest)) = panes.split_first() else {
-                    // No panes at all. The caller checked, but the check is
-                    // over there and this is the read.
-                    return Self::build_even(panes, SplitDir::Horizontal);
-                };
-                if rest.is_empty() {
-                    LayoutNode::Leaf(main_pane)
-                } else {
-                    LayoutNode::Split {
-                        direction: SplitDir::Horizontal,
-                        ratio: 0.6,
-                        first: Box::new(LayoutNode::Leaf(main_pane)),
-                        second: Box::new(Self::build_even(rest, SplitDir::Vertical)),
-                    }
-                }
-            }
-            Self::MainVertical => {
-                let Some((&main_pane, rest)) = panes.split_first() else {
-                    return Self::build_even(panes, SplitDir::Vertical);
-                };
-                if rest.is_empty() {
-                    LayoutNode::Leaf(main_pane)
-                } else {
-                    LayoutNode::Split {
-                        direction: SplitDir::Vertical,
-                        ratio: 0.6,
-                        first: Box::new(LayoutNode::Leaf(main_pane)),
-                        second: Box::new(Self::build_even(rest, SplitDir::Horizontal)),
-                    }
-                }
-            }
-            Self::Tiled => Self::build_tiled(panes),
+            Self::EvenHorizontal => Self::EvenVertical,
+            Self::EvenVertical => Self::MainHorizontal,
+            Self::MainHorizontal => Self::MainVertical,
+            Self::MainVertical => Self::Tiled,
+            Self::Tiled => Self::EvenHorizontal,
         }
     }
 
-    fn build_even(panes: &[PaneId], direction: SplitDir) -> LayoutNode {
-        // One pane, or none: `first` answers both, and an empty slice would
-        // otherwise recurse forever halving zero.
-        if panes.len() <= 1 {
-            return panes.first().map_or_else(
-                || LayoutNode::Leaf(PaneId(0)),
-                |&only| LayoutNode::Leaf(only),
-            );
+    /// Build a layout tree from a preset and a list of pane IDs. `None` for
+    /// no panes, which is no layout at all.
+    fn build(self, panes: &[PaneId]) -> Option<LayoutNode> {
+        let (&main_pane, rest) = panes.split_first()?;
+        if rest.is_empty() {
+            return Some(LayoutNode::Leaf(main_pane));
+        }
+        Some(match self {
+            Self::EvenHorizontal => Self::build_even(panes, SplitDir::SideBySide)?,
+            Self::EvenVertical => Self::build_even(panes, SplitDir::Stacked)?,
+            Self::MainHorizontal => LayoutNode::Split {
+                direction: SplitDir::Stacked,
+                ratio: 0.6,
+                first: Box::new(LayoutNode::Leaf(main_pane)),
+                second: Box::new(Self::build_even(rest, SplitDir::SideBySide)?),
+            },
+            Self::MainVertical => LayoutNode::Split {
+                direction: SplitDir::SideBySide,
+                ratio: 0.6,
+                first: Box::new(LayoutNode::Leaf(main_pane)),
+                second: Box::new(Self::build_even(rest, SplitDir::Stacked)?),
+            },
+            Self::Tiled => Self::build_tiled(panes)?,
+        })
+    }
+
+    /// `panes` in equal shares along one direction.
+    fn build_even(panes: &[PaneId], direction: SplitDir) -> Option<LayoutNode> {
+        if let [only] = panes {
+            return Some(LayoutNode::Leaf(*only));
         }
         let mid = panes.len() / 2;
-        let ratio = mid as f32 / panes.len() as f32;
-        LayoutNode::Split {
+        let (front, back) = (panes.get(..mid)?, panes.get(mid..)?);
+        Some(LayoutNode::Split {
             direction,
-            ratio,
-            first: Box::new(Self::build_even(panes.get(..mid).unwrap_or(&[]), direction)),
-            second: Box::new(Self::build_even(panes.get(mid..).unwrap_or(&[]), direction)),
-        }
+            ratio: mid as f32 / panes.len() as f32,
+            first: Box::new(Self::build_even(front, direction)?),
+            second: Box::new(Self::build_even(back, direction)?),
+        })
     }
 
-    fn build_tiled(panes: &[PaneId]) -> LayoutNode {
-        // The one- and two-pane cases read their panes out of the slice they
-        // just measured; `match` on the slice does both at once, so the length
-        // and the reads cannot come apart.
+    /// Two rows of side-by-side panes; two panes are simply side by side.
+    fn build_tiled(panes: &[PaneId]) -> Option<LayoutNode> {
         match panes {
-            [] => LayoutNode::Leaf(PaneId(0)),
-            [only] => LayoutNode::Leaf(*only),
-            [left, right] => LayoutNode::Split {
-                direction: SplitDir::Vertical,
+            [] => None,
+            [only] => Some(LayoutNode::Leaf(*only)),
+            [left, right] => Some(LayoutNode::Split {
+                direction: SplitDir::SideBySide,
                 ratio: 0.5,
                 first: Box::new(LayoutNode::Leaf(*left)),
                 second: Box::new(LayoutNode::Leaf(*right)),
-            },
+            }),
             _ => {
                 let mid = panes.len() / 2;
-                LayoutNode::Split {
-                    direction: SplitDir::Horizontal,
+                Some(LayoutNode::Split {
+                    direction: SplitDir::Stacked,
                     ratio: 0.5,
-                    first: Box::new(Self::build_even(
-                        panes.get(..mid).unwrap_or(&[]),
-                        SplitDir::Vertical,
-                    )),
-                    second: Box::new(Self::build_even(
-                        panes.get(mid..).unwrap_or(&[]),
-                        SplitDir::Vertical,
-                    )),
-                }
+                    first: Box::new(Self::build_even(panes.get(..mid)?, SplitDir::SideBySide)?),
+                    second: Box::new(Self::build_even(panes.get(mid..)?, SplitDir::SideBySide)?),
+                })
             }
         }
     }
@@ -1487,26 +628,28 @@ impl LayoutPreset {
 // Window (tab)
 // ============================================================================
 
-/// A unique window identifier.
+/// A window's identity, which survives the windows before it closing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct WindowId(usize);
 
 /// A tmux "window" — a tab containing one or more panes arranged by a layout.
 #[derive(Debug, Clone)]
 struct Window {
-    /// Stable identity, distinct from the position in `Session::windows` --
-    /// which moves when a window before it is closed.
-    #[allow(
-        dead_code,
-        reason = "windows are addressed by position everywhere today; this is                   what survives a close, and is what a `select-window -t` by                   id would use"
-    )]
+    /// What a click on its tab names: its position moves when a window before
+    /// it closes, and this does not.
     id: WindowId,
-    /// Window name (user-settable or auto-derived from active pane).
+    /// Its name, which `prefix ,` changes.
     name: String,
     /// Layout tree describing pane arrangement.
     layout: LayoutNode,
     /// The currently focused pane.
     active_pane: PaneId,
+    /// The pane that was active before this one, for `prefix ;`.
+    ///
+    /// The card said ";" was "the pane you were in before", and the key moved
+    /// to the previous pane in the layout's order -- which is the pane you
+    /// were in before only when you got here with `o`.
+    last_pane: Option<PaneId>,
     /// Layout preset applied to this window.
     preset: LayoutPreset,
     /// Whether the active pane is filling the window on its own.
@@ -1515,7 +658,11 @@ struct Window {
     /// reading "Pane zoom toggled" -- the word "zoom" appeared exactly once
     /// in this crate, in that string. It announced a thing it did not do.
     zoomed: bool,
-    /// Window creation number (for display index).
+    /// Its number: what its tab shows and what the prefix and a digit reach.
+    ///
+    /// The lowest number free when it was made, as in tmux. It was a count of
+    /// every window ever made while the digits chose by *position*, so once a
+    /// window had closed, `prefix 1` went to the window labelled 2.
     index: usize,
 }
 
@@ -1523,111 +670,92 @@ impl Window {
     fn new(id: WindowId, index: usize, initial_pane: PaneId) -> Self {
         Self {
             id,
-            name: format!("{index}:shell"),
+            name: "shell".to_string(),
             layout: LayoutNode::Leaf(initial_pane),
             active_pane: initial_pane,
+            last_pane: None,
             preset: LayoutPreset::Tiled,
             zoomed: false,
             index,
         }
     }
 
-    /// The rectangle each of this window's panes occupies, as
-    /// `(id, x, y, width, height)`.
-    ///
-    /// The one layout walk. [`Multiplexer::render`] paints these rectangles
-    /// and [`Multiplexer::relayout`] converts them into cell counts; when the
-    /// two computed the pane area separately, only one of them was ever told
-    /// about a change.
+    /// Make `id` the active pane, remembering the one it replaces.
+    fn select_pane(&mut self, id: PaneId) {
+        if id != self.active_pane {
+            self.last_pane = Some(self.active_pane);
+            self.active_pane = id;
+        }
+    }
+
     /// Where each pane sits, given the window's pixel size.
     ///
-    /// Taking the size rather than reading `WINDOW_WIDTH`/`WINDOW_HEIGHT`,
-    /// which is what it did: this is the one place a pane's pixel rectangle
-    /// comes from, and `relayout` turns that rectangle into the terminal's
-    /// columns and rows -- so with the constants here, every pane was 1200x800
-    /// worth of character cells whatever size window the compositor granted,
-    /// and text wrapped at a width it was not being drawn at.
-    fn bounds(&self, width: f32, height: f32) -> Vec<(PaneId, f32, f32, f32, f32)> {
-        let y = TAB_BAR_HEIGHT;
-        let h = height - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT;
+    /// The one layout walk. The drawing paints these rectangles and
+    /// [`Multiplexer::relayout`] turns them into each terminal's columns and
+    /// rows; when the two computed the pane area separately, only one of them
+    /// was ever told about a change.
+    fn bounds(&self, width: f32, height: f32) -> Vec<(PaneId, Rect)> {
+        let area = Rect::new(
+            0.0,
+            TAB_BAR_HEIGHT,
+            width.max(0.0),
+            (height - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT).max(0.0),
+        );
         if self.zoomed {
-            // The whole area, one pane. Here rather than in the renderer
+            // The whole area, one pane. Here rather than in the drawing
             // because this is the only function that turns a layout into
-            // rectangles: `relayout` reads it to size the terminal grid, so
-            // a zoomed pane is given the cells it is drawn with rather than
-            // the cells it had when it was a quarter of the screen.
-            return vec![(self.active_pane, 0.0, y, width, h)];
+            // rectangles: `relayout` reads it to size the terminal, so a
+            // zoomed pane is given the cells it is drawn with rather than the
+            // cells it had when it was a quarter of the screen.
+            return vec![(self.active_pane, area)];
         }
-        self.layout.compute_bounds(0.0, y, width, h)
+        self.layout.compute_bounds(area)
     }
+}
+
+/// The terminal's part of a pane's rectangle: below the title strip, inside
+/// the border.
+fn pane_content(pane: Rect) -> Rect {
+    Rect::new(
+        pane.x + PANE_INSET,
+        pane.y + PANE_TITLE_HEIGHT,
+        (pane.w - PANE_INSET * 2.0).max(0.0),
+        (pane.h - PANE_TITLE_HEIGHT - PANE_INSET).max(0.0),
+    )
 }
 
 // ============================================================================
 // Session
 // ============================================================================
 
-/// A unique session identifier.
+/// A session's identity, which survives the sessions before it ending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct SessionId(usize);
 
 /// A tmux session — a collection of windows that can be detached/reattached.
 #[derive(Debug, Clone)]
 struct Session {
-    /// Stable identity, distinct from the position in `Multiplexer::sessions`.
-    #[allow(
-        dead_code,
-        reason = "as `Window::id`: sessions are addressed by position, and                   `kill-session` takes an index for that reason"
-    )]
+    /// What a click in the session chooser names.
     id: SessionId,
     /// Session name.
     name: String,
-    /// Windows in this session.
+    /// Windows in this session, in the order of their numbers.
     windows: Vec<Window>,
-    /// Active window index.
+    /// Active window's position in `windows`.
     active_window: usize,
-    /// Whether a client is attached.
-    attached: bool,
-    /// When the session was created (monotonic ms).
-    #[allow(
-        dead_code,
-        reason = "when the session was made. The status bar has room for an                   age and does not show one yet; recorded now because it                   cannot be recovered later"
-    )]
-    created_at_ms: u64,
-    /// Next pane ID counter.
-    next_pane_id: usize,
     /// Next window ID counter.
     next_window_id: usize,
-    /// Window creation counter.
-    next_window_index: usize,
 }
 
 impl Session {
-    fn new(id: SessionId, name: &str, now_ms: u64) -> Self {
-        let pane = PaneId(0);
-        let window = Window::new(WindowId(0), 0, pane);
+    fn new(id: SessionId, name: &str, first_pane: PaneId) -> Self {
         Self {
             id,
             name: name.to_string(),
-            windows: vec![window],
+            windows: vec![Window::new(WindowId(0), 0, first_pane)],
             active_window: 0,
-            attached: true,
-            created_at_ms: now_ms,
-            next_pane_id: 1,
             next_window_id: 1,
-            next_window_index: 1,
         }
-    }
-
-    #[allow(
-        dead_code,
-        reason = "the session's own id allocator. Panes are currently numbered \
-                  by the multiplexer, which owns the shared pane vector; this \
-                  is what a session would use if panes became per-session"
-    )]
-    fn alloc_pane_id(&mut self) -> PaneId {
-        let id = PaneId(self.next_pane_id);
-        self.next_pane_id = self.next_pane_id.saturating_add(1);
-        id
     }
 
     fn alloc_window_id(&mut self) -> WindowId {
@@ -1636,10 +764,11 @@ impl Session {
         id
     }
 
-    fn alloc_window_index(&mut self) -> usize {
-        let idx = self.next_window_index;
-        self.next_window_index = self.next_window_index.saturating_add(1);
-        idx
+    /// The lowest window number no window has.
+    fn free_window_index(&self) -> usize {
+        (0..=self.windows.len())
+            .find(|i| !self.windows.iter().any(|w| w.index == *i))
+            .unwrap_or(self.windows.len())
     }
 
     fn active_window(&self) -> Option<&Window> {
@@ -1649,10 +778,23 @@ impl Session {
     fn active_window_mut(&mut self) -> Option<&mut Window> {
         self.windows.get_mut(self.active_window)
     }
+
+    /// Where the window with this identity is in `windows`.
+    fn position_of(&self, id: WindowId) -> Option<usize> {
+        self.windows.iter().position(|w| w.id == id)
+    }
+
+    /// Every pane in every window of the session.
+    fn pane_ids(&self) -> Vec<PaneId> {
+        self.windows
+            .iter()
+            .flat_map(|w| w.layout.pane_ids())
+            .collect()
+    }
 }
 
 // ============================================================================
-// Key binding prefix mode
+// Modes
 // ============================================================================
 
 /// The prefix key mode state. tmux uses Ctrl+B as prefix key.
@@ -1664,11 +806,18 @@ enum PrefixState {
     Prefix,
 }
 
-// ============================================================================
-// Multiplexer state
-// ============================================================================
+/// Something that ends a program, waiting for a yes.
+///
+/// tmux asks before `prefix x` and `prefix &` -- "kill-pane 3? (y/n)" -- and
+/// here the question matters for the same reason it does there: a pane has a
+/// shell in it now, and closing the pane ends the shell and whatever it was
+/// running. One key next to the prefix is too easy to hit for that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Confirm {
+    ClosePane(PaneId),
+    CloseWindow(WindowId),
+}
 
-/// Top-level terminal multiplexer state.
 /// The prefix commands this multiplexer answers, as a reader sees them.
 ///
 /// Every one is pressed *after* the prefix -- Ctrl+B, then the key -- which
@@ -1677,44 +826,111 @@ enum PrefixState {
 /// named not one of the twenty-odd keys it was waiting for.
 ///
 /// `F1` is the exception and is not a prefix command: a list you can only
-/// reach by already knowing a key is not much of a list.
+/// reach by already knowing a key is not much of a list. Copy mode's keys work
+/// with the prefix and, while copy mode is on, without it -- as in tmux, where
+/// copy mode takes the keyboard.
 const SHORTCUTS: &[(&str, &str)] = &[
     ("F1", "This list"),
+    ("?", "This list, after the prefix"),
     ("c", "New window"),
     ("n / p", "Next or previous window"),
-    ("0-9", "Go to a window by number"),
+    ("0-9", "The window with that number"),
     ("w", "Choose a window from a list"),
     ("s", "Choose a session from a list"),
-    ("&", "Close the window"),
-    ("- or \"", "Split the pane top and bottom"),
-    ("| or %", "Split the pane left and right"),
+    ("&", "Close the window (asks first)"),
+    ("- or \"", "Split the pane, one above the other"),
+    ("| or %", "Split the pane, side by side"),
     ("o", "Next pane"),
     (";", "The pane you were in before"),
     ("}", "Swap this pane with the next"),
     ("z", "Zoom this pane to fill the window, and back"),
     ("+", "Grow the pane"),
-    ("x", "Close the pane"),
-    ("Space", "Cycle the layout"),
+    ("Arrows", "Move the divider beside the pane"),
+    ("x", "Close the pane (asks first)"),
+    ("Space", "Next layout"),
     ("[", "Copy mode, to look back at what scrolled past"),
+    ("k / j", "Copy mode: back or forward one line"),
+    ("b / f", "Copy mode: back or forward one screen"),
+    ("g / G", "Copy mode: the oldest line, or the live screen"),
+    ("v", "Copy mode: start a selection"),
+    ("y", "Copy the selection, or what the pointer selected"),
     ("q", "Leave copy mode"),
-    ("k / j", "Back or forward one line"),
-    ("b / f", "Back or forward one screen"),
-    ("g / G", "To the top, or back to the live screen"),
-    ("v", "Start a selection"),
-    ("y", "Copy the selection"),
-    ("]", "Paste"),
+    ("]", "Paste into the program in the pane"),
     (",", "Rename the window"),
     (":", "Type a command"),
     ("d", "Detach"),
 ];
 
+/// What a click can land on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    /// A window's tab: show that window.
+    Tab(WindowId),
+    /// After the tabs: a new window.
+    NewWindow,
+    /// At the end of the tab bar: the list of keys.
+    Help,
+    /// A pane's title strip: make it the active pane.
+    PaneTitle(PaneId),
+    /// A part of a pane's terminal -- its grid, or its scrollback bar.
+    Pane(PaneId, TermTarget),
+    /// The session's name on the status bar: the session chooser.
+    SessionName,
+    /// A window in the status bar's list.
+    StatusWindow(WindowId),
+    /// A session in the session chooser.
+    SessionRow(SessionId),
+    /// A window in the window chooser.
+    WindowRow(WindowId),
+    /// Behind an open chooser: closes it.
+    Scrim,
+    /// A chooser's box, between its rows: nothing, rather than the scrim.
+    ChooserBox,
+    /// The detached screen's button: attach again.
+    Attach,
+    /// The detached screen's other button: choose a session.
+    ChooseSession,
+    /// The confirmation's two answers.
+    ConfirmYes,
+    ConfirmNo,
+    /// The shortcut card, anywhere on it: closes it.
+    HelpCard,
+}
+
+/// How a pane's shell is started: `termchild`'s `spawn_shell` in a real
+/// window, a script in a test.
+type Spawner = Box<dyn FnMut(WinSize) -> Result<Box<dyn Link>, SpawnError>>;
+
+/// The wall clock, in milliseconds since the epoch, or `None` if the system
+/// does not know it. A function so a test can stop the clock.
+fn system_clock() -> Option<u64> {
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    u64::try_from(since.as_millis()).ok()
+}
+
+// ============================================================================
+// Multiplexer state
+// ============================================================================
+
+/// Top-level terminal multiplexer state.
 struct Multiplexer {
-    /// All panes across all sessions (shared storage).
+    /// Every pane of every session. A pane is removed -- and its shell hung
+    /// up -- when it closes; nothing else holds one.
     panes: Vec<Pane>,
+    /// The next pane's number. Counted rather than taken from `panes.len()`,
+    /// which repeats once panes are removed.
+    next_pane_id: usize,
     /// All sessions.
     sessions: Vec<Session>,
+    /// Next session ID counter.
+    next_session_id: usize,
     /// Currently active session index.
     active_session: usize,
+    /// Whether the window has detached from its session.
+    ///
+    /// One flag for the window rather than one per session: there is one
+    /// client -- this window -- and it is attached to one session or to none.
+    detached: bool,
     /// Whether the shortcut card is up.
     show_help: bool,
     /// Prefix key state.
@@ -1723,119 +939,126 @@ struct Multiplexer {
     command_mode: bool,
     /// Command input buffer.
     command_input: String,
-    /// Status message (shown in status bar, cleared on next action).
+    /// A close waiting for its yes.
+    confirm: Option<Confirm>,
+    /// Status message (shown in status bar until it is old).
     status_message: String,
-    /// Status message timestamp.
+    /// When the message was set, on the uptime clock.
     status_time: u64,
-    /// Current time (monotonic ms).
-    current_time: u64,
-    /// Next session ID counter.
-    next_session_id: usize,
+    /// Milliseconds this window has been open, from the ticks.
+    uptime_ms: u64,
+    /// The wall clock at the last tick, for the status bar's time.
+    wall_ms: Option<u64>,
+    /// Where the wall clock is read from.
+    clock: fn() -> Option<u64>,
     /// Clipboard content (from copy mode).
     clipboard: String,
     /// Whether the session chooser is open.
     session_chooser: bool,
     /// Window chooser open flag.
     window_chooser: bool,
+    /// Carries a precision wheel's fractions of a row in the choosers.
+    chooser_wheel: wheel::Accumulator,
     /// How wide the window is, in pixels.
-    ///
-    /// Every layout read the `WINDOW_WIDTH` constant, so the panes were laid
-    /// out for a 1200x800 window whatever size the compositor granted -- and
-    /// because `relayout` turns pixels into terminal columns and rows, a pane
-    /// drawn at one size wrapped its text at another.
     window_width: f32,
     /// How tall the window is, in pixels.
     window_height: f32,
+    /// Whether the window has the keyboard.
+    focused: bool,
+    /// The pane a press in its grid started a selection in, which the drag
+    /// and the release belong to wherever the pointer goes.
+    drag: Option<PaneId>,
     /// The user's colours, replaced whenever the theme changes.
-    ///
-    /// Seeded from the defaults so the field is never absent; the framework
-    /// calls `App::theme_changed` before the first frame, so nothing is drawn
-    /// with this initial value in a real window.
     palette: Palette,
+    /// How shells are started. `None` in the tests of everything else, where a
+    /// pane is a terminal with nothing attached.
+    spawner: Option<Spawner>,
+    /// Set when the last session has ended: the window closes.
+    quit: bool,
 }
 
 impl Multiplexer {
+    /// A multiplexer whose panes run nothing: the tests of everything but
+    /// the shells.
+    #[cfg(test)]
     fn new() -> Self {
-        let initial_pane = Pane::new(PaneId(0), INITIAL_COLS, INITIAL_ROWS);
-        let session = Session::new(SessionId(0), "main", 0);
+        Self::build(None)
+    }
+
+    /// A multiplexer whose panes run shells started by `spawner`.
+    fn with_shells(spawner: Spawner) -> Self {
+        Self::build(Some(spawner))
+    }
+
+    fn build(spawner: Option<Spawner>) -> Self {
         let mut mux = Self {
-            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
-            panes: vec![initial_pane],
-            sessions: vec![session],
+            panes: Vec::new(),
+            next_pane_id: 0,
+            sessions: Vec::new(),
+            next_session_id: 0,
             active_session: 0,
+            detached: false,
             show_help: false,
             prefix_state: PrefixState::Normal,
             command_mode: false,
             command_input: String::new(),
+            confirm: None,
             status_message: String::new(),
             status_time: 0,
-            current_time: 0,
-            window_width: WINDOW_WIDTH,
-            window_height: WINDOW_HEIGHT,
-            next_session_id: 1,
+            uptime_ms: 0,
+            wall_ms: system_clock(),
+            clock: system_clock,
             clipboard: String::new(),
             session_chooser: false,
             window_chooser: false,
+            chooser_wheel: wheel::Accumulator::default(),
+            window_width: WINDOW_WIDTH,
+            window_height: WINDOW_HEIGHT,
+            focused: true,
+            drag: None,
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            spawner,
+            quit: false,
         };
-        // The pane above was built at the placeholder grid; give it the real
-        // one before anyone can observe it, so there is no moment at which a
-        // pane of this multiplexer is a size it is not drawn at.
-        mux.relayout();
+        mux.new_session("main");
+        // "Created session: main" is news only for a session the user asked
+        // for.
+        mux.status_message.clear();
         mux
     }
 
-    /// Tell every pane of the attached session the size of the rectangle it is
-    /// now drawn in.
-    ///
-    /// A terminal is only correct if the program writing into it and the pane
-    /// painting it agree about the grid, and only the layout walk knows a
-    /// pane's rectangle. Without this, `TerminalBuffer::resize` had no callers
-    /// outside the tests: splitting a window four ways left four terminals
-    /// still wrapping at 80 columns and still believing they had 24 rows.
-    ///
-    /// Every window of the session is sized, not just the visible one, because
-    /// a background window's program keeps running and writing — it must not
-    /// discover a new width only when the user switches to it. Other sessions
-    /// are left alone until attached; a detached session has no client and so
-    /// no size.
-    ///
-    /// Idempotent: resizing a buffer to the size it already has changes
-    /// nothing. That is what lets [`Self::render`] call it unconditionally as
-    /// a backstop while the mutations that change a layout also call it
-    /// directly, so that key handling between two frames — which reads
-    /// [`Pane::max_scroll_back`] and [`Pane::page_lines`] — sees a current
-    /// grid rather than the previous frame's.
-    fn relayout(&mut self) {
-        let (width, height) = (self.window_width, self.window_height);
-        let Some(session) = self.active_session() else {
+    // ========================================================================
+    // Panes and their shells
+    // ========================================================================
+
+    /// A new pane with nothing in it yet.
+    fn create_pane(&mut self) -> PaneId {
+        let id = PaneId(self.next_pane_id);
+        self.next_pane_id = self.next_pane_id.saturating_add(1);
+        self.panes.push(Pane::new(id, &self.palette));
+        id
+    }
+
+    /// Start the pane's shell -- once it is in a layout and sized, so the
+    /// shell is born at the size it is drawn at.
+    fn start_shell(&mut self, id: PaneId) {
+        let Some(spawn) = self.spawner.as_mut() else {
             return;
         };
-        // Collected first because sizing a pane needs `&mut self.panes` while
-        // the walk borrows `self.sessions`.
-        let mut grids: Vec<(PaneId, usize, usize)> = Vec::new();
-        for window in &session.windows {
-            for (id, _, _, w, h) in window.bounds(width, height) {
-                let (cols, rows) = pane_grid(w, h);
-                grids.push((id, cols, rows));
-            }
-        }
-        for (id, cols, rows) in grids {
-            if let Some(pane) = self.find_pane_mut(id) {
-                pane.buffer.resize(cols, rows);
-            }
+        if let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) {
+            pane.term.start_with(spawn);
         }
     }
 
-    fn set_time(&mut self, ms: u64) {
-        self.current_time = ms;
-    }
-
-    fn active_session(&self) -> Option<&Session> {
-        self.sessions.get(self.active_session)
-    }
-
-    fn active_session_mut(&mut self) -> Option<&mut Session> {
-        self.sessions.get_mut(self.active_session)
+    /// Hang up a pane's shell and forget the pane.
+    fn drop_pane(&mut self, id: PaneId) {
+        if let Some(at) = self.panes.iter().position(|p| p.id == id) {
+            let mut pane = self.panes.remove(at);
+            pane.term.hang_up();
+        }
+        if self.drag == Some(id) {
+            self.drag = None;
+        }
     }
 
     fn find_pane(&self, id: PaneId) -> Option<&Pane> {
@@ -1846,156 +1069,261 @@ impl Multiplexer {
         self.panes.iter_mut().find(|p| p.id == id)
     }
 
+    fn active_session(&self) -> Option<&Session> {
+        self.sessions.get(self.active_session)
+    }
+
+    fn active_session_mut(&mut self) -> Option<&mut Session> {
+        self.sessions.get_mut(self.active_session)
+    }
+
+    fn active_window(&self) -> Option<&Window> {
+        self.active_session()?.active_window()
+    }
+
+    fn active_window_mut(&mut self) -> Option<&mut Window> {
+        self.active_session_mut()?.active_window_mut()
+    }
+
+    fn active_pane_id(&self) -> Option<PaneId> {
+        Some(self.active_window()?.active_pane)
+    }
+
     /// The pane keystrokes are addressed to: the active window's active pane.
-    ///
-    /// Resolved through the id rather than held as a reference, so that a pane
-    /// closing or a window switching between one key and the next cannot leave
-    /// a stale borrow behind.
     fn active_pane_mut(&mut self) -> Option<&mut Pane> {
-        let pane_id = self.active_session()?.active_window()?.active_pane;
-        self.find_pane_mut(pane_id)
+        let id = self.active_pane_id()?;
+        self.find_pane_mut(id)
     }
 
     fn set_status(&mut self, msg: &str) {
         self.status_message = msg.to_string();
-        self.status_time = self.current_time;
+        self.status_time = self.uptime_ms;
+    }
+
+    /// Tell every pane of the attached session the size it is drawn at.
+    ///
+    /// A terminal is only correct if the program writing into it and the pane
+    /// painting it agree about the grid, and only the layout walk knows a
+    /// pane's rectangle. Every window of the session is sized, not just the
+    /// visible one, because a background window's program keeps running and
+    /// writing -- it must not discover a new width only when the user switches
+    /// to it. Each terminal tells its own shell (`TIOCSWINSZ`) when its grid
+    /// changes, and does nothing when it has not, which is what makes calling
+    /// this on every frame free.
+    fn relayout(&mut self) {
+        let (width, height) = (self.window_width, self.window_height);
+        let Some(session) = self.active_session() else {
+            return;
+        };
+        // Collected first because sizing a pane needs `&mut self.panes` while
+        // the walk borrows `self.sessions`.
+        let rects: Vec<(PaneId, Rect)> = session
+            .windows
+            .iter()
+            .flat_map(|w| w.bounds(width, height))
+            .collect();
+        for (id, rect) in rects {
+            let content = pane_content(rect);
+            if let Some(pane) = self.find_pane_mut(id) {
+                pane.term.resize_to_window(content.w, content.h);
+            }
+        }
+        self.sync_focus();
+    }
+
+    /// Give the keyboard to the pane that will get the next key, and take it
+    /// from every other.
+    ///
+    /// Only when it changes: giving a terminal the keyboard restarts its
+    /// cursor's blink, and a blink restarted on every event never blinks.
+    fn sync_focus(&mut self) {
+        let modal = self.show_help
+            || self.command_mode
+            || self.confirm.is_some()
+            || self.session_chooser
+            || self.window_chooser;
+        let keyboard = if self.focused && !self.detached && !modal {
+            self.active_pane_id()
+        } else {
+            None
+        };
+        for pane in &mut self.panes {
+            let want = Some(pane.id) == keyboard;
+            if pane.term.is_focused() != want {
+                pane.term.set_focused(want);
+            }
+        }
+    }
+
+    /// The panes on screen now.
+    fn visible_panes(&self) -> Vec<PaneId> {
+        if self.detached {
+            return Vec::new();
+        }
+        self.active_window()
+            .map(|w| {
+                w.bounds(self.window_width, self.window_height)
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Where a pane of the active window is drawn -- or would be, while the
+    /// window is detached.
+    fn pane_rect(&self, id: PaneId) -> Option<Rect> {
+        self.active_window()?
+            .bounds(self.window_width, self.window_height)
+            .into_iter()
+            .find(|(p, _)| *p == id)
+            .map(|(_, r)| r)
     }
 
     // ========================================================================
-    // Session management
+    // The clock
     // ========================================================================
 
-    /// Create a new session and switch to it.
+    /// Advance the clocks and read every shell.
+    ///
+    /// Every pane, not only the ones on screen: a shell in a background window
+    /// or a detached session keeps writing, and one whose output is never read
+    /// fills its terminal's buffer and stops. `true` if anything on screen
+    /// changed.
+    fn tick(&mut self, elapsed_ms: u64) -> bool {
+        let before = self.status_text();
+        self.uptime_ms = self.uptime_ms.saturating_add(elapsed_ms);
+        self.wall_ms = (self.clock)();
+        let mut changed = self.status_text() != before;
+
+        let visible = self.visible_panes();
+        let mut finished = Vec::new();
+        for pane in &mut self.panes {
+            match pane.term.on_event(&Event::Tick { elapsed_ms }) {
+                Response::Exit => finished.push(pane.id),
+                Response::Redraw => changed |= visible.contains(&pane.id),
+                Response::Idle => {}
+            }
+        }
+        for id in finished {
+            self.pane_finished(id);
+            changed = true;
+        }
+        changed
+    }
+
+    /// A shell exited cleanly: its pane closes, as in tmux -- and its window
+    /// with it if it was the last, and its session if that was the last
+    /// window.
+    ///
+    /// A shell that failed or was killed does not come here: its terminal
+    /// says how it ended, and the pane stays until the user closes it.
+    fn pane_finished(&mut self, id: PaneId) {
+        self.remove_pane(id);
+    }
+
+    /// When the status bar next changes by itself: a message expiring, or
+    /// the clock's minute turning.
+    fn status_wake_ms(&self) -> u64 {
+        let age = self.uptime_ms.saturating_sub(self.status_time);
+        if !self.status_message.is_empty() && age < STATUS_MESSAGE_MS {
+            return STATUS_MESSAGE_MS.saturating_sub(age).max(1);
+        }
+        match self.wall_ms {
+            Some(ms) => 60_000_u64.saturating_sub(ms % 60_000).max(1),
+            None => 60_000,
+        }
+    }
+
+    /// The right-hand end of the status bar: a fresh message, or the time.
+    fn status_text(&self) -> String {
+        let age = self.uptime_ms.saturating_sub(self.status_time);
+        if !self.status_message.is_empty() && age < STATUS_MESSAGE_MS {
+            return self.status_message.clone();
+        }
+        self.wall_ms.map_or_else(String::new, clock_text)
+    }
+
+    // ========================================================================
+    // Sessions
+    // ========================================================================
+
+    /// Create a new session, with one window of one shell, and attach to it.
     fn new_session(&mut self, name: &str) {
         if self.sessions.len() >= MAX_SESSIONS {
-            self.set_status("Maximum sessions reached");
+            self.set_status(&format!("at most {MAX_SESSIONS} sessions"));
             return;
         }
-
+        if self.sessions.iter().any(|s| s.name == name) {
+            // tmux refuses too: `attach` and `kill-session` find a session by
+            // its name, and two of one name cannot both be found.
+            self.set_status(&format!("duplicate session: {name}"));
+            return;
+        }
         let sid = SessionId(self.next_session_id);
         self.next_session_id = self.next_session_id.saturating_add(1);
-
-        let pane_id = PaneId(self.panes.len());
-        let pane = Pane::new(pane_id, INITIAL_COLS, INITIAL_ROWS);
-        self.panes.push(pane);
-
-        let mut session = Session::new(sid, name, self.current_time);
-        // Fix the initial window's pane to match the actual pane we created
-        if let Some(w) = session.windows.first_mut() {
-            w.active_pane = pane_id;
-            w.layout = LayoutNode::Leaf(pane_id);
-        }
-        session.next_pane_id = pane_id.0.saturating_add(1);
-
-        self.sessions.push(session);
+        let pane = self.create_pane();
+        self.sessions.push(Session::new(sid, name, pane));
         self.active_session = self.sessions.len().saturating_sub(1);
+        self.detached = false;
         self.relayout();
+        self.start_shell(pane);
         self.set_status(&format!("Created session: {name}"));
     }
 
-    /// Detach from the current session.
+    /// A name no session has, for `:new-session` without one.
+    fn unused_session_name(&self) -> String {
+        // One more candidate than there can be sessions, so one is free.
+        (0..=MAX_SESSIONS)
+            .map(|n| format!("session-{n}"))
+            .find(|name| !self.sessions.iter().any(|s| &s.name == name))
+            .unwrap_or_else(|| "session".to_string())
+    }
+
+    /// Detach from the current session. Its shells go on running.
     fn detach(&mut self) {
-        if let Some(session) = self.active_session_mut() {
-            session.attached = false;
-            let name = session.name.clone();
+        if self.detached {
+            return;
+        }
+        self.detached = true;
+        self.session_chooser = false;
+        self.window_chooser = false;
+        if let Some(name) = self.active_session().map(|s| s.name.clone()) {
             self.set_status(&format!("Detached from session: {name}"));
         }
     }
 
-    /// Attach to a specific session by index.
+    /// Attach to a session by index.
     fn attach(&mut self, index: usize) {
-        if let Some(session) = self.sessions.get_mut(index) {
-            session.attached = true;
-            self.active_session = index;
-            let name = session.name.clone();
-            // The session being attached has not been sized while it was
-            // detached, and its windows may have been laid out under a
-            // different client.
-            self.relayout();
-            self.set_status(&format!("Attached to session: {name}"));
-        }
+        let Some(name) = self.sessions.get(index).map(|s| s.name.clone()) else {
+            self.set_status(&format!("no session {index}"));
+            return;
+        };
+        self.active_session = index;
+        self.detached = false;
+        // A session that was not attached has not been sized since the window
+        // last changed.
+        self.relayout();
+        self.set_status(&format!("Attached to session: {name}"));
     }
 
-    /// Kill a session by index.
-    /// Copy the marked lines into the clipboard and leave copy mode.
-    fn yank_selection(&mut self) {
-        let Some(text) = self
-            .active_pane_mut()
-            .filter(|pane| pane.copy_mode)
-            .and_then(|pane| {
-                let text = pane.copy_selection();
-                if text.is_some() {
-                    pane.exit_copy_mode();
-                }
-                text
-            })
-        else {
-            self.set_status("nothing marked");
-            return;
-        };
-        let lines = text.lines().count();
-        self.clipboard = text;
-        self.set_status(&format!("copied {lines} line(s)"));
-    }
-
-    /// Paste the clipboard into the active pane.
-    fn paste_clipboard(&mut self) {
-        if self.clipboard.is_empty() {
-            self.set_status("clipboard is empty");
-            return;
-        }
-        let text = self.clipboard.clone();
-        if let Some(pane) = self.active_pane_mut() {
-            pane.feed(&text);
-        }
-    }
-
-    /// Resize the split around the active pane.
-    ///
-    /// `RESIZE_STEP` was a constant with no code behind it, and the module doc
-    /// promises "split panes ... with configurable ratios": the layout tree
-    /// stored a ratio per split and nothing ever changed one, so every split
-    /// was 50/50 for the life of the session.
-    ///
-    /// `delta` is in pixels, converted against the window so that a step moves
-    /// the divider the same visible distance whichever way the split runs.
-    fn resize_active_split(&mut self, delta: f32) {
-        let Some(pane_id) = self
-            .active_session()
-            .and_then(Session::active_window)
-            .map(|w| w.active_pane)
-        else {
-            return;
-        };
-        let span = self.window_width.max(1.0);
-        let fraction = delta / span;
-        let Some(session) = self.sessions.get_mut(self.active_session) else {
-            return;
-        };
-        let Some(window) = session.windows.get_mut(session.active_window) else {
-            return;
-        };
-        if !window.layout.resize_containing(pane_id, fraction) {
-            self.set_status("no split to resize");
-        }
+    /// A session named by the user: its number in the list, or its name.
+    fn session_named(&self, arg: &str) -> Option<usize> {
+        arg.parse::<usize>()
+            .ok()
+            .filter(|i| *i < self.sessions.len())
+            .or_else(|| self.sessions.iter().position(|s| s.name == arg))
     }
 
     /// Move to the next session, wrapping at the end.
-    ///
-    /// The session chooser (Ctrl+B `s`) drew a list of every session and there
-    /// was no way to choose one: nothing in the program ever changed
-    /// `active_session` except creating or killing a session. The same shape as
-    /// `apps/kanban`'s board list, which listed boards and had no key that
-    /// picked one.
     fn next_session(&mut self) {
-        // `checked_rem` is the emptiness test: there is no next session in a
-        // list of none, and no remainder modulo zero.
         if let Some(next) = self
             .active_session
             .saturating_add(1)
             .checked_rem(self.sessions.len())
         {
             self.active_session = next;
+            self.relayout();
         }
     }
 
@@ -2007,168 +1335,271 @@ impl Multiplexer {
         self.active_session = self
             .active_session
             .checked_sub(1)
-            // Wrapping past the start lands on the last session, and clamping
-            // to `last` also repairs an index that was somehow already past the
-            // end rather than carrying it forward.
             .map_or(last, |prev| prev.min(last));
+        self.relayout();
     }
 
+    /// End a session: every shell in it is hung up. The last session ending
+    /// closes the window, as the last one ending ends tmux.
     fn kill_session(&mut self, index: usize) {
-        // `get` rather than an index guarded two conditions away: the
-        // length test and the read are the same question asked once.
-        if self.sessions.len() > 1
-            && let Some(name) = self.sessions.get(index).map(|s| s.name.clone())
-        {
-            self.sessions.remove(index);
-            if self.active_session >= self.sessions.len() {
-                self.active_session = self.sessions.len().saturating_sub(1);
-            }
-            self.relayout();
-            self.set_status(&format!("Killed session: {name}"));
+        let Some(session) = self.sessions.get(index) else {
+            self.set_status(&format!("no session {index}"));
+            return;
+        };
+        let name = session.name.clone();
+        for id in session.pane_ids() {
+            self.drop_pane(id);
         }
+        self.sessions.remove(index);
+        self.after_session_removed(index);
+        self.set_status(&format!("Killed session: {name}"));
+    }
+
+    /// Keep `active_session` on a session after the one at `index` has gone.
+    fn after_session_removed(&mut self, index: usize) {
+        if self.sessions.is_empty() {
+            self.quit = true;
+            return;
+        }
+        if index < self.active_session {
+            self.active_session = self.active_session.saturating_sub(1);
+        }
+        self.active_session = self
+            .active_session
+            .min(self.sessions.len().saturating_sub(1));
+        self.relayout();
     }
 
     // ========================================================================
-    // Window management
+    // Windows
     // ========================================================================
 
-    /// Create a new window in the current session.
+    /// Create a new window in the current session, with a shell of its own.
+    ///
+    /// The limit is checked before the pane is made. It was checked after,
+    /// so every refused window left a pane behind in the shared list -- and a
+    /// pane now has a shell in it.
     fn new_window(&mut self) {
-        let pane_id = PaneId(self.panes.len());
-        let pane = Pane::new(pane_id, INITIAL_COLS, INITIAL_ROWS);
-        self.panes.push(pane);
+        let Some(session) = self.active_session() else {
+            return;
+        };
+        if session.windows.len() >= MAX_WINDOWS {
+            self.set_status(&format!("at most {MAX_WINDOWS} windows in a session"));
+            return;
+        }
+        let pane = self.create_pane();
+        let Some(session) = self.active_session_mut() else {
+            return;
+        };
+        let wid = session.alloc_window_id();
+        let index = session.free_window_index();
+        let at = session
+            .windows
+            .iter()
+            .position(|w| w.index > index)
+            .unwrap_or(session.windows.len());
+        session.windows.insert(at, Window::new(wid, index, pane));
+        session.active_window = at;
+        self.relayout();
+        self.start_shell(pane);
+    }
 
+    /// Close a window and end every shell in it. The session's last window
+    /// closing ends the session.
+    fn close_window(&mut self, id: WindowId) {
+        let Some(session) = self.active_session() else {
+            return;
+        };
+        let Some(at) = session.position_of(id) else {
+            return;
+        };
+        if session.windows.len() <= 1 {
+            self.kill_session(self.active_session);
+            return;
+        }
+        let panes = session
+            .windows
+            .get(at)
+            .map(|w| w.layout.pane_ids())
+            .unwrap_or_default();
+        for pane in panes {
+            self.drop_pane(pane);
+        }
         if let Some(session) = self.active_session_mut() {
-            if session.windows.len() >= MAX_WINDOWS {
-                return;
+            session.windows.remove(at);
+            if session.active_window >= session.windows.len() || session.active_window > at {
+                session.active_window = session.active_window.saturating_sub(1);
             }
-            let wid = session.alloc_window_id();
-            let idx = session.alloc_window_index();
-            let window = Window::new(wid, idx, pane_id);
-            session.windows.push(window);
-            session.active_window = session.windows.len().saturating_sub(1);
         }
         self.relayout();
     }
 
-    /// Close the current window. If it's the last window, detach.
-    fn close_window(&mut self) {
-        if let Some(session) = self.active_session_mut() {
-            if session.windows.len() <= 1 {
-                // Last window — detach session
-                session.attached = false;
-                return;
-            }
-            session.windows.remove(session.active_window);
-            if session.active_window >= session.windows.len() {
-                session.active_window = session.windows.len().saturating_sub(1);
-            }
+    /// Show the window at `position`.
+    fn select_window(&mut self, position: usize) {
+        if let Some(session) = self.active_session_mut()
+            && position < session.windows.len()
+        {
+            session.active_window = position;
+        }
+        self.relayout();
+    }
+
+    /// Show the window with this identity.
+    fn select_window_id(&mut self, id: WindowId) {
+        if let Some(at) = self.active_session().and_then(|s| s.position_of(id)) {
+            self.select_window(at);
+        }
+    }
+
+    /// Show the window with this number, which is what its tab says.
+    fn select_window_number(&mut self, number: usize) {
+        let at = self
+            .active_session()
+            .and_then(|s| s.windows.iter().position(|w| w.index == number));
+        match at {
+            Some(at) => self.select_window(at),
+            None => self.set_status(&format!("no window {number}")),
         }
     }
 
     /// Switch to next window.
     fn next_window(&mut self) {
         if let Some(session) = self.active_session_mut()
-            && !session.windows.is_empty()
-        {
-            // `checked_rem` is the emptiness test; the `!is_empty` above says
-            // the same thing, and stating it in the arithmetic is what keeps
-            // the two from drifting apart.
-            if let Some(next) = session
+            && let Some(next) = session
                 .active_window
                 .saturating_add(1)
                 .checked_rem(session.windows.len())
-            {
-                session.active_window = next;
-            }
+        {
+            session.active_window = next;
         }
+        self.relayout();
     }
 
     /// Switch to previous window.
     fn prev_window(&mut self) {
         if let Some(session) = self.active_session_mut()
-            && !session.windows.is_empty()
+            && let Some(last) = session.windows.len().checked_sub(1)
         {
-            if session.active_window == 0 {
-                session.active_window = session.windows.len().saturating_sub(1);
-            } else {
-                session.active_window = session.active_window.saturating_sub(1);
-            }
+            session.active_window = session
+                .active_window
+                .checked_sub(1)
+                .map_or(last, |prev| prev.min(last));
         }
+        self.relayout();
     }
 
     /// Rename current window.
     fn rename_window(&mut self, name: &str) {
-        if let Some(session) = self.active_session_mut()
-            && let Some(window) = session.active_window_mut()
-        {
+        let name = name.trim();
+        if name.is_empty() {
+            self.set_status("a window needs a name");
+            return;
+        }
+        if let Some(window) = self.active_window_mut() {
             window.name = name.to_string();
         }
     }
 
     // ========================================================================
-    // Pane management
+    // Panes
     // ========================================================================
 
-    /// Split the active pane in the given direction.
+    /// Split the active pane, starting a shell in the new half.
+    ///
+    /// Refused when the pane is too small to halve -- tmux says "pane too
+    /// small" -- rather than making two panes that overlap, which is what
+    /// `compute_bounds` flooring each half at `MIN_PANE_SIZE` did to a pane
+    /// narrower than two of them. And refused *before* the pane is made: the
+    /// limit used to be checked after, leaving an orphan behind every time.
     fn split_pane(&mut self, direction: SplitDir) {
-        let pane_id = PaneId(self.panes.len());
-        let pane = Pane::new(pane_id, INITIAL_COLS, INITIAL_ROWS);
-        self.panes.push(pane);
-
-        if let Some(session) = self.active_session_mut()
-            && let Some(window) = session.active_window_mut()
-        {
-            if window.layout.pane_count() >= MAX_PANES {
-                return;
+        let Some(window) = self.active_window() else {
+            return;
+        };
+        if window.layout.pane_count() >= MAX_PANES {
+            self.set_status(&format!("at most {MAX_PANES} panes in a window"));
+            return;
+        }
+        let target = window.active_pane;
+        if window.zoomed {
+            // tmux unzooms to split: the new pane has to go somewhere visible.
+            if let Some(window) = self.active_window_mut() {
+                window.zoomed = false;
             }
-            let target = window.active_pane;
-            window.layout.split_pane(target, pane_id, direction);
-            window.active_pane = pane_id;
+        }
+        let room = self.pane_rect(target).map_or(0.0, |r| match direction {
+            SplitDir::Stacked => r.h,
+            SplitDir::SideBySide => r.w,
+        });
+        if room < MIN_PANE_SIZE * 2.0 + PANE_BORDER_WIDTH {
+            self.set_status("no room to split this pane");
+            return;
+        }
+        let new = self.create_pane();
+        if let Some(window) = self.active_window_mut() {
+            window.layout.split_pane(target, new, direction);
+            window.select_pane(new);
         }
         // The pane that was split is now half the size it was, and the new one
         // has only the placeholder grid. Both learn their real size here.
         self.relayout();
+        self.start_shell(new);
     }
 
-    /// Close the active pane. If it's the last pane, close the window.
-    fn close_pane(&mut self) {
-        if let Some(session) = self.active_session_mut()
-            && let Some(window) = session.active_window_mut()
-        {
-            if window.layout.pane_count() <= 1 {
-                // Only one pane — close the window instead
-                if session.windows.len() <= 1 {
-                    session.attached = false;
-                    return;
+    /// Close a pane and end its shell, wherever it is. The last pane of a
+    /// window closes the window; the last window of a session ends it; the
+    /// last session closes this window.
+    fn remove_pane(&mut self, id: PaneId) {
+        let place = self.sessions.iter().enumerate().find_map(|(s, session)| {
+            session
+                .windows
+                .iter()
+                .position(|w| w.layout.contains(id))
+                .map(|w| (s, w))
+        });
+        self.drop_pane(id);
+        let Some((s, w)) = place else {
+            return;
+        };
+        let Some(session) = self.sessions.get_mut(s) else {
+            return;
+        };
+        let Some(window) = session.windows.get_mut(w) else {
+            return;
+        };
+        if window.layout.remove_pane(id) {
+            if window.active_pane == id {
+                let next = window
+                    .last_pane
+                    .filter(|p| window.layout.contains(*p))
+                    .or_else(|| window.layout.pane_ids().first().copied());
+                if let Some(next) = next {
+                    window.active_pane = next;
                 }
-                session.windows.remove(session.active_window);
-                if session.active_window >= session.windows.len() {
-                    session.active_window = session.windows.len().saturating_sub(1);
-                }
+            }
+            if window.last_pane == Some(id) || window.last_pane == Some(window.active_pane) {
+                window.last_pane = None;
+            }
+            if window.layout.pane_count() == 1 {
+                window.zoomed = false;
+            }
+        } else {
+            // The window's only pane: the window goes.
+            session.windows.remove(w);
+            if session.windows.is_empty() {
+                self.sessions.remove(s);
+                self.after_session_removed(s);
                 return;
             }
-            let target = window.active_pane;
-            window.layout.remove_pane(target);
-            // Select next pane
-            let remaining = window.layout.pane_ids();
-            if let Some(next) = remaining.first() {
-                window.active_pane = *next;
-            }
-            // Mark pane as dead
-            if let Some(pane) = self.find_pane_mut(target) {
-                pane.alive = false;
+            if session.active_window >= session.windows.len() || session.active_window > w {
+                session.active_window = session.active_window.saturating_sub(1);
             }
         }
-        // Whatever pane absorbed the closed one's space is now larger.
         self.relayout();
     }
 
     /// Navigate to the next pane in the active window.
     fn next_pane(&mut self) {
-        if let Some(session) = self.active_session_mut()
-            && let Some(window) = session.active_window_mut()
-        {
+        if let Some(window) = self.active_window_mut() {
             let ids = window.layout.pane_ids();
             if let Some(pos) = ids.iter().position(|id| *id == window.active_pane)
                 && let Some(id) = pos
@@ -2176,179 +1607,418 @@ impl Multiplexer {
                     .checked_rem(ids.len())
                     .and_then(|next| ids.get(next))
             {
-                window.active_pane = *id;
+                window.select_pane(*id);
             }
         }
+        self.sync_focus();
     }
 
-    /// Navigate to the previous pane.
-    fn prev_pane(&mut self) {
-        if let Some(session) = self.active_session_mut()
-            && let Some(window) = session.active_window_mut()
-        {
-            let ids = window.layout.pane_ids();
-            if let Some(pos) = ids.iter().position(|id| *id == window.active_pane) {
-                let prev = if pos == 0 {
-                    ids.len().saturating_sub(1)
-                } else {
-                    pos.saturating_sub(1)
-                };
-                if let Some(id) = ids.get(prev) {
-                    window.active_pane = *id;
-                }
-            }
+    /// Back to the pane that was active before this one.
+    fn last_pane(&mut self) {
+        let Some(window) = self.active_window_mut() else {
+            return;
+        };
+        match window.last_pane.filter(|p| window.layout.contains(*p)) {
+            Some(last) => window.select_pane(last),
+            None => self.set_status("no last pane"),
         }
+        self.sync_focus();
     }
 
-    /// Resize the active pane in a direction.
-    fn resize_pane(&mut self, grow: bool) {
-        if let Some(session) = self.active_session_mut()
-            && let Some(window) = session.active_window_mut()
+    /// Make `id` the active pane of the window showing.
+    fn select_pane(&mut self, id: PaneId) {
+        if let Some(window) = self.active_window_mut()
+            && window.layout.contains(id)
         {
-            let delta = if grow { 0.05 } else { -0.05 };
-            window.layout.adjust_ratio(window.active_pane, delta);
+            window.select_pane(id);
+        }
+        self.sync_focus();
+    }
+
+    /// Grow the active pane's share of the split beside it.
+    fn grow_pane(&mut self) {
+        let grew = self.active_window_mut().is_some_and(|window| {
+            let id = window.active_pane;
+            window.layout.grow(id, GROW_STEP)
+        });
+        if !grew {
+            self.set_status("no split to resize");
+        }
+        self.relayout();
+    }
+
+    /// Move the divider beside the active pane.
+    ///
+    /// `delta` is in pixels, converted against the window so that a step moves
+    /// the divider the same visible distance whichever way the split runs.
+    fn resize_active_split(&mut self, delta: f32) {
+        let span = self.window_width.max(1.0);
+        let moved = self.active_window_mut().is_some_and(|window| {
+            let id = window.active_pane;
+            window.layout.resize_containing(id, delta / span)
+        });
+        if !moved {
+            self.set_status("no split to resize");
         }
         self.relayout();
     }
 
     /// Apply a layout preset to the current window.
     fn apply_layout(&mut self, preset: LayoutPreset) {
-        if let Some(session) = self.active_session_mut()
-            && let Some(window) = session.active_window_mut()
+        if let Some(window) = self.active_window_mut()
+            && let Some(layout) = preset.build(&window.layout.pane_ids())
         {
-            let pane_ids = window.layout.pane_ids();
-            window.layout = preset.build(&pane_ids);
+            window.layout = layout;
             window.preset = preset;
         }
         self.relayout();
     }
 
-    /// Swap the active pane with the next pane.
+    /// Swap the active pane with the next one; the active pane moves and stays
+    /// active.
     fn swap_pane_next(&mut self) {
-        // Swap by swapping pane IDs in the layout is complex.
-        // For simplicity, just cycle the active pane forward.
-        self.next_pane();
+        if let Some(window) = self.active_window_mut() {
+            let ids = window.layout.pane_ids();
+            let here = window.active_pane;
+            if let Some(pos) = ids.iter().position(|id| *id == here)
+                && let Some(&other) = pos
+                    .saturating_add(1)
+                    .checked_rem(ids.len())
+                    .and_then(|next| ids.get(next))
+                && other != here
+            {
+                window.layout.swap(here, other);
+            }
+        }
+        self.relayout();
+    }
+
+    /// Toggle the active pane filling the window.
+    fn toggle_zoom(&mut self) {
+        let zoomed = self.active_window_mut().and_then(|w| {
+            if w.layout.pane_count() < 2 {
+                return None;
+            }
+            w.zoomed = !w.zoomed;
+            Some(w.zoomed)
+        });
+        self.relayout();
+        match zoomed {
+            Some(true) => self.set_status("pane zoomed -- the prefix and z again to unzoom"),
+            Some(false) => self.set_status("pane unzoomed"),
+            None => self.set_status("one pane: nothing to zoom over"),
+        }
     }
 
     // ========================================================================
-    // Command processing
+    // Copy and paste
     // ========================================================================
 
-    // ====================================================================
+    /// Copy the active pane's selection -- made in copy mode or with the
+    /// pointer -- and leave copy mode.
+    fn yank_selection(&mut self) {
+        let Some(pane) = self.active_pane_mut() else {
+            return;
+        };
+        let text = pane.term.get_selection_text();
+        if text.is_some() {
+            pane.exit_copy_mode();
+            pane.term.clear_selection();
+        }
+        let Some(text) = text else {
+            self.set_status("nothing marked");
+            return;
+        };
+        let lines = text.lines().count();
+        self.clipboard = text;
+        self.set_status(&format!("copied {lines} line(s)"));
+    }
+
+    /// Paste the clipboard into the active pane's program.
+    ///
+    /// To the program, as a paste -- not onto the screen, which is where this
+    /// used to put it: fed through the pane's parser, the text appeared as
+    /// though the program had printed it, and nothing had typed it.
+    fn paste_clipboard(&mut self) {
+        if self.clipboard.is_empty() {
+            self.set_status("clipboard is empty");
+            return;
+        }
+        let text = self.clipboard.clone();
+        if let Some(pane) = self.active_pane_mut() {
+            pane.term.paste(&text);
+        }
+    }
+}
+
+/// The status bar's time: hours and minutes, and the zone they are in.
+///
+/// UTC, said out loud, as every clock in this tree says it until there is a
+/// per-process zone to read (`known-issues.md` ->
+/// `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`). Through `tzrules` rather than
+/// `% 86_400` so that a real zone is a one-line change here. The clock this
+/// replaced counted the seconds the window had been open and printed them as
+/// a time of day, so it read 00:00 at every launch.
+fn clock_text(wall_ms: u64) -> String {
+    let secs = i64::try_from(wall_ms / 1000).unwrap_or(i64::MAX);
+    let zone = tzrules::Tz::utc();
+    let info = zone.lookup(secs);
+    let local = secs.saturating_add(i64::from(info.gmtoff));
+    let into_day = local.rem_euclid(86_400);
+    let name = std::str::from_utf8(info.name.as_bytes()).unwrap_or("UTC");
+    format!("{:02}:{:02} {name}", into_day / 3600, (into_day / 60) % 60)
+}
+
+impl Multiplexer {
+    // ========================================================================
     // Input
-    //
-    // The multiplexer was complete and had no way in. `process_prefix_key` --
-    // the Ctrl+B keyboard this program is *for*, and the first feature its
-    // module doc lists -- had eighteen tests and no caller; so did
-    // `process_command`, the `:` prompt. `main` constructed a `Multiplexer`
-    // and dropped it.
-    // ====================================================================
+    // ========================================================================
 
     /// Handle one event from the window.
     fn handle_event(&mut self, event: &Event) -> EventResult {
-        match event {
+        let result = match event {
             Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Resize { width, height } => {
                 self.window_width = *width as f32;
                 self.window_height = *height as f32;
-                // `relayout` re-derives every pane's columns and rows from the
-                // new pixel size; it is idempotent, so doing it here as well as
-                // in `render` costs nothing and keeps the terminal's idea of
-                // its own width true between the two.
                 self.relayout();
                 EventResult::Consumed
             }
-            Event::Tick { .. } => {
-                // A whole second of it, which is this clock's resolution.
-                self.set_time(self.current_time.saturating_add(1000));
+            Event::FocusIn | Event::FocusOut => {
+                self.focused = matches!(event, Event::FocusIn);
                 EventResult::Consumed
             }
+            Event::Tick { elapsed_ms } => {
+                if self.tick(*elapsed_ms) {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
             _ => EventResult::Ignored,
-        }
+        };
+        self.sync_focus();
+        result
     }
 
     /// Handle a key press.
     ///
-    /// Three states, in the order they take priority:
-    ///
-    /// 1. the `:` command prompt, which swallows everything until Enter or
-    ///    Escape, because a half-typed command must not also split a pane;
-    /// 2. the prefix state, one key after Ctrl+B, which is the tmux vocabulary;
-    /// 3. everything else, which belongs to the pane -- and which currently has
-    ///    nowhere to go, because no pane has a process behind it.
+    /// In the order they take priority: F1's card; a close waiting for its
+    /// yes; the `:` prompt, which swallows everything until Enter or Escape; the
+    /// prefix, one key after Ctrl+B; an open chooser; the detached screen;
+    /// copy mode, which has the keyboard as it does in tmux -- and then
+    /// everything else, which is the program's in the active pane.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
-        // Above the command prompt and the prefix, both of which swallow the
-        // key and return. A list you cannot dismiss from the state you
-        // reached it in is the failure this ordering avoids, and it is the
-        // seventh app where the placement mattered.
+        // Above everything that swallows keys: a list you cannot dismiss from
+        // the state you reached it in is the failure this ordering avoids.
         if key.key == Key::F1 {
             self.show_help = !self.show_help;
             return EventResult::Consumed;
         }
         if self.show_help {
-            // Modal. `d` detaches and `&` closes a window; neither should
+            // Modal: `d` detaches and `&` closes a window, and neither should
             // happen from behind a list somebody is reading.
-            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+            if matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
             return EventResult::Consumed;
         }
-
-        if self.command_mode {
-            return self.handle_command_key(key);
-        }
-
-        if self.prefix_state == PrefixState::Prefix {
-            self.prefix_state = PrefixState::Normal;
-            // Prefix then an arrow resizes the split around the active pane,
-            // which is what tmux does and what makes the layout's ratio -- a
-            // field nothing else ever wrote -- reachable.
-            match key.key {
-                Key::Left => {
-                    self.resize_active_split(-RESIZE_STEP);
-                    return EventResult::Consumed;
-                }
-                Key::Right => {
-                    self.resize_active_split(RESIZE_STEP);
-                    return EventResult::Consumed;
-                }
-                // Up and Down move a top/bottom divider the same way Left
-                // and Right move a left/right one: towards the near edge and
-                // towards the far one. Which kind of divider it is comes from
-                // the split itself, so the pair of directions is enough.
-                Key::Up => {
-                    self.resize_active_split(-RESIZE_STEP);
-                    return EventResult::Consumed;
-                }
-                Key::Down => {
-                    self.resize_active_split(RESIZE_STEP);
-                    return EventResult::Consumed;
-                }
-                _ => {}
-            }
-            // Otherwise the prefix is followed by a *character*: `x` closes a
-            // pane, `%` splits it. A key that carries no text is not one of
-            // them, and eating it here would make the prefix swallow the next
-            // keystroke whatever it was.
-            if let Some(ch) = key.typed().next() {
-                self.process_prefix_key(ch);
+        if let Some(confirm) = self.confirm.take() {
+            if key
+                .typed()
+                .next()
+                .is_some_and(|c| c.eq_ignore_ascii_case(&'y'))
+            {
+                self.confirmed(confirm);
+            } else {
+                self.set_status("not closed");
             }
             return EventResult::Consumed;
         }
-
+        if self.command_mode {
+            return self.handle_command_key(key);
+        }
+        if self.prefix_state == PrefixState::Prefix {
+            self.prefix_state = PrefixState::Normal;
+            return self.handle_prefixed_key(key);
+        }
         // Ctrl+B arms the prefix. This is the one chord the multiplexer keeps
         // for itself; everything else Ctrl is the pane's.
         if key.modifiers.ctrl && key.key == Key::B {
             self.prefix_state = PrefixState::Prefix;
             return EventResult::Consumed;
         }
-
-        // A chooser overlay takes the arrows and Enter while it is open.
         if self.session_chooser || self.window_chooser {
             return self.handle_chooser_key(key);
         }
+        if self.detached {
+            if key.key == Key::Enter {
+                self.attach(self.active_session);
+            }
+            return EventResult::Consumed;
+        }
+        if self.active_pane_mut().is_some_and(|p| p.copy_mode) {
+            return self.handle_copy_key(key);
+        }
+        // The program's. The terminal turns the key into what a terminal
+        // sends for it and passes it down the pseudo-terminal: before this,
+        // every key that was not a multiplexer command was dropped here.
+        match self.active_pane_mut() {
+            Some(pane) => {
+                pane.term.handle_event(&Event::Key(key.clone()));
+                EventResult::Consumed
+            }
+            None => EventResult::Ignored,
+        }
+    }
 
-        EventResult::Ignored
+    /// The key after the prefix.
+    fn handle_prefixed_key(&mut self, key: &KeyEvent) -> EventResult {
+        // An arrow moves the divider beside the active pane -- the layout's
+        // ratio, a field nothing else ever wrote. Up and Down move a
+        // top/bottom divider the way Left and Right move a left/right one;
+        // which kind of divider it is comes from the split itself.
+        match key.key {
+            Key::Left | Key::Up => {
+                self.resize_active_split(-RESIZE_STEP);
+                return EventResult::Consumed;
+            }
+            Key::Right | Key::Down => {
+                self.resize_active_split(RESIZE_STEP);
+                return EventResult::Consumed;
+            }
+            _ => {}
+        }
+        // The prefix twice sends the program a Ctrl+B of its own, as tmux's
+        // `send-prefix`: otherwise nothing running under the multiplexer could
+        // ever be sent one.
+        if key.modifiers.ctrl && key.key == Key::B {
+            if let Some(pane) = self.active_pane_mut() {
+                pane.term.handle_event(&Event::Key(key.clone()));
+            }
+            return EventResult::Consumed;
+        }
+        // Otherwise the prefix is followed by a *character*. A key that
+        // carries none is not a command, and is spent rather than leaving the
+        // prefix armed for whatever comes next.
+        if let Some(ch) = key.typed().next() {
+            self.process_prefix_key(ch);
+        }
+        EventResult::Consumed
+    }
+
+    /// Process a prefix command key.
+    fn process_prefix_key(&mut self, key: char) {
+        match key {
+            '-' | '"' => self.split_pane(SplitDir::Stacked),
+            '|' | '%' => self.split_pane(SplitDir::SideBySide),
+            'o' => self.next_pane(),
+            ';' => self.last_pane(),
+            '}' => self.swap_pane_next(),
+            '&' => self.ask_close_window(),
+            'x' => self.ask_close_pane(),
+            'n' => self.next_window(),
+            'p' => self.prev_window(),
+            'c' => self.new_window(),
+            'd' => self.detach(),
+            ',' => self.open_prompt(":rename-window "),
+            ':' => self.open_prompt(":"),
+            '?' => self.show_help = true,
+            's' => {
+                self.session_chooser = !self.session_chooser;
+                self.window_chooser = false;
+            }
+            // Not while detached, where no window is showing to choose among:
+            // the list would take the keyboard without being drawn.
+            'w' if self.detached => self.set_status("attach to choose a window"),
+            'w' => {
+                self.window_chooser = !self.window_chooser;
+                self.session_chooser = false;
+            }
+            '[' => {
+                if let Some(pane) = self.active_pane_mut() {
+                    pane.enter_copy_mode();
+                }
+            }
+            ']' => self.paste_clipboard(),
+            'y' => self.yank_selection(),
+            'q' | 'k' | 'j' | 'b' | 'f' | 'g' | 'G' | 'v' => self.copy_command(key),
+            ' ' => self.next_layout(),
+            '+' => self.grow_pane(),
+            'z' => self.toggle_zoom(),
+            _ => match key.to_digit(10) {
+                Some(n) => self.select_window_number(n as usize),
+                None => self.set_status(&format!("Unknown key: {key}")),
+            },
+        }
+    }
+
+    /// A copy-mode command, from a bare key in copy mode or after the prefix.
+    ///
+    /// The keys that look *back* enter copy mode by themselves: asking to see
+    /// earlier output is unambiguous, and needing `[` first would make the
+    /// first press do nothing, which reads as the program being broken rather
+    /// than modal. The forward keys do not, because scrolling towards a screen
+    /// you are already looking at is a no-op worth ignoring.
+    fn copy_command(&mut self, key: char) {
+        let Some(pane) = self.active_pane_mut() else {
+            return;
+        };
+        if key == 'q' {
+            pane.exit_copy_mode();
+            return;
+        }
+        if matches!(key, 'k' | 'b' | 'g') {
+            pane.enter_copy_mode();
+        }
+        if !pane.copy_mode {
+            return;
+        }
+        let page = pane.page();
+        match key {
+            'k' => pane.scroll_back(1),
+            'j' => pane.scroll_forward(1),
+            'b' => pane.scroll_back(page),
+            'f' => pane.scroll_forward(page),
+            'g' => pane.scroll_to_top(),
+            'G' => pane.scroll_to_bottom(),
+            'v' => pane.set_mark(),
+            _ => {}
+        }
+        if key == 'v' {
+            self.set_status("selection started");
+        }
+    }
+
+    /// Keys while copy mode has the keyboard: tmux's vi keys and the keys a
+    /// user reaches for anyway. Anything else is swallowed -- copy mode is a
+    /// place to read, and a key that typed into the shell behind it would
+    /// land somewhere the user is not looking.
+    fn handle_copy_key(&mut self, key: &KeyEvent) -> EventResult {
+        let command = match key.key {
+            Key::Escape => Some('q'),
+            Key::Up => Some('k'),
+            Key::Down => Some('j'),
+            Key::PageUp => Some('b'),
+            Key::PageDown => Some('f'),
+            Key::Home => Some('g'),
+            Key::End => Some('G'),
+            Key::Enter => Some('y'),
+            _ => key.typed().next().map(|c| if c == ' ' { 'v' } else { c }),
+        };
+        match command {
+            Some('y') => self.yank_selection(),
+            Some(c @ ('q' | 'k' | 'j' | 'b' | 'f' | 'g' | 'G' | 'v')) => self.copy_command(c),
+            _ => {}
+        }
+        EventResult::Consumed
+    }
+
+    /// Open the `:` prompt with `text` already typed.
+    fn open_prompt(&mut self, text: &str) {
+        self.command_mode = true;
+        self.command_input = text.to_string();
     }
 
     /// Keys while the `:` prompt is open.
@@ -2357,22 +2027,19 @@ impl Multiplexer {
             Key::Escape => {
                 self.command_mode = false;
                 self.command_input.clear();
-                EventResult::Consumed
             }
             Key::Enter => {
                 let cmd = std::mem::take(&mut self.command_input);
                 self.command_mode = false;
                 self.process_command(&cmd);
-                EventResult::Consumed
             }
             Key::Backspace => {
                 // Never past the `:` itself: the prompt is the mode indicator,
                 // and a prompt that can be deleted leaves the user typing into
                 // an empty line with no way to tell what it is.
-                if self.command_input.len() > 1 {
+                if self.command_input.chars().count() > 1 {
                     self.command_input.pop();
                 }
-                EventResult::Consumed
             }
             _ => {
                 let typed: String = key.typed().collect();
@@ -2380,427 +2047,425 @@ impl Multiplexer {
                     return EventResult::Ignored;
                 }
                 self.command_input.push_str(&typed);
-                EventResult::Consumed
             }
         }
+        EventResult::Consumed
     }
 
-    /// Keys while the session or window chooser is open.
+    /// Keys while the session or window chooser is open. Modal: a key that
+    /// fell through to the shell behind the list would type somewhere the
+    /// user cannot see.
     fn handle_chooser_key(&mut self, key: &KeyEvent) -> EventResult {
         match key.key {
             Key::Escape => {
                 self.session_chooser = false;
                 self.window_chooser = false;
-                EventResult::Consumed
             }
-            Key::Down if self.window_chooser => {
-                self.next_window();
-                EventResult::Consumed
-            }
-            Key::Up if self.window_chooser => {
-                self.prev_window();
-                EventResult::Consumed
-            }
-            Key::Down if self.session_chooser => {
-                self.next_session();
-                EventResult::Consumed
-            }
-            Key::Up if self.session_chooser => {
-                self.prev_session();
-                EventResult::Consumed
-            }
-            Key::Enter => {
-                self.session_chooser = false;
-                self.window_chooser = false;
-                EventResult::Consumed
-            }
-            _ => EventResult::Ignored,
+            Key::Down if self.window_chooser => self.next_window(),
+            Key::Up if self.window_chooser => self.prev_window(),
+            Key::Down => self.next_session(),
+            Key::Up => self.prev_session(),
+            Key::Enter => self.choose(),
+            _ => {}
+        }
+        EventResult::Consumed
+    }
+
+    /// Enter in a chooser: the highlighted row is the one wanted.
+    fn choose(&mut self) {
+        if self.session_chooser {
+            self.attach(self.active_session);
+        }
+        self.session_chooser = false;
+        self.window_chooser = false;
+    }
+
+    /// Ask before closing the active pane.
+    fn ask_close_pane(&mut self) {
+        if let Some(id) = self.active_pane_id() {
+            self.confirm = Some(Confirm::ClosePane(id));
         }
     }
 
-    /// Put something in the first pane, so the window does not open blank.
-    ///
-    /// Through [`Pane::feed`], which is the real ANSI path -- the escape
-    /// sequences below are parsed by the same parser a process's output would
-    /// go through, so the parser is exercised by the program and not only by
-    /// its tests. Nothing called `feed` before this: every pane was empty for
-    /// the life of the process.
-    ///
-    /// What it says is what is true. There is no PTY layer in this tree, so no
-    /// pane has a process behind it and typing into one has nowhere to go; the
-    /// splitting, the windows, the sessions and the `:` prompt are all real.
-    /// Saying so beats an empty black rectangle that looks like a shell which
-    /// has stopped responding. See `known-issues.md` ->
-    /// `TD-C-SEVERAL-APPS-DISPLAY-DATA-THAT-NOTHING-PRODUCES`.
-    fn greet_pane(&mut self) {
-        let Some(pane) = self.active_pane_mut() else {
-            return;
-        };
-        pane.feed("\x1B[1mSlate OS terminal multiplexer\x1B[0m\r\n");
-        pane.feed("\r\n");
-        pane.feed("No process is attached to this pane: the OS has no PTY\r\n");
-        pane.feed("layer yet, so there is nothing to run in it.\r\n");
-        pane.feed("\r\n");
-        pane.feed("\x1B[1mCtrl+B\x1B[0m then:\r\n");
-        pane.feed("  \x1B[1m%\x1B[0m  split left/right     \x1B[1m\"\x1B[0m  split top/bottom\r\n");
-        pane.feed("  \x1B[1mo\x1B[0m  next pane            \x1B[1mx\x1B[0m  close pane\r\n");
-        pane.feed("  \x1B[1mc\x1B[0m  new window           \x1B[1mn\x1B[0m / \x1B[1mp\x1B[0m  next / previous\r\n");
-        pane.feed("  \x1B[1ms\x1B[0m  sessions             \x1B[1mw\x1B[0m  windows\r\n");
-        pane.feed("  \x1B[1md\x1B[0m  detach               \x1B[1m:\x1B[0m  command prompt\r\n");
-    }
-
-    /// Process a prefix command key.
-    fn process_prefix_key(&mut self, key: char) {
-        match key {
-            // Split horizontal (top/bottom)
-            '-' | '"' => self.split_pane(SplitDir::Horizontal),
-            // Split vertical (left/right)
-            '|' | '%' => self.split_pane(SplitDir::Vertical),
-            // Navigate panes. `;` is tmux's "last pane" and is the only way
-            // backwards -- `prev_pane` existed, was tested, and had no key.
-            'o' => self.next_pane(),
-            ';' => self.prev_pane(),
-            // Swap the active pane with the next one, tmux's `}`. Written,
-            // untested and unbound before this.
-            '}' => self.swap_pane_next(),
-            // Close the whole window, tmux's `&`. `x` closes one pane; this
-            // closed nothing, because nothing called it.
-            '&' => self.close_window(),
-            // Next/prev window
-            'n' => self.next_window(),
-            'p' => self.prev_window(),
-            // New window
-            'c' => self.new_window(),
-            // Close pane
-            'x' => self.close_pane(),
-            // Detach
-            'd' => self.detach(),
-            // Rename window
-            ',' => {
-                self.command_mode = true;
-                self.command_input = ":rename-window ".to_string();
-            }
-            // Command mode
-            ':' => {
-                self.command_mode = true;
-                self.command_input = ":".to_string();
-            }
-            // Session chooser
-            's' => {
-                self.session_chooser = !self.session_chooser;
-                self.window_chooser = false;
-            }
-            // Window chooser
-            'w' => {
-                self.window_chooser = !self.window_chooser;
-                self.session_chooser = false;
-            }
-            // Copy mode
-            '[' => {
-                if let Some(pane) = self.active_pane_mut() {
-                    pane.enter_copy_mode();
-                }
-            }
-            // Leave copy mode, back to the live screen.
-            'q' => {
-                if let Some(pane) = self.active_pane_mut() {
-                    pane.exit_copy_mode();
-                }
-            }
-            // Mark one end of a selection, and yank from the mark to here.
-            // Both are no-ops outside copy mode, where there is no scrollback
-            // position to mark.
-            //
-            // `v`, not Space: Space already cycles the layout preset below, and
-            // the compiler said so -- an unreachable-pattern warning on the
-            // arm I had shadowed. `v` is what tmux's own vi copy mode uses for
-            // begin-selection, so it is the right key anyway.
-            'v' => {
-                if let Some(pane) = self.active_pane_mut()
-                    && pane.copy_mode
-                {
-                    pane.set_copy_mark();
-                    self.set_status("selection started");
-                }
-            }
-            'y' => self.yank_selection(),
-            // Paste, tmux's `]`. Into the pane through `feed`, the same path a
-            // process's output takes, so pasted text is parsed rather than
-            // pushed in behind the terminal's back.
-            ']' => self.paste_clipboard(),
-            // Scrollback navigation. The keys that move *backwards* enter copy
-            // mode on their own: asking to see earlier output is unambiguous,
-            // and requiring `[` first would make the first press of Page Up do
-            // nothing, which reads as the app being broken rather than modal.
-            // The forward keys do not, because scrolling towards a screen you
-            // are already looking at is a no-op worth ignoring.
-            'k' | 'j' | 'b' | 'f' | 'g' | 'G' => {
-                let enters = matches!(key, 'k' | 'b' | 'g');
-                if let Some(pane) = self.active_pane_mut() {
-                    if enters && !pane.copy_mode {
-                        pane.enter_copy_mode();
-                    }
-                    if pane.copy_mode {
-                        let page = pane.page_lines();
-                        match key {
-                            'k' => pane.scroll_back(1),
-                            'j' => pane.scroll_forward(1),
-                            'b' => pane.scroll_back(page),
-                            'f' => pane.scroll_forward(page),
-                            'g' => pane.scroll_to_top(),
-                            _ => pane.scroll_to_bottom(),
-                        }
-                    }
-                }
-            }
-            // Layout cycling
-            ' ' => {
-                if let Some(session) = self.active_session()
-                    && let Some(window) = session.active_window()
-                {
-                    let next = match window.preset {
-                        LayoutPreset::EvenHorizontal => LayoutPreset::EvenVertical,
-                        LayoutPreset::EvenVertical => LayoutPreset::MainHorizontal,
-                        LayoutPreset::MainHorizontal => LayoutPreset::MainVertical,
-                        LayoutPreset::MainVertical => LayoutPreset::Tiled,
-                        LayoutPreset::Tiled => LayoutPreset::EvenHorizontal,
-                    };
-                    self.apply_layout(next);
-                }
-            }
-            // Resize (with arrow keys this would be done differently;
-            // for prefix mode, use +/- for grow/shrink)
-            '+' => self.resize_pane(true),
-            // Note: '-' is used for horizontal split, so resize-shrink
-            // is available via the ':' command mode instead.
-            // Window selection by number
-            '0'..='9' => {
-                // The arm above matched `'1'..='9'`, so the subtraction is
-                // in range -- said here rather than there, where an added
-                // digit would quietly change it.
-                let idx = usize::from((key as u8).saturating_sub(b'0'));
-                if let Some(session) = self.active_session_mut()
-                    && idx < session.windows.len()
-                {
-                    session.active_window = idx;
-                }
-            }
-            // Zoom: the active pane fills the window until it is pressed
-            // again. `Window::bounds` is what honours it.
-            'z' => {
-                let zoomed = self
-                    .active_session_mut()
-                    .and_then(Session::active_window_mut)
-                    .map(|w| {
-                        w.zoomed = !w.zoomed;
-                        w.zoomed
-                    });
-                if let Some(zoomed) = zoomed {
-                    self.relayout();
-                    self.set_status(if zoomed {
-                        "pane zoomed -- press the prefix and z again to unzoom"
-                    } else {
-                        "pane unzoomed"
-                    });
-                }
-            }
-            _ => {
-                self.set_status(&format!("Unknown key: {key}"));
-            }
+    /// Ask before closing the active window.
+    fn ask_close_window(&mut self) {
+        if let Some(id) = self.active_window().map(|w| w.id) {
+            self.confirm = Some(Confirm::CloseWindow(id));
         }
-        self.prefix_state = PrefixState::Normal;
     }
 
-    /// Process a command string (from : prompt).
+    /// The user said yes.
+    fn confirmed(&mut self, confirm: Confirm) {
+        match confirm {
+            Confirm::ClosePane(id) => self.remove_pane(id),
+            Confirm::CloseWindow(id) => self.close_window(id),
+        }
+    }
+
+    /// `prefix Space`: the next layout, by name on the status bar.
+    fn next_layout(&mut self) {
+        if let Some(next) = self.active_window().map(|w| w.preset.next()) {
+            self.apply_layout(next);
+            self.set_status(&format!("layout: {}", next.name()));
+        }
+    }
+
+    /// Process a command string (from the `:` prompt).
+    ///
+    /// tmux's names and tmux's meanings. `split-window -h` splits side by
+    /// side, and with no flag one above the other -- it did the opposite of
+    /// both. `attach` and `kill-session` take a session's number or name and
+    /// mean the current session with neither: `:attach` alone, the obvious
+    /// thing to type on the detached screen, did nothing.
     fn process_command(&mut self, cmd: &str) {
         let cmd = cmd.trim_start_matches(':').trim();
-        let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
-        let command = parts.first().copied().unwrap_or("");
-        let arg = parts.get(1).copied().unwrap_or("");
+        let (command, arg) = cmd.split_once(' ').unwrap_or((cmd, ""));
+        let arg = arg.trim();
 
         match command {
             "new-session" | "new" => {
                 let name = if arg.is_empty() {
-                    format!("session-{}", self.sessions.len())
+                    self.unused_session_name()
                 } else {
                     arg.to_string()
                 };
                 self.new_session(&name);
             }
-            "kill-session" | "kill" => {
-                if let Ok(idx) = arg.parse::<usize>() {
-                    self.kill_session(idx);
-                }
-            }
-            "rename-window" | "renamew" => {
-                self.rename_window(arg);
-            }
-            "split-window" | "splitw" => {
-                if arg.contains("-h") || arg.contains("horizontal") {
-                    self.split_pane(SplitDir::Horizontal);
-                } else {
-                    self.split_pane(SplitDir::Vertical);
-                }
-            }
-            "new-window" | "neww" => {
-                self.new_window();
-            }
-            "select-layout" | "layout" => match arg {
-                "even-horizontal" => self.apply_layout(LayoutPreset::EvenHorizontal),
-                "even-vertical" => self.apply_layout(LayoutPreset::EvenVertical),
-                "main-horizontal" => self.apply_layout(LayoutPreset::MainHorizontal),
-                "main-vertical" => self.apply_layout(LayoutPreset::MainVertical),
-                "tiled" => self.apply_layout(LayoutPreset::Tiled),
-                _ => self.set_status(&format!("Unknown layout: {arg}")),
+            "kill-session" | "kill" => match self.session_or_current(arg) {
+                Some(index) => self.kill_session(index),
+                None => self.set_status(&format!("no session {arg}")),
             },
-            "attach" | "attach-session" => {
-                if let Ok(idx) = arg.parse::<usize>() {
-                    self.attach(idx);
+            "attach" | "attach-session" => match self.session_or_current(arg) {
+                Some(index) => self.attach(index),
+                None => self.set_status(&format!("no session {arg}")),
+            },
+            "detach" | "detach-client" => self.detach(),
+            "rename-session" | "rename" => {
+                if arg.is_empty() {
+                    self.set_status("a session needs a name");
+                } else if self.sessions.iter().any(|s| s.name == arg) {
+                    self.set_status(&format!("duplicate session: {arg}"));
+                } else if let Some(session) = self.active_session_mut() {
+                    session.name = arg.to_string();
                 }
             }
-            "detach" | "detach-client" => {
-                self.detach();
+            "rename-window" | "renamew" => self.rename_window(arg),
+            "new-window" | "neww" => self.new_window(),
+            "kill-window" | "killw" => {
+                if let Some(id) = self.active_window().map(|w| w.id) {
+                    self.close_window(id);
+                }
             }
+            "select-window" | "selectw" => match arg.trim_start_matches("-t").trim().parse() {
+                Ok(n) => self.select_window_number(n),
+                Err(_) => self.set_status("select-window takes a window number"),
+            },
+            "split-window" | "splitw" => {
+                let flags = arg.split_whitespace();
+                if flags.clone().any(|f| f == "-h") {
+                    self.split_pane(SplitDir::SideBySide);
+                } else {
+                    self.split_pane(SplitDir::Stacked);
+                }
+            }
+            "kill-pane" | "killp" => {
+                if let Some(id) = self.active_pane_id() {
+                    self.remove_pane(id);
+                }
+            }
+            "select-layout" | "selectl" | "layout" => match LayoutPreset::by_name(arg) {
+                Some(preset) => self.apply_layout(preset),
+                None => self.set_status(&format!("Unknown layout: {arg}")),
+            },
             "list-sessions" | "ls" => {
                 let msg = self
                     .sessions
                     .iter()
                     .enumerate()
                     .map(|(i, s)| {
+                        let here = i == self.active_session && !self.detached;
                         format!(
                             "{i}: {} ({} windows{})",
                             s.name,
                             s.windows.len(),
-                            if s.attached { " (attached)" } else { "" }
+                            if here { ", attached" } else { "" }
                         )
                     })
                     .collect::<Vec<_>>()
                     .join(" | ");
                 self.set_status(&msg);
             }
-            _ => {
-                self.set_status(&format!("Unknown command: {command}"));
-            }
+            "" => {}
+            _ => self.set_status(&format!("Unknown command: {command}")),
+        }
+    }
+
+    /// A session named by the user, or the current one when nothing is named.
+    fn session_or_current(&self, arg: &str) -> Option<usize> {
+        let arg = arg.trim_start_matches("-t").trim();
+        if arg.is_empty() {
+            (self.active_session < self.sessions.len()).then_some(self.active_session)
+        } else {
+            self.session_named(arg)
         }
     }
 
     // ========================================================================
-    // Rendering
+    // The pointer
     // ========================================================================
 
-    /// Render the entire multiplexer UI.
-    ///
-    /// Takes `&mut self` because a pane's grid is part of what a frame
-    /// decides: the layout walk below is the only thing that knows how large
-    /// each pane is, so the frame that paints a pane is also the frame that
-    /// has to tell its terminal how large it is. Doing that here rather than
-    /// relying on every mutation to remember makes a pane drawn at one size
-    /// and wrapping at another unreachable, rather than merely unlikely.
-    /// [`Self::relayout`] is idempotent, so the mutations calling it too costs
-    /// nothing.
-    ///
-    /// Not `render`: [`App::render`] is the one the window calls, and an
-    /// inherent method of the same name shadows a trait method at equal arity.
-    fn render_commands(&mut self) -> Vec<RenderCommand> {
-        self.relayout();
-
-        let mut cmds = Vec::with_capacity(256);
-
-        let Some(session) = self.active_session() else {
-            return cmds;
-        };
-
-        if !session.attached {
-            // Show detached screen
-            self.render_detached(&mut cmds);
-            return cmds;
+    /// Handle a pointer event.
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        match &event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                self.relayout();
+                let size = (self.window_width, self.window_height);
+                match self.frame_at(size).hit_test(event.x, event.y) {
+                    Some(target) => {
+                        self.press(target, event);
+                        EventResult::Consumed
+                    }
+                    None => EventResult::Ignored,
+                }
+            }
+            MouseEventKind::Move | MouseEventKind::Release(MouseButton::Left) => {
+                // A selection's drag belongs to the pane it started in,
+                // wherever the pointer has wandered since.
+                let Some(id) = self.drag else {
+                    return EventResult::Ignored;
+                };
+                if matches!(event.kind, MouseEventKind::Release(_)) {
+                    self.drag = None;
+                }
+                self.forward_mouse(id, event);
+                EventResult::Consumed
+            }
+            MouseEventKind::Scroll { dy, .. } => self.wheel(event, *dy),
+            _ => EventResult::Ignored,
         }
+    }
 
-        // Background
-        self.palette.push_surface(
-            &mut cmds,
-            0.0,
-            0.0,
-            self.window_width,
-            self.window_height,
-            0.0,
-            Surface::Card,
-        );
-
-        // Tab bar
-        self.render_tab_bar(&mut cmds, session);
-
-        // Pane area
-        if let Some(window) = session.active_window() {
-            let bounds = window.bounds(self.window_width, self.window_height);
-
-            for (pane_id, x, y, w, h) in &bounds {
-                let is_active = *pane_id == window.active_pane;
-                self.render_pane(&mut cmds, *pane_id, *x, *y, *w, *h, is_active);
+    /// A left press on `target`.
+    fn press(&mut self, target: Target, event: &MouseEvent) {
+        match target {
+            Target::HelpCard => self.show_help = false,
+            Target::Help => self.show_help = true,
+            Target::Tab(id) | Target::StatusWindow(id) => self.select_window_id(id),
+            Target::NewWindow => self.new_window(),
+            Target::PaneTitle(id) => self.select_pane(id),
+            Target::Pane(id, part) => {
+                self.select_pane(id);
+                if part == TermTarget::Grid {
+                    // A press in the grid starts a selection with the pointer,
+                    // which replaces one `v` was making.
+                    if let Some(pane) = self.find_pane_mut(id) {
+                        pane.marking = false;
+                    }
+                    self.drag = Some(id);
+                }
+                self.forward_mouse(id, event);
+            }
+            Target::SessionName => {
+                self.session_chooser = !self.session_chooser;
+                self.window_chooser = false;
+            }
+            Target::SessionRow(sid) => {
+                if let Some(at) = self.sessions.iter().position(|s| s.id == sid) {
+                    self.attach(at);
+                }
+                self.session_chooser = false;
+            }
+            Target::WindowRow(id) => {
+                self.select_window_id(id);
+                self.window_chooser = false;
+            }
+            Target::Scrim => {
+                self.session_chooser = false;
+                self.window_chooser = false;
+            }
+            Target::ChooserBox => {}
+            Target::Attach => self.attach(self.active_session),
+            Target::ChooseSession => {
+                self.session_chooser = true;
+                self.window_chooser = false;
+            }
+            Target::ConfirmYes => {
+                if let Some(confirm) = self.confirm.take() {
+                    self.confirmed(confirm);
+                }
+            }
+            Target::ConfirmNo => {
+                self.confirm = None;
+                self.set_status("not closed");
             }
         }
+    }
 
-        // Status bar
-        self.render_status_bar(&mut cmds, session);
+    /// The wheel: through a chooser's list, or the scrollback of the pane
+    /// under the pointer.
+    fn wheel(&mut self, event: &MouseEvent, dy: f32) -> EventResult {
+        if self.show_help || self.confirm.is_some() {
+            return EventResult::Ignored;
+        }
+        if self.session_chooser || self.window_chooser {
+            // One row a notch: a chooser's rows are big targets, and three a
+            // notch skips past the one being looked for.
+            let rows = self.chooser_wheel.rows_at(dy, 1.0);
+            for _ in 0..rows.unsigned_abs() {
+                match (self.window_chooser, rows > 0) {
+                    (true, true) => self.next_window(),
+                    (true, false) => self.prev_window(),
+                    (false, true) => self.next_session(),
+                    (false, false) => self.prev_session(),
+                }
+            }
+            return EventResult::Consumed;
+        }
+        self.relayout();
+        let size = (self.window_width, self.window_height);
+        match self.frame_at(size).hit_test(event.x, event.y) {
+            Some(Target::Pane(id, _)) => {
+                self.forward_mouse(id, event);
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
 
-        // Overlays
+    /// Hand a pointer event to a pane's terminal, in the terminal's own
+    /// coordinates -- its selection, its scrollback bar and its wheel are its
+    /// own business.
+    fn forward_mouse(&mut self, id: PaneId, event: &MouseEvent) {
+        let Some(rect) = self.pane_rect(id) else {
+            return;
+        };
+        let content = pane_content(rect);
+        if let Some(pane) = self.find_pane_mut(id) {
+            pane.term.handle_event(&Event::Mouse(MouseEvent {
+                x: event.x - content.x,
+                y: event.y - content.y,
+                kind: event.kind.clone(),
+            }));
+        }
+    }
+
+    // ========================================================================
+    // Drawing
+    // ========================================================================
+
+    /// The whole window at `size`, with every control's hit box.
+    ///
+    /// Drawing and hit-testing are one walk (`guitk::frame`), so a control can
+    /// only be clicked where it is drawn. None of this window's controls could
+    /// be clicked before: it drew into a bare list of commands and recorded no
+    /// targets at all.
+    fn frame_at(&self, (width, height): (f32, f32)) -> Frame<Target> {
+        let size = (width.max(0.0), height.max(0.0));
+        let window = Rect::new(0.0, 0.0, size.0, size.1);
+        let mut f = Frame::new(size.0, size.1);
+        f.clip(window);
+        self.palette
+            .push_surface(&mut f, 0.0, 0.0, size.0, size.1, 0.0, Surface::Card);
+
+        match self.active_session() {
+            Some(session) if !self.detached => {
+                self.draw_tab_bar(&mut f, session, size.0);
+                if let Some(active) = session.active_window() {
+                    self.draw_panes(&mut f, active, size);
+                }
+                self.draw_bottom(&mut f, Some(session), size);
+                if self.window_chooser {
+                    self.draw_window_chooser(&mut f, session, size);
+                }
+            }
+            _ => {
+                self.draw_detached(&mut f, size);
+                self.draw_bottom(&mut f, None, size);
+            }
+        }
         if self.session_chooser {
-            self.render_session_chooser(&mut cmds);
-        }
-        if self.window_chooser {
-            self.render_window_chooser(&mut cmds);
-        }
-        if self.command_mode {
-            self.render_command_input(&mut cmds);
+            self.draw_session_chooser(&mut f, size);
         }
         if self.prefix_state == PrefixState::Prefix {
-            self.render_prefix_indicator(&mut cmds);
+            self.draw_prefix_indicator(&mut f, size.0);
         }
         if self.show_help {
+            // Modal: nothing behind the card can be clicked.
+            f.discard_hits();
             guitk::shortcut::render_card(
-                &mut cmds,
+                &mut f,
                 &self.palette,
-                (self.window_width, self.window_height),
+                size,
                 0.0,
                 SHORTCUTS,
-                "F1 closes this; the rest follow Ctrl+B",
+                "F1 closes this. The rest follow Ctrl+B -- in copy mode, its keys work alone.",
             );
+            f.hit(Target::HelpCard, window);
         }
-
-        cmds
+        f.unclip();
+        f
     }
 
-    #[allow(clippy::unused_self)] // kept as method for symmetry with other render_* dispatch
-    fn render_tab_bar(&self, cmds: &mut Vec<RenderCommand>, session: &Session) {
-        // Tab bar background
+    /// The tab bar: a tab per window, a button for a new one, and one for the
+    /// list of keys.
+    fn draw_tab_bar(&self, f: &mut Frame<Target>, session: &Session, width: f32) {
         self.palette.push_surface(
-            cmds,
+            f,
             0.0,
             0.0,
-            self.window_width,
+            width,
             TAB_BAR_HEIGHT,
             0.0,
             Surface::Strip(Edge::Bottom),
         );
 
-        let mut tab_x = PADDING;
-        for (i, window) in session.windows.iter().enumerate() {
-            let is_active = i == session.active_window;
-            let label = &window.name;
-            let tab_w = text::width(label, SMALL_TEXT) + 24.0;
+        let keys = "F1 Keys";
+        let keys_w = text::width(keys, SMALL_TEXT) + 16.0;
+        let keys_rect = Rect::new(
+            (width - keys_w - PADDING).max(0.0),
+            4.0,
+            keys_w,
+            TAB_BAR_HEIGHT - 8.0,
+        );
+        self.button(f, keys_rect, keys, Target::Help);
 
-            // Tab background
-            let tab_bg = if is_active {
-                self.palette.surface0
-            } else {
-                self.palette.mantle
-            };
-            cmds.push(RenderCommand::FillRect {
-                x: tab_x,
-                y: 2.0,
-                width: tab_w,
-                height: TAB_BAR_HEIGHT - 2.0,
-                color: tab_bg,
+        // The tabs, in the room left of the new-window button. When they do
+        // not all fit, the row is slid along so the active one is in view --
+        // a session can hold thirty-two windows, and a tab drawn past the
+        // window's edge is a window that cannot be reached with the pointer.
+        let plus_w = 24.0;
+        let room = (keys_rect.x - PADDING * 2.0 - plus_w - TAB_GAP).max(0.0);
+        let tabs: Vec<(WindowId, String, f32)> = session
+            .windows
+            .iter()
+            .map(|w| {
+                let label = format!("{}:{}", w.index, w.name);
+                let tab_w = text::width(&label, SMALL_TEXT) + 24.0;
+                (w.id, label, tab_w)
+            })
+            .collect();
+        let active_end: f32 = tabs
+            .iter()
+            .take(session.active_window.saturating_add(1))
+            .map(|(_, _, w)| w + TAB_GAP)
+            .sum();
+        let slide = (active_end - room).max(0.0);
+
+        f.clip(Rect::new(PADDING, 0.0, room, TAB_BAR_HEIGHT));
+        let mut x = PADDING - slide;
+        for (i, (id, label, tab_w)) in tabs.iter().enumerate() {
+            let active = i == session.active_window;
+            let tab = Rect::new(x, 2.0, *tab_w, TAB_BAR_HEIGHT - 2.0);
+            f.push(RenderCommand::FillRect {
+                x: tab.x,
+                y: tab.y,
+                width: tab.w,
+                height: tab.h,
+                color: if active {
+                    self.palette.surface0
+                } else {
+                    self.palette.mantle
+                },
                 corner_radii: CornerRadii {
                     top_left: 4.0,
                     top_right: 4.0,
@@ -2808,617 +2473,646 @@ impl Multiplexer {
                     bottom_right: 0.0,
                 },
             });
-
-            // Active indicator bar
-            if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: tab_x,
-                    y: 2.0,
-                    width: tab_w,
-                    height: 2.0,
-                    color: self.palette.blue,
-                    corner_radii: CornerRadii::ZERO,
-                });
+            if active {
+                fill(f, Rect::new(tab.x, tab.y, tab.w, 2.0), self.palette.blue);
             }
+            let (color, weight) = if active {
+                (self.palette.text, FontWeightHint::Bold)
+            } else {
+                (self.palette.subtext0, FontWeightHint::Regular)
+            };
+            label_at(
+                f,
+                (x + 12.0, 8.0),
+                label,
+                (SMALL_TEXT, weight),
+                color,
+                tab_w - 16.0,
+            );
+            f.hit(Target::Tab(*id), tab);
+            x += tab_w + TAB_GAP;
+        }
+        f.unclip();
 
-            // Tab label
-            let tab_color = if is_active {
+        let plus_x = x.min(PADDING + room) + TAB_GAP;
+        self.button(
+            f,
+            Rect::new(plus_x, 4.0, plus_w, TAB_BAR_HEIGHT - 8.0),
+            "+",
+            Target::NewWindow,
+        );
+    }
+
+    /// A small labelled button.
+    fn button(&self, f: &mut Frame<Target>, rect: Rect, label: &str, target: Target) {
+        self.palette.push_surface(
+            f,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            4.0,
+            Surface::ControlTrack,
+        );
+        let label_w = text::width(label, SMALL_TEXT);
+        label_at(
+            f,
+            (
+                rect.x + ((rect.w - label_w) / 2.0).max(0.0),
+                rect.y + (rect.h - SMALL_TEXT) / 2.0 - 1.0,
+            ),
+            label,
+            (SMALL_TEXT, FontWeightHint::Regular),
+            self.palette.text,
+            rect.w,
+        );
+        f.hit(target, rect);
+    }
+
+    /// Every pane of the window showing.
+    fn draw_panes(&self, f: &mut Frame<Target>, window: &Window, (width, height): (f32, f32)) {
+        for (id, rect) in window.bounds(width, height) {
+            if let Some(pane) = self.find_pane(id) {
+                self.draw_pane(f, pane, rect, id == window.active_pane);
+            }
+        }
+    }
+
+    /// One pane: its title strip, its terminal, its border.
+    ///
+    /// The terminal draws itself -- `TerminalState::frame`, the terminal app's
+    /// own drawing -- and is placed in the pane by a translation, with its hit
+    /// boxes carried over under this window's `Target::Pane`. So a pane's
+    /// grid, its selection and its scrollback bar are the terminal's, drawn
+    /// and clicked exactly as they are in the terminal's own window.
+    fn draw_pane(&self, f: &mut Frame<Target>, pane: &Pane, rect: Rect, active: bool) {
+        fill(f, rect, self.palette.base);
+        // The whole pane, under everything else in it: a click on its border
+        // makes it the active pane. The title strip is recorded again, on top,
+        // below.
+        f.hit(Target::PaneTitle(pane.id), rect);
+
+        let strip = Rect::new(rect.x, rect.y, rect.w, PANE_TITLE_HEIGHT.min(rect.h));
+        fill(
+            f,
+            strip,
+            if active {
+                self.palette.surface0
+            } else {
+                self.palette.mantle
+            },
+        );
+        let mut title_room = (rect.w - 12.0).max(0.0);
+        if pane.copy_mode {
+            // How far back the view is, not just that copy mode is on:
+            // scrolling through lines that repeat otherwise looks exactly like
+            // a key doing nothing.
+            let badge = format!("[COPY -{}]", pane.term.scroll_offset);
+            let badge_w = text::measure(&badge, SMALL_TEXT, FontWeightHint::Bold) + 8.0;
+            let badge_rect = Rect::new(
+                (rect.right() - badge_w).max(rect.x),
+                rect.y,
+                badge_w.min(rect.w),
+                strip.h,
+            );
+            fill(f, badge_rect, self.palette.yellow);
+            label_at(
+                f,
+                (badge_rect.x + 4.0, rect.y + 2.0),
+                &badge,
+                (SMALL_TEXT, FontWeightHint::Bold),
+                self.palette.crust,
+                badge_rect.w,
+            );
+            title_room = (title_room - badge_w).max(0.0);
+        }
+        label_at(
+            f,
+            (rect.x + 6.0, rect.y + 2.0),
+            &text::elide(
+                pane.title(),
+                title_room,
+                "...",
+                SMALL_TEXT,
+                FontWeightHint::Regular,
+            ),
+            (SMALL_TEXT, FontWeightHint::Regular),
+            if active {
                 self.palette.text
             } else {
                 self.palette.subtext0
-            };
-            cmds.push(RenderCommand::Text {
-                x: tab_x + 12.0,
-                y: 8.0,
-                text: label.clone(),
-                font_size: SMALL_TEXT,
-                color: tab_color,
-                font_weight: if is_active {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(tab_w - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            },
+            title_room,
+        );
 
-            tab_x += tab_w + 2.0;
+        let content = pane_content(rect);
+        if !content.is_empty() {
+            let inner = pane.term.frame(content.w, content.h);
+            f.translate(content.x, content.y);
+            f.clip(Rect::new(0.0, 0.0, content.w, content.h));
+            f.extend(inner.commands().iter().cloned());
+            for (part, r) in inner.hits() {
+                f.hit(Target::Pane(pane.id, *part), *r);
+            }
+            f.unclip();
+            f.untranslate();
         }
-    }
 
-    #[allow(clippy::too_many_arguments)] // render_pane needs all of: target, pane id, geometry, focus state
-    fn render_pane(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        pane_id: PaneId,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        active: bool,
-    ) {
-        // Pane background
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height,
-            color: self.palette.base,
-            corner_radii: CornerRadii::ZERO,
-        });
+        // The title strip over the terminal's own hit boxes, so that it is the
+        // copy of this target a click finds first.
+        f.hit(Target::PaneTitle(pane.id), strip);
 
-        // Pane border
-        let border_color = if active {
-            self.palette.blue
-        } else {
-            self.palette.surface1
-        };
-        cmds.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width,
-            height,
-            color: border_color,
+        // The border last, over the edges of everything inside it.
+        f.push(RenderCommand::StrokeRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: if active {
+                self.palette.blue
+            } else {
+                self.palette.surface1
+            },
             line_width: PANE_BORDER_WIDTH,
             corner_radii: CornerRadii::ZERO,
         });
+    }
 
-        // The pane's name, on its top border, which is where tmux puts it and
-        // the only thing that tells two panes apart once a window is split
-        // four ways. `Pane::effective_title` -- title, else the buffer's OSC
-        // title, else the command -- existed for this and had no caller, so
-        // every pane was an anonymous rectangle and the `command` field was
-        // read by nothing.
-        if let Some(pane) = self.panes.iter().find(|p| p.id == pane_id) {
-            let title = pane.effective_title();
-            if !title.is_empty() {
-                let room = (width - 12.0).max(0.0);
-                cmds.push(RenderCommand::Text {
-                    x: x + 6.0,
-                    y: y - SMALL_TEXT / 2.0,
-                    text: text::elide(title, room, "...", SMALL_TEXT, FontWeightHint::Regular),
-                    color: border_color,
-                    font_size: SMALL_TEXT,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(room),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-        }
-
-        // Render terminal content
-        if let Some(pane) = self.find_pane(pane_id) {
-            let content_x = x + PANE_CONTENT_INSET;
-            let content_y = y + PANE_CONTENT_INSET;
-            let (cell_w, cell_h) = (char_width(), char_height());
-            // The same conversion the layout pass used to size this pane's
-            // terminal, so what is drawn and what was written into are the
-            // same grid rather than two independent readings of one rectangle.
-            let (visible_cols, visible_rows) = pane_grid(width, height);
-
-            // The grid, and only the grid, is drawn fixed-pitch: `char_width`
-            // measured in this family, so the glyphs have to be drawn in it
-            // too or the cells the app laid out and the glyphs the compositor
-            // puts in them are different widths. The indicators below sit
-            // outside the scope because they are UI labels, not cells.
-            cmds.push(RenderCommand::PushFont {
-                family: FontFamily::Mono,
-            });
-
-            // Which lines the pane is looking at: the tail of the live grid
-            // normally, or a window that many lines further back while the
-            // pane is browsing its scrollback. Capacity is capped at the
-            // buffer's own row count so a pane taller than its terminal draws
-            // blank space below the grid rather than pulling extra history up
-            // into it -- what is on screen must stay what the program wrote.
-            // The layout pass keeps the two equal for any pane that fits
-            // inside MAX_ROWS; the cap is what a pane taller than that gets.
-            let capacity = visible_rows.min(pane.buffer.rows);
-            let back = if pane.copy_mode { pane.copy_scroll } else { 0 };
-            let window = pane.buffer.view_rows(capacity, back);
-            for (row_idx, row) in pane.buffer.visible_lines(capacity, back).iter().enumerate() {
-                for col_idx in 0..visible_cols.min(row.len()) {
-                    if let Some(cell) = row.get(col_idx)
-                        && (cell.ch != ' ' || cell.bg != self.palette.base)
-                    {
-                        let (fg, bg) = TerminalBuffer::effective_colors(cell);
-                        let cx = content_x + col_idx as f32 * cell_w;
-                        let cy = content_y + row_idx as f32 * cell_h;
-
-                        // Cell background (only if non-default)
-                        if bg != self.palette.base {
-                            cmds.push(RenderCommand::FillRect {
-                                x: cx,
-                                y: cy,
-                                width: cell_w,
-                                height: cell_h,
-                                color: bg,
-                                corner_radii: CornerRadii::ZERO,
-                            });
-                        }
-
-                        // Character
-                        if cell.ch != ' ' {
-                            cmds.push(RenderCommand::Text {
-                                x: cx,
-                                y: cy,
-                                text: cell.ch.to_string(),
-                                font_size: CELL_FONT_SIZE,
-                                color: fg,
-                                font_weight: if cell.bold {
-                                    FontWeightHint::Bold
-                                } else {
-                                    FontWeightHint::Regular
-                                },
-                                max_width: Some(cell_w),
-                                overflow: TextOverflow::Ellipsis,
-                            });
-                        }
-                    }
-                }
-            }
-
-            // Cursor. Placed by the same window the lines were, not at its raw
-            // grid row: the two agree only while the whole grid is on screen,
-            // and a pane too short for its grid would otherwise draw the
-            // cursor against whichever line happened to land at that height.
-            let cursor_line = pane
-                .buffer
-                .scrollback
-                .len()
-                .saturating_add(pane.buffer.cursor_row);
-            if pane.buffer.cursor_visible
-                && active
-                && !pane.copy_mode
-                && cursor_line >= window.start
-                && cursor_line < window.end()
-            {
-                let cx = content_x + pane.buffer.cursor_col as f32 * cell_w;
-                let cy = content_y + (cursor_line.saturating_sub(window.start)) as f32 * cell_h;
-                cmds.push(RenderCommand::FillRect {
-                    x: cx,
-                    y: cy,
-                    width: cell_w,
-                    height: cell_h,
-                    color: Color::rgba(205, 214, 244, 128),
-                    corner_radii: CornerRadii::ZERO,
-                });
-            }
-
-            cmds.push(RenderCommand::PopFont);
-
-            // Copy mode indicator
-            if pane.copy_mode {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + width - 90.0,
-                    y,
-                    width: 90.0,
-                    height: 18.0,
-                    color: self.palette.yellow,
-                    corner_radii: CornerRadii::ZERO,
-                });
-                cmds.push(RenderCommand::Text {
-                    x: x + width - 86.0,
-                    y: y + 2.0,
-                    // How far back the view is, not just that copy mode is on:
-                    // scrolling through lines that repeat (a build log, a
-                    // `yes` loop) otherwise looks exactly like a key doing
-                    // nothing.
-                    text: format!("[COPY -{}]", pane.copy_scroll),
-                    font_size: SMALL_TEXT,
-                    color: self.palette.crust,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(85.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-
-            // Bell indicator
-            if pane.buffer.bell {
-                cmds.push(RenderCommand::FillRect {
-                    x,
-                    y,
-                    width: 16.0,
-                    height: 16.0,
-                    color: self.palette.red,
-                    corner_radii: CornerRadii::all(8.0),
-                });
-            }
+    /// The bottom row: the status bar -- or, in its place, the prompt or a
+    /// question waiting for its answer.
+    fn draw_bottom(&self, f: &mut Frame<Target>, session: Option<&Session>, size: (f32, f32)) {
+        if self.command_mode {
+            self.draw_prompt(f, size);
+        } else if let Some(confirm) = self.confirm {
+            self.draw_confirm(f, confirm, size);
+        } else if let Some(session) = session {
+            self.draw_status_bar(f, session, size);
         }
     }
 
-    fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>, session: &Session) {
-        let y = self.window_height - STATUS_BAR_HEIGHT;
+    /// The status bar: the session, its windows, and the time or a message.
+    fn draw_status_bar(
+        &self,
+        f: &mut Frame<Target>,
+        session: &Session,
+        (width, height): (f32, f32),
+    ) {
+        let y = height - STATUS_BAR_HEIGHT;
+        fill(
+            f,
+            Rect::new(0.0, y, width, STATUS_BAR_HEIGHT),
+            self.palette.green,
+        );
+        let ink = self.palette.crust;
 
-        // Status bar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: self.window_width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.green,
-            corner_radii: CornerRadii::ZERO,
-        });
+        // Right: measured first, so the window list knows where to stop.
+        let right = self.status_text();
+        let right_w = text::width(&right, SMALL_TEXT).min(width * 0.5);
+        let right_x = (width - PADDING - right_w).max(0.0);
+        label_at(
+            f,
+            (right_x, y + 4.0),
+            &right,
+            (SMALL_TEXT, FontWeightHint::Regular),
+            ink,
+            right_w + 1.0,
+        );
 
-        // Session name (left)
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: y + 4.0,
-            text: format!("[{}]", session.name),
-            font_size: SMALL_TEXT,
-            color: self.palette.crust,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // Left: the session's name, which opens the session chooser.
+        let name = format!("[{}]", session.name);
+        let name_w = text::measure(&name, SMALL_TEXT, FontWeightHint::Bold).min(200.0);
+        label_at(
+            f,
+            (PADDING, y + 4.0),
+            &name,
+            (SMALL_TEXT, FontWeightHint::Bold),
+            ink,
+            name_w + 1.0,
+        );
+        f.hit(
+            Target::SessionName,
+            Rect::new(PADDING, y, name_w, STATUS_BAR_HEIGHT),
+        );
 
-        // Window list (center)
-        let mut wx = 120.0;
+        // The windows, as many as there is room for, each one a click away.
+        let end = right_x - 16.0;
+        let mut x = PADDING + name_w + 16.0;
         for (i, window) in session.windows.iter().enumerate() {
-            let is_active = i == session.active_window;
-            let label = format!("{}:{}", window.index, window.name);
-            let color = if is_active {
-                self.palette.crust
-            } else {
-                self.palette.mantle
-            };
-            let weight = if is_active {
+            let active = i == session.active_window;
+            let entry = format!(
+                "{}:{}{}",
+                window.index,
+                window.name,
+                if active { "*" } else { "" }
+            );
+            let weight = if active {
                 FontWeightHint::Bold
             } else {
                 FontWeightHint::Regular
             };
-
-            if is_active {
-                cmds.push(RenderCommand::Text {
-                    x: wx,
-                    y: y + 4.0,
-                    text: format!("*{label}"),
-                    font_size: SMALL_TEXT,
-                    color,
-                    font_weight: weight,
-                    max_width: Some(150.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            } else {
-                cmds.push(RenderCommand::Text {
-                    x: wx,
-                    y: y + 4.0,
-                    text: label,
-                    font_size: SMALL_TEXT,
-                    color,
-                    font_weight: weight,
-                    max_width: Some(150.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
+            let entry_w = text::measure(&entry, SMALL_TEXT, weight);
+            if x + entry_w > end {
+                if x + 12.0 <= end {
+                    label_at(
+                        f,
+                        (x, y + 4.0),
+                        "...",
+                        (SMALL_TEXT, FontWeightHint::Regular),
+                        ink,
+                        12.0,
+                    );
+                }
+                break;
             }
-            wx += 100.0;
-        }
-
-        // Status message or clock (right)
-        let msg = if !self.status_message.is_empty()
-            && self.current_time.saturating_sub(self.status_time) < 5000
-        {
-            self.status_message.clone()
-        } else {
-            // Mock clock
-            let secs = (self.current_time / 1000) % 86400;
-            let h = secs / 3600;
-            let m = (secs % 3600) / 60;
-            format!("{h:02}:{m:02}")
-        };
-
-        cmds.push(RenderCommand::Text {
-            x: self.window_width - 200.0,
-            y: y + 4.0,
-            text: msg,
-            font_size: SMALL_TEXT,
-            color: self.palette.crust,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(190.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-    }
-
-    #[allow(clippy::unused_self)] // kept as method for symmetry with other render_* dispatch
-    fn render_detached(&self, cmds: &mut Vec<RenderCommand>) {
-        self.palette.push_surface(
-            cmds,
-            0.0,
-            0.0,
-            self.window_width,
-            self.window_height,
-            0.0,
-            Surface::Card,
-        );
-
-        cmds.push(RenderCommand::Text {
-            x: self.window_width / 2.0 - 100.0,
-            y: self.window_height / 2.0 - 20.0,
-            text: "[detached]".into(),
-            font_size: HEADER_TEXT,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: self.window_width / 2.0 - 150.0,
-            y: self.window_height / 2.0 + 10.0,
-            text: "Use :attach or tmux attach to reconnect".into(),
-            font_size: NORMAL_TEXT,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(300.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-    }
-
-    fn render_session_chooser(&self, cmds: &mut Vec<RenderCommand>) {
-        let w = 300.0;
-        let h = (self.sessions.len() as f32 * 24.0 + 40.0).min(400.0);
-        let x = (self.window_width - w) / 2.0;
-        let y = (self.window_height - h) / 2.0;
-
-        // Overlay background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: self.window_height,
-            color: Color::rgba(0, 0, 0, 100),
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.base,
-            corner_radii: CornerRadii::all(8.0),
-        });
-        cmds.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: x + 12.0,
-            y: y + 8.0,
-            text: "Sessions".into(),
-            font_size: HEADER_TEXT,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(w - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        for (i, session) in self.sessions.iter().enumerate() {
-            let row_y = y + 36.0 + i as f32 * 24.0;
-            let is_active = i == self.active_session;
-
-            if is_active {
-                self.palette.push_surface(
-                    cmds,
-                    x + 4.0,
-                    row_y,
-                    w - 8.0,
-                    22.0,
-                    4.0,
-                    Surface::Selected,
-                );
-            }
-
-            let label = format!(
-                "{}: {} ({} windows{})",
-                i,
-                session.name,
-                session.windows.len(),
-                if session.attached { ", attached" } else { "" }
+            label_at(
+                f,
+                (x, y + 4.0),
+                &entry,
+                (SMALL_TEXT, weight),
+                ink,
+                entry_w + 1.0,
             );
-            cmds.push(RenderCommand::Text {
-                x: x + 12.0,
-                y: row_y + 3.0,
-                text: label,
-                font_size: SMALL_TEXT,
-                color: if is_active {
-                    self.palette.text
-                } else {
-                    self.palette.subtext0
-                },
-                font_weight: if is_active {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(w - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            f.hit(
+                Target::StatusWindow(window.id),
+                Rect::new(x, y, entry_w, STATUS_BAR_HEIGHT),
+            );
+            x += entry_w + 12.0;
         }
     }
 
-    fn render_window_chooser(&self, cmds: &mut Vec<RenderCommand>) {
-        let Some(session) = self.active_session() else {
-            return;
-        };
-
-        let w = 300.0;
-        let h = (session.windows.len() as f32 * 24.0 + 40.0).min(400.0);
-        let x = (self.window_width - w) / 2.0;
-        let y = (self.window_height - h) / 2.0;
-
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: self.window_height,
-            color: Color::rgba(0, 0, 0, 100),
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.base,
-            corner_radii: CornerRadii::all(8.0),
-        });
-        cmds.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: x + 12.0,
-            y: y + 8.0,
-            text: "Windows".into(),
-            font_size: HEADER_TEXT,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(w - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        for (i, window) in session.windows.iter().enumerate() {
-            let row_y = y + 36.0 + i as f32 * 24.0;
-            let is_active = i == session.active_window;
-
-            if is_active {
-                self.palette.push_surface(
-                    cmds,
-                    x + 4.0,
-                    row_y,
-                    w - 8.0,
-                    22.0,
-                    4.0,
-                    Surface::Selected,
-                );
-            }
-
-            let pane_count = window.layout.pane_count();
-            let label = format!("{}: {} ({} panes)", window.index, window.name, pane_count);
-            cmds.push(RenderCommand::Text {
-                x: x + 12.0,
-                y: row_y + 3.0,
-                text: label,
-                font_size: SMALL_TEXT,
-                color: if is_active {
-                    self.palette.text
-                } else {
-                    self.palette.subtext0
-                },
-                font_weight: if is_active {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(w - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-    }
-
-    fn render_command_input(&self, cmds: &mut Vec<RenderCommand>) {
-        let y = self.window_height - STATUS_BAR_HEIGHT;
-        // Overwrite status bar with command input
+    /// The `:` prompt, in the status bar's place.
+    fn draw_prompt(&self, f: &mut Frame<Target>, (width, height): (f32, f32)) {
+        let y = height - STATUS_BAR_HEIGHT;
         self.palette.push_surface(
-            cmds,
+            f,
             0.0,
             y,
-            self.window_width,
+            width,
             STATUS_BAR_HEIGHT,
             0.0,
             Surface::Strip(Edge::Top),
         );
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: y + 4.0,
-            text: self.command_input.clone(),
-            font_size: SMALL_TEXT,
-            color: self.palette.ink(self.palette.yellow),
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(self.window_width - PADDING * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        let ink = self.palette.ink(self.palette.yellow);
+        let room = (width - PADDING * 2.0).max(0.0);
+        label_at(
+            f,
+            (PADDING, y + 4.0),
+            &self.command_input,
+            (SMALL_TEXT, FontWeightHint::Regular),
+            ink,
+            room,
+        );
+        // Where the next character goes.
+        let caret_x = PADDING + text::width(&self.command_input, SMALL_TEXT).min(room);
+        fill(
+            f,
+            Rect::new(caret_x + 1.0, y + 4.0, 1.5, SMALL_TEXT + 2.0),
+            ink,
+        );
     }
 
-    #[allow(clippy::unused_self)] // kept as method for symmetry with other render_* dispatch
-    fn render_prefix_indicator(&self, cmds: &mut Vec<RenderCommand>) {
-        // Show a small indicator that prefix key was pressed
-        let x = self.window_width - 100.0;
-        let y = TAB_BAR_HEIGHT;
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: 100.0,
-            height: 20.0,
-            color: self.palette.yellow,
-            corner_radii: CornerRadii::all(0.0),
+    /// A question in the status bar's place, with its two answers.
+    fn draw_confirm(&self, f: &mut Frame<Target>, confirm: Confirm, (width, height): (f32, f32)) {
+        let y = height - STATUS_BAR_HEIGHT;
+        fill(
+            f,
+            Rect::new(0.0, y, width, STATUS_BAR_HEIGHT),
+            self.palette.yellow,
+        );
+        let question = match confirm {
+            Confirm::ClosePane(id) => {
+                let title = self.find_pane(id).map_or("the pane", Pane::title);
+                format!("Close {title} and end what is running in it? (y/n)")
+            }
+            Confirm::CloseWindow(id) => {
+                let name = self
+                    .active_session()
+                    .and_then(|s| s.windows.iter().find(|w| w.id == id))
+                    .map_or_else(String::new, |w| format!("{}:{}", w.index, w.name));
+                format!("Close window {name} and end every shell in it? (y/n)")
+            }
+        };
+        let ink = self.palette.crust;
+        let buttons_w = 2.0 * 44.0 + PADDING;
+        let room = (width - buttons_w - PADDING * 3.0).max(0.0);
+        label_at(
+            f,
+            (PADDING, y + 4.0),
+            &question,
+            (SMALL_TEXT, FontWeightHint::Bold),
+            ink,
+            room,
+        );
+        let yes = Rect::new(
+            width - buttons_w - PADDING,
+            y + 2.0,
+            44.0,
+            STATUS_BAR_HEIGHT - 4.0,
+        );
+        let no = Rect::new(
+            yes.right() + PADDING,
+            y + 2.0,
+            44.0,
+            STATUS_BAR_HEIGHT - 4.0,
+        );
+        self.button(f, yes, "Yes", Target::ConfirmYes);
+        self.button(f, no, "No", Target::ConfirmNo);
+    }
+
+    /// The screen of a detached window: what is still running, and the way
+    /// back.
+    ///
+    /// It said "Use :attach or tmux attach to reconnect". There is no `tmux`
+    /// command to type anywhere, and `:attach` needed a number nobody had been
+    /// told.
+    fn draw_detached(&self, f: &mut Frame<Target>, (width, height): (f32, f32)) {
+        let name = self.active_session().map_or("", |s| s.name.as_str());
+        let centre = width / 2.0;
+        let mut y = height / 2.0 - 70.0;
+        let lines = [
+            (
+                "[detached]".to_string(),
+                HEADER_TEXT,
+                FontWeightHint::Bold,
+                self.palette.text,
+            ),
+            (
+                format!("Session {name} is still running, and so are the shells in it."),
+                NORMAL_TEXT,
+                FontWeightHint::Regular,
+                self.palette.subtext0,
+            ),
+            (
+                "Closing this window ends every session.".to_string(),
+                SMALL_TEXT,
+                FontWeightHint::Regular,
+                self.palette.subtext0,
+            ),
+        ];
+        for (line, size, weight, color) in &lines {
+            let w = text::measure(line, *size, *weight).min(width);
+            label_at(
+                f,
+                ((centre - w / 2.0).max(0.0), y),
+                line,
+                (*size, *weight),
+                *color,
+                w + 1.0,
+            );
+            y += size + 12.0;
+        }
+        y += 8.0;
+        let attach = "Attach (Enter)";
+        let attach_w = text::width(attach, SMALL_TEXT) + 24.0;
+        let others = self.sessions.len() > 1;
+        let sessions = format!("Sessions ({})", self.sessions.len());
+        let sessions_w = text::width(&sessions, SMALL_TEXT) + 24.0;
+        let total = attach_w + if others { sessions_w + 12.0 } else { 0.0 };
+        let x = (centre - total / 2.0).max(0.0);
+        self.button(f, Rect::new(x, y, attach_w, 26.0), attach, Target::Attach);
+        if others {
+            self.button(
+                f,
+                Rect::new(x + attach_w + 12.0, y, sessions_w, 26.0),
+                &sessions,
+                Target::ChooseSession,
+            );
+        }
+    }
+
+    /// The box a chooser of `rows` rows sits in, and how many of its rows fit.
+    fn chooser_box(rows: usize, (width, height): (f32, f32)) -> (Rect, usize) {
+        let want = rows as f32 * CHOOSER_ROW + CHOOSER_TOP + 8.0;
+        let h = want.min(CHOOSER_MAX_HEIGHT).min((height - 16.0).max(0.0));
+        let w = CHOOSER_WIDTH.min((width - 16.0).max(0.0));
+        let x = ((width - w) / 2.0).max(0.0);
+        let y = ((height - h) / 2.0).max(0.0);
+        let fits = ((h - CHOOSER_TOP - 8.0) / CHOOSER_ROW).floor().max(0.0) as usize;
+        (Rect::new(x, y, w, h), fits.max(1))
+    }
+
+    /// A chooser: a scrim that closes it, a box, a heading and rows.
+    ///
+    /// The rows that fit, slid so the highlighted one is among them. Every
+    /// row used to be drawn, at the same pitch, whatever the box's height --
+    /// the sixty-fourth session sat half a screen below a box four hundred
+    /// pixels tall.
+    fn draw_chooser(
+        &self,
+        f: &mut Frame<Target>,
+        heading: &str,
+        rows: &[(Target, String)],
+        selected: usize,
+        size: (f32, f32),
+    ) {
+        fill(
+            f,
+            Rect::new(0.0, 0.0, size.0, size.1),
+            Color::rgba(0, 0, 0, 100),
+        );
+        let (area, fits) = Self::chooser_box(rows.len(), size);
+        // The scrim is the four bands around the box, so that each of its hit
+        // boxes is somewhere a click on it lands on it -- one box under the
+        // whole window would have its middle covered by the chooser.
+        for band in [
+            Rect::new(0.0, 0.0, size.0, area.y),
+            Rect::new(
+                0.0,
+                area.bottom(),
+                size.0,
+                (size.1 - area.bottom()).max(0.0),
+            ),
+            Rect::new(0.0, area.y, area.x, area.h),
+            Rect::new(
+                area.right(),
+                area.y,
+                (size.0 - area.right()).max(0.0),
+                area.h,
+            ),
+        ] {
+            f.hit(Target::Scrim, band);
+        }
+        f.push(RenderCommand::FillRect {
+            x: area.x,
+            y: area.y,
+            width: area.w,
+            height: area.h,
+            color: self.palette.base,
+            corner_radii: CornerRadii::all(8.0),
         });
-        cmds.push(RenderCommand::Text {
-            x: x + 8.0,
-            y: y + 3.0,
-            text: "Ctrl+B ...".into(),
-            font_size: SMALL_TEXT,
-            color: self.palette.crust,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(90.0),
-            overflow: TextOverflow::Ellipsis,
+        f.push(RenderCommand::StrokeRect {
+            x: area.x,
+            y: area.y,
+            width: area.w,
+            height: area.h,
+            color: self.palette.surface1,
+            line_width: 1.0,
+            corner_radii: CornerRadii::all(8.0),
         });
+        // The box itself takes a click that misses every row, rather than
+        // passing it to the scrim and closing the list under the pointer.
+        f.hit(Target::ChooserBox, area);
+        label_at(
+            f,
+            (area.x + 12.0, area.y + 8.0),
+            heading,
+            (HEADER_TEXT, FontWeightHint::Bold),
+            self.palette.text,
+            area.w - 24.0,
+        );
+
+        let first = selected.saturating_add(1).saturating_sub(fits);
+        f.clip(area);
+        let mut row_y = area.y + CHOOSER_TOP;
+        for (i, (target, row)) in rows.iter().enumerate().skip(first).take(fits) {
+            let active = i == selected;
+            let rect = Rect::new(area.x + 4.0, row_y, area.w - 8.0, CHOOSER_ROW - 2.0);
+            if active {
+                self.palette.push_surface(
+                    f,
+                    rect.x,
+                    rect.y,
+                    rect.w,
+                    rect.h,
+                    4.0,
+                    Surface::Selected,
+                );
+            }
+            label_at(
+                f,
+                (area.x + 12.0, row_y + 4.0),
+                row,
+                (
+                    SMALL_TEXT,
+                    if active {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                ),
+                if active {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
+                area.w - 24.0,
+            );
+            f.hit(*target, rect);
+            row_y += CHOOSER_ROW;
+        }
+        f.unclip();
+    }
+
+    /// `prefix s`: every session, the current one highlighted.
+    fn draw_session_chooser(&self, f: &mut Frame<Target>, size: (f32, f32)) {
+        let rows: Vec<(Target, String)> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let here = i == self.active_session && !self.detached;
+                (
+                    Target::SessionRow(s.id),
+                    format!(
+                        "{i}: {} ({} windows{})",
+                        s.name,
+                        s.windows.len(),
+                        if here { ", attached" } else { "" }
+                    ),
+                )
+            })
+            .collect();
+        self.draw_chooser(f, "Sessions", &rows, self.active_session, size);
+    }
+
+    /// `prefix w`: the session's windows, the current one highlighted.
+    fn draw_window_chooser(&self, f: &mut Frame<Target>, session: &Session, size: (f32, f32)) {
+        let rows: Vec<(Target, String)> = session
+            .windows
+            .iter()
+            .map(|w| {
+                (
+                    Target::WindowRow(w.id),
+                    format!("{}: {} ({} panes)", w.index, w.name, w.layout.pane_count()),
+                )
+            })
+            .collect();
+        self.draw_chooser(f, "Windows", &rows, session.active_window, size);
+    }
+
+    /// While the prefix is armed: that it is, and where the keys are listed.
+    fn draw_prefix_indicator(&self, f: &mut Frame<Target>, width: f32) {
+        let hint = "Ctrl+B: now a key (? lists them)";
+        let w = text::measure(hint, SMALL_TEXT, FontWeightHint::Bold) + 16.0;
+        let rect = Rect::new((width - w).max(0.0), TAB_BAR_HEIGHT, w, 20.0);
+        fill(f, rect, self.palette.yellow);
+        label_at(
+            f,
+            (rect.x + 8.0, rect.y + 3.0),
+            hint,
+            (SMALL_TEXT, FontWeightHint::Bold),
+            self.palette.crust,
+            w,
+        );
     }
 }
 
+/// One filled rectangle.
+fn fill(f: &mut Frame<Target>, r: Rect, color: Color) {
+    if r.is_empty() {
+        return;
+    }
+    f.push(RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii: CornerRadii::ZERO,
+    });
+}
+
+/// One line of text, cut with an ellipsis at `max_w`.
+fn label_at(
+    f: &mut Frame<Target>,
+    (x, y): (f32, f32),
+    s: &str,
+    (size, weight): (f32, FontWeightHint),
+    color: Color,
+    max_w: f32,
+) {
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: s.to_string(),
+        font_size: size,
+        color,
+        font_weight: weight,
+        max_width: Some(max_w.max(0.0)),
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
 // ============================================================================
-// Main (placeholder)
+// The window
 // ============================================================================
 
 impl App for Multiplexer {
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
+        for pane in &mut self.panes {
+            pane.term.theme_changed(palette);
+        }
     }
 
     fn title(&self) -> String {
         // The session and the window inside it, which is what a multiplexer's
-        // title bar is for -- the same two names its own status bar shows. The
-        // harness re-reads this as the program runs.
+        // title bar is for -- the same two names its own status bar shows.
         match self.active_session() {
             Some(session) => {
                 let window = session
-                    .windows
-                    .get(session.active_window)
-                    .map_or("", |w| w.name.as_str());
+                    .active_window()
+                    .map_or(String::new(), |w| format!("{}:{}", w.index, w.name));
                 format!("{}:{} - tmux", session.name, window)
             }
             None => "tmux".to_string(),
@@ -3429,25 +3123,35 @@ impl App for Multiplexer {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
-    /// A second.
+    /// As often as the busiest pane needs -- its shell talking, its cursor
+    /// blinking -- and otherwise when the status bar next changes by itself.
     ///
-    /// Two things on screen age without anyone touching the keyboard: the clock
-    /// in the status bar, which is `current_time / 1000`, and status messages,
-    /// which stop being shown five seconds after they are set. Nothing ever
-    /// moved `current_time` -- `set_time` had no caller -- so the clock read
-    /// 00:00:00 for the life of the process and no message ever expired.
-    ///
-    /// A second is the resolution of the coarsest of them; anything shorter
-    /// redraws an identical frame.
+    /// It was a flat second, for a clock that counted the seconds the window
+    /// had been open.
     fn tick_interval(&self) -> Option<Duration> {
-        Some(Duration::from_secs(1))
+        let panes = self
+            .panes
+            .iter()
+            .filter_map(|p| App::tick_interval(&p.term))
+            .min();
+        let status = Duration::from_millis(self.status_wake_ms());
+        Some(panes.map_or(status, |p| p.min(status)))
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
+            // Every shell is told its terminal is gone, rather than left
+            // running against a pseudo-terminal nobody reads.
+            for pane in &mut self.panes {
+                pane.term.hang_up();
+            }
             return Response::Exit;
         }
-        match self.handle_event(event) {
+        let result = self.handle_event(event);
+        if self.quit {
+            return Response::Exit;
+        }
+        match result {
             EventResult::Consumed => Response::Redraw,
             EventResult::Ignored => Response::Idle,
         }
@@ -3455,19 +3159,57 @@ impl App for Multiplexer {
 
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
         // From the frame being drawn rather than the last `Resize`: `relayout`
-        // turns these pixels into terminal columns and rows, so a stale pair is
-        // a pane that wraps its text at a width it is not being drawn at.
+        // turns these pixels into each terminal's columns and rows, so a stale
+        // pair is a pane that wraps its text at a width it is not drawn at.
         self.window_width = width;
         self.window_height = height;
-        RenderTree {
-            commands: self.render_commands(),
-        }
+        self.relayout();
+        self.frame_at((width, height)).into_tree()
+    }
+}
+
+impl Probe for Multiplexer {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame_at(size)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> EventResult {
+        self.window_width = size.0;
+        self.window_height = size.1;
+        self.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }))
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> EventResult {
+        self.window_width = size.0;
+        self.window_height = size.1;
+        self.relayout();
+        self.handle_event(&Event::Key(key.clone()))
+    }
+
+    fn scroll_at(&mut self, x: f32, y: f32, dy: f32, size: (f32, f32)) -> Option<EventResult> {
+        self.window_width = size.0;
+        self.window_height = size.1;
+        Some(self.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        })))
     }
 }
 
 fn main() -> ExitCode {
-    let mut mux = Multiplexer::new();
-    mux.greet_pane();
+    // The first shell starts here, before the window and its threads exist;
+    // later panes' shells start with threads running, which `libcall::pty`'s
+    // spawn is built for -- the child does nothing but exec.
+    let mut mux = Multiplexer::with_shells(Box::new(terminal::child::spawn_shell));
     app::launch("tmux", &mut mux)
 }
 
@@ -3478,437 +3220,1021 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     // Panicking on bad data is the point of a test, so the defensive lints the
-    // project enables for production code are off here.
+    // workspace applies to production code are lifted here.
     #![allow(
+        clippy::indexing_slicing,
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        clippy::indexing_slicing,
         clippy::arithmetic_side_effects
     )]
 
     use super::*;
+    use guitk::probe::{self, rect_of, scroll_at_point};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use terminal::child::Exit;
+    use terminal::child::script::{Script, ScriptLink};
 
-    // --- Terminal Buffer ---
+    // -- helpers --
 
-    #[test]
-    fn test_new_buffer() {
-        let buf = TerminalBuffer::new(80, 24);
-        assert_eq!(buf.cols, 80);
-        assert_eq!(buf.rows, 24);
-        assert_eq!(buf.cursor_col, 0);
-        assert_eq!(buf.cursor_row, 0);
+    /// Every shell the multiplexer started, in the order it started them.
+    type Shells = Rc<RefCell<Vec<Rc<RefCell<Script>>>>>;
+
+    /// A multiplexer whose shells are scripts, and the scripts.
+    fn scripted() -> (Multiplexer, Shells) {
+        let shells: Shells = Rc::default();
+        let log = Rc::clone(&shells);
+        let spawner: Spawner = Box::new(move |_size| {
+            let (link, script) = ScriptLink::new();
+            log.borrow_mut().push(script);
+            Ok(Box::new(link) as Box<dyn Link>)
+        });
+        (Multiplexer::with_shells(spawner), shells)
     }
 
-    #[test]
-    fn test_write_char() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        buf.write_char('A');
-        assert_eq!(buf.cells[0][0].ch, 'A');
-        assert_eq!(buf.cursor_col, 1);
+    /// The `n`th shell started.
+    fn shell(shells: &Shells, n: usize) -> Rc<RefCell<Script>> {
+        Rc::clone(&shells.borrow()[n])
     }
 
-    #[test]
-    fn test_write_string() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        buf.write_str("Hello");
-        assert_eq!(buf.cells[0][0].ch, 'H');
-        assert_eq!(buf.cells[0][4].ch, 'o');
-        assert_eq!(buf.cursor_col, 5);
+    fn key_ev(key: Key, text: &str, ctrl: bool) -> Event {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = ctrl;
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_string(),
+        })
     }
 
-    #[test]
-    fn test_newline() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        buf.write_str("Line1\nLine2");
-        assert_eq!(buf.cells[0][0].ch, 'L');
-        assert_eq!(buf.cells[1][0].ch, 'L');
-        assert_eq!(buf.cursor_row, 1);
+    fn press(k: Key) -> Event {
+        key_ev(k, "", false)
     }
 
-    #[test]
-    fn test_scroll_up() {
-        let mut buf = TerminalBuffer::new(80, 3);
-        buf.write_str("A\nB\nC\nD");
-        assert!(!buf.scrollback.is_empty());
-        assert_eq!(buf.cells[2][0].ch, 'D');
+    fn types(c: char) -> Event {
+        key_ev(Key::A, &c.to_string(), false)
     }
 
-    #[test]
-    fn test_clear() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        buf.write_str("Hello");
-        buf.clear();
-        assert_eq!(buf.cells[0][0].ch, ' ');
-        assert_eq!(buf.cursor_col, 0);
-        assert_eq!(buf.cursor_row, 0);
-    }
-
-    #[test]
-    fn test_resize() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        buf.write_str("Hello");
-        buf.resize(40, 12);
-        assert_eq!(buf.cols, 40);
-        assert_eq!(buf.rows, 12);
-        assert_eq!(buf.cells[0][0].ch, 'H');
-    }
-
-    #[test]
-    fn test_set_cursor() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        buf.set_cursor(5, 10);
-        assert_eq!(buf.cursor_row, 4); // 1-indexed → 0-indexed
-        assert_eq!(buf.cursor_col, 9);
-    }
-
-    #[test]
-    fn test_clear_to_end() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        buf.write_str("Hello World");
-        buf.cursor_col = 5;
-        buf.clear_to_end();
-        assert_eq!(buf.cells[0][4].ch, 'o');
-        assert_eq!(buf.cells[0][5].ch, ' ');
-    }
-
-    #[test]
-    fn test_tab_character() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        buf.write_char('\t');
-        assert_eq!(buf.cursor_col, 8);
-    }
-
-    #[test]
-    fn test_backspace() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        buf.write_str("AB");
-        buf.write_char('\x08');
-        assert_eq!(buf.cursor_col, 1);
-    }
-
-    #[test]
-    fn test_bell() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        assert!(!buf.bell);
-        buf.write_char('\x07');
-        assert!(buf.bell);
-    }
-
-    #[test]
-    fn test_carriage_return() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        buf.write_str("Hello");
-        buf.write_char('\r');
-        assert_eq!(buf.cursor_col, 0);
-    }
-
-    #[test]
-    fn test_line_wrap() {
-        let mut buf = TerminalBuffer::new(5, 3);
-        buf.write_str("ABCDEFGH");
-        // Should have wrapped to second line
-        assert_eq!(buf.cursor_row, 1);
-    }
-
-    // --- ANSI Parser ---
-
-    #[test]
-    fn test_ansi_cursor_up() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        let mut parser = AnsiParser::new();
-        buf.cursor_row = 5;
-        parser.feed("\x1B[2A", &mut buf);
-        assert_eq!(buf.cursor_row, 3);
-    }
-
-    #[test]
-    fn test_ansi_cursor_down() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        let mut parser = AnsiParser::new();
-        parser.feed("\x1B[3B", &mut buf);
-        assert_eq!(buf.cursor_row, 3);
-    }
-
-    #[test]
-    fn test_ansi_cursor_position() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        let mut parser = AnsiParser::new();
-        parser.feed("\x1B[10;20H", &mut buf);
-        assert_eq!(buf.cursor_row, 9);
-        assert_eq!(buf.cursor_col, 19);
-    }
-
-    #[test]
-    fn test_ansi_erase_display() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        let mut parser = AnsiParser::new();
-        parser.feed("Hello", &mut buf);
-        parser.feed("\x1B[2J", &mut buf);
-        assert_eq!(buf.cells[0][0].ch, ' ');
-    }
-
-    #[test]
-    fn test_ansi_sgr_bold() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        let mut parser = AnsiParser::new();
-        parser.feed("\x1B[1mBold\x1B[0m", &mut buf);
-        assert!(buf.cells[0][0].bold);
-        // After reset, next char should not be bold
-        parser.feed("X", &mut buf);
-        assert!(!buf.cells[0][4].bold);
-    }
-
-    #[test]
-    fn test_ansi_sgr_color() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        let mut parser = AnsiParser::new();
-        parser.feed("\x1B[31mRed", &mut buf);
-        assert_eq!(buf.cells[0][0].fg, Color::from_hex(0xF38BA8));
-    }
-
-    #[test]
-    fn test_ansi_cursor_visibility() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        let mut parser = AnsiParser::new();
-        parser.feed("\x1B[?25l", &mut buf);
-        assert!(!buf.cursor_visible);
-        parser.feed("\x1B[?25h", &mut buf);
-        assert!(buf.cursor_visible);
-    }
-
-    #[test]
-    fn test_ansi_osc_title() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        let mut parser = AnsiParser::new();
-        parser.feed("\x1B]0;My Title\x07", &mut buf);
-        assert_eq!(buf.title, "My Title");
-    }
-
-    #[test]
-    fn test_ansi_truecolor() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        let mut parser = AnsiParser::new();
-        parser.feed("\x1B[38;2;255;128;0mX", &mut buf);
-        assert_eq!(buf.cells[0][0].fg, Color::rgb(255, 128, 0));
-    }
-
-    #[test]
-    fn test_ansi_erase_line() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        let mut parser = AnsiParser::new();
-        parser.feed("Hello World", &mut buf);
-        buf.cursor_col = 5;
-        parser.feed("\x1B[K", &mut buf);
-        assert_eq!(buf.cells[0][4].ch, 'o');
-        assert_eq!(buf.cells[0][5].ch, ' ');
-    }
-
-    #[test]
-    fn test_ansi_reset() {
-        let mut buf = TerminalBuffer::new(80, 24);
-        let mut parser = AnsiParser::new();
-        parser.feed("Hello\x1Bc", &mut buf);
-        assert_eq!(buf.cells[0][0].ch, ' ');
-        assert_eq!(buf.cursor_col, 0);
-    }
-
-    // --- Layout ---
-
-    #[test]
-    fn test_layout_leaf_bounds() {
-        let layout = LayoutNode::Leaf(PaneId(0));
-        let bounds = layout.compute_bounds(0.0, 0.0, 800.0, 600.0);
-        assert_eq!(bounds.len(), 1);
-        assert_eq!(bounds[0].0, PaneId(0));
-        assert!((bounds[0].2 - 0.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn test_layout_horizontal_split() {
-        let layout = LayoutNode::Split {
-            direction: SplitDir::Horizontal,
-            ratio: 0.5,
-            first: Box::new(LayoutNode::Leaf(PaneId(0))),
-            second: Box::new(LayoutNode::Leaf(PaneId(1))),
-        };
-        let bounds = layout.compute_bounds(0.0, 0.0, 800.0, 600.0);
-        assert_eq!(bounds.len(), 2);
-        // Second pane should be below the first
-        assert!(bounds[1].2 > bounds[0].2);
-    }
-
-    #[test]
-    fn test_layout_vertical_split() {
-        let layout = LayoutNode::Split {
-            direction: SplitDir::Vertical,
-            ratio: 0.5,
-            first: Box::new(LayoutNode::Leaf(PaneId(0))),
-            second: Box::new(LayoutNode::Leaf(PaneId(1))),
-        };
-        let bounds = layout.compute_bounds(0.0, 0.0, 800.0, 600.0);
-        assert_eq!(bounds.len(), 2);
-        // Second pane should be to the right of the first
-        assert!(bounds[1].1 > bounds[0].1);
-    }
-
-    #[test]
-    fn test_layout_pane_count() {
-        let layout = LayoutNode::Split {
-            direction: SplitDir::Vertical,
-            ratio: 0.5,
-            first: Box::new(LayoutNode::Leaf(PaneId(0))),
-            second: Box::new(LayoutNode::Split {
-                direction: SplitDir::Horizontal,
-                ratio: 0.5,
-                first: Box::new(LayoutNode::Leaf(PaneId(1))),
-                second: Box::new(LayoutNode::Leaf(PaneId(2))),
-            }),
-        };
-        assert_eq!(layout.pane_count(), 3);
-    }
-
-    #[test]
-    fn test_layout_pane_ids() {
-        let layout = LayoutNode::Split {
-            direction: SplitDir::Vertical,
-            ratio: 0.5,
-            first: Box::new(LayoutNode::Leaf(PaneId(0))),
-            second: Box::new(LayoutNode::Leaf(PaneId(1))),
-        };
-        assert_eq!(layout.pane_ids(), vec![PaneId(0), PaneId(1)]);
-    }
-
-    #[test]
-    fn test_layout_split_pane() {
-        let mut layout = LayoutNode::Leaf(PaneId(0));
-        assert!(layout.split_pane(PaneId(0), PaneId(1), SplitDir::Vertical));
-        assert_eq!(layout.pane_count(), 2);
-    }
-
-    #[test]
-    fn test_layout_remove_pane() {
-        let mut layout = LayoutNode::Split {
-            direction: SplitDir::Vertical,
-            ratio: 0.5,
-            first: Box::new(LayoutNode::Leaf(PaneId(0))),
-            second: Box::new(LayoutNode::Leaf(PaneId(1))),
-        };
-        assert!(layout.remove_pane(PaneId(0)));
-        assert_eq!(layout.pane_count(), 1);
-        assert_eq!(layout.pane_ids(), vec![PaneId(1)]);
-    }
-
-    #[test]
-    fn test_layout_adjust_ratio() {
-        let mut layout = LayoutNode::Split {
-            direction: SplitDir::Vertical,
-            ratio: 0.5,
-            first: Box::new(LayoutNode::Leaf(PaneId(0))),
-            second: Box::new(LayoutNode::Leaf(PaneId(1))),
-        };
-        layout.adjust_ratio(PaneId(0), 0.1);
-        if let LayoutNode::Split { ratio, .. } = &layout {
-            assert!((*ratio - 0.6).abs() < f32::EPSILON);
+    fn type_str(mux: &mut Multiplexer, s: &str) {
+        for c in s.chars() {
+            mux.handle_event(&types(c));
         }
     }
 
-    // --- Layout Presets ---
+    /// Ctrl+B, then the key.
+    fn prefixed(mux: &mut Multiplexer, c: char) {
+        mux.handle_event(&key_ev(Key::B, "", true));
+        assert_eq!(mux.prefix_state, PrefixState::Prefix, "Ctrl+B did not arm");
+        mux.handle_event(&types(c));
+    }
+
+    fn tick(mux: &mut Multiplexer) {
+        mux.handle_event(&Event::Tick { elapsed_ms: 20 });
+    }
+
+    fn active_pane(mux: &Multiplexer) -> &Pane {
+        let id = mux.active_pane_id().expect("an active pane");
+        mux.find_pane(id).expect("the active pane exists")
+    }
+
+    fn panes_in_active_window(mux: &Multiplexer) -> usize {
+        mux.active_window().map_or(0, |w| w.layout.pane_count())
+    }
+
+    fn windows(mux: &Multiplexer) -> usize {
+        mux.active_session().map_or(0, |s| s.windows.len())
+    }
+
+    /// A pane's screen, row by row, trailing blanks trimmed.
+    fn screen(mux: &Multiplexer, id: PaneId) -> String {
+        let term = &mux.find_pane(id).expect("the pane").term;
+        (0..term.rows())
+            .filter_map(|r| term.line_at(term.buffer_row_of(r)))
+            .map(|l| {
+                l.cells
+                    .iter()
+                    .map(|c| c.ch)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every string the frame draws.
+    fn drawn_texts(mux: &Multiplexer) -> Vec<String> {
+        mux.frame_at((mux.window_width, mux.window_height))
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn feed_lines(shells: &Shells, n: usize, count: usize) {
+        let script = shell(shells, n);
+        for i in 0..count {
+            script
+                .borrow_mut()
+                .pending
+                .extend_from_slice(format!("line {i}\r\n").as_bytes());
+        }
+    }
+
+    // -- shells --
 
     #[test]
-    fn test_preset_even_horizontal() {
-        let panes = vec![PaneId(0), PaneId(1), PaneId(2)];
-        let layout = LayoutPreset::EvenHorizontal.build(&panes);
-        assert_eq!(layout.pane_count(), 3);
+    fn every_pane_gets_a_shell_of_its_own() {
+        let (mut mux, shells) = scripted();
+        assert_eq!(shells.borrow().len(), 1, "the first pane's shell");
+        prefixed(&mut mux, '%');
+        prefixed(&mut mux, 'c');
+        mux.process_command(":new-session two");
+        assert_eq!(shells.borrow().len(), 4);
+        assert_eq!(mux.panes.len(), 4);
+        assert!(mux.panes.iter().all(|p| p.term.child_is_live()));
     }
 
     #[test]
-    fn test_preset_even_vertical() {
-        let panes = vec![PaneId(0), PaneId(1)];
-        let layout = LayoutPreset::EvenVertical.build(&panes);
-        assert_eq!(layout.pane_count(), 2);
+    fn a_shell_is_told_the_size_its_pane_is_drawn_at() {
+        let (mut mux, shells) = scripted();
+        let first = mux.active_pane_id().unwrap();
+        let born = shell(&shells, 0).borrow().size;
+        assert_eq!(born, Some(mux.find_pane(first).unwrap().term.win_size()));
+
+        prefixed(&mut mux, '%');
+        let now = shell(&shells, 0).borrow().size;
+        assert_ne!(
+            now, born,
+            "the split halved the pane and its shell was not told"
+        );
+        assert_eq!(now, Some(mux.find_pane(first).unwrap().term.win_size()));
+        let cols = |s: Option<WinSize>| s.map_or(0, |s| s.cols);
+        assert!(cols(now) < cols(born));
     }
 
     #[test]
-    fn test_preset_main_horizontal() {
-        let panes = vec![PaneId(0), PaneId(1), PaneId(2)];
-        let layout = LayoutPreset::MainHorizontal.build(&panes);
-        assert_eq!(layout.pane_count(), 3);
+    fn typing_reaches_the_active_panes_shell() {
+        // Every key that was not a multiplexer command was dropped: there was
+        // nowhere for it to go.
+        let (mut mux, shells) = scripted();
+        type_str(&mut mux, "ls");
+        mux.handle_event(&press(Key::Enter));
+        assert_eq!(shell(&shells, 0).borrow().sent, b"ls\r");
+
+        prefixed(&mut mux, '%');
+        mux.handle_event(&types('x'));
+        assert_eq!(
+            shell(&shells, 1).borrow().sent,
+            b"x",
+            "the new pane is active"
+        );
+        assert_eq!(
+            shell(&shells, 0).borrow().sent,
+            b"ls\r",
+            "and the old one heard nothing"
+        );
+        assert_eq!(
+            panes_in_active_window(&mux),
+            2,
+            "`x` alone is not a command"
+        );
     }
 
     #[test]
-    fn test_preset_main_vertical() {
-        let panes = vec![PaneId(0), PaneId(1), PaneId(2)];
-        let layout = LayoutPreset::MainVertical.build(&panes);
-        assert_eq!(layout.pane_count(), 3);
+    fn what_a_shell_writes_appears_in_its_pane() {
+        let (mut mux, shells) = scripted();
+        let id = mux.active_pane_id().unwrap();
+        shell(&shells, 0)
+            .borrow_mut()
+            .pending
+            .extend_from_slice(b"$ hello");
+        tick(&mut mux);
+        assert!(screen(&mux, id).contains("$ hello"), "{}", screen(&mux, id));
     }
 
     #[test]
-    fn test_preset_tiled() {
-        let panes = vec![PaneId(0), PaneId(1), PaneId(2), PaneId(3)];
-        let layout = LayoutPreset::Tiled.build(&panes);
-        assert_eq!(layout.pane_count(), 4);
+    fn a_shell_in_a_window_not_showing_is_read_too() {
+        // A shell whose output nobody reads fills its terminal's buffer and
+        // stops, so a background window's is read on every tick like any.
+        let (mut mux, shells) = scripted();
+        let first = mux.active_pane_id().unwrap();
+        prefixed(&mut mux, 'c');
+        shell(&shells, 0)
+            .borrow_mut()
+            .pending
+            .extend_from_slice(b"meanwhile");
+        tick(&mut mux);
+        assert!(screen(&mux, first).contains("meanwhile"));
+        assert!(shell(&shells, 0).borrow().pending.is_empty());
     }
 
     #[test]
-    fn test_preset_single_pane() {
-        let panes = vec![PaneId(0)];
-        let layout = LayoutPreset::Tiled.build(&panes);
-        assert_eq!(layout.pane_count(), 1);
-    }
-
-    // --- Pane ---
-
-    #[test]
-    fn test_pane_feed() {
-        let mut pane = Pane::new(PaneId(0), 80, 24);
-        pane.feed("Hello World");
-        assert_eq!(pane.buffer.cells[0][0].ch, 'H');
+    fn a_shell_that_exits_takes_its_pane_with_it() {
+        let (mut mux, shells) = scripted();
+        prefixed(&mut mux, '%');
+        let second = mux.active_pane_id().unwrap();
+        shell(&shells, 1).borrow_mut().exit = Some(Exit::Code(0));
+        tick(&mut mux);
+        assert_eq!(panes_in_active_window(&mux), 1);
+        assert!(mux.find_pane(second).is_none(), "the pane was not let go");
+        assert_ne!(mux.active_pane_id(), Some(second));
+        assert!(!mux.quit);
     }
 
     #[test]
-    fn test_pane_copy_mode() {
-        let mut pane = Pane::new(PaneId(0), 80, 24);
-        assert!(!pane.copy_mode);
-        pane.enter_copy_mode();
-        assert!(pane.copy_mode);
-        pane.exit_copy_mode();
-        assert!(!pane.copy_mode);
+    fn the_last_shell_to_exit_closes_the_window() {
+        let (mut mux, shells) = scripted();
+        shell(&shells, 0).borrow_mut().exit = Some(Exit::Code(0));
+        assert!(matches!(
+            mux.on_event(&Event::Tick { elapsed_ms: 20 }),
+            Response::Exit
+        ));
     }
 
     #[test]
-    fn test_pane_title_from_osc() {
-        let mut pane = Pane::new(PaneId(0), 80, 24);
-        pane.feed("\x1B]0;My Pane\x07");
-        assert_eq!(pane.effective_title(), "My Pane");
+    fn a_shell_that_fails_leaves_its_pane_to_say_how() {
+        let (mut mux, shells) = scripted();
+        let id = mux.active_pane_id().unwrap();
+        shell(&shells, 0).borrow_mut().exit = Some(Exit::Code(2));
+        assert!(!matches!(
+            mux.on_event(&Event::Tick { elapsed_ms: 20 }),
+            Response::Exit
+        ));
+        assert!(mux.find_pane(id).is_some());
+        assert!(
+            screen(&mux, id).contains("[the shell"),
+            "{}",
+            screen(&mux, id)
+        );
     }
 
-    // --- Session ---
+    #[test]
+    fn a_shell_that_cannot_start_says_why_in_its_pane() {
+        let spawner: Spawner = Box::new(|_| {
+            Err(SpawnError {
+                program: "/bin/sh".into(),
+                errno: libcall::ENOSYS,
+            })
+        });
+        let mux = Multiplexer::with_shells(spawner);
+        let text = screen(&mux, mux.active_pane_id().unwrap());
+        assert!(text.contains("No shell."), "{text}");
+        assert!(text.contains("no pseudo-terminals"), "{text}");
+        assert!(
+            !text.contains("PTY layer"),
+            "the old banner claimed the system had no PTY layer"
+        );
+    }
 
-    // ------------------------------------------------------------------
-    // Input
-    //
-    // `main` built a `Multiplexer` and dropped it. `process_prefix_key` -- the
-    // Ctrl+B keyboard, the first feature the module doc lists -- had eighteen
-    // tests and no caller, and so did `process_command`.
-    // ------------------------------------------------------------------
+    #[test]
+    fn closing_a_pane_asks_first_and_hangs_up_its_shell() {
+        let (mut mux, shells) = scripted();
+        prefixed(&mut mux, '%');
+        prefixed(&mut mux, 'x');
+        assert!(mux.confirm.is_some(), "x closed a pane without asking");
+        assert!(
+            drawn_texts(&mux).iter().any(|t| t.contains("(y/n)")),
+            "and the question is on the screen"
+        );
+        mux.handle_event(&types('n'));
+        assert_eq!(panes_in_active_window(&mux), 2, "no leaves it open");
+        assert_eq!(shell(&shells, 1).borrow().hang_ups, 0);
 
-    /// **Every prefix command the card advertises is answered.**
-    ///
-    /// Pressed the way a keyboard sends them: Ctrl+B, then the character in
-    /// `text`. `process_prefix_key` takes a `char`, so a synthetic event with
-    /// an empty string reaches nothing -- which is also why `key-survey.py`
-    /// could not see these seventeen keys until it learned to follow a call
-    /// from a handler into a function taking a char.
-    ///
-    /// The control is the last assertion: an unbound letter must *not* be
-    /// answered, or this test would pass on a program that accepted
-    /// everything.
+        prefixed(&mut mux, 'x');
+        mux.handle_event(&types('y'));
+        assert_eq!(panes_in_active_window(&mux), 1);
+        assert_eq!(
+            shell(&shells, 1).borrow().hang_ups,
+            1,
+            "its shell was not told"
+        );
+        assert_eq!(mux.panes.len(), 1);
+    }
+
+    #[test]
+    fn closing_a_window_asks_and_ends_every_shell_in_it() {
+        let (mut mux, shells) = scripted();
+        prefixed(&mut mux, 'c');
+        prefixed(&mut mux, '%');
+        prefixed(&mut mux, '&');
+        mux.handle_event(&types('y'));
+        assert_eq!(windows(&mux), 1);
+        assert_eq!(shell(&shells, 1).borrow().hang_ups, 1);
+        assert_eq!(shell(&shells, 2).borrow().hang_ups, 1);
+        assert_eq!(shell(&shells, 0).borrow().hang_ups, 0);
+    }
+
+    #[test]
+    fn closing_the_window_hangs_up_every_shell() {
+        let (mut mux, shells) = scripted();
+        prefixed(&mut mux, '%');
+        mux.process_command(":new-session two");
+        assert!(matches!(
+            mux.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+        for n in 0..3 {
+            assert_eq!(shell(&shells, n).borrow().hang_ups, 1, "shell {n}");
+        }
+    }
+
+    #[test]
+    fn killing_a_session_ends_its_shells_and_the_last_one_closes_the_window() {
+        let (mut mux, shells) = scripted();
+        mux.process_command(":new-session two");
+        prefixed(&mut mux, '%');
+        mux.process_command(":kill-session two");
+        assert_eq!(mux.sessions.len(), 1);
+        assert_eq!(shell(&shells, 1).borrow().hang_ups, 1);
+        assert_eq!(shell(&shells, 2).borrow().hang_ups, 1);
+        assert_eq!(shell(&shells, 0).borrow().hang_ups, 0);
+        assert_eq!(mux.panes.len(), 1);
+
+        mux.process_command(":kill-session");
+        assert!(
+            mux.quit,
+            "the last session ending ends the multiplexer, as in tmux"
+        );
+    }
+
+    #[test]
+    fn the_prefix_twice_sends_the_program_a_ctrl_b() {
+        let (mut mux, shells) = scripted();
+        mux.handle_event(&key_ev(Key::B, "", true));
+        mux.handle_event(&key_ev(Key::B, "", true));
+        assert_eq!(shell(&shells, 0).borrow().sent, [0x02]);
+        assert_eq!(mux.prefix_state, PrefixState::Normal);
+    }
+
+    #[test]
+    fn a_paste_goes_to_the_program_not_onto_the_screen() {
+        // It was fed through the pane's parser, so the text appeared as though
+        // the program had printed it -- and nothing had typed it.
+        let (mut mux, shells) = scripted();
+        let id = mux.active_pane_id().unwrap();
+        mux.clipboard = "echo hi\n".to_string();
+        prefixed(&mut mux, ']');
+        assert_eq!(shell(&shells, 0).borrow().sent, b"echo hi\r");
+        assert!(!screen(&mux, id).contains("echo hi"));
+    }
+
+    #[test]
+    fn a_refused_window_leaves_no_pane_or_shell_behind() {
+        let (mut mux, shells) = scripted();
+        for _ in 1..MAX_WINDOWS {
+            prefixed(&mut mux, 'c');
+        }
+        assert_eq!(windows(&mux), MAX_WINDOWS);
+        let (panes, started) = (mux.panes.len(), shells.borrow().len());
+        prefixed(&mut mux, 'c');
+        assert_eq!(windows(&mux), MAX_WINDOWS);
+        assert_eq!(
+            mux.panes.len(),
+            panes,
+            "a refused window left a pane behind"
+        );
+        assert_eq!(shells.borrow().len(), started, "and started a shell for it");
+    }
+
+    #[test]
+    fn a_pane_too_small_to_halve_is_not_split() {
+        // Each half was floored at `MIN_PANE_SIZE`, so splitting a narrow pane
+        // made two that overlapped.
+        let mut mux = Multiplexer::new();
+        mux.window_width = 300.0;
+        mux.window_height = 300.0;
+        for _ in 0..8 {
+            prefixed(&mut mux, '%');
+        }
+        assert_eq!(mux.status_message, "no room to split this pane");
+        let rects: Vec<Rect> = mux
+            .active_window()
+            .unwrap()
+            .bounds(300.0, 300.0)
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect();
+        for (i, a) in rects.iter().enumerate() {
+            assert!(a.right() <= 300.01, "pane {i} runs off the window: {a:?}");
+            for b in rects.iter().skip(i + 1) {
+                assert!(a.intersect(*b).is_none(), "{a:?} overlaps {b:?}");
+            }
+        }
+    }
+
+    // -- focus --
+
+    #[test]
+    fn only_the_active_pane_has_the_keyboard() {
+        let mut mux = Multiplexer::new();
+        let first = mux.active_pane_id().unwrap();
+        prefixed(&mut mux, '%');
+        let second = mux.active_pane_id().unwrap();
+        let focused = |m: &Multiplexer, id| m.find_pane(id).unwrap().term.is_focused();
+        assert!(focused(&mux, second) && !focused(&mux, first));
+
+        probe::click(&mut mux, Target::PaneTitle(first));
+        assert!(focused(&mux, first) && !focused(&mux, second));
+
+        mux.handle_event(&Event::FocusOut);
+        assert!(!focused(&mux, first), "the window lost the keyboard");
+        mux.handle_event(&Event::FocusIn);
+        assert!(focused(&mux, first));
+
+        prefixed(&mut mux, ':');
+        assert!(!focused(&mux, first), "the prompt has the keyboard");
+    }
+
+    // -- copy mode --
+
+    #[test]
+    fn copy_mode_selects_whole_lines_and_copies_them() {
+        let (mut mux, shells) = scripted();
+        feed_lines(&shells, 0, 200);
+        tick(&mut mux);
+        prefixed(&mut mux, '[');
+        assert!(active_pane(&mux).copy_mode);
+
+        // Bare keys now: copy mode has the keyboard.
+        mux.handle_event(&types('k'));
+        mux.handle_event(&types('k'));
+        assert_eq!(active_pane(&mux).term.scroll_offset, 2);
+        mux.handle_event(&types('v'));
+        for _ in 0..3 {
+            mux.handle_event(&types('k'));
+        }
+        assert!(
+            shell(&shells, 0).borrow().sent.is_empty(),
+            "a key in copy mode reached the shell"
+        );
+        mux.handle_event(&press(Key::Enter));
+
+        let lines: Vec<&str> = mux.clipboard.lines().collect();
+        assert_eq!(lines.len(), 4, "{:?}", mux.clipboard);
+        let numbers: Vec<usize> = lines
+            .iter()
+            .map(|l| l.trim_start_matches("line ").parse().unwrap())
+            .collect();
+        assert!(numbers.windows(2).all(|w| w[1] == w[0] + 1), "{numbers:?}");
+        assert!(!active_pane(&mux).copy_mode, "copying leaves copy mode");
+        assert_eq!(active_pane(&mux).term.scroll_offset, 0);
+    }
+
+    #[test]
+    fn leaving_copy_mode_returns_to_the_live_screen() {
+        let (mut mux, shells) = scripted();
+        feed_lines(&shells, 0, 200);
+        tick(&mut mux);
+        prefixed(&mut mux, 'b');
+        assert!(active_pane(&mux).copy_mode, "b enters copy mode by itself");
+        assert!(active_pane(&mux).term.scroll_offset > 0);
+        mux.handle_event(&press(Key::Escape));
+        assert!(!active_pane(&mux).copy_mode);
+        assert_eq!(active_pane(&mux).term.scroll_offset, 0);
+
+        prefixed(&mut mux, 'f');
+        assert!(
+            !active_pane(&mux).copy_mode,
+            "a forward key does not enter it"
+        );
+        prefixed(&mut mux, 'g');
+        let pane = active_pane(&mux);
+        assert_eq!(pane.term.viewport_top(), 0, "g goes to the oldest line");
+        mux.handle_event(&types('G'));
+        assert_eq!(
+            active_pane(&mux).term.scroll_offset,
+            0,
+            "G to the live screen"
+        );
+    }
+
+    #[test]
+    fn what_the_pointer_selected_can_be_copied() {
+        let (mut mux, shells) = scripted();
+        shell(&shells, 0)
+            .borrow_mut()
+            .pending
+            .extend_from_slice(b"alpha bravo\r\n");
+        tick(&mut mux);
+        let id = mux.active_pane_id().unwrap();
+        let grid = rect_of(&mux, Target::Pane(id, TermTarget::Grid)).expect("the grid");
+        let y = grid.y + 3.0;
+        mux.handle_event(&Event::Mouse(MouseEvent {
+            x: grid.x + 1.0,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        mux.handle_event(&Event::Mouse(MouseEvent {
+            x: grid.x + 200.0,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        mux.handle_event(&Event::Mouse(MouseEvent {
+            x: grid.x + 200.0,
+            y,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        }));
+        prefixed(&mut mux, 'y');
+        assert_eq!(mux.clipboard, "alpha bravo");
+    }
+
+    #[test]
+    fn copying_with_nothing_selected_says_so() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, '[');
+        prefixed(&mut mux, 'y');
+        assert!(mux.clipboard.is_empty());
+        assert_eq!(mux.status_message, "nothing marked");
+    }
+
+    #[test]
+    fn pasting_an_empty_clipboard_says_so() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, ']');
+        assert_eq!(mux.status_message, "clipboard is empty");
+    }
+
+    // -- the pointer --
+
+    #[test]
+    fn every_control_answers_the_pointer() {
+        let mut mux = Multiplexer::new();
+        let first_window = mux.active_window().unwrap().id;
+
+        probe::click(&mut mux, Target::NewWindow);
+        assert_eq!(windows(&mux), 2);
+        let second_window = mux.active_window().unwrap().id;
+
+        probe::click(&mut mux, Target::Tab(first_window));
+        assert_eq!(mux.active_window().unwrap().id, first_window);
+        probe::click(&mut mux, Target::StatusWindow(second_window));
+        assert_eq!(mux.active_window().unwrap().id, second_window);
+
+        probe::click(&mut mux, Target::Help);
+        assert!(mux.show_help);
+        assert!(
+            rect_of(&mux, Target::NewWindow).is_none(),
+            "behind the card, nothing can be clicked"
+        );
+        probe::click(&mut mux, Target::HelpCard);
+        assert!(!mux.show_help);
+
+        probe::click(&mut mux, Target::SessionName);
+        assert!(mux.session_chooser);
+        probe::click(&mut mux, Target::ChooserBox);
+        assert!(
+            mux.session_chooser,
+            "a click between the rows keeps it open"
+        );
+        probe::click(&mut mux, Target::Scrim);
+        assert!(!mux.session_chooser);
+
+        mux.process_command(":new-session two");
+        let first_session = mux.sessions[0].id;
+        probe::click(&mut mux, Target::SessionName);
+        probe::click(&mut mux, Target::SessionRow(first_session));
+        assert_eq!(mux.active_session, 0);
+        assert!(!mux.session_chooser);
+
+        prefixed(&mut mux, 'w');
+        probe::click(&mut mux, Target::WindowRow(first_window));
+        assert_eq!(mux.active_window().unwrap().id, first_window);
+        assert!(!mux.window_chooser);
+
+        prefixed(&mut mux, '%');
+        let right = mux.active_pane_id().unwrap();
+        let left = mux.active_window().unwrap().layout.pane_ids()[0];
+        probe::click(&mut mux, Target::PaneTitle(left));
+        assert_eq!(mux.active_pane_id(), Some(left));
+        probe::click(&mut mux, Target::Pane(right, TermTarget::Grid));
+        assert_eq!(
+            mux.active_pane_id(),
+            Some(right),
+            "a click in a grid focuses it"
+        );
+        assert_eq!(mux.drag, Some(right), "and starts a selection there");
+
+        prefixed(&mut mux, 'x');
+        probe::click(&mut mux, Target::ConfirmNo);
+        assert_eq!(panes_in_active_window(&mux), 2);
+        prefixed(&mut mux, 'x');
+        probe::click(&mut mux, Target::ConfirmYes);
+        assert_eq!(panes_in_active_window(&mux), 1);
+
+        prefixed(&mut mux, 'd');
+        assert!(mux.detached);
+        probe::click(&mut mux, Target::ChooseSession);
+        assert!(mux.session_chooser);
+        mux.handle_event(&press(Key::Escape));
+        probe::click(&mut mux, Target::Attach);
+        assert!(!mux.detached);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_pane_under_the_pointer() {
+        let (mut mux, shells) = scripted();
+        prefixed(&mut mux, '%');
+        let ids = mux.active_window().unwrap().layout.pane_ids();
+        feed_lines(&shells, 0, 200);
+        feed_lines(&shells, 1, 200);
+        tick(&mut mux);
+        scroll_at_point(&mut mux, Target::Pane(ids[0], TermTarget::Grid), 1.0);
+        assert!(mux.find_pane(ids[0]).unwrap().term.scroll_offset > 0);
+        assert_eq!(mux.find_pane(ids[1]).unwrap().term.scroll_offset, 0);
+    }
+
+    #[test]
+    fn the_wheel_moves_through_a_chooser() {
+        let mut mux = Multiplexer::new();
+        mux.process_command(":new-session two");
+        mux.process_command(":new-session three");
+        prefixed(&mut mux, 's');
+        let before = mux.active_session;
+        let row = Target::SessionRow(mux.sessions[before].id);
+        scroll_at_point(&mut mux, row, 1.0);
+        assert_ne!(mux.active_session, before, "one notch, one row");
+    }
+
+    #[test]
+    fn a_long_list_of_sessions_stays_inside_its_box() {
+        let mut mux = Multiplexer::new();
+        for n in 0..40 {
+            mux.process_command(&format!(":new-session s{n}"));
+        }
+        prefixed(&mut mux, 's');
+        let frame = mux.frame_at((WINDOW_WIDTH, WINDOW_HEIGHT));
+        let area = frame
+            .rect_of(|t| *t == Target::ChooserBox)
+            .expect("the box");
+        let rows: Vec<Rect> = frame
+            .hits()
+            .iter()
+            .filter(|(t, _)| matches!(t, Target::SessionRow(_)))
+            .map(|(_, r)| *r)
+            .collect();
+        assert!(!rows.is_empty());
+        assert!(
+            rows.len() < 41,
+            "every row was drawn, whatever the box's height"
+        );
+        for r in &rows {
+            assert!(
+                r.bottom() <= area.bottom() + 0.01,
+                "{r:?} is below {area:?}"
+            );
+        }
+        let current = mux.sessions[mux.active_session].id;
+        assert!(
+            frame
+                .rect_of(|t| *t == Target::SessionRow(current))
+                .is_some(),
+            "the highlighted session is among the rows shown"
+        );
+    }
+
+    // -- tmux's meanings --
+
+    fn split_dir(mux: &Multiplexer) -> Option<SplitDir> {
+        match &mux.active_window()?.layout {
+            LayoutNode::Split { direction, .. } => Some(*direction),
+            LayoutNode::Leaf(_) => None,
+        }
+    }
+
+    #[test]
+    fn split_window_h_splits_side_by_side_as_tmux_does() {
+        let mut mux = Multiplexer::new();
+        mux.process_command(":split-window -h");
+        assert_eq!(split_dir(&mux), Some(SplitDir::SideBySide));
+
+        let mut mux = Multiplexer::new();
+        mux.process_command(":split-window");
+        assert_eq!(
+            split_dir(&mux),
+            Some(SplitDir::Stacked),
+            "-v is the default"
+        );
+
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, '%');
+        assert_eq!(split_dir(&mux), Some(SplitDir::SideBySide));
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, '"');
+        assert_eq!(split_dir(&mux), Some(SplitDir::Stacked));
+    }
+
+    #[test]
+    fn the_layouts_mean_what_tmux_means_by_them() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, '%');
+        prefixed(&mut mux, '%');
+        let rects = |m: &Multiplexer| -> Vec<Rect> {
+            m.active_window()
+                .unwrap()
+                .bounds(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect()
+        };
+        mux.process_command(":select-layout even-horizontal");
+        let r = rects(&mux);
+        assert!(
+            r.windows(2)
+                .all(|p| p[1].x > p[0].x && (p[1].y - p[0].y).abs() < 0.01),
+            "{r:?}"
+        );
+
+        mux.process_command(":select-layout even-vertical");
+        let r = rects(&mux);
+        assert!(
+            r.windows(2)
+                .all(|p| p[1].y > p[0].y && (p[1].x - p[0].x).abs() < 0.01),
+            "{r:?}"
+        );
+
+        mux.process_command(":select-layout main-horizontal");
+        let r = rects(&mux);
+        assert!(
+            r[0].w > r[1].w && r[1].y > r[0].y,
+            "the main pane on top: {r:?}"
+        );
+
+        mux.process_command(":select-layout main-vertical");
+        let r = rects(&mux);
+        assert!(
+            r[0].h > r[1].h && r[1].x > r[0].x,
+            "the main pane on the left: {r:?}"
+        );
+
+        mux.process_command(":select-layout diagonal");
+        assert_eq!(mux.status_message, "Unknown layout: diagonal");
+    }
+
+    #[test]
+    fn prefix_space_names_the_layout_it_chose() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, '%');
+        prefixed(&mut mux, ' ');
+        assert_eq!(mux.status_message, "layout: even-horizontal");
+        assert_eq!(
+            mux.active_window().unwrap().preset,
+            LayoutPreset::EvenHorizontal
+        );
+    }
+
+    fn pane_width(mux: &Multiplexer, id: PaneId) -> f32 {
+        mux.pane_rect(id).unwrap().w
+    }
+
+    #[test]
+    fn growing_a_pane_grows_it_whichever_side_it_is_on() {
+        // `prefix +` moved the outermost split in its first child's favour, so
+        // it shrank every pane on the right or at the bottom.
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, '%');
+        let right = mux.active_pane_id().unwrap();
+        let before = pane_width(&mux, right);
+        prefixed(&mut mux, '+');
+        assert!(
+            pane_width(&mux, right) > before,
+            "the right-hand pane shrank"
+        );
+
+        prefixed(&mut mux, 'o');
+        let left = mux.active_pane_id().unwrap();
+        let before = pane_width(&mux, left);
+        prefixed(&mut mux, '+');
+        assert!(pane_width(&mux, left) > before);
+
+        let mut single = Multiplexer::new();
+        prefixed(&mut single, '+');
+        assert_eq!(single.status_message, "no split to resize");
+    }
+
+    #[test]
+    fn swapping_moves_the_pane_and_keeps_it_active() {
+        // `}` cycled the active pane under a comment calling a real swap too
+        // complex, and the card said "Swap this pane with the next".
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, '%');
+        let ids = mux.active_window().unwrap().layout.pane_ids();
+        let active = mux.active_pane_id().unwrap();
+        assert_eq!(active, ids[1]);
+        prefixed(&mut mux, '}');
+        assert_eq!(
+            mux.active_window().unwrap().layout.pane_ids(),
+            vec![ids[1], ids[0]]
+        );
+        assert_eq!(mux.active_pane_id(), Some(active));
+    }
+
+    #[test]
+    fn semicolon_goes_back_to_the_pane_you_were_in() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, '%');
+        prefixed(&mut mux, '"');
+        let ids = mux.active_window().unwrap().layout.pane_ids();
+        let third = mux.active_pane_id().unwrap();
+        assert_eq!(third, ids[2]);
+        prefixed(&mut mux, 'o');
+        assert_eq!(mux.active_pane_id(), Some(ids[0]), "o wraps to the first");
+        prefixed(&mut mux, ';');
+        assert_eq!(
+            mux.active_pane_id(),
+            Some(third),
+            "; is the one before, not the previous in order"
+        );
+        prefixed(&mut mux, ';');
+        assert_eq!(mux.active_pane_id(), Some(ids[0]));
+    }
+
+    #[test]
+    fn a_window_is_reached_by_the_number_on_its_tab() {
+        // The digits chose by position and the tabs showed a creation count:
+        // once a window had closed, prefix 1 went to the window labelled 2.
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, 'c');
+        prefixed(&mut mux, 'c');
+        prefixed(&mut mux, '1');
+        prefixed(&mut mux, '&');
+        mux.handle_event(&types('y'));
+        let numbers: Vec<usize> = mux
+            .active_session()
+            .unwrap()
+            .windows
+            .iter()
+            .map(|w| w.index)
+            .collect();
+        assert_eq!(numbers, vec![0, 2]);
+        prefixed(&mut mux, '2');
+        assert_eq!(mux.active_window().unwrap().index, 2);
+        assert!(
+            drawn_texts(&mux).iter().any(|t| t == "2:shell"),
+            "the tab says 2"
+        );
+
+        prefixed(&mut mux, 'c');
+        let numbers: Vec<usize> = mux
+            .active_session()
+            .unwrap()
+            .windows
+            .iter()
+            .map(|w| w.index)
+            .collect();
+        assert_eq!(
+            numbers,
+            vec![0, 1, 2],
+            "a new window takes the lowest number free"
+        );
+        assert_eq!(mux.active_window().unwrap().index, 1);
+        prefixed(&mut mux, '7');
+        assert_eq!(mux.status_message, "no window 7");
+    }
+
+    #[test]
+    fn attach_and_kill_session_take_a_name_a_number_or_nothing() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, 'd');
+        assert!(mux.detached);
+        mux.process_command(":attach");
+        assert!(!mux.detached, "attach alone attaches the current session");
+
+        mux.process_command(":new-session work");
+        mux.process_command(":attach main");
+        assert_eq!(mux.active_session().unwrap().name, "main");
+        mux.process_command(":attach 1");
+        assert_eq!(mux.active_session().unwrap().name, "work");
+        mux.process_command(":attach nowhere");
+        assert_eq!(mux.status_message, "no session nowhere");
+
+        mux.process_command(":kill-session main");
+        assert_eq!(mux.sessions.len(), 1);
+        assert_eq!(mux.active_session().unwrap().name, "work");
+    }
+
+    #[test]
+    fn two_sessions_cannot_share_a_name() {
+        let mut mux = Multiplexer::new();
+        mux.process_command(":new-session main");
+        assert_eq!(mux.sessions.len(), 1);
+        assert_eq!(mux.status_message, "duplicate session: main");
+        mux.process_command(":new-session");
+        mux.process_command(":new-session");
+        let names: Vec<&str> = mux.sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert_ne!(names[1], names[2]);
+    }
+
+    #[test]
+    fn the_detached_screen_says_what_runs_on_and_how_to_return() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, 'd');
+        let texts = drawn_texts(&mux);
+        assert!(
+            texts.iter().any(|t| t.contains("still running")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t == "Closing this window ends every session.")
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("tmux attach")),
+            "there is no tmux command to type"
+        );
+        assert!(rect_of(&mux, Target::Attach).is_some());
+        assert!(
+            rect_of(&mux, Target::ChooseSession).is_none(),
+            "one session: nothing to choose"
+        );
+        mux.handle_event(&press(Key::Enter));
+        assert!(!mux.detached, "Enter attaches, as the button says");
+    }
+
+    // -- the clock --
+
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "it stands in for `system_clock`, whose type it must have"
+    )]
+    fn fixed_clock() -> Option<u64> {
+        // 2025-09-25 11:33:20 UTC.
+        Some(1_758_800_000_000)
+    }
+
+    #[test]
+    fn the_status_bar_reads_the_wall_clock_in_utc() {
+        // It printed the seconds the window had been open as a time of day,
+        // so every launch began at 00:00.
+        let mut mux = Multiplexer::new();
+        mux.clock = fixed_clock;
+        tick(&mut mux);
+        assert!(
+            drawn_texts(&mux).iter().any(|t| t == "11:33 UTC"),
+            "{:?}",
+            drawn_texts(&mux)
+        );
+    }
+
+    #[test]
+    fn a_status_message_gives_way_to_the_clock() {
+        let mut mux = Multiplexer::new();
+        mux.clock = fixed_clock;
+        mux.set_status("hello");
+        assert!(drawn_texts(&mux).iter().any(|t| t == "hello"));
+        for _ in 0..6 {
+            mux.handle_event(&Event::Tick { elapsed_ms: 1000 });
+        }
+        let after = drawn_texts(&mux);
+        assert!(
+            !after.iter().any(|t| t == "hello"),
+            "the message outlived five seconds"
+        );
+        assert!(after.iter().any(|t| t == "11:33 UTC"));
+    }
+
+    #[test]
+    fn the_clock_is_asked_for_only_as_often_as_something_moves() {
+        let mut mux = Multiplexer::new();
+        mux.clock = fixed_clock;
+        tick(&mut mux);
+        mux.handle_event(&Event::FocusOut);
+        // No shell, no focused cursor to blink: the next change is the minute.
+        let wait = mux.tick_interval().unwrap();
+        assert_eq!(
+            wait,
+            Duration::from_secs(40),
+            "the minute turns at 11:34:00"
+        );
+
+        mux.set_status("x");
+        assert_eq!(
+            mux.tick_interval().unwrap(),
+            Duration::from_millis(STATUS_MESSAGE_MS)
+        );
+
+        let (mut live, _shells) = scripted();
+        live.clock = fixed_clock;
+        assert!(
+            live.tick_interval().unwrap() <= Duration::from_millis(20),
+            "a talking shell is read often"
+        );
+    }
+
+    // -- keys --
+
     #[test]
     fn every_advertised_prefix_command_does_something() {
         for (label, what) in SHORTCUTS {
-            if *label == "F1" {
-                continue; // not a prefix command; covered below
+            if matches!(*label, "F1" | "Arrows") {
+                continue; // not characters after the prefix; tested elsewhere
             }
             for ch in prefix_chars(label) {
                 let mut mux = Multiplexer::new();
@@ -3944,1627 +4270,344 @@ mod tests {
         }
     }
 
-    /// **Zoom fills the window with one pane, rather than saying it did.**
-    ///
-    /// `prefix z` used to call `set_status("Pane zoom toggled")` and nothing
-    /// else: the word "zoom" appeared exactly once in this crate, in that
-    /// string. It announced a thing it did not do, which is the same defect
-    /// as `apps/fileassoc`'s export -- a message true about a variable and
-    /// false about the world.
-    #[test]
-    fn zooming_gives_the_active_pane_the_whole_window() {
-        let mut mux = Multiplexer::new();
-        mux.handle_event(&key_ev(Key::B, "", true));
-        mux.handle_event(&key_ev(Key::A, "%", false));
-        let split = mux
-            .active_session()
-            .and_then(Session::active_window)
-            .map(|w| w.bounds(1200.0, 800.0))
-            .unwrap_or_default();
-        assert!(split.len() > 1, "control: the split did not happen");
-
-        mux.handle_event(&key_ev(Key::B, "", true));
-        mux.handle_event(&key_ev(Key::A, "z", false));
-        let zoomed = mux
-            .active_session()
-            .and_then(Session::active_window)
-            .map(|w| w.bounds(1200.0, 800.0))
-            .unwrap_or_default();
-        assert_eq!(zoomed.len(), 1, "zoom left more than one pane on screen");
-        let only = zoomed.first().expect("one pane");
-        let widest = split.iter().map(|b| b.3).fold(0.0_f32, f32::max);
-        assert!(
-            only.3 > widest,
-            "the zoomed pane is no wider than it was: {} against {widest}",
-            only.3
-        );
-
-        mux.handle_event(&key_ev(Key::B, "", true));
-        mux.handle_event(&key_ev(Key::A, "z", false));
-        let back = mux
-            .active_session()
-            .and_then(Session::active_window)
-            .map(|w| w.bounds(1200.0, 800.0))
-            .unwrap_or_default();
-        assert_eq!(back.len(), split.len(), "unzoom did not restore the split");
-    }
-
-    fn key_ev(key: Key, text: &str, ctrl: bool) -> Event {
-        let mut modifiers = guitk::event::Modifiers::NONE;
-        modifiers.ctrl = ctrl;
-        Event::Key(KeyEvent {
-            key,
-            pressed: true,
-            modifiers,
-            text: text.to_string(),
-        })
-    }
-
-    fn press(k: Key) -> Event {
-        key_ev(k, "", false)
-    }
-
-    fn types(c: char) -> Event {
-        key_ev(Key::A, &c.to_string(), false)
-    }
-
-    /// Ctrl+B, then the key.
-    fn prefixed(mux: &mut Multiplexer, c: char) {
-        mux.handle_event(&key_ev(Key::B, "", true));
-        assert_eq!(mux.prefix_state, PrefixState::Prefix, "Ctrl+B did not arm");
-        mux.handle_event(&types(c));
-    }
-
-    /// The pane the keyboard is aimed at.
-    ///
-    /// A test helper rather than a method: every production reader of the
-    /// active pane needs it mutably, and a shared accessor that only tests call
-    /// is API for its own sake.
-    fn active_pane(mux: &Multiplexer) -> Option<&Pane> {
-        let id = mux.active_session()?.active_window()?.active_pane;
-        mux.find_pane(id)
-    }
-
-    fn panes_in_active_window(mux: &Multiplexer) -> usize {
-        mux.active_session()
-            .and_then(Session::active_window)
-            .map_or(0, |w| w.layout.pane_ids().len())
-    }
-
     #[test]
     fn ctrl_b_arms_the_prefix_and_the_next_key_is_a_command() {
         let mut mux = Multiplexer::new();
-        assert_eq!(panes_in_active_window(&mux), 1);
-
         prefixed(&mut mux, '%');
-        assert_eq!(panes_in_active_window(&mux), 2, "Ctrl+B % should split");
-        assert_eq!(
-            mux.prefix_state,
-            PrefixState::Normal,
-            "the prefix lasts exactly one key"
-        );
+        assert_eq!(panes_in_active_window(&mux), 2);
+        assert_eq!(mux.prefix_state, PrefixState::Normal, "one key only");
     }
 
-    /// A bare key is the pane's, not the multiplexer's -- otherwise typing `x`
-    /// into a shell would close the pane.
-    #[test]
-    fn a_key_without_the_prefix_is_not_a_command() {
-        let mut mux = Multiplexer::new();
-        mux.handle_event(&types('x'));
-        assert_eq!(panes_in_active_window(&mux), 1, "`x` alone closed a pane");
-    }
-
-    /// The prefix waits for a *character*. An arrow resizes; a key with no text
-    /// and no meaning must not be swallowed as if it were a command.
     #[test]
     fn the_prefix_is_spent_by_whatever_follows_it() {
         let mut mux = Multiplexer::new();
         mux.handle_event(&key_ev(Key::B, "", true));
         mux.handle_event(&press(Key::F5));
-        assert_eq!(
-            mux.prefix_state,
-            PrefixState::Normal,
-            "the prefix must not stay armed waiting for a key it likes"
-        );
+        assert_eq!(mux.prefix_state, PrefixState::Normal);
     }
-
-    #[test]
-    fn the_prefix_covers_the_vocabulary_the_banner_advertises() {
-        let mut mux = Multiplexer::new();
-
-        prefixed(&mut mux, 'c');
-        assert_eq!(
-            mux.active_session().map_or(0, |s| s.windows.len()),
-            2,
-            "Ctrl+B c should make a window"
-        );
-
-        prefixed(&mut mux, '"');
-        assert_eq!(panes_in_active_window(&mux), 2, "Ctrl+B \" should split");
-
-        prefixed(&mut mux, 'x');
-        assert_eq!(panes_in_active_window(&mux), 1, "Ctrl+B x should close one");
-
-        prefixed(&mut mux, 'd');
-        assert!(
-            mux.active_session().is_some_and(|s| !s.attached),
-            "Ctrl+B d should detach"
-        );
-    }
-
-    // -- the command prompt --
 
     #[test]
     fn the_command_prompt_takes_a_line_and_runs_it() {
         let mut mux = Multiplexer::new();
         prefixed(&mut mux, ':');
         assert!(mux.command_mode);
-        assert_eq!(mux.command_input, ":");
-
-        for c in "new-window".chars() {
-            mux.handle_event(&types(c));
-        }
+        type_str(&mut mux, "new-window");
         assert_eq!(mux.command_input, ":new-window");
         mux.handle_event(&press(Key::Enter));
-
         assert!(!mux.command_mode);
-        assert_eq!(mux.active_session().map_or(0, |s| s.windows.len()), 2);
+        assert_eq!(windows(&mux), 2);
     }
 
-    /// While the prompt is open it takes every key: a half-typed `:split-window`
-    /// must not also split something because it contains an `x`.
     #[test]
-    fn the_prompt_swallows_keys_that_would_otherwise_be_commands() {
-        let mut mux = Multiplexer::new();
+    fn the_prompt_swallows_keys_and_backspace_stops_at_the_colon() {
+        let (mut mux, shells) = scripted();
         prefixed(&mut mux, ':');
         mux.handle_event(&types('x'));
-        assert_eq!(panes_in_active_window(&mux), 1);
         assert_eq!(mux.command_input, ":x");
-    }
-
-    #[test]
-    fn escape_abandons_the_prompt_and_backspace_stops_at_the_colon() {
-        let mut mux = Multiplexer::new();
-        prefixed(&mut mux, ':');
+        assert!(
+            shell(&shells, 0).borrow().sent.is_empty(),
+            "the prompt's key reached the shell"
+        );
         for _ in 0..5 {
             mux.handle_event(&press(Key::Backspace));
         }
-        assert_eq!(
-            mux.command_input, ":",
-            "the prompt is the mode indicator and must survive backspace"
-        );
-
-        for c in "kill".chars() {
-            mux.handle_event(&types(c));
-        }
+        assert_eq!(mux.command_input, ":");
         mux.handle_event(&press(Key::Escape));
         assert!(!mux.command_mode);
         assert!(mux.command_input.is_empty());
     }
 
-    // -- the choosers --
-
-    /// The session chooser drew every session and there was no way to pick one:
-    /// nothing ever changed `active_session` except creating or killing.
     #[test]
-    fn the_session_chooser_can_choose_a_session() {
-        let mut mux = Multiplexer::new();
-        mux.new_session("second");
-        assert!(mux.sessions.len() >= 2);
-
+    fn the_choosers_choose_and_keep_the_keyboard() {
+        let (mut mux, shells) = scripted();
+        mux.process_command(":new-session second");
         prefixed(&mut mux, 's');
-        assert!(mux.session_chooser);
         let before = mux.active_session;
         mux.handle_event(&press(Key::Down));
-        assert_ne!(
-            mux.active_session, before,
-            "Down did not move the selection"
+        assert_ne!(mux.active_session, before);
+        mux.handle_event(&types('x'));
+        assert!(
+            shells.borrow().iter().all(|s| s.borrow().sent.is_empty()),
+            "the list is modal"
         );
-
         mux.handle_event(&press(Key::Enter));
-        assert!(!mux.session_chooser, "Enter should close the chooser");
-    }
+        assert!(!mux.session_chooser);
 
-    #[test]
-    fn the_window_chooser_can_choose_a_window() {
-        let mut mux = Multiplexer::new();
         prefixed(&mut mux, 'c');
         prefixed(&mut mux, 'w');
-        assert!(mux.window_chooser);
-
-        let before = mux.active_session().map_or(0, |s| s.active_window);
+        let before = mux.active_session().unwrap().active_window;
         mux.handle_event(&press(Key::Down));
-        assert_ne!(mux.active_session().map_or(0, |s| s.active_window), before);
+        assert_ne!(mux.active_session().unwrap().active_window, before);
         mux.handle_event(&press(Key::Escape));
         assert!(!mux.window_chooser);
     }
 
-    // -- resizing --
-
-    /// `RESIZE_STEP` was a constant with nothing behind it, and every split was
-    /// 50/50 for the life of the session.
     #[test]
-    fn the_prefix_and_an_arrow_move_the_divider() {
+    fn the_prefix_and_an_arrow_move_the_divider_and_stop_short_of_the_edge() {
         let mut mux = Multiplexer::new();
         prefixed(&mut mux, '%');
-        let before = split_ratio(&mux).expect("a split exists");
-
+        let ratio = |m: &Multiplexer| match &m.active_window().unwrap().layout {
+            LayoutNode::Split { ratio, .. } => *ratio,
+            LayoutNode::Leaf(_) => panic!("no split"),
+        };
+        let before = ratio(&mux);
         mux.handle_event(&key_ev(Key::B, "", true));
         mux.handle_event(&press(Key::Right));
-        let after = split_ratio(&mux).expect("still split");
-        assert!(
-            after > before,
-            "the divider did not move: {before} -> {after}"
-        );
-
-        mux.handle_event(&key_ev(Key::B, "", true));
-        mux.handle_event(&press(Key::Left));
-        let back = split_ratio(&mux).expect("still split");
-        assert!((back - before).abs() < 0.001, "and it should come back");
-    }
-
-    /// The divider stops well inside the edges, or the ratio walks past a bound
-    /// `compute_bounds` then floors -- and cannot be brought back.
-    #[test]
-    fn the_divider_stops_before_it_reaches_the_edge() {
-        let mut mux = Multiplexer::new();
-        prefixed(&mut mux, '%');
+        assert!(ratio(&mux) > before);
         for _ in 0..200 {
-            mux.handle_event(&key_ev(Key::B, "", true));
-            mux.handle_event(&press(Key::Right));
-        }
-        let ratio = split_ratio(&mux).expect("still split");
-        assert!(
-            (MIN_SPLIT_RATIO..=1.0 - MIN_SPLIT_RATIO).contains(&ratio),
-            "ratio ran to {ratio}"
-        );
-
-        for _ in 0..400 {
             mux.handle_event(&key_ev(Key::B, "", true));
             mux.handle_event(&press(Key::Left));
         }
-        let ratio = split_ratio(&mux).expect("still split");
-        assert!(
-            (MIN_SPLIT_RATIO..=1.0 - MIN_SPLIT_RATIO).contains(&ratio),
-            "ratio ran to {ratio}"
-        );
+        assert!((MIN_SPLIT_RATIO..=1.0 - MIN_SPLIT_RATIO).contains(&ratio(&mux)));
     }
 
-    fn split_ratio(mux: &Multiplexer) -> Option<f32> {
-        fn find(node: &LayoutNode) -> Option<f32> {
-            match node {
-                LayoutNode::Leaf(_) => None,
-                LayoutNode::Split {
-                    ratio,
-                    first,
-                    second,
-                    ..
-                } => find(first).or_else(|| find(second)).or(Some(*ratio)),
-            }
-        }
-        find(&mux.active_session()?.active_window()?.layout)
-    }
-
-    // -- copy and paste --
-
-    /// `copy_start` was set to `None` in two places and to a value in none, and
-    /// `clipboard` was read by nothing: copy mode could scroll the scrollback
-    /// and not copy from it.
     #[test]
-    fn copy_mode_can_mark_yank_and_paste() {
+    fn zoom_fills_the_window_and_comes_back() {
         let mut mux = Multiplexer::new();
-        if let Some(pane) = mux.active_pane_mut() {
-            pane.feed("alpha\r\nbravo\r\n");
-        }
-
-        prefixed(&mut mux, '[');
-        assert!(active_pane(&mux).is_some_and(|p| p.copy_mode));
-        prefixed(&mut mux, 'v');
-        assert!(
-            active_pane(&mux).is_some_and(|p| p.copy_start.is_some()),
-            "`v` should have marked a position"
-        );
-
-        prefixed(&mut mux, 'y');
-        assert!(!mux.clipboard.is_empty(), "the yank copied nothing");
-        assert!(
-            !active_pane(&mux).is_some_and(|p| p.copy_mode),
-            "yanking leaves copy mode"
-        );
-
-        // Into a *new* pane, which starts empty. Pasting back into the pane the
-        // text was yanked from proves nothing: the words are already on that
-        // screen, so the assertion passes whether or not the paste happened --
-        // which is exactly what a mutation deleting the paste showed.
-        let copied = mux.clipboard.clone();
         prefixed(&mut mux, '%');
-        assert!(
-            pane_text(&mux).trim().is_empty(),
-            "the new pane should start empty, or this proves nothing either"
-        );
-
-        prefixed(&mut mux, ']');
-        assert!(
-            pane_text(&mux).contains(copied.trim()),
-            "the paste did not reach the pane"
-        );
-    }
-
-    /// The divider a user means by "make this wider" is the one beside the
-    /// pane, not the outermost one in the window.
-    #[test]
-    fn resizing_moves_the_divider_nearest_the_active_pane() {
-        let mut mux = Multiplexer::new();
-        // Two nested splits: an outer one, then a second inside its right half,
-        // which is where the active pane ends up.
-        prefixed(&mut mux, '%');
-        prefixed(&mut mux, '"');
-
-        let outer_before = outer_ratio(&mux).expect("an outer split");
-        let inner_before = inner_ratio(&mux).expect("an inner split");
-
-        mux.handle_event(&key_ev(Key::B, "", true));
-        mux.handle_event(&press(Key::Down));
-
+        let active = mux.active_pane_id().unwrap();
+        let split = mux.pane_rect(active).unwrap();
+        prefixed(&mut mux, 'z');
+        let zoomed = mux
+            .active_window()
+            .unwrap()
+            .bounds(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert_eq!(zoomed.len(), 1);
+        assert!(zoomed[0].1.w > split.w);
+        let cols = mux.find_pane(active).unwrap().term.cols();
+        prefixed(&mut mux, 'z');
         assert_eq!(
-            outer_ratio(&mux),
-            Some(outer_before),
-            "the outer divider should not have moved"
-        );
-        assert_ne!(
-            inner_ratio(&mux),
-            Some(inner_before),
-            "the divider beside the active pane is the one that should move"
-        );
-    }
-
-    /// The ratio of the topmost split.
-    fn outer_ratio(mux: &Multiplexer) -> Option<f32> {
-        match &mux.active_session()?.active_window()?.layout {
-            LayoutNode::Split { ratio, .. } => Some(*ratio),
-            LayoutNode::Leaf(_) => None,
-        }
-    }
-
-    /// The ratio of the deepest split, which is the one nearest the pane the
-    /// splits were made from.
-    fn inner_ratio(mux: &Multiplexer) -> Option<f32> {
-        fn deepest(node: &LayoutNode) -> Option<f32> {
-            match node {
-                LayoutNode::Leaf(_) => None,
-                LayoutNode::Split {
-                    ratio,
-                    first,
-                    second,
-                    ..
-                } => deepest(first).or_else(|| deepest(second)).or(Some(*ratio)),
-            }
-        }
-        let layout = &mux.active_session()?.active_window()?.layout;
-        match layout {
-            LayoutNode::Split { first, second, .. } => deepest(first).or_else(|| deepest(second)),
-            LayoutNode::Leaf(_) => None,
-        }
-    }
-
-    #[test]
-    fn yanking_with_nothing_marked_says_so_rather_than_copying_blank() {
-        let mut mux = Multiplexer::new();
-        prefixed(&mut mux, '[');
-        prefixed(&mut mux, 'y');
-        assert!(mux.clipboard.is_empty());
-        assert_eq!(mux.status_message, "nothing marked");
-    }
-
-    #[test]
-    fn pasting_an_empty_clipboard_says_so() {
-        let mut mux = Multiplexer::new();
-        prefixed(&mut mux, ']');
-        assert_eq!(mux.status_message, "clipboard is empty");
-    }
-
-    fn pane_text(mux: &Multiplexer) -> String {
-        let Some(pane) = active_pane(mux) else {
-            return String::new();
-        };
-        (0..pane.buffer.cells.len())
-            .filter_map(|i| pane.buffer.line_text(i))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    // -- the window --
-
-    /// Nothing ever moved `current_time`, so the status bar's clock read
-    /// 00:00:00 for the life of the process and no status message expired.
-    #[test]
-    fn the_tick_moves_the_clock() {
-        let mut mux = Multiplexer::new();
-        assert_eq!(mux.current_time, 0);
-        mux.handle_event(&Event::Tick { elapsed_ms: 1000 });
-        assert_eq!(mux.current_time, 1000);
-        assert_eq!(mux.tick_interval(), Some(Duration::from_secs(1)));
-    }
-
-    #[test]
-    fn a_status_message_stops_being_shown_once_it_is_old() {
-        let mut mux = Multiplexer::new();
-        mux.set_status("hello");
-        // The message and the clock share one slot in the status bar, so the
-        // *count* of draw commands is the same either way -- which is what the
-        // first version of this test compared, and why it passed against a
-        // status bar that never changed. The text is the observable thing.
-        assert!(
-            drawn_texts(&mut mux).iter().any(|t| t == "hello"),
-            "the message should be on the status bar as soon as it is set"
-        );
-
-        // Ten minutes of ticks, not ten seconds: the status clock is hh:mm, so
-        // ten seconds of it is still 00:00 and would prove only that something
-        // was drawn there.
-        for _ in 0..600 {
-            mux.handle_event(&Event::Tick { elapsed_ms: 1000 });
-        }
-        let after = drawn_texts(&mut mux);
-        assert!(
-            !after.iter().any(|t| t == "hello"),
-            "the message should have gone once it was older than five seconds"
+            mux.active_window()
+                .unwrap()
+                .bounds(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .len(),
+            2
         );
         assert!(
-            after.iter().any(|t| t == "00:10"),
-            "and the clock should be back, reading the time the ticks made: {after:?}"
-        );
-    }
-
-    /// Every string the current frame draws.
-    fn drawn_texts(mux: &mut Multiplexer) -> Vec<String> {
-        mux.render_commands()
-            .into_iter()
-            .filter_map(|cmd| match cmd {
-                RenderCommand::Text { text, .. } => Some(text),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Every layout read the `WINDOW_WIDTH` constant, and `relayout` turns
-    /// pixels into terminal columns -- so a pane was drawn at one size and
-    /// wrapped at another.
-    #[test]
-    fn the_panes_are_measured_in_the_window_they_are_given() {
-        let mut mux = Multiplexer::new();
-        let narrow = App::render(&mut mux, 600.0, 400.0);
-        let cols_narrow = active_pane(&mux).map_or(0, |p| p.buffer.cols);
-        assert!(!narrow.commands.is_empty());
-
-        let _ = App::render(&mut mux, 1600.0, 900.0);
-        let cols_wide = active_pane(&mux).map_or(0, |p| p.buffer.cols);
-        assert!(
-            cols_wide > cols_narrow,
-            "a wider window should be a wider terminal: {cols_narrow} -> {cols_wide}"
-        );
-    }
-
-    #[test]
-    fn the_first_pane_is_not_blank() {
-        let mut mux = Multiplexer::new();
-        mux.greet_pane();
-        let text = pane_text(&mux);
-        assert!(
-            text.contains("multiplexer"),
-            "the window opens on an empty black rectangle"
-        );
-        assert!(
-            text.contains("Ctrl+B"),
-            "and it should say how to drive it, got {text:?}"
+            mux.find_pane(active).unwrap().term.cols() < cols,
+            "and its terminal shrank back"
         );
     }
 
     #[test]
     fn the_title_names_the_session_and_window() {
         let mut mux = Multiplexer::new();
-        let first = mux.title();
-        assert!(first.ends_with("- tmux"), "got {first:?}");
+        assert_eq!(mux.title(), "main:0:shell - tmux");
         prefixed(&mut mux, 'c');
-        assert_ne!(mux.title(), first, "a new window should retitle");
+        assert_eq!(mux.title(), "main:1:shell - tmux");
     }
 
-    #[test]
-    fn test_session_new() {
-        let session = Session::new(SessionId(0), "test", 0);
-        assert_eq!(session.name, "test");
-        assert_eq!(session.windows.len(), 1);
-        assert!(session.attached);
-    }
+    // -- drawing --
 
     #[test]
-    fn test_session_alloc_ids() {
-        let mut session = Session::new(SessionId(0), "test", 0);
-        let pid1 = session.alloc_pane_id();
-        let pid2 = session.alloc_pane_id();
-        assert_ne!(pid1, pid2);
-
-        let wid1 = session.alloc_window_id();
-        let wid2 = session.alloc_window_id();
-        assert_ne!(wid1, wid2);
-    }
-
-    // --- Multiplexer ---
-
-    #[test]
-    fn test_mux_new() {
-        let mux = Multiplexer::new();
-        assert_eq!(mux.sessions.len(), 1);
-        assert_eq!(mux.panes.len(), 1);
-        assert_eq!(mux.active_session, 0);
-    }
-
-    #[test]
-    fn test_mux_new_session() {
+    fn the_panes_are_measured_in_the_window_they_are_given() {
         let mut mux = Multiplexer::new();
-        mux.new_session("second");
-        assert_eq!(mux.sessions.len(), 2);
-        assert_eq!(mux.active_session, 1);
-        assert_eq!(mux.sessions[1].name, "second");
+        let _ = App::render(&mut mux, 600.0, 400.0);
+        let narrow = active_pane(&mux).term.cols();
+        let _ = App::render(&mut mux, 1600.0, 900.0);
+        let wide = active_pane(&mux).term.cols();
+        assert!(wide > narrow, "{narrow} -> {wide}");
     }
 
     #[test]
-    fn test_mux_detach_attach() {
+    fn each_terminal_is_as_big_as_the_space_it_is_drawn_in() {
+        // In every window, not only the one showing: a background window's
+        // program keeps writing, and must not learn the new width only when
+        // the user switches to it.
         let mut mux = Multiplexer::new();
-        mux.detach();
-        assert!(!mux.sessions[0].attached);
-        mux.attach(0);
-        assert!(mux.sessions[0].attached);
-    }
-
-    #[test]
-    fn test_mux_new_window() {
-        let mut mux = Multiplexer::new();
-        mux.new_window();
+        prefixed(&mut mux, '%');
+        prefixed(&mut mux, 'c');
+        prefixed(&mut mux, '"');
+        mux.handle_event(&Event::Resize {
+            width: 1000,
+            height: 700,
+        });
+        let cfg = TerminalConfig::default();
         let session = mux.active_session().unwrap();
-        assert_eq!(session.windows.len(), 2);
-        assert_eq!(session.active_window, 1);
-    }
-
-    #[test]
-    fn test_mux_close_window() {
-        let mut mux = Multiplexer::new();
-        mux.new_window();
-        mux.close_window();
-        let session = mux.active_session().unwrap();
-        assert_eq!(session.windows.len(), 1);
-    }
-
-    #[test]
-    fn test_mux_next_prev_window() {
-        let mut mux = Multiplexer::new();
-        mux.new_window();
-        mux.new_window();
-        // At window 2
-        mux.prev_window();
-        assert_eq!(mux.active_session().unwrap().active_window, 1);
-        mux.next_window();
-        assert_eq!(mux.active_session().unwrap().active_window, 2);
-    }
-
-    #[test]
-    fn test_mux_split_pane() {
-        let mut mux = Multiplexer::new();
-        mux.split_pane(SplitDir::Vertical);
-        let session = mux.active_session().unwrap();
-        let window = session.active_window().unwrap();
-        assert_eq!(window.layout.pane_count(), 2);
-        assert_eq!(mux.panes.len(), 2);
-    }
-
-    #[test]
-    fn test_mux_close_pane() {
-        let mut mux = Multiplexer::new();
-        mux.split_pane(SplitDir::Vertical);
-        mux.close_pane();
-        let session = mux.active_session().unwrap();
-        let window = session.active_window().unwrap();
-        assert_eq!(window.layout.pane_count(), 1);
-    }
-
-    #[test]
-    fn test_mux_next_prev_pane() {
-        let mut mux = Multiplexer::new();
-        mux.split_pane(SplitDir::Vertical);
-        let p1 = mux
-            .active_session()
-            .unwrap()
-            .active_window()
-            .unwrap()
-            .active_pane;
-        mux.prev_pane();
-        let p2 = mux
-            .active_session()
-            .unwrap()
-            .active_window()
-            .unwrap()
-            .active_pane;
-        assert_ne!(p1, p2);
-        mux.next_pane();
-        let p3 = mux
-            .active_session()
-            .unwrap()
-            .active_window()
-            .unwrap()
-            .active_pane;
-        assert_eq!(p1, p3);
-    }
-
-    #[test]
-    fn test_mux_apply_layout() {
-        let mut mux = Multiplexer::new();
-        mux.split_pane(SplitDir::Vertical);
-        mux.split_pane(SplitDir::Horizontal);
-        mux.apply_layout(LayoutPreset::EvenHorizontal);
-        let window = mux.active_session().unwrap().active_window().unwrap();
-        assert_eq!(window.preset, LayoutPreset::EvenHorizontal);
-        assert_eq!(window.layout.pane_count(), 3);
-    }
-
-    #[test]
-    fn test_mux_rename_window() {
-        let mut mux = Multiplexer::new();
-        mux.rename_window("my-window");
-        assert_eq!(
-            mux.active_session().unwrap().active_window().unwrap().name,
-            "my-window"
-        );
-    }
-
-    #[test]
-    fn test_mux_kill_session() {
-        let mut mux = Multiplexer::new();
-        mux.new_session("to-kill");
-        assert_eq!(mux.sessions.len(), 2);
-        mux.kill_session(1);
-        assert_eq!(mux.sessions.len(), 1);
-    }
-
-    #[test]
-    fn test_mux_kill_only_session_noop() {
-        let mut mux = Multiplexer::new();
-        mux.kill_session(0);
-        // Should not kill the last session
-        assert_eq!(mux.sessions.len(), 1);
-    }
-
-    #[test]
-    fn test_mux_process_command_new_session() {
-        let mut mux = Multiplexer::new();
-        mux.process_command(":new-session my-session");
-        assert_eq!(mux.sessions.len(), 2);
-        assert_eq!(mux.sessions[1].name, "my-session");
-    }
-
-    #[test]
-    fn test_mux_process_command_split() {
-        let mut mux = Multiplexer::new();
-        mux.process_command(":split-window -h");
-        let pane_count = mux
-            .active_session()
-            .unwrap()
-            .active_window()
-            .unwrap()
-            .layout
-            .pane_count();
-        assert_eq!(pane_count, 2);
-    }
-
-    #[test]
-    fn test_mux_process_command_layout() {
-        let mut mux = Multiplexer::new();
-        mux.split_pane(SplitDir::Vertical);
-        mux.process_command(":select-layout even-vertical");
-        let preset = mux
-            .active_session()
-            .unwrap()
-            .active_window()
-            .unwrap()
-            .preset;
-        assert_eq!(preset, LayoutPreset::EvenVertical);
-    }
-
-    #[test]
-    fn test_mux_process_command_rename() {
-        let mut mux = Multiplexer::new();
-        mux.process_command(":rename-window test-name");
-        assert_eq!(
-            mux.active_session().unwrap().active_window().unwrap().name,
-            "test-name"
-        );
-    }
-
-    #[test]
-    fn test_mux_prefix_split_horizontal() {
-        let mut mux = Multiplexer::new();
-        mux.process_prefix_key('"');
-        let pane_count = mux
-            .active_session()
-            .unwrap()
-            .active_window()
-            .unwrap()
-            .layout
-            .pane_count();
-        assert_eq!(pane_count, 2);
-    }
-
-    #[test]
-    fn test_mux_prefix_split_vertical() {
-        let mut mux = Multiplexer::new();
-        mux.process_prefix_key('%');
-        let pane_count = mux
-            .active_session()
-            .unwrap()
-            .active_window()
-            .unwrap()
-            .layout
-            .pane_count();
-        assert_eq!(pane_count, 2);
-    }
-
-    #[test]
-    fn test_mux_prefix_new_window() {
-        let mut mux = Multiplexer::new();
-        mux.process_prefix_key('c');
-        assert_eq!(mux.active_session().unwrap().windows.len(), 2);
-    }
-
-    #[test]
-    fn test_mux_prefix_close_pane() {
-        let mut mux = Multiplexer::new();
-        mux.split_pane(SplitDir::Vertical);
-        mux.process_prefix_key('x');
-        assert_eq!(
-            mux.active_session()
-                .unwrap()
-                .active_window()
-                .unwrap()
-                .layout
-                .pane_count(),
-            1
-        );
-    }
-
-    #[test]
-    fn test_mux_prefix_detach() {
-        let mut mux = Multiplexer::new();
-        mux.process_prefix_key('d');
-        assert!(!mux.active_session().unwrap().attached);
-    }
-
-    #[test]
-    fn test_mux_prefix_session_chooser() {
-        let mut mux = Multiplexer::new();
-        assert!(!mux.session_chooser);
-        mux.process_prefix_key('s');
-        assert!(mux.session_chooser);
-    }
-
-    #[test]
-    fn test_mux_prefix_window_chooser() {
-        let mut mux = Multiplexer::new();
-        assert!(!mux.window_chooser);
-        mux.process_prefix_key('w');
-        assert!(mux.window_chooser);
-    }
-
-    #[test]
-    fn test_mux_render_nonempty() {
-        let mut mux = Multiplexer::new();
-        let cmds = mux.render_commands();
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_mux_render_detached() {
-        let mut mux = Multiplexer::new();
-        mux.detach();
-        let cmds = mux.render_commands();
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_mux_render_with_splits() {
-        let mut mux = Multiplexer::new();
-        mux.split_pane(SplitDir::Vertical);
-        mux.split_pane(SplitDir::Horizontal);
-        let cmds = mux.render_commands();
-        assert!(cmds.len() > 10); // Should have many render commands
-    }
-
-    #[test]
-    fn test_mux_status_message() {
-        let mut mux = Multiplexer::new();
-        mux.set_time(1000);
-        mux.set_status("Hello");
-        assert_eq!(mux.status_message, "Hello");
-    }
-
-    // --- 256 color ---
-
-    #[test]
-    fn test_color_256_standard() {
-        assert_eq!(color_256(1), Color::from_hex(0xF38BA8));
-        assert_eq!(color_256(2), Color::from_hex(0xA6E3A1));
-    }
-
-    #[test]
-    fn test_color_256_grayscale() {
-        let c = color_256(232);
-        // Should be a dark gray
-        assert_eq!(c, Color::rgb(8, 8, 8));
-    }
-
-    #[test]
-    fn test_color_256_cube() {
-        // Color cube index 16 = (0,0,0) → black
-        let c = color_256(16);
-        assert_eq!(c, Color::rgb(0, 0, 0));
-    }
-
-    // --- Scrollback ---
-
-    #[test]
-    fn test_scrollback_limit() {
-        let mut buf = TerminalBuffer::new(80, 2);
-        for i in 0..MAX_SCROLLBACK + 100 {
-            buf.write_str(&format!("Line {i}\n"));
-        }
-        assert!(buf.scrollback.len() <= MAX_SCROLLBACK);
-    }
-    // --- Cell metrics ---
-
-    /// A character has to fit the cell drawn behind it. Measured in the
-    /// family the glyphs are actually drawn in — with the proportional UI
-    /// face a `W` came out 13.1 px wide in a 7.5 px cell, over its
-    /// neighbour's background and beside the block cursor meant to mark it.
-    #[test]
-    fn a_character_fits_its_cell() {
-        let w = char_width();
-        for ch in ['0', 'W', 'i', '#', 'é', 'M', '@'] {
-            let drawn = text::measure_in(
-                &ch.to_string(),
-                CELL_FONT_SIZE,
-                FontWeightHint::Regular,
-                FontFamily::Mono,
-            );
-            assert!(
-                drawn <= w + 0.01,
-                "{ch:?} draws {drawn} px wide in a {w} px cell"
-            );
-        }
-    }
-
-    /// Bold cells share the grid with regular ones, so a bold glyph has to
-    /// fit the same cell — a fixed-pitch family's bold face is the same
-    /// pitch, and this is where that assumption is checked rather than
-    /// assumed.
-    #[test]
-    fn a_bold_character_fits_the_same_cell() {
-        let w = char_width();
-        for ch in ['0', 'W', 'M', '@'] {
-            let drawn = text::measure_in(
-                &ch.to_string(),
-                CELL_FONT_SIZE,
-                FontWeightHint::Bold,
-                FontFamily::Mono,
-            );
-            assert!(
-                drawn <= w + 0.01,
-                "bold {ch:?} draws {drawn} px wide in a {w} px cell"
-            );
-        }
-    }
-
-    /// The row pitch has to clear the face's line height, or descenders land
-    /// in the row below.
-    #[test]
-    fn rows_do_not_overlap() {
-        assert!(
-            char_height()
-                >= text::ascent_in(CELL_FONT_SIZE, FontWeightHint::Regular, FontFamily::Mono)
-        );
-        assert!(char_height() > 0.0 && char_width() > 0.0);
-    }
-
-    /// Whatever the pane draws its cells with, the compositor has to be told
-    /// to use the same family — otherwise the grid is laid out in one face
-    /// and filled in another, which is the bug the cell width alone cannot
-    /// catch.
-    #[test]
-    fn the_grid_is_drawn_in_the_family_it_was_measured_in() {
-        let mut app = Multiplexer::new();
-        // A fresh multiplexer's buffer is all spaces, and the cell loop skips
-        // a space on the default background — so with no content the scope
-        // would open and close over nothing and the test would pass vacuously.
-        for pane in &mut app.panes {
-            pane.buffer.write_str("cell content\n");
-        }
-        let cmds = app.render_commands();
-        let mut depth = 0_i32;
-        let mut deepest = 0_i32;
-        let mut cell_glyphs = 0_usize;
-        for cmd in &cmds {
-            match cmd {
-                RenderCommand::PushFont { family } => {
-                    assert_eq!(family, &FontFamily::Mono, "only the grid pushes a family");
-                    depth += 1;
-                    deepest = deepest.max(depth);
-                }
-                RenderCommand::PopFont => {
-                    depth -= 1;
-                    assert!(depth >= 0, "a PopFont without a matching PushFont");
-                }
-                RenderCommand::Text { font_size, .. }
-                    if depth > 0 && (font_size - CELL_FONT_SIZE).abs() < 0.01 =>
-                {
-                    cell_glyphs += 1;
-                }
-                _ => {}
-            }
-        }
-        assert_eq!(depth, 0, "the font scopes do not balance");
-        assert_eq!(deepest, 1, "the grid's scope was never opened");
-        assert!(cell_glyphs > 0, "no cell was drawn inside the mono scope");
-    }
-
-    /// Window tabs are chrome, not grid: the label is proportional text and
-    /// the tab is sized by measuring it, so a long window name cannot spill
-    /// past the tab drawn around it.
-    #[test]
-    fn window_tab_fits_its_label() {
-        for name in ["sh", "cargo watch", "very long window name"] {
-            let tab_w = text::width(name, SMALL_TEXT) + 24.0;
-            let label_end = 12.0 + text::width(name, SMALL_TEXT);
-            assert!(label_end <= tab_w - 8.0, "{name:?} overflows its tab");
-        }
-    }
-
-    // --- Scrollback browsing (copy mode) ---
-
-    /// The text of one line, trailing blanks trimmed.
-    fn line_text(line: &[Cell]) -> String {
-        line.iter()
-            .map(|c| c.ch)
-            .collect::<String>()
-            .trim_end()
-            .to_string()
-    }
-
-    fn shown(buf: &TerminalBuffer, capacity: usize, back: usize) -> Vec<String> {
-        buf.visible_lines(capacity, back)
-            .iter()
-            .map(|l| line_text(l))
-            .collect()
-    }
-
-    /// A `rows`-tall terminal that has had `n` numbered lines written through
-    /// it, so everything but the last screenful has been pushed to scrollback.
-    fn buffer_with_lines(rows: usize, n: usize) -> TerminalBuffer {
-        let mut buf = TerminalBuffer::new(20, rows);
-        for i in 0..n {
-            buf.write_str(&format!("line{i}\n"));
-        }
-        buf
-    }
-
-    fn pane_with_lines(rows: usize, n: usize) -> Pane {
-        let mut pane = Pane::new(PaneId(0), 20, rows);
-        pane.buffer = buffer_with_lines(rows, n);
-        pane
-    }
-
-    /// The default view — what every pane that is not browsing its scrollback
-    /// shows — has to be exactly the grid the program wrote, or the scrollback
-    /// window has silently changed what a terminal displays.
-    #[test]
-    fn a_pane_not_browsing_its_scrollback_shows_the_live_screen() {
-        let buf = buffer_with_lines(3, 5);
-        let live: Vec<String> = buf.cells.iter().map(|r| line_text(r)).collect();
-        assert_eq!(shown(&buf, 3, 0), live);
-    }
-
-    /// Scrolling back by one has to reveal the line that most recently left
-    /// the screen — the scrollback and the live grid are one sequence to the
-    /// user, not two buffers with a seam between them.
-    #[test]
-    fn scrolling_back_reveals_the_line_that_just_left_the_screen() {
-        let buf = buffer_with_lines(3, 5);
-        assert_eq!(shown(&buf, 3, 0), ["line3", "line4", ""]);
-        assert_eq!(shown(&buf, 3, 1), ["line2", "line3", "line4"]);
-        assert_eq!(shown(&buf, 3, 2), ["line1", "line2", "line3"]);
-        assert_eq!(shown(&buf, 3, 3), ["line0", "line1", "line2"]);
-    }
-
-    /// Past the oldest line kept there is nothing to show, and the answer is
-    /// the top of the history rather than a blank pane: holding the key down
-    /// must stop, not empty the screen.
-    #[test]
-    fn scrolling_back_past_the_oldest_line_pins_to_the_top() {
-        let buf = buffer_with_lines(3, 5);
-        for back in [3, 4, 50, usize::MAX] {
-            assert_eq!(
-                shown(&buf, 3, back),
-                ["line0", "line1", "line2"],
-                "back={back} should pin to the oldest line kept"
-            );
-        }
-    }
-
-    /// A pane shorter than its own grid draws the *bottom* of it. A terminal's
-    /// interesting end is the one the prompt is on; showing the top would hide
-    /// the line the user is typing.
-    #[test]
-    fn a_view_shorter_than_the_grid_shows_the_bottom_of_it() {
-        let buf = buffer_with_lines(3, 5);
-        assert_eq!(shown(&buf, 1, 0), [""]);
-        assert_eq!(shown(&buf, 2, 0), ["line4", ""]);
-    }
-
-    /// The clamp is the buffer's, not the caller's: the pane may ask for any
-    /// number of lines back, and gets no more than there are.
-    #[test]
-    fn a_pane_cannot_scroll_further_back_than_it_has_history() {
-        let mut pane = pane_with_lines(3, 5);
-        assert_eq!(pane.max_scroll_back(), 3);
-        pane.enter_copy_mode();
-        for _ in 0..20 {
-            pane.scroll_back(1);
-        }
-        assert_eq!(pane.copy_scroll, 3);
-        // And it comes straight back down: an offset that had run past the top
-        // would need those twenty presses back before the view moved at all.
-        pane.scroll_forward(1);
-        assert_eq!(pane.copy_scroll, 2);
-    }
-
-    /// Scrolling forward stops at the live screen rather than running into
-    /// negative territory, and the jump keys reach both ends.
-    #[test]
-    fn the_two_ends_of_the_history_are_both_reachable() {
-        let mut pane = pane_with_lines(3, 5);
-        pane.enter_copy_mode();
-        pane.scroll_to_top();
-        assert_eq!(pane.copy_scroll, 3);
-        pane.scroll_to_bottom();
-        assert_eq!(pane.copy_scroll, 0);
-        pane.scroll_forward(100);
-        assert_eq!(pane.copy_scroll, 0);
-        // Still in copy mode: the jump to the live screen is a move, not an
-        // exit, so the selection keys stay available.
-        assert!(pane.copy_mode);
-    }
-
-    /// Leaving copy mode returns to the live screen even though `copy_scroll`
-    /// is left where it was — the view is only consulted while browsing, which
-    /// is what makes leaving cheap and unambiguous.
-    #[test]
-    fn leaving_copy_mode_returns_to_the_live_screen() {
-        let mut pane = pane_with_lines(3, 5);
-        pane.enter_copy_mode();
-        pane.scroll_back(2);
-        pane.exit_copy_mode();
-        let back = if pane.copy_mode { pane.copy_scroll } else { 0 };
-        assert_eq!(shown(&pane.buffer, 3, back), ["line3", "line4", ""]);
-    }
-
-    /// A degenerate grid must not swallow the key: a zero-row buffer would
-    /// otherwise page by zero lines forever.
-    #[test]
-    fn a_page_is_never_zero_lines() {
-        let pane = Pane::new(PaneId(0), 20, 0);
-        assert_eq!(pane.page_lines(), 1);
-    }
-
-    /// The keys are the feature. Asking to see earlier output enters copy mode
-    /// on its own, so the first press of the key does something visible rather
-    /// than requiring `[` that the user has no reason to know about.
-    #[test]
-    fn the_backwards_keys_enter_copy_mode_by_themselves() {
-        for key in ['k', 'b', 'g'] {
-            let mut app = Multiplexer::new();
-            for pane in &mut app.panes {
-                pane.buffer = buffer_with_lines(3, 10);
-            }
-            app.process_prefix_key(key);
-            let pane = app.active_pane_mut().expect("an active pane");
-            assert!(pane.copy_mode, "{key:?} should have entered copy mode");
-            assert!(pane.copy_scroll > 0, "{key:?} should have moved the view");
-        }
-    }
-
-    /// ...and the forward keys do not, because scrolling towards a screen you
-    /// are already looking at is a no-op worth ignoring rather than a reason
-    /// to change modes under the user.
-    #[test]
-    fn the_forwards_keys_do_not_enter_copy_mode() {
-        for key in ['j', 'f', 'G'] {
-            let mut app = Multiplexer::new();
-            app.process_prefix_key(key);
-            let pane = app.active_pane_mut().expect("an active pane");
-            assert!(!pane.copy_mode, "{key:?} should not have entered copy mode");
-        }
-    }
-
-    /// A page key moves by a screenful, and the line keys by one line — the
-    /// distinction the whole binding exists for.
-    #[test]
-    fn the_page_keys_move_a_screenful_and_the_line_keys_one_line() {
-        let mut app = Multiplexer::new();
-        for pane in &mut app.panes {
-            pane.buffer = buffer_with_lines(3, 30);
-        }
-        app.process_prefix_key('k');
-        assert_eq!(app.active_pane_mut().expect("pane").copy_scroll, 1);
-        app.process_prefix_key('b');
-        assert_eq!(app.active_pane_mut().expect("pane").copy_scroll, 4);
-        app.process_prefix_key('f');
-        assert_eq!(app.active_pane_mut().expect("pane").copy_scroll, 1);
-        app.process_prefix_key('j');
-        assert_eq!(app.active_pane_mut().expect("pane").copy_scroll, 0);
-        app.process_prefix_key('g');
-        assert_eq!(app.active_pane_mut().expect("pane").copy_scroll, 28);
-        app.process_prefix_key('G');
-        assert_eq!(app.active_pane_mut().expect("pane").copy_scroll, 0);
-        app.process_prefix_key('q');
-        assert!(!app.active_pane_mut().expect("pane").copy_mode);
-    }
-
-    /// The end-to-end claim: scrolling back actually changes what is drawn.
-    /// Every test above this one is about numbers; this one is about pixels,
-    /// and is the one that would have caught the original bug — a `copy_scroll`
-    /// that nothing rendered ever read.
-    #[test]
-    fn scrolling_back_changes_what_the_pane_draws() {
-        let mut app = Multiplexer::new();
-        for pane in &mut app.panes {
-            pane.buffer = buffer_with_lines(24, 200);
-        }
-        let live = drawn_text(&mut app);
-        assert!(
-            live.contains("line199"),
-            "the live screen shows the newest line"
-        );
-        assert!(
-            !live.contains("line100"),
-            "and not one from deep in the history"
-        );
-
-        app.process_prefix_key('g');
-        let top = drawn_text(&mut app);
-        assert_ne!(top, live, "scrolling to the top drew the same thing");
-        assert!(
-            !top.contains("line199"),
-            "the newest line is still on screen at the top of the history"
-        );
-
-        app.process_prefix_key('G');
-        assert_eq!(
-            drawn_text(&mut app),
-            live,
-            "returning to the live screen differs from it"
-        );
-    }
-
-    // --- Pane sizing ---
-
-    /// Every pane of the attached session paired with the grid its drawn
-    /// rectangle calls for.
-    ///
-    /// The expectation comes from the layout walk rather than from the
-    /// buffers being checked against it, so a pane that was never sized
-    /// cannot pass by agreeing with itself.
-    ///
-    /// It does *not* independently check the layout walk: a helper that
-    /// asks [`Window::bounds`] where the panes are cannot notice
-    /// [`Window::bounds`] putting them in the wrong place. Mutation testing
-    /// confirmed that blind spot — drawing the panes over the tab bar left
-    /// every test here green. `no_cell_is_drawn_over_the_chrome` is the one
-    /// that covers it, by taking its bounds from the layout constants
-    /// directly.
-    fn expected_grids(app: &Multiplexer) -> Vec<(PaneId, usize, usize)> {
-        app.active_session()
-            .into_iter()
-            .flat_map(|s| s.windows.iter())
-            .flat_map(|w| w.bounds(WINDOW_WIDTH, WINDOW_HEIGHT))
-            .map(|(id, _, _, w, h)| {
-                let (cols, rows) = pane_grid(w, h);
-                (id, cols, rows)
-            })
-            .collect()
-    }
-
-    /// Panics unless every pane's terminal is the size the pane is drawn.
-    fn assert_grids_match(app: &Multiplexer, after: &str) {
-        let expected = expected_grids(app);
-        assert!(!expected.is_empty(), "no panes to check after {after}");
-        for (id, cols, rows) in expected {
-            let pane = app.find_pane(id).expect("a laid-out pane exists");
-            assert_eq!(
-                (pane.buffer.cols, pane.buffer.rows),
-                (cols, rows),
-                "after {after}, {id:?} is drawn {cols}x{rows} \
-                 but its terminal is {}x{}",
-                pane.buffer.cols,
-                pane.buffer.rows,
-            );
-        }
-    }
-
-    /// A pane occupying the whole window has to hold more than the 80x24 every
-    /// terminal starts life at, or none of the tests below distinguish a grid
-    /// that was sized from one that was merely never touched.
-    #[test]
-    fn a_full_window_pane_is_larger_than_the_placeholder_grid() {
-        let app = Multiplexer::new();
-        let pane = app.find_pane(PaneId(0)).expect("the initial pane");
-        assert!(
-            pane.buffer.cols > INITIAL_COLS && pane.buffer.rows > INITIAL_ROWS,
-            "a {WINDOW_WIDTH}x{WINDOW_HEIGHT} window holds only {}x{} cells",
-            pane.buffer.cols,
-            pane.buffer.rows,
-        );
-        assert_grids_match(&app, "startup");
-    }
-
-    /// The claim in full: after *any* change to the arrangement, every pane's
-    /// terminal is the size of the rectangle it is drawn in.
-    ///
-    /// Deliberately never renders. [`Multiplexer::render`] resizes as a
-    /// backstop, so a frame between the steps would hide a mutation that
-    /// forgot to say the arrangement had changed — which is precisely the
-    /// failure this test is for.
-    #[test]
-    fn every_pane_learns_the_rectangle_it_is_drawn_in() {
-        /// One named change to the arrangement of panes.
-        type Step = (&'static str, fn(&mut Multiplexer));
-
-        let mut app = Multiplexer::new();
-        assert_grids_match(&app, "startup");
-
-        let steps: [Step; 14] = [
-            ("a vertical split", |a| a.split_pane(SplitDir::Vertical)),
-            ("a horizontal split", |a| a.split_pane(SplitDir::Horizontal)),
-            ("growing the active pane", |a| a.resize_pane(true)),
-            ("shrinking the active pane", |a| a.resize_pane(false)),
-            ("the even-horizontal layout", |a| {
-                a.apply_layout(LayoutPreset::EvenHorizontal);
-            }),
-            ("the main-vertical layout", |a| {
-                a.apply_layout(LayoutPreset::MainVertical);
-            }),
-            ("the tiled layout", |a| a.apply_layout(LayoutPreset::Tiled)),
-            ("a new window", Multiplexer::new_window),
-            ("a split in the new window", |a| {
-                a.split_pane(SplitDir::Vertical);
-            }),
-            ("switching windows", Multiplexer::next_window),
-            ("closing a pane", Multiplexer::close_pane),
-            ("a new session", |a| a.new_session("second")),
-            ("a split in the new session", |a| {
-                a.split_pane(SplitDir::Horizontal);
-            }),
-            ("attaching back to the first session", |a| a.attach(0)),
-        ];
-        for (name, step) in steps {
-            step(&mut app);
-            assert_grids_match(&app, name);
-        }
-    }
-
-    /// Splitting halves the space, so it has to halve the grid: two panes that
-    /// both still believe they are full width is the original bug exactly.
-    #[test]
-    fn splitting_a_pane_halves_the_grid_of_both_halves() {
-        let mut app = Multiplexer::new();
-        let whole = app.find_pane(PaneId(0)).expect("a pane").buffer.cols;
-        let tall = app.find_pane(PaneId(0)).expect("a pane").buffer.rows;
-
-        app.split_pane(SplitDir::Vertical);
-        let ids = app
-            .active_session()
-            .expect("a session")
-            .active_window()
-            .expect("a window")
-            .layout
-            .pane_ids();
-        assert_eq!(ids.len(), 2);
-
-        let cols: Vec<usize> = ids
-            .iter()
-            .map(|id| app.find_pane(*id).expect("a pane").buffer.cols)
-            .collect();
-        for (id, c) in ids.iter().zip(&cols) {
-            assert!(
-                *c < whole,
-                "{id:?} is half the window wide but still has {c} of {whole} columns"
-            );
-            // A side-by-side split takes nothing off the height.
-            assert_eq!(app.find_pane(*id).expect("a pane").buffer.rows, tall);
-        }
-        // Between them the halves account for the whole width, less the border
-        // and the cell each loses to its own rounding.
-        let sum = cols[0] + cols[1];
-        assert!(
-            sum <= whole && sum + 3 >= whole,
-            "two halves of a {whole}-column pane came to {sum} columns"
-        );
-    }
-
-    /// The user-visible claim. A line that fits across the pane must be drawn
-    /// across the pane — under the fixed 80-column grid it folded at column 80
-    /// with a third of the pane left blank beside the fold.
-    #[test]
-    fn a_line_that_fits_the_pane_is_not_folded() {
-        let mut app = Multiplexer::new();
-        let cols = app.find_pane(PaneId(0)).expect("a pane").buffer.cols;
-        // One short of the full width: longer than the placeholder grid, and
-        // still inside the pane, so a fold can only be the grid being wrong.
-        let width = cols - 1;
-        assert!(width > INITIAL_COLS);
-        let line: String = (0..width)
-            .map(|i| char::from(b'a' + u8::try_from(i % 26).expect("under 26")))
-            .collect();
-
-        app.active_pane_mut().expect("a pane").feed(&line);
-        {
-            let pane = app.active_pane_mut().expect("a pane");
-            assert_eq!(pane.buffer.cursor_row, 0, "the line folded inside the pane");
-            assert_eq!(line_text(&pane.buffer.cells[0]), line);
-        }
-        // And it reaches the screen whole, not just the buffer.
-        assert!(
-            drawn_text(&mut app).contains(&line),
-            "the pane drew a folded line"
-        );
-    }
-
-    /// A pane too small to hold a character is still a terminal, and a
-    /// nonsensical rectangle must not become a nonsensical grid — a
-    /// zero-column buffer would divide the cursor arithmetic by nothing, and a
-    /// zero-row one would make every page key a no-op.
-    #[test]
-    fn a_grid_is_never_smaller_than_one_cell_or_larger_than_the_maximum() {
-        for (w, h) in [
-            (0.0, 0.0),
-            (1.0, 1.0),
-            (-100.0, -100.0),
-            (f32::NAN, f32::NAN),
-            (f32::INFINITY, f32::NEG_INFINITY),
-            (1.0e9, 1.0e9),
-        ] {
-            let (cols, rows) = pane_grid(w, h);
-            assert!(
-                cols >= 1 && rows >= 1,
-                "{w}x{h} px gave a {cols}x{rows} grid"
-            );
-            assert!(
-                cols <= MAX_COLS && rows <= MAX_ROWS,
-                "{w}x{h} px gave a {cols}x{rows} grid"
-            );
-        }
-    }
-
-    /// A frame is the last chance to notice. Whatever else has happened to a
-    /// pane's grid, painting it starts by putting it back in step with the
-    /// rectangle about to be drawn — so a future mutation that changes the
-    /// arrangement without saying so costs a frame's lag, not a terminal that
-    /// wraps in the wrong place until the next split.
-    #[test]
-    fn a_frame_puts_a_pane_that_drifted_back_in_step() {
-        let mut app = Multiplexer::new();
-        app.split_pane(SplitDir::Vertical);
-        let want = expected_grids(&app);
-
-        // Drift every pane behind the multiplexer's back, the way a layout
-        // change that forgot to say so would.
-        for pane in &mut app.panes {
-            pane.buffer.resize(INITIAL_COLS, INITIAL_ROWS);
-        }
-        assert_ne!(
-            (
-                app.find_pane(PaneId(0)).expect("a pane").buffer.cols,
-                app.find_pane(PaneId(0)).expect("a pane").buffer.rows,
-            ),
-            (want[0].1, want[0].2),
-            "the drift this test relies on did not take"
-        );
-
-        let _ = app.render_commands();
-        assert_grids_match(&app, "a frame drawn after the grids drifted");
-    }
-
-    /// A pane's grid has to fit inside the pane at *every* size, not merely at
-    /// the handful a 1200x800 window happens to produce.
-    ///
-    /// Stated as arithmetic over a fine sweep of sizes because the inset is
-    /// smaller than a cell: dropping it changes the column count only at those
-    /// widths where the lost four pixels straddle a cell boundary, which a
-    /// check against one live layout will miss almost every time.
-    #[test]
-    fn a_grid_always_fits_inside_the_pane_that_holds_it() {
-        let (cw, ch) = (char_width(), char_height());
-        let inset = PANE_CONTENT_INSET * 2.0;
-        // From the smallest pane the layout will produce up to the whole
-        // window — a range in which neither MAX_COLS nor MAX_ROWS binds, so
-        // what is being checked is the rounding and not the cap.
-        let mut side = MIN_PANE_SIZE;
-        while side <= WINDOW_WIDTH {
-            let (cols, rows) = pane_grid(side, side);
-            #[allow(clippy::cast_precision_loss)]
-            let (wide, tall) = (cols as f32 * cw, rows as f32 * ch);
-            assert!(
-                inset + wide <= side,
-                "{cols} columns plus the inset need {} px of a {side} px pane",
-                inset + wide
-            );
-            assert!(
-                inset + tall <= side,
-                "{rows} rows plus the inset need {} px of a {side} px pane",
-                inset + tall
-            );
-            side += 0.5;
-        }
-    }
-
-    /// The grid lives between the tab bar and the status bar, and inside the
-    /// window. A cell drawn over the chrome is a cell the user cannot read.
-    ///
-    /// The bounds here are the layout constants rather than
-    /// [`Window::bounds`], deliberately: a test that asks the layout walk
-    /// where the panes are cannot notice the layout walk putting them in the
-    /// wrong place.
-    #[test]
-    fn no_cell_is_drawn_over_the_chrome() {
-        let mut app = Multiplexer::new();
-        app.split_pane(SplitDir::Horizontal);
-        for pane in &mut app.panes {
-            let count = pane.buffer.cols * pane.buffer.rows;
-            pane.feed(&"x".repeat(count));
-        }
-
-        let (cw, ch) = (char_width(), char_height());
-        let bottom = WINDOW_HEIGHT - STATUS_BAR_HEIGHT;
-        let mut cells = 0_usize;
-        for cmd in &app.render_commands() {
-            if let RenderCommand::Text {
-                x, y, font_size, ..
-            } = cmd
-                && (font_size - CELL_FONT_SIZE).abs() < 0.01
-            {
-                cells += 1;
-                assert!(*y >= TAB_BAR_HEIGHT, "a cell at y={y} is over the tab bar");
-                assert!(y + ch <= bottom, "a cell at y={y} is over the status bar");
-                assert!(*x >= 0.0, "a cell at x={x} is off the left of the window");
-                assert!(
-                    x + cw <= WINDOW_WIDTH,
-                    "a cell at x={x} runs off the window"
+        for window in &session.windows {
+            for (id, rect) in window.bounds(1000.0, 700.0) {
+                let content = pane_content(rect);
+                let want =
+                    terminal::Layout::solve(content.w, content.h, cfg.cell_width, cfg.cell_height);
+                let term = &mux.find_pane(id).unwrap().term;
+                assert_eq!(
+                    (term.cols(), term.rows()),
+                    (want.cols, want.rows),
+                    "pane {id:?} in window {}",
+                    window.index
                 );
             }
         }
-        assert!(cells > 1000, "only {cells} cells were drawn");
     }
 
-    /// Nothing the grid draws may land outside the pane it belongs to.
-    ///
-    /// The paint and the sizing take their cell counts from one function; this
-    /// is the check that the rectangle they were both handed is the rectangle
-    /// actually painted. Every pane is filled edge to edge first, so the far
-    /// corner of each grid is drawn rather than merely reckoned.
     #[test]
-    fn no_cell_is_drawn_outside_the_pane_it_belongs_to() {
-        let mut app = Multiplexer::new();
-        app.split_pane(SplitDir::Vertical);
-        app.split_pane(SplitDir::Horizontal);
-        for pane in &mut app.panes {
-            let count = pane.buffer.cols * pane.buffer.rows;
-            pane.feed(&"x".repeat(count));
+    fn the_active_window_is_always_within_reach() {
+        // Thirty-two tabs do not fit in a window, and a tab drawn past its
+        // edge is a window the pointer cannot reach; nor may the status bar's
+        // list of windows run on under the clock.
+        let mut mux = Multiplexer::new();
+        mux.clock = fixed_clock;
+        tick(&mut mux);
+        for _ in 1..MAX_WINDOWS {
+            prefixed(&mut mux, 'c');
         }
+        let active = mux.active_window().unwrap().id;
+        let tab = rect_of(&mux, Target::Tab(active)).expect("the active tab is in view");
+        assert!(tab.right() <= WINDOW_WIDTH);
 
-        let bounds = app
-            .active_session()
-            .expect("a session")
+        let frame = mux.frame_at((WINDOW_WIDTH, WINDOW_HEIGHT));
+        let clock_x = WINDOW_WIDTH - PADDING - text::width("11:33 UTC", SMALL_TEXT);
+        let listed = frame
+            .hits()
+            .iter()
+            .filter(|(t, _)| matches!(t, Target::StatusWindow(_)))
+            .inspect(|(t, r)| assert!(r.right() < clock_x, "{t:?} runs under the clock"))
+            .count();
+        assert!(listed > 0 && listed < MAX_WINDOWS, "{listed} listed");
+    }
+
+    #[test]
+    fn a_panes_terminal_is_drawn_and_clicked_inside_its_pane() {
+        let mut mux = Multiplexer::new();
+        prefixed(&mut mux, '%');
+        prefixed(&mut mux, '"');
+        let frame = mux.frame_at((WINDOW_WIDTH, WINDOW_HEIGHT));
+        for (id, rect) in mux
             .active_window()
-            .expect("a window")
-            .bounds(WINDOW_WIDTH, WINDOW_HEIGHT);
-        let (cw, ch) = (char_width(), char_height());
-        let mut cells = 0_usize;
-        for cmd in &app.render_commands() {
-            if let RenderCommand::Text {
-                x, y, font_size, ..
-            } = cmd
-                && (font_size - CELL_FONT_SIZE).abs() < 0.01
-            {
-                cells += 1;
-                let inside = bounds.iter().any(|(_, px, py, pw, ph)| {
-                    x >= px && y >= py && x + cw <= px + pw && y + ch <= py + ph
-                });
-                assert!(inside, "a cell at ({x}, {y}) is outside every pane");
+            .unwrap()
+            .bounds(WINDOW_WIDTH, WINDOW_HEIGHT)
+        {
+            let grid = frame
+                .rect_of(|t| *t == Target::Pane(id, TermTarget::Grid))
+                .expect("each pane's grid is hit-boxed");
+            assert!(
+                grid.x >= rect.x
+                    && grid.y >= rect.y + PANE_TITLE_HEIGHT - 0.01
+                    && grid.right() <= rect.right() + 0.01
+                    && grid.bottom() <= rect.bottom() + 0.01,
+                "{grid:?} is not inside {rect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_frame_balances_at_every_size() {
+        for size in [
+            (0.0, 0.0),
+            (50.0, 30.0),
+            (300.0, 200.0),
+            (1200.0, 800.0),
+            (2400.0, 1400.0),
+        ] {
+            let mut mux = Multiplexer::new();
+            mux.window_width = size.0;
+            mux.window_height = size.1;
+            mux.relayout();
+            prefixed(&mut mux, '%');
+            prefixed(&mut mux, 's');
+            let frame = mux.frame_at(size);
+            assert!(frame.is_balanced(), "{size:?}");
+            for (t, r) in frame.hits() {
+                assert!(
+                    r.x >= -0.01
+                        && r.y >= -0.01
+                        && r.right() <= size.0 + 0.01
+                        && r.bottom() <= size.1 + 0.01,
+                    "{t:?} at {r:?} is outside a {size:?} window"
+                );
             }
         }
-        assert!(cells > 1000, "only {cells} cells were drawn");
     }
 
-    /// Every glyph the render pass emits at cell size, concatenated. Cells are
-    /// drawn one character at a time, so this reassembles the screen as text.
-    fn drawn_text(app: &mut Multiplexer) -> String {
-        app.render_commands()
-            .iter()
-            .filter_map(|cmd| match cmd {
-                RenderCommand::Text {
-                    text, font_size, ..
-                } if (font_size - CELL_FONT_SIZE).abs() < 0.01 => Some(text.clone()),
-                _ => None,
-            })
-            .collect()
+    #[test]
+    fn a_pane_is_named_by_what_runs_in_it() {
+        let (mut mux, shells) = scripted();
+        let id = mux.active_pane_id().unwrap();
+        assert!(drawn_texts(&mux).iter().any(|t| t == "shell"));
+        shell(&shells, 0)
+            .borrow_mut()
+            .pending
+            .extend_from_slice(b"\x1b]0;vim notes.txt\x07");
+        tick(&mut mux);
+        assert_eq!(mux.find_pane(id).unwrap().title(), "vim notes.txt");
+        assert!(drawn_texts(&mux).iter().any(|t| t == "vim notes.txt"));
     }
 
-    // -- Following the user's theme -------------------------------------------
-
-    /// The window draws in the user's colours rather than in constants of its
-    /// own.
-    ///
-    /// Asserted on the rectangles emitted, not on the `palette` field: a field
-    /// that was assigned proves nothing a user would see.
     #[test]
     fn the_window_draws_in_the_theme_it_is_given() {
-        fn theme(
-            mode: appearance::ThemeMode,
-            contrast: Option<appearance::HighContrastScheme>,
-        ) -> Palette {
-            Palette::from_settings(&appearance::AppearanceSettings {
-                theme_mode: mode,
-                high_contrast: contrast,
-                ..appearance::AppearanceSettings::default()
-            })
-        }
-
-        fn fills(app: &mut Multiplexer) -> Vec<Color> {
-            app.render(1000.0, 700.0)
-                .commands
-                .iter()
-                .filter_map(|c| match c {
-                    RenderCommand::FillRect { color, .. } => Some(*color),
-                    _ => None,
-                })
-                .collect()
-        }
-
-        let mut app = Multiplexer::new();
-
-        app.theme_changed(&theme(appearance::ThemeMode::Dark, None));
-        let dark = fills(&mut app);
-        assert!(!dark.is_empty(), "the window drew no filled rectangles");
-
-        app.theme_changed(&theme(appearance::ThemeMode::Light, None));
-        let light = fills(&mut app);
-        // No equal-count assertion here, unlike the other applications: a
-        // terminal skips drawing a cell whose background already matches the
-        // surface behind it, so a different background legitimately changes
-        // how many rectangles are emitted. The claim that matters is that the
-        // colours differ.
-        assert!(!light.is_empty(), "the light theme drew nothing at all");
-        assert_ne!(
-            dark, light,
-            "the window drew identically on the dark and light themes, so it \
-             is still painting from constants"
+        let mut mux = Multiplexer::new();
+        let mut palette = mux.palette;
+        palette.green = Color::rgb(1, 2, 3);
+        App::theme_changed(&mut mux, &palette);
+        let frame = mux.frame_at((WINDOW_WIDTH, WINDOW_HEIGHT));
+        assert!(
+            frame.commands().iter().any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == Color::rgb(1, 2, 3))),
+            "the status bar did not take the theme's colour"
         );
+    }
 
-        // High contrast is the case a hardcoded palette fails silently: the
-        // user asks for maximum legibility and this window alone ignores them.
-        app.theme_changed(&theme(
-            appearance::ThemeMode::Dark,
-            Some(appearance::HighContrastScheme::WhiteOnBlack),
-        ));
-        assert_ne!(
-            dark,
-            fills(&mut app),
-            "high contrast reached every other surface but not this window"
+    // -- the layout tree --
+
+    fn two(direction: SplitDir) -> LayoutNode {
+        LayoutNode::Split {
+            direction,
+            ratio: 0.5,
+            first: Box::new(LayoutNode::Leaf(PaneId(0))),
+            second: Box::new(LayoutNode::Leaf(PaneId(1))),
+        }
+    }
+
+    fn area() -> Rect {
+        Rect::new(0.0, 0.0, 800.0, 600.0)
+    }
+
+    #[test]
+    fn a_stacked_split_puts_the_second_pane_below() {
+        let b = two(SplitDir::Stacked).compute_bounds(area());
+        assert!(b[1].1.y > b[0].1.y && (b[1].1.x - b[0].1.x).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_side_by_side_split_puts_the_second_pane_to_the_right() {
+        let b = two(SplitDir::SideBySide).compute_bounds(area());
+        assert!(b[1].1.x > b[0].1.x && (b[1].1.y - b[0].1.y).abs() < 0.01);
+    }
+
+    #[test]
+    fn removing_a_pane_gives_its_place_to_its_sibling() {
+        let mut layout = two(SplitDir::SideBySide);
+        assert!(layout.remove_pane(PaneId(0)));
+        assert_eq!(layout.pane_ids(), vec![PaneId(1)]);
+        assert!(
+            !layout.remove_pane(PaneId(1)),
+            "the last pane is the window's to close"
         );
+        assert!(!layout.remove_pane(PaneId(7)));
+    }
+
+    #[test]
+    fn swapping_exchanges_two_leaves() {
+        let mut layout = two(SplitDir::Stacked);
+        layout.swap(PaneId(0), PaneId(1));
+        assert_eq!(layout.pane_ids(), vec![PaneId(1), PaneId(0)]);
+    }
+
+    #[test]
+    fn every_preset_keeps_every_pane() {
+        let panes: Vec<PaneId> = (0..5).map(PaneId).collect();
+        for preset in LayoutPreset::ALL {
+            let layout = preset.build(&panes).expect("a layout");
+            assert_eq!(layout.pane_ids().len(), 5, "{preset:?}");
+            assert_eq!(LayoutPreset::by_name(preset.name()), Some(preset));
+            assert_eq!(preset.build(&panes[..1]).unwrap().pane_count(), 1);
+            assert!(preset.build(&[]).is_none());
+        }
+    }
+
+    #[test]
+    fn the_clock_text_is_hours_and_minutes_in_the_zone() {
+        assert_eq!(clock_text(1_758_800_000_000), "11:33 UTC");
+        assert_eq!(clock_text(0), "00:00 UTC");
+        assert_eq!(clock_text(86_399_999), "23:59 UTC");
     }
 }

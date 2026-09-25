@@ -160093,6 +160093,46 @@ all three pane positions draw. A message written here reads back exactly as
 written, which a test checks. 109 tests; `apps/email/mutate.py` has 35 rows
 over the window, the codings and the store. Nineteen examined; two to go.
 
+**`apps/tmux`, 2026-09-25 -- a multiplexer of terminals with nothing in them.**
+Every pane held a banner saying the system had no PTY layer, long after
+`apps/terminal` had a shell on a kernel pseudo-terminal; typing into a pane went
+nowhere, because every key that was not a multiplexer command was dropped; and
+nothing answered the pointer. Its own ANSI parser -- no scroll regions, no
+alternate screen, no cursor-key modes -- could not have drawn a full-screen
+program anyway. Reading it for the rework found more that was false:
+`:split-window -h` and the `even-horizontal` layout each did the opposite of
+tmux's; `prefix +`, "grow the pane", shrank every pane on the right or at the
+bottom; `}`, "swap this pane with the next", only moved the focus; `;`, "the
+pane you were in before", was the previous pane in order; `prefix 1` went to
+the window labelled 2 once a window had closed; the status bar's clock counted
+the seconds the window had been open and printed them as the time of day; a
+refused window or split left an orphan pane behind; a pane too small to halve
+was split into two that overlapped; a chooser drew all sixty-four sessions at
+the same pitch, most of them below its box; and the detached screen said to type
+`tmux attach`, a command that exists nowhere. Now every pane is an
+`apps/terminal` terminal -- the terminal is a library as well as a program for
+this -- running the user's shell: keys go to the active pane's shell, output is
+read on the tick (from background windows and detached sessions too), a pane's
+size reaches its shell whenever the layout changes, a shell that exits cleanly
+takes its pane with it and one that fails leaves the pane to say how, and a
+closed pane hangs its shell up. Closing a pane or a window asks first, as tmux
+does. The pointer reaches everything: tabs, a new-window button, each pane's
+title, grid and scrollback bar (a drag selects, the wheel scrolls the pane under
+it), the status bar's session and windows, the choosers' rows, the detached
+screen's Attach and Sessions, the question's Yes and No, and an F1 Keys button.
+Copy mode has the keyboard while it is on, marks whole lines that the terminal
+highlights, and copies the pointer's selection too; a paste goes to the program
+as a paste, fenced when it asked for bracketed paste. The clock is the wall
+clock, in UTC and said so. Putting the terminal's emulator in panes that are
+resized on every split found five bugs in *it*, all fixed: shrinking the grid
+pushed a shell's prompt into the scrollback; the hidden screen under a
+full-screen program lost its prompt on a resize; one saved-cursor slot served
+both screens; `reset` (`ESC c`) dropped the link to the shell and so killed it;
+and its grid was drawn in the proportional face at a guessed cell size. 62
+tests in tmux (91 in the terminal); `apps/tmux/mutate.py` has 42 rows and
+`apps/terminal/mutate.py` 90. Sessions end with the window -- see `[E] tmux is
+not a server`. Twenty examined; one to go.
+
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 
 **In short:** a `cargo test --workspace` failed with exactly one failing test,
@@ -165944,3 +165984,28 @@ output-only.
 **Until then** the recorder refuses a take with the reason on screen, and is
 useful only for what is already on disk (see the soundrecorder paragraph of
 `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`).
+
+### [E] tmux is not a server: its sessions end when its window closes -- 2026-09-25
+**Status:** OPEN -- a design choice for now (`design-decisions.md` §1203);
+lane E's to build when there is a reason to.
+
+**In short:** real tmux keeps its sessions -- and every program running in them
+-- alive after the terminal it was started in closes, so a user can come back
+to them later. This one cannot: the sessions live inside the window's own
+process, so closing the window ends every session and hangs up every shell in
+them. Detaching only hides a session inside the same window. The detached
+screen says so ("Closing this window ends every session."), so nobody loses
+work believing otherwise.
+
+**Where:** `apps/tmux/src/main.rs` -- `Multiplexer` owns the panes, and each
+pane's `TerminalState` owns its shell's pseudo-terminal link.
+
+**The proper fix** is tmux's own shape: a server process that owns the
+sessions and the pseudo-terminals, and clients that attach to it over a local
+channel -- a window per client, sending keys and receiving each pane's screen
+(or its output stream, to be parsed client-side). The pieces this needs that
+exist: `terminal::child`'s links (the server would hold them), the terminal's
+emulator (either side could run it), and the system's IPC channels. What does
+not exist: the protocol, the server's lifetime (who starts it, when it exits),
+and a way for a second window to find the first's server. It is worth doing
+when detaching to leave a long job running is a thing users need here.

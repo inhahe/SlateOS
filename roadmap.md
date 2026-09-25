@@ -1812,6 +1812,15 @@ word; text inside them that says "lane C" is history.
   **Not yet run on SlateOS**, because no graphical application runs there yet
   — `todo.txt` → Lane E lists what to check the first time one does. Still
   polls for output, pending `requests/e-f-wake-an-application-for-its-own-descriptor.md`.
+  **2026-09-25:** a library as well as a program, so `apps/tmux` runs this
+  terminal in every pane (design-decisions §1203); the link moved to
+  `apps/termchild`. Doing so fixed four faults the terminal had alone:
+  `reset` (`ESC c`) dropped the link and killed the shell; a shorter grid
+  pushed a shell's prompt into the scrollback; the screen hidden under a
+  full-screen program lost its prompt on a resize; one saved-cursor slot
+  served both screens. The grid is drawn in the fixed-pitch face its cells are
+  measured in, a paste is fenced when the program asked for bracketed paste,
+  and a terminal without the keyboard draws its cursor as an outline.
 
 - `[-]` `[E]` **Twenty applications draw an interface the pointer cannot
   touch** — `known-issues.md` → `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`.
@@ -1871,8 +1880,10 @@ word; text inside them that says "lane C" is history.
   and `.eml` mail kept in files, whole, with its attachments; a compose form
   that is drawn at last, drafts saved and opened again, Save as file; marks
   kept apart from mail it never rewrites; and a builder that writes what it
-  declares).
-  **Next:** tmux and pinball. (`reminders` was
+  declares), `tmux` (2026-09-25 — every control; a shell in every pane, on
+  the terminal app's own emulator, shared as a library; tmux's meanings for
+  its splits, layouts and keys; closing asks first; the wall clock).
+  **Next:** pinball. (`reminders` was
   examined 2026-09-18: keyboard-driven by design, its two gaps fixed.)
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
@@ -7768,7 +7779,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Log Viewer (apps/logviewer: JSON-lines log parser with level filtering (trace→fatal), real-time tailing, full-text search, time range filtering, source/component filtering, log entry detail view, statistics dashboard with level distribution and rate graphs, bookmarking, color-coded log levels, multi-file tabs, export filtered view, 76 tests)
 - [x] QR Code Generator (apps/qrcode: QR code generation from scratch with Reed-Solomon error correction (versions 1-10), byte mode encoding, format/version info embedding, masking with penalty scoring, Code128 barcode generation, multiple input modes — text/URL/email/phone/WiFi/vCard, customizable module size and colors, generation history, multi-panel UI, 90 tests) — *until 2026-09-25 the version information was not embedded (versions 7-10 did not scan), the Code128 table was corrupt from value 60, and the colours could not be customised; see `known-issues.md` → the qrcode paragraph of `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`*
 - [x] JSON Viewer (apps/jsonviewer: custom JSON parser (RFC 8259), collapsible tree view with color-coded value types, syntax-highlighted raw/formatted view, JSONPath display, in-place editing for values with key add/delete, real-time validation with line/column errors, search across keys and values, YAML-like display conversion, statistics panel, structural JSON diff between documents, multi-tab support, 120 tests)
-- [x] Terminal Multiplexer (apps/tmux: terminal multiplexer with ANSI parser (CSI/SGR/OSC sequences), split panes with binary tree layout, 5 presets (even-horizontal/vertical, main-horizontal/vertical, tiled), window/session management, Ctrl+B prefix key bindings, command mode, scrollback buffer, pane resize/zoom/swap/rotate, session attach/detach, status bar with mode indicator, panes sized from their drawn rectangle by a single layout walk (`relayout`/`pane_grid`, see design-decisions §477), 102 tests)
+- [x] Terminal Multiplexer (apps/tmux: terminal multiplexer with ANSI parser (CSI/SGR/OSC sequences), split panes with binary tree layout, 5 presets (even-horizontal/vertical, main-horizontal/vertical, tiled), window/session management, Ctrl+B prefix key bindings, command mode, scrollback buffer, pane resize/zoom/swap/rotate, session attach/detach, status bar with mode indicator, panes sized from their drawn rectangle by a single layout walk (`relayout`/`pane_grid`, see design-decisions §477), 102 tests) — *its panes held a banner saying there was no PTY layer and ran nothing; since 2026-09-25 each pane is an `apps/terminal` terminal running the user's shell, and every control answers the pointer. See the tmux paragraph of `known-issues.md` → `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`, and design-decisions §1203*
 - [x] Desktop Reminders (apps/reminders: task management with Date/Time/DateTime types, 4 priority levels, categories with color coding, recurrence patterns (daily/weekly/biweekly/monthly/yearly), due date tracking, notifications with Z-to-snooze at four durations and Escape to dismiss, overdue detection, task filtering and sorting, JSON import/export reporting what it did, search, statistics dashboard, 129 tests; subtasks are on the model and unreachable, and `SnoozeDuration::Custom` has nowhere to type a number)
 - [x] Batch File Renamer (apps/renamer: 10 rename operation types — find/replace, regex, case change, insert text, delete range, trim whitespace, sequential numbering, date stamp, extension change, custom template — operation chaining with reorder, live preview, conflict detection, undo/redo history, file filtering by extension, select all/none/invert, multi-panel UI, 60+ tests)
 - [x] File Recovery / Undelete (apps/undelete: disk scanning with ext4 inode table simulation, file signature detection for 30+ formats (JPEG/PNG/PDF/ZIP/MP3/FLAC/MP4/SQLite/etc.), recycle bin integration, recovery confidence scoring (High/Medium/Low/Unlikely), deep scan mode with sector-by-sector scanning, batch recovery, scan progress with ETA, multi-panel UI with category sidebar and detail preview, 100 tests)

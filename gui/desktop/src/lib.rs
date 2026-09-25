@@ -2192,6 +2192,28 @@ impl DesktopShell {
         ))
     }
 
+    /// How long until the automatic light/dark mode next changes, if the mode
+    /// is automatic -- in this shell's zone. The shell sleeps exactly this
+    /// long, for [`next_schedule_change`](Self::next_schedule_change)'s
+    /// reason. See `AppearanceSettings::next_auto_change`.
+    #[must_use]
+    pub fn next_theme_change(&self, utc_secs: u64) -> Option<Duration> {
+        self.appearance
+            .next_auto_change(utc_secs, self.local_zone())
+    }
+
+    /// Whether the automatic light/dark mode is on the other side of an edge
+    /// from the settings the shell holds -- the moment to read them again.
+    ///
+    /// Asked against the shell's own zone and clock, with no file read: this
+    /// runs on a tick, and the reading it prompts is what touches the disk.
+    #[must_use]
+    pub fn theme_phase_is_due(&self, utc_secs: u64) -> bool {
+        self.appearance.theme_mode == appearance::ThemeMode::System
+            && self.appearance.auto_light_at(utc_secs, self.local_zone())
+                != self.appearance.auto_is_light
+    }
+
     /// Apply one per-app change the user made in the notification pane.
     ///
     /// Writes `notifications.yaml`, which is safe here and was not safe on the
@@ -8089,12 +8111,10 @@ impl DesktopShell {
         self.evaluate_schedules(utc_secs);
     }
 
-    /// Seconds since the epoch, or 0 on a clock set before it.
+    /// Seconds since the epoch, or 0 on a clock set before it: the desktop's
+    /// one wall clock, which a test can fix (`datetimesettings::clock`).
     fn unix_now() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
+        datetimesettings::clock::now_utc_secs()
     }
 
     /// The pin menu's first row. Numbered well clear of the desktop menu's

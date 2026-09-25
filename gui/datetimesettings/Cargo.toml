@@ -28,5 +28,12 @@ pathcodec = { path = "../pathcodec" }
 # configuration directory instead of the developer's own.
 settingsfile = { path = "../settingsfile", features = ["testing"] }
 
+[features]
+# Compiles `clock::with_time`, which fixes the time of day for a test. Behind a
+# feature rather than `#[cfg(test)]` because a dependent's tests need it, and
+# `cfg(test)` is set only when *this* crate is under test -- the reason
+# `settingsfile::testing` is a feature too.
+testing = []
+
 [lints]
 workspace = true

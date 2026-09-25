@@ -40,6 +40,8 @@ dependencies = [
 name = "appearance"
 version = "0.1.0"
 dependencies = [
+ "datetimesettings",
+ "daywindow",
  "guitk",
  "pathcodec",
  "scratchdir",

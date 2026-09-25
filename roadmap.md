@@ -1749,6 +1749,19 @@ live.
   the Settings page (lane E), the relay that makes a change reach a running
   shell (lane F), and the libc and `osh` adopting `tz_source` (lanes D, B).
 
+- `[C]` **"System (Auto)" switches between light and dark by the clock** --
+  done 2026-09-25 (`design-decisions.md` §876). It had always meant dark. It is
+  now light from 07:00 until 19:00 unless the user sets other hours, in the
+  clock's time zone, and says so to everything drawn -- the palette and the
+  accent follow one answer, `AppearanceSettings::is_light`. The phase is
+  resolved when the settings are read and is part of the appearance watcher's
+  fingerprint, so the file need not change at the edge; the shell sleeps until
+  it, re-reads, and sends `ReloadAppearance`. The desktop's wall clock is one
+  function a test can fix (`datetimesettings::clock`). Waiting on others: the
+  hours in Settings (lane E), and applications switching at the edge rather
+  than at the next change, once `ThemeWatch` watches through
+  `appearance::watcher()` (lane F).
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's

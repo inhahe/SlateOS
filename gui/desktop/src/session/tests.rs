@@ -4942,3 +4942,76 @@ fn an_edit_to_the_chosen_theme_reaches_the_shell() {
         );
     });
 }
+
+// ---- the automatic light/dark mode ------------------------------------------
+
+/// **At the automatic mode's edge the desktop turns dark, and tells the
+/// compositor so every other program does too.** The file does not change at
+/// 19:00; the shell is the process that keeps a clock for it. It sleeps until
+/// the edge rather than checking every minute, re-reads there -- its watcher
+/// sees the phase -- and sends `ReloadAppearance`, which is how the compositor
+/// and every application learn to look.
+#[test]
+fn at_the_automatic_modes_edge_the_desktop_turns_dark_and_says_so() {
+    settingsfile::testing::with_scratch_config("session-auto-edge", |_root| {
+        let mut clock = datetimesettings::DateTimeFile::load();
+        assert!(clock.settings.set_zone(Some("UTC")));
+        clock.save().expect("save");
+        let mut look = appearance::AppearanceFile::load();
+        look.settings.theme_mode = appearance::ThemeMode::System;
+        look.save().expect("save");
+
+        // 2026-09-25, a minute before seven in the evening.
+        let before = 1_790_337_600 + 7 * 3600 - 60;
+        let (mut session, desktop) = datetimesettings::clock::with_time(before, || {
+            let (mut session, desktop, turn) = session();
+            drop(turn);
+            session.load_appearance();
+            (session, desktop)
+        });
+        let _turn = settingsfile::testing::config_turn();
+        assert!(
+            session.shell().appearance.is_light(),
+            "the evening has not come"
+        );
+        assert_eq!(
+            session.shell().next_theme_change(before),
+            Some(std::time::Duration::from_mins(1)),
+            "the shell sleeps until the edge"
+        );
+        // And it has registered that wake-up: a shell that knew when the edge
+        // was and slept through it would be no better than one that did not.
+        let armed = session
+            .events_mut()
+            .next_wakeup()
+            .expect("no wake-up registered, so the shell would sleep through the edge");
+        let until = armed.saturating_duration_since(std::time::Instant::now());
+        assert!(
+            until <= std::time::Duration::from_mins(1)
+                && until > std::time::Duration::from_secs(30),
+            "the wake-up is not the edge: {until:?}"
+        );
+        let reloads = |desktop: &Desktop| {
+            desktop
+                .borrow_mut()
+                .asked()
+                .iter()
+                .filter(|r| **r == "ReloadAppearance")
+                .count()
+        };
+        let asked_before = reloads(&desktop);
+
+        datetimesettings::clock::with_time(before + 90, || {
+            run_frames(&mut session, &desktop, 16);
+        });
+        assert!(
+            !session.shell().appearance.is_light(),
+            "the edge passed and the desktop is still light"
+        );
+        assert_eq!(
+            reloads(&desktop),
+            asked_before + 1,
+            "the compositor was not told, so no other program will look"
+        );
+    });
+}

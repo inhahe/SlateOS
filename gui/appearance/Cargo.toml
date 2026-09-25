@@ -19,6 +19,16 @@ guitk = { path = "../toolkit" }
 # with the comments intact. See yamldoc/src/lib.rs.
 yamldoc = { path = "../../yamldoc" }
 
+# A recurring window of the day, validated, with its `HH:MM` spelling: the
+# hours the automatic mode is light. The same type quiet hours use, so the two
+# schedules on this desktop cannot disagree about what 07:00 is.
+daywindow = { path = "../daywindow" }
+
+# The time zone the clock is in -- the user's choice, or the machine's --
+# which the automatic mode reads the time of day through. See
+# gui/datetimesettings/src/lib.rs.
+datetimesettings = { path = "../datetimesettings" }
+
 # Where settings files live and how they are replaced atomically. Re-exported
 # as `appearance::config`, which is what it used to be called; it moved out so
 # that `inputsettings` could use it without depending on the appearance model
@@ -26,6 +36,9 @@ yamldoc = { path = "../../yamldoc" }
 settingsfile = { path = "../settingsfile" }
 
 [dev-dependencies]
+# `datetimesettings::clock::with_time`, which fixes the time of day for a test
+# of anything scheduled by it -- the automatic light/dark mode first.
+datetimesettings = { path = "../datetimesettings", features = ["testing"] }
 # `settingsfile::testing` -- reached here as `config::testing` -- for the tests
 # that read a colour theme from a scratch user's data directory.
 settingsfile = { path = "../settingsfile", features = ["testing"] }

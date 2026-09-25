@@ -304,6 +304,63 @@ pub fn search_zones(query: &str) -> Vec<&'static TimezoneInfo> {
 }
 
 // ============================================================================
+// The clock
+// ============================================================================
+
+/// The desktop's wall clock: seconds since the epoch.
+///
+/// One function for every decision the desktop dates against the wall clock --
+/// the taskbar clock, quiet hours, the automatic light/dark mode -- behind a
+/// seam a test can fix. Without the seam, a test of anything scheduled by the
+/// time of day passes by day and fails by night.
+// `missing_const_for_thread_local` fires on initializers that already are
+// `const` blocks on rustc/clippy 1.95 -- a false positive with no true
+// positives, measured and written up in the workspace `Cargo.toml`. That allow
+// does not reach a crate that denies `clippy::all` in its source, as this one
+// does; and an allow on the `thread_local!` invocation does not reach the item
+// the macro generates, hence the module. Remove both when the toolchain moves
+// on.
+#[allow(clippy::missing_const_for_thread_local)]
+pub mod clock {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(any(test, feature = "testing"))]
+    thread_local! {
+        static FIXED: core::cell::Cell<Option<u64>> = const { core::cell::Cell::new(None) };
+    }
+
+    /// Seconds since the epoch: this thread's fixed time, if a test has set
+    /// one ([`with_time`]), else the system clock. A clock set before the
+    /// epoch -- one that is badly wrong -- reads as the epoch.
+    #[must_use]
+    pub fn now_utc_secs() -> u64 {
+        #[cfg(any(test, feature = "testing"))]
+        if let Some(fixed) = FIXED.with(core::cell::Cell::get) {
+            return fixed;
+        }
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    }
+
+    /// Run `body` with this thread's clock reading `utc_secs`, restored on
+    /// every way out -- a failing assertion included, which is the usual way
+    /// a test ends badly.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn with_time<T>(utc_secs: u64, body: impl FnOnce() -> T) -> T {
+        struct Restore(Option<u64>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let previous = self.0;
+                FIXED.with(|f| f.set(previous));
+            }
+        }
+        let _restore = Restore(FIXED.with(|f| f.replace(Some(utc_secs))));
+        body()
+    }
+}
+
+// ============================================================================
 // The machine's zone
 // ============================================================================
 
@@ -668,6 +725,33 @@ mod tests {
     /// user can actually choose.
     fn shipped(tz_id: &str) -> &'static TimezoneInfo {
         zone(tz_id).unwrap_or_else(|| panic!("{tz_id} should be in the table"))
+    }
+
+    // ---- the clock ----
+
+    /// A fixed time is the time on this thread until the body returns, and
+    /// the clock is itself again after -- a failing assertion included.
+    #[test]
+    fn a_fixed_time_holds_for_its_body_and_no_longer() {
+        let real = clock::now_utc_secs();
+        assert!(real > 1_700_000_000, "the real clock reads a real time");
+        let inside = clock::with_time(42, clock::now_utc_secs);
+        assert_eq!(inside, 42);
+        assert_ne!(clock::now_utc_secs(), 42);
+        let unwound = std::panic::catch_unwind(|| {
+            clock::with_time(7, || panic!("an assertion failed"));
+        });
+        assert!(unwound.is_err());
+        assert_ne!(
+            clock::now_utc_secs(),
+            7,
+            "a panic did not leave the time fixed"
+        );
+        // Nested, the inner time wins and the outer comes back.
+        clock::with_time(1, || {
+            clock::with_time(2, || assert_eq!(clock::now_utc_secs(), 2));
+            assert_eq!(clock::now_utc_secs(), 1);
+        });
     }
 
     // ---- the table ----

@@ -67,6 +67,9 @@ pub mod themes;
 pub use settingsfile as config;
 
 use core::num::NonZeroU32;
+use core::time::Duration;
+use datetimesettings::Tz;
+pub use daywindow::{DailyWindow, TimeOfDay};
 use guitk::color::Color;
 use std::path::PathBuf;
 use yamldoc::Document;
@@ -1410,6 +1413,21 @@ pub struct AppearanceSettings {
     /// name and a set of colours, so the two cannot disagree; see
     /// [`themes::ColorTheme`].
     pub color_theme: themes::ColorTheme,
+    /// The hours `System (Auto)` is light, local time: from the window's start
+    /// until its end, and dark the rest of the day. `theme.auto.light_from`
+    /// and `theme.auto.dark_from` in the file; 07:00 until 19:00 unless the
+    /// user says otherwise.
+    pub auto_light_hours: DailyWindow,
+    /// Whether `System (Auto)` was in its light hours when these settings
+    /// were read: the schedule against the clock and the time zone, resolved
+    /// by [`read_from`](Self::read_from) -- never per frame -- and always
+    /// `false` in the other two modes, so that comparing two readings does
+    /// not change with the time of day unless the time of day is the setting.
+    ///
+    /// A process learns that it has changed from its watcher
+    /// ([`watcher`]), whose fingerprint includes it. See
+    /// [`is_light`](Self::is_light) and `design-decisions.md` §876.
+    pub auto_is_light: bool,
     /// Whether boxes are outlined or filled. See [`SurfaceStyle`]; defaults to
     /// [`SurfaceStyle::Borders`] (§829), with `Cards` the optional theme.
     pub surface_style: SurfaceStyle,
@@ -1603,6 +1621,8 @@ impl Default for AppearanceSettings {
             login_background: LoginBackground::Theme,
             theme_mode: ThemeMode::Dark,
             color_theme: themes::ColorTheme::built_in(),
+            auto_light_hours: DEFAULT_AUTO_LIGHT_HOURS,
+            auto_is_light: false,
             // Borders, per §829. The `Default` impl is what a machine with no
             // configuration file gets, so this is where "the default theme" is
             // actually decided.
@@ -1671,10 +1691,48 @@ impl AppearanceSettings {
     /// light-background accent on a dark-only theme's dark grounds.
     #[must_use]
     pub fn is_light(&self) -> bool {
-        let asked = self.theme_mode.is_light();
+        let asked = match self.theme_mode {
+            ThemeMode::Light => true,
+            ThemeMode::Dark => false,
+            ThemeMode::System => self.auto_is_light,
+        };
         self.color_theme
             .colors()
             .map_or(asked, |theme| theme.variant(asked).0)
+    }
+
+    /// How long until the automatic mode next turns light or dark, reading
+    /// the time of day at `utc_secs` in `zone`; `None` unless the mode is
+    /// automatic, or when its hours start and end at the same time and so
+    /// never change.
+    ///
+    /// What a process with a clock sleeps for -- the shell -- rather than
+    /// checking every minute and finding 1 438 times a day that nothing has
+    /// changed (`design-decisions.md` 812). Never zero: a timer of no length
+    /// would fire before the edge it waits for and re-arm for zero again.
+    #[must_use]
+    pub fn next_auto_change(&self, utc_secs: u64, zone: Tz) -> Option<Duration> {
+        if self.theme_mode != ThemeMode::System {
+            return None;
+        }
+        let now = local_time_of_day(utc_secs, zone);
+        let minutes = self.auto_light_hours.minutes_to_next_edge(now)?;
+        Some(Duration::from_secs(
+            u64::from(minutes)
+                .saturating_mul(60)
+                .saturating_sub(utc_secs % 60)
+                .max(1),
+        ))
+    }
+
+    /// Whether the automatic mode's light hours contain `utc_secs` in `zone`
+    /// -- what [`auto_is_light`](Self::auto_is_light) will say when the
+    /// settings are next read, for a caller holding a clock to compare against
+    /// what they say now.
+    #[must_use]
+    pub fn auto_light_at(&self, utc_secs: u64, zone: Tz) -> bool {
+        self.auto_light_hours
+            .contains(local_time_of_day(utc_secs, zone))
     }
 
     /// The accent colour to actually draw with.
@@ -2160,6 +2218,13 @@ impl AppearanceSettings {
             doc.get_str(&["theme", "mode"])
                 .and_then(|v| ThemeMode::from_yaml_name(&v))
         );
+        if let Some(hours) = auto_light_hours_in(doc) {
+            s.auto_light_hours = hours;
+        }
+        // Resolved here, against the clock, for the reason the colour theme is
+        // loaded here: every reader of the settings gets it, and none works it
+        // out per frame.
+        s.auto_is_light = s.theme_mode == ThemeMode::System && auto_light_now(s.auto_light_hours);
         read_into!(
             s.surface_style,
             doc.get_str(&["theme", "surface_style"])
@@ -2399,6 +2464,14 @@ impl AppearanceSettings {
         }
         doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
         doc.set_str(
+            &["theme", "auto", "light_from"],
+            &self.auto_light_hours.start().to_string(),
+        );
+        doc.set_str(
+            &["theme", "auto", "dark_from"],
+            &self.auto_light_hours.end().to_string(),
+        );
+        doc.set_str(
             &["theme", "colors"],
             &pathcodec::encode_path(std::path::Path::new(self.color_theme.id())),
         );
@@ -2498,7 +2571,75 @@ pub const CONFIG_NAME: &str = "appearance";
 /// `SettingsChanged` announcement, as for any other change.
 #[must_use]
 pub fn watcher() -> config::Watcher {
-    config::Watcher::with_dependencies(CONFIG_NAME, themes::fingerprint)
+    config::Watcher::with_dependencies(CONFIG_NAME, dependencies)
+}
+
+/// What the settings read from `doc` depend on besides the document: the
+/// chosen theme's file, and -- in the automatic mode -- whether it is light
+/// now. The file does not change at 19:00; what it means does.
+fn dependencies(doc: &Document) -> Vec<u8> {
+    let mut out = themes::fingerprint(doc);
+    let automatic = doc
+        .get_str(&["theme", "mode"])
+        .and_then(|v| ThemeMode::from_yaml_name(&v))
+        == Some(ThemeMode::System);
+    if automatic {
+        let hours = auto_light_hours_in(doc).unwrap_or(DEFAULT_AUTO_LIGHT_HOURS);
+        out.push(if auto_light_now(hours) { b'L' } else { b'D' });
+    }
+    out
+}
+
+/// 07:00 until 19:00: the hours the automatic mode is light unless the user
+/// says otherwise -- roughly the working day, and the hours a room is most
+/// likely lit by daylight across the year in the latitudes most people live
+/// in. See `design-decisions.md` §876 for why fixed hours and not sunrise.
+pub const DEFAULT_AUTO_LIGHT_HOURS: DailyWindow = match (
+    TimeOfDay::from_minutes(7 * 60),
+    TimeOfDay::from_minutes(19 * 60),
+) {
+    (Some(start), Some(end)) => DailyWindow::new(start, end),
+    // Unreachable -- both are under a day -- and a `const` cannot panic
+    // politely. An empty window (dark all day) is the harmless failure.
+    _ => DailyWindow::new(TimeOfDay::MIDNIGHT, TimeOfDay::MIDNIGHT),
+};
+
+/// The automatic mode's hours as `doc` states them: both ends or neither, as
+/// quiet hours read theirs -- a start paired with a default end is a window
+/// nobody chose.
+fn auto_light_hours_in(doc: &Document) -> Option<DailyWindow> {
+    let start = doc
+        .get_str(&["theme", "auto", "light_from"])
+        .and_then(|v| TimeOfDay::parse(&v))?;
+    let end = doc
+        .get_str(&["theme", "auto", "dark_from"])
+        .and_then(|v| TimeOfDay::parse(&v))?;
+    Some(DailyWindow::new(start, end))
+}
+
+/// Whether `hours` contain the time of day now, in the zone the clock is in
+/// -- the user's choice in `datetime.yaml`, or the machine's.
+///
+/// Reads a file and perhaps the machine's zone, so it is asked when the
+/// settings are read and when a watcher looks, never per frame.
+fn auto_light_now(hours: DailyWindow) -> bool {
+    let zone = datetimesettings::DateTimeFile::load()
+        .settings
+        .rule(datetimesettings::system_zone());
+    hours.contains(local_time_of_day(
+        datetimesettings::clock::now_utc_secs(),
+        zone,
+    ))
+}
+
+/// The local time of day at `utc_secs` in `zone`.
+#[must_use]
+pub fn local_time_of_day(utc_secs: u64, zone: Tz) -> TimeOfDay {
+    let t = i64::try_from(utc_secs).unwrap_or(i64::MAX);
+    let local = t.saturating_add(i64::from(zone.lookup(t).gmtoff));
+    // `rem_euclid` of a day, over sixty: 0..1440, so both steps are exact.
+    let minutes = u16::try_from(local.rem_euclid(86_400) / 60).unwrap_or(0);
+    TimeOfDay::from_minutes(minutes).unwrap_or(TimeOfDay::MIDNIGHT)
 }
 
 /// The colour theme a settings document names, decoded; `None` when it names
@@ -2992,6 +3133,13 @@ mod tests {
             wallpaper_fit: ImageFit::Tile,
             wallpaper: Some(PathBuf::from("/home/u/Pictures/maíz del alba.png")),
             theme_mode: ThemeMode::Light,
+            // Not 07:00-19:00. Read back whatever the mode, since the hours are
+            // a setting even while the mode does not use them.
+            auto_light_hours: DailyWindow::from_hm(6, 30, 20, 15).unwrap(),
+            // Derived, and `false` outside the automatic mode -- which this
+            // fixture is not in -- so the default is the only value it can
+            // round-trip as.
+            auto_is_light: false,
             caret_width_scale: 2.5,
             focus_ring_scale: 3.0,
             night_light: true,
@@ -3161,6 +3309,152 @@ mod tests {
         AppearanceSettings::default().write_into(&mut doc);
         assert!(themes::fingerprint(&doc).is_empty());
         assert!(themes::fingerprint(&Document::new()).is_empty());
+    }
+
+    // ---- the automatic mode ----
+
+    /// 2026-09-25 at 12:00 UTC, and at 23:00 UTC.
+    const NOON: u64 = 1_790_337_600;
+    const NIGHT: u64 = NOON + 11 * 3600;
+
+    /// A scratch user whose clock is in UTC, so the time of day in these
+    /// tests is the same on every machine that runs them.
+    fn in_utc<T>(tag: &str, body: impl FnOnce(&std::path::Path) -> T) -> T {
+        config::testing::with_scratch_config(tag, |root| {
+            let mut clock = datetimesettings::DateTimeFile::load();
+            assert!(clock.settings.set_zone(Some("UTC")));
+            clock.save().unwrap();
+            body(root)
+        })
+    }
+
+    fn automatic() -> Document {
+        Document::parse("theme:\n  mode: system\n")
+    }
+
+    /// `System (Auto)` is light in its hours and dark outside them -- and says
+    /// so to everything drawn from it, the palette and the accent included.
+    #[test]
+    fn the_automatic_mode_follows_its_hours() {
+        in_utc("auto-hours", |_| {
+            let day = datetimesettings::clock::with_time(NOON, || {
+                AppearanceSettings::read_from(&automatic())
+            });
+            assert!(day.auto_is_light && day.is_light());
+            assert!(Palette::from_settings(&day).light);
+            assert_eq!(day.effective_accent(), day.accent_color.color_light());
+
+            let night = datetimesettings::clock::with_time(NIGHT, || {
+                AppearanceSettings::read_from(&automatic())
+            });
+            assert!(!night.auto_is_light && !night.is_light());
+            assert!(!Palette::from_settings(&night).light);
+        });
+    }
+
+    /// Only the automatic mode reads the clock: in the other two a reading at
+    /// noon and one at midnight are the same settings.
+    #[test]
+    fn the_other_modes_do_not_change_with_the_time_of_day() {
+        in_utc("auto-fixed-modes", |_| {
+            for mode in ["light", "dark"] {
+                let doc = Document::parse(&format!("theme:\n  mode: {mode}\n"));
+                let at = |t| {
+                    datetimesettings::clock::with_time(t, || AppearanceSettings::read_from(&doc))
+                };
+                assert_eq!(at(NOON), at(NIGHT), "{mode}");
+            }
+        });
+    }
+
+    /// The hours are the user's to set, both ends or neither, and are
+    /// written back in the spelling they were read in.
+    #[test]
+    fn the_automatic_modes_hours_round_trip() {
+        let doc = Document::parse(
+            "theme:\n  mode: system\n  auto:\n    light_from: \"06:30\"\n    dark_from: \"20:15\"\n",
+        );
+        let s = AppearanceSettings::read_from(&doc);
+        assert_eq!(
+            s.auto_light_hours,
+            DailyWindow::from_hm(6, 30, 20, 15).unwrap()
+        );
+        let mut out = Document::new();
+        s.write_into(&mut out);
+        assert_eq!(
+            out.get_str(&["theme", "auto", "light_from"]).as_deref(),
+            Some("06:30")
+        );
+        assert_eq!(
+            out.get_str(&["theme", "auto", "dark_from"]).as_deref(),
+            Some("20:15")
+        );
+
+        let one_end = Document::parse("theme:\n  auto:\n    light_from: \"05:00\"\n");
+        assert_eq!(
+            AppearanceSettings::read_from(&one_end).auto_light_hours,
+            DEFAULT_AUTO_LIGHT_HOURS,
+            "a start without an end is a window nobody chose"
+        );
+    }
+
+    /// The next edge, for the shell to sleep until: the evening one just
+    /// before 19:00, the morning one just after, none outside the automatic
+    /// mode, and never a timer of no length.
+    #[test]
+    fn the_next_change_is_the_next_edge_of_the_hours() {
+        let utc = datetimesettings::Tz::utc();
+        let s = AppearanceSettings {
+            theme_mode: ThemeMode::System,
+            ..AppearanceSettings::default()
+        };
+        let evening = NOON + 7 * 3600; // 19:00:00
+        assert_eq!(
+            s.next_auto_change(evening - 30, utc),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            s.next_auto_change(evening, utc),
+            Some(Duration::from_hours(12))
+        );
+        assert_eq!(
+            s.next_auto_change(evening + 59, utc),
+            Some(Duration::from_secs(12 * 3600 - 59))
+        );
+        let dark = AppearanceSettings::default();
+        assert_eq!(dark.next_auto_change(NOON, utc), None);
+        // In a zone ahead of UTC the edge comes that much sooner.
+        let tokyo = datetimesettings::zone("Asia/Tokyo").unwrap().rule;
+        // 12:00 UTC is 21:00 in Tokyo: dark, and light again at 07:00, ten
+        // hours on.
+        assert_eq!(
+            s.next_auto_change(NOON, tokyo),
+            Some(Duration::from_hours(10))
+        );
+        assert!(!s.auto_light_at(NOON, tokyo));
+    }
+
+    /// The watcher reports the edge though `appearance.yaml` did not change:
+    /// its fingerprint includes the phase.
+    #[test]
+    fn the_appearance_watcher_sees_the_automatic_modes_edge() {
+        in_utc("auto-watch", |_| {
+            let mut file = AppearanceFile::load();
+            file.settings.theme_mode = ThemeMode::System;
+            file.save().unwrap();
+            let mut w = watcher();
+            let before = NOON + 7 * 3600 - 60; // 18:59
+            datetimesettings::clock::with_time(before, || {
+                let doc = w.poll().expect("the first look");
+                assert!(AppearanceSettings::read_from(&doc).is_light());
+                assert!(w.poll().is_none(), "nothing has changed");
+            });
+            datetimesettings::clock::with_time(before + 120, || {
+                let doc = w.poll().expect("the edge passed");
+                assert!(!AppearanceSettings::read_from(&doc).is_light());
+                assert!(w.poll().is_none(), "reported once");
+            });
+        });
     }
 
     #[test]

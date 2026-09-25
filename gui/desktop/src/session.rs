@@ -1782,6 +1782,31 @@ impl<T: Transport> ShellSession<T> {
         self.arm_next_frame();
     }
 
+    /// Re-read the appearance settings and adopt them if they changed:
+    /// what a `SettingsChanged` announcement asks for, and what the automatic
+    /// light/dark mode's edge asks for, which is the same question.
+    fn adopt_appearance_change(&mut self) {
+        if self.shell.poll_appearance() {
+            // The animation speed lives on this session's manager, not
+            // on the shell, so adopting the settings is two steps and
+            // the second is easy to forget. `sync_animation_speed` is
+            // cheap and unconditional rather than guarded on the speed
+            // having changed: a guard would be a second place that has
+            // to know which fields matter.
+            self.sync_animation_speed();
+            self.sync_autohide();
+            self.sync_theme_problem();
+            // And the wallpaper, on the same argument the comment
+            // above makes: this is the live path, and a setting
+            // adopted only at startup is one that appears to need a
+            // logout. Unlike the two above, this one *is* guarded --
+            // see `sync_wallpaper`, where the guard stops an unrelated
+            // settings change re-decoding a full-screen photograph.
+            self.sync_wallpaper();
+            self.dirty = true;
+        }
+    }
+
     /// Persist the widget layout, reporting a failure rather than hiding it.
     ///
     /// Called after a change rather than on a timer: the layout changes when a
@@ -2328,25 +2353,7 @@ impl<T: Transport> ShellSession<T> {
             Event::SettingsChanged {
                 group: SettingsGroup::Appearance,
             } => {
-                if self.shell.poll_appearance() {
-                    // The animation speed lives on this session's manager, not
-                    // on the shell, so adopting the settings is two steps and
-                    // the second is easy to forget. `sync_animation_speed` is
-                    // cheap and unconditional rather than guarded on the speed
-                    // having changed: a guard would be a second place that has
-                    // to know which fields matter.
-                    self.sync_animation_speed();
-                    self.sync_autohide();
-                    self.sync_theme_problem();
-                    // And the wallpaper, on the same argument the comment
-                    // above makes: this is the live path, and a setting
-                    // adopted only at startup is one that appears to need a
-                    // logout. Unlike the two above, this one *is* guarded --
-                    // see `sync_wallpaper`, where the guard stops an unrelated
-                    // settings change re-decoding a full-screen photograph.
-                    self.sync_wallpaper();
-                    self.dirty = true;
-                }
+                self.adopt_appearance_change();
             }
             _ => {}
         }
@@ -2605,6 +2612,17 @@ impl<T: Transport> ShellSession<T> {
             // has just started or ended is a thing on screen that changed.
             self.dirty = true;
         }
+        // The automatic light/dark mode, dated against the wall clock for the
+        // same reason. At its edge the settings mean something else though the
+        // file has not changed: the shell reads them again -- its watcher sees
+        // the phase -- and tells the compositor, which re-reads them and tells
+        // every other program. The shell is the one to tell because it is the
+        // one process that keeps a clock for it; every reader works the phase
+        // out for itself once told to look.
+        if self.shell.theme_phase_is_due(unix_now()) {
+            self.adopt_appearance_change();
+            self.events.appearance_changed()?;
+        }
 
         if moved {
             self.dirty = true;
@@ -2640,7 +2658,8 @@ impl<T: Transport> ShellSession<T> {
             .next_due_in(self.clock_ms)
             .map(|ms| Duration::from_millis(ms.max(1)));
         let schedule = self.shell.next_schedule_change(unix_now());
-        if let Some(delay) = [widget, schedule].into_iter().flatten().min() {
+        let theme = self.shell.next_theme_change(unix_now());
+        if let Some(delay) = [widget, schedule, theme].into_iter().flatten().min() {
             self.events.wake_after(self.panel.window, delay);
         }
     }
@@ -2832,12 +2851,10 @@ fn pos(v: f32) -> i32 {
     v.round() as i32
 }
 
-/// Seconds since the epoch, or 0 on a clock set before it.
+/// Seconds since the epoch, or 0 on a clock set before it: the desktop's
+/// one wall clock, which a test can fix (`datetimesettings::clock`).
 fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    datetimesettings::clock::now_utc_secs()
 }
 
 #[cfg(test)]

@@ -154,6 +154,9 @@ workspace = true
 # `store`/`Watcher` pair without touching the developer's own
 # `~/.config/slateos`.
 [dev-dependencies]
+# `datetimesettings::clock::with_time`, which fixes the time of day for a test
+# of anything scheduled by it -- the automatic light/dark mode first.
+datetimesettings = { path = "../datetimesettings", features = ["testing"] }
 # `appearance::palette_check`, the sweep that proves a module draws from the
 # palette rather than from colours of its own. Cargo unifies this with the
 # ordinary dependency when building tests.

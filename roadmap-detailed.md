@@ -1767,7 +1767,7 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 - [x] Semantic color tokens (~30-40 defined by OS): `background`, `surface`, `primary`, `secondary`, `accent`, `error`, `warning`, `text`, `text-dim`, `text-on-primary`, `border`, etc. — the palette's 27 roles (`guitk::palette::Palette`); a theme sets 26 of them by the palette's own names (`THEME_ROLES`), the accent being the user's. Why those names and not the example ones here: §874.
 - [x] Apps reference semantic tokens, not hardcoded colors — theme redefines tokens and everything updates — 2026-09-25: a theme is loaded with the settings (`AppearanceSettings::read_from`), so every program that resolves `Palette::from_settings` -- the shell, the compositor, applications through `oswindow` -- draws in it. (Whether each app draws *only* from the palette is the conversion sweeps' question, not this one.)
 - [x] Light and dark mode variants in a single theme file (`colors` and `colors-light` sections) — 2026-09-25. A theme with only one section is shown in that mode in both (§874).
-- [ ] Auto mode: switch light/dark based on time of day or system toggle
+- [-] Auto mode: switch light/dark based on time of day or system toggle — *time of day done 2026-09-25 (§876): "System (Auto)" is light from 07:00 until 19:00 unless the user sets other hours (`theme.auto.light_from` / `dark_from`), in the clock's zone; the shell sleeps until the edge and every program re-reads there. A quick system toggle is not built, and the Settings page for the hours is lane E's (`requests/c-e-the-automatic-modes-hours.md`).*
 - [ ] Theme color API for applications (apps query current token values)
 
 ##### Tier 1 — Window Decorations

@@ -61654,7 +61654,7 @@ promise to break.
 | `email` | an inbox, folders, threads, filters | a network. Every IMAP and SMTP command it can build -- `login`, `select`, `fetch`, `ehlo`, `mail_from`, twenty in all -- returns a protocol string with no socket to write it to | `None`, documented |
 | `rssreader` | feeds, folders, articles, search | an HTTP client. Its RSS/Atom parser is real and now runs at startup on one sample feed, but nothing can fetch a second one, so `global_auto_refresh_seconds` has nothing to refresh | `None`, documented |
 | `ebook` | library, pagination, bookmarks, contents, search | a window that can be resized. The reading position is a byte offset precisely so it survives repagination, and nothing ever repaginated because nothing ever changed size | `None` -- nothing in a book advances on its own |
-| `torrent` | transfers, peers, pieces, trackers | a network. `TrackerRequest::build_url` builds an announce URL nothing can fetch, so no peer list ever comes back -- the swarm a download picks pieces from is invented at the first tick | `PIECE_STEP` while downloading |
+| `torrent` | transfers, peers, pieces, trackers | a network. `TrackerRequest::build_url` builds an announce URL nothing can fetch, so no peer list ever comes back -- the swarm a download picks pieces from is invented at the first tick | `PIECE_STEP` while downloading -- since 2026-09-25 only while a download has a peer, so never; see `[E] The torrent client transfers nothing` |
 | `spreadsheet` | a sheet a user can actually fill in | nothing to *show* — the gap is the other way round: `import_csv`/`export_csv` work on a `String` and there is no file dialog, command line or system clipboard to carry one | `None`, documented |
 
 **The rule that came out of it, and it is not "wire a tick".** In each case the
@@ -159957,6 +159957,29 @@ written again from the standard, and checks the Code128 table's rules and a
 sample of the published one. 114 tests; `apps/qrcode/mutate.py` has 41 rows.
 Fourteen examined; seven to go.
 
+**`apps/torrent`, 2026-09-25 -- a client that says it cannot transfer, said
+so where nobody could read it, and offered controls nothing could press.**
+The three-line notice was drawn at the top of the window and then painted
+over by the background and the header. Nothing answered the pointer: six
+toolbar buttons, seven filters, five labels, six tabs and every row. The
+transfer list did not scroll -- rows past the bottom were not drawn -- and Up
+and Down walked the transfers in the order they were added, not the order on
+screen, so with a sort or a filter on they jumped about and onto hidden rows.
+A label could be neither given nor chosen by; the search had a query and no
+way to type one; `add_magnet` had no caller and the dialog fields that would
+have fed it were written and never read; a file set to Skip was downloaded all
+the same, because nothing carried a file's priority to the pieces the picker
+reads; and a transfer set going asked for a tick every 150 ms for good, with no
+network to bring it a peer. Now: every button, filter, label, tab, column head
+(a press sorts, a second reverses) and row (a second press shows the details)
+answers the pointer; the list scrolls and follows the selection; a magnet
+dialog (Ctrl+U) that says what is wrong with a bad link; a search box (`/`);
+labels given with L or a press in the details; file priorities that set the
+pieces' (a piece shared by a skipped file and a wanted one is still fetched);
+"No network" in place of "Downloading" at 0% for good; and no clock without a
+peer. 103 tests; `apps/torrent/mutate.py` has 25 rows. The transfer itself is
+its own entry below. Fifteen examined; six to go.
+
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 
 **In short:** a `cargo test --workspace` failed with exactly one failing test,
@@ -165715,3 +165738,41 @@ against the same commits: nothing with `xargs -r git diff-tree`, the five
 **The fix** is `git diff-tree --stdin` (or `xargs -r -n1`) in both places,
 given in the request with a regression case for `test-pre-push-gates.py`.
 Until then, run a script's `test-<stem>.py` by hand before pushing it.
+
+### [E] The torrent client transfers nothing: it has no tracker or peer transport -- 2026-09-25
+**Status:** OPEN -- `apps/torrent/src/main.rs`; nothing blocks it but the
+work itself.
+
+**In short:** the torrent client reads `.torrent` files and magnet links,
+lists what they describe, and can do nothing else: there is no network code
+in it at all, so no tracker is asked for peers and no peer is asked for a
+piece. The window says so. Everything a transfer needs *around* the network
+is written and tested -- bencode, the info hash, the tracker URL and response
+parser, the peer-wire message encoder and decoder, the piece picker, piece
+priorities, the handshake -- and is waiting for the bytes.
+
+**Why this one is worth doing before the other network-less apps.** The
+weather, feed and mail programs need HTTPS, and there is no TLS an application
+can use. BitTorrent does not: most public trackers speak UDP (BEP 15), the rest
+plain HTTP, and peers speak unencrypted TCP. `std::net` is all it needs, on
+the host today and on SlateOS once lane D's sockets carry it.
+
+**The proper fix, in the order it can be tested:**
+1. A UDP tracker client (BEP 15: connect, announce, scrape) and an HTTP one
+   for `http://` trackers, returning `AnnounceResponse`, which already parses
+   the compact peer list.
+2. A peer connection: the handshake (`Handshake` encodes and decodes it), bitfield,
+   interested/choke, and `request`/`piece` for 16 KiB blocks, one thread per
+   connection reporting to the window through a channel.
+3. Piece assembly and SHA-1 verification against `TorrentMetainfo::pieces`
+   (`Sha1` is in the crate), then the bytes written to the files a piece
+   spans -- the same spans `set_file_priority` computes -- through a cap and
+   without following a path out of the save directory.
+4. Magnet links: the metadata exchange (BEP 9/10) from the peers the trackers
+   in the link return, since there is no DHT.
+5. Tests against a seed run in-process on localhost: a tracker stub and a
+   peer serving a known file, so a transfer can be checked byte for byte
+   without the internet.
+
+The window wakes on a tick today; with a connection thread per peer it wants
+`requests/e-f-wake-an-application-for-its-own-descriptor.md` to stop polling.

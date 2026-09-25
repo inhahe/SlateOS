@@ -1232,6 +1232,12 @@ impl PieceTracker {
         }
     }
 
+    /// A piece's priority: 0 for never, then 1, 5 and 10.
+    #[must_use]
+    pub fn priority(&self, index: usize) -> Option<u8> {
+        self.priorities.get(index).copied()
+    }
+
     /// Get our bitfield for sending to peers
     #[must_use]
     pub fn bitfield(&self) -> &[u8] {
@@ -1744,6 +1750,20 @@ pub enum FilePriority {
     High,
 }
 
+impl FilePriority {
+    /// The priority a piece of a file this important gets: the scale
+    /// `PieceTracker` picks by, where 0 is never.
+    #[must_use]
+    pub fn piece_priority(self) -> u8 {
+        match self {
+            Self::Skip => 0,
+            Self::Low => 1,
+            Self::Normal => 5,
+            Self::High => 10,
+        }
+    }
+}
+
 impl fmt::Display for FilePriority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1992,6 +2012,40 @@ impl ManagedTorrent {
     pub fn toggle_sequential(&mut self) {
         self.sequential_download = !self.sequential_download;
     }
+
+    /// Set file `index`'s priority, and the priority of every piece it
+    /// shares -- which the piece picker reads, and which nothing set: a file
+    /// marked Skip was still downloaded. A piece takes the highest priority
+    /// of the files it holds part of, so a piece shared by a skipped file and
+    /// a wanted one is still fetched.
+    pub fn set_file_priority(&mut self, index: usize, priority: FilePriority) {
+        let Some(slot) = self.file_priorities.get_mut(index) else {
+            return;
+        };
+        *slot = priority;
+        let Some(meta) = &self.metainfo else {
+            return;
+        };
+        let piece_length = meta.piece_length.max(1);
+        let mut start = 0_u64;
+        let mut spans = Vec::with_capacity(meta.files.len());
+        for file in &meta.files {
+            spans.push((start, start.saturating_add(file.length)));
+            start = start.saturating_add(file.length);
+        }
+        for piece in 0..self.pieces.total_count() {
+            let from = (piece as u64).saturating_mul(piece_length);
+            let to = from.saturating_add(piece_length);
+            let wanted = spans
+                .iter()
+                .zip(&self.file_priorities)
+                .filter(|((a, b), _)| *a < to && from < *b)
+                .map(|(_, p)| p.piece_priority())
+                .max()
+                .unwrap_or(5);
+            self.pieces.set_priority(piece, wanted);
+        }
+    }
 }
 
 // ─── Client Settings ─────────────────────────────────────────────────
@@ -2099,9 +2153,12 @@ impl Default for ClientSettings {
 // ─── Application ─────────────────────────────────────────────────────
 
 use guitk::dialog::{FilePicker, Picked};
-use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
 use guitk::render::RenderTree;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::textinput::TextInput;
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -2181,6 +2238,84 @@ use guitk::text;
 
 /// Font size used for every detail-table header and cell.
 const TABLE_FONT: f32 = 11.0;
+
+/// The window's bands.
+const HEADER_H: f32 = 48.0;
+const TAB_H: f32 = 36.0;
+const STATUS_H: f32 = 28.0;
+const SIDEBAR_W: f32 = 160.0;
+
+/// A transfer row's height.
+const ROW_H: f32 = 48.0;
+
+/// The band at the top of the transfer list that says what this client
+/// cannot do.
+const NOTICE_H: f32 = 48.0;
+
+/// The most characters the magnet dialog takes. A magnet link with a dozen
+/// trackers is a few kilobytes; this is past any.
+const MAX_MAGNET_CHARS: usize = 8192;
+
+/// The sidebar's filters, in the order the number keys choose them.
+const FILTERS: [TorrentFilter; 7] = [
+    TorrentFilter::All,
+    TorrentFilter::Downloading,
+    TorrentFilter::Seeding,
+    TorrentFilter::Completed,
+    TorrentFilter::Paused,
+    TorrentFilter::Active,
+    TorrentFilter::Error,
+];
+
+/// The transfer list's columns: what each sorts by, its heading, its width.
+const TRANSFER_COLUMNS: [(SortColumn, &str, f32); 8] = [
+    (SortColumn::Name, "Name", 250.0),
+    (SortColumn::Size, "Size", 80.0),
+    (SortColumn::Progress, "Progress", 120.0),
+    (SortColumn::Status, "Status", 80.0),
+    (SortColumn::DownSpeed, "\u{2193} Speed", 80.0),
+    (SortColumn::UpSpeed, "\u{2191} Speed", 80.0),
+    (SortColumn::Ratio, "Ratio", 60.0),
+    (SortColumn::Eta, "ETA", 80.0),
+];
+
+/// Everything in the window a pointer can press, as the renderer records it.
+///
+/// Nothing answered the pointer: six toolbar buttons, seven filters, five
+/// labels, six tabs, eight sortable column heads and every row were drawn as
+/// controls and were pictures of them (`known-issues.md` ->
+/// `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Open,
+    AddMagnet,
+    Remove,
+    Pause,
+    Resume,
+    PauseAll,
+    ResumeAll,
+    Help,
+    Search,
+    Filter(TorrentFilter),
+    /// A label in the sidebar, by its place in `TorrentApp::labels`.
+    Label(usize),
+    Tab(Tab),
+    SortBy(SortColumn),
+    TransferList,
+    Row(u32),
+    /// The selected transfer's label, in its details.
+    CycleLabel,
+    /// Whether the selected transfer downloads in order.
+    ToggleSequential,
+    /// A file's priority, by its place in the torrent's file list.
+    FilePriority(usize),
+    MagnetField,
+    MagnetAdd,
+    MagnetCancel,
+    /// Around and behind the magnet dialog: a press does nothing.
+    DialogBackdrop,
+    HelpCard,
+}
 
 /// What the window says instead of a transfer.
 ///
@@ -2291,7 +2426,7 @@ const TRACKER_COLUMNS: &[Column] = &[
 ];
 
 /// Active UI tab
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Transfers,
     Details,
@@ -2350,9 +2485,25 @@ pub struct TorrentApp {
     pub filter: TorrentFilter,
     pub global_download_speed: SpeedTracker,
     pub global_upload_speed: SpeedTracker,
+    /// Whether the magnet dialog is up, what is typed in it, why the last
+    /// attempt to add it failed, and where the new transfer will save.
     pub show_add_dialog: bool,
-    pub add_url_input: String,
+    pub magnet_input: TextInput,
+    pub magnet_error: Option<String>,
     pub add_save_path: String,
+    /// Whether the search box has the keys.
+    pub search_active: bool,
+    /// How far the transfer list is scrolled, in rows. It did not scroll:
+    /// rows past the bottom were not drawn.
+    pub transfer_scroll: usize,
+    /// The text fields' clipboard.
+    clipboard: String,
+    /// What the pointer is over, so it can be drawn lit.
+    hover: Option<Target>,
+    /// Every box the last paint recorded, for hover and the wheel.
+    last_hits: Vec<(Target, Rect)>,
+    /// The wheel's remainder.
+    wheel: wheel::Accumulator,
     pub status_message: String,
     pub labels: Vec<String>,
     pub selected_label: Option<String>,
@@ -2412,7 +2563,7 @@ impl SortColumn {
 }
 
 /// Column for sorting
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortColumn {
     Name,
     Size,
@@ -2428,7 +2579,7 @@ pub enum SortColumn {
 }
 
 /// Filter for torrent list
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TorrentFilter {
     All,
     Downloading,
@@ -2488,7 +2639,12 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("C", "Change the sort column"),
     ("R", "Reverse the sort"),
     ("Tab", "Next tab"),
+    ("Enter", "The selected transfer's details"),
+    ("L", "Change the selected transfer's label"),
+    ("PgUp / PgDn", "Scroll the list a page"),
+    ("/", "Search names and labels; Esc clears it"),
     ("Ctrl+O", "Open a .torrent file"),
+    ("Ctrl+U", "Add a magnet link"),
     ("Ctrl+P", "Pause every transfer"),
     ("Ctrl+R", "Resume every transfer"),
 ];
@@ -2530,8 +2686,15 @@ impl TorrentApp {
             global_download_speed: SpeedTracker::new(60, 1000),
             global_upload_speed: SpeedTracker::new(60, 1000),
             show_add_dialog: false,
-            add_url_input: String::new(),
+            magnet_input: TextInput::new(),
+            magnet_error: None,
             add_save_path: ClientSettings::default().default_save_path.clone(),
+            search_active: false,
+            transfer_scroll: 0,
+            clipboard: String::new(),
+            hover: None,
+            last_hits: Vec::new(),
+            wheel: wheel::Accumulator::default(),
             status_message: "Ready".to_string(),
             labels: vec![
                 "Movies".to_string(),
@@ -2723,8 +2886,24 @@ impl TorrentApp {
             Picked::Ignored => {}
         }
         match event {
-            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Key(key) if key.pressed => {
+                let result = self.handle_key(key);
+                self.keep_selection_visible();
+                result
+            }
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Tick { .. } => self.handle_tick(),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a window dimension is far below f32's integer-exact range"
+                )]
+                {
+                    self.win_width = *width as f32;
+                    self.win_height = *height as f32;
+                }
+                EventResult::Ignored
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -2838,8 +3017,21 @@ impl TorrentApp {
             }
             return EventResult::Consumed;
         }
+        // The magnet dialog and the search box take the keys while they have
+        // them: a `1` in a magnet link would change the filter, and Delete in
+        // the search would remove the selected transfer.
+        if self.show_add_dialog {
+            return self.handle_dialog_key(key);
+        }
+        if self.search_active {
+            return self.handle_search_key(key);
+        }
         if key.modifiers.ctrl {
             return match key.key {
+                Key::U => {
+                    self.open_magnet_dialog();
+                    EventResult::Consumed
+                }
                 // Everything at once, which is what the toolbar buttons are
                 // for and what nothing called.
                 Key::P => {
@@ -2871,6 +3063,28 @@ impl TorrentApp {
         match key.key {
             Key::Up | Key::Down => {
                 self.move_selection(if key.key == Key::Down { 1 } else { -1 });
+                EventResult::Consumed
+            }
+            Key::PageUp | Key::PageDown => {
+                let (_, rows) = Self::transfer_pane(self.content_rect());
+                let page = isize::try_from(rows).unwrap_or(1);
+                self.move_selection(if key.key == Key::PageDown {
+                    page
+                } else {
+                    page.saturating_neg()
+                });
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                if self.selected_torrent.is_none() || self.active_tab == Tab::Details {
+                    return EventResult::Ignored;
+                }
+                self.active_tab = Tab::Details;
+                EventResult::Consumed
+            }
+            Key::L => self.cycle_label(),
+            Key::Slash => {
+                self.search_active = true;
                 EventResult::Consumed
             }
             // Pause and resume the selected transfer. Both existed, both were
@@ -2954,7 +3168,10 @@ impl TorrentApp {
     /// Held as an id rather than an index, so removing a torrent above the
     /// selected one does not silently select its neighbour. Stops at the ends.
     fn move_selection(&mut self, delta: isize) {
-        let ids: Vec<u32> = self.torrents.iter().map(|t| t.id).collect();
+        // The list on screen, in its order: it walked `torrents` in the order
+        // they were added, so with a sort or a filter on, Down jumped about
+        // the list and onto rows the filter hid.
+        let ids: Vec<u32> = self.filtered_torrents().iter().map(|t| t.id).collect();
         if ids.is_empty() {
             self.selected_torrent = None;
             return;
@@ -3094,47 +3311,23 @@ impl TorrentApp {
         (downloading, seeding, total, dl_speed, ul_speed)
     }
 
-    /// Render the UI
-    #[must_use]
-    /// Draw the whole window.
+    /// For the tests: the window draws `frame`, whose boxes it keeps.
     ///
     /// Not `render`: [`App::render`] is the one the window calls, and this one
     /// takes the same two arguments -- so at equal arity the inherent method
     /// wins method lookup outright and the trait's is never called, silently.
+    #[cfg(test)]
+    #[must_use]
     pub fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-        // Drawn first so the layout below sits under it, and unconditionally:
-        // there is no state in which this client *can* transfer, so a
-        // condition here would be one that is always true and would rot the
-        // moment it stopped being.
-        for (i, line) in CANNOT_TRANSFER_LINES.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: 12.0,
-                #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
-                y: 4.0 + i as f32 * 14.0,
-                text: (*line).to_string(),
-                color: if i == 0 {
-                    self.palette.ink(self.palette.yellow)
-                } else {
-                    self.palette.subtext0
-                },
-                font_size: if i == 0 { 12.0 } else { 10.0 },
-                font_weight: if i == 0 {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(width - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-        let header_h = 48.0;
-        let tab_h = 36.0;
-        let status_h = 28.0;
-        let sidebar_w = 160.0;
+        self.frame(width, height).into_tree().commands
+    }
 
-        // Background
-        cmds.push(RenderCommand::FillRect {
+    /// Draw the window, recording every control where it is drawn: both the
+    /// picture and the hit test.
+    #[must_use]
+    pub fn frame(&self, width: f32, height: f32) -> Frame<Target> {
+        let mut f = Frame::new(width, height);
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width,
@@ -3142,89 +3335,229 @@ impl TorrentApp {
             color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
+        self.render_header(&mut f, width);
+        self.render_sidebar(&mut f, height);
+        self.render_tabs(&mut f, width);
 
-        // Header bar
+        let content = Rect::new(
+            SIDEBAR_W,
+            HEADER_H + TAB_H,
+            (width - SIDEBAR_W).max(0.0),
+            (height - HEADER_H - TAB_H - STATUS_H).max(0.0),
+        );
+        f.clip(content);
+        match self.active_tab {
+            Tab::Transfers => self.render_transfers(&mut f, content),
+            Tab::Details => self.render_details(&mut f, content),
+            Tab::Peers => self.render_peers(&mut f, content),
+            Tab::Files => self.render_files(&mut f, content),
+            Tab::Trackers => self.render_trackers(&mut f, content),
+            Tab::Settings => self.render_settings(&mut f, content),
+        }
+        f.unclip();
+        self.render_status(&mut f, width, height);
+
+        if self.show_add_dialog {
+            self.render_magnet_dialog(&mut f, width, height);
+        }
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+            f.hit(Target::HelpCard, Rect::new(0.0, 0.0, width, height));
+        }
+        // Last, so it is above everything. Without this the picker
+        // takes every keystroke with nothing on screen to say why --
+        // the defect apps/flashcards shipped.
+        f.extend(self.picker.render(&self.palette, width, height));
+        f
+    }
+
+    /// A button, lit while the pointer is on it; one with nothing to do is
+    /// drawn dim and records no box.
+    fn button(
+        &self,
+        f: &mut Frame<Target>,
+        rect: Rect,
+        label: &str,
+        target: Target,
+        enabled: bool,
+    ) {
+        let lit = enabled && self.hover == Some(target);
+        f.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: if lit {
+                self.palette.surface2
+            } else {
+                self.palette.surface1
+            },
+            corner_radii: CornerRadii::all(4.0),
+        });
+        f.push(RenderCommand::Text {
+            x: rect.x + 12.0,
+            y: rect.y + (rect.h - 12.0) / 2.0,
+            text: label.to_string(),
+            font_size: 12.0,
+            color: if enabled {
+                self.palette.text
+            } else {
+                self.palette.overlay0
+            },
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((rect.w - 16.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if enabled {
+            f.hit(target, rect);
+        }
+    }
+
+    /// The torrent the selection names, if it still exists.
+    fn selected(&self) -> Option<&ManagedTorrent> {
+        self.selected_torrent
+            .and_then(|id| self.torrents.iter().find(|t| t.id == id))
+    }
+
+    fn render_header(&self, f: &mut Frame<Target>, width: f32) {
         self.palette.push_surface(
-            &mut cmds,
+            f,
             0.0,
             0.0,
             width,
-            header_h,
+            HEADER_H,
             0.0,
             Surface::Strip(Edge::Bottom),
         );
-
-        // Title
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 16.0,
             y: 14.0,
             text: "Torrent".to_string(),
             font_size: 18.0,
             color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(96.0),
+            overflow: TextOverflow::Ellipsis,
         });
 
-        // Toolbar buttons
-        let buttons = [
-            "Add",
-            "Remove",
-            "Pause",
-            "Resume",
-            "Pause All",
-            "Resume All",
-        ];
+        // The toolbar. Six buttons were drawn here and none could be pressed.
+        let selected = self.selected();
+        let can_pause = selected
+            .is_some_and(|t| matches!(t.state, TorrentState::Downloading | TorrentState::Seeding));
+        let can_resume = selected.is_some_and(|t| t.state == TorrentState::Paused);
+        let any_running = self
+            .torrents
+            .iter()
+            .any(|t| matches!(t.state, TorrentState::Downloading | TorrentState::Seeding));
+        let any_paused = self
+            .torrents
+            .iter()
+            .any(|t| t.state == TorrentState::Paused);
         let mut bx = 120.0;
-        for label in &buttons {
+        for (label, target, enabled) in [
+            ("Open\u{2026}", Target::Open, true),
+            ("Add magnet\u{2026}", Target::AddMagnet, true),
+            ("Remove", Target::Remove, selected.is_some()),
+            ("Pause", Target::Pause, can_pause),
+            ("Resume", Target::Resume, can_resume),
+            ("Pause all", Target::PauseAll, any_running),
+            ("Resume all", Target::ResumeAll, any_paused),
+        ] {
             let bw = text::padded_width(label, 12.0, 12.0, FontWeightHint::Regular);
-            self.palette
-                .push_surface(&mut cmds, bx, 8.0, bw, 32.0, 4.0, Surface::Card);
-            cmds.push(RenderCommand::Text {
-                x: bx + 12.0,
-                y: 16.0,
-                text: label.to_string(),
-                font_size: 12.0,
-                color: self.palette.text,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            self.button(f, Rect::new(bx, 8.0, bw, 32.0), label, target, enabled);
             bx += bw + 8.0;
         }
 
-        // Sidebar
-        let sidebar_y = header_h;
-        let sidebar_h = height - header_h - status_h;
-        cmds.push(RenderCommand::FillRect {
+        // The search box and the keys, at the right.
+        let keys = Rect::new(width - 12.0 - 84.0, 8.0, 84.0, 32.0);
+        self.button(f, keys, "Keys (F1)", Target::Help, true);
+        let search = Rect::new((keys.x - 8.0 - 220.0).max(bx), 8.0, 220.0, 32.0);
+        self.palette.push_surface(
+            f,
+            search.x,
+            search.y,
+            search.w,
+            search.h,
+            6.0,
+            Surface::Card,
+        );
+        if self.search_active {
+            f.push(RenderCommand::StrokeRect {
+                x: search.x,
+                y: search.y,
+                width: search.w,
+                height: search.h,
+                color: self.palette.blue,
+                line_width: 2.0,
+                corner_radii: CornerRadii::all(6.0),
+            });
+        }
+        let placeholder = self.search_query.is_empty() && !self.search_active;
+        f.push(RenderCommand::Text {
+            x: search.x + 10.0,
+            y: search.y + 9.0,
+            text: if placeholder {
+                String::from("Search names and labels  ( / )")
+            } else {
+                self.search_query.clone()
+            },
+            font_size: 12.0,
+            color: if placeholder {
+                self.palette.subtext0
+            } else {
+                self.palette.text
+            },
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(search.w - 20.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if self.search_active {
+            let typed = text::measure(&self.search_query, 12.0, FontWeightHint::Regular);
+            f.push(RenderCommand::FillRect {
+                x: search.x + 10.0 + typed.min(search.w - 22.0),
+                y: search.y + 8.0,
+                width: guitk::textedit::CARET_WIDTH,
+                height: 16.0,
+                color: self.palette.text,
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+        f.hit(Target::Search, search);
+    }
+
+    fn render_sidebar(&self, f: &mut Frame<Target>, height: f32) {
+        f.push(RenderCommand::FillRect {
             x: 0.0,
-            y: sidebar_y,
-            width: sidebar_w,
-            height: sidebar_h,
+            y: HEADER_H,
+            width: SIDEBAR_W,
+            height: (height - HEADER_H - STATUS_H).max(0.0),
             color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
-
-        // Filter items in sidebar
-        let filters = [
-            TorrentFilter::All,
-            TorrentFilter::Downloading,
-            TorrentFilter::Seeding,
-            TorrentFilter::Completed,
-            TorrentFilter::Paused,
-            TorrentFilter::Active,
-            TorrentFilter::Error,
-        ];
-        let mut fy = sidebar_y + 8.0;
-        for filter in &filters {
-            let is_sel = *filter == self.filter;
-            if is_sel {
-                cmds.push(RenderCommand::FillRect {
-                    x: 4.0,
-                    y: fy,
-                    width: sidebar_w - 8.0,
-                    height: 28.0,
-                    color: self.palette.surface0,
+        // The filters. They were drawn, highlighted, and could not be chosen.
+        let mut fy = HEADER_H + 8.0;
+        for filter in FILTERS {
+            let row = Rect::new(4.0, fy, SIDEBAR_W - 8.0, 28.0);
+            let target = Target::Filter(filter);
+            let chosen = filter == self.filter;
+            if chosen || self.hover == Some(target) {
+                f.push(RenderCommand::FillRect {
+                    x: row.x,
+                    y: row.y,
+                    width: row.w,
+                    height: row.h,
+                    color: if chosen {
+                        self.palette.surface0
+                    } else {
+                        self.palette.crust
+                    },
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
@@ -3233,92 +3566,107 @@ impl TorrentApp {
                 .iter()
                 .filter(|t| filter.matches(t.state))
                 .count();
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: 16.0,
                 y: fy + 7.0,
-                text: format!("{} ({})", filter.label(), count),
+                text: format!("{} ({count})", filter.label()),
                 font_size: 12.0,
-                color: if is_sel {
+                color: if chosen {
                     self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext1
                 },
-                font_weight: if is_sel {
+                font_weight: if chosen {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(sidebar_w - 24.0),
+                max_width: Some(SIDEBAR_W - 24.0),
                 overflow: TextOverflow::Ellipsis,
             });
+            f.hit(target, row);
             fy += 32.0;
         }
 
-        // Labels section
+        // The labels: a press shows only the transfers under one, and a
+        // second press all of them again. Nothing could choose one, and
+        // nothing could give a transfer a label to be chosen by.
         fy += 16.0;
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 16.0,
             y: fy,
             text: "Labels".to_string(),
             font_size: 11.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(SIDEBAR_W - 24.0),
+            overflow: TextOverflow::Ellipsis,
         });
         fy += 20.0;
-        for label in &self.labels {
-            let is_sel = self.selected_label.as_ref() == Some(label);
-            if is_sel {
-                cmds.push(RenderCommand::FillRect {
-                    x: 4.0,
-                    y: fy,
-                    width: sidebar_w - 8.0,
-                    height: 24.0,
-                    color: self.palette.surface0,
+        for (i, label) in self.labels.iter().enumerate() {
+            let row = Rect::new(4.0, fy, SIDEBAR_W - 8.0, 24.0);
+            let target = Target::Label(i);
+            let chosen = self.selected_label.as_ref() == Some(label);
+            if chosen || self.hover == Some(target) {
+                f.push(RenderCommand::FillRect {
+                    x: row.x,
+                    y: row.y,
+                    width: row.w,
+                    height: row.h,
+                    color: if chosen {
+                        self.palette.surface0
+                    } else {
+                        self.palette.crust
+                    },
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
-            cmds.push(RenderCommand::Text {
+            let count = self.torrents.iter().filter(|t| &t.label == label).count();
+            f.push(RenderCommand::Text {
                 x: 16.0,
                 y: fy + 5.0,
-                text: label.clone(),
+                text: format!("{label} ({count})"),
                 font_size: 12.0,
-                color: if is_sel {
+                color: if chosen {
                     self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext0
                 },
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(sidebar_w - 24.0),
+                max_width: Some(SIDEBAR_W - 24.0),
                 overflow: TextOverflow::Ellipsis,
             });
+            f.hit(target, row);
             fy += 28.0;
         }
+    }
 
-        // Tab bar
-        let content_x = sidebar_w;
-        let content_w = width - sidebar_w;
-        cmds.push(RenderCommand::FillRect {
-            x: content_x,
-            y: header_h,
-            width: content_w,
-            height: tab_h,
+    fn render_tabs(&self, f: &mut Frame<Target>, width: f32) {
+        f.push(RenderCommand::FillRect {
+            x: SIDEBAR_W,
+            y: HEADER_H,
+            width: (width - SIDEBAR_W).max(0.0),
+            height: TAB_H,
             color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
-
-        let mut tx = content_x + 8.0;
-        for tab in &Tab::ALL {
-            let is_active = *tab == self.active_tab;
+        let mut tx = SIDEBAR_W + 8.0;
+        for tab in Tab::ALL {
+            let is_active = tab == self.active_tab;
             let tw = text::padded_width_any_weight(tab.label(), 10.0, 12.0);
-            if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: tx,
-                    y: header_h + 4.0,
-                    width: tw,
-                    height: tab_h - 4.0,
-                    color: self.palette.base,
+            let rect = Rect::new(tx, HEADER_H + 4.0, tw, TAB_H - 4.0);
+            let target = Target::Tab(tab);
+            if is_active || self.hover == Some(target) {
+                f.push(RenderCommand::FillRect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.w,
+                    height: rect.h,
+                    color: if is_active {
+                        self.palette.base
+                    } else {
+                        self.palette.mantle
+                    },
                     corner_radii: CornerRadii {
                         top_left: 6.0,
                         top_right: 6.0,
@@ -3327,9 +3675,9 @@ impl TorrentApp {
                     },
                 });
             }
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: tx + 10.0,
-                y: header_h + 12.0,
+                y: HEADER_H + 12.0,
                 text: tab.label().to_string(),
                 font_size: 12.0,
                 color: if is_active {
@@ -3342,44 +3690,24 @@ impl TorrentApp {
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: None,
+                max_width: Some(tw),
                 overflow: TextOverflow::Clip,
             });
+            f.hit(target, rect);
             tx += tw + 4.0;
         }
+    }
 
-        // Content area
-        let content_y = header_h + tab_h;
-        let content_h = height - header_h - tab_h - status_h;
-
-        match self.active_tab {
-            Tab::Transfers => {
-                self.render_transfers(&mut cmds, content_x, content_y, content_w, content_h);
-            }
-            Tab::Details => {
-                self.render_details(&mut cmds, content_x, content_y, content_w, content_h);
-            }
-            Tab::Peers => self.render_peers(&mut cmds, content_x, content_y, content_w, content_h),
-            Tab::Files => self.render_files(&mut cmds, content_x, content_y, content_w, content_h),
-            Tab::Trackers => {
-                self.render_trackers(&mut cmds, content_x, content_y, content_w, content_h);
-            }
-            Tab::Settings => {
-                self.render_settings(&mut cmds, content_x, content_y, content_w, content_h);
-            }
-        }
-
-        // Status bar
-        let sy = height - status_h;
+    fn render_status(&self, f: &mut Frame<Target>, width: f32, height: f32) {
+        let sy = height - STATUS_H;
         self.palette
-            .push_surface(&mut cmds, 0.0, sy, width, status_h, 0.0, Surface::Card);
-
+            .push_surface(f, 0.0, sy, width, STATUS_H, 0.0, Surface::Card);
         let (downloading, seeding, total, dl_speed, ul_speed) = self.stats();
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: 12.0,
             y: sy + 8.0,
             text: format!(
-                "↓ {}  ↑ {}  |  {} downloading, {} seeding, {} total  |  sorted by {} {} (C, R)  |  {}",
+                "\u{2193} {}  \u{2191} {}  |  {} downloading, {} seeding, {} total  |  sorted by {} {} (C, R)  |  {}",
                 format_speed(dl_speed),
                 format_speed(ul_speed),
                 downloading,
@@ -3391,293 +3719,363 @@ impl TorrentApp {
                 } else {
                     "descending"
                 },
-                self.status_message
+                self.last_open.as_deref().unwrap_or(&self.status_message)
             ),
             font_size: 11.0,
             color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(width - 24.0),
+            max_width: Some((width - 24.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
-
-        if self.show_help {
-            guitk::shortcut::render_card(
-                &mut cmds,
-                &self.palette,
-                (width, height),
-                0.0,
-                SHORTCUTS,
-                "F1 or ? closes this",
-            );
-        }
-
-        // Last, so it is above everything. Without this the picker
-        // takes every keystroke with nothing on screen to say why --
-        // the defect apps/flashcards shipped.
-        cmds.extend(self.picker.render(&self.palette, width, height));
-
-        cmds
     }
 
-    fn render_transfers(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
-        // Column headers
-        let cols = [
-            ("Name", 250.0),
-            ("Size", 80.0),
-            ("Progress", 120.0),
-            ("Status", 80.0),
-            ("↓ Speed", 80.0),
-            ("↑ Speed", 80.0),
-            ("Ratio", 60.0),
-            ("ETA", 80.0),
-        ];
-        let mut cx = x + 8.0;
-        let hy = y + 4.0;
-        for (label, cw) in &cols {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: hy,
-                text: label.to_string(),
-                font_size: 11.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(*cw),
+    /// Where the transfer rows are drawn in the content area `content`, and
+    /// how many whole rows fit: under the notice and the column heads.
+    fn transfer_pane(content: Rect) -> (Rect, usize) {
+        let top = content.y + NOTICE_H + 24.0;
+        let pane = Rect::new(content.x, top, content.w, (content.bottom() - top).max(0.0));
+        (pane, ((pane.h / ROW_H).floor().max(1.0)) as usize)
+    }
+
+    /// The content area at the window's own size.
+    fn content_rect(&self) -> Rect {
+        Rect::new(
+            SIDEBAR_W,
+            HEADER_H + TAB_H,
+            (self.win_width - SIDEBAR_W).max(0.0),
+            (self.win_height - HEADER_H - TAB_H - STATUS_H).max(0.0),
+        )
+    }
+
+    fn render_transfers(&self, f: &mut Frame<Target>, content: Rect) {
+        let (x, y, w) = (content.x, content.y, content.w);
+        // What this client cannot do, where it can be read. It was drawn
+        // first, at the top of the window, and then painted over by the
+        // background and the header.
+        for (i, line) in CANNOT_TRANSFER_LINES.iter().enumerate() {
+            f.push(RenderCommand::Text {
+                x: x + 12.0,
+                y: y + 6.0 + i as f32 * 14.0,
+                text: (*line).to_string(),
+                color: if i == 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
+                font_size: if i == 0 { 12.0 } else { 10.0 },
+                font_weight: if i == 0 {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some((w - 24.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
+        }
+
+        // The column heads: a press sorts by one, and a second press on the
+        // one already sorted by reverses it.
+        let head_y = y + NOTICE_H;
+        let mut cx = x + 8.0;
+        for (column, label, cw) in TRANSFER_COLUMNS {
+            let rect = Rect::new(cx - 4.0, head_y, cw + 8.0, 22.0);
+            let target = Target::SortBy(column);
+            let sorted = column == self.sort_column;
+            if self.hover == Some(target) {
+                f.push(RenderCommand::FillRect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.w,
+                    height: rect.h,
+                    color: self.palette.surface0,
+                    corner_radii: CornerRadii::all(3.0),
+                });
+            }
+            f.push(RenderCommand::Text {
+                x: cx,
+                y: head_y + 4.0,
+                text: if sorted {
+                    format!(
+                        "{label} {}",
+                        if self.sort_ascending {
+                            "\u{25B2}"
+                        } else {
+                            "\u{25BC}"
+                        }
+                    )
+                } else {
+                    label.to_string()
+                },
+                font_size: 11.0,
+                color: if sorted {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(cw),
+                overflow: TextOverflow::Ellipsis,
+            });
+            f.hit(target, rect);
             cx += cw + 8.0;
         }
 
-        // Torrent rows
+        let (pane, rows) = Self::transfer_pane(content);
+        f.hit(Target::TransferList, pane);
         let filtered = self.filtered_torrents();
-        let row_h = 48.0;
-        let mut ry = y + 24.0;
+        if filtered.is_empty() {
+            let why = if self.torrents.is_empty() {
+                String::from(
+                    "No torrents. Open\u{2026} (Ctrl+O) reads a .torrent file; Add magnet\u{2026} (Ctrl+U) takes a magnet link.",
+                )
+            } else {
+                String::from("Nothing here matches the filter, the label or the search.")
+            };
+            f.push(RenderCommand::Text {
+                x: pane.x + 16.0,
+                y: pane.y + 20.0,
+                text: why,
+                font_size: 13.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((pane.w - 32.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        for (shown, torrent) in filtered
+            .iter()
+            .skip(self.transfer_scroll)
+            .take(rows.saturating_add(1))
+            .enumerate()
+        {
+            let ry = pane.y + shown as f32 * ROW_H;
+            let row = Rect::new(x + 4.0, ry, (w - 8.0).max(0.0), ROW_H - 2.0);
+            self.render_transfer_row(f, torrent, row);
+            f.hit(Target::Row(torrent.id), row);
+        }
+        if filtered.len() > rows {
+            let last = filtered.len().saturating_sub(rows).max(1);
+            let thumb_h = (pane.h * rows as f32 / filtered.len() as f32)
+                .max(16.0)
+                .min(pane.h);
+            let thumb_y =
+                pane.y + (pane.h - thumb_h) * (self.transfer_scroll.min(last) as f32 / last as f32);
+            f.push(RenderCommand::FillRect {
+                x: pane.right() - 5.0,
+                y: thumb_y,
+                width: 4.0,
+                height: thumb_h,
+                color: self.palette.surface2,
+                corner_radii: CornerRadii::all(2.0),
+            });
+        }
+    }
 
-        for torrent in filtered.iter().take(((h - 24.0) / row_h) as usize) {
-            if ry + row_h > y + h {
-                break;
-            }
+    fn render_transfer_row(&self, f: &mut Frame<Target>, torrent: &ManagedTorrent, row: Rect) {
+        let is_sel = self.selected_torrent == Some(torrent.id);
+        if is_sel {
+            self.palette
+                .push_surface(f, row.x, row.y, row.w, row.h, 4.0, Surface::Card);
+        } else if self.hover == Some(Target::Row(torrent.id)) {
+            f.push(RenderCommand::FillRect {
+                x: row.x,
+                y: row.y,
+                width: row.w,
+                height: row.h,
+                color: self.palette.mantle,
+                corner_radii: CornerRadii::all(4.0),
+            });
+        }
+        let ry = row.y;
+        let mut cx = row.x + 4.0;
 
-            let is_sel = self.selected_torrent == Some(torrent.id);
-            if is_sel {
-                self.palette.push_surface(
-                    cmds,
-                    x + 4.0,
-                    ry,
-                    w - 8.0,
-                    row_h - 2.0,
-                    4.0,
-                    Surface::Card,
-                );
-            }
-
-            let mut cx = x + 8.0;
-
-            // Name
-            cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
+            x: cx,
+            y: ry + 6.0,
+            text: torrent.name.clone(),
+            font_size: 12.0,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(250.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        if !torrent.label.is_empty() {
+            f.push(RenderCommand::Text {
                 x: cx,
-                y: ry + 6.0,
-                text: torrent.name.clone(),
-                font_size: 12.0,
-                color: self.palette.text,
+                y: ry + 24.0,
+                text: torrent.label.clone(),
+                font_size: 10.0,
+                color: self.palette.ink(self.palette.mauve),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(250.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            if !torrent.label.is_empty() {
-                cmds.push(RenderCommand::Text {
-                    x: cx,
-                    y: ry + 24.0,
-                    text: torrent.label.clone(),
-                    font_size: 10.0,
-                    color: self.palette.ink(self.palette.mauve),
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(250.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-            cx += 258.0;
+        }
+        cx += 258.0;
 
-            // Size
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: format_size(torrent.total_size),
-                font_size: 12.0,
-                color: self.palette.subtext1,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cx += 88.0;
+        f.push(RenderCommand::Text {
+            x: cx,
+            y: ry + 6.0,
+            text: format_size(torrent.total_size),
+            font_size: 12.0,
+            color: self.palette.subtext1,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cx += 88.0;
 
-            // Progress bar
-            let bar_w = 112.0;
-            let bar_h = 12.0;
-            cmds.push(RenderCommand::FillRect {
+        let bar_w = 112.0;
+        let bar_h = 12.0;
+        f.push(RenderCommand::FillRect {
+            x: cx,
+            y: ry + 8.0,
+            width: bar_w,
+            height: bar_h,
+            color: self.palette.surface1,
+            corner_radii: CornerRadii::all(3.0),
+        });
+        let progress = torrent.progress();
+        let fill_w = (bar_w * progress as f32 / 100.0).min(bar_w);
+        if fill_w > 0.5 {
+            f.push(RenderCommand::FillRect {
                 x: cx,
                 y: ry + 8.0,
-                width: bar_w,
+                width: fill_w,
                 height: bar_h,
-                color: self.palette.surface1,
-                corner_radii: CornerRadii::all(3.0),
-            });
-            let progress = torrent.progress();
-            let fill_w = (bar_w * progress as f32 / 100.0).min(bar_w);
-            if fill_w > 0.5 {
-                let bar_color = match torrent.state {
+                color: match torrent.state {
                     TorrentState::Downloading => self.palette.blue,
                     TorrentState::Seeding => self.palette.green,
                     TorrentState::Paused => self.palette.yellow,
                     TorrentState::Error => self.palette.red,
                     _ => self.palette.teal,
-                };
-                cmds.push(RenderCommand::FillRect {
-                    x: cx,
-                    y: ry + 8.0,
-                    width: fill_w,
-                    height: bar_h,
-                    color: bar_color,
-                    corner_radii: CornerRadii::all(3.0),
-                });
-            }
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 24.0,
-                text: format!("{progress:.1}%"),
-                font_size: 10.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                },
+                corner_radii: CornerRadii::all(3.0),
             });
-            cx += 128.0;
-
-            // Status
-            let status_color = match torrent.state {
-                TorrentState::Downloading => self.palette.blue,
-                TorrentState::Seeding => self.palette.green,
-                TorrentState::Paused => self.palette.yellow,
-                TorrentState::Error => self.palette.red,
-                TorrentState::Complete => self.palette.teal,
-                _ => self.palette.subtext0,
-            };
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: torrent.state.to_string(),
-                font_size: 12.0,
-                color: status_color,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cx += 88.0;
-
-            // Down speed
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: format_speed(torrent.download_speed.speed_bps()),
-                font_size: 12.0,
-                color: self.palette.ink(self.palette.teal),
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cx += 88.0;
-
-            // Up speed
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: format_speed(torrent.upload_speed.speed_bps()),
-                font_size: 12.0,
-                color: self.palette.ink(self.palette.peach),
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cx += 88.0;
-
-            // Ratio
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: format!("{:.2}", torrent.ratio()),
-                font_size: 12.0,
-                color: self.palette.subtext1,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cx += 68.0;
-
-            // ETA
-            let eta_str = torrent
-                .eta_seconds()
-                .map_or_else(|| "∞".to_string(), format_duration);
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ry + 6.0,
-                text: eta_str,
-                font_size: 12.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-
-            ry += row_h;
         }
+        f.push(RenderCommand::Text {
+            x: cx,
+            y: ry + 24.0,
+            text: format!("{progress:.1}%"),
+            font_size: 10.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(bar_w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cx += 128.0;
 
-        if filtered.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 80.0,
-                y: y + h / 2.0 - 10.0,
-                text: "No torrents".to_string(),
-                font_size: 14.0,
-                color: self.palette.subtext0,
+        // A transfer set going with nobody to transfer from says so, rather
+        // than "Downloading" in blue at 0% for good.
+        let (status, status_color) = match torrent.state {
+            TorrentState::Downloading if torrent.peers.is_empty() => {
+                (String::from("No network"), self.palette.subtext0)
+            }
+            TorrentState::Downloading => (
+                torrent.state.to_string(),
+                self.palette.ink(self.palette.blue),
+            ),
+            TorrentState::Seeding => (
+                torrent.state.to_string(),
+                self.palette.ink(self.palette.green),
+            ),
+            TorrentState::Paused => (
+                torrent.state.to_string(),
+                self.palette.ink(self.palette.yellow),
+            ),
+            TorrentState::Error => (
+                torrent.state.to_string(),
+                self.palette.ink(self.palette.red),
+            ),
+            TorrentState::Complete => (
+                torrent.state.to_string(),
+                self.palette.ink(self.palette.teal),
+            ),
+            _ => (torrent.state.to_string(), self.palette.subtext0),
+        };
+        f.push(RenderCommand::Text {
+            x: cx,
+            y: ry + 6.0,
+            text: status,
+            font_size: 12.0,
+            color: status_color,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(80.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cx += 88.0;
+
+        for (value, ink, width) in [
+            (
+                format_speed(torrent.download_speed.speed_bps()),
+                self.palette.ink(self.palette.teal),
+                80.0,
+            ),
+            (
+                format_speed(torrent.upload_speed.speed_bps()),
+                self.palette.ink(self.palette.peach),
+                80.0,
+            ),
+            (
+                format!("{:.2}", torrent.ratio()),
+                self.palette.subtext1,
+                60.0,
+            ),
+            (
+                torrent
+                    .eta_seconds()
+                    .map_or_else(|| "\u{221E}".to_string(), format_duration),
+                self.palette.subtext0,
+                80.0,
+            ),
+        ] {
+            f.push(RenderCommand::Text {
+                x: cx,
+                y: ry + 6.0,
+                text: value,
+                font_size: 12.0,
+                color: ink,
                 font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some(width),
+                overflow: TextOverflow::Ellipsis,
             });
+            cx += width + 8.0;
         }
     }
 
-    fn render_details(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
-        let torrent = if let Some(t) = self
-            .selected_torrent
-            .and_then(|id| self.torrents.iter().find(|t| t.id == id))
-        {
-            t
-        } else {
-            cmds.push(RenderCommand::Text {
-                x: x + 16.0,
-                y: y + 20.0,
-                text: "Select a torrent to view details".to_string(),
-                font_size: 13.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+    /// A line saying there is nothing chosen to show.
+    fn render_nothing_chosen(&self, f: &mut Frame<Target>, content: Rect, what: &str) {
+        f.push(RenderCommand::Text {
+            x: content.x + 16.0,
+            y: content.y + 20.0,
+            text: format!("Select a torrent to view {what}"),
+            font_size: 13.0,
+            color: self.palette.subtext0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((content.w - 32.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    fn render_details(&self, f: &mut Frame<Target>, content: Rect) {
+        let Some(torrent) = self.selected() else {
+            self.render_nothing_chosen(f, content, "details");
             return;
         };
-
-        let mut dy = y + 12.0;
+        let (x, y, w) = (content.x, content.y, content.w);
         let label_x = x + 16.0;
         let value_x = x + 160.0;
-        let max_val_w = w - 180.0;
+        let max_val_w = (w - 180.0).max(0.0);
 
-        let fields: Vec<(&str, String)> = vec![
-            ("Name:", torrent.name.clone()),
-            ("Save Path:", torrent.save_path.clone()),
-            ("Total Size:", format_size(torrent.total_size)),
-            ("Downloaded:", format_size(torrent.downloaded)),
-            ("Uploaded:", format_size(torrent.uploaded)),
-            ("Ratio:", format!("{:.3}", torrent.ratio())),
-            ("Status:", torrent.state.to_string()),
-            ("Progress:", format!("{:.1}%", torrent.progress())),
+        let fields: Vec<(&str, String, Option<Target>)> = vec![
+            ("Name:", torrent.name.clone(), None),
+            ("Save Path:", torrent.save_path.clone(), None),
+            ("Total Size:", format_size(torrent.total_size), None),
+            ("Downloaded:", format_size(torrent.downloaded), None),
+            ("Uploaded:", format_size(torrent.uploaded), None),
+            ("Ratio:", format!("{:.3}", torrent.ratio()), None),
+            ("Status:", torrent.state.to_string(), None),
+            ("Progress:", format!("{:.1}%", torrent.progress()), None),
             (
                 "Pieces:",
                 format!(
@@ -3689,8 +4087,9 @@ impl TorrentApp {
                         .as_ref()
                         .map_or("?".to_string(), |m| format_size(m.piece_length)),
                 ),
+                None,
             ),
-            ("Peers:", format!("{} connected", torrent.peers.len())),
+            ("Peers:", format!("{} connected", torrent.peers.len()), None),
             (
                 "Info Hash:",
                 torrent.metainfo.as_ref().map_or_else(
@@ -3702,6 +4101,7 @@ impl TorrentApp {
                     },
                     |m| hex_encode(&m.info_hash),
                 ),
+                None,
             ),
             (
                 "Comment:",
@@ -3710,6 +4110,7 @@ impl TorrentApp {
                     .as_ref()
                     .and_then(|m| m.comment.clone())
                     .unwrap_or_else(|| "N/A".to_string()),
+                None,
             ),
             (
                 "Created By:",
@@ -3718,38 +4119,63 @@ impl TorrentApp {
                     .as_ref()
                     .and_then(|m| m.created_by.clone())
                     .unwrap_or_else(|| "N/A".to_string()),
+                None,
             ),
             (
                 "Sequential:",
-                if torrent.sequential_download {
-                    "Yes"
-                } else {
-                    "No"
-                }
-                .to_string(),
+                format!(
+                    "{}   (press, or S)",
+                    if torrent.sequential_download {
+                        "Yes"
+                    } else {
+                        "No"
+                    }
+                ),
+                Some(Target::ToggleSequential),
             ),
             (
                 "Label:",
-                if torrent.label.is_empty() {
-                    "None".to_string()
-                } else {
-                    torrent.label.clone()
-                },
+                format!(
+                    "{}   (press, or L)",
+                    if torrent.label.is_empty() {
+                        "None"
+                    } else {
+                        torrent.label.as_str()
+                    }
+                ),
+                Some(Target::CycleLabel),
             ),
         ];
 
-        for (label, value) in &fields {
-            cmds.push(RenderCommand::Text {
+        let mut dy = y + 12.0;
+        for (label, value, target) in &fields {
+            f.push(RenderCommand::Text {
                 x: label_x,
                 y: dy,
-                text: label.to_string(),
+                text: (*label).to_string(),
                 font_size: 12.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some(140.0),
+                overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::Text {
+            if let Some(target) = target {
+                let rect = Rect::new(value_x - 6.0, dy - 3.0, max_val_w.min(320.0), 20.0);
+                f.push(RenderCommand::FillRect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.w,
+                    height: rect.h,
+                    color: if self.hover == Some(*target) {
+                        self.palette.surface1
+                    } else {
+                        self.palette.surface0
+                    },
+                    corner_radii: CornerRadii::all(4.0),
+                });
+                f.hit(*target, rect);
+            }
+            f.push(RenderCommand::Text {
                 x: value_x,
                 y: dy,
                 text: value.clone(),
@@ -3763,35 +4189,19 @@ impl TorrentApp {
         }
     }
 
-    fn render_peers(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
-        let torrent = if let Some(t) = self
-            .selected_torrent
-            .and_then(|id| self.torrents.iter().find(|t| t.id == id))
-        {
-            t
-        } else {
-            cmds.push(RenderCommand::Text {
-                x: x + 16.0,
-                y: y + 20.0,
-                text: "Select a torrent to view peers".to_string(),
-                font_size: 13.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+    fn render_peers(&self, f: &mut Frame<Target>, content: Rect) {
+        let Some(torrent) = self.selected() else {
+            self.render_nothing_chosen(f, content, "peers");
             return;
         };
-
+        let (x, y, w, h) = (content.x, content.y, content.w, content.h);
         let table = Table::new(PEER_COLUMNS, x);
-        table.header(cmds, y + 4.0, self.palette.overlay0, TABLE_FONT);
-
+        f.draw_with(|c| table.header(c, y + 4.0, self.palette.subtext0, TABLE_FONT));
         let mut py = y + 24.0;
         for peer in &torrent.peers {
             if py + 24.0 > y + h {
                 break;
             }
-
             let mut flags = String::new();
             if !peer.am_choking {
                 flags.push('u');
@@ -3808,7 +4218,6 @@ impl TorrentApp {
             if peer.supports_extensions {
                 flags.push('e');
             }
-
             let cells: [(String, guitk::Color, Fit); 6] = [
                 (
                     format!("{}:{}", peer.address, peer.port),
@@ -3821,12 +4230,12 @@ impl TorrentApp {
                 (peer.client_name.clone(), self.palette.text, Fit::Start),
                 (
                     format_speed(peer.download_rate),
-                    self.palette.teal,
+                    self.palette.ink(self.palette.teal),
                     Fit::Start,
                 ),
                 (
                     format_speed(peer.upload_rate),
-                    self.palette.peach,
+                    self.palette.ink(self.palette.peach),
                     Fit::Start,
                 ),
                 (
@@ -3841,73 +4250,87 @@ impl TorrentApp {
                 table.len(),
                 "a cell with no column is positioned past the table and drawn empty",
             );
-            for (i, (cell, color, fit)) in cells.iter().enumerate() {
-                table.cell(cmds, i, py, cell, *color, TABLE_FONT, *fit);
-            }
-
+            f.draw_with(|c| {
+                for (i, (cell, color, fit)) in cells.iter().enumerate() {
+                    table.cell(c, i, py, cell, *color, TABLE_FONT, *fit);
+                }
+            });
             py += 24.0;
         }
-
         if torrent.peers.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 50.0,
+            f.push(RenderCommand::Text {
+                x: x + 16.0,
                 y: y + 40.0,
-                text: "No peers".to_string(),
+                text: String::from("No peers: this client has no network to find any on."),
                 font_size: 13.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some((w - 32.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
 
-    fn render_files(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, _w: f32, h: f32) {
-        let torrent = if let Some(t) = self
-            .selected_torrent
-            .and_then(|id| self.torrents.iter().find(|t| t.id == id))
-        {
-            t
-        } else {
-            cmds.push(RenderCommand::Text {
-                x: x + 16.0,
-                y: y + 20.0,
-                text: "Select a torrent to view files".to_string(),
-                font_size: 13.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+    fn render_files(&self, f: &mut Frame<Target>, content: Rect) {
+        let Some(torrent) = self.selected() else {
+            self.render_nothing_chosen(f, content, "files");
             return;
         };
-
+        let (x, y, h) = (content.x, content.y, content.h);
         let meta_files = torrent
             .metainfo
             .as_ref()
             .map_or(&[] as &[TorrentFile], |m| &m.files);
-
         let table = Table::new(FILE_COLUMNS, x);
-        table.header(cmds, y + 4.0, self.palette.overlay0, TABLE_FONT);
-
+        f.draw_with(|c| table.header(c, y + 4.0, self.palette.subtext0, TABLE_FONT));
+        if meta_files.is_empty() {
+            f.push(RenderCommand::Text {
+                x: x + 16.0,
+                y: y + 32.0,
+                text: String::from(
+                    "No file list: a magnet link carries none, and the metadata that would comes from peers.",
+                ),
+                font_size: 12.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((content.w - 32.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        let priority_x = x + FILE_COLUMNS.iter().take(2).map(|c| c.width).sum::<f32>();
         let mut fy = y + 24.0;
         for (i, file) in meta_files.iter().enumerate() {
             if fy + 22.0 > y + h {
                 break;
             }
-
             let priority = torrent
                 .file_priorities
                 .get(i)
                 .copied()
                 .unwrap_or(FilePriority::Normal);
             let prio_color = match priority {
-                FilePriority::Skip => self.palette.overlay0,
-                FilePriority::Low => self.palette.yellow,
+                FilePriority::Skip => self.palette.subtext0,
+                FilePriority::Low => self.palette.ink(self.palette.yellow),
                 FilePriority::Normal => self.palette.text,
-                FilePriority::High => self.palette.green,
+                FilePriority::High => self.palette.ink(self.palette.green),
             };
-
+            // A press on the priority steps it: Low, Normal, High, Skip. It
+            // was shown and could not be changed.
+            let target = Target::FilePriority(i);
+            let chip = Rect::new(priority_x, fy - 2.0, 80.0, 20.0);
+            f.push(RenderCommand::FillRect {
+                x: chip.x,
+                y: chip.y,
+                width: chip.w,
+                height: chip.h,
+                color: if self.hover == Some(target) {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
+                corner_radii: CornerRadii::all(4.0),
+            });
+            f.hit(target, chip);
             // The path is elided from the *front*: it comes from the torrent's
             // metainfo and is routinely longer than the column, and what
             // identifies a file is its name, not the directory chain above it.
@@ -3922,50 +4345,34 @@ impl TorrentApp {
                 table.len(),
                 "a cell with no column is positioned past the table and drawn empty",
             );
-            for (i, (cell, color, fit)) in cells.iter().enumerate() {
-                table.cell(cmds, i, fy, cell, *color, TABLE_FONT, *fit);
-            }
-
+            f.draw_with(|c| {
+                for (i, (cell, color, fit)) in cells.iter().enumerate() {
+                    table.cell(c, i, fy, cell, *color, TABLE_FONT, *fit);
+                }
+            });
             fy += 22.0;
         }
     }
 
-    fn render_trackers(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, _w: f32, h: f32) {
-        let torrent = if let Some(t) = self
-            .selected_torrent
-            .and_then(|id| self.torrents.iter().find(|t| t.id == id))
-        {
-            t
-        } else {
-            cmds.push(RenderCommand::Text {
-                x: x + 16.0,
-                y: y + 20.0,
-                text: "Select a torrent to view trackers".to_string(),
-                font_size: 13.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+    fn render_trackers(&self, f: &mut Frame<Target>, content: Rect) {
+        let Some(torrent) = self.selected() else {
+            self.render_nothing_chosen(f, content, "trackers");
             return;
         };
-
+        let (x, y, h) = (content.x, content.y, content.h);
         let table = Table::new(TRACKER_COLUMNS, x);
-        table.header(cmds, y + 4.0, self.palette.overlay0, TABLE_FONT);
-
+        f.draw_with(|c| table.header(c, y + 4.0, self.palette.subtext0, TABLE_FONT));
         let mut ty = y + 24.0;
         for tracker in &torrent.trackers {
             if ty + 22.0 > y + h {
                 break;
             }
-
             let status_color = match tracker.status {
-                TrackerStatus::Working => self.palette.green,
-                TrackerStatus::Updating => self.palette.blue,
-                TrackerStatus::Error => self.palette.red,
+                TrackerStatus::Working => self.palette.ink(self.palette.green),
+                TrackerStatus::Updating => self.palette.ink(self.palette.blue),
+                TrackerStatus::Error => self.palette.ink(self.palette.red),
                 _ => self.palette.subtext0,
             };
-
             // A tracker URL is elided from the front for the same reason a file
             // path is: the announce path at the end is what distinguishes two
             // trackers on the same host, and cutting the usual way keeps only
@@ -3973,8 +4380,16 @@ impl TorrentApp {
             let cells: [(String, guitk::Color, Fit); 5] = [
                 (tracker.url.clone(), self.palette.text, Fit::End),
                 (tracker.status.to_string(), status_color, Fit::Start),
-                (tracker.seeders.to_string(), self.palette.green, Fit::Start),
-                (tracker.leechers.to_string(), self.palette.peach, Fit::Start),
+                (
+                    tracker.seeders.to_string(),
+                    self.palette.ink(self.palette.green),
+                    Fit::Start,
+                ),
+                (
+                    tracker.leechers.to_string(),
+                    self.palette.ink(self.palette.peach),
+                    Fit::Start,
+                ),
                 (tracker.tier.to_string(), self.palette.subtext0, Fit::Start),
             ];
             debug_assert_eq!(
@@ -3982,32 +4397,33 @@ impl TorrentApp {
                 table.len(),
                 "a cell with no column is positioned past the table and drawn empty",
             );
-            for (i, (cell, color, fit)) in cells.iter().enumerate() {
-                table.cell(cmds, i, ty, cell, *color, TABLE_FONT, *fit);
-            }
-
+            f.draw_with(|c| {
+                for (i, (cell, color, fit)) in cells.iter().enumerate() {
+                    table.cell(c, i, ty, cell, *color, TABLE_FONT, *fit);
+                }
+            });
             ty += 22.0;
         }
     }
 
-    fn render_settings(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
+    fn render_settings(&self, f: &mut Frame<Target>, content: Rect) {
+        let (x, y, w) = (content.x, content.y, content.w);
         let mut sy = y + 12.0;
         let label_x = x + 16.0;
-
-        cmds.push(RenderCommand::Text {
+        f.push(RenderCommand::Text {
             x: label_x,
             y: sy,
             text: SETTINGS_NOT_APPLIED.to_owned(),
             font_size: 11.0,
             color: self.palette.ink(self.palette.yellow),
             font_weight: FontWeightHint::Bold,
-            max_width: Some(w - 32.0),
+            max_width: Some((w - 32.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
         sy += 24.0;
         let value_x = x + 220.0;
-        let max_val_w = w - 240.0;
-
+        let max_val_w = (w - 240.0).max(0.0);
+        let on_off = |on: bool| if on { "Enabled" } else { "Disabled" }.to_string();
         let settings: Vec<(&str, String)> = vec![
             ("Listen Port:", self.settings.listen_port.to_string()),
             (
@@ -4047,33 +4463,9 @@ impl TorrentApp {
                 self.settings.default_save_path.clone(),
             ),
             ("Encryption:", self.settings.encryption_mode.to_string()),
-            (
-                "DHT:",
-                if self.settings.dht_enabled {
-                    "Enabled"
-                } else {
-                    "Disabled"
-                }
-                .to_string(),
-            ),
-            (
-                "PEX:",
-                if self.settings.pex_enabled {
-                    "Enabled"
-                } else {
-                    "Disabled"
-                }
-                .to_string(),
-            ),
-            (
-                "µTP:",
-                if self.settings.enable_utp {
-                    "Enabled"
-                } else {
-                    "Disabled"
-                }
-                .to_string(),
-            ),
+            ("DHT:", on_off(self.settings.dht_enabled)),
+            ("PEX:", on_off(self.settings.pex_enabled)),
+            ("\u{B5}TP:", on_off(self.settings.enable_utp)),
             (
                 "Seed Ratio Limit:",
                 self.settings
@@ -4091,19 +4483,18 @@ impl TorrentApp {
             ),
             ("Proxy:", self.settings.proxy_type.to_string()),
         ];
-
         for (label, value) in &settings {
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: label_x,
                 y: sy,
-                text: label.to_string(),
+                text: (*label).to_string(),
                 font_size: 12.0,
                 color: self.palette.subtext0,
                 font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some(200.0),
+                overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::Text {
+            f.push(RenderCommand::Text {
                 x: value_x,
                 y: sy,
                 text: value.clone(),
@@ -4115,6 +4506,437 @@ impl TorrentApp {
             });
             sy += 22.0;
         }
+    }
+
+    /// Where the magnet dialog's card is.
+    fn magnet_card(width: f32, height: f32) -> Rect {
+        let w = 600.0_f32.min(width - 24.0).max(0.0);
+        let h = 190.0_f32.min(height - 24.0).max(0.0);
+        Rect::new((width - w) / 2.0, (height - h) / 2.0, w, h)
+    }
+
+    /// The dialog that takes a magnet link. `add_magnet` had no caller, and
+    /// the fields it would have filled were written and never read.
+    fn render_magnet_dialog(&self, f: &mut Frame<Target>, width: f32, height: f32) {
+        f.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+            color: guitk::Color::rgba(0, 0, 0, 150),
+            corner_radii: CornerRadii::ZERO,
+        });
+        // Around and behind the card a press does nothing: the dialog is
+        // modal, and a press reaching a row behind it would change what it
+        // is about.
+        f.hit(Target::DialogBackdrop, Rect::new(0.0, 0.0, width, height));
+        let card = Self::magnet_card(width, height);
+        self.palette
+            .push_surface(f, card.x, card.y, card.w, card.h, 12.0, Surface::Card);
+        f.push(RenderCommand::Text {
+            x: card.x + 20.0,
+            y: card.y + 18.0,
+            text: String::from("Add a magnet link"),
+            font_size: 16.0,
+            color: self.palette.text,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some((card.w - 40.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let field = Rect::new(card.x + 20.0, card.y + 50.0, (card.w - 40.0).max(0.0), 32.0);
+        self.palette
+            .push_surface(f, field.x, field.y, field.w, field.h, 4.0, Surface::Card);
+        f.push(RenderCommand::StrokeRect {
+            x: field.x,
+            y: field.y,
+            width: field.w,
+            height: field.h,
+            color: self.palette.blue,
+            line_width: 2.0,
+            corner_radii: CornerRadii::all(4.0),
+        });
+        if self.magnet_input.text().is_empty() {
+            f.push(RenderCommand::Text {
+                x: field.x + 8.0,
+                y: field.y + 9.0,
+                text: String::from("magnet:?xt=urn:btih:\u{2026}"),
+                font_size: 12.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((field.w - 16.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        let mut tree = RenderTree::new();
+        guitk::textedit::draw(
+            &mut tree,
+            &guitk::textedit::SingleLine {
+                text: self.magnet_input.text(),
+                cursor: self.magnet_input.cursor(),
+                selection_anchor: self.magnet_input.selection_anchor(),
+                focused: true,
+                x: field.x + 8.0,
+                y: field.y + 7.0,
+                width: (field.w - 16.0).max(0.0),
+                line_height: 18.0,
+                font_size: 12.0,
+                weight: FontWeightHint::Regular,
+                color: self.palette.text,
+                selection_bg: self.palette.blue,
+                selection_fg: self.palette.crust,
+                caret_width: guitk::textedit::CARET_WIDTH,
+            },
+        );
+        f.extend(tree.commands);
+        f.hit(Target::MagnetField, field);
+        let (note, ink) = match &self.magnet_error {
+            Some(why) => (why.clone(), self.palette.ink(self.palette.red)),
+            None => (
+                format!(
+                    "Saved to {} -- once there is a network to fetch it over.",
+                    self.add_save_path
+                ),
+                self.palette.subtext0,
+            ),
+        };
+        f.push(RenderCommand::Text {
+            x: card.x + 20.0,
+            y: field.bottom() + 12.0,
+            text: note,
+            font_size: 11.0,
+            color: ink,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((card.w - 40.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        let by = card.bottom() - 48.0;
+        self.button(
+            f,
+            Rect::new(card.right() - 20.0 - 90.0, by, 90.0, 30.0),
+            "Cancel",
+            Target::MagnetCancel,
+            true,
+        );
+        self.button(
+            f,
+            Rect::new(card.right() - 20.0 - 90.0 - 8.0 - 90.0, by, 90.0, 30.0),
+            "Add",
+            Target::MagnetAdd,
+            !self.magnet_input.text().trim().is_empty(),
+        );
+    }
+
+    // ── The pointer ─────────────────────────────────────────────────
+
+    /// What is under `(x, y)` in the frame last shown.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self.frame(self.win_width, self.win_height).hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                let Some(target) = self
+                    .frame(self.win_width, self.win_height)
+                    .hit_test(event.x, event.y)
+                else {
+                    return EventResult::Ignored;
+                };
+                self.press(target)
+            }
+            MouseEventKind::Move => {
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return EventResult::Ignored;
+                }
+                self.hover = over;
+                EventResult::Consumed
+            }
+            MouseEventKind::Leave => {
+                if self.hover.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            MouseEventKind::Scroll { dy, .. } => self.wheel_at(event.x, event.y, dy),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// A left press on `target`.
+    fn press(&mut self, target: Target) -> EventResult {
+        // A press anywhere but the search box takes the keys out of it.
+        if target != Target::Search {
+            self.search_active = false;
+        }
+        match target {
+            Target::HelpCard => self.show_help = false,
+            Target::Help => self.show_help = true,
+            Target::Open => self.picker.open_to_read(),
+            Target::AddMagnet => self.open_magnet_dialog(),
+            Target::Remove => {
+                let Some(id) = self.selected_torrent else {
+                    return EventResult::Ignored;
+                };
+                self.remove_torrent(id, false);
+                self.reanchor_selection();
+            }
+            Target::Pause => {
+                let Some(id) = self.selected_torrent else {
+                    return EventResult::Ignored;
+                };
+                self.pause_torrent(id);
+            }
+            Target::Resume => {
+                let Some(id) = self.selected_torrent else {
+                    return EventResult::Ignored;
+                };
+                self.resume_torrent(id);
+            }
+            Target::PauseAll => self.pause_all(),
+            Target::ResumeAll => self.resume_all(),
+            Target::Search => self.search_active = true,
+            Target::Filter(filter) => return self.set_filter(filter),
+            Target::Label(index) => {
+                let Some(label) = self.labels.get(index).cloned() else {
+                    return EventResult::Ignored;
+                };
+                self.selected_label = if self.selected_label.as_ref() == Some(&label) {
+                    None
+                } else {
+                    Some(label)
+                };
+                self.transfer_scroll = 0;
+            }
+            Target::Tab(tab) => {
+                if tab == self.active_tab {
+                    return EventResult::Ignored;
+                }
+                self.active_tab = tab;
+            }
+            Target::SortBy(column) => {
+                if column == self.sort_column {
+                    self.sort_ascending = !self.sort_ascending;
+                } else {
+                    self.sort_column = column;
+                }
+            }
+            // A press chooses a transfer; a second press on it shows its
+            // details.
+            Target::Row(id) => {
+                if self.selected_torrent == Some(id) {
+                    self.active_tab = Tab::Details;
+                } else {
+                    self.selected_torrent = Some(id);
+                }
+            }
+            Target::CycleLabel => return self.cycle_label(),
+            Target::ToggleSequential => {
+                let Some(id) = self.selected_torrent else {
+                    return EventResult::Ignored;
+                };
+                if let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) {
+                    t.toggle_sequential();
+                }
+            }
+            Target::FilePriority(index) => {
+                let Some(id) = self.selected_torrent else {
+                    return EventResult::Ignored;
+                };
+                let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) else {
+                    return EventResult::Ignored;
+                };
+                let next = match t.file_priorities.get(index) {
+                    Some(FilePriority::Low) => FilePriority::Normal,
+                    Some(FilePriority::Normal) => FilePriority::High,
+                    Some(FilePriority::High) => FilePriority::Skip,
+                    Some(FilePriority::Skip) => FilePriority::Low,
+                    None => return EventResult::Ignored,
+                };
+                t.set_file_priority(index, next);
+            }
+            Target::MagnetAdd => self.add_typed_magnet(),
+            Target::MagnetCancel => self.close_magnet_dialog(),
+            Target::MagnetField | Target::DialogBackdrop | Target::TransferList => {
+                return EventResult::Ignored;
+            }
+        }
+        EventResult::Consumed
+    }
+
+    /// The wheel over the transfer list.
+    fn wheel_at(&mut self, x: f32, y: f32, dy: f32) -> EventResult {
+        if !matches!(
+            self.target_at(x, y),
+            Some(Target::TransferList | Target::Row(_))
+        ) {
+            return EventResult::Ignored;
+        }
+        let rows = self.wheel.rows(dy);
+        let (_, visible) = Self::transfer_pane(self.content_rect());
+        let last = self.filtered_torrents().len().saturating_sub(visible);
+        let now = self.transfer_scroll;
+        let next = if rows < 0 {
+            now.saturating_sub(rows.unsigned_abs())
+        } else {
+            now.saturating_add(rows.unsigned_abs())
+        }
+        .min(last);
+        if next == now {
+            return EventResult::Ignored;
+        }
+        self.transfer_scroll = next;
+        EventResult::Consumed
+    }
+
+    /// Scroll the transfer list so the selected transfer is on screen, and
+    /// the list not past its end.
+    fn keep_selection_visible(&mut self) {
+        let (_, visible) = Self::transfer_pane(self.content_rect());
+        let ids: Vec<u32> = self.filtered_torrents().iter().map(|t| t.id).collect();
+        if let Some(at) = self
+            .selected_torrent
+            .and_then(|id| ids.iter().position(|v| *v == id))
+        {
+            if at < self.transfer_scroll {
+                self.transfer_scroll = at;
+            } else if at >= self.transfer_scroll.saturating_add(visible) {
+                self.transfer_scroll = at.saturating_add(1).saturating_sub(visible);
+            }
+        }
+        self.transfer_scroll = self.transfer_scroll.min(ids.len().saturating_sub(visible));
+    }
+
+    /// Give the selected transfer the next label, and then none.
+    fn cycle_label(&mut self) -> EventResult {
+        let Some(id) = self.selected_torrent else {
+            return EventResult::Ignored;
+        };
+        let labels = self.labels.clone();
+        let Some(t) = self.torrents.iter_mut().find(|t| t.id == id) else {
+            return EventResult::Ignored;
+        };
+        let at = labels.iter().position(|l| *l == t.label);
+        t.label = match at {
+            None => labels.first().cloned().unwrap_or_default(),
+            Some(i) => labels.get(i.saturating_add(1)).cloned().unwrap_or_default(),
+        };
+        self.status_message = if t.label.is_empty() {
+            format!("{}: no label", t.name)
+        } else {
+            format!("{}: labelled {}", t.name, t.label)
+        };
+        EventResult::Consumed
+    }
+
+    fn open_magnet_dialog(&mut self) {
+        self.show_add_dialog = true;
+        self.magnet_input.clear();
+        self.magnet_error = None;
+        self.add_save_path
+            .clone_from(&self.settings.default_save_path);
+    }
+
+    fn close_magnet_dialog(&mut self) {
+        self.show_add_dialog = false;
+        self.magnet_error = None;
+    }
+
+    /// Add the magnet link typed into the dialog, or say what is wrong with
+    /// it and keep it there to be mended.
+    fn add_typed_magnet(&mut self) {
+        let typed = self.magnet_input.text().trim().to_owned();
+        match MagnetLink::parse(&typed) {
+            Ok(magnet) => {
+                let path = self.add_save_path.clone();
+                let id = self.add_magnet(magnet, Some(&path));
+                self.selected_torrent = Some(id);
+                self.close_magnet_dialog();
+                self.keep_selection_visible();
+            }
+            Err(why) => {
+                self.magnet_error = Some(format!("Not a magnet link this client reads: {why}"));
+            }
+        }
+    }
+
+    /// Keys while the magnet dialog is up.
+    fn handle_dialog_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => {
+                self.close_magnet_dialog();
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                if self.magnet_input.text().trim().is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.add_typed_magnet();
+                EventResult::Consumed
+            }
+            _ => {
+                let clipboard = self.clipboard.clone();
+                let before = (
+                    self.magnet_input.text().to_owned(),
+                    self.magnet_input.cursor(),
+                    self.magnet_input.selection_anchor(),
+                );
+                let copied = edit_line(&mut self.magnet_input, key, MAX_MAGNET_CHARS, &clipboard);
+                let did_copy = copied.is_some();
+                if let Some(text) = copied {
+                    self.clipboard = text;
+                }
+                let changed = self.magnet_input.text() != before.0;
+                if changed {
+                    self.magnet_error = None;
+                }
+                if changed
+                    || did_copy
+                    || self.magnet_input.cursor() != before.1
+                    || self.magnet_input.selection_anchor() != before.2
+                {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+        }
+    }
+
+    /// Keys while the search box has them.
+    fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => {
+                self.search_active = false;
+                self.search_query.clear();
+            }
+            Key::Enter | Key::Tab => self.search_active = false,
+            Key::Backspace => {
+                if self.search_query.pop().is_none() {
+                    return EventResult::Ignored;
+                }
+            }
+            _ => {
+                if key.modifiers.ctrl {
+                    return EventResult::Ignored;
+                }
+                let typed: String = key.text.chars().filter(|c| !c.is_control()).collect();
+                if typed.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.search_query.push_str(&typed);
+            }
+        }
+        self.transfer_scroll = 0;
+        EventResult::Consumed
     }
 }
 
@@ -4179,10 +5001,15 @@ impl App for TorrentApp {
     /// A window showing a list of paused or finished torrents has nothing to
     /// redraw, and waking the machine to find that out is what
     /// `known-issues.md` lesson 47 is about.
+    ///
+    /// And only while one has a peer to take a piece from. It asked for a
+    /// tick every 150 ms while anything was "downloading", and with no
+    /// network nothing ever has a peer -- so a transfer set going woke the
+    /// machine seven times a second, for good, to find nothing to do.
     fn tick_interval(&self) -> Option<Duration> {
         self.torrents
             .iter()
-            .any(|t| t.state == TorrentState::Downloading)
+            .any(|t| t.state == TorrentState::Downloading && !t.peers.is_empty())
             .then_some(PIECE_STEP)
     }
 
@@ -4197,9 +5024,12 @@ impl App for TorrentApp {
     }
 
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
-        RenderTree {
-            commands: self.render_commands(width, height),
-        }
+        self.win_width = width;
+        self.win_height = height;
+        self.keep_selection_visible();
+        let frame = self.frame(width, height);
+        self.last_hits = frame.hits().to_vec();
+        frame.into_tree()
     }
 }
 
@@ -4246,6 +5076,67 @@ impl TorrentApp {
         };
         self.add_magnet(magnet, None);
         // In a real system, these commands would be sent to the compositor
+    }
+}
+
+/// Apply a keystroke to a one-line field, as `apps/finance` and
+/// `apps/qrcode` do (see `requests/e-c-a-text-field-that-takes-its-own-keys.md`);
+/// answers what a copy or a cut put on the clipboard.
+fn edit_line(
+    input: &mut TextInput,
+    key: &KeyEvent,
+    capacity: usize,
+    clipboard: &str,
+) -> Option<String> {
+    let shift = key.modifiers.shift;
+    let ctrl = key.modifiers.ctrl;
+    let mut copied = None;
+    match key.key {
+        Key::Left => input.move_cursor_left(shift, 12.0, FontWeightHint::Regular),
+        Key::Right => input.move_cursor_right(shift, 12.0, FontWeightHint::Regular),
+        Key::Home => input.move_home(shift),
+        Key::End => input.move_end(shift),
+        Key::Backspace => input.backspace(),
+        Key::Delete => input.delete(),
+        Key::A if ctrl => input.select_all(),
+        Key::C if ctrl => {
+            if input.has_selection() {
+                copied = Some(input.selected_text().to_string());
+            }
+        }
+        Key::X if ctrl => {
+            if input.has_selection() {
+                copied = Some(input.selected_text().to_string());
+                input.delete_selection();
+            }
+        }
+        Key::V if ctrl => insert_limited(input, clipboard, capacity),
+        _ => {
+            if !ctrl {
+                insert_limited(input, &key.text, capacity);
+            }
+        }
+    }
+    copied
+}
+
+/// Type `typed` into `input` over its selection, up to `capacity`
+/// characters, leaving control characters out.
+fn insert_limited(input: &mut TextInput, typed: &str, capacity: usize) {
+    if typed.chars().all(char::is_control) {
+        return;
+    }
+    if input.has_selection() {
+        input.delete_selection();
+    }
+    for ch in typed.chars() {
+        if ch.is_control() {
+            continue;
+        }
+        if input.text().chars().count() >= capacity {
+            break;
+        }
+        input.insert_char(ch);
     }
 }
 
@@ -4679,14 +5570,23 @@ about anything -- it drew {} text command(s)",
     fn every_advertised_key_does_something() {
         for (label, what) in SHORTCUTS {
             for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
-                let answered =
-                    [TorrentFilter::All, TorrentFilter::Error]
-                        .into_iter()
-                        .any(|start| {
-                            let mut app = TorrentApp::new();
-                            app.filter = start;
-                            app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
-                        });
+                // And one with a transfer chosen, for the keys that act on
+                // the chosen one.
+                let answered = [TorrentFilter::All, TorrentFilter::Error]
+                    .into_iter()
+                    .map(|start| {
+                        let mut app = TorrentApp::new();
+                        app.filter = start;
+                        app
+                    })
+                    .chain(std::iter::once({
+                        let mut app = seeded();
+                        app.selected_torrent = app.torrents.first().map(|t| t.id);
+                        app
+                    }))
+                    .any(|mut app| {
+                        app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                    });
                 assert!(
                     answered,
                     "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
@@ -4823,7 +5723,12 @@ about anything -- it drew {} text command(s)",
             .iter()
             .find(|t| t.id == id)
             .map_or(0, |t| t.pieces.completed_count());
-        assert!(app.tick_interval().is_some(), "a download needs a clock");
+        // Nobody to download from, so nothing to wake for: it ticked seven
+        // times a second for good with no network to bring a peer.
+        assert!(
+            app.tick_interval().is_none(),
+            "a download with nobody to download from asked for a clock"
+        );
 
         // The swarm is attached here rather than by the first tick. Until
         // 2026-09-15 `handle_tick` called `attach_simulated_peers` itself, so
@@ -4838,6 +5743,7 @@ about anything -- it drew {} text command(s)",
                 .is_some_and(|t| !t.peers.is_empty()),
             "the fixture attached no peers"
         );
+        assert!(app.tick_interval().is_some(), "a download needs a clock");
 
         // One tick, one piece. It used to take two, because the first tick
         // was the one that invented the swarm.
@@ -5820,12 +6726,13 @@ about anything -- it drew {} text command(s)",
     #[test]
     fn no_peer_row_cell_escapes_its_column() {
         let app = app_with_a_shouting_torrent();
-        let mut cmds = Vec::new();
+        let mut frame = Frame::new(900.0, 400.0);
         // Render the panel directly rather than the whole app: a full render
         // puts toolbar and sidebar text at x values that happen to fall inside
         // a column's range, and the assertion would then fail on chrome that
         // was never part of this table.
-        app.render_peers(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        app.render_peers(&mut frame, Rect::new(0.0, 0.0, 900.0, 400.0));
+        let cmds = frame.into_tree().commands;
         // 6 header labels + 2 peers x 6 cells.
         assert_cells_fit(&cmds, PEER_COLUMNS, 0.0, 18, "peers");
     }
@@ -5833,8 +6740,9 @@ about anything -- it drew {} text command(s)",
     #[test]
     fn no_file_row_cell_escapes_its_column() {
         let app = app_with_a_shouting_torrent();
-        let mut cmds = Vec::new();
-        app.render_files(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let mut frame = Frame::new(900.0, 400.0);
+        app.render_files(&mut frame, Rect::new(0.0, 0.0, 900.0, 400.0));
+        let cmds = frame.into_tree().commands;
         // 3 header labels + 2 files x 3 cells.
         assert_cells_fit(&cmds, FILE_COLUMNS, 0.0, 9, "files");
     }
@@ -5842,8 +6750,9 @@ about anything -- it drew {} text command(s)",
     #[test]
     fn no_tracker_row_cell_escapes_its_column() {
         let app = app_with_a_shouting_torrent();
-        let mut cmds = Vec::new();
-        app.render_trackers(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let mut frame = Frame::new(900.0, 400.0);
+        app.render_trackers(&mut frame, Rect::new(0.0, 0.0, 900.0, 400.0));
+        let cmds = frame.into_tree().commands;
         // 5 header labels + at least the one over-long tracker's 5 cells.
         assert_cells_fit(&cmds, TRACKER_COLUMNS, 0.0, 10, "trackers");
     }
@@ -5851,8 +6760,9 @@ about anything -- it drew {} text command(s)",
     #[test]
     fn an_overlong_file_path_keeps_its_filename() {
         let app = app_with_a_shouting_torrent();
-        let mut cmds = Vec::new();
-        app.render_files(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let mut frame = Frame::new(900.0, 400.0);
+        app.render_files(&mut frame, Rect::new(0.0, 0.0, 900.0, 400.0));
+        let cmds = frame.into_tree().commands;
         let names = first_column_cells(&cmds, FILE_COLUMNS, 0.0);
         let long = names
             .iter()
@@ -5871,8 +6781,9 @@ about anything -- it drew {} text command(s)",
     #[test]
     fn a_short_file_path_is_left_alone() {
         let app = app_with_a_shouting_torrent();
-        let mut cmds = Vec::new();
-        app.render_files(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let mut frame = Frame::new(900.0, 400.0);
+        app.render_files(&mut frame, Rect::new(0.0, 0.0, 900.0, 400.0));
+        let cmds = frame.into_tree().commands;
         let names = first_column_cells(&cmds, FILE_COLUMNS, 0.0);
         assert!(
             names.iter().any(|n| n == "readme.txt"),
@@ -5883,8 +6794,9 @@ about anything -- it drew {} text command(s)",
     #[test]
     fn an_overlong_tracker_url_keeps_its_announce_path() {
         let app = app_with_a_shouting_torrent();
-        let mut cmds = Vec::new();
-        app.render_trackers(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let mut frame = Frame::new(900.0, 400.0);
+        app.render_trackers(&mut frame, Rect::new(0.0, 0.0, 900.0, 400.0));
+        let cmds = frame.into_tree().commands;
         let urls = first_column_cells(&cmds, TRACKER_COLUMNS, 0.0);
         let long = urls
             .iter()
@@ -5899,8 +6811,9 @@ about anything -- it drew {} text command(s)",
     #[test]
     fn an_overlong_peer_client_name_is_marked_as_cut() {
         let app = app_with_a_shouting_torrent();
-        let mut cmds = Vec::new();
-        app.render_peers(&mut cmds, 0.0, 0.0, 900.0, 400.0);
+        let mut frame = Frame::new(900.0, 400.0);
+        app.render_peers(&mut frame, Rect::new(0.0, 0.0, 900.0, 400.0));
+        let cmds = frame.into_tree().commands;
         let edges = column_edges(PEER_COLUMNS, 0.0);
         let (client_x, _) = edges[1];
         let clients: Vec<&String> = cmds
@@ -5998,5 +6911,471 @@ about anything -- it drew {} text command(s)",
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // ── The pointer, the dialog, the search, and the file priorities ──
+
+    use guitk::probe::{self, Probe};
+
+    impl Probe for TorrentApp {
+        type Target = Target;
+        type Outcome = EventResult;
+        const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+        /// Drawn at the app's own size, which these tests leave at `SIZE`.
+        fn draw(&self, _size: (f32, f32)) -> Frame<Target> {
+            self.frame(self.win_width, self.win_height)
+        }
+
+        fn click_at(
+            &mut self,
+            x: f32,
+            y: f32,
+            button: MouseButton,
+            _size: (f32, f32),
+        ) -> EventResult {
+            self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> EventResult {
+            self.handle_event(&Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, _size: (f32, f32)) -> Option<EventResult> {
+            Some(self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })))
+        }
+    }
+
+    fn texts(app: &TorrentApp) -> Vec<String> {
+        app.frame(app.win_width, app.win_height)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn press_at(app: &mut TorrentApp, x: f32, y: f32) -> EventResult {
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }))
+    }
+
+    /// The seeded window with its first transfer chosen.
+    fn chosen() -> (TorrentApp, u32) {
+        let mut app = seeded();
+        let id = app.filtered_torrents()[0].id;
+        app.selected_torrent = Some(id);
+        (app, id)
+    }
+
+    /// The notice was drawn at the top of the window, then painted over by
+    /// the background and the header.
+    #[test]
+    fn the_notice_is_drawn_where_it_can_be_read() {
+        let app = TorrentApp::new();
+        let cmds = app
+            .frame(app.win_width, app.win_height)
+            .into_tree()
+            .commands;
+        for line in CANNOT_TRANSFER_LINES {
+            let at = cmds
+                .iter()
+                .position(|c| matches!(c, RenderCommand::Text { text, .. } if text == line))
+                .unwrap_or_else(|| panic!("never drew {line:?}"));
+            let RenderCommand::Text { x, y, .. } = &cmds[at] else {
+                unreachable!()
+            };
+            assert!(
+                *y >= HEADER_H + TAB_H && *x >= SIDEBAR_W,
+                "{line:?} at ({x}, {y})"
+            );
+            for later in &cmds[at + 1..] {
+                if let RenderCommand::FillRect {
+                    x: fx,
+                    y: fy,
+                    width,
+                    height,
+                    color,
+                    ..
+                } = later
+                {
+                    let covers = *fx <= *x && *x < fx + width && *fy <= *y && *y < fy + height;
+                    assert!(!(covers && color.a == 255), "{line:?} is painted over");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_toolbar_answers_the_pointer() {
+        let (mut app, id) = chosen();
+        let state = |app: &TorrentApp| app.torrents.iter().find(|t| t.id == id).unwrap().state;
+        app.torrents.iter_mut().find(|t| t.id == id).unwrap().state = TorrentState::Downloading;
+        assert!(
+            probe::rect_of(&app, Target::Resume).is_none(),
+            "Resume is offered on a running transfer"
+        );
+        probe::click(&mut app, Target::Pause);
+        assert_eq!(state(&app), TorrentState::Paused);
+        probe::click(&mut app, Target::Resume);
+        assert_eq!(state(&app), TorrentState::Downloading);
+        probe::click(&mut app, Target::PauseAll);
+        assert!(
+            app.torrents
+                .iter()
+                .all(|t| t.state != TorrentState::Downloading)
+        );
+        probe::click(&mut app, Target::ResumeAll);
+        assert_eq!(state(&app), TorrentState::Downloading);
+        let n = app.torrents.len();
+        probe::click(&mut app, Target::Remove);
+        assert_eq!(app.torrents.len(), n - 1);
+        assert!(!app.torrents.iter().any(|t| t.id == id));
+        probe::click(&mut app, Target::Open);
+        assert!(app.picker.is_open(), "Open\u{2026} opened nothing");
+    }
+
+    #[test]
+    fn the_sidebar_filters_and_labels_answer_the_pointer() {
+        let mut app = seeded();
+        probe::click(&mut app, Target::Filter(TorrentFilter::Paused));
+        assert_eq!(app.filter, TorrentFilter::Paused);
+        let software = app.labels.iter().position(|l| l == "Software").unwrap();
+        probe::click(&mut app, Target::Filter(TorrentFilter::All));
+        probe::click(&mut app, Target::Label(software));
+        assert_eq!(app.selected_label.as_deref(), Some("Software"));
+        assert!(
+            app.filtered_torrents()
+                .iter()
+                .all(|t| t.label == "Software")
+        );
+        assert!(!app.filtered_torrents().is_empty());
+        probe::click(&mut app, Target::Label(software));
+        assert_eq!(
+            app.selected_label, None,
+            "a second press did not show them all"
+        );
+    }
+
+    #[test]
+    fn the_tabs_answer_the_pointer() {
+        let mut app = TorrentApp::new();
+        for tab in Tab::ALL.iter().rev() {
+            probe::click(&mut app, Target::Tab(*tab));
+            assert_eq!(app.active_tab, *tab);
+        }
+    }
+
+    #[test]
+    fn a_column_head_sorts_and_a_second_press_reverses() {
+        let mut app = seeded();
+        probe::click(&mut app, Target::SortBy(SortColumn::Name));
+        assert_eq!(app.sort_column, SortColumn::Name);
+        let ascending = app.sort_ascending;
+        let first = app.filtered_torrents()[0].name.clone();
+        probe::click(&mut app, Target::SortBy(SortColumn::Name));
+        assert_eq!(app.sort_ascending, !ascending);
+        assert_ne!(
+            app.filtered_torrents()[0].name,
+            first,
+            "the order did not turn round"
+        );
+        let arrow = if app.sort_ascending {
+            "Name \u{25B2}"
+        } else {
+            "Name \u{25BC}"
+        };
+        assert!(
+            texts(&app).iter().any(|t| t == arrow),
+            "the head does not say it is sorted"
+        );
+    }
+
+    #[test]
+    fn a_row_press_chooses_and_a_second_shows_its_details() {
+        let mut app = seeded();
+        let id = app.filtered_torrents()[1].id;
+        probe::click(&mut app, Target::Row(id));
+        assert_eq!(app.selected_torrent, Some(id));
+        assert_eq!(app.active_tab, Tab::Transfers);
+        probe::click(&mut app, Target::Row(id));
+        assert_eq!(app.active_tab, Tab::Details);
+    }
+
+    fn many_torrents(n: usize) -> TorrentApp {
+        let mut app = TorrentApp::new();
+        for i in 0..n {
+            let meta =
+                create_sample_torrent(&format!("Item {i:02}"), 1000, 100, "udp://t.example/");
+            app.add_torrent(meta, None);
+        }
+        app.sort_column = SortColumn::Name;
+        app.sort_ascending = true;
+        app
+    }
+
+    /// Rows past the bottom were not drawn, and nothing scrolled.
+    #[test]
+    fn the_transfer_list_scrolls_and_follows_the_selection() {
+        let mut app = many_torrents(40);
+        let (_, rows) = TorrentApp::transfer_pane(app.content_rect());
+        assert!(rows < 40, "the list is not long enough to scroll");
+        assert_eq!(
+            probe::scroll_at_point(&mut app, Target::TransferList, -3.0),
+            EventResult::Consumed
+        );
+        assert!(app.transfer_scroll > 0);
+        for _ in 0..60 {
+            probe::scroll_at_point(&mut app, Target::TransferList, -3.0);
+        }
+        assert_eq!(app.transfer_scroll, 40 - rows, "the wheel ran past the end");
+        for _ in 0..60 {
+            probe::scroll_at_point(&mut app, Target::TransferList, 3.0);
+        }
+        assert_eq!(app.transfer_scroll, 0);
+        for _ in 0..30 {
+            probe::key(&mut app, &probe::press(Key::Down));
+        }
+        let chosen = app.selected_torrent.unwrap();
+        assert_eq!(
+            app.filtered_torrents()[29].id,
+            chosen,
+            "Down did not walk the list on screen"
+        );
+        assert!(
+            probe::rect_of(&app, Target::Row(chosen)).is_some(),
+            "the chosen transfer is off screen"
+        );
+    }
+
+    #[test]
+    fn a_magnet_link_is_added_from_the_dialog() {
+        let mut app = TorrentApp::new();
+        probe::key(&mut app, &probe::ctrl(Key::U));
+        assert!(app.show_add_dialog, "Ctrl+U opened nothing");
+        probe::type_str(&mut app, "not a magnet");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        let why = app
+            .magnet_error
+            .clone()
+            .expect("a bad link was taken without a word");
+        assert!(texts(&app).contains(&why), "the reason is not on screen");
+        assert!(app.torrents.is_empty());
+        probe::key(&mut app, &probe::ctrl(Key::A));
+        let hash = "0123456789abcdef0123456789abcdef01234567";
+        probe::type_str(
+            &mut app,
+            &format!("magnet:?xt=urn:btih:{hash}&dn=Test%20Film"),
+        );
+        assert!(
+            app.magnet_error.is_none(),
+            "typing did not clear the complaint"
+        );
+        probe::click(&mut app, Target::MagnetAdd);
+        assert!(!app.show_add_dialog);
+        assert_eq!(app.torrents.len(), 1);
+        let t = &app.torrents[0];
+        assert_eq!(t.name, "Test Film");
+        assert_eq!(hex_encode(&t.magnet.as_ref().unwrap().info_hash), hash);
+        assert_eq!(app.selected_torrent, Some(t.id));
+        // Cancel and Escape leave without adding.
+        probe::click(&mut app, Target::AddMagnet);
+        probe::type_str(
+            &mut app,
+            "magnet:?xt=urn:btih:ffffffffffffffffffffffffffffffffffffffff",
+        );
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(!app.show_add_dialog);
+        assert_eq!(app.torrents.len(), 1, "Escape added the link");
+    }
+
+    #[test]
+    fn a_press_behind_the_magnet_dialog_reaches_nothing() {
+        let mut app = seeded();
+        let id = app.filtered_torrents()[0].id;
+        let row = probe::rect_of(&app, Target::Row(id)).unwrap();
+        probe::click(&mut app, Target::AddMagnet);
+        let (x, y) = (row.x + 4.0, row.y + 4.0);
+        assert_eq!(
+            app.frame(app.win_width, app.win_height).hit_test(x, y),
+            Some(Target::DialogBackdrop)
+        );
+        assert_eq!(press_at(&mut app, x, y), EventResult::Ignored);
+        assert!(app.show_add_dialog);
+        assert_eq!(
+            app.selected_torrent, None,
+            "the press reached the row behind"
+        );
+        // And its keys are the dialog's: a `1` goes in the link, not the filter.
+        app.filter = TorrentFilter::Paused;
+        probe::type_str(&mut app, "1");
+        assert_eq!(app.filter, TorrentFilter::Paused);
+        assert_eq!(app.magnet_input.text(), "1");
+    }
+
+    #[test]
+    fn the_search_box_filters_and_escape_clears_it() {
+        let mut app = seeded();
+        probe::click(&mut app, Target::Search);
+        assert!(app.search_active);
+        probe::type_str(&mut app, "libre");
+        assert_eq!(app.search_query, "libre");
+        let names: Vec<&str> = app
+            .filtered_torrents()
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(names, ["LibreOffice 7.6.4"]);
+        // Delete is the search's backspace's neighbour, not a removal, while
+        // the box has the keys.
+        let n = app.torrents.len();
+        app.selected_torrent = app.torrents.first().map(|t| t.id);
+        probe::key(&mut app, &probe::press(Key::Delete));
+        assert_eq!(
+            app.torrents.len(),
+            n,
+            "Delete in the search removed a transfer"
+        );
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(!app.search_active && app.search_query.is_empty());
+        probe::key(&mut app, &probe::press(Key::Slash));
+        assert!(app.search_active, "/ did not start a search");
+    }
+
+    #[test]
+    fn a_label_can_be_given_and_chosen_by() {
+        let (mut app, id) = chosen();
+        let label = |app: &TorrentApp| {
+            app.torrents
+                .iter()
+                .find(|t| t.id == id)
+                .unwrap()
+                .label
+                .clone()
+        };
+        app.torrents
+            .iter_mut()
+            .find(|t| t.id == id)
+            .unwrap()
+            .label
+            .clear();
+        probe::key(&mut app, &probe::press(Key::L));
+        assert_eq!(label(&app), app.labels[0]);
+        app.active_tab = Tab::Details;
+        probe::click(&mut app, Target::CycleLabel);
+        assert_eq!(label(&app), app.labels[1]);
+        for _ in 1..app.labels.len() {
+            probe::click(&mut app, Target::CycleLabel);
+        }
+        assert_eq!(label(&app), "", "the cycle does not come back to none");
+        probe::click(&mut app, Target::ToggleSequential);
+        assert!(
+            app.torrents
+                .iter()
+                .find(|t| t.id == id)
+                .unwrap()
+                .sequential_download
+        );
+    }
+
+    /// Two files over four pieces of a hundred bytes: the third piece holds
+    /// the end of the first file and the start of the second.
+    fn two_files() -> (TorrentApp, u32) {
+        let mut app = TorrentApp::new();
+        let mut meta = create_sample_torrent("Pair", 400, 100, "udp://t.example/");
+        meta.files = vec![
+            TorrentFile {
+                path: "first.bin".to_string(),
+                length: 250,
+                md5sum: None,
+            },
+            TorrentFile {
+                path: "second.bin".to_string(),
+                length: 150,
+                md5sum: None,
+            },
+        ];
+        let id = app.add_torrent(meta, None);
+        app.selected_torrent = Some(id);
+        app.active_tab = Tab::Files;
+        (app, id)
+    }
+
+    /// A file set to Skip was downloaded all the same: nothing carried its
+    /// priority to the pieces the picker reads.
+    #[test]
+    fn a_skipped_file_is_not_downloaded() {
+        let (mut app, id) = two_files();
+        // Normal -> High -> Skip.
+        probe::click(&mut app, Target::FilePriority(0));
+        probe::click(&mut app, Target::FilePriority(0));
+        let t = app.torrents.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(t.file_priorities[0], FilePriority::Skip);
+        assert_eq!(
+            (0..4)
+                .map(|p| t.pieces.priority(p).unwrap())
+                .collect::<Vec<_>>(),
+            [0, 0, 5, 5],
+            "a piece shared with a wanted file was skipped, or a skipped one kept"
+        );
+        app.torrents.iter_mut().find(|t| t.id == id).unwrap().state = TorrentState::Downloading;
+        app.attach_simulated_peers(id);
+        for _ in 0..10 {
+            app.handle_event(&Event::Tick { elapsed_ms: 150 });
+        }
+        let t = app.torrents.iter().find(|t| t.id == id).unwrap();
+        assert!(
+            !t.pieces.has_piece(0) && !t.pieces.has_piece(1),
+            "a skipped piece was taken"
+        );
+        assert!(t.pieces.has_piece(2) && t.pieces.has_piece(3));
+    }
+
+    #[test]
+    fn a_stalled_download_says_there_is_no_network() {
+        let (mut app, id) = chosen();
+        app.torrents.iter_mut().find(|t| t.id == id).unwrap().state = TorrentState::Paused;
+        probe::click(&mut app, Target::Resume);
+        assert!(texts(&app).iter().any(|t| t == "No network"));
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "a stalled download keeps the machine awake"
+        );
+    }
+
+    #[test]
+    fn the_list_of_keys_is_modal_to_the_pointer() {
+        let mut app = seeded();
+        let id = app.filtered_torrents()[0].id;
+        let row = probe::rect_of(&app, Target::Row(id)).unwrap();
+        probe::click(&mut app, Target::Help);
+        assert!(app.show_help);
+        press_at(&mut app, row.x + 4.0, row.y + 4.0);
+        assert!(!app.show_help, "a press left the list up");
+        assert_eq!(
+            app.selected_torrent, None,
+            "the press went through the list"
+        );
+    }
+
+    #[test]
+    fn enter_shows_the_chosen_transfers_details() {
+        let (mut app, _) = chosen();
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert_eq!(app.active_tab, Tab::Details);
     }
 }

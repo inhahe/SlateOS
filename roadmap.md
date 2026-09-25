@@ -1853,8 +1853,12 @@ word; text inside them that says "lane C" is history.
   deletes that ask, the clock's today, lists that scroll, and a ledger kept
   as it changes), `qrcode` (2026-09-25 — every control; text fields, a
   history of codes rather than keystrokes, saving as SVG, colours, and QR
-  versions 7-10 and every lowercase barcode made readable at last).
-  **Next:** torrent, mediaconvert — then the rest. (`reminders` was
+  versions 7-10 and every lowercase barcode made readable at last),
+  `torrent` (2026-09-25 — every control; a notice that can be read, a list
+  that scrolls, magnet links, search, labels, and file priorities that reach
+  the picker; the transfer itself is `known-issues.md` → `[E] The torrent
+  client transfers nothing`).
+  **Next:** mediaconvert, soundrecorder — then the rest. (`reminders` was
   examined 2026-09-18: keyboard-driven by design, its two gaps fixed.)
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;

@@ -1714,6 +1714,30 @@ D's to act on once answered).
   which was an O(n²) insertion sort that silently left the array unsorted when
   its `mmap` failed, with an allocation-free introsort.
   Linking, not running — same caveat as CPython. The rootfs rung is next.
+  **The exec path, made correct — 2026-09-24 (lane D).** Every item below was
+  silent, and several sat under green rungs because the rungs run from `/`
+  with absolute paths and no environment:
+    * native exec needs only `(File, READ)` — it began with a `METADATA`-gated
+      path `stat`, which is why `ctest-coreutils-runs` (exit 11) and
+      `ctest-python-repl` (exit 8) could not exec anything;
+    * `execv`/`execvp`/`execl`/`execlp` pass `environ` (they passed NULL, so
+      every program they started — every external command Oils and sshd run —
+      had no environment);
+    * `#!` scripts run, by Linux's `binfmt_script` rules; `execvp` falls back
+      to `/bin/sh` on `ENOEXEC` as POSIX requires;
+    * the `PATH` search is glibc's (attempt, continue on not-here errors, empty
+      element is `.`), for `execvp`/`execvpe`/`posix_spawnp` alike;
+    * descriptors 32..255 reach children (the fd map was 32 wide);
+    * `posix_spawn` file actions fail the spawn or are applied, rather than
+      being skipped (`addopen`), misapplied (`adddup2` from a closed fd) or
+      ignored (`addclosefrom_np`);
+    * the environment is `environ` itself — no 128 × 256-byte table silently
+      dropping what did not fit, `getenv` sees a reassigned `environ`, `putenv`
+      does not copy;
+    * `getcwd(NULL, n)` allocates, as bash needs.
+  Still open, and not libc's alone: the working directory and umask across
+  exec and spawn (`requests/d-a-cwd-and-umask-do-not-survive-exec.md`), and
+  spawn attributes (`TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES`).
 
 - `[-]` `[D]` **Pseudo-terminals — scoped 2026-08-21, unblocked 2026-08-23.**
   **Status: the block is cleared; the remaining work is lane B's.** Lane A
@@ -1753,6 +1777,12 @@ D's to act on once answered).
   design-decisions.md §768 — the same door `libcall::kill` came through for
   `apps/procexplorer`. Asked for in
   `requests/c-b-a-terminal-needs-a-shell-on-the-other-end-of-its-pty.md`.
+  **The `libcall` half landed 2026-09-24 (lane D):** `forkpty_spawn`,
+  `try_wait` and `set_window_size`, with the child doing nothing but exec
+  between the fork and the exec. Wiring them into `apps/terminal` is lane E's;
+  the kernel's read-time `^C` (`requests/d-a-ctrl-c-becomes-a-signal-only-when-someone-reads-the-terminal.md`)
+  and the lost working directory (`TD-D-CWD-AND-UMASK-DO-NOT-SURVIVE-EXEC-OR-SPAWN`)
+  are what the terminal will meet next.
   The missing half was not obvious from here because it was *simulated*: a
   `ChildProcess` type whose `spawn` took a PID from a counter and whose `wait`
   returned success, with no caller outside its own tests. It is deleted, and

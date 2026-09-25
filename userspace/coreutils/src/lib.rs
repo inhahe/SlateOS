@@ -460,7 +460,7 @@
 
 pub mod backup;
 pub mod basenc;
-mod bignat;
+pub mod bignat;
 pub mod canon;
 pub mod cfmt;
 pub mod chowncore;

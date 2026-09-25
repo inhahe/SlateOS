@@ -53,6 +53,24 @@ pub struct Nat {
     limbs: Vec<u32>,
 }
 
+/// Ordering by value. A canonical `Nat` has no trailing zero limb, so the one
+/// with more limbs is the larger, and two of one length compare limb by limb
+/// from the top.
+impl Ord for Nat {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.limbs.len().cmp(&other.limbs.len()) {
+            Ordering::Equal => self.limbs.iter().rev().cmp(other.limbs.iter().rev()),
+            unequal => unequal,
+        }
+    }
+}
+
+impl PartialOrd for Nat {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl Nat {
     /// Zero.
     pub fn zero() -> Self {
@@ -306,14 +324,6 @@ impl Nat {
         let mut n = Nat { limbs: out };
         n.trim();
         n
-    }
-
-    /// Ordering by value.
-    pub fn cmp(&self, other: &Self) -> Ordering {
-        match self.limbs.len().cmp(&other.limbs.len()) {
-            Ordering::Equal => self.limbs.iter().rev().cmp(other.limbs.iter().rev()),
-            unequal => unequal,
-        }
     }
 
     /// `self / d` and `self % d` for a single-limb divisor.

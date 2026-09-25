@@ -2272,28 +2272,32 @@ copy lacked (`free` gained `-l/--lohi`, `--tebi` and the GNU long forms;
 every entry point was shadowed, unreachable, or an outright refusal. The
 unreachable ledger stands at 169.
 
-**UPDATE 2026-09-25: the unreachable ledger stands at 160.** Nine names have
+**UPDATE 2026-09-25: the unreachable ledger stands at 158.** Eleven names have
 left it since the 169 above. Two, `blockdev:blkzone` and `cal:ncal`, went on
 2026-09-12 (commit 888598b8f: `blkzone` printed hard-coded zones for any
-device and reported zone resets it never attempted). Seven were closed the
+device and reported zone resets it never attempted). Nine were closed the
 §1005 way -- the name becomes a `coreutils` bin, ported from GNU
 9.4 and checked against a build of it by a `scripts/<name>-diff.sh` harness,
 and the dead branch is deleted -- rather than by adding a link to the
 personality: `printenv` and `sync` (from `getopt`), `truncate` (from `pv`),
-`arch`, `pathchk` and `users` (from `nproc`), and `numfmt` (from `shuf`).
+`arch`, `pathchk` and `users` (from `nproc`), `numfmt` and `factor` (from
+`shuf`, which with both gone is `shuf` alone), and `base32` (from `base64`,
+whose own `base64` waits on TD-B-BASE64-IS-STILL-THE-OLD-CRATE-UNTIL-UUENCODE-MOVES).
 None of the deleted branches was worth keeping: `nproc`'s `users` read the
 terminal field as the user name, from wtmp instead of utmp; its `pathchk -p`
 checked against 4096 and 255 instead of POSIX's 256 and 14; its `arch`
 guessed from `/proc/cpuinfo`; `shuf`'s `numfmt` rounded every scaled value to
 a whole number (`--to=si 1500` said `2K` where GNU says `1.5K`) and failed 135
-of the 148 cases `scripts/numfmt-diff.sh` runs. With its last three personalities gone, **`userspace/nproc`
+of the 148 cases `scripts/numfmt-diff.sh` runs; its `factor` worked in `u64` by
+trial division alone, so a large prime took minutes and anything past 2^64
+was refused. With its last three personalities gone, **`userspace/nproc`
 itself was retired**: `nproc` is a `coreutils` bin too now, a port of GNU's
 (gnulib's `num_processors` -- affinity mask, `OMP_NUM_THREADS`,
 `OMP_THREAD_LIMIT`), where the crate had counted `/sys` ranges and told a
 process pinned to two CPUs that it had twelve. Still here and next in line,
 all GNU programs that live as personalities of something else:
-`getopt:cksum`, `pv:shred`, `shuf:factor`, `base64:base32`,
-`finger:pinky`. None of the new bins is on the image yet: that is lane D's
+`getopt:cksum`, `pv:shred` and `finger:pinky`. None of the new bins is on the
+image yet: that is lane D's
 manifest, `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.
 
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is

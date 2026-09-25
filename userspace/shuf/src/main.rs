@@ -1,13 +1,10 @@
-//! Slate OS shuf/factor — randomization and number tools
+//! Slate OS shuf — randomly permute lines, or select random lines.
 //!
-//! Multi-personality binary detected via argv[0]:
-//! - `shuf`: Randomly permute lines / select random lines
-//! - `factor`: Print prime factors of numbers
-//!
-//! `numfmt` was a third personality, which no link ever reached. It is
-//! `userspace/coreutils`'s own bin since 2026-09-25, a port of GNU's checked
-//! against it, and a name belongs to the one program that does the job
-//! (design-decisions.md §1005).
+//! This was a three-way argv[0] binary, and is `shuf` alone now. Its `numfmt`
+//! and `factor` personalities, which no link ever reached, became
+//! `userspace/coreutils` bins on 2026-09-25, each a port of GNU's checked
+//! against it: a name belongs to the one program that does the job
+//! (design-decisions.md §1005). With one mode left, the dispatch went too.
 
 use quoting::quoteaf_os;
 use std::env;
@@ -15,24 +12,6 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::process;
 use std::time::SystemTime;
-
-// ── Personality detection ──────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Mode {
-    Shuf,
-    Factor,
-}
-
-fn detect_mode(argv0: &str) -> Mode {
-    let name = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
-    let name = name.strip_suffix(".exe").unwrap_or(name);
-    let lower = name.to_ascii_lowercase();
-    match lower.as_str() {
-        "factor" => Mode::Factor,
-        _ => Mode::Shuf,
-    }
-}
 
 // ── PRNG (xorshift64*) ────────────────────────────────────────────
 
@@ -312,96 +291,10 @@ fn read_lines_delimited(file: Option<&str>, delim: u8) -> Result<Vec<String>, St
     Ok(lines)
 }
 
-// ── factor mode ────────────────────────────────────────────────────
-
-fn run_factor() -> Result<(), String> {
-    let argv: Vec<String> = env::args().collect();
-
-    if argv.len() > 1 {
-        // Factor command-line arguments
-        for arg in &argv[1..] {
-            if arg == "-h" || arg == "--help" {
-                eprintln!("Usage: factor [NUMBER]...");
-                eprintln!("Print the prime factors of each NUMBER.");
-                process::exit(0);
-            }
-            let n = arg
-                .parse::<u64>()
-                .map_err(|_| format!("{} is not a valid number", quoteaf_os(arg)))?;
-            print_factors(n);
-        }
-    } else {
-        // Read from stdin
-        let stdin = io::stdin();
-        for line in stdin.lock().lines() {
-            let line = line.map_err(|e| format!("read: {e}"))?;
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let n = line
-                .parse::<u64>()
-                .map_err(|_| format!("{} is not a valid number", quoteaf_os(line)))?;
-            print_factors(n);
-        }
-    }
-    Ok(())
-}
-
-fn factorize(mut n: u64) -> Vec<u64> {
-    let mut factors = Vec::new();
-
-    if n <= 1 {
-        return factors;
-    }
-
-    // Trial division by 2
-    while n.is_multiple_of(2) {
-        factors.push(2);
-        n /= 2;
-    }
-
-    // Trial division by odd numbers
-    let mut d = 3u64;
-    while d.saturating_mul(d) <= n {
-        while n.is_multiple_of(d) {
-            factors.push(d);
-            n /= d;
-        }
-        d += 2;
-    }
-
-    if n > 1 {
-        factors.push(n);
-    }
-
-    factors
-}
-
-fn print_factors(n: u64) {
-    let factors = factorize(n);
-    if factors.is_empty() {
-        println!("{n}:");
-    } else {
-        let factor_strs: Vec<String> = factors.iter().map(|f| f.to_string()).collect();
-        println!("{n}: {}", factor_strs.join(" "));
-    }
-}
-
 // ── Main entry point ───────────────────────────────────────────────
 
-fn run() -> Result<(), String> {
-    let argv0 = env::args().next().unwrap_or_else(|| "shuf".to_string());
-    let mode = detect_mode(&argv0);
-
-    match mode {
-        Mode::Shuf => run_shuf(),
-        Mode::Factor => run_factor(),
-    }
-}
-
 fn main() {
-    if let Err(e) = run() {
+    if let Err(e) = run_shuf() {
         let prog = env::args().next().unwrap_or_else(|| "shuf".to_string());
         let name = prog.rsplit(['/', '\\']).next().unwrap_or(&prog);
         eprintln!("{name}: {e}");
@@ -415,34 +308,8 @@ fn main() {
 mod tests {
     use super::*;
 
-    // ── Personality detection ──
-
-    #[test]
-    fn test_detect_shuf() {
-        assert_eq!(detect_mode("shuf"), Mode::Shuf);
-        assert_eq!(detect_mode("/usr/bin/shuf"), Mode::Shuf);
-        assert_eq!(detect_mode("shuf.exe"), Mode::Shuf);
-    }
-
-    #[test]
-    fn test_detect_factor() {
-        assert_eq!(detect_mode("factor"), Mode::Factor);
-        assert_eq!(detect_mode("/usr/bin/factor"), Mode::Factor);
-        assert_eq!(detect_mode("C:\\bin\\factor.exe"), Mode::Factor);
-    }
-
     /// `numfmt` is coreutils' bin now; this binary no longer answers to it,
     /// so the name falls to the default like any other it does not know.
-    #[test]
-    fn numfmt_is_not_a_personality_here() {
-        assert_eq!(detect_mode("numfmt"), Mode::Shuf);
-        assert_eq!(detect_mode("./numfmt"), Mode::Shuf);
-    }
-
-    #[test]
-    fn test_detect_default() {
-        assert_eq!(detect_mode("unknown"), Mode::Shuf);
-    }
 
     // ── PRNG ──
 
@@ -483,52 +350,6 @@ mod tests {
     fn test_rng_zero_seed_adjusted() {
         let rng = Rng::from_seed(0);
         assert_eq!(rng.state, 1); // Zero adjusted to 1
-    }
-
-    // ── Factorization ──
-
-    #[test]
-    fn test_factor_zero() {
-        assert_eq!(factorize(0), vec![] as Vec<u64>);
-    }
-
-    #[test]
-    fn test_factor_one() {
-        assert_eq!(factorize(1), vec![] as Vec<u64>);
-    }
-
-    #[test]
-    fn test_factor_prime() {
-        assert_eq!(factorize(2), vec![2]);
-        assert_eq!(factorize(3), vec![3]);
-        assert_eq!(factorize(7), vec![7]);
-        assert_eq!(factorize(13), vec![13]);
-        assert_eq!(factorize(97), vec![97]);
-    }
-
-    #[test]
-    fn test_factor_composite() {
-        assert_eq!(factorize(4), vec![2, 2]);
-        assert_eq!(factorize(6), vec![2, 3]);
-        assert_eq!(factorize(12), vec![2, 2, 3]);
-        assert_eq!(factorize(100), vec![2, 2, 5, 5]);
-        assert_eq!(factorize(360), vec![2, 2, 2, 3, 3, 5]);
-    }
-
-    #[test]
-    fn test_factor_large_prime() {
-        assert_eq!(factorize(104729), vec![104729]); // Prime
-    }
-
-    #[test]
-    fn test_factor_power_of_two() {
-        assert_eq!(factorize(64), vec![2, 2, 2, 2, 2, 2]);
-        assert_eq!(factorize(1024), vec![2, 2, 2, 2, 2, 2, 2, 2, 2, 2]);
-    }
-
-    #[test]
-    fn test_factor_large_composite() {
-        assert_eq!(factorize(2 * 3 * 5 * 7 * 11 * 13), vec![2, 3, 5, 7, 11, 13]);
     }
 
     // ── Range parsing (shuf -i) ──

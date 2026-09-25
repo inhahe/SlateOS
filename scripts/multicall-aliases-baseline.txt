@@ -122,7 +122,6 @@ selinux:sesearch
 selinux:sestatus
 selinux:setenforce
 selinux:setsebool
-shuf:factor
 ss:sockstat
 sudo:sudoedit
 sudo:sudoreplay

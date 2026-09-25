@@ -79,7 +79,7 @@ pub(super) fn decode(
             reason = "the green channel of 0xAARRGGBB, shifted down and masked by the cast"
         )]
         let green = |pixel: u32| (pixel >> 8) as u8;
-        super::lossless::decode_stream(data, width, height, limits, super::lossless::Stream::Alpha)?
+        super::lossless::decode_alpha(data, width, height, limits)?
             .into_iter()
             .map(green)
             .collect()

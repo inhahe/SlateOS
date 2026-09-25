@@ -148,6 +148,22 @@ const LOSSY: &[(&str, &str)] = &[
         "webp_lossy_short_by_padding",
         "cut short, and finished by the chunk's padding byte as in libwebp",
     ),
+    (
+        "webp_lossless_alpha_unhinted",
+        "alpha, but a header that says none: shown opaque",
+    ),
+    (
+        "webp_lossy_alpha_unflagged",
+        "an alpha chunk the VP8X flags disown: dropped",
+    ),
+    (
+        "webp_lossy_alpha_corrupt_tail",
+        "corrupt alpha whose last symbol reads libwebp's stale window",
+    ),
+    (
+        "webp_lossless_stray_symbol",
+        "corrupt: a prefix code naming a symbol past its alphabet",
+    ),
     ("webp_alpha_raw_none", "a raw alpha plane"),
     ("webp_alpha_raw_horizontal", "raw, filtered from the left"),
     ("webp_alpha_raw_vertical", "raw, filtered from above"),

@@ -10907,10 +10907,24 @@ token. The transforms, predictors and loop filter are each checked against
 the RFC's reference code over thousands of inputs.
 
 Outside the suite, 701 cut files and 6,280 bit-flipped ones were compared
-with libwebp; every difference found was one of the details in item 3, and
-none remains but one: a lossless alpha plane whose last symbol reads past
-the end at exactly the 64th bit of libwebp's window, where libwebp reads
-stale bits (`known-issues.md`).
+with libwebp; every difference found was one of the details in item 3.
+
+*Addendum, same day.* The lossless decoder's bit reader is now a port of
+libwebp's `VP8LBitReader` -- its 64-bit window, the refills at the points
+libwebp refills, symbol reads that move the position without looking, the end
+flagged where libwebp flags it -- and its pixel loops check where libwebp's
+do, including the byte-per-pixel loop libwebp uses for colour-indexed alpha
+planes. That closed the last difference the comparisons had found (an alpha
+plane whose last symbol read stale bits from the window) and three more that
+a further 4,500 corrupted lossless files turned up: a simple prefix code
+naming a symbol past its alphabet names nothing, as in libwebp; a lossless
+picture whose header says it has no alpha is shown opaque, as Pillow and
+Firefox (through `WebPGetFeatures`) show it; and a lossy frame's `ALPH` chunk
+under a `VP8X` header without the alpha flag is dropped unread, as libwebp's
+demuxer drops it. What remains are files whose RIFF structure libwebp's
+demuxer refuses and this decoder's chunk walk accepts; porting the demuxer is
+the next step, and animation needs it anyway. Four more fixtures hold these
+cases.
 
 ### Measured
 

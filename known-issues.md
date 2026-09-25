@@ -165317,9 +165317,9 @@ the corrupt-file comparison in design-decisions.md §1312:
 **How to see it.** `cargo run --release -p imagecodec --example time_decode --
 <lossy.webp>`, against Pillow's `Image.open(...).load()` on the same file.
 
-### [F] A lossless alpha plane cut off mid-symbol can differ from libwebp in its last pixel -- 2026-09-25
+### [F] A lossless alpha plane cut off mid-symbol can differ from libwebp in its last pixel -- 2026-09-25 -- **fixed 2026-09-25**
 
-**Status:** OPEN — lane F's.
+**Status:** FIXED — `Bits` in `webp/lossless.rs` is now a port of libwebp's `VP8LBitReader`, called where `vp8l_dec.c` calls it, and the byte-per-pixel alpha loop is libwebp's `DecodeAlphaData`; `tests/data/webp_lossy_alpha_corrupt_tail.webp` is the file that showed it. The original report follows.
 
 **In short:** on a damaged file only. If a WebP's alpha plane is stored
 compressed, is one libwebp decodes a byte per pixel, and runs out of data in

@@ -15,6 +15,16 @@
 //! specified to the bit, so the result is the encoder's input exactly, and the
 //! tests hold it to libwebp's decode with no tolerance at all.
 //!
+//! # Running out
+//!
+//! The bit reader is a port of libwebp's (`VP8LBitReader`), read in the order
+//! libwebp reads it and checked where libwebp checks it, so that a stream
+//! that ends early -- or is corrupt -- fails here exactly when it fails there,
+//! and where libwebp still shows it, shows the same pixels. The format does not
+//! say what a decoder must do with such a stream; libwebp is what browsers do.
+//! [`Bits`] says how its window works, and the two pixel loops -- the general
+//! one and libwebp's byte-per-pixel one for alpha planes -- where they check.
+//!
 //! # Hostile input
 //!
 //! Every count in the stream is bounded before anything is sized from it: the
@@ -37,10 +47,15 @@ pub(super) const SIGNATURE: u8 = 0x2F;
 /// Width and height from a stream's five-byte header.
 pub(super) fn dimensions(data: &[u8]) -> ImageResult<(u32, u32)> {
     let header = data.get(..5).ok_or(ImageError::Truncated)?;
-    if header.first() != Some(&SIGNATURE) {
+    read_header(&mut Bits::new(header))
+}
+
+/// Read a stream's header -- signature, size, alpha hint, version -- as
+/// libwebp's `ReadImageInfo` does.
+fn read_header(bits: &mut Bits<'_>) -> ImageResult<(u32, u32)> {
+    if bits.read(8) != u32::from(SIGNATURE) {
         return Err(ImageError::Malformed("a VP8L stream without its signature"));
     }
-    let mut bits = Bits::new(header.get(1..).unwrap_or(&[]), 0);
     let width = bits.read(14).saturating_add(1);
     let height = bits.read(14).saturating_add(1);
     let _alpha_is_used = bits.read(1);
@@ -49,53 +64,50 @@ pub(super) fn dimensions(data: &[u8]) -> ImageResult<(u32, u32)> {
             "a VP8L stream of a version other than 0",
         ));
     }
+    if bits.ended() {
+        return Err(ImageError::Truncated);
+    }
     Ok((width, height))
+}
+
+/// Whether a stream's header says it uses alpha: a hint, which does not
+/// change the decode, but does change what viewers show (see `webp::decode`).
+pub(super) fn alpha_hint(data: &[u8]) -> bool {
+    // The bit after the two 14-bit sizes, in the four bytes after the
+    // signature.
+    data.get(4).is_some_and(|byte| byte & 0x10 != 0)
 }
 
 /// Decode a whole `VP8L` chunk into `0xAARRGGBB` pixels, row by row.
 pub(super) fn decode(data: &[u8], limits: Limits) -> ImageResult<(u32, u32, Vec<u32>)> {
-    let (width, height) = dimensions(data)?;
-    let pixels = decode_stream(
-        data.get(5..).unwrap_or(&[]),
-        width,
-        height,
-        limits,
-        Stream::Image,
-    )?;
+    let mut bits = Bits::new(data);
+    let (width, height) = read_header(&mut bits)?;
+    let pixels = decode_main(&mut bits, width, height, limits, false)?;
     Ok((width, height, pixels))
 }
 
-/// What an image stream is, which decides -- as it does in libwebp -- exactly
-/// when running out of data is an error.
-///
-/// libwebp's reader flags the end of a stream once more bits have been read
-/// than it holds, but never within the first 64 bits it loads, which for a
-/// stream shorter than eight bytes is past its end: those read as zeros and
-/// are not an error. A `VP8L` picture's reader starts at its five-byte header,
-/// so its stream gets the rest of those 64 bits; an `ALPH` stream's reader
-/// starts at the stream.
-///
-/// And libwebp decodes an alpha plane that is only colour-indexed, with no
-/// colour cache and only one red, blue and alpha value, a byte per pixel, by a
-/// routine that judges it by whether every pixel was decoded: the last symbol
-/// may read past the end. Everywhere else a stream that reads past its end is
-/// truncated.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Stream {
-    /// A `VP8L` picture's stream, after its header.
-    Image,
-    /// An `ALPH` chunk's plane, its value in the green channel.
-    Alpha,
-}
-
-/// Decode an image stream with no header -- what follows a VP8L header, and
-/// what a lossless `ALPH` chunk holds -- of the given size.
-pub(super) fn decode_stream(
+/// Decode a lossless `ALPH` plane: an image stream with no header, of the
+/// given size, whose green channel is the alpha.
+pub(super) fn decode_alpha(
     data: &[u8],
     width: u32,
     height: u32,
     limits: Limits,
-    stream: Stream,
+) -> ImageResult<Vec<u32>> {
+    decode_main(&mut Bits::new(data), width, height, limits, true)
+}
+
+/// Decode a stream's main image: its transforms, its codes, its pixels. An
+/// `alpha` plane that is only colour-indexed, with no colour cache and one
+/// red, blue and alpha value, is decoded as libwebp decodes it -- a byte per
+/// pixel ([`decode_bytes`]) -- since that routine forgives what the general
+/// one ([`decode_pixels`]) does not.
+fn decode_main(
+    bits: &mut Bits<'_>,
+    width: u32,
+    height: u32,
+    limits: Limits,
+    alpha: bool,
 ) -> ImageResult<Vec<u32>> {
     let (width, height) = (width as usize, height as usize);
     let pixels = width.saturating_mul(height);
@@ -107,28 +119,17 @@ pub(super) fn decode_stream(
     }
     let mut budget = Budget::new(limits);
     budget.spend(pixels.saturating_mul(4))?;
-    let mut bits = Bits::new(
-        data,
-        match stream {
-            Stream::Image => 3,
-            Stream::Alpha => 8,
-        },
-    );
 
-    let (transforms, coded_width) = read_transforms(&mut bits, width, height, &mut budget)?;
-    let byte_per_pixel = stream == Stream::Alpha
-        && matches!(transforms.as_slice(), [Transform::ColorIndexing { .. }]);
-    let end = if byte_per_pixel {
-        End::ForgiveLastIfBytePerPixel
+    let (transforms, coded_width) = read_transforms(bits, width, height, &mut budget)?;
+    let codes = read_codes(bits, coded_width, height, true, &mut budget)?;
+    let byte_per_pixel = alpha
+        && matches!(transforms.as_slice(), [Transform::ColorIndexing { .. }])
+        && codes.byte_per_pixel();
+    let mut image = if byte_per_pixel {
+        decode_bytes(bits, &codes, coded_width, height, &mut budget)?
     } else {
-        End::Strict
+        decode_pixels(bits, &codes, coded_width, height, &mut budget)?
     };
-
-    let (mut image, forgiven) =
-        decode_image(&mut bits, coded_width, height, Some(end), &mut budget)?;
-    if bits.exhausted() && !forgiven {
-        return Err(ImageError::Truncated);
-    }
     for transform in transforms.iter().rev() {
         image = transform.undo(image, height);
     }
@@ -166,7 +167,7 @@ fn read_transforms(
                 let size_bits = bits.read(3).saturating_add(2);
                 let blocks_w = div_round_up(coded_width, size_bits);
                 let blocks_h = div_round_up(height, size_bits);
-                let (data, _) = decode_image(bits, blocks_w, blocks_h, None, budget)?;
+                let data = decode_image(bits, blocks_w, blocks_h, budget)?;
                 let block = Blocks {
                     size_bits,
                     blocks_w,
@@ -181,7 +182,7 @@ fn read_transforms(
             2 => Transform::SubtractGreen,
             _ => {
                 let size = (bits.read(8) as usize).saturating_add(1);
-                let (mut table, _) = decode_image(bits, size, 1, None, budget)?;
+                let mut table = decode_image(bits, size, 1, budget)?;
                 // Delta-coded: each entry adds to the one before it, channel
                 // by channel -- a running sum from black-transparent zero.
                 let mut previous = 0u32;
@@ -227,89 +228,153 @@ const fn div_round_up(size: usize, bits: u32) -> usize {
 // Bits
 // ---------------------------------------------------------------------------
 
-/// The stream, least significant bit of each byte first.
+/// The stream, least significant bit of each byte first: a port of libwebp's
+/// `VP8LBitReader` (`src/utils/bit_reader_utils.c`).
 ///
-/// Reading past the end yields zero bits and remembers that it did, so the
-/// decode can finish its current step cheaply and report the file truncated
-/// once, rather than every read checking.
+/// It holds a 64-bit window of the stream -- eight bytes, the next bit at
+/// `bit_pos` -- and slides it along as bits are used. Past the end of the data
+/// the window's upper bytes are zeros. Two of its behaviours only a stream that
+/// runs out ever meets, and both are libwebp's:
+///
+/// * The end is flagged ([`Bits::ended`]) by a refill or a [`Bits::read`] that
+///   finds the position past the window with nothing left to load -- not by a
+///   symbol read, which moves the position without looking, as libwebp's
+///   `ReadSymbol` does. Flagging the end moves the position back to the start
+///   of the window.
+/// * A read that starts at or past the window's 64th bit wraps
+///   (`bit_pos & 63`) to bits already read, and returns those.
+///
+/// [`Bits::past_end`] is libwebp's `VP8LIsEndOfStream`: the flag, or the
+/// position past a window with nothing left to load.
 struct Bits<'a> {
     data: &'a [u8],
-    /// The data's length for judging an overrun: at least `floor` bytes, the
-    /// window libwebp's reader never flags (see [`Stream`]).
-    judged_len: usize,
-    /// The next byte to load.
-    at: usize,
-    /// Loaded bits, the next one lowest.
-    acc: u64,
-    /// How many of them.
-    count: u32,
-    /// Bits consumed that were not there.
-    overrun: bool,
+    /// The next byte to load into the window.
+    pos: usize,
+    /// The window.
+    val: u64,
+    /// The next bit's position in the window.
+    bit_pos: u32,
+    /// libwebp's `eos` flag.
+    eos: bool,
 }
 
 impl<'a> Bits<'a> {
-    /// A reader over `data` that flags an overrun only past `floor` bytes if
-    /// the data is shorter than that.
-    fn new(data: &'a [u8], floor: usize) -> Self {
+    /// A reader at the start of `data`, its first eight bytes loaded.
+    fn new(data: &'a [u8]) -> Self {
+        // Little-endian: the first byte lowest.
+        let val = data
+            .iter()
+            .take(8)
+            .rev()
+            .fold(0u64, |val, &byte| (val << 8) | u64::from(byte));
         Self {
             data,
-            judged_len: data.len().max(floor),
-            at: 0,
-            acc: 0,
-            count: 0,
-            overrun: false,
+            pos: data.len().min(8),
+            val,
+            bit_pos: 0,
+            eos: false,
         }
     }
 
-    /// At least 32 bits loaded, from the data or, past its end, zeros.
+    /// The window from the next bit on (libwebp's `VP8LPrefetchBits`).
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the low 32 bits of the window are the prefetch, as in libwebp"
+    )]
+    const fn prefetch(&self) -> u32 {
+        (self.val >> (self.bit_pos & 63)) as u32
+    }
+
+    /// Move past `n` bits without looking at the end (libwebp's
+    /// `VP8LSetBitPos`).
+    const fn advance(&mut self, n: u32) {
+        self.bit_pos = self.bit_pos.saturating_add(n);
+    }
+
+    /// libwebp's `VP8LIsEndOfStream`: the end flagged, or the position past a
+    /// window with nothing left to load.
+    const fn past_end(&self) -> bool {
+        self.eos || (self.pos == self.data.len() && self.bit_pos > 64)
+    }
+
+    /// Whether the end has been flagged (libwebp's `br->eos`).
+    const fn ended(&self) -> bool {
+        self.eos
+    }
+
+    /// Flag the end if the stream is past it, leaving the position alone: what
+    /// libwebp's pixel loops do with `br->eos = VP8LIsEndOfStream(br)`.
+    const fn note_end(&mut self) {
+        self.eos = self.past_end();
+    }
+
+    /// libwebp's `VP8LSetEndOfStream`.
+    const fn set_end(&mut self) {
+        self.eos = true;
+        self.bit_pos = 0;
+    }
+
+    /// Slide the window a byte at a time while a whole byte of it is used and
+    /// data remains, then flag the end if the stream is past it (libwebp's
+    /// `ShiftBytes`).
     #[allow(
         clippy::arithmetic_side_effects,
-        reason = "count stays within 0..=64 and each byte lands below bit 64"
+        reason = "bit_pos is at least 8 where 8 is taken from it, and pos below the data's length where it is incremented"
+    )]
+    fn shift_bytes(&mut self) {
+        while self.bit_pos >= 8
+            && let Some(&byte) = self.data.get(self.pos)
+        {
+            self.val = (self.val >> 8) | (u64::from(byte) << 56);
+            self.pos += 1;
+            self.bit_pos -= 8;
+        }
+        if self.past_end() {
+            self.set_end();
+        }
+    }
+
+    /// Top the window up once half of it is used (libwebp's
+    /// `VP8LFillBitWindow`): four bytes at once while more than eight remain,
+    /// otherwise a byte at a time.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "bit_pos is at least 32 where 32 is taken from it, and four bytes remain where pos moves by four"
     )]
     fn fill(&mut self) {
-        while self.count <= 56 {
-            let byte = self.data.get(self.at).copied();
-            self.at = self.at.saturating_add(1);
-            self.acc |= u64::from(byte.unwrap_or(0)) << self.count;
-            self.count += 8;
+        if self.bit_pos < 32 {
+            return;
+        }
+        let word = self
+            .data
+            .get(self.pos..self.pos.saturating_add(4))
+            .filter(|_| self.pos.saturating_add(8) < self.data.len())
+            .and_then(|w| <[u8; 4]>::try_from(w).ok());
+        if let Some(word) = word {
+            self.val = (self.val >> 32) | (u64::from(u32::from_le_bytes(word)) << 32);
+            self.bit_pos -= 32;
+            self.pos += 4;
+        } else {
+            self.shift_bytes();
         }
     }
 
-    /// The next `n` bits (at most 32) without consuming them.
+    /// The next `n` bits (at most 24), consumed; 0 once the end is flagged
+    /// (libwebp's `VP8LReadBits`).
     #[allow(
         clippy::arithmetic_side_effects,
-        reason = "n is below 32 where the mask is shifted"
+        reason = "n is at most 24, so the mask fits and the position stays small"
     )]
-    fn peek(&mut self, n: u32) -> u32 {
-        if self.count < n {
-            self.fill();
-        }
-        let mask = if n >= 32 { u32::MAX } else { (1u32 << n) - 1 };
-        (self.acc as u32) & mask
-    }
-
-    /// Consume `n` bits already peeked.
-    fn skip(&mut self, n: u32) {
-        self.acc = self.acc.checked_shr(n).unwrap_or(0);
-        self.count = self.count.saturating_sub(n);
-        // Bytes loaded past the end are zeros standing in for data; using any
-        // of them means the stream was too short.
-        let loaded_past = self.at.saturating_sub(self.judged_len).saturating_mul(8);
-        if (self.count as usize) < loaded_past {
-            self.overrun = true;
-        }
-    }
-
-    /// The next `n` bits (at most 32), consumed.
     fn read(&mut self, n: u32) -> u32 {
-        let value = self.peek(n);
-        self.skip(n);
-        value
-    }
-
-    /// Whether any bit read so far lay past the end of the data.
-    const fn exhausted(&self) -> bool {
-        self.overrun
+        if !self.eos && n <= 24 {
+            let value = self.prefetch() & ((1u32 << n) - 1);
+            self.bit_pos += n;
+            self.shift_bytes();
+            value
+        } else {
+            self.set_end();
+            0
+        }
     }
 }
 
@@ -471,33 +536,40 @@ impl Code {
         Some(Self { table })
     }
 
-    /// The next symbol.
+    /// The next symbol (libwebp's `ReadSymbol`): a lookup in the first table,
+    /// and for a long code a second lookup after moving past the first
+    /// table's bits. Reads from the window as it stands -- the caller refills
+    /// it where libwebp does -- and does not check for the end.
     #[allow(
         clippy::arithmetic_side_effects,
         reason = "table lengths are at most 15 bits and indices are masked to their tables"
     )]
     fn read(&self, bits: &mut Bits<'_>) -> u16 {
-        let peeked = bits.peek(MAX_LENGTH as u32);
         let root = self
             .table
-            .get((peeked as usize) & ((1 << ROOT_BITS) - 1))
+            .get((bits.prefetch() as usize) & ((1 << ROOT_BITS) - 1))
             .copied()
             .unwrap_or_default();
         if u32::from(root.length) <= ROOT_BITS {
-            bits.skip(u32::from(root.length));
+            bits.advance(u32::from(root.length));
             return root.value;
         }
         let sub_bits = u32::from(root.length) - ROOT_BITS;
-        let index =
-            usize::from(root.value) + ((peeked >> ROOT_BITS) as usize & ((1 << sub_bits) - 1));
+        bits.advance(ROOT_BITS);
+        let index = usize::from(root.value) + (bits.prefetch() as usize & ((1 << sub_bits) - 1));
         let entry = self.table.get(index).copied().unwrap_or_default();
-        bits.skip(ROOT_BITS + u32::from(entry.length));
+        bits.advance(u32::from(entry.length));
         entry.value
     }
 
     /// Whether the code has a single symbol, which reads no bits.
     fn single(&self) -> bool {
         self.table.first().is_some_and(|entry| entry.length == 0)
+    }
+
+    /// A single-symbol code's symbol.
+    fn first(&self) -> u16 {
+        self.table.first().map_or(0, |entry| entry.value)
     }
 
     /// Bytes the tables hold, for the budget.
@@ -533,15 +605,20 @@ fn read_code(bits: &mut Bits<'_>, size: usize) -> ImageResult<Code> {
         // Simple: one or two symbols, of length one.
         let two = bits.read(1) == 1;
         let first_width = if bits.read(1) == 1 { 8 } else { 1 };
+        // A symbol past the alphabet (a distance code's, above 39) names
+        // nothing, as it does in libwebp, whose lengths array is wider than
+        // any alphabet and whose tables are built from the alphabet's part
+        // of it: a code of two symbols, one of them past it, is a code of
+        // one; of none, not a code at all.
         let first = bits.read(first_width) as usize;
-        *lengths
-            .get_mut(first)
-            .ok_or(ImageError::Malformed("a VP8L symbol past its alphabet"))? = 1;
+        if let Some(slot) = lengths.get_mut(first) {
+            *slot = 1;
+        }
         if two {
             let second = bits.read(8) as usize;
-            *lengths
-                .get_mut(second)
-                .ok_or(ImageError::Malformed("a VP8L symbol past its alphabet"))? = 1;
+            if let Some(slot) = lengths.get_mut(second) {
+                *slot = 1;
+            }
         }
     } else {
         let count = bits.read(4) as usize + 4;
@@ -568,6 +645,7 @@ fn read_code(bits: &mut Bits<'_>, size: usize) -> ImageResult<Code> {
         let mut previous = 8u8;
         while symbol < size && tokens > 0 {
             tokens -= 1;
+            bits.fill();
             let token = length_code.read(bits);
             if token < 16 {
                 let length = token as u8;
@@ -593,10 +671,10 @@ fn read_code(bits: &mut Bits<'_>, size: usize) -> ImageResult<Code> {
                 }
                 symbol += repeat;
             }
-            if bits.exhausted() {
-                return Err(ImageError::Truncated);
-            }
         }
+    }
+    if bits.ended() {
+        return Err(ImageError::Truncated);
     }
     Code::build(&lengths).ok_or(ImageError::Malformed(
         "a VP8L prefix code that is not a tree",
@@ -629,9 +707,25 @@ fn read_group(bits: &mut Bits<'_>, cache_size: usize) -> ImageResult<Group> {
 
 impl Group {
     /// Whether its red, blue and alpha codes each have a single symbol, and so
-    /// read no bits.
+    /// read no bits: libwebp's "trivial literal".
     fn one_value_but_green(&self) -> bool {
         self.red.single() && self.blue.single() && self.alpha.single()
+    }
+
+    /// For a trivial literal, the pixel less its green.
+    fn literal_but_green(&self) -> u32 {
+        (u32::from(self.alpha.first()) << 24)
+            | (u32::from(self.red.first()) << 16)
+            | u32::from(self.blue.first())
+    }
+
+    /// The whole pixel, if every literal code has a single symbol and green's
+    /// is a literal: a block that reads no bits at all (libwebp's "trivial
+    /// code").
+    fn trivial_pixel(&self) -> Option<u32> {
+        let green = self.green.first();
+        (self.one_value_but_green() && self.green.single() && usize::from(green) < LITERALS)
+            .then(|| self.literal_but_green() | (u32::from(green) << 8))
     }
 
     fn size(&self) -> usize {
@@ -838,33 +932,75 @@ const fn cache_slot(argb: u32, bits: u32) -> usize {
     (argb.wrapping_mul(0x1E35_A7BD) >> (32 - bits)) as usize
 }
 
-/// How the main image's decode treats reading past the end of the stream.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum End {
-    /// Any bit read past the end is an error.
-    Strict,
-    /// If the image turns out to be one libwebp decodes a byte per pixel (see
-    /// [`Stream`]), bits read past the end by the symbol that completes it are
-    /// forgiven.
-    ForgiveLastIfBytePerPixel,
+/// An image's entropy coding: its colour cache, and which of its prefix-code
+/// groups each block uses.
+struct Codes {
+    cache_bits: Option<u32>,
+    /// Blocks' groups: the block size in bits, the blocks a row, and each
+    /// block's group number; `None` for one group everywhere.
+    entropy: Option<(u32, usize, Vec<u32>)>,
+    /// The groups kept -- the ones some block uses -- and each group number's
+    /// place among them.
+    groups: Vec<Group>,
+    index: Vec<usize>,
+    /// Whether every group read, and every group kept, has one red, blue and
+    /// alpha value.
+    single_all: bool,
+    single_used: bool,
+    /// Whether libwebp would keep only the used groups: more than 1000
+    /// numbered, or more than there are pixels.
+    kept_only_used: bool,
 }
 
-/// Decode one entropy-coded image of `width` x `height` pixels: the colour
-/// cache info, for the main image the meta prefix codes, the prefix codes, and
-/// the pixels (RFC 9649 §3.6, §3.7). `main` is the main image's end rule, and
-/// `None` for the images inside transforms and meta codes. Returns the pixels,
-/// and whether an overrun in the last symbol was forgiven.
+impl Codes {
+    /// The group for the pixel at (`x`, `y`).
+    fn group_at(&self, x: usize, y: usize) -> Option<&Group> {
+        match &self.entropy {
+            None => self.groups.first(),
+            Some((prefix_bits, blocks_w, image)) => {
+                let block = (y >> prefix_bits)
+                    .saturating_mul(*blocks_w)
+                    .saturating_add(x >> prefix_bits);
+                let named = *image.get(block)? as usize;
+                self.groups.get(*self.index.get(named)?)
+            }
+        }
+    }
+
+    /// libwebp's `Is8bOptimizable`, over the groups libwebp keeps: no colour
+    /// cache, and one red, blue and alpha value in every group.
+    const fn byte_per_pixel(&self) -> bool {
+        self.cache_bits.is_none()
+            && if self.kept_only_used {
+                self.single_used
+            } else {
+                self.single_all
+            }
+    }
+
+    const fn cache_size(&self) -> usize {
+        match self.cache_bits {
+            Some(bits) => 1usize << bits,
+            None => 0,
+        }
+    }
+}
+
+/// Read an image's entropy-coding header: the colour cache info, for the main
+/// image the meta prefix codes and their entropy image, and the groups of
+/// prefix codes (RFC 9649 §3.6, §3.7; libwebp's `DecodeImageStream` and
+/// `ReadHuffmanCodes`).
 #[allow(
     clippy::arithmetic_side_effects,
-    reason = "positions are bounded by the image, which Limits bounds, and each step is checked against what is left"
+    reason = "prefix bits are at most 9 and group numbers below 2^16"
 )]
-fn decode_image(
+fn read_codes(
     bits: &mut Bits<'_>,
     width: usize,
     height: usize,
-    main: Option<End>,
+    main: bool,
     budget: &mut Budget,
-) -> ImageResult<(Vec<u32>, bool)> {
+) -> ImageResult<Codes> {
     let total = width.saturating_mul(height);
     let cache_bits = if bits.read(1) == 1 {
         let cache_bits = bits.read(4);
@@ -882,17 +1018,20 @@ fn decode_image(
     // Which group each block uses: one group everywhere, or an entropy image.
     let mut entropy: Option<(u32, usize, Vec<u32>)> = None;
     let mut groups_named = 1usize;
-    if main.is_some() && bits.read(1) == 1 {
+    if main && bits.read(1) == 1 {
         let prefix_bits = bits.read(3) + 2;
         let blocks_w = div_round_up(width, prefix_bits);
         let blocks_h = div_round_up(height, prefix_bits);
         budget.spend(blocks_w.saturating_mul(blocks_h).saturating_mul(4))?;
-        let (mut image, _) = decode_image(bits, blocks_w, blocks_h, None, budget)?;
+        let mut image = decode_image(bits, blocks_w, blocks_h, budget)?;
         for pixel in &mut image {
             *pixel = (*pixel >> 8) & 0xFFFF;
             groups_named = groups_named.max(*pixel as usize + 1);
         }
         entropy = Some((prefix_bits, blocks_w, image));
+    }
+    if bits.ended() {
+        return Err(ImageError::Truncated);
     }
 
     // Every group named is in the stream and must be read to reach the next;
@@ -910,8 +1049,6 @@ fn decode_image(
     }
     let mut index = vec![usize::MAX; groups_named];
     let mut groups: Vec<Group> = Vec::new();
-    // Whether every group -- and every group a block uses -- has one red, one
-    // blue and one alpha value: half of libwebp's byte-per-pixel test.
     let (mut single_all, mut single_used) = (true, true);
     for (n, &wanted) in used.iter().enumerate() {
         let group = read_group(bits, cache_size)?;
@@ -924,41 +1061,53 @@ fn decode_image(
             }
             groups.push(group);
         }
-        if bits.exhausted() {
-            return Err(ImageError::Truncated);
-        }
     }
+    Ok(Codes {
+        cache_bits,
+        kept_only_used: entropy.is_some() && (groups_named > 1000 || groups_named > total),
+        entropy,
+        groups,
+        index,
+        single_all,
+        single_used,
+    })
+}
 
-    // libwebp keeps every group it reads unless there are more than 1000 of
-    // them or more than pixels, when it keeps only the used ones -- and its
-    // byte-per-pixel test looks at the groups it kept.
-    let kept_only_used = entropy.is_some() && (groups_named > 1000 || groups_named > total);
-    let byte_per_pixel = main == Some(End::ForgiveLastIfBytePerPixel)
-        && cache_bits.is_none()
-        && if kept_only_used {
-            single_used
-        } else {
-            single_all
-        };
+/// Decode an image inside a transform or the meta prefix codes: its codes and
+/// its pixels (libwebp's `DecodeImageStream` below level 0).
+fn decode_image(
+    bits: &mut Bits<'_>,
+    width: usize,
+    height: usize,
+    budget: &mut Budget,
+) -> ImageResult<Vec<u32>> {
+    let codes = read_codes(bits, width, height, false, budget)?;
+    decode_pixels(bits, &codes, width, height, budget)
+}
 
+/// Decode an image's pixels as libwebp's `DecodeImageData` does: literals,
+/// copies and cache entries, refilling the window before each symbol and
+/// between a literal's red and blue, and stopping -- an error -- as soon as
+/// the stream is past its end.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "positions are bounded by the image, which Limits bounds, and each copy is checked against what is left"
+)]
+fn decode_pixels(
+    bits: &mut Bits<'_>,
+    codes: &Codes,
+    width: usize,
+    height: usize,
+    budget: &mut Budget,
+) -> ImageResult<Vec<u32>> {
+    let total = width.saturating_mul(height);
+    let cache_size = codes.cache_size();
     budget.spend(total.saturating_mul(4))?;
     budget.spend(cache_size.saturating_mul(4))?;
     let mut out = vec![0u32; total];
     let mut cache = vec![0u32; cache_size];
-    let group_at = |x: usize, y: usize| -> Option<&Group> {
-        match &entropy {
-            None => groups.first(),
-            Some((prefix_bits, blocks_w, image)) => {
-                let block = (y >> prefix_bits)
-                    .saturating_mul(*blocks_w)
-                    .saturating_add(x >> prefix_bits);
-                let named = *image.get(block)? as usize;
-                groups.get(*index.get(named)?)
-            }
-        }
-    };
     let insert = |cache: &mut Vec<u32>, argb: u32| {
-        if let Some(b) = cache_bits
+        if let Some(b) = codes.cache_bits
             && let Some(slot) = cache.get_mut(cache_slot(argb, b))
         {
             *slot = argb;
@@ -968,57 +1117,153 @@ fn decode_image(
     let mut at = 0usize;
     let (mut x, mut y) = (0usize, 0usize);
     while at < total {
-        let group = group_at(x, y).ok_or(ImageError::Malformed("a VP8L block naming no code"))?;
-        let symbol = usize::from(group.green.read(bits));
-        if symbol < LITERALS {
-            let red = u32::from(group.red.read(bits));
-            let blue = u32::from(group.blue.read(bits));
-            let alpha = u32::from(group.alpha.read(bits));
-            let argb = (alpha << 24) | (red << 16) | ((symbol as u32) << 8) | blue;
+        let group = codes
+            .group_at(x, y)
+            .ok_or(ImageError::Malformed("a VP8L block naming no code"))?;
+        if let Some(argb) = group.trivial_pixel() {
             if let Some(slot) = out.get_mut(at) {
                 *slot = argb;
             }
             insert(&mut cache, argb);
             at += 1;
             x += 1;
+        } else {
+            bits.fill();
+            let symbol = usize::from(group.green.read(bits));
+            if bits.past_end() {
+                break;
+            }
+            if symbol < LITERALS {
+                let argb = if group.one_value_but_green() {
+                    group.literal_but_green() | ((symbol as u32) << 8)
+                } else {
+                    let red = u32::from(group.red.read(bits));
+                    bits.fill();
+                    let blue = u32::from(group.blue.read(bits));
+                    let alpha = u32::from(group.alpha.read(bits));
+                    if bits.past_end() {
+                        break;
+                    }
+                    (alpha << 24) | (red << 16) | ((symbol as u32) << 8) | blue
+                };
+                if let Some(slot) = out.get_mut(at) {
+                    *slot = argb;
+                }
+                insert(&mut cache, argb);
+                at += 1;
+                x += 1;
+            } else if symbol < LITERALS + LENGTH_CODES {
+                let length = prefix_value(bits, (symbol - LITERALS) as u32);
+                let distance_prefix = u32::from(group.distance.read(bits));
+                bits.fill();
+                let code = prefix_value(bits, distance_prefix);
+                let dist = distance(code, width);
+                if bits.past_end() {
+                    break;
+                }
+                if dist > at || length > total - at {
+                    return Err(ImageError::Malformed("a VP8L copy from outside the image"));
+                }
+                for _ in 0..length {
+                    let argb = out.get(at - dist).copied().unwrap_or(0);
+                    if let Some(slot) = out.get_mut(at) {
+                        *slot = argb;
+                    }
+                    insert(&mut cache, argb);
+                    at += 1;
+                }
+                x += length;
+            } else {
+                let key = symbol - LITERALS - LENGTH_CODES;
+                let argb = *cache.get(key).ok_or(ImageError::Malformed(
+                    "a VP8L colour cache entry past the cache",
+                ))?;
+                if let Some(slot) = out.get_mut(at) {
+                    *slot = argb;
+                }
+                insert(&mut cache, argb);
+                at += 1;
+                x += 1;
+            }
+        }
+        if width > 0 {
+            y += x / width;
+            x %= width;
+        }
+    }
+    bits.note_end();
+    if bits.ended() {
+        return Err(ImageError::Truncated);
+    }
+    Ok(out)
+}
+
+/// Decode a colour-indexed alpha plane's pixels as libwebp's
+/// `DecodeAlphaData` decodes them, a byte per pixel: only green is read, the
+/// loop stops once the stream is past its end, and the result stands if every
+/// pixel was decoded by then -- the last symbol may have read past the end,
+/// and taken what the window held there.
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "positions are bounded by the image, which Limits bounds, and each copy is checked against what is left"
+)]
+fn decode_bytes(
+    bits: &mut Bits<'_>,
+    codes: &Codes,
+    width: usize,
+    height: usize,
+    budget: &mut Budget,
+) -> ImageResult<Vec<u32>> {
+    let total = width.saturating_mul(height);
+    budget.spend(total.saturating_mul(4))?;
+    let mut out = vec![0u32; total];
+    let mut at = 0usize;
+    let (mut x, mut y) = (0usize, 0usize);
+    while !bits.ended() && at < total {
+        let group = codes
+            .group_at(x, y)
+            .ok_or(ImageError::Malformed("a VP8L block naming no code"))?;
+        bits.fill();
+        let symbol = usize::from(group.green.read(bits));
+        if symbol < LITERALS {
+            if let Some(slot) = out.get_mut(at) {
+                *slot = (symbol as u32) << 8;
+            }
+            at += 1;
+            x += 1;
         } else if symbol < LITERALS + LENGTH_CODES {
             let length = prefix_value(bits, (symbol - LITERALS) as u32);
             let distance_prefix = u32::from(group.distance.read(bits));
+            bits.fill();
             let code = prefix_value(bits, distance_prefix);
             let dist = distance(code, width);
             if dist > at || length > total - at {
                 return Err(ImageError::Malformed("a VP8L copy from outside the image"));
             }
             for _ in 0..length {
-                let argb = out.get(at - dist).copied().unwrap_or(0);
+                let value = out.get(at - dist).copied().unwrap_or(0);
                 if let Some(slot) = out.get_mut(at) {
-                    *slot = argb;
+                    *slot = value;
                 }
-                insert(&mut cache, argb);
                 at += 1;
             }
             x += length;
         } else {
-            let key = symbol - LITERALS - LENGTH_CODES;
-            let argb = *cache.get(key).ok_or(ImageError::Malformed(
-                "a VP8L colour cache entry past the cache",
-            ))?;
-            if let Some(slot) = out.get_mut(at) {
-                *slot = argb;
-            }
-            insert(&mut cache, argb);
-            at += 1;
-            x += 1;
+            return Err(ImageError::Malformed(
+                "a VP8L colour cache code with no colour cache",
+            ));
         }
         if width > 0 {
             y += x / width;
             x %= width;
         }
-        if bits.exhausted() && !(byte_per_pixel && at >= total) {
-            return Err(ImageError::Truncated);
-        }
+        bits.note_end();
     }
-    Ok((out, byte_per_pixel))
+    bits.note_end();
+    if bits.ended() && at < total {
+        return Err(ImageError::Truncated);
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1290,8 +1535,8 @@ mod tests {
     /// indexing's bundling width), a colour cache, and meta prefix codes.
     fn tools(file: &[u8]) -> Vec<&'static str> {
         let data = payload(file);
-        let (width, height) = dimensions(data).unwrap();
-        let mut bits = Bits::new(&data[5..], 3);
+        let mut bits = Bits::new(data);
+        let (width, height) = read_header(&mut bits).unwrap();
         let mut budget = Budget::new(Limits::default());
         let (transforms, _) =
             read_transforms(&mut bits, width as usize, height as usize, &mut budget).unwrap();
@@ -1372,7 +1617,7 @@ mod tests {
         // bit first into a least-significant-first stream.
         let code = Code::build(&[1, 2, 3, 3]).unwrap();
         let data = stream(&[0, 1, 0, 1, 1, 0, 1, 1, 1]);
-        let mut bits = Bits::new(&data, 0);
+        let mut bits = Bits::new(&data);
         let read: Vec<u16> = (0..4).map(|_| code.read(&mut bits)).collect();
         assert_eq!(read, vec![0, 1, 2, 3]);
     }
@@ -1389,7 +1634,7 @@ mod tests {
         sent.push(0);
         sent.extend([1u8; 15]);
         let data = stream(&sent);
-        let mut bits = Bits::new(&data, 0);
+        let mut bits = Bits::new(&data);
         assert_eq!(code.read(&mut bits), 14);
         assert_eq!(code.read(&mut bits), 15);
     }
@@ -1398,7 +1643,7 @@ mod tests {
     fn a_single_symbol_reads_no_bits_and_an_incomplete_tree_is_refused() {
         let code = Code::build(&[0, 0, 5, 0]).unwrap();
         let data = stream(&[1, 1, 1]);
-        let mut bits = Bits::new(&data, 0);
+        let mut bits = Bits::new(&data);
         assert_eq!(code.read(&mut bits), 2);
         assert_eq!(bits.read(3), 0b111, "nothing was consumed");
         assert!(Code::build(&[1, 2, 3]).is_none(), "a missing 111");

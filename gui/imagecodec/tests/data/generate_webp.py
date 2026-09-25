@@ -442,6 +442,38 @@ def lossy_fixtures() -> None:
     size = struct.unpack("<I", whole[16:20])[0] - 3
     keep("webp_lossy_short_by_padding", riff([(b"VP8 ", whole[20 : 20 + size])]))
 
+    # What libwebp, and Pillow over it, show of files whose flags disagree
+    # with their data -- which no encoder writes. A lossless stream whose
+    # header's alpha bit is clear is shown opaque, whatever its pixels' alpha;
+    # a lossy frame's ALPH chunk under a VP8X header without the alpha flag is
+    # dropped unread.
+    buf = io.BytesIO()
+    translucent(29, 19).save(buf, "WEBP", lossless=True, exact=True)
+    unhinted = bytearray(chunk(buf.getvalue(), b"VP8L"))
+    unhinted[4] &= ~0x10
+    keep("webp_lossless_alpha_unhinted", riff([(b"VP8L", bytes(unhinted))]))
+    buf = io.BytesIO()
+    translucent(29, 19).save(buf, "WEBP", quality=80)
+    lossy_alpha = buf.getvalue()
+    keep(
+        "webp_lossy_alpha_unflagged",
+        riff([vp8x(29, 19, 0), (b"ALPH", chunk(lossy_alpha, b"ALPH")), (b"VP8 ", chunk(lossy_alpha, b"VP8 "))]),
+    )
+
+    # Corrupt lossless streams, as libwebp reads them. In `webp_lossy_alpha`'s
+    # alpha plane -- decoded a byte per pixel -- the last symbol reads past
+    # the end, where libwebp takes stale bits from its window; in
+    # `webp_lossless_1x1`, a simple prefix code names a symbol past its
+    # alphabet, which libwebp ignores.
+    def flipped(name: str, flips: list[tuple[int, int]]) -> bytes:
+        data = bytearray((HERE / f"{name}.webp").read_bytes())
+        for at, mask in flips:
+            data[at] ^= mask
+        return bytes(data)
+
+    keep("webp_lossy_alpha_corrupt_tail", flipped("webp_lossy_alpha", [(80, 0x01), (216, 0x10)]))
+    keep("webp_lossless_stray_symbol", flipped("webp_lossless_1x1", [(29, 0x02), (31, 0x02), (34, 0x20), (36, 0x02)]))
+
     # libvpx: a different encoder's habits. Its quantiser held coarse enough
     # that its loop filter is on -- a lone key frame otherwise gets so fine a
     # one that the filter level is zero -- so that its per-mode filter deltas

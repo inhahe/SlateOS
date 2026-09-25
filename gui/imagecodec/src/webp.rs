@@ -137,10 +137,16 @@ fn layout(bytes: &[u8]) -> ImageResult<Layout<'_>> {
             }
             // The alpha plane is the last `ALPH` before the frame, as libwebp
             // takes it; a lossless frame has its own alpha and ignores one.
+            // And a lossy frame's is used only if the header's alpha flag is
+            // set: libwebp's demuxer, which Pillow and the browsers read
+            // WebP through, drops it otherwise ("Clear any alpha when the
+            // alpha flag is missing") -- unread, so a broken one breaks
+            // nothing.
+            let alpha_flag = flags & 0x10 != 0;
             let mut alpha = None;
             for chunk in chunks {
                 match &chunk.fourcc {
-                    b"ALPH" => alpha = Some(chunk.payload),
+                    b"ALPH" if alpha_flag => alpha = Some(chunk.payload),
                     b"VP8L" => {
                         let own = lossless::dimensions(chunk.payload)?;
                         if own != (width, height) {
@@ -213,7 +219,19 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
     }
     match layout.content {
         Content::Lossless(payload) => {
-            let (width, height, pixels) = lossless::decode(payload, limits)?;
+            let (width, height, mut pixels) = lossless::decode(payload, limits)?;
+            // A stream whose header says it has no alpha is shown opaque,
+            // whatever its pixels' alpha: the format calls the bit a hint that
+            // must not change the decode, and it does not -- but Pillow and
+            // Firefox (through libwebp's `WebPGetFeatures`) and Chrome's
+            // simple-format path all show such a picture without its alpha.
+            // An encoder sets the bit whenever a pixel is not opaque, so only
+            // a damaged or hand-made file can tell the difference.
+            if !lossless::alpha_hint(payload) {
+                for pixel in &mut pixels {
+                    *pixel |= 0xFF00_0000;
+                }
+            }
             Ok(Image {
                 width,
                 height,

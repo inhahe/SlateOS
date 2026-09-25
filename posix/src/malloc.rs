@@ -1,75 +1,196 @@
 //! C dynamic memory allocation.
 //!
-//! Implements `malloc`, `free`, `calloc`, `realloc`, `posix_memalign`,
-//! `aligned_alloc`, `valloc`, `pvalloc`, `memalign`, `malloc_usable_size`
-//! using mmap/munmap as the backing allocator.
+//! Implements `malloc`, `free`, `calloc`, `realloc`, `reallocarray`,
+//! `posix_memalign`, `aligned_alloc`, `memalign`, `valloc`, `pvalloc`,
+//! `malloc_usable_size` and glibc's `__libc_*` aliases.
 //!
-//! ## Design
+//! ## The allocator is Doug Lea's
 //!
-//! This is a simple allocator that prepends a header to each allocation
-//! recording the mmap base address and size (so `free` and `realloc`
-//! know what to unmap).  Every allocation is its own mmap region.  This
-//! is correct but not efficient — a real allocator (dlmalloc, jemalloc)
-//! would batch small allocations into larger arenas.  This is
-//! intentionally simple because:
+//! The heap is dlmalloc — the allocator glibc's own descends from — in
+//! Alex Crichton's Rust port, `dlmalloc-rs` 0.2.14, which is what Rust's
+//! standard library uses on wasm. It is vendored in `malloc/dlmalloc.rs`; the
+//! local changes are listed in `malloc/VENDORED.md`, and the two that matter
+//! are that large requests get a mapping of their own (C dlmalloc's
+//! `mmap_alloc`, which the Rust port does not carry) and that
+//! address-contiguous regions are never merged.
 //!
-//! - Correctness matters more than performance at this stage
-//! - Programs needing a real allocator can link one in later
-//! - It exercises the mmap/munmap syscall path
+//! ## What it replaced, and why that mattered to every program
 //!
-//! ## Header Layout
+//! Until 2026-09-25 every allocation was its own `mmap` region: one system
+//! call for each `malloc` and each `free`, and at least one 16 KiB page per
+//! allocation however small — a 10-byte string committed 16 KiB, and the
+//! kernel printed a serial line for each map and unmap. Rust's `std` allocator
+//! on this target *is* these functions (`System` calls `malloc`/`free` on
+//! linux-musl), so that was the price of every `Box`, `Vec` and `String` in
+//! the userland, not only of C programs. dlmalloc takes memory in 64 KiB
+//! regions and carves them, so a small allocation costs its size plus 8 or 16
+//! bytes and no system call at all.
 //!
-//! ```text
-//! +-----------+-----------+------------------+
-//! | base: u64 | size: u64 | user data...     |
-//! +-----------+-----------+------------------+
-//! ^                        ^
-//! (may differ for aligned)  returned pointer
-//! ```
+//! ## How memory reaches the kernel and comes back
 //!
-//! For standard malloc, the header is at `mmap_base` and the user
-//! pointer is at `mmap_base + 16`.  For aligned allocations with
-//! alignment > 16, the header is placed just before the aligned user
-//! pointer — `base` stores the actual mmap start address so `free()`
-//! can always unmap the correct region regardless of pointer alignment.
+//! [`SlateSystem`] is dlmalloc's view of the system: anonymous mappings of
+//! whole 16 KiB pages. Three properties of this kernel shape it:
 //!
-//! The header is 16 bytes (aligned to 16 for ABI compliance).
+//! * **`munmap` releases a VMA record only when given its base.** So a region
+//!   is only ever returned whole — the core never merges neighbouring regions
+//!   into one segment, and [`SlateSystem::free_part`] declines to trim. A
+//!   region is released when the core finds it wholly free; a request of
+//!   256 KiB or more is its own mapping and goes back the moment it is freed.
+//! * **`mremap` is not implemented** (`mman::mremap` answers `ENOSYS`), so
+//!   growing a large block copies it; [`SlateSystem::remap`] says so.
+//! * **Anonymous mappings arrive zeroed**, which lets `calloc` skip clearing a
+//!   block that came fresh from the kernel.
+//!
+//! ## Size zero
+//!
+//! `malloc(0)`, `calloc(0, n)`, `posix_memalign(&p, a, 0)` and the other
+//! aligned forms return a unique pointer that must be freed, as glibc and musl
+//! both do. They returned NULL until 2026-09-25, which POSIX permits and
+//! ported software does not expect: `p = malloc(n); if (!p) die("out of
+//! memory")` dies on a legitimate `n == 0`. `realloc(p, 0)` frees `p` and
+//! returns NULL, as glibc does. See `design-decisions.md` §1101.
+//!
+//! ## Threads and `fork`
+//!
+//! One heap, one lock ([`HeapGuard`]): a spin lock that yields after a short
+//! spin, because the holder may have been preempted on a single CPU. `fork`
+//! takes it before the system call and releases it in both processes after
+//! ([`lock_for_fork`] and friends), so a child never starts with the lock held
+//! by a thread that does not exist in it — the deadlock glibc's own
+//! `__malloc_fork_lock_parent` prevents.
+//!
+//! `malloc` is not async-signal-safe, here as everywhere: a signal handler
+//! that allocates while its thread holds the lock deadlocks.
 
-#[cfg(target_os = "none")]
-use crate::mman;
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-/// Header size: 16 bytes (u64 mmap_base + u64 total_size).
-/// Placed immediately before the user pointer.
-const HEADER_SIZE: usize = 16;
+mod dlmalloc;
 
-// ---------------------------------------------------------------------------
-// Backing store
-// ---------------------------------------------------------------------------
-//
-// Every allocation below is one region obtained here and released by `free`.
-// The two implementations differ only in where the bytes come from; both must
-// return memory that is **zeroed** (`calloc` leans on it) and aligned to
-// `REGION_ALIGN` (`valloc`/`pvalloc` hand the base straight back as
-// "page-aligned", and `aligned_alloc_impl` rounds up from it).
-
-/// Alignment every region is anchored on: our page size.
+/// The page size every region is anchored on.
 ///
 /// An alias of [`crate::unistd::PAGE_SIZE`], not an independent value — see the
 /// doc comment there for why the number is written down exactly once.
 const REGION_ALIGN: usize = crate::unistd::PAGE_SIZE;
 
+// ---------------------------------------------------------------------------
+// dlmalloc's system interface
+// ---------------------------------------------------------------------------
+
+/// How dlmalloc obtains and returns memory — `dlmalloc-rs`'s `Allocator` trait,
+/// vendored with the core it serves (`malloc/VENDORED.md`). The documentation
+/// of each method is upstream's.
+///
+/// # Safety
+///
+/// Implementations must return memory that is valid, writable and not in use
+/// elsewhere for the whole of the size they report.
+pub(crate) unsafe trait Allocator: Send {
+    /// Allocates system memory region of at least `size` bytes
+    /// Returns a triple of `(base, size, flags)` where `base` is a pointer to the beginning of the
+    /// allocated memory region. `size` is the actual size of the region while `flags` specifies
+    /// properties of the allocated region. If `EXTERN_BIT` (bit 0) set in flags, then we did not
+    /// allocate this segment and so should not try to deallocate or merge with others.
+    /// This function can return a `std::ptr::null_mut()` when allocation fails (other values of
+    /// the triple will be ignored).
+    fn alloc(&self, size: usize) -> (*mut u8, usize, u32);
+
+    /// Remaps system memory region at `ptr` with size `oldsize` to a potential new location with
+    /// size `newsize`. `can_move` indicates if the location is allowed to move to a completely new
+    /// location, or that it is only allowed to change in size. Returns a pointer to the new
+    /// location in memory.
+    /// This function can return a `std::ptr::null_mut()` to signal an error.
+    fn remap(&self, ptr: *mut u8, oldsize: usize, newsize: usize, can_move: bool) -> *mut u8;
+
+    /// Frees a part of a memory chunk. The original memory chunk starts at `ptr` with size `oldsize`
+    /// and is turned into a memory region starting at the same address but with `newsize` bytes.
+    /// Returns `true` iff the access memory region could be freed.
+    fn free_part(&self, ptr: *mut u8, oldsize: usize, newsize: usize) -> bool;
+
+    /// Frees an entire memory region. Returns `true` iff the operation succeeded. When `false` is
+    /// returned, the `dlmalloc` may re-use the location on future allocation requests
+    fn free(&self, ptr: *mut u8, size: usize) -> bool;
+
+    /// Indicates if the system can release a part of memory. For the `flags` argument, see
+    /// `Allocator::alloc`
+    fn can_release_part(&self, flags: u32) -> bool;
+
+    /// Indicates whether newly allocated regions contain zeros.
+    fn allocates_zeros(&self) -> bool;
+
+    /// Returns the page size. Must be a power of two
+    fn page_size(&self) -> usize;
+}
+
+/// dlmalloc's source of memory: whole-page anonymous mappings.
+struct SlateSystem;
+
+// SAFETY: `alloc` returns either NULL or a fresh mapping of exactly the size it
+// reports, which nothing else uses; `free` releases exactly such a mapping.
+unsafe impl Allocator for SlateSystem {
+    fn alloc(&self, size: usize) -> (*mut u8, usize, u32) {
+        let base = map_region(size);
+        if base.is_null() {
+            (core::ptr::null_mut(), 0, 0)
+        } else {
+            (base, size, 0)
+        }
+    }
+
+    /// `mremap` is not implemented on this system (`mman::mremap` returns
+    /// `ENOSYS`), so a large block that grows is copied instead.
+    fn remap(&self, _ptr: *mut u8, _oldsize: usize, _newsize: usize, _can_move: bool) -> *mut u8 {
+        core::ptr::null_mut()
+    }
+
+    /// Declined, always. Unmapping the tail of a region would free its frames
+    /// but leave the kernel's VMA record claiming the whole original range,
+    /// because native `munmap` drops a record only when handed its base
+    /// address. dlmalloc treats a refusal as "nothing released" and stops
+    /// retrying once it has been refused.
+    fn free_part(&self, _ptr: *mut u8, _oldsize: usize, _newsize: usize) -> bool {
+        false
+    }
+
+    fn free(&self, ptr: *mut u8, size: usize) -> bool {
+        // SAFETY: dlmalloc hands back exactly the `(base, size)` pairs `alloc`
+        // produced — the vendored core never merges regions (VENDORED.md).
+        unsafe { unmap_region(ptr, size) };
+        true
+    }
+
+    /// True, so that dlmalloc's pass that releases wholly free regions runs;
+    /// the partial releases the same flag would permit are refused by
+    /// `free_part`.
+    fn can_release_part(&self, _flags: u32) -> bool {
+        true
+    }
+
+    fn allocates_zeros(&self) -> bool {
+        true
+    }
+
+    fn page_size(&self) -> usize {
+        REGION_ALIGN
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backing store
+// ---------------------------------------------------------------------------
+
 /// Map `total` bytes of zeroed, writable anonymous memory; NULL on failure.
 #[cfg(target_os = "none")]
 fn map_region(total: usize) -> *mut u8 {
-    let ptr = mman::mmap(
+    let ptr = crate::mman::mmap(
         core::ptr::null_mut(),
         total,
-        mman::PROT_READ | mman::PROT_WRITE,
-        mman::MAP_PRIVATE | mman::MAP_ANONYMOUS,
+        crate::mman::PROT_READ | crate::mman::PROT_WRITE,
+        crate::mman::MAP_PRIVATE | crate::mman::MAP_ANONYMOUS,
         -1,
         0,
     );
-    if ptr == mman::MAP_FAILED {
+    if ptr == crate::mman::MAP_FAILED {
         return core::ptr::null_mut();
     }
     ptr.cast::<u8>()
@@ -78,88 +199,43 @@ fn map_region(total: usize) -> *mut u8 {
 /// Release a region obtained from `map_region`.
 ///
 /// # Safety
-/// `base`/`total` must be exactly the pair a `map_region` call returned and
-/// recorded, and the region must not have been released already.
+/// `base`/`total` must be exactly the pair a `map_region` call returned, and
+/// the region must not have been released already.
 #[cfg(target_os = "none")]
 unsafe fn unmap_region(base: *mut u8, total: usize) {
-    let _ = mman::munmap(base.cast::<core::ffi::c_void>(), total);
+    // A failed unmap of our own private anonymous mapping has no remedy here;
+    // the region is reclaimed with the process in any case.
+    let _ = crate::mman::munmap(base.cast::<core::ffi::c_void>(), total);
 }
 
 /// Host-build backing, so `cargo test` exercises this allocator instead of
 /// silently skipping it.
 ///
 /// `syscallN()` returns `-ENOSYS` on host builds — deliberately, see
-/// syscall.rs's "Host-build safety gate" — so `mman::mmap` fails there and
-/// **every `malloc` on the host used to return NULL**.  That is not a harmless
-/// difference between the two builds: it un-tests, without saying so, every
-/// libc function that allocates, and the `free`/`realloc`/`malloc_usable_size`
-/// header logic in this file along with them.  Nothing reported it because a
-/// NULL return is a legal `malloc` result, so the callers' error paths simply
-/// took over and their tests passed on the wrong branch.
-///
-/// What finally said it out loud was `posix_spawn`'s file-actions array moving
-/// to the heap (see spawn.rs): eleven tests turned into `ENOMEM` at once.
-/// Backing the region here — the same shape as `syscall.rs`'s `host_clock`
-/// shim — fixes those eleven and un-skips the rest.
+/// syscall.rs's "Host-build safety gate" — so `mman::mmap` fails there, and
+/// **every `malloc` on the host used to return NULL**, un-testing every libc
+/// function that allocates without saying so. Backing the regions with the
+/// Rust global allocator — page-aligned and zeroed, like a real mapping — is
+/// what lets the whole suite run dlmalloc for real.
 #[cfg(not(target_os = "none"))]
 fn map_region(total: usize) -> *mut u8 {
     extern crate std;
     let Ok(layout) = std::alloc::Layout::from_size_align(total, REGION_ALIGN) else {
         return core::ptr::null_mut();
     };
-    // SAFETY: `layout` has non-zero size — every caller checks `size == 0`
-    // first and adds `HEADER_SIZE` — which is `alloc_zeroed`'s one
-    // requirement.  Zeroed, because `calloc` documents that it relies on the
-    // backing store already being zero.
-    let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
-    #[cfg(test)]
-    if !ptr.is_null() {
-        live_regions::bump(1);
+    if layout.size() == 0 {
+        return core::ptr::null_mut();
     }
-    ptr
-}
-
-/// Per-thread count of regions this thread mapped and has not yet unmapped.
-///
-/// Exists so a test can assert **"nothing leaked"** rather than assume it: a
-/// function that reports an error after allocating — `regcomp` rejecting a bad
-/// pattern part-way through the compile, say — returns exactly the same code
-/// whether or not it freed what it had.  Only a count distinguishes them.
-///
-/// It is **thread-local, and signed**, because `cargo test` runs thousands of
-/// tests in parallel in one process.  A global counter would be perturbed by
-/// every unrelated test that happened to allocate at the same moment, making
-/// the check flaky in exactly the way that gets a test deleted rather than
-/// fixed.  A thread-local one is perturbed only by this thread — and libtest
-/// gives each test its own — so a delta of zero across a call really is that
-/// call's own accounting.  Signed, because a region mapped on one thread and
-/// freed on another legitimately drives the freeing thread's count negative;
-/// that is a valid program, not an error, and it must not panic on overflow.
-#[cfg(all(test, not(target_os = "none")))]
-pub(crate) mod live_regions {
-    extern crate std;
-    use core::cell::Cell;
-
-    std::thread_local! {
-        static COUNT: Cell<i64> = const { Cell::new(0) };
-    }
-
-    /// Add `delta` to this thread's live-region count.
-    pub(super) fn bump(delta: i64) {
-        COUNT.with(|c| c.set(c.get().wrapping_add(delta)));
-    }
-
-    /// This thread's live-region count.  Only differences are meaningful.
-    pub(crate) fn count() -> i64 {
-        COUNT.with(Cell::get)
-    }
+    // SAFETY: non-zero size, checked just above — `alloc_zeroed`'s one
+    // requirement. Zeroed, because `allocates_zeros` promises it.
+    unsafe { std::alloc::alloc_zeroed(layout) }
 }
 
 /// Release a region obtained from `map_region`.
 ///
 /// # Safety
-/// `base`/`total` must be exactly the pair a `map_region` call returned and
-/// recorded, and the region must not have been released already.
+/// `base`/`total` must be exactly the pair a `map_region` call returned, and
+/// the region must not have been released already.
 #[cfg(not(target_os = "none"))]
 unsafe fn unmap_region(base: *mut u8, total: usize) {
     extern crate std;
@@ -167,400 +243,463 @@ unsafe fn unmap_region(base: *mut u8, total: usize) {
         return;
     };
     // SAFETY: the caller guarantees `base`/`total` name a live region from
-    // `map_region`, and `Layout::from_size_align` is deterministic, so this
-    // layout is the one it was allocated with.
+    // `map_region`, and `Layout::from_size_align` is deterministic, so this is
+    // the layout it was allocated with.
     unsafe { std::alloc::dealloc(base, layout) };
-    #[cfg(test)]
-    live_regions::bump(-1);
 }
 
-/// Allocate `size` bytes of memory.
-///
-/// Returns a pointer to at least `size` bytes of memory, or NULL
-/// on failure.  The memory is not initialized.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn malloc(size: usize) -> *mut u8 {
-    if size == 0 {
-        // POSIX: malloc(0) may return NULL or a unique pointer.
-        // We return NULL for simplicity.
-        return core::ptr::null_mut();
+// ---------------------------------------------------------------------------
+// The heap and its lock
+// ---------------------------------------------------------------------------
+
+/// The process's heap. One instance, shared by every thread under
+/// [`HEAP_LOCK`]; on the host it is shared by every test thread, which is the
+/// point — it is the allocator the suite runs on.
+static HEAP: Heap = Heap(UnsafeCell::new(dlmalloc::Dlmalloc::new(SlateSystem)));
+
+/// [`HEAP`]'s type: the heap in a cell that only a [`HeapGuard`] opens.
+struct Heap(UnsafeCell<dlmalloc::Dlmalloc<SlateSystem>>);
+
+// SAFETY: the cell's contents are reached only through `HeapGuard::heap`, and
+// a `HeapGuard` exists only while it holds `HEAP_LOCK`, so no two threads ever
+// hold a reference to the heap at once.
+unsafe impl Sync for Heap {}
+
+/// Held while [`HEAP`] is in use.
+static HEAP_LOCK: AtomicBool = AtomicBool::new(false);
+
+/// Ownership of [`HEAP`], released on drop.
+struct HeapGuard;
+
+impl HeapGuard {
+    /// Take the heap. Spins briefly, then yields: on a single CPU the holder
+    /// may have been preempted, and spinning then only delays its return.
+    fn lock() -> Self {
+        let mut spins: u32 = 0;
+        while HEAP_LOCK
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            if spins < 64 {
+                spins = spins.saturating_add(1);
+                core::hint::spin_loop();
+            } else {
+                yield_cpu();
+            }
+        }
+        Self
     }
 
-    let Some(total) = size.checked_add(HEADER_SIZE) else {
-        crate::errno::set_errno(crate::errno::ENOMEM);
-        return core::ptr::null_mut();
-    };
-
-    let base = map_region(total);
-    if base.is_null() {
-        return core::ptr::null_mut();
+    /// The heap, for as long as this guard lives.
+    #[allow(clippy::unused_self)] // the borrow of `self` is the point
+    fn heap(&mut self) -> &mut dlmalloc::Dlmalloc<SlateSystem> {
+        // SAFETY: a `HeapGuard` exists only while `HEAP_LOCK` is held by it, so
+        // this is the only reference to `HEAP` anywhere, and it cannot outlive
+        // the guard it is borrowed from.
+        unsafe { &mut *HEAP.0.get() }
     }
-
-    // Write the header: [mmap_base_addr, total_region_size].
-    // SAFETY: map_region returned valid memory of at least `total` bytes.
-    unsafe {
-        // Store the mmap base address (= ptr itself for standard malloc).
-        core::ptr::write_unaligned(base.cast::<u64>(), base as u64);
-        // Store the total mmap region size.
-        core::ptr::write_unaligned(base.add(8).cast::<u64>(), total as u64);
-    }
-
-    // Return pointer past the header.
-    // SAFETY: total >= HEADER_SIZE (checked_add above), so base + 16
-    // is within the mapped region.
-    unsafe { base.add(HEADER_SIZE) }
 }
 
-/// Allocate and zero-initialize memory for `nmemb` elements of `size` bytes.
-///
-/// Returns NULL on overflow or allocation failure.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn calloc(nmemb: usize, size: usize) -> *mut u8 {
-    let Some(total_size) = nmemb.checked_mul(size) else {
-        crate::errno::set_errno(crate::errno::ENOMEM);
-        return core::ptr::null_mut();
-    };
+impl Drop for HeapGuard {
+    fn drop(&mut self) {
+        HEAP_LOCK.store(false, Ordering::Release);
+    }
+}
 
-    let ptr = malloc(total_size);
+fn yield_cpu() {
+    #[cfg(target_os = "none")]
+    {
+        let _ = crate::pthread::sched_yield();
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        extern crate std;
+        std::thread::yield_now();
+    }
+}
+
+/// `fork`, before the system call: take the heap, so that no other thread of
+/// this process can be halfway through changing it at the instant the address
+/// space is copied.
+///
+/// Must be paired with [`unlock_after_fork_parent`] in the parent and
+/// [`unlock_after_fork_child`] in the child.
+pub(crate) fn lock_for_fork() {
+    core::mem::forget(HeapGuard::lock());
+}
+
+/// `fork`, in the parent afterwards (and after a failed fork): release the heap.
+pub(crate) fn unlock_after_fork_parent() {
+    HEAP_LOCK.store(false, Ordering::Release);
+}
+
+/// `fork`, in the child afterwards: release the heap. The child has one
+/// thread — the one that called `fork` and took the lock — so the heap is
+/// consistent and the lock is simply given up.
+pub(crate) fn unlock_after_fork_child() {
+    HEAP_LOCK.store(false, Ordering::Release);
+}
+
+// ---------------------------------------------------------------------------
+// Test accounting
+// ---------------------------------------------------------------------------
+
+/// Per-thread count of blocks this thread allocated and has not yet freed.
+///
+/// Exists so a test can assert **"nothing leaked"** rather than assume it: a
+/// function that reports an error after allocating — `regcomp` rejecting a bad
+/// pattern part-way through the compile, say — returns exactly the same code
+/// whether or not it freed what it had. Only a count distinguishes them.
+///
+/// It counted *regions* until 2026-09-25, when a region was an allocation.
+/// dlmalloc keeps regions and carves many blocks from each, so the region
+/// count stopped saying anything about a leak; blocks are what a leak is made
+/// of. Thread-local and signed for the reasons it always was: libtest runs
+/// tests in parallel in one process, and a block allocated on one thread and
+/// freed on another legitimately drives the freeing thread's count negative.
+#[cfg(all(test, not(target_os = "none")))]
+pub(crate) mod live_allocations {
+    extern crate std;
+    use core::cell::Cell;
+
+    std::thread_local! {
+        static COUNT: Cell<i64> = const { Cell::new(0) };
+    }
+
+    /// Add `delta` to this thread's live-block count.
+    pub(super) fn bump(delta: i64) {
+        // `try_with`: a `free` from a thread-local destructor during thread
+        // teardown must not panic after this cell has gone.
+        let _ = COUNT.try_with(|c| c.set(c.get().wrapping_add(delta)));
+    }
+
+    /// This thread's live-block count. Only differences are meaningful.
+    pub(crate) fn count() -> i64 {
+        COUNT.with(Cell::get)
+    }
+}
+
+/// Record a block handed out (tests only).
+#[inline]
+fn note_alloc(ptr: *mut u8) -> *mut u8 {
+    #[cfg(all(test, not(target_os = "none")))]
     if !ptr.is_null() {
-        // mmap returns zeroed memory, so calloc needs no explicit memset.
-        // If we ever switch to an arena allocator, this will need to zero.
+        live_allocations::bump(1);
     }
     ptr
 }
 
-/// Change the size of an allocated block.
+/// Record a block returned (tests only).
+#[inline]
+fn note_free() {
+    #[cfg(all(test, not(target_os = "none")))]
+    live_allocations::bump(-1);
+}
+
+/// Test builds only: the byte a new `malloc` block is filled with.
 ///
-/// If `ptr` is NULL, equivalent to `malloc(size)`.
-/// If `size` is 0, equivalent to `free(ptr)` and returns NULL.
+/// The allocator this one replaced gave every block a fresh, zeroed mapping
+/// and unmapped it again on `free`. So code in this crate that read a block
+/// before writing it saw zeroes, and code that read a block after freeing it
+/// faulted at once — and neither mistake could be caught, because neither
+/// could fail. A heap that reuses memory changes both, silently. Filling
+/// blocks with non-zero garbage at both ends of their life (glibc's
+/// `MALLOC_PERTURB_`) turns both into test failures instead of heisenbugs on
+/// the target.
+#[cfg(all(test, not(target_os = "none")))]
+const PERTURB_ON_ALLOC: u8 = 0xa5;
+
+/// Test builds only: the byte a block is overwritten with as it is freed.
+#[cfg(all(test, not(target_os = "none")))]
+const PERTURB_ON_FREE: u8 = 0x5a;
+
+/// Fill `len` bytes at `ptr` with `byte` (test builds; NULL is ignored).
 ///
 /// # Safety
 ///
-/// `ptr` must be NULL or a value previously returned by `malloc`,
-/// `calloc`, or `realloc` that has not been freed.
+/// `ptr` must be NULL or valid for `len` bytes of writes.
+#[cfg(all(test, not(target_os = "none")))]
+unsafe fn perturb(ptr: *mut u8, len: usize, byte: u8) {
+    if !ptr.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe { core::ptr::write_bytes(ptr, byte, len) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The C interface
+// ---------------------------------------------------------------------------
+
+/// The alignment every block has without being asked: 16 on x86_64, which is
+/// what `max_align_t` requires.
+const MALLOC_ALIGN: usize = 2 * core::mem::size_of::<usize>();
+
+/// Allocate `size` bytes of uninitialised memory, 16-byte aligned.
+///
+/// `malloc(0)` returns a unique pointer, as glibc and musl do (see the module
+/// docs). Returns NULL with `errno` set to `ENOMEM` when the memory cannot be
+/// had, including for a size too large to represent with its bookkeeping.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn malloc(size: usize) -> *mut u8 {
+    let mut guard = HeapGuard::lock();
+    // SAFETY: the guard gives exclusive use of the heap.
+    let ptr = unsafe { guard.heap().malloc(size) };
+    drop(guard);
+    if ptr.is_null() {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+    }
+    // SAFETY: a non-null `ptr` is a new block of at least `size` bytes.
+    #[cfg(all(test, not(target_os = "none")))]
+    unsafe {
+        perturb(ptr, size, PERTURB_ON_ALLOC);
+    }
+    note_alloc(ptr)
+}
+
+/// Allocate zeroed memory for `nmemb` elements of `size` bytes each.
+///
+/// NULL with `ENOMEM` if the product overflows or the memory cannot be had.
+/// A block that came straight from the kernel is already zero and is not
+/// cleared again.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn calloc(nmemb: usize, size: usize) -> *mut u8 {
+    let Some(total) = nmemb.checked_mul(size) else {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+        return core::ptr::null_mut();
+    };
+    let mut guard = HeapGuard::lock();
+    let heap = guard.heap();
+    // SAFETY: the guard gives exclusive use of the heap, and a non-null result
+    // is a block of at least `total` bytes that this call owns.
+    let ptr = unsafe {
+        let ptr = heap.malloc(total);
+        if !ptr.is_null() && heap.calloc_must_clear(ptr) {
+            core::ptr::write_bytes(ptr, 0, total);
+        }
+        ptr
+    };
+    drop(guard);
+    if ptr.is_null() {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+    }
+    note_alloc(ptr)
+}
+
+/// Change the size of an allocated block, moving it if it must.
+///
+/// `realloc(NULL, n)` is `malloc(n)`; `realloc(p, 0)` frees `p` and returns
+/// NULL, as glibc does. On failure the old block is untouched and still owned
+/// by the caller, and `errno` is `ENOMEM`.
+///
+/// The result is 16-byte aligned; a block that was over-aligned by
+/// `posix_memalign` keeps its bytes but not its alignment, as in C.
+///
+/// # Safety
+///
+/// `ptr` must be NULL or a live block from this allocator.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn realloc(ptr: *mut u8, size: usize) -> *mut u8 {
     if ptr.is_null() {
         return malloc(size);
     }
-
     if size == 0 {
-        unsafe {
-            free(ptr);
-        }
+        // SAFETY: the caller's contract.
+        unsafe { free(ptr) };
         return core::ptr::null_mut();
     }
-
-    // Read the header: [mmap_base, total_mmap_size] at ptr - HEADER_SIZE.
-    // SAFETY: ptr was returned by malloc/aligned_alloc, so the header is valid.
-    let header = unsafe { ptr.sub(HEADER_SIZE) };
-    let mmap_base = unsafe { core::ptr::read_unaligned(header.cast::<u64>()) } as usize;
-    let mmap_total = unsafe { core::ptr::read_unaligned(header.add(8).cast::<u64>()) } as usize;
-    // Compute usable bytes: from user pointer to end of mapped region.
-    // This works correctly for both standard malloc (base + total - ptr = size)
-    // and aligned allocations (base + total - aligned_ptr = remaining bytes).
-    let old_payload = (mmap_base.wrapping_add(mmap_total)).saturating_sub(ptr as usize);
-
-    // If the existing region is already big enough, keep it.
-    if size <= old_payload {
-        return ptr;
+    let mut guard = HeapGuard::lock();
+    // SAFETY (both blocks): the guard gives exclusive use of the heap; `ptr`
+    // is a live block of it (the caller's contract).
+    #[cfg(all(test, not(target_os = "none")))]
+    let old_usable = unsafe { guard.heap().usable_size(ptr) };
+    let moved = unsafe { guard.heap().realloc(ptr, size) };
+    drop(guard);
+    if moved.is_null() {
+        crate::errno::set_errno(crate::errno::ENOMEM);
     }
-
-    // Allocate new block and copy.
-    let new_ptr = malloc(size);
-    if new_ptr.is_null() {
-        return core::ptr::null_mut();
+    // The bytes a grown block gains are as uninitialised as a new block's.
+    // SAFETY: a non-null `moved` is a block of at least `size` bytes, of which
+    // the first `old_usable` (when fewer) are the old contents.
+    #[cfg(all(test, not(target_os = "none")))]
+    if !moved.is_null() && size > old_usable {
+        unsafe { perturb(moved.add(old_usable), size - old_usable, PERTURB_ON_ALLOC) };
     }
-
-    // Copy the smaller of old and new sizes.
-    let copy_size = if old_payload < size {
-        old_payload
-    } else {
-        size
-    };
-    // SAFETY: Both pointers are valid for copy_size bytes and do not overlap
-    // (new_ptr is a fresh mmap).
-    unsafe {
-        crate::string::memcpy(new_ptr, ptr, copy_size);
-    }
-
-    // Free old block.
-    unsafe {
-        free(ptr);
-    }
-
-    new_ptr
+    // One block in, one block out: the count only changes if the old block
+    // survives a failure, and then it was already counted.
+    moved
 }
 
-/// Free a previously allocated block.
-///
-/// If `ptr` is NULL, no operation is performed.
+/// Free a block. `free(NULL)` does nothing.
 ///
 /// # Safety
 ///
-/// `ptr` must be NULL or a value previously returned by `malloc`,
-/// `calloc`, or `realloc` that has not been freed.
+/// `ptr` must be NULL or a live block from this allocator.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn free(ptr: *mut u8) {
     if ptr.is_null() {
         return;
     }
-
-    // Read header: [mmap_base, total_size] at ptr - HEADER_SIZE.
-    // SAFETY: ptr was returned by malloc/calloc/realloc/aligned_alloc,
-    // so the 16 bytes before ptr contain the valid header fields.
-    let header = unsafe { ptr.sub(HEADER_SIZE) };
-    let mmap_base = unsafe { core::ptr::read_unaligned(header.cast::<u64>()) } as usize;
-    let total = unsafe { core::ptr::read_unaligned(header.add(8).cast::<u64>()) } as usize;
-
-    // Unmap the entire region using the stored base address.
-    // For standard malloc, mmap_base == header.  For aligned allocations,
-    // mmap_base points to the original mmap start (before alignment padding).
-    // SAFETY: the header was written by `malloc`/`aligned_alloc_impl` from the
-    // `map_region` call that produced this block, and `ptr` has not been freed
-    // (the caller's contract, restated in the doc comment above).
-    unsafe { unmap_region(mmap_base as *mut u8, total) };
+    // `free` must not change `errno`, and releasing a region calls `munmap`.
+    let saved = crate::errno::get_errno();
+    let mut guard = HeapGuard::lock();
+    // SAFETY (both blocks): the guard gives exclusive use of the heap; `ptr`
+    // is a live block of it (the caller's contract), so its usable bytes are
+    // still the caller's to overwrite until the `free` below.
+    #[cfg(all(test, not(target_os = "none")))]
+    unsafe {
+        let usable = guard.heap().usable_size(ptr);
+        perturb(ptr, usable, PERTURB_ON_FREE);
+    }
+    unsafe { guard.heap().free(ptr) };
+    drop(guard);
+    crate::errno::set_errno(saved);
+    note_free();
 }
 
-/// Query the usable size of an allocated block (GNU extension).
-///
-/// Returns the number of usable bytes in the allocation pointed to
-/// by `ptr` — this may be larger than the size originally requested
-/// because our allocator rounds up to page-size mmap regions.
-///
-/// If `ptr` is NULL, returns 0.
+/// The number of bytes the block at `ptr` can hold (GNU extension) — at least
+/// what was asked for, and possibly more. 0 for NULL.
 ///
 /// # Safety
 ///
-/// `ptr` must be NULL or a value returned by `malloc`/`calloc`/`realloc`.
+/// `ptr` must be NULL or a live block from this allocator.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn malloc_usable_size(ptr: *mut u8) -> usize {
     if ptr.is_null() {
         return 0;
     }
-
-    // Read header: [mmap_base, total_size] at ptr - HEADER_SIZE.
-    // SAFETY: ptr was returned by malloc, header is valid.
-    let header = unsafe { ptr.sub(HEADER_SIZE) };
-    let mmap_base = unsafe { core::ptr::read_unaligned(header.cast::<u64>()) } as usize;
-    let total = unsafe { core::ptr::read_unaligned(header.add(8).cast::<u64>()) } as usize;
-
-    // Usable bytes = from user pointer to end of mmap region.
-    (mmap_base.wrapping_add(total)).saturating_sub(ptr as usize)
+    let mut guard = HeapGuard::lock();
+    // SAFETY: the guard gives exclusive use of the heap; `ptr` is a live block
+    // of it (the caller's contract).
+    unsafe { guard.heap().usable_size(ptr) }
 }
 
 // ---------------------------------------------------------------------------
 // Aligned allocation
 // ---------------------------------------------------------------------------
 
-/// Allocate memory aligned to `alignment` bytes.
-///
-/// POSIX `posix_memalign`: stores the allocated pointer in `*memptr`.
-/// Returns 0 on success, or an error code (EINVAL/ENOMEM) — does NOT
-/// set errno (per POSIX spec, the error code is the return value).
+/// A block of `size` bytes aligned to `alignment`, a power of two; NULL with
+/// `ENOMEM` on failure.
+fn aligned_block(alignment: usize, size: usize) -> *mut u8 {
+    let mut guard = HeapGuard::lock();
+    let heap = guard.heap();
+    // SAFETY: the guard gives exclusive use of the heap. `memalign` requires a
+    // power of two above the natural alignment, which the branch establishes
+    // (callers have already checked `alignment` is a power of two).
+    let ptr = unsafe {
+        if alignment <= MALLOC_ALIGN {
+            heap.malloc(size)
+        } else {
+            heap.memalign(alignment, size)
+        }
+    };
+    drop(guard);
+    if ptr.is_null() {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+    }
+    // SAFETY: a non-null `ptr` is a new block of at least `size` bytes.
+    #[cfg(all(test, not(target_os = "none")))]
+    unsafe {
+        perturb(ptr, size, PERTURB_ON_ALLOC);
+    }
+    note_alloc(ptr)
+}
+
+/// Allocate `size` bytes aligned to `alignment` (POSIX `posix_memalign`).
 ///
 /// `alignment` must be a power of two and a multiple of `sizeof(void *)`.
+/// Returns 0 and stores the block in `*memptr`, or returns `EINVAL`/`ENOMEM`
+/// without touching `*memptr` — the error is the return value, and `errno` is
+/// left alone, as POSIX specifies.
+///
+/// `size == 0` stores a unique pointer, as glibc does.
 ///
 /// # Safety
 ///
-/// `memptr` must be a valid, writable pointer to `*mut u8`.
+/// `memptr` must be NULL or valid for one pointer-sized write.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_memalign(memptr: *mut *mut u8, alignment: usize, size: usize) -> i32 {
     if memptr.is_null() {
         return crate::errno::EFAULT;
     }
-
-    // Alignment must be power of two and >= sizeof(void*).
     if alignment < core::mem::size_of::<usize>() || !alignment.is_power_of_two() {
         return crate::errno::EINVAL;
     }
-
-    if size == 0 {
-        // SAFETY: memptr verified non-null.
-        unsafe {
-            *memptr = core::ptr::null_mut();
-        }
-        return 0;
-    }
-
-    // Our malloc always returns mmap'd memory which is page-aligned
-    // (typically 4096 or 16384 byte alignment).  Any alignment <=
-    // page size is automatically satisfied.  For larger alignments
-    // we'd need a custom mmap, but that's exceedingly rare.
-    let ptr = malloc(size);
+    let saved = crate::errno::get_errno();
+    let ptr = aligned_block(alignment, size);
+    crate::errno::set_errno(saved);
     if ptr.is_null() {
         return crate::errno::ENOMEM;
     }
-
-    // Verify alignment (always true for mmap-backed malloc where
-    // HEADER_SIZE=16 and mmap returns page-aligned addresses, so
-    // the user pointer is at page_start + 16, which is 16-byte aligned).
-    if !(ptr as usize).is_multiple_of(alignment) {
-        // If somehow misaligned, fall back to over-allocating.
-        // SAFETY: ptr was returned by malloc.
-        unsafe {
-            free(ptr);
-        }
-        let ptr2 = aligned_alloc_impl(alignment, size);
-        if ptr2.is_null() {
-            return crate::errno::ENOMEM;
-        }
-        unsafe {
-            *memptr = ptr2;
-        }
-        return 0;
-    }
-
-    // SAFETY: memptr verified non-null.
-    unsafe {
-        *memptr = ptr;
-    }
+    // SAFETY: `memptr` was checked non-null and is writable (the caller's
+    // contract).
+    unsafe { *memptr = ptr };
     0
 }
 
-/// Allocate memory with specified alignment (C11 `aligned_alloc`).
+/// Allocate `size` bytes aligned to `alignment` (C11 `aligned_alloc`).
 ///
-/// `alignment` must be a power of two.  `size` must be a multiple of
-/// `alignment` (per C11 spec, though many implementations don't enforce
-/// this).
-///
-/// Returns a pointer to aligned memory, or NULL on failure.
+/// `alignment` must be a power of two; anything else is NULL with `EINVAL`.
+/// C17 no longer requires `size` to be a multiple of `alignment`, and neither
+/// does this. `size == 0` returns a unique pointer.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn aligned_alloc(alignment: usize, size: usize) -> *mut u8 {
-    if !alignment.is_power_of_two() || alignment == 0 {
+    if !alignment.is_power_of_two() {
         crate::errno::set_errno(crate::errno::EINVAL);
         return core::ptr::null_mut();
     }
-    aligned_alloc_impl(alignment, size)
+    aligned_block(alignment, size)
 }
 
-/// Allocate page-aligned memory (obsolete but still used).
-///
-/// The returned pointer can be passed to `free()`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn valloc(size: usize) -> *mut u8 {
-    if size == 0 {
-        return core::ptr::null_mut();
-    }
-    // Page-aligned allocation; `REGION_ALIGN` *is* the page size.
-    // Delegate to aligned_alloc_impl so the returned pointer has a valid
-    // header that free() can use.  The previous implementation returned
-    // a raw mmap pointer with no header, which caused memory corruption
-    // when free() tried to read the nonexistent header.
-    aligned_alloc_impl(REGION_ALIGN, size)
-}
-
-/// Allocate aligned memory (obsolete but still used by some programs).
-///
-/// `alignment` must be a power of two.
+/// Allocate aligned memory (obsolete, still used). As [`aligned_alloc`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn memalign(alignment: usize, size: usize) -> *mut u8 {
     aligned_alloc(alignment, size)
 }
 
-/// Overflow-safe array allocation.
+/// Allocate page-aligned memory (obsolete, still used).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn valloc(size: usize) -> *mut u8 {
+    aligned_block(REGION_ALIGN, size)
+}
+
+/// Allocate page-aligned memory rounded up to a whole number of pages
+/// (GNU/BSD extension). NULL with `ENOMEM` if the rounding overflows.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pvalloc(size: usize) -> *mut u8 {
+    // `REGION_ALIGN` is the page size (an alias of `unistd::PAGE_SIZE`), so this
+    // cannot drift from what `getpagesize()` reports.
+    let Some(rounded) = size
+        .checked_add(REGION_ALIGN.wrapping_sub(1))
+        .map(|v| v & !REGION_ALIGN.wrapping_sub(1))
+    else {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+        return core::ptr::null_mut();
+    };
+    aligned_block(REGION_ALIGN, rounded)
+}
+
+/// Overflow-safe array reallocation: `realloc(ptr, nmemb * size)`, or NULL
+/// with `ENOMEM` (and `ptr` untouched) if the product overflows.
 ///
-/// Allocates `nmemb * size` bytes, returning null with `ENOMEM` if the
-/// multiplication would overflow.  This is safer than `malloc(n * s)`
-/// where the multiplication can silently wrap.
+/// # Safety
+///
+/// As [`realloc`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn reallocarray(ptr: *mut u8, nmemb: usize, size: usize) -> *mut u8 {
     let Some(total) = nmemb.checked_mul(size) else {
         crate::errno::set_errno(crate::errno::ENOMEM);
         return core::ptr::null_mut();
     };
-    // SAFETY: realloc handles null/non-null ptr correctly; total was
-    // validated against overflow above.
+    // SAFETY: forwarded; the product was checked above.
     unsafe { realloc(ptr, total) }
-}
-
-/// Internal aligned allocation implementation.
-///
-/// Allocates via mmap with extra space for alignment padding, then places
-/// the standard `[mmap_base, total_size]` header just before the aligned
-/// user pointer.  This means `free()` works uniformly — it always reads
-/// the header at `ptr - 16` regardless of alignment.
-fn aligned_alloc_impl(alignment: usize, size: usize) -> *mut u8 {
-    if size == 0 {
-        return core::ptr::null_mut();
-    }
-
-    // Our malloc returns 16-byte-aligned pointers.  If alignment <= 16,
-    // plain malloc suffices.
-    if alignment <= HEADER_SIZE {
-        return malloc(size);
-    }
-
-    // Allocate via mmap directly with extra space for alignment padding
-    // and the 16-byte header.  Worst case: (alignment - 1) bytes of
-    // padding plus HEADER_SIZE for the header before the aligned address.
-    let Some(total) = size
-        .checked_add(alignment.wrapping_sub(1))
-        .and_then(|v| v.checked_add(HEADER_SIZE))
-    else {
-        crate::errno::set_errno(crate::errno::ENOMEM);
-        return core::ptr::null_mut();
-    };
-
-    let region = map_region(total);
-    if region.is_null() {
-        crate::errno::set_errno(crate::errno::ENOMEM);
-        return core::ptr::null_mut();
-    }
-
-    let base = region as usize;
-    // The user pointer must be aligned AND have HEADER_SIZE bytes before
-    // it for the [mmap_base, total_size] header.
-    let min_user = base.wrapping_add(HEADER_SIZE);
-    let aligned_user =
-        (min_user.wrapping_add(alignment.wrapping_sub(1))) & !alignment.wrapping_sub(1);
-
-    // Write the standard header at aligned_user - HEADER_SIZE.
-    // SAFETY: aligned_user >= base + HEADER_SIZE (by construction of min_user),
-    // so the header write is within the mmap'd region.  aligned_user + size
-    // <= base + total by the checked_add above.
-    unsafe {
-        let header = aligned_user.wrapping_sub(HEADER_SIZE) as *mut u8;
-        core::ptr::write_unaligned(header.cast::<u64>(), base as u64);
-        core::ptr::write_unaligned(header.add(8).cast::<u64>(), total as u64);
-    }
-
-    aligned_user as *mut u8
-}
-
-/// Allocate page-aligned memory rounded up to a page-size multiple.
-///
-/// Like `valloc`, but rounds `size` up to the next multiple of the
-/// system page size before allocating.  This ensures the entire
-/// returned region consists of whole pages.
-///
-/// The returned pointer can be passed to `free()`.
-///
-/// This is a GNU/BSD extension — not standardised by POSIX.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pvalloc(size: usize) -> *mut u8 {
-    if size == 0 {
-        return core::ptr::null_mut();
-    }
-    // Round up to the next page-size multiple.  `REGION_ALIGN` is the page
-    // size (an alias of `unistd::PAGE_SIZE`), so this cannot drift from what
-    // `getpagesize()` reports to the caller who asked for "a whole page".
-    let rounded = if let Some(v) = size.checked_add(REGION_ALIGN.wrapping_sub(1)) {
-        v & !REGION_ALIGN.wrapping_sub(1)
-    } else {
-        crate::errno::set_errno(crate::errno::ENOMEM);
-        return core::ptr::null_mut();
-    };
-    aligned_alloc_impl(REGION_ALIGN, rounded)
 }
 
 // ---------------------------------------------------------------------------
 // glibc internal aliases
 // ---------------------------------------------------------------------------
 //
-// Some programs call glibc's internal __libc_* symbols directly
-// (e.g., when overriding malloc).  These just delegate to our
-// implementations.
+// Some programs call glibc's internal __libc_* symbols directly (e.g. when
+// interposing malloc). These just delegate to our implementations.
 
 /// glibc internal: `__libc_malloc`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -609,433 +748,472 @@ pub extern "C" fn __libc_memalign(alignment: usize, size: usize) -> *mut u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate std;
+    use std::vec::Vec;
 
     /// `valloc`/`pvalloc` promise "page-aligned", so their alignment must be
     /// the page size `unistd` reports.
-    ///
-    /// `REGION_ALIGN` is private, so `unistd`'s
-    /// `every_spelling_of_the_page_size_agrees` cannot reach it; this is that
-    /// test's arm inside this module.
     #[test]
     fn region_align_is_the_page_size() {
         assert_eq!(REGION_ALIGN, crate::unistd::PAGE_SIZE);
+        assert_eq!(SlateSystem.page_size(), REGION_ALIGN);
     }
 
-    // -----------------------------------------------------------------------
-    // malloc boundary cases
-    // -----------------------------------------------------------------------
-
+    /// `max_align_t` is 16 on x86_64, and every block must meet it unasked.
     #[test]
-    fn malloc_zero_returns_null() {
-        // POSIX: malloc(0) may return NULL.
-        let ptr = malloc(0);
-        assert!(ptr.is_null(), "malloc(0) should return NULL");
-    }
-
-    #[test]
-    fn malloc_overflow_returns_null() {
-        // size + HEADER_SIZE overflows → NULL.
-        let ptr = malloc(usize::MAX);
-        assert!(ptr.is_null(), "malloc(usize::MAX) should return NULL");
-    }
-
-    #[test]
-    fn malloc_near_overflow_returns_null() {
-        // size + 16 would overflow.
-        let ptr = malloc(usize::MAX - 8);
-        assert!(ptr.is_null(), "malloc(MAX - 8) should return NULL");
-    }
-
-    // -----------------------------------------------------------------------
-    // calloc boundary cases
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn calloc_zero_nmemb() {
-        let ptr = calloc(0, 100);
-        assert!(ptr.is_null(), "calloc(0, 100) should return NULL");
-    }
-
-    #[test]
-    fn calloc_zero_size() {
-        let ptr = calloc(100, 0);
-        assert!(ptr.is_null(), "calloc(100, 0) should return NULL");
-    }
-
-    #[test]
-    fn calloc_overflow_returns_null() {
-        // nmemb * size overflows.
-        let ptr = calloc(usize::MAX, 2);
-        assert!(ptr.is_null(), "calloc(MAX, 2) should return NULL");
-    }
-
-    #[test]
-    fn calloc_large_overflow() {
-        // Just below MAX for each, product overflows.
-        let ptr = calloc(usize::MAX / 2 + 1, 3);
-        assert!(ptr.is_null(), "calloc with overflow should return NULL");
-    }
-
-    // -----------------------------------------------------------------------
-    // free(NULL)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn free_null_is_noop() {
-        // Must not crash.
-        unsafe {
-            free(core::ptr::null_mut());
+    fn plain_blocks_are_sixteen_byte_aligned() {
+        assert_eq!(MALLOC_ALIGN, 16);
+        let mut held = Vec::new();
+        for size in [1usize, 7, 8, 15, 16, 17, 100, 1000, 4096, 70_000] {
+            let p = malloc(size);
+            assert!(!p.is_null(), "malloc({size})");
+            assert_eq!(p as usize % MALLOC_ALIGN, 0, "malloc({size}) = {p:p}");
+            held.push(p);
+        }
+        for p in held {
+            unsafe { free(p) };
         }
     }
 
     // -----------------------------------------------------------------------
-    // realloc boundary cases
+    // Size zero: a unique pointer, as glibc and musl
     // -----------------------------------------------------------------------
 
+    /// Every allocating entry point answers size 0 with a distinct, freeable
+    /// block. They all answered NULL until 2026-09-25, and these tests used to
+    /// pin that.
     #[test]
-    fn realloc_null_is_malloc() {
-        // realloc(NULL, size) should behave like malloc(size).
-        // We test the degenerate case: realloc(NULL, 0) = malloc(0) = NULL.
-        let ptr = unsafe { realloc(core::ptr::null_mut(), 0) };
-        assert!(ptr.is_null(), "realloc(NULL, 0) should return NULL");
+    fn size_zero_is_a_unique_freeable_pointer_everywhere() {
+        let mut got = Vec::new();
+        got.push(malloc(0));
+        got.push(calloc(0, 100));
+        got.push(calloc(100, 0));
+        got.push(calloc(0, 0));
+        got.push(aligned_alloc(64, 0));
+        got.push(memalign(16, 0));
+        got.push(valloc(0));
+        got.push(pvalloc(0));
+        got.push(unsafe { realloc(core::ptr::null_mut(), 0) });
+        got.push(reallocarray(core::ptr::null_mut(), 0, 100));
+        got.push(__libc_malloc(0));
+        got.push(__libc_calloc(0, 0));
+        got.push(__libc_memalign(16, 0));
+        let mut p = core::ptr::null_mut();
+        assert_eq!(posix_memalign(&raw mut p, 32, 0), 0);
+        got.push(p);
+        for (i, a) in got.iter().enumerate() {
+            assert!(!a.is_null(), "entry {i} returned NULL for size 0");
+            for b in &got[..i] {
+                assert_ne!(a, b, "size-0 blocks must be distinct");
+            }
+        }
+        for p in got {
+            unsafe { free(p) };
+        }
     }
 
-    // -----------------------------------------------------------------------
-    // posix_memalign validation
-    // -----------------------------------------------------------------------
-
+    /// Size 0 at every valid alignment: a unique, aligned pointer each time.
+    /// (These asserted NULL for alignments up to 1 MiB until 2026-09-25.)
     #[test]
-    fn posix_memalign_null_memptr() {
-        let ret = posix_memalign(core::ptr::null_mut(), 16, 100);
-        assert_eq!(ret, crate::errno::EFAULT);
+    fn size_zero_at_every_alignment() {
+        for shift in 3..=20u32 {
+            let align = 1usize << shift;
+            let mut p: *mut u8 = 0x1234 as *mut u8;
+            assert_eq!(
+                posix_memalign(&raw mut p, align, 0),
+                0,
+                "posix_memalign({align}, 0)"
+            );
+            assert!(!p.is_null());
+            assert_eq!(p as usize % align, 0, "posix_memalign({align}, 0) = {p:p}");
+            unsafe { free(p) };
+        }
+        for shift in 0..=16u32 {
+            let align = 1usize << shift;
+            let p = aligned_alloc(align, 0);
+            assert!(!p.is_null(), "aligned_alloc({align}, 0)");
+            assert_eq!(p as usize % align, 0, "aligned_alloc({align}, 0) = {p:p}");
+            unsafe { free(p) };
+        }
     }
 
+    /// The test-build fill is on: a new block is not zero, and neither are the
+    /// bytes a grown block gains. If this fails, the fill was switched off and
+    /// the suite has stopped catching code that reads memory before writing it.
+    /// (The fill on `free` cannot be observed without reading freed memory.)
     #[test]
-    fn posix_memalign_alignment_not_power_of_two() {
-        let mut ptr: *mut u8 = core::ptr::null_mut();
-        let ret = posix_memalign(&raw mut ptr, 3, 100);
-        assert_eq!(ret, crate::errno::EINVAL);
-        assert!(ptr.is_null());
+    fn test_builds_fill_new_blocks() {
+        let p = malloc(64);
+        assert!(!p.is_null());
+        let bytes = unsafe { core::slice::from_raw_parts(p, 64) };
+        assert!(bytes.iter().all(|&b| b == PERTURB_ON_ALLOC), "{bytes:?}");
+        unsafe { core::ptr::write_bytes(p, 0, 64) };
+        let old = unsafe { malloc_usable_size(p) };
+        let q = unsafe { realloc(p, old + 4096) };
+        assert!(!q.is_null());
+        let head = unsafe { core::slice::from_raw_parts(q, 64) };
+        assert!(head.iter().all(|&b| b == 0), "realloc kept the contents");
+        let tail = unsafe { core::slice::from_raw_parts(q.add(old), 4096) };
+        assert!(tail.iter().all(|&b| b == PERTURB_ON_ALLOC));
+        unsafe { free(q) };
     }
 
+    /// `realloc(p, 0)` frees and returns NULL, as glibc — not a new block.
     #[test]
-    fn posix_memalign_alignment_too_small() {
-        // Alignment must be >= sizeof(void*) = 8 on x86_64.
-        let mut ptr: *mut u8 = core::ptr::null_mut();
-        let ret = posix_memalign(&raw mut ptr, 4, 100);
-        assert_eq!(ret, crate::errno::EINVAL);
-        assert!(ptr.is_null());
-    }
-
-    #[test]
-    fn posix_memalign_zero_size() {
-        // POSIX: posix_memalign with size=0 stores NULL in *memptr.
-        let mut ptr: *mut u8 = 0x1234_usize as *mut u8; // garbage
-        let ret = posix_memalign(&raw mut ptr, 8, 0);
-        assert_eq!(ret, 0);
-        assert!(ptr.is_null());
-    }
-
-    #[test]
-    fn posix_memalign_alignment_one() {
-        // alignment=1 is a power of two but < sizeof(void*).
-        let mut ptr: *mut u8 = core::ptr::null_mut();
-        let ret = posix_memalign(&raw mut ptr, 1, 100);
-        assert_eq!(ret, crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn posix_memalign_alignment_two() {
-        // alignment=2 is a power of two but < sizeof(void*) on 64-bit.
-        let mut ptr: *mut u8 = core::ptr::null_mut();
-        let ret = posix_memalign(&raw mut ptr, 2, 100);
-        assert_eq!(ret, crate::errno::EINVAL);
-    }
-
-    // -----------------------------------------------------------------------
-    // aligned_alloc validation
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn aligned_alloc_zero_alignment() {
-        let ptr = aligned_alloc(0, 100);
-        assert!(ptr.is_null(), "aligned_alloc(0, 100) should fail");
-    }
-
-    #[test]
-    fn aligned_alloc_non_power_of_two() {
-        let ptr = aligned_alloc(3, 100);
-        assert!(ptr.is_null(), "aligned_alloc(3, 100) should fail");
-
-        let ptr = aligned_alloc(6, 100);
-        assert!(ptr.is_null(), "aligned_alloc(6, 100) should fail");
-    }
-
-    #[test]
-    fn aligned_alloc_zero_size() {
-        // aligned_alloc with size=0: our impl returns NULL.
-        let ptr = aligned_alloc(16, 0);
-        assert!(ptr.is_null(), "aligned_alloc(16, 0) should return NULL");
-    }
-
-    // -----------------------------------------------------------------------
-    // valloc
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn valloc_zero_size() {
-        let ptr = valloc(0);
-        assert!(ptr.is_null(), "valloc(0) should return NULL");
+    fn realloc_to_zero_frees() {
+        let before = live_allocations::count();
+        let p = malloc(40);
+        let q = unsafe { realloc(p, 0) };
+        assert!(q.is_null());
+        assert_eq!(live_allocations::count(), before, "the block was freed");
     }
 
     // -----------------------------------------------------------------------
-    // reallocarray overflow
+    // Refusals
     // -----------------------------------------------------------------------
 
     #[test]
-    fn reallocarray_overflow() {
-        let ptr = reallocarray(core::ptr::null_mut(), usize::MAX, 2);
-        assert!(ptr.is_null(), "reallocarray overflow should return NULL");
+    fn oversized_requests_fail_with_enomem() {
+        for size in [usize::MAX, usize::MAX - 8, usize::MAX / 2] {
+            crate::errno::set_errno(0);
+            assert!(malloc(size).is_null(), "malloc({size:#x})");
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOMEM);
+        }
+        assert!(unsafe { realloc(core::ptr::null_mut(), usize::MAX) }.is_null());
+        assert!(valloc(usize::MAX).is_null());
+        assert!(pvalloc(usize::MAX).is_null());
+        assert!(pvalloc(usize::MAX - 100).is_null());
     }
 
     #[test]
-    fn reallocarray_zero() {
-        // reallocarray(NULL, 0, 100) = realloc(NULL, 0) = malloc(0) = NULL.
-        let ptr = reallocarray(core::ptr::null_mut(), 0, 100);
-        assert!(ptr.is_null(), "reallocarray(NULL, 0, 100) → NULL");
-    }
-
-    // -----------------------------------------------------------------------
-    // malloc_usable_size
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn malloc_usable_size_null() {
-        let size = unsafe { malloc_usable_size(core::ptr::null_mut()) };
-        assert_eq!(size, 0, "malloc_usable_size(NULL) should be 0");
-    }
-
-    // -----------------------------------------------------------------------
-    // Header size constant
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn header_size_is_16() {
-        // Must be 16 for ABI compliance (16-byte aligned user pointers).
-        assert_eq!(HEADER_SIZE, 16);
-    }
-
-    // -----------------------------------------------------------------------
-    // pvalloc
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn pvalloc_zero_size() {
-        let ptr = pvalloc(0);
-        assert!(ptr.is_null(), "pvalloc(0) should return NULL");
+    fn calloc_overflow_is_enomem() {
+        crate::errno::set_errno(0);
+        assert!(calloc(usize::MAX, 2).is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOMEM);
+        assert!(calloc(usize::MAX / 2 + 1, 3).is_null());
+        assert!(reallocarray(core::ptr::null_mut(), usize::MAX, 2).is_null());
     }
 
     #[test]
-    fn pvalloc_overflow() {
-        // size close to usize::MAX should fail gracefully.
-        let ptr = pvalloc(usize::MAX);
-        assert!(ptr.is_null(), "pvalloc(MAX) should return NULL");
+    fn free_and_usable_size_of_null() {
+        unsafe { free(core::ptr::null_mut()) };
+        unsafe { __libc_free(core::ptr::null_mut()) };
+        assert_eq!(unsafe { malloc_usable_size(core::ptr::null_mut()) }, 0);
+    }
+
+    /// POSIX: `posix_memalign` reports through its return value and leaves
+    /// `errno` alone, and a refusal leaves `*memptr` alone.
+    #[test]
+    fn posix_memalign_refusals() {
+        assert_eq!(
+            posix_memalign(core::ptr::null_mut(), 16, 100),
+            crate::errno::EFAULT
+        );
+        for bad in [0usize, 1, 2, 3, 4, 6, 12, 24] {
+            let mut p: *mut u8 = 0x1234 as *mut u8;
+            crate::errno::set_errno(0);
+            assert_eq!(
+                posix_memalign(&raw mut p, bad, 100),
+                crate::errno::EINVAL,
+                "{bad}"
+            );
+            assert_eq!(p, 0x1234 as *mut u8, "untouched on refusal");
+            assert_eq!(crate::errno::get_errno(), 0, "errno untouched");
+        }
     }
 
     #[test]
-    fn pvalloc_near_overflow() {
-        // size + PAGE_SIZE - 1 would overflow.
-        let ptr = pvalloc(usize::MAX - 100);
-        assert!(ptr.is_null(), "pvalloc(MAX-100) should return NULL");
-    }
-
-    // -----------------------------------------------------------------------
-    // memalign validation
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn memalign_zero_alignment() {
-        let ptr = memalign(0, 100);
-        assert!(ptr.is_null(), "memalign(0, 100) should fail");
-    }
-
-    #[test]
-    fn memalign_non_power_of_two() {
-        let ptr = memalign(3, 100);
-        assert!(ptr.is_null(), "memalign(3, 100) should fail");
-    }
-
-    #[test]
-    fn memalign_zero_size() {
-        let ptr = memalign(16, 0);
-        assert!(ptr.is_null(), "memalign(16, 0) should return NULL");
-    }
-
-    // -----------------------------------------------------------------------
-    // valloc overflow
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn valloc_overflow() {
-        let ptr = valloc(usize::MAX);
-        assert!(ptr.is_null(), "valloc(MAX) should return NULL");
+    fn aligned_alloc_refuses_a_non_power_of_two() {
+        for bad in [0usize, 3, 6, 100] {
+            crate::errno::set_errno(0);
+            assert!(aligned_alloc(bad, 100).is_null(), "{bad}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+            assert!(memalign(bad, 100).is_null());
+        }
     }
 
     // -----------------------------------------------------------------------
-    // reallocarray valid parameters (without actual mmap)
+    // Alignment
     // -----------------------------------------------------------------------
 
     #[test]
-    fn reallocarray_null_zero_zero() {
-        let ptr = reallocarray(core::ptr::null_mut(), 0, 0);
-        assert!(ptr.is_null());
+    fn requested_alignments_are_honoured() {
+        for shift in 3..=16u32 {
+            let align = 1usize << shift;
+            let mut p: *mut u8 = core::ptr::null_mut();
+            assert_eq!(posix_memalign(&raw mut p, align, 1000), 0);
+            assert_eq!(p as usize % align, 0, "posix_memalign({align})");
+            // Writable for the whole request.
+            unsafe { core::ptr::write_bytes(p, 0x5a, 1000) };
+            assert!(unsafe { malloc_usable_size(p) } >= 1000);
+            unsafe { free(p) };
+
+            let q = aligned_alloc(align, align * 3);
+            assert_eq!(q as usize % align, 0, "aligned_alloc({align})");
+            unsafe { free(q) };
+        }
+        let v = valloc(100);
+        assert_eq!(v as usize % REGION_ALIGN, 0);
+        unsafe { free(v) };
+        let pv = pvalloc(REGION_ALIGN + 1);
+        assert_eq!(pv as usize % REGION_ALIGN, 0);
+        assert!(unsafe { malloc_usable_size(pv) } >= 2 * REGION_ALIGN);
+        unsafe { free(pv) };
     }
 
-    /// `reallocarray(NULL, n, m)` is `malloc(n * m)`, so this is the third
-    /// test that asserted the host allocator's failure rather than its
-    /// behaviour — see `malloc_small_round_trips` for why all three were
-    /// wrong. It now checks the multiplication it exists to check.
+    // -----------------------------------------------------------------------
+    // Contents
+    // -----------------------------------------------------------------------
+
+    /// A reused block is not zero; `calloc` must clear it. The old allocator
+    /// never reused anything, so it could skip the clear — this one cannot.
     #[test]
-    fn reallocarray_one_one_allocates() {
+    fn calloc_clears_a_reused_block() {
+        let p = malloc(512);
+        unsafe { core::ptr::write_bytes(p, 0xff, 512) };
+        unsafe { free(p) };
+        let q = calloc(64, 8);
+        assert!(!q.is_null());
+        let bytes = unsafe { core::slice::from_raw_parts(q, 512) };
+        assert!(bytes.iter().all(|&b| b == 0), "calloc must return zeroes");
+        unsafe { free(q) };
+    }
+
+    /// `realloc` keeps the bytes that fit, across the small/large boundary
+    /// (256 KiB, where a block becomes a mapping of its own) in both
+    /// directions.
+    #[test]
+    fn realloc_keeps_contents_across_the_mapping_threshold() {
+        let fill = |p: *mut u8, n: usize| {
+            for i in 0..n {
+                unsafe { p.add(i).write((i % 251) as u8) };
+            }
+        };
+        let check = |p: *const u8, n: usize| {
+            for i in 0..n {
+                assert_eq!(unsafe { p.add(i).read() }, (i % 251) as u8, "byte {i}");
+            }
+        };
+        let p = malloc(1000);
+        fill(p, 1000);
+        let p = unsafe { realloc(p, 300 * 1024) };
+        assert!(!p.is_null());
+        check(p, 1000);
+        fill(p, 300 * 1024);
+        let p = unsafe { realloc(p, 600 * 1024) };
+        check(p, 300 * 1024);
+        let p = unsafe { realloc(p, 2000) };
+        check(p, 2000);
+        unsafe { free(p) };
+    }
+
+    #[test]
+    fn a_large_block_round_trips() {
+        let n = 3 * 1024 * 1024;
+        let p = malloc(n);
+        assert!(!p.is_null());
+        assert!(unsafe { malloc_usable_size(p) } >= n);
+        unsafe {
+            p.write(1);
+            p.add(n - 1).write(2);
+            assert_eq!(p.read(), 1);
+            assert_eq!(p.add(n - 1).read(), 2);
+            free(p);
+        }
+    }
+
+    #[test]
+    fn reallocarray_sizes_by_the_product() {
         let ptr = reallocarray(core::ptr::null_mut(), 1, 1);
         assert!(!ptr.is_null(), "reallocarray(NULL, 1, 1) is malloc(1)");
         assert!(unsafe { malloc_usable_size(ptr) } >= 1);
         unsafe { free(ptr) };
-
-        // The product, not either factor, sizes the allocation.
         let ptr = reallocarray(core::ptr::null_mut(), 7, 9);
         assert!(!ptr.is_null());
         assert!(unsafe { malloc_usable_size(ptr) } >= 63);
         unsafe { free(ptr) };
     }
 
-    // -----------------------------------------------------------------------
-    // posix_memalign: valid alignments with zero size
-    // -----------------------------------------------------------------------
-
+    /// `free` must not change `errno` — it may `munmap`, and a caller reading
+    /// `errno` after cleaning up must still see its own failure.
     #[test]
-    fn posix_memalign_valid_alignments_zero_size() {
-        // All power-of-two alignments >= 8 should succeed with size=0
-        for shift in 3..=20u32 {
-            let align = 1usize << shift;
-            let mut ptr: *mut u8 = 0x1234_usize as *mut u8;
-            let ret = posix_memalign(&raw mut ptr, align, 0);
-            assert_eq!(ret, 0, "posix_memalign(_, {align}, 0) should succeed");
-            assert!(ptr.is_null(), "size=0 should store NULL");
-        }
+    fn free_preserves_errno() {
+        let big = malloc(1024 * 1024);
+        crate::errno::set_errno(crate::errno::EIO);
+        unsafe { free(big) };
+        assert_eq!(crate::errno::get_errno(), crate::errno::EIO);
     }
 
     // -----------------------------------------------------------------------
-    // calloc: both zero
+    // The accounting the rest of the suite relies on
     // -----------------------------------------------------------------------
 
     #[test]
-    fn calloc_both_zero() {
-        let ptr = calloc(0, 0);
-        assert!(ptr.is_null());
-    }
-
-    // -----------------------------------------------------------------------
-    // malloc: a real allocation, on the host too
-    // -----------------------------------------------------------------------
-
-    /// These two replace `malloc_small_returns_null_in_test` and
-    /// `malloc_page_size_returns_null_in_test`, which asserted that `malloc`
-    /// returns NULL on the host.
-    ///
-    /// That was true, and it was the bug: `syscallN` returns `-ENOSYS` off
-    /// target (syscall.rs, "Host-build safety gate"), so `mman::mmap` failed
-    /// and **every host `malloc` returned NULL**. A NULL return is a legal
-    /// `malloc` result, so nothing looked wrong — every allocating function's
-    /// tests quietly ran their out-of-memory path and passed on it, and
-    /// `free`/`realloc`/`malloc_usable_size` were never reached at all.
-    /// Writing that down as the *expected* result is what made a broken
-    /// allocator look like a tested one for as long as it did.
-    ///
-    /// `map_region` now falls back to the Rust global allocator on the host,
-    /// so these can assert what the function is actually for.
-    #[test]
-    fn malloc_small_round_trips() {
-        let ptr = malloc(1);
-        assert!(!ptr.is_null(), "malloc(1) must succeed");
-        // Writable, and the header behind it survives the write.
-        unsafe { ptr.write(0xab) };
-        assert_eq!(unsafe { ptr.read() }, 0xab);
-        assert!(unsafe { malloc_usable_size(ptr) } >= 1);
-        unsafe { free(ptr) };
-    }
-
-    #[test]
-    fn malloc_page_size_round_trips() {
-        let ptr = malloc(16384);
-        assert!(!ptr.is_null(), "malloc(16384) must succeed");
-        // Touch both ends: a short mapping would fault or corrupt the header.
-        unsafe { ptr.write(1) };
-        unsafe { ptr.add(16383).write(2) };
-        assert_eq!(unsafe { ptr.read() }, 1);
-        assert_eq!(unsafe { ptr.add(16383).read() }, 2);
-        assert!(unsafe { malloc_usable_size(ptr) } >= 16384);
-        unsafe { free(ptr) };
-    }
-
-    // -----------------------------------------------------------------------
-    // realloc: overflow size returns NULL
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn realloc_null_overflow_size() {
-        let ptr = unsafe { realloc(core::ptr::null_mut(), usize::MAX) };
-        assert!(ptr.is_null());
-    }
-
-    // -----------------------------------------------------------------------
-    // aligned_alloc: valid powers of two with zero size
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn aligned_alloc_valid_align_zero_size() {
-        for shift in 0..=16u32 {
-            let align = 1usize << shift;
-            let ptr = aligned_alloc(align, 0);
-            assert!(
-                ptr.is_null(),
-                "aligned_alloc({align}, 0) should return NULL"
-            );
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // glibc alias behavior (if functions exist)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn libc_malloc_zero() {
-        let ptr = __libc_malloc(0);
-        assert!(ptr.is_null());
-    }
-
-    #[test]
-    fn libc_free_null() {
+    fn live_allocations_counts_blocks() {
+        let before = live_allocations::count();
+        let a = malloc(10);
+        let b = calloc(2, 2);
+        let mut c = core::ptr::null_mut();
+        assert_eq!(posix_memalign(&raw mut c, 64, 8), 0);
+        assert_eq!(live_allocations::count(), before + 3);
+        let a = unsafe { realloc(a, 5000) }; // one in, one out
+        assert_eq!(live_allocations::count(), before + 3);
         unsafe {
-            __libc_free(core::ptr::null_mut());
+            free(a);
+            free(b);
+            free(c);
+        }
+        assert_eq!(live_allocations::count(), before);
+    }
+
+    // -----------------------------------------------------------------------
+    // Under load
+    // -----------------------------------------------------------------------
+
+    /// A deterministic mixed workload: many small blocks, some medium, a few
+    /// large enough to be mappings of their own, freed and resized in a
+    /// shuffled order, every byte checked against a pattern derived from the
+    /// block's identity. A corrupted chunk header, a double hand-out or a bad
+    /// realloc copy shows up as a pattern mismatch.
+    #[test]
+    fn a_mixed_workload_keeps_every_block_intact() {
+        struct Block {
+            ptr: *mut u8,
+            len: usize,
+            tag: u8,
+        }
+        fn fill(b: &Block) {
+            for i in 0..b.len {
+                unsafe { b.ptr.add(i).write(b.tag.wrapping_add(i as u8)) };
+            }
+        }
+        fn check(b: &Block) {
+            for i in 0..b.len {
+                let got = unsafe { b.ptr.add(i).read() };
+                assert_eq!(
+                    got,
+                    b.tag.wrapping_add(i as u8),
+                    "block {:p} byte {i}",
+                    b.ptr
+                );
+            }
+        }
+        let mut rng: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let before = live_allocations::count();
+        let mut live: Vec<Block> = Vec::new();
+        for round in 0..6000u32 {
+            let r = next();
+            let choice = r % 10;
+            if choice < 5 || live.is_empty() {
+                let len = match r % 100 {
+                    0..=79 => (r >> 8) as usize % 512 + 1,
+                    80..=97 => (r >> 8) as usize % (64 * 1024) + 1,
+                    _ => (r >> 8) as usize % (512 * 1024) + 256 * 1024,
+                };
+                let ptr = malloc(len);
+                assert!(!ptr.is_null(), "round {round}: malloc({len})");
+                assert_eq!(ptr as usize % MALLOC_ALIGN, 0);
+                let b = Block {
+                    ptr,
+                    len,
+                    tag: (round % 251) as u8,
+                };
+                fill(&b);
+                live.push(b);
+            } else if choice < 8 {
+                let i = (r >> 16) as usize % live.len();
+                let b = live.swap_remove(i);
+                check(&b);
+                unsafe { free(b.ptr) };
+            } else {
+                let i = (r >> 16) as usize % live.len();
+                let new_len = (r >> 24) as usize % (128 * 1024) + 1;
+                let b = &mut live[i];
+                check(b);
+                let moved = unsafe { realloc(b.ptr, new_len) };
+                assert!(!moved.is_null());
+                b.ptr = moved;
+                // The surviving prefix must be intact; refill for the new size.
+                let keep = b.len.min(new_len);
+                for j in 0..keep {
+                    let got = unsafe { moved.add(j).read() };
+                    assert_eq!(got, b.tag.wrapping_add(j as u8), "realloc lost byte {j}");
+                }
+                b.len = new_len;
+                fill(b);
+            }
+        }
+        for b in live.drain(..) {
+            check(&b);
+            unsafe { free(b.ptr) };
+        }
+        assert_eq!(
+            live_allocations::count(),
+            before,
+            "every block accounted for"
+        );
+    }
+
+    /// Four threads allocating and freeing at once. The heap is one instance
+    /// behind one lock; a missing or wrong lock corrupts it quickly under this.
+    #[test]
+    fn concurrent_threads_share_the_heap_safely() {
+        let handles: Vec<_> = (0..4u8)
+            .map(|t| {
+                std::thread::spawn(move || {
+                    let mut held: Vec<(usize, usize)> = Vec::new();
+                    for i in 0..3000usize {
+                        let len = (i * 37 + usize::from(t) * 11) % 3000 + 1;
+                        let p = malloc(len);
+                        assert!(!p.is_null());
+                        unsafe { core::ptr::write_bytes(p, t, len) };
+                        held.push((p as usize, len));
+                        if held.len() > 64 {
+                            let (q, n) = held.remove(i % held.len());
+                            let q = q as *mut u8;
+                            let bytes = unsafe { core::slice::from_raw_parts(q, n) };
+                            assert!(
+                                bytes.iter().all(|&b| b == t),
+                                "thread {t} saw another's bytes"
+                            );
+                            unsafe { free(q) };
+                        }
+                    }
+                    for (q, _) in held {
+                        unsafe { free(q as *mut u8) };
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("an allocating thread panicked");
         }
     }
 
+    /// The `fork` pair leaves the heap usable in the parent, and a lock taken
+    /// for a fork does not stay taken.
     #[test]
-    fn libc_realloc_null_zero() {
-        let ptr = unsafe { __libc_realloc(core::ptr::null_mut(), 0) };
-        assert!(ptr.is_null());
-    }
+    fn the_fork_lock_is_released() {
+        lock_for_fork();
+        // Read, release, *then* assert: a failed assertion with the heap still
+        // locked would hang every other test in the process.
+        let held = HEAP_LOCK.load(Ordering::Acquire);
+        unlock_after_fork_parent();
+        assert!(held, "held across the fork");
+        let p = malloc(8);
+        assert!(!p.is_null(), "the heap must be usable again");
+        unsafe { free(p) };
 
-    #[test]
-    fn libc_calloc_zero() {
-        let ptr = __libc_calloc(0, 0);
-        assert!(ptr.is_null());
-    }
-
-    #[test]
-    fn libc_memalign_zero_size() {
-        let ptr = __libc_memalign(16, 0);
-        assert!(ptr.is_null());
+        lock_for_fork();
+        unlock_after_fork_child();
+        let p = malloc(8);
+        assert!(!p.is_null());
+        unsafe { free(p) };
     }
 }

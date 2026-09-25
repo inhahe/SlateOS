@@ -885,6 +885,15 @@ pub extern "C" fn fork() -> PidT {
     // leaving child/parent state consistent.
     crate::pthread::atfork_run_prepare();
 
+    // The heap is taken last and given back first -- after the `prepare`
+    // handlers and before the `child`/`parent` ones, because handlers may
+    // allocate -- which is glibc's order. Held across the system call, it
+    // guarantees no other thread is half-way through changing the heap at
+    // the instant the address space is copied: the child has only this
+    // thread, and a heap frozen mid-update, with its lock held by a thread
+    // the child does not have, would deadlock the child's first `malloc`.
+    crate::malloc::lock_for_fork();
+
     // SYS_PROCESS_FORK is frame-handled in the kernel: it reads the
     // caller's saved register frame to build the child's resume state.
     // The parent returns here with the child PID (> 0); the child
@@ -894,6 +903,12 @@ pub extern "C" fn fork() -> PidT {
     // `translate` returns the PID/0 unchanged on success, or sets errno
     // and returns -1 on a negative kernel error code.
     let pid = errno::translate(ret) as PidT;
+
+    if pid == 0 {
+        crate::malloc::unlock_after_fork_child();
+    } else {
+        crate::malloc::unlock_after_fork_parent();
+    }
 
     if pid == 0 {
         // The inherited `arc4random` pool is a byte-for-byte copy of the

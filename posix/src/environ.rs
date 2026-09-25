@@ -957,7 +957,7 @@ mod tests {
     #[test]
     fn ownership_follows_who_allocated_the_string() {
         let _g = reset();
-        let before = crate::malloc::live_regions::count();
+        let before = crate::malloc::live_allocations::count();
         unsafe { setenv(b"OWN\0".as_ptr(), b"lib\0".as_ptr(), 1) };
         let mut caller = *b"OWN=caller\0";
         assert_eq!(unsafe { putenv(caller.as_mut_ptr()) }, 0);
@@ -972,7 +972,7 @@ mod tests {
         assert_eq!(&caller, b"OWN=caller\0", "the caller's buffer is untouched");
         clearenv();
         assert_eq!(
-            crate::malloc::live_regions::count(),
+            crate::malloc::live_allocations::count(),
             before,
             "clearenv must free every string and array setenv allocated"
         );

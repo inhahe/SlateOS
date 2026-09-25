@@ -8977,7 +8977,8 @@ mod tests {
         assert!(!ret.is_null());
         // SAFETY: `ret` came from this crate's `malloc`.
         let usable = unsafe { crate::malloc::malloc_usable_size(ret) };
-        assert!(usable >= b"/home/user".len() + 1, "usable {usable}");
+        // The path and its terminator.
+        assert!(usable >= b"/home/user\0".len(), "usable {usable}");
         assert_eq!(take_allocated(ret), b"/home/user");
     }
 
@@ -8986,14 +8987,14 @@ mod tests {
     #[test]
     fn test_getcwd_null_buf_too_small_is_erange_and_allocates_nothing() {
         set_test_cwd(b"/usr/local/lib");
-        let before = crate::malloc::live_regions::count();
+        let before = crate::malloc::live_allocations::count();
         errno::set_errno(0);
         // 14 bytes of path need 15 with the terminator.
         let ret = getcwd(core::ptr::null_mut(), 14);
         assert!(ret.is_null());
         assert_eq!(errno::get_errno(), errno::ERANGE);
         assert_eq!(
-            crate::malloc::live_regions::count(),
+            crate::malloc::live_allocations::count(),
             before,
             "leaked a block"
         );
@@ -9001,7 +9002,7 @@ mod tests {
         // One byte more is enough.
         let ret = getcwd(core::ptr::null_mut(), 15);
         assert_eq!(take_allocated(ret), b"/usr/local/lib");
-        assert_eq!(crate::malloc::live_regions::count(), before);
+        assert_eq!(crate::malloc::live_allocations::count(), before);
     }
 
     /// The boundary on the caller-buffer form: exactly `len + 1` fits, `len`

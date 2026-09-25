@@ -1371,7 +1371,7 @@ mod tests {
     /// decrement.
     #[test]
     fn test_regfree_is_idempotent() {
-        let before = crate::malloc::live_regions::count();
+        let before = crate::malloc::live_allocations::count();
         let mut re = RegexT::new();
         // SAFETY: `re` is a live, writable RegexT; the pattern is NUL-terminated.
         assert_eq!(unsafe { regcomp(&raw mut re, cstr(b"x\0"), 0) }, 0);
@@ -1381,7 +1381,7 @@ mod tests {
         unsafe { regfree(&raw mut re) };
         assert!(re.program.is_null());
         assert_eq!(
-            crate::malloc::live_regions::count(),
+            crate::malloc::live_allocations::count(),
             before,
             "one alloc, one free — not two frees"
         );
@@ -1396,17 +1396,17 @@ mod tests {
     /// must *rise* while a program is held, and only then return.
     #[test]
     fn test_live_region_counter_is_wired_up() {
-        let before = crate::malloc::live_regions::count();
+        let before = crate::malloc::live_allocations::count();
         let mut re = RegexT::new();
         // SAFETY: `re` is a live, writable RegexT; the pattern is NUL-terminated.
         assert_eq!(unsafe { regcomp(&raw mut re, cstr(b"a\0"), 0) }, 0);
         assert!(
-            crate::malloc::live_regions::count() > before,
+            crate::malloc::live_allocations::count() > before,
             "regcomp holds a program, so the count must have risen"
         );
         // SAFETY: compiled above, freed exactly once.
         unsafe { regfree(&raw mut re) };
-        assert_eq!(crate::malloc::live_regions::count(), before);
+        assert_eq!(crate::malloc::live_allocations::count(), before);
     }
 
     /// A rejected pattern frees the program it had already allocated.
@@ -1428,7 +1428,7 @@ mod tests {
             (b"[[:nosuch:]]\0", 0, REG_ECTYPE),  // unknown character class
         ];
         for &(pat, cflags, want) in cases {
-            let before = crate::malloc::live_regions::count();
+            let before = crate::malloc::live_allocations::count();
             let mut re = RegexT::new();
             // SAFETY: `re` is a live, writable RegexT; `pat` is NUL-terminated.
             let rc = unsafe { regcomp(&raw mut re, cstr(pat), cflags) };
@@ -1438,7 +1438,7 @@ mod tests {
                 "a failed regcomp must not install a program ({pat:?})"
             );
             assert_eq!(
-                crate::malloc::live_regions::count(),
+                crate::malloc::live_allocations::count(),
                 before,
                 "failed regcomp leaked its part-built program ({pat:?})"
             );
@@ -1532,7 +1532,7 @@ mod tests {
     /// every one of them is released.
     #[test]
     fn test_many_regcomps_all_free() {
-        let before = crate::malloc::live_regions::count();
+        let before = crate::malloc::live_allocations::count();
         for i in 0..8 {
             let mut re = RegexT::new();
             // SAFETY: `re` is a live, writable RegexT; the pattern is NUL-terminated.
@@ -1547,7 +1547,7 @@ mod tests {
             unsafe { regfree(&raw mut re) };
         }
         assert_eq!(
-            crate::malloc::live_regions::count(),
+            crate::malloc::live_allocations::count(),
             before,
             "eight compiles, eight frees"
         );

@@ -930,7 +930,7 @@ mod tests {
         ///
         /// Per-thread, the counter is perturbed only by this test, so it needs
         /// no lock and the tests keep running concurrently. (Same reasoning,
-        /// and the same shape, as `malloc::live_regions`.)
+        /// and the same shape, as `malloc::live_allocations`.)
         static WALK_COUNT: Cell<i32> = const { Cell::new(0) };
     }
 

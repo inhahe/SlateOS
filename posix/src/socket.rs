@@ -8497,12 +8497,12 @@ mod tests {
 
     #[test]
     fn freeaddrinfo_releases_every_node_and_nothing_else() {
-        use crate::malloc::live_regions;
+        use crate::malloc::live_allocations;
 
         // A NULL list is a no-op, not a fault.
         unsafe { freeaddrinfo(core::ptr::null_mut()) };
 
-        let before = live_regions::count();
+        let before = live_allocations::count();
 
         // No socktype in hints → a two-node list, so this also proves the
         // walk reaches past the head.
@@ -8513,13 +8513,13 @@ mod tests {
             0
         );
         assert_eq!(
-            live_regions::count() - before,
+            live_allocations::count() - before,
             2,
             "expected one block per result node"
         );
 
         unsafe { freeaddrinfo(res) };
-        assert_eq!(live_regions::count(), before, "freeaddrinfo leaked a node");
+        assert_eq!(live_allocations::count(), before, "freeaddrinfo leaked a node");
     }
 
     // -- socketpair argument validation --

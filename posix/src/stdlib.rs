@@ -2387,7 +2387,7 @@ mod tests {
     // below are shared *by specification* -- POSIX gives a process one `rand`
     // sequence, one `drand48` sequence and one `l64a` return buffer, so they
     // cannot stop being shared the way a test-only counter can (which would
-    // become a `thread_local!`; see `posix::malloc::live_regions`). The
+    // become a `thread_local!`; see `posix::malloc::live_allocations`). The
     // remaining option is to stop the tests overlapping.
     //
     // Each guard must be the FIRST statement of its test and stay bound for

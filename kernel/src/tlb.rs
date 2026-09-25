@@ -8,13 +8,19 @@
 //!
 //! ## Protocol
 //!
-//! 1. Initiator stores the flush request (address + page count) in a
-//!    shared static.
+//! 1. Initiator takes the shootdown lock (with preemption disabled), stores
+//!    the flush request (address + page count) in shared statics, and gives
+//!    it the next sequence number.
 //! 2. Initiator sends an IPI to all other CPUs (vector 251).
 //! 3. Initiator spins waiting for all other CPUs to acknowledge.
 //! 4. Each receiving CPU executes `invlpg` for the range, then bumps
-//!    the acknowledgement counter.
+//!    the acknowledgement counter — once per sequence number, however many
+//!    times it is asked.
 //! 5. Initiator continues once all CPUs have acknowledged.
+//!
+//! A CPU that is itself waiting for the lock services the pending request on
+//! every spin, so it acknowledges even with interrupts disabled — the case
+//! that used to deadlock two CPUs shooting down at once. See `broadcast`.
 //!
 //! For a full address space flush (e.g., process exit, CR3 change),
 //! we simply CR3-reload on all CPUs.
@@ -109,6 +115,23 @@ static ACK_COUNT: AtomicU32 = AtomicU32::new(0);
 /// shootdowns are infrequent and the critical section is very short.
 static SHOOTDOWN_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
+/// Sequence number of the most recent shootdown request; 0 before the first.
+///
+/// Bumped by the initiator, under [`SHOOTDOWN_LOCK`], after it has published
+/// [`FLUSH_ADDR`]/[`FLUSH_PAGES`] and reset [`ACK_COUNT`], so a CPU that sees a
+/// new number also sees the request it names.
+static SHOOTDOWN_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Per CPU: the last request sequence number this CPU has serviced (or, for
+/// the initiator, issued — it flushes its own TLB directly).
+///
+/// What makes servicing idempotent, so a request can be answered from two
+/// places — the IPI handler, and a CPU that is spinning for
+/// [`SHOOTDOWN_LOCK`] and may have interrupts disabled — without being
+/// acknowledged twice. See [`service_pending`].
+static HANDLED_SEQ: [AtomicU64; crate::smp::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::smp::MAX_CPUS];
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -131,39 +154,13 @@ pub fn flush_range(vaddr: u64, page_count: u32) {
     local_flush_range(vaddr, page_count);
 
     // If only one CPU is online, no IPI needed.
-    let online = crate::smp::cpu_count();
-    if online <= 1 {
+    if crate::smp::cpu_count() <= 1 {
         LOCAL_ONLY_COUNT.fetch_add(1, Ordering::Relaxed);
         crate::kprofile::end(crate::kprofile::Slot::TlbShootdown, _prof_t);
         return;
     }
 
-    // Acquire the shootdown lock to serialize concurrent requests.
-    let _guard = SHOOTDOWN_LOCK.lock();
-
-    // Set up the request.
-    FLUSH_ADDR.store(vaddr, Ordering::Release);
-    FLUSH_PAGES.store(page_count, Ordering::Release);
-    ACK_COUNT.store(0, Ordering::Release);
-
-    // Send the IPI to all other CPUs.
-    // target_acks = online - 1 (exclude self).
-    #[allow(clippy::cast_possible_truncation)]
-    let target_acks = (online - 1) as u32;
-
-    IPI_FLUSH_COUNT.fetch_add(1, Ordering::Relaxed);
-
-    // SAFETY: APIC is initialized, the vector has a valid ISR.
-    unsafe {
-        crate::apic::send_ipi_all_excluding_self(TLB_SHOOTDOWN_VECTOR);
-    }
-
-    // Spin-wait for all other CPUs to acknowledge.
-    // This is a tight loop but shootdowns are rare and fast.
-    while ACK_COUNT.load(Ordering::Acquire) < target_acks {
-        core::hint::spin_loop();
-    }
-
+    broadcast(vaddr, page_count);
     crate::kprofile::end(crate::kprofile::Slot::TlbShootdown, _prof_t);
 }
 
@@ -177,20 +174,63 @@ pub fn flush_all() {
     // Local full flush.
     local_flush_all();
 
-    let online = crate::smp::cpu_count();
-    if online <= 1 {
+    if crate::smp::cpu_count() <= 1 {
         LOCAL_ONLY_COUNT.fetch_add(1, Ordering::Relaxed);
         return;
     }
 
-    let _guard = SHOOTDOWN_LOCK.lock();
+    broadcast(FLUSH_ALL, 0);
+}
 
-    FLUSH_ADDR.store(FLUSH_ALL, Ordering::Release);
-    FLUSH_PAGES.store(0, Ordering::Release);
+/// Ask every other online CPU to flush `addr`/`pages` (or everything, for
+/// [`FLUSH_ALL`]) and wait until each has.
+///
+/// # Two ways this used to be able to hang, and what stops them
+///
+/// **Waiting for the lock with interrupts off.** The lock holder waits for an
+/// acknowledgement from every other CPU, and a CPU acknowledges from the IPI
+/// handler. A CPU that wanted to shoot down too, and spun on the lock with
+/// interrupts disabled, could never take that IPI: the holder waited for it
+/// and it waited for the holder, forever, with no message. A CPU spinning for
+/// the lock now services the pending request itself on every iteration
+/// ([`service_pending`]), so it acknowledges whether or not interrupts are on.
+///
+/// **Being preempted while holding the lock.** A holder switched out
+/// mid-shootdown left every other would-be initiator spinning until it was
+/// scheduled again. Preemption is disabled from before the lock is taken until
+/// after it is released, as the kernel's other spinlocks do.
+///
+/// What this does not solve, and cannot: a CPU sitting in some *other* loop
+/// with interrupts disabled — waiting on a lock this CPU holds while it
+/// shoots down, say — still never acknowledges. The rule for callers stands:
+/// do not shoot down while holding a lock that is taken with interrupts off.
+fn broadcast(addr: u64, pages: u32) {
+    let cpu = crate::smp::fast_cpu_index();
+    crate::sched::preempt_disable();
+    let guard = loop {
+        if let Some(g) = SHOOTDOWN_LOCK.try_lock() {
+            break g;
+        }
+        // Someone else is shooting down, and may be waiting for this CPU.
+        service_pending(cpu);
+        core::hint::spin_loop();
+    };
+
+    // Publish the request, then the sequence number that names it.
+    FLUSH_ADDR.store(addr, Ordering::Release);
+    FLUSH_PAGES.store(pages, Ordering::Release);
     ACK_COUNT.store(0, Ordering::Release);
+    let seq = SHOOTDOWN_SEQ.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+    // This CPU has already flushed its own TLB; mark the request handled here
+    // so a later `service_pending` on this CPU never acknowledges its own
+    // request and makes the count reach its target one CPU early.
+    if let Some(mine) = HANDLED_SEQ.get(cpu) {
+        mine.store(seq, Ordering::Release);
+    }
 
+    // target_acks = online - 1 (exclude self).
     #[allow(clippy::cast_possible_truncation)]
-    let target_acks = (online - 1) as u32;
+    let target_acks = crate::smp::cpu_count().saturating_sub(1) as u32;
 
     IPI_FLUSH_COUNT.fetch_add(1, Ordering::Relaxed);
 
@@ -199,9 +239,49 @@ pub fn flush_all() {
         crate::apic::send_ipi_all_excluding_self(TLB_SHOOTDOWN_VECTOR);
     }
 
+    // Spin-wait for all other CPUs to acknowledge.
     while ACK_COUNT.load(Ordering::Acquire) < target_acks {
         core::hint::spin_loop();
     }
+
+    drop(guard);
+    crate::sched::preempt_enable();
+}
+
+/// Service the in-flight shootdown request on CPU `cpu`, unless it already
+/// has: flush what it names, then acknowledge it. Returns whether it did.
+///
+/// Called from the IPI handler, and from a CPU spinning for
+/// [`SHOOTDOWN_LOCK`] (see [`broadcast`]). Both can run on one CPU for one
+/// request — the IPI can arrive in the middle of the spinning — so the claim
+/// is a compare-and-swap on [`HANDLED_SEQ`]: exactly one of them wins, and
+/// only the winner flushes and acknowledges. The flush happens before the
+/// acknowledgement, because the acknowledgement is the initiator's licence to
+/// reuse what it unmapped.
+fn service_pending(cpu: usize) -> bool {
+    let Some(handled) = HANDLED_SEQ.get(cpu) else {
+        return false;
+    };
+    let seq = SHOOTDOWN_SEQ.load(Ordering::Acquire);
+    let seen = handled.load(Ordering::Acquire);
+    if seen >= seq {
+        return false;
+    }
+    if handled
+        .compare_exchange(seen, seq, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    let addr = FLUSH_ADDR.load(Ordering::Acquire);
+    let pages = FLUSH_PAGES.load(Ordering::Acquire);
+    if addr == FLUSH_ALL {
+        local_flush_all();
+    } else {
+        local_flush_range(addr, pages);
+    }
+    ACK_COUNT.fetch_add(1, Ordering::Release);
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -210,23 +290,13 @@ pub fn flush_all() {
 
 /// ISR handler for the TLB shootdown IPI (vector 251).
 ///
-/// Called from the IDT assembly stub.  Reads the flush request,
-/// performs the local TLB invalidation, acknowledges, and sends EOI.
+/// Called from the IDT assembly stub.  Services the pending request (see
+/// [`service_pending`], which makes a second delivery harmless) and sends EOI.
 ///
 /// Must be fast — no allocations, no lock contention, no serial output.
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_tlb_shootdown_irq(_frame: &crate::idt::InterruptStackFrame, _error: u64) {
-    let addr = FLUSH_ADDR.load(Ordering::Acquire);
-    let pages = FLUSH_PAGES.load(Ordering::Acquire);
-
-    if addr == FLUSH_ALL {
-        local_flush_all();
-    } else {
-        local_flush_range(addr, pages);
-    }
-
-    // Acknowledge.
-    ACK_COUNT.fetch_add(1, Ordering::Release);
+    service_pending(crate::smp::fast_cpu_index());
 
     // Send EOI to the local APIC.
     // SAFETY: Always safe to write to the APIC EOI register.
@@ -300,6 +370,75 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     flush_all();
     serial_println!("[tlb]   Shootdown flush_all: OK ({} CPUs)", online);
 
-    serial_println!("[tlb] Self-test PASSED");
+    // Test 5: the servicing path a waiting CPU and the IPI share.
+    let mut skipped = 0usize;
+    if online <= 1 {
+        test_service_pending()?;
+        serial_println!("[tlb]   service_pending acknowledges once, never its own request: OK");
+    } else {
+        // The request it stages is visible to every CPU; another one could
+        // service it and leave an acknowledgement for the next real request.
+        serial_println!(
+            "[tlb]   SKIP: service_pending unit test (other CPUs online could answer its staged request)"
+        );
+        skipped = skipped.saturating_add(1);
+    }
+
+    if skipped == 0 {
+        serial_println!("[tlb] Self-test PASSED");
+    } else {
+        serial_println!("[tlb] Self-test passed with {} section(s) SKIPPED", skipped);
+    }
     Ok(())
+}
+
+/// [`service_pending`] acknowledges a request exactly once however often it
+/// is asked — the IPI and a spinning waiter can both ask on one CPU — and
+/// never answers a request this CPU issued.
+///
+/// A single-CPU system never broadcasts, so without this the path runs only on
+/// multi-core hardware, which the boot test does not use. The requests are
+/// staged by hand under the lock, the way [`broadcast`] stages real ones, and
+/// name a harmless address. Only called with one CPU online.
+fn test_service_pending() -> crate::error::KernelResult<()> {
+    let cpu = crate::smp::fast_cpu_index();
+    let fail = |what: &str| {
+        serial_println!("[tlb]   FAIL: service_pending: {}", what);
+        crate::error::KernelError::InternalError
+    };
+    let guard = SHOOTDOWN_LOCK.lock();
+    let result = (|| -> crate::error::KernelResult<()> {
+        // A request from "another CPU": published and numbered, not yet
+        // handled here.
+        FLUSH_ADDR.store(0x3000_0000, Ordering::Release);
+        FLUSH_PAGES.store(1, Ordering::Release);
+        ACK_COUNT.store(0, Ordering::Release);
+        SHOOTDOWN_SEQ.fetch_add(1, Ordering::AcqRel);
+        if !service_pending(cpu) || ACK_COUNT.load(Ordering::Acquire) != 1 {
+            return Err(fail(
+                "a pending request was not serviced and acknowledged once",
+            ));
+        }
+        if service_pending(cpu) || ACK_COUNT.load(Ordering::Acquire) != 1 {
+            return Err(fail(
+                "servicing the same request again acknowledged it twice",
+            ));
+        }
+
+        // A request this CPU issued is marked handled at issue, as
+        // `broadcast` does, and must never be self-acknowledged.
+        ACK_COUNT.store(0, Ordering::Release);
+        let own = SHOOTDOWN_SEQ.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        if let Some(mine) = HANDLED_SEQ.get(cpu) {
+            mine.store(own, Ordering::Release);
+        }
+        if service_pending(cpu) || ACK_COUNT.load(Ordering::Acquire) != 0 {
+            return Err(fail("this CPU acknowledged a request it issued itself"));
+        }
+        Ok(())
+    })();
+    // The next real request resets the count before it numbers itself.
+    ACK_COUNT.store(0, Ordering::Release);
+    drop(guard);
+    result
 }

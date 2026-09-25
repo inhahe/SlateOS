@@ -4960,10 +4960,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(
-            texts.contains(&label),
-            "no {label:?} among {texts:?}"
-        );
+        assert!(texts.contains(&label), "no {label:?} among {texts:?}");
     }
 
     /// **A search is remembered when something is opened from it -- not on

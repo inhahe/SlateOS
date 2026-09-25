@@ -1,8 +1,13 @@
 # E → F: an application needs to be woken for data that does not come from the compositor
 
 **From:** lane E · **To:** lane F · **Filed:** 2026-09-24
-**Status:** open — two asks; the first is the one that matters, the second is
-small and stands on its own
+**Status:** ANSWERED 2026-09-25 — both asks, by lane F: `App::wants_waker`,
+`attach_waker` and `on_wake` (a standard `std::task::Waker`), and `sync_clock`
+now brings an armed deadline forward (`EventLoop::wake_within`). Lane E uses the
+waker in `apps/terminal` and `apps/tmux` from 2026-09-25; `known-issues.md` →
+`[E] The terminal polls for its shell's output` is closed. The request reached
+lane F only as the shape of a waker lane C's photo-decoding entry also needed --
+it sat on `lane-e` unpublished -- which is the argument for publishing early.
 
 ## In short
 

@@ -57,6 +57,7 @@ use guitk::wheel;
 use oswindow::app::{App, Response};
 
 use std::collections::VecDeque;
+use std::task::Waker;
 
 // ============================================================================
 // Window geometry
@@ -89,14 +90,16 @@ const BELL_MS: u64 = 100;
 /// How long each half of the cursor's blink lasts, in milliseconds.
 const BLINK_MS: u64 = 500;
 
-/// How often a terminal with a child looks for its output while the two are
-/// talking, in milliseconds: one frame, so an echo appears with the keystroke.
+/// How often a terminal looks for its child's output on a clock while the two
+/// are talking, in milliseconds: one frame, so an echo appears with the
+/// keystroke.
 ///
-/// A clock at all, rather than a wake-up when output arrives, because the
-/// window library can wake an application for the compositor's events and
-/// for a clock and for nothing else -- see `child`'s module documentation and
-/// `requests/e-f-wake-an-application-for-its-own-descriptor.md`. When that
-/// lands, both of these go.
+/// Only for a link that cannot wake the terminal, and for draining a flood:
+/// a link given the window's waker (`App::attach_waker`) wakes the terminal
+/// for every chunk its child writes, and between those the terminal asks for
+/// no clock at all. A wake is spent draining at most [`MAX_READ_PER_DRAIN`],
+/// so output left over after it is read on this clock until it is gone --
+/// the reader has already sent it, and will not wake anyone for it again.
 const ACTIVE_POLL_MS: u64 = 16;
 
 /// How often a terminal with a quiet child looks for output, in milliseconds.
@@ -691,6 +694,15 @@ pub struct TerminalState {
     /// the window open with the reason on it instead.
     close_requested: bool,
 
+    /// The window loop's waker, once it has handed one over.
+    waker: Option<Waker>,
+    /// Whether the attached link wakes the terminal itself, so nothing needs
+    /// to ask it on a clock.
+    link_wakes: bool,
+    /// Whether the last read took all it was allowed and so may have left
+    /// output behind, which no wake will announce again.
+    backlog: bool,
+
     /// The window size the last frame was drawn at.
     ///
     /// Kept so an event that has to know the geometry -- a click landing in a
@@ -788,6 +800,9 @@ impl TerminalState {
             child_exit: None,
             quiet_ms: 0,
             close_requested: false,
+            waker: None,
+            link_wakes: false,
+            backlog: false,
             bell_flash_ms: 0,
             blink_ms: 0,
             blink_on: true,
@@ -1254,6 +1269,10 @@ impl TerminalState {
     /// size the caller guessed, and the window may already have been resized.
     pub fn attach(&mut self, mut link: Box<dyn Link>) {
         link.resize(self.win_size());
+        // The waker, if the window has given one: the link wakes the terminal
+        // for its child's output from here on, or says it cannot.
+        self.link_wakes = self.waker.clone().is_some_and(|w| link.set_waker(w));
+        self.backlog = false;
         self.child = Some(link);
         self.child_exit = None;
         self.close_requested = false;
@@ -1419,6 +1438,8 @@ terminal, so what you type goes nowhere.\r\n"
         };
         let mut got = Vec::new();
         link.receive(&mut got, MAX_READ_PER_DRAIN);
+        // A read that took all it was allowed may have left more behind.
+        self.backlog = got.len() >= MAX_READ_PER_DRAIN;
         // Asked every time: the link reports an exit exactly once, so a
         // finished child answers `None` from then on.
         let exit = link.poll_exit();
@@ -3452,6 +3473,34 @@ impl App for TerminalState {
         String::from("terminal")
     }
 
+    /// Yes: the shell writes on a thread of its own, and a terminal that is
+    /// woken for it sleeps at a prompt instead of looking twenty times a
+    /// second.
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: Waker) {
+        if let Some(link) = self.child.as_mut() {
+            self.link_wakes = link.set_waker(waker.clone());
+        }
+        self.waker = Some(waker);
+    }
+
+    /// The link woke the terminal: read what the child wrote, and anything
+    /// the reading made the terminal want to say back.
+    fn on_wake(&mut self) -> Response {
+        let changed = self.drain_child();
+        self.flush_to_child();
+        if self.close_requested {
+            Response::Exit
+        } else if changed {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
     fn initial_size(&self) -> (u32, u32) {
         // The grid the config was born with, in the cells it is drawn in:
         // eighty by twenty-four of the fixed-pitch face, plus the bar.
@@ -3469,13 +3518,20 @@ impl App for TerminalState {
         // A live child is something moving too: its output reaches the screen
         // only on a tick. Fast while the two are talking, slower once they are
         // not -- see `ACTIVE_POLL_MS`.
-        let polling = self
-            .child_is_live()
-            .then_some(if self.quiet_ms < ACTIVE_WINDOW_MS {
+        //
+        // Only a link that cannot wake the terminal is asked on a clock --
+        // and one that can, while it has output left over from a read that
+        // hit its limit.
+        let polling = (self.child_is_live() && (!self.link_wakes || self.backlog)).then_some(
+            // A backlog is drained as fast as a busy child is read. A link
+            // that cannot wake is asked quickly while the two are talking and
+            // slowly once they are quiet.
+            if self.backlog || self.quiet_ms < ACTIVE_WINDOW_MS {
                 ACTIVE_POLL_MS
             } else {
                 IDLE_POLL_MS
-            });
+            },
+        );
         let ms = match (aging, polling) {
             (Some(a), Some(p)) => Some(a.min(p)),
             (a, p) => a.or(p),
@@ -5512,6 +5568,107 @@ mod tests {
         let (mut term, script) = scripted();
         term.hang_up();
         assert_eq!(script.borrow().hang_ups, 1);
+    }
+
+    // -- woken, not asked --
+
+    /// A terminal with a still cursor and a link that wakes it: nothing to
+    /// ask a clock for. The link is given the waker whichever of the two
+    /// arrives first.
+    fn woken_terminal(waker_first: bool) -> (TerminalState, Rc<RefCell<Script>>) {
+        let mut term = TerminalState::new(TerminalConfig {
+            cursor_blink: false,
+            ..TerminalConfig::default()
+        });
+        let (link, script) = ScriptLink::new();
+        script.borrow_mut().wakes = true;
+        if waker_first {
+            term.attach_waker(std::task::Waker::noop().clone());
+            term.attach(Box::new(link));
+        } else {
+            term.attach(Box::new(link));
+            term.attach_waker(std::task::Waker::noop().clone());
+        }
+        (term, script)
+    }
+
+    #[test]
+    fn a_link_that_wakes_the_terminal_is_not_asked_on_a_clock() {
+        // Twenty times a second at a prompt, forever, to find nothing: the
+        // clock the terminal asked for while the window could not be woken
+        // for its shell.
+        for waker_first in [true, false] {
+            let (term, script) = woken_terminal(waker_first);
+            assert!(term.wants_waker());
+            assert!(
+                script.borrow().waker.is_some(),
+                "the link was not given the waker"
+            );
+            assert_eq!(term.tick_interval(), None, "waker first: {waker_first}");
+        }
+    }
+
+    #[test]
+    fn a_link_that_cannot_wake_is_still_asked() {
+        // The one thing that must not happen: a terminal that stops asking a
+        // link that never wakes it.
+        let mut term = TerminalState::new(TerminalConfig {
+            cursor_blink: false,
+            ..TerminalConfig::default()
+        });
+        let (link, _script) = ScriptLink::new();
+        term.attach(Box::new(link));
+        term.attach_waker(std::task::Waker::noop().clone());
+        assert_eq!(
+            term.tick_interval().map(|d| d.as_millis()),
+            Some(u128::from(ACTIVE_POLL_MS))
+        );
+    }
+
+    #[test]
+    fn a_wake_reads_the_child_and_draws_only_what_changed() {
+        let (mut term, script) = woken_terminal(true);
+        script
+            .borrow_mut()
+            .pending
+            .extend_from_slice(b"hello\x1b[6n");
+        assert!(matches!(term.on_wake(), Response::Redraw));
+        assert!(screen_text(&term).contains("hello"));
+        assert_eq!(
+            script.borrow().sent,
+            b"\x1b[1;6R",
+            "and the reply the reading produced went out on the same wake"
+        );
+        assert!(matches!(term.on_wake(), Response::Idle), "nothing new");
+    }
+
+    #[test]
+    fn a_clean_exit_found_on_a_wake_closes_the_window() {
+        let (mut term, script) = woken_terminal(true);
+        script.borrow_mut().exit = Some(Exit::Code(0));
+        assert!(matches!(term.on_wake(), Response::Exit));
+    }
+
+    #[test]
+    fn a_flood_left_over_after_a_wake_is_read_on_the_clock_until_it_is_gone() {
+        // The reader wakes once per chunk it sends; what a wake leaves behind
+        // it has already sent, and will not announce again.
+        let (mut term, script) = woken_terminal(true);
+        script
+            .borrow_mut()
+            .pending
+            .extend(std::iter::repeat_n(b'x', MAX_READ_PER_DRAIN * 3));
+        term.on_wake();
+        assert_eq!(
+            term.tick_interval().map(|d| d.as_millis()),
+            Some(u128::from(ACTIVE_POLL_MS)),
+            "output was left behind and nothing will wake for it"
+        );
+        for _ in 0..4 {
+            term.on_event(&Event::Tick { elapsed_ms: 16 });
+        }
+        assert!(script.borrow().pending.is_empty());
+        assert_eq!(term.tick_interval(), None, "and once it is gone, no clock");
     }
 
     // -- resizing, which a multiplexer does on every split --

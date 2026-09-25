@@ -267,6 +267,34 @@ pub fn try_wait(pid: i32) -> Result<ChildState, i32> {
     try_wait_one(pid)
 }
 
+/// Block until the child `pid` has finished -- without collecting it.
+///
+/// `waitid(P_PID, pid, WEXITED | WNOWAIT)`. Returns once the child has exited
+/// or a signal has ended it, and leaves it waitable: its exit status is still
+/// there for [`try_wait`] to collect, and **its process id stays reserved
+/// until then**. That is the point of the `WNOWAIT`. A thread that *reaped*
+/// the child while another thread might still signal it -- a terminal hanging
+/// up its shell -- would free the id in between, and the signal could reach
+/// whatever process was given that id next.
+///
+/// For a thread whose one job is to notice the child ending. A terminal that
+/// is woken for its shell's output rather than asking on a clock still has to
+/// learn when the shell has gone, and the end of the output is no sign of it:
+/// a job the shell started in the background can hold the terminal open long
+/// after the shell itself has exited.
+///
+/// A single child, for the reason [`try_wait`] gives.
+///
+/// # Errors
+///
+/// As [`try_wait`].
+pub fn wait_exited(pid: i32) -> Result<(), i32> {
+    if pid <= 0 {
+        return Err(EINVAL);
+    }
+    wait_exited_one(pid)
+}
+
 /// What a `waitpid` status word says, in the Linux encoding our `posix` and
 /// glibc both use.
 ///
@@ -329,6 +357,7 @@ mod sys {
         pub fn write(fd: i32, buf: *const u8, count: usize) -> isize;
         pub fn close(fd: i32) -> i32;
         pub fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+        pub fn waitid(idtype: i32, id: i32, infop: *mut core::ffi::c_void, options: i32) -> i32;
         pub fn signal(signum: i32, handler: usize) -> usize;
         pub fn sigprocmask(how: i32, set: *const u64, oldset: *mut u64) -> i32;
         pub fn ioctl(fd: i32, request: u64, ...) -> i32;
@@ -346,6 +375,12 @@ mod sys {
     pub const TIOCSWINSZ: u64 = 0x5414;
     /// `waitpid`: do not block.
     pub const WNOHANG: i32 = 1;
+    /// `waitid`: the id names one process.
+    pub const P_PID: i32 = 1;
+    /// `waitid`: report children that have ended.
+    pub const WEXITED: i32 = 4;
+    /// `waitid`: leave the child to be waited for again.
+    pub const WNOWAIT: i32 = 0x0100_0000;
     /// `sigprocmask`: replace the mask outright.
     pub const SIG_SETMASK: i32 = 2;
     /// The signal a write to a pipe with no reader raises.
@@ -588,6 +623,37 @@ fn try_wait_one(_pid: i32) -> Result<ChildState, i32> {
     Err(crate::ENOSYS)
 }
 
+#[cfg(unix)]
+fn wait_exited_one(pid: i32) -> Result<(), i32> {
+    // Room for a `siginfo_t` -- 128 bytes on every Linux ABI and ours --
+    // which `waitid` fills and nothing here reads. Given rather than null:
+    // null is a Linux extension POSIX does not promise.
+    let mut info = [0u64; 16];
+    loop {
+        // SAFETY: `info` is 128 writable bytes, the size of a `siginfo_t`.
+        let rc = unsafe {
+            sys::waitid(
+                sys::P_PID,
+                pid,
+                info.as_mut_ptr().cast::<core::ffi::c_void>(),
+                sys::WEXITED | sys::WNOWAIT,
+            )
+        };
+        if rc == 0 {
+            return Ok(());
+        }
+        let e = crate::last_errno();
+        if e != EINTR {
+            return Err(e);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn wait_exited_one(_pid: i32) -> Result<(), i32> {
+    Err(crate::ENOSYS)
+}
+
 #[cfg(test)]
 mod tests {
     // A test that indexes out of range should fail loudly and point at the
@@ -647,6 +713,9 @@ mod tests {
         assert_eq!(sys::FD_CLOEXEC, i64::from(posix::fdtable::FD_CLOEXEC));
         assert_eq!(sys::TIOCSWINSZ, posix::ioctl::TIOCSWINSZ);
         assert_eq!(sys::WNOHANG, posix::process::WNOHANG);
+        assert_eq!(sys::P_PID, posix::process::P_PID);
+        assert_eq!(sys::WEXITED, posix::process::WEXITED);
+        assert_eq!(sys::WNOWAIT, posix::process::WNOWAIT);
         assert_eq!(sys::SIG_SETMASK, posix::signal::SIG_SETMASK);
         assert_eq!(sys::SIGPIPE, posix::signal::SIGPIPE);
         assert_eq!(sys::SIG_DFL, posix::signal::SIG_DFL);
@@ -736,6 +805,15 @@ mod tests {
         assert_eq!(spawn(SH, &[SH], &[], size(24, 80)), Err(ENOSYS));
         assert_eq!(set_window_size(3, size(24, 80)), Err(ENOSYS));
         assert_eq!(try_wait(1), Err(ENOSYS));
+        assert_eq!(wait_exited(1), Err(ENOSYS));
+    }
+
+    /// `wait_exited` means one child, as `try_wait` does.
+    #[test]
+    fn wait_exited_refuses_every_pid_that_is_not_one_process() {
+        for pid in [0, -1, -42] {
+            assert_eq!(wait_exited(pid), Err(EINVAL), "pid {pid}");
+        }
     }
 
     /// Everything below starts real programs on real pseudo-terminals, so it
@@ -916,6 +994,32 @@ mod tests {
             read_until_closed(s.master, Duration::from_secs(5));
             close(s.master);
             assert_eq!(wait_for(s.pid), ChildState::Signaled(9));
+        }
+
+        /// `wait_exited` blocks until the child is done and leaves it to be
+        /// collected: the exit status is still there afterwards, once.
+        #[test]
+        fn wait_exited_blocks_and_leaves_the_child_to_be_collected() {
+            let s =
+                spawn(SH, &[c"sh", c"-c", c"sleep 0.2; exit 5"], &[], size(24, 80)).expect("spawn");
+            let start = Instant::now();
+            assert_eq!(wait_exited(s.pid), Ok(()));
+            assert!(
+                start.elapsed() >= Duration::from_millis(150),
+                "it did not wait"
+            );
+            assert_eq!(
+                wait_exited(s.pid),
+                Ok(()),
+                "not collected: it can be waited for again"
+            );
+            assert_eq!(
+                try_wait(s.pid),
+                Ok(ChildState::Exited(5)),
+                "and its status is intact"
+            );
+            assert!(try_wait(s.pid).is_err(), "collected once");
+            close(s.master);
         }
 
         /// A finished child is reaped once, and asking again is an error.

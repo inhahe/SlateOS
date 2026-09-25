@@ -384,8 +384,8 @@ MUTATIONS = [
     ),
     (
         "a child attached to a resized window is left at the size it started at",
-        "        link.resize(self.win_size());\n        self.child = Some(link);",
-        "        self.child = Some(link);",
+        "    pub fn attach(&mut self, mut link: Box<dyn Link>) {\n        link.resize(self.win_size());",
+        "    pub fn attach(&mut self, mut link: Box<dyn Link>) {",
         ["the_child_is_told_the_size_the_moment_it_is_attached"],
     ),
     (
@@ -426,14 +426,14 @@ MUTATIONS = [
     ),
     (
         "a live child gets no clock, so its output waits for a keypress",
-        "        let polling = self\n            .child_is_live()",
-        "        let polling = false",
+        "        let polling = (self.child_is_live() && (!self.link_wakes || self.backlog)).then_some(",
+        "        let polling = false.then_some(",
         ["a_live_child_keeps_the_clock_running_and_quiet_slows_it"],
     ),
     (
         "a quiet child is polled as fast as a busy one, holding the desktop awake",
-        "            .then_some(if self.quiet_ms < ACTIVE_WINDOW_MS {",
-        "            .then_some(if true {",
+        "            if self.backlog || self.quiet_ms < ACTIVE_WINDOW_MS {",
+        "            if true {",
         ["a_live_child_keeps_the_clock_running_and_quiet_slows_it"],
     ),
     (
@@ -701,6 +701,43 @@ MUTATIONS = [
         "            cell_width: text::cell_advance(FONT_SIZE, FontWeightHint::Regular),",
         "            cell_width: 6.0,",
         ["a_character_fits_its_cell"],
+    ),
+    # -- woken, not asked (2026-09-25) --
+    (
+        "a link that wakes is asked on a clock anyway",
+        "        let polling = (self.child_is_live() && (!self.link_wakes || self.backlog)).then_some(",
+        "        let polling = self.child_is_live().then_some(",
+        ["a_link_that_wakes_the_terminal_is_not_asked_on_a_clock"],
+    ),
+    (
+        "a link given no waker at attach",
+        "        self.link_wakes = self.waker.clone().is_some_and(|w| link.set_waker(w));",
+        "        self.link_wakes = false;",
+        ["a_link_that_wakes_the_terminal_is_not_asked_on_a_clock"],
+    ),
+    (
+        "output left over after a wake is forgotten",
+        "        self.backlog = got.len() >= MAX_READ_PER_DRAIN;",
+        "        self.backlog = false;",
+        ["a_flood_left_over_after_a_wake_is_read_on_the_clock_until_it_is_gone"],
+    ),
+    (
+        "a wake reads nothing",
+        "    fn on_wake(&mut self) -> Response {\n        let changed = self.drain_child();",
+        "    fn on_wake(&mut self) -> Response {\n        let changed = false;",
+        ["a_wake_reads_the_child_and_draws_only_what_changed"],
+    ),
+    (
+        "a wake's reply waits for a key",
+        "        let changed = self.drain_child();\n        self.flush_to_child();\n        if self.close_requested {\n            Response::Exit",
+        "        let changed = self.drain_child();\n        if self.close_requested {\n            Response::Exit",
+        ["a_wake_reads_the_child_and_draws_only_what_changed"],
+    ),
+    (
+        "a clean exit found on a wake keeps the window",
+        "        self.flush_to_child();\n        if self.close_requested {\n            Response::Exit",
+        "        self.flush_to_child();\n        if false {\n            Response::Exit",
+        ["a_clean_exit_found_on_a_wake_closes_the_window"],
     ),
 ]
 

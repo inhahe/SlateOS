@@ -165593,7 +165593,22 @@ signal init. Nothing ran this crate's tests on a Unix target until this
 change's Linux run found it; the test is now `#[cfg(not(unix))]`.
 
 ### [E] The terminal polls for its shell's output, because nothing can wake an application for its own descriptor -- 2026-09-24
-**Status:** OPEN -- blocked on lane F, `requests/e-f-wake-an-application-for-its-own-descriptor.md`
+**Status:** FIXED 2026-09-25 (lane E, on lane F's waker)
+
+**What changed.** Lane F added a waker to the window loop (`App::wants_waker`,
+`attach_waker`, `on_wake`) and made a clock that speeds up take effect at once.
+The terminal and tmux ask for the waker and hand it to each link
+(`termchild::Link::set_waker`); the link's reader thread wakes the window after
+every chunk the shell writes, and a waiter thread wakes it when the shell
+finishes -- which the end of the output does not announce when a background
+job still holds the terminal open. The waiter blocks in the new
+`libcall::pty::wait_exited` (`waitid` with `WNOWAIT`), which leaves the child
+for the window's thread to collect, so the process id stays reserved while the
+window might still signal it; for a link already dropped -- a closed tmux pane
+-- the waiter collects it, so closed panes no longer leave finished processes
+behind for as long as tmux runs. A terminal at a prompt now asks for no clock at
+all; it asks only a link that cannot wake it, and while draining output a wake
+left over. The text below is the entry as it was.
 
 **In short:** The terminal cannot be told that its shell has written
 something; it has to look. It looks every 16 ms while the shell is talking and

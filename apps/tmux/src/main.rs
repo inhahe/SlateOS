@@ -59,6 +59,7 @@ use guitk::wheel;
 use libcall::pty::WinSize;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
+use std::task::Waker;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use terminal::child::{Link, SpawnError};
 use terminal::{Selection, Target as TermTarget, TerminalConfig, TerminalState};
@@ -975,6 +976,9 @@ struct Multiplexer {
     spawner: Option<Spawner>,
     /// Set when the last session has ended: the window closes.
     quit: bool,
+    /// The window loop's waker, which every pane's link is given so that a
+    /// shell's output wakes the window rather than being looked for.
+    waker: Option<Waker>,
 }
 
 impl Multiplexer {
@@ -1019,6 +1023,7 @@ impl Multiplexer {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             spawner,
             quit: false,
+            waker: None,
         };
         mux.new_session("main");
         // "Created session: main" is news only for a session the user asked
@@ -1035,7 +1040,12 @@ impl Multiplexer {
     fn create_pane(&mut self) -> PaneId {
         let id = PaneId(self.next_pane_id);
         self.next_pane_id = self.next_pane_id.saturating_add(1);
-        self.panes.push(Pane::new(id, &self.palette));
+        let mut pane = Pane::new(id, &self.palette);
+        if let Some(waker) = &self.waker {
+            // Before its shell starts, so the link is woken for its first word.
+            App::attach_waker(&mut pane.term, waker.clone());
+        }
+        self.panes.push(pane);
         id
     }
 
@@ -3125,6 +3135,44 @@ impl App for Multiplexer {
         (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
     }
 
+    /// Yes: every pane's shell writes on a thread of its own.
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: Waker) {
+        for pane in &mut self.panes {
+            App::attach_waker(&mut pane.term, waker.clone());
+        }
+        self.waker = Some(waker);
+    }
+
+    /// A shell woke the window. Wakes that land together arrive as one, so
+    /// every pane is read -- a pane with nothing new costs one empty read.
+    fn on_wake(&mut self) -> Response {
+        let visible = self.visible_panes();
+        let mut changed = false;
+        let mut finished = Vec::new();
+        for pane in &mut self.panes {
+            match App::on_wake(&mut pane.term) {
+                Response::Exit => finished.push(pane.id),
+                Response::Redraw | Response::KeepOpen => changed |= visible.contains(&pane.id),
+                Response::Idle => {}
+            }
+        }
+        for id in finished {
+            self.pane_finished(id);
+            changed = true;
+        }
+        if self.quit {
+            Response::Exit
+        } else if changed {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
     /// As often as the busiest pane needs -- its shell talking, its cursor
     /// blinking -- and otherwise when the status bar next changes by itself.
     ///
@@ -3253,6 +3301,21 @@ mod tests {
             Ok(Box::new(link) as Box<dyn Link>)
         });
         (Multiplexer::with_shells(spawner), shells)
+    }
+
+    /// As [`scripted`], with shells whose links wake the window.
+    fn scripted_waking() -> (Multiplexer, Shells) {
+        let shells: Shells = Rc::default();
+        let log = Rc::clone(&shells);
+        let spawner: Spawner = Box::new(move |_size| {
+            let (link, script) = ScriptLink::new();
+            script.borrow_mut().wakes = true;
+            log.borrow_mut().push(script);
+            Ok(Box::new(link) as Box<dyn Link>)
+        });
+        let mut mux = Multiplexer::with_shells(spawner);
+        App::attach_waker(&mut mux, Waker::noop().clone());
+        (mux, shells)
     }
 
     /// The `n`th shell started.
@@ -3473,6 +3536,58 @@ mod tests {
             screen(&mux, id).contains("[the shell"),
             "{}",
             screen(&mux, id)
+        );
+    }
+
+    #[test]
+    fn every_pane_is_woken_by_its_shell_and_none_is_asked_on_a_clock() {
+        let (mut mux, shells) = scripted_waking();
+        assert!(mux.wants_waker());
+        prefixed(&mut mux, '%');
+        prefixed(&mut mux, 'c');
+        for n in 0..3 {
+            assert!(
+                shell(&shells, n).borrow().waker.is_some(),
+                "shell {n} has no waker"
+            );
+        }
+        mux.clock = fixed_clock;
+        tick(&mut mux);
+        mux.handle_event(&Event::FocusOut);
+        // No cursor blinking, no shell asked: the next thing is the minute.
+        assert_eq!(mux.tick_interval(), Some(Duration::from_secs(40)));
+    }
+
+    #[test]
+    fn a_wake_reads_every_shell_and_closes_a_pane_whose_shell_is_done() {
+        let (mut mux, shells) = scripted_waking();
+        let first = mux.active_pane_id().unwrap();
+        prefixed(&mut mux, '%');
+        let second = mux.active_pane_id().unwrap();
+        assert!(
+            matches!(mux.on_wake(), Response::Idle),
+            "nothing new, nothing drawn"
+        );
+
+        shell(&shells, 0)
+            .borrow_mut()
+            .pending
+            .extend_from_slice(b"left");
+        shell(&shells, 1)
+            .borrow_mut()
+            .pending
+            .extend_from_slice(b"right");
+        assert!(matches!(mux.on_wake(), Response::Redraw));
+        assert!(screen(&mux, first).contains("left"));
+        assert!(screen(&mux, second).contains("right"));
+
+        shell(&shells, 1).borrow_mut().exit = Some(Exit::Code(0));
+        assert!(matches!(mux.on_wake(), Response::Redraw));
+        assert!(mux.find_pane(second).is_none(), "its pane went with it");
+        shell(&shells, 0).borrow_mut().exit = Some(Exit::Code(0));
+        assert!(
+            matches!(mux.on_wake(), Response::Exit),
+            "and the last closes the window"
         );
     }
 

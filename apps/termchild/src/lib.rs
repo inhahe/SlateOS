@@ -34,17 +34,24 @@
 //!
 //! # Being woken
 //!
-//! The window library wakes an application for the compositor's events and
-//! for a clock it asks for, and for nothing else, so output the shell writes
-//! while the user is not typing reaches the screen only on a tick. The
-//! emulator therefore asks for a clock for as long as a child is attached --
-//! see `TerminalState::tick_interval` -- and a reader thread keeps the kernel's
-//! buffer drained in between so a busy child is never stalled by it. The
-//! proper wake-up, the loop waking when the master becomes readable, is the
-//! window library's to provide: `requests/e-f-wake-an-application-for-its-own-descriptor.md`.
+//! A link wakes the application when there is something to read: give it the
+//! window loop's `Waker` with [`Link::set_waker`], and its reader thread wakes
+//! the loop after every chunk the child writes, while a waiter thread wakes it
+//! when the child finishes. So a terminal at a prompt sleeps until the shell
+//! says something, and the first keystroke after a pause is echoed as soon as
+//! the shell echoes it.
+//!
+//! It used to be asked on a clock -- twenty times a second at a prompt,
+//! forever, to find nothing -- because the window loop woke an application
+//! for the compositor's events and its own timer and for nothing else. Lane F
+//! added the waker (`oswindow::app::App::attach_waker`), asked for in
+//! `requests/e-f-wake-an-application-for-its-own-descriptor.md`. A link given
+//! no waker, or one that cannot wake anyone, says so, and the terminal goes on
+//! asking it on a clock.
 
 use std::fmt;
 use std::path::PathBuf;
+use std::task::Waker;
 
 use libcall::pty::WinSize;
 
@@ -173,6 +180,18 @@ pub trait Link {
 
     /// The terminal is going away: tell the child. Idempotent.
     fn hang_up(&mut self);
+
+    /// Wake the application through `waker` whenever there is output to read
+    /// or the child has finished, rather than waiting to be asked.
+    ///
+    /// Returns whether it will. A link that cannot wake anyone keeps the
+    /// default and answers `false`, and the terminal goes on asking it on a
+    /// clock -- the one thing that must not happen is a terminal that stops
+    /// asking a link that never wakes it.
+    fn set_waker(&mut self, waker: Waker) -> bool {
+        let _ = waker;
+        false
+    }
 }
 
 /// Why no shell could be started.
@@ -336,7 +355,41 @@ mod pty_link {
     use std::io::{ErrorKind, Read, Write};
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
+    use std::sync::{Arc, Mutex};
+    use std::task::Waker;
     use std::time::{Duration, Instant};
+
+    /// The waker a link was given, shared with its threads.
+    type WakeSlot = Arc<Mutex<Option<Waker>>>;
+
+    /// Wake whoever is waiting, if anyone is.
+    ///
+    /// A poisoned slot -- a thread panicked holding it -- still holds a waker,
+    /// and waking through it is still right.
+    fn wake(slot: &WakeSlot) {
+        let guard = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(waker) = guard.as_ref() {
+            waker.wake_by_ref();
+        }
+    }
+
+    /// Who is left to collect the child: the link, until it is dropped, and
+    /// then the waiter thread.
+    ///
+    /// The one piece of state both touch. Collecting a child frees its process
+    /// id, and the link *signals* that id when it hangs up -- so the two must
+    /// never both think they may do it, or a hang-up could reach whatever
+    /// process was given the id next.
+    #[derive(Default)]
+    struct Collect {
+        /// The link has been dropped: nobody will ask `poll_exit` again.
+        link_gone: bool,
+        /// The waiter has seen the child finish (it is waitable, not yet
+        /// collected).
+        finished: bool,
+    }
 
     /// How long after the child is reaped its remaining output may still be
     /// arriving before the exit is announced anyway.
@@ -375,6 +428,10 @@ mod pty_link {
         reaped: Option<(Exit, Instant)>,
         reported: bool,
         hung_up: bool,
+        /// The waker the reader and the waiter wake, once there is one.
+        wake: WakeSlot,
+        /// Shared with the waiter thread: see [`Collect`].
+        collect: Arc<Mutex<Collect>>,
     }
 
     impl PtyLink {
@@ -416,15 +473,25 @@ mod pty_link {
             // flow control. Unbounded, a child printing without end would fill
             // this process's memory instead.
             let (from_child_tx, from_reader) = mpsc::sync_channel(READ_QUEUE_CHUNKS);
+            let wake_slot: WakeSlot = Arc::default();
+            let reader_wake = Arc::clone(&wake_slot);
             std::thread::Builder::new()
                 .name("terminal-pty-reader".into())
-                .spawn(move || read_child(reader, &from_child_tx))
+                .spawn(move || read_child(reader, &from_child_tx, &reader_wake))
                 .map_err(give_up)?;
 
             let (to_writer, to_child_rx) = mpsc::channel::<Vec<u8>>();
             std::thread::Builder::new()
                 .name("terminal-pty-writer".into())
                 .spawn(move || write_child(writer, &to_child_rx))
+                .map_err(give_up)?;
+
+            let collect: Arc<Mutex<Collect>> = Arc::default();
+            let (pid, waiter_wake, waiter_collect) =
+                (spawned.pid, Arc::clone(&wake_slot), Arc::clone(&collect));
+            std::thread::Builder::new()
+                .name("terminal-pty-waiter".into())
+                .spawn(move || wait_child(pid, &waiter_wake, &waiter_collect))
                 .map_err(give_up)?;
 
             Ok(Self {
@@ -436,13 +503,15 @@ mod pty_link {
                 reaped: None,
                 reported: false,
                 hung_up: false,
+                wake: wake_slot,
+                collect,
             })
         }
     }
 
     /// The reader thread: everything the child writes, until nothing holds
-    /// the slave.
-    fn read_child(mut master: File, out: &SyncSender<FromChild>) {
+    /// the slave -- waking the application after each chunk.
+    fn read_child(mut master: File, out: &SyncSender<FromChild>, wake_slot: &WakeSlot) {
         let mut buf = vec![0u8; 16 * 1024];
         loop {
             match master.read(&mut buf) {
@@ -455,6 +524,7 @@ mod pty_link {
                         // The emulator has dropped the link; nobody is reading.
                         return;
                     }
+                    wake(wake_slot);
                 }
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(_) => break,
@@ -463,6 +533,42 @@ mod pty_link {
         // The receiver may already be gone if the link was dropped while this
         // was reading, and then there is nobody left to tell.
         let _ = out.send(FromChild::Closed);
+        wake(wake_slot);
+    }
+
+    /// The waiter thread: notice the child finishing, and say so.
+    ///
+    /// A thread of its own because the end of the output is not the end of
+    /// the child -- a job the shell started in the background can hold the
+    /// terminal open long after the shell has exited -- and a terminal that is
+    /// woken rather than asking on a clock would otherwise never learn it.
+    ///
+    /// It does not collect the child: `wait_exited` leaves it waitable, so its
+    /// process id stays reserved until the link's `poll_exit` collects it, and
+    /// the link's hang-up can never signal an id that has been handed on. The
+    /// exception is a link that has already been dropped -- a closed pane --
+    /// which will never ask again; then this collects it, rather than leaving
+    /// a finished process behind for as long as the application runs.
+    fn wait_child(pid: i32, wake_slot: &WakeSlot, collect: &Mutex<Collect>) {
+        // An error is a child that cannot be waited for, which `poll_exit`
+        // will find out for itself and report; either way this is done.
+        let _ = libcall::pty::wait_exited(pid);
+        {
+            let mut state = collect
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.finished = true;
+            if state.link_gone {
+                // Nobody left to ask, and the id is still ours: collect it.
+                let _ = libcall::pty::try_wait(pid);
+                return;
+            }
+        }
+        wake(wake_slot);
+        // The exit is announced once the output side closes -- which wakes by
+        // itself -- or after `OUTPUT_GRACE`, which nothing else would wake for.
+        std::thread::sleep(OUTPUT_GRACE);
+        wake(wake_slot);
     }
 
     /// The writer thread: what the user typed, in order, for as long as the
@@ -553,6 +659,18 @@ mod pty_link {
             }
         }
 
+        fn set_waker(&mut self, waker: Waker) -> bool {
+            // Woken at once as well: whatever the child wrote before there was
+            // a waker to wake is waiting, and would otherwise wait for the
+            // child's next word.
+            waker.wake_by_ref();
+            *self
+                .wake
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(waker);
+            true
+        }
+
         fn hang_up(&mut self) {
             if self.hung_up {
                 return;
@@ -576,6 +694,18 @@ mod pty_link {
     impl Drop for PtyLink {
         fn drop(&mut self) {
             self.hang_up();
+            // From here the waiter collects the child; if it already found it
+            // finished, nobody will again, so it is collected here -- but only
+            // if `poll_exit` has not, because a second collection could take
+            // some other child that has since been given the same id.
+            let mut state = self
+                .collect
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.link_gone = true;
+            if state.finished && self.reaped.is_none() {
+                let _ = libcall::pty::try_wait(self.pid);
+            }
         }
     }
 
@@ -676,6 +806,54 @@ mod pty_link {
             }
         }
 
+        /// A waker given to the link is woken for output and for the exit,
+        /// with nobody asking in between -- including a shell that exits
+        /// while a job it started still holds the terminal open.
+        #[test]
+        fn the_link_wakes_for_output_and_for_an_exit_nothing_else_announces() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use std::task::Wake;
+
+            struct Count(AtomicUsize);
+            impl Wake for Count {
+                fn wake(self: Arc<Self>) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            let count = Arc::new(Count(AtomicUsize::new(0)));
+            let woken = |c: &Arc<Count>| c.0.load(Ordering::SeqCst);
+
+            let mut link = PtyLink::spawn(
+                SH,
+                &[c"sh", c"-c", c"sleep 0.2; echo hello; sleep 30 & exit 4"],
+                &[],
+                size(24, 80),
+            )
+            .unwrap();
+            assert!(link.set_waker(Waker::from(Arc::clone(&count))));
+            let at_start = woken(&count);
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while woken(&count) == at_start {
+                assert!(Instant::now() < deadline, "never woken for the output");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            receive_until(&mut link, "hello");
+            // The background `sleep` holds the slave, so the output never
+            // closes: only the waiter can say the shell has gone.
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let exit = loop {
+                let before = woken(&count);
+                if let Some(exit) = link.poll_exit() {
+                    break exit;
+                }
+                while woken(&count) == before {
+                    assert!(Instant::now() < deadline, "the exit woke nobody");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            };
+            assert_eq!(exit, Exit::Code(4));
+        }
+
         /// The exit is announced after the child's last output, not before.
         #[test]
         fn the_last_output_arrives_before_the_exit() {
@@ -737,6 +915,11 @@ pub mod script {
         pub exit: Option<Exit>,
         /// How many times the terminal hung up.
         pub hang_ups: usize,
+        /// The waker the terminal handed over, if it did.
+        pub waker: Option<std::task::Waker>,
+        /// Whether this link says it will wake the terminal. A test that sets
+        /// it wakes the terminal itself, through `waker`.
+        pub wakes: bool,
     }
 
     /// A [`Link`] over a shared [`Script`], which the test keeps a handle to.
@@ -779,6 +962,12 @@ pub mod script {
         fn hang_up(&mut self) {
             let mut s = self.0.borrow_mut();
             s.hang_ups = s.hang_ups.saturating_add(1);
+        }
+
+        fn set_waker(&mut self, waker: std::task::Waker) -> bool {
+            let mut s = self.0.borrow_mut();
+            s.waker = Some(waker);
+            s.wakes
         }
     }
 }

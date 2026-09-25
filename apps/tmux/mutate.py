@@ -53,7 +53,9 @@ MUTATIONS = [
     ),
     (
         "a shell that exits leaves its pane",
+        "            match pane.term.on_event(&Event::Tick { elapsed_ms }) {\n"
         "                Response::Exit => finished.push(pane.id),",
+        "            match pane.term.on_event(&Event::Tick { elapsed_ms }) {\n"
         "                Response::Exit => {}",
         ["a_shell_that_exits_takes_its_pane_with_it", "the_last_shell_to_exit_closes_the_window"],
     ),
@@ -303,6 +305,31 @@ MUTATIONS = [
         '                "Closing this window ends every session.".to_string(),',
         '                "Use :attach or tmux attach to reconnect".to_string(),',
         ["the_detached_screen_says_what_runs_on_and_how_to_return"],
+    ),
+    # -- woken by the shells (2026-09-25) --
+    (
+        "a new pane's shell cannot wake the window",
+        "            // Before its shell starts, so the link is woken for its first word.\n            App::attach_waker(&mut pane.term, waker.clone());",
+        "",
+        ["every_pane_is_woken_by_its_shell_and_none_is_asked_on_a_clock"],
+    ),
+    (
+        "the panes already open are not given the waker",
+        "        for pane in &mut self.panes {\n            App::attach_waker(&mut pane.term, waker.clone());\n        }",
+        "",
+        ["every_pane_is_woken_by_its_shell_and_none_is_asked_on_a_clock"],
+    ),
+    (
+        "a wake reads no shell",
+        "            match App::on_wake(&mut pane.term) {",
+        "            match Response::Idle {",
+        ["a_wake_reads_every_shell_and_closes_a_pane_whose_shell_is_done"],
+    ),
+    (
+        "a shell done on a wake leaves its pane",
+        "            match App::on_wake(&mut pane.term) {\n                Response::Exit => finished.push(pane.id),",
+        "            match App::on_wake(&mut pane.term) {\n                Response::Exit => {}",
+        ["a_wake_reads_every_shell_and_closes_a_pane_whose_shell_is_done"],
     ),
 ]
 

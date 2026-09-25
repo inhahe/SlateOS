@@ -68,6 +68,7 @@
 //! things a point belongs to, and that comparison is only meaningful while they
 //! are all in one space.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -341,6 +342,11 @@ pub struct ShellSession<T: Transport> {
     /// was corrupt would be a worse outcome than a plain background. See
     /// [`wallpaper_error`](Self::wallpaper_error).
     wallpaper_error: Option<String>,
+    /// The "could not be saved" report last posted for each thing saved, so
+    /// a save that keeps failing the same way says so once rather than once
+    /// per change -- and two that are both failing do not take turns
+    /// reposting each other's news. See [`report_save`](Self::report_save).
+    save_errors: BTreeMap<&'static str, String>,
     /// The picture uploaded to the greeter's surface, and which file it is.
     ///
     /// Separate from `wallpaper_image` even when they name the same file,
@@ -589,6 +595,7 @@ impl<T: Transport> ShellSession<T> {
             rotation_loaded: None,
             wallpaper_image: None,
             wallpaper_error: None,
+            save_errors: BTreeMap::new(),
             login_image: None,
             login_image_next: 1,
             login_background_error: None,
@@ -978,19 +985,6 @@ impl<T: Transport> ShellSession<T> {
         self.wallpaper_error.as_deref()
     }
 
-    /// Make sure the compositor holds the pixels that the background surface's
-    /// `Image` command is about to name.
-    ///
-    /// [`WallpaperManager`] performs no I/O by design — that is what keeps its
-    /// tests runnable with no filesystem — so it allocates an image id and
-    /// emits a command naming it, and something else has to put bytes under
-    /// that id. This is that something else, and it lives here rather than in
-    /// the manager because this is the layer that owns the connection.
-    ///
-    /// Called on every `paint_background` and almost always does nothing: the
-    /// `(id, path)` pair it remembers is unchanged, so there is no read, no
-    /// decode and no upload. It does work exactly when the wallpaper actually
-    /// changed, which is what the id was allocated to signal.
     /// Record why the wallpaper could not be shown — and tell the user.
     ///
     /// The single writer of `wallpaper_error`. It exists because the field had
@@ -1047,6 +1041,19 @@ impl<T: Transport> ShellSession<T> {
         self.wallpaper_error = why;
     }
 
+    /// Make sure the compositor holds the pixels that the background surface's
+    /// `Image` command is about to name.
+    ///
+    /// [`WallpaperManager`] performs no I/O by design — that is what keeps its
+    /// tests runnable with no filesystem — so it allocates an image id and
+    /// emits a command naming it, and something else has to put bytes under
+    /// that id. This is that something else, and it lives here rather than in
+    /// the manager because this is the layer that owns the connection.
+    ///
+    /// Called on every `paint_background` and almost always does nothing: the
+    /// `(id, path)` pair it remembers is unchanged, so there is no read, no
+    /// decode and no upload. It does work exactly when the wallpaper actually
+    /// changed, which is what the id was allocated to signal.
     fn refresh_wallpaper_image(&mut self) -> Result<(), Error<T>> {
         let id = self.wallpaper.current_image_id();
         let want = self.wallpaper.current_image_path().map(Path::to_path_buf);
@@ -1669,13 +1676,59 @@ impl<T: Transport> ShellSession<T> {
     /// person adds, moves or removes a widget, which is rare and always the
     /// result of an event this session already handled.
     fn save_widgets(&mut self) {
-        if let Err(err) = self.shell.save_widgets() {
-            // Not fatal: a desktop whose layout cannot be written is still a
-            // working desktop, and refusing to run would be a worse answer than
-            // forgetting where a clock was. Reported, because silently losing a
-            // user's arrangement every time is a bug they cannot see.
-            self.set_wallpaper_error(Some(format!("widget layout not saved: {err}")));
+        let saved = self.shell.save_widgets();
+        self.report_save("The widget layout", saved);
+    }
+
+    /// Tell the user that `what` could not be written -- once per distinct
+    /// failure, and forgotten when a save of the same thing works again, so
+    /// the next failure is news.
+    ///
+    /// Not fatal: a desktop whose layout cannot be written is still a working
+    /// desktop, and refusing to run would be a worse answer than forgetting
+    /// where a clock was. Reported, because silently losing a user's
+    /// arrangement every time is a bug they cannot see. The pane is not
+    /// opened, for the reason [`set_wallpaper_error`](Self::set_wallpaper_error)
+    /// gives: this is a thing to explain, not an emergency.
+    ///
+    /// Its own notification. Until 2026-09-25 a failed widget save went through
+    /// `set_wallpaper_error`, which posted it under the title "Wallpaper could
+    /// not be shown" and left [`wallpaper_error`](Self::wallpaper_error) naming
+    /// something that had nothing to do with the wallpaper -- until the next
+    /// wallpaper that loaded cleared it, after which the same failure was
+    /// news again on every change.
+    fn report_save(&mut self, what: &'static str, saved: std::io::Result<()>) {
+        let err = match saved {
+            Ok(()) => {
+                self.save_errors.remove(what);
+                return;
+            }
+            Err(err) => err,
+        };
+        let message = format!("{what} could not be written: {err}");
+        if self.save_errors.get(what) == Some(&message) {
+            return;
         }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // The id is discarded: this is a message, not something to update.
+        let _ = self.shell.notify(notif_pane::Notification {
+            id: 0,
+            app_name: "Desktop".to_owned(),
+            title: "Desktop layout not saved".to_owned(),
+            body: message.clone(),
+            timestamp: now,
+            priority: notif_pane::NotifPriority::Normal,
+            read: false,
+            action: None,
+            // Left to `notify`, which knows whether focus assist is silencing
+            // "Desktop" right now.
+            silent: false,
+        });
+        self.dirty = true;
+        self.save_errors.insert(what, message);
     }
 
     /// Push the shell's animation speed into the manager that obeys it.

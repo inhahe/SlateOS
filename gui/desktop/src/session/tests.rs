@@ -4284,3 +4284,56 @@ fn an_exclusion_pattern_removes_a_picture_from_the_rotation() {
         "the wrong pictures survived the filter"
     );
 }
+
+/// **A widget layout that cannot be saved says so -- once, and under its own
+/// name.** It used to be posted as "Wallpaper could not be shown", and it left
+/// `wallpaper_error` naming a failure that had nothing to do with the
+/// wallpaper -- until a wallpaper that loaded cleared it, after which the same
+/// failure was news again on every change.
+#[test]
+fn a_widget_layout_that_cannot_be_saved_says_so_once_and_not_as_the_wallpaper() {
+    settingsfile::testing::with_scratch_config("session-widget-save-fails", |root| {
+        // A file where the configuration directory should be: every save
+        // fails, the way it would on a full or read-only disk. Before the
+        // session starts, so nothing it does at start-up can have made the
+        // directory first.
+        std::fs::write(root.join("slateos"), b"not a directory")
+            .expect("the scratch root is writable");
+        let (mut session, _desktop, _turn) = session();
+        let reports = |session: &Session| -> Vec<String> {
+            session
+                .shell()
+                .notifications
+                .notifications()
+                .iter()
+                .filter(|n| n.title == "Desktop layout not saved")
+                .map(|n| n.body.clone())
+                .collect()
+        };
+        assert!(reports(&session).is_empty());
+
+        for _ in 0..3 {
+            assert!(
+                session
+                    .shell_mut()
+                    .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK)
+            );
+            session.pump().expect("a failed save is not a failed pump");
+        }
+        let posted = reports(&session);
+        assert_eq!(
+            posted.len(),
+            1,
+            "one failure, one report, not one per change: {posted:?}"
+        );
+        assert!(
+            posted[0].starts_with("The widget layout could not be written"),
+            "{posted:?}"
+        );
+        assert_eq!(
+            session.wallpaper_error(),
+            None,
+            "a layout that was not saved is not a wallpaper that was not shown"
+        );
+    });
+}

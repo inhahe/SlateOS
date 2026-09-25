@@ -1,6 +1,8 @@
 # a -> b: ctest-pty exit 45 is a race in the fixture — the pty works
 
-**Status:** ✅ answered 2026-09-24 by lane D (`services/` is lane D's since the six-lane split) — not a race: the fixture's readiness handshake predates this request, and the defect is that the kernel turns `^C` into `SIGINT` only at read time. Filed back as `requests/d-a-ctrl-c-becomes-a-signal-only-when-someone-reads-the-terminal.md`; the fixture's bounds are fixed.
+**Status:** ✅ withdrawn 2026-09-24 by lane A — **the diagnosis below is wrong, and the fixture was right.** The pty was not fine: the kernel only turned a `^C` into `SIGINT` when something *read* the slave, and this fixture's child correctly never reads after announcing readiness — it waits for the signal, as a busy program would. The line discipline now runs in the master's write, so the signal is raised the moment the parent writes it. Nothing is needed from lane B (or lane D, which owns `services/` since the six-lane split). Full write-up: `known-issues.md` → `A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER`.
+
+**Lane D, 2026-09-24:** reached the same diagnosis independently -- the kernel raised `SIGINT` for a `^C` only when something read the slave -- and filed it back as `requests/d-a-ctrl-c-becomes-a-signal-only-when-someone-reads-the-terminal.md`, which lane A's fix above answers. The fixture's own wait bounds were tightened meanwhile (`services/ctest-pty/main.c`, `SIGNAL_SPIN`/`REAP_SPIN`); its logic was right and is unchanged.
 
 **Filed:** 2026-09-16 · **From:** lane A · **To:** lane B
 · **Severity:** medium — the rung cannot pass as written, and it is not testing what it claims

@@ -156,7 +156,7 @@ run_case '' A
 # A name holding `=` is never found -- even `B=x`, whose entry is `B=x=y`.
 run_case B=x
 run_case A=1
-run_case =
+run_case '='
 # Exact, not a prefix, in either direction.
 ENVV='AB=1'; run_case A
 ENVV='A=1'; run_case AB

@@ -381,6 +381,20 @@ pub struct Recording {
     /// watchdog that turns a frame never shown into a failed assertion rather
     /// than a hung test.
     pub close_at: Option<Instant>,
+    /// Close the display the moment the loop has nothing left to wait for:
+    /// its script is spent and it is about to wait with no deadline at all.
+    ///
+    /// For a test that feeds a burst of input and wants to see everything the
+    /// loop does about it, however long a loaded machine takes to do it. No
+    /// count of ticks or frames has to be guessed, and no timer has to be
+    /// short enough to keep the test quick yet long enough never to fire
+    /// early. While this is set, [`Self::close_at`] is still honoured but is
+    /// not offered to the loop as a deadline, since a watchdog is not work.
+    pub close_when_idle: bool,
+    /// Close the display once another thread sets this — the way a test ends
+    /// a loop it is not driving. The loop notices the next time it wakes, so
+    /// the test must also give it a reason to: hang up a client, say.
+    pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// What [`Present::monitors`] answers, if this recorder is standing in for a
     /// display that has monitors at all.
     ///
@@ -408,6 +422,8 @@ impl Recording {
             close_after: None,
             close_once_shown: None,
             close_at: None,
+            close_when_idle: false,
+            stop: None,
             monitors: None,
         }
     }
@@ -514,6 +530,10 @@ impl Present for Recording {
             && self.close_after.is_none_or(|limit| self.ticks < limit)
             && self.close_once_shown.is_none_or(|limit| self.shown < limit)
             && self.close_at.is_none_or(|at| Instant::now() < at)
+            && self
+                .stop
+                .as_ref()
+                .is_none_or(|stop| !stop.load(std::sync::atomic::Ordering::Acquire))
     }
 
     fn monitors(&mut self) -> Option<Vec<MonitorInfo>> {
@@ -530,7 +550,24 @@ impl Present for Recording {
         if !self.script.is_empty() || self.close_after.is_some() {
             return Some(Instant::now());
         }
+        if self.close_when_idle {
+            // The watchdog is still checked by `is_open` whenever the loop
+            // wakes; offering it as a deadline would stop the loop ever being
+            // idle, which is the moment this recording is waiting for.
+            return None;
+        }
         self.close_at
+    }
+
+    /// Closes instead of waiting when [`Self::close_when_idle`] is set and
+    /// the loop has no deadline at all; otherwise waits as any display with
+    /// no input of its own does.
+    fn wait(&mut self, set: &mut WaitSet, timeout: Option<Duration>) -> io::Result<()> {
+        if self.close_when_idle && timeout.is_none() {
+            self.open = false;
+            return Ok(());
+        }
+        set.wait(timeout).map(drop)
     }
 }
 
@@ -1112,5 +1149,38 @@ mod tests {
         assert_eq!(rec.deadline(), Some(at), "it wakes the loop to be closed");
         std::thread::sleep(Duration::from_millis(25));
         assert!(!rec.is_open(), "the watchdog fired");
+    }
+
+    #[test]
+    fn a_recording_closed_when_idle_closes_instead_of_waiting_for_ever() {
+        let mut rec = Recording::new();
+        rec.close_when_idle = true;
+        rec.close_at = Some(Instant::now() + Duration::from_hours(1));
+        assert_eq!(
+            rec.deadline(),
+            None,
+            "its watchdog is not work the loop should wake for"
+        );
+        let mut set = guiremote::WaitSet::new();
+        // A bounded wait is still a wait...
+        rec.wait(&mut set, Some(Duration::from_millis(1))).unwrap();
+        assert!(rec.is_open());
+        // ...and an unbounded one is the end of the session.
+        rec.wait(&mut set, None).unwrap();
+        assert!(!rec.is_open());
+    }
+
+    #[test]
+    fn a_recording_can_be_stopped_from_another_thread() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut rec = Recording::new();
+        rec.stop = Some(Arc::clone(&stop));
+        assert!(rec.is_open());
+        std::thread::spawn(move || stop.store(true, Ordering::Release))
+            .join()
+            .unwrap();
+        assert!(!rec.is_open());
     }
 }

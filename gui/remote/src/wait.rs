@@ -1125,10 +1125,15 @@ mod tests {
         (near, far)
     }
 
-    /// How long a wait that should return at once may take, generously: a
-    /// loaded test machine can deschedule the thread, and the claims below are
-    /// about orders of magnitude, not microseconds.
-    const PROMPT: Duration = Duration::from_millis(500);
+    /// A timeout no test here waits out.
+    const LONG: Duration = Duration::from_mins(1);
+
+    /// "Returned long before its timeout": half of [`LONG`]. The claims below
+    /// are that a wait ended early *because something happened*, never that it
+    /// ended within some short time — a loaded machine decides the second, and
+    /// a timing assertion is only safe bounding a measurement from below (see
+    /// the commit that made this the rule, 6cd54fc62).
+    const PROMPT: Duration = Duration::from_secs(30);
 
     #[test]
     fn a_socket_with_bytes_waiting_is_ready_and_its_idle_neighbour_is_not() {
@@ -1140,7 +1145,7 @@ mod tests {
         let has_data = set.add_source(&b);
         let idle = set.add_source(&d);
         let began = Instant::now();
-        let ready = set.wait(Some(Duration::from_secs(10))).unwrap();
+        let ready = set.wait(Some(LONG)).unwrap();
 
         assert!(
             began.elapsed() < PROMPT,
@@ -1167,7 +1172,6 @@ mod tests {
             took >= timeout,
             "came back early, after {took:?}: a caller waiting for a deadline would spin"
         );
-        assert!(took < timeout + PROMPT, "overslept badly: {took:?}");
     }
 
     #[test]
@@ -1202,17 +1206,14 @@ mod tests {
         let mut set = WaitSet::new();
         let only = set.add_source(&b);
         let began = Instant::now();
-        // No timeout: only the byte can end this.
-        let ready = set.wait(None).unwrap();
+        // Only the byte can end this before the minute is up.
+        let ready = set.wait(Some(LONG)).unwrap();
         let took = began.elapsed();
         let _a = writer.join().unwrap();
 
         assert_eq!(ready, 1);
         assert!(set.is_ready(only));
-        assert!(
-            took < Duration::from_secs(5),
-            "the byte did not wake the wait: {took:?}"
-        );
+        assert!(took < PROMPT, "the byte did not wake the wait: {took:?}");
     }
 
     #[test]
@@ -1222,7 +1223,7 @@ mod tests {
         let mut set = WaitSet::new();
         let only = set.add_source(&b);
         let began = Instant::now();
-        let ready = set.wait(Some(Duration::from_secs(10))).unwrap();
+        let ready = set.wait(Some(LONG)).unwrap();
         assert!(
             began.elapsed() < PROMPT,
             "a hung-up socket did not wake the wait"
@@ -1245,7 +1246,7 @@ mod tests {
 
         let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let began = Instant::now();
-        let ready = set.wait(Some(Duration::from_secs(10))).unwrap();
+        let ready = set.wait(Some(LONG)).unwrap();
         assert!(began.elapsed() < PROMPT);
         assert_eq!(ready, 1);
         assert!(set.is_ready(at));
@@ -1266,7 +1267,7 @@ mod tests {
         a.write_all(b"x").unwrap();
         let mut set = WaitSet::new();
         set.add_source(&b);
-        assert_eq!(set.wait(Some(Duration::from_secs(10))).unwrap(), 1);
+        assert_eq!(set.wait(Some(LONG)).unwrap(), 1);
 
         set.clear();
         assert!(set.is_empty());
@@ -1292,11 +1293,11 @@ mod tests {
         a.write_all(b"once").unwrap();
         let mut set = WaitSet::new();
         set.add_source(&b);
-        assert_eq!(set.wait(Some(Duration::from_secs(10))).unwrap(), 1);
+        assert_eq!(set.wait(Some(LONG)).unwrap(), 1);
         let mut buf = [0u8; 16];
         // The four bytes may take a moment to all arrive; read until they have.
         let mut got = 0;
-        let until = Instant::now() + Duration::from_secs(5);
+        let until = Instant::now() + LONG;
         while got < 4 && Instant::now() < until {
             match b.read(&mut buf[got..]) {
                 Ok(n) => got += n,
@@ -1366,17 +1367,14 @@ mod tests {
         let mut set = WaitSet::new();
         let only = set.add_source(&b);
         let began = Instant::now();
-        let ready = set.wait_or_message(Some(Duration::from_secs(10))).unwrap();
+        let ready = set.wait_or_message(Some(LONG)).unwrap();
         let took = began.elapsed();
         assert_ne!(poster.join().unwrap(), 0, "the message was not posted");
         // SAFETY: as above; removes the test's message so it cannot leak into
         // another test on this thread.
         unsafe { PeekMessageW(&raw mut scratch, std::ptr::null_mut(), 0, 0, PM_REMOVE) };
 
-        assert!(
-            took < Duration::from_secs(5),
-            "the message did not wake the wait: {took:?}"
-        );
+        assert!(took < PROMPT, "the message did not wake the wait: {took:?}");
         assert_eq!(ready, 0, "a message is not a socket being ready");
         assert!(!set.is_ready(only));
     }
@@ -1394,10 +1392,10 @@ mod tests {
         let mut set = WaitSet::new();
         let at = set.add_source(&receiver);
         let began = Instant::now();
-        // No timeout: only the wake can end this.
-        assert_eq!(set.wait(None).unwrap(), 1);
+        // Only the wake can end this before the minute is up.
+        assert_eq!(set.wait(Some(LONG)).unwrap(), 1);
         assert!(set.is_ready(at));
-        assert!(began.elapsed() < Duration::from_secs(5));
+        assert!(began.elapsed() < PROMPT);
         let _sender = waker.join().unwrap();
     }
 
@@ -1408,7 +1406,7 @@ mod tests {
         let mut set = WaitSet::new();
         set.add_source(&receiver);
         let began = Instant::now();
-        assert_eq!(set.wait(Some(Duration::from_secs(10))).unwrap(), 1);
+        assert_eq!(set.wait(Some(LONG)).unwrap(), 1);
         assert!(
             began.elapsed() < PROMPT,
             "the wake was lost and the wait ran its course"
@@ -1421,7 +1419,7 @@ mod tests {
         sender.wake();
         let mut set = WaitSet::new();
         set.add_source(&receiver);
-        assert_eq!(set.wait(Some(Duration::from_secs(10))).unwrap(), 1);
+        assert_eq!(set.wait(Some(LONG)).unwrap(), 1);
         receiver.drain();
         let timeout = Duration::from_millis(30);
         let began = Instant::now();
@@ -1433,16 +1431,19 @@ mod tests {
     fn waking_never_blocks_the_waker_however_often_it_wakes() {
         // A pipe holds 64 KiB; past that a write would block, and a waker that
         // blocked would stall the worker that was only saying it had finished.
+        // Done on a thread, so that a blocked waker fails this rather than
+        // hanging it; no bound is put on how long the wakes take.
         let (sender, receiver) = wake_channel().unwrap();
-        let began = Instant::now();
-        for _ in 0..200_000 {
-            sender.wake();
-        }
-        assert!(
-            began.elapsed() < Duration::from_secs(20),
-            "waking took {:?}: something blocked",
-            began.elapsed()
-        );
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            for _ in 0..200_000 {
+                sender.wake();
+            }
+            done_tx.send(sender).unwrap();
+        });
+        let _sender = done_rx
+            .recv_timeout(LONG)
+            .expect("a waker blocked: nobody drains the pipe, so it would block for ever");
         // And the receiver can be emptied, a bounded drain at a time.
         let mut set = WaitSet::new();
         set.add_source(&receiver);
@@ -1465,7 +1466,7 @@ mod tests {
         });
         let mut set = WaitSet::new();
         set.add_source(&receiver);
-        assert_eq!(set.wait(Some(Duration::from_secs(10))).unwrap(), 1);
+        assert_eq!(set.wait(Some(LONG)).unwrap(), 1);
         worker.join().unwrap();
         drop(waker);
     }

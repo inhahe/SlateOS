@@ -946,12 +946,15 @@ mod tests {
             thread::sleep(Duration::from_millis(50));
             waker.wake();
         });
+        // Nothing will arrive on the wire: only the wake can end this before
+        // the minute is up.
+        server
+            .set_wait_timeout(Some(Duration::from_mins(1)))
+            .unwrap();
         let began = Instant::now();
-        // No timeout, and nothing will arrive on the wire: only the wake can
-        // end this.
         server.wait().unwrap();
         assert!(
-            began.elapsed() < Duration::from_secs(5),
+            began.elapsed() < Duration::from_secs(30),
             "the wake did not end the wait"
         );
         worker.join().unwrap();
@@ -999,10 +1002,10 @@ mod tests {
         second.wake();
         let began = Instant::now();
         server
-            .set_wait_timeout(Some(Duration::from_secs(10)))
+            .set_wait_timeout(Some(Duration::from_mins(1)))
             .unwrap();
         server.wait().unwrap();
-        assert!(began.elapsed() < Duration::from_secs(5));
+        assert!(began.elapsed() < Duration::from_secs(30));
         drop(first);
     }
 

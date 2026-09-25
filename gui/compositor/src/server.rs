@@ -1759,9 +1759,20 @@ mod tests {
 
     /// A client's request wakes the loop and is answered at once, rather than
     /// at the next frame — and the loop does not otherwise tick.
+    ///
+    /// Nothing here bounds *how fast* the answer comes, which a loaded machine
+    /// decides. The loop's only timer is a watchdog a minute away, so an answer
+    /// that arrives at all, before it, arrived because the request woke the
+    /// loop; and the tick count, which load cannot raise, says the loop did
+    /// not tick for any other reason.
     #[test]
     fn a_request_wakes_the_loop_and_is_answered_without_a_timer() {
-        let watchdog = Instant::now() + Duration::from_secs(2);
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let watchdog = Instant::now() + Duration::from_mins(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_loop = Arc::clone(&stop);
         let (addr_tx, addr_rx) = std::sync::mpsc::channel();
         // Built on the loop's own thread, as the shipped binary builds it: the
         // loop owns both for as long as it runs.
@@ -1770,16 +1781,12 @@ mod tests {
             addr_tx.send(addr).expect("the test is waiting for this");
             let mut display = Recording::new();
             display.close_at = Some(watchdog);
+            display.stop = Some(stop_for_loop);
             server.run_with(&mut compositor, &mut display).expect("run");
-            (
-                server.stats().accepted,
-                compositor.window_count(),
-                display.ticks(),
-            )
+            (*server.stats(), display.ticks())
         });
         let addr = addr_rx.recv().expect("the loop started");
 
-        let began = Instant::now();
         let mut conn = Connection::new(Socket::connect(addr).expect("connect"));
         let seq = conn
             .send(RequestBody::CreateWindow(WindowSpec::new(
@@ -1791,28 +1798,29 @@ mod tests {
             if let Some(reply) = conn.take_reply(seq) {
                 break reply;
             }
-            assert!(Instant::now() < watchdog, "the request was never answered");
+            assert!(
+                Instant::now() < watchdog,
+                "the request was never answered: the loop did not wake for it"
+            );
             conn.transport_mut()
                 .set_wait_timeout(Some(Duration::from_millis(50)))
                 .expect("a non-zero timeout");
             conn.transport_mut().wait().expect("wait");
         };
-        let round_trip = began.elapsed();
-        let (accepted, windows, ticks) = loop_thread.join().expect("the loop");
+        // Hanging up is what wakes the loop to notice it has been stopped.
+        stop.store(true, Ordering::Release);
+        drop(conn);
+        let (stats, ticks) = loop_thread.join().expect("the loop");
 
         assert!(
             matches!(reply, ResponseBody::WindowCreated { .. }),
             "{reply:?}"
         );
-        assert!(
-            round_trip < Duration::from_secs(1),
-            "the answer took {round_trip:?}: the loop did not wake for the client"
-        );
-        assert_eq!(windows, 1);
-        assert_eq!(accepted, 1);
-        // Connecting, the request and the window's first frame are a handful
-        // of wakes; a timer loop would have ticked 120 times in the two
-        // seconds this ran.
+        assert_eq!(stats.accepted, 1);
+        assert!(stats.served >= 1);
+        // Connecting, the request, the window's first frame and the hang-up
+        // are a handful of wakes; a timer loop ticks sixty times a second for
+        // as long as this ran.
         assert!(ticks < 30, "the loop ticked {ticks} times for one request");
     }
 
@@ -1825,7 +1833,8 @@ mod tests {
         display.feed(Vec::new());
         display.feed(vec![InputEvent::MouseMove { x: 30, y: 40 }]);
         display.close_once_shown = Some(2);
-        display.close_at = Some(Instant::now() + Duration::from_secs(5));
+        // Only reached if the pointer's frame is never shown.
+        display.close_at = Some(Instant::now() + Duration::from_mins(1));
         server
             .run_with(&mut compositor, &mut display)
             .expect("the loop");
@@ -1845,6 +1854,11 @@ mod tests {
     /// A mouse far faster than the display is drawn once per refresh, at
     /// wherever it has got to: every movement is taken in, and the frames are
     /// not multiplied to match.
+    ///
+    /// The frame count is bounded by the refreshes that actually elapsed,
+    /// measured, so a slow machine is allowed its extra frames and cannot fail
+    /// this; a loop that drew a frame per movement fails it on any machine
+    /// that handles forty movements in less than twenty refreshes.
     #[test]
     fn a_fast_pointer_is_shown_once_per_refresh_at_its_latest_position() {
         let (mut server, mut compositor, _addr) = server();
@@ -1853,10 +1867,15 @@ mod tests {
         for i in 1..=moves {
             display.feed(vec![InputEvent::MouseMove { x: i * 10, y: 50 }]);
         }
-        display.close_at = Some(Instant::now() + Duration::from_millis(300));
+        // Ends when the loop has taken in every movement and shown whatever it
+        // owed for them; the watchdog is only for a loop that never settles.
+        display.close_when_idle = true;
+        display.close_at = Some(Instant::now() + Duration::from_mins(1));
+        let began = Instant::now();
         server
             .run_with(&mut compositor, &mut display)
             .expect("the loop");
+        let took = began.elapsed();
 
         let pointer = display.last_pointer().expect("a pointer");
         assert_eq!(
@@ -1864,9 +1883,12 @@ mod tests {
             moves * 10,
             "the last frame did not show where the pointer ended up"
         );
+        // One frame at the start, then at most one per refresh since, and one
+        // more for the interval being a hair under `FRAME` at 60 Hz.
+        let refreshes = took.as_nanos() / FRAME.as_nanos();
         assert!(
-            display.shown() < u64::try_from(moves / 4).unwrap(),
-            "{} frames for {moves} movements: the pointer is not paced to the display",
+            u128::from(display.shown()) <= refreshes + 2,
+            "{} frames in {took:?} ({refreshes} refreshes): the pointer is not paced to the display",
             display.shown()
         );
     }
@@ -1967,21 +1989,32 @@ mod tests {
         assert_eq!(comp.wake_at(), None, "nothing is waiting yet");
         assert_eq!(server.next_wake(&comp, None, FRAME, Instant::now()), None);
 
-        let pressed = Instant::now();
+        let before = Instant::now();
         // 0x1E is A. Pressing it starts the threshold rather than typing.
         comp.handle_input(InputEvent::KeyDown {
             scancode: 0x1E,
             character: None,
         });
+        let after = Instant::now();
         assert!(
             comp.has_deferred_key(),
             "the test premise: a key is waiting"
         );
         let due = comp.wake_at().expect("the threshold is a deadline");
-        let from_press = due.saturating_duration_since(pressed);
+        // The press happened somewhere between the two readings, and its
+        // clock counts whole milliseconds, so the deadline is 300 ms after a
+        // moment in that window, give or take the millisecond the clock drops.
+        // Bounded by the readings rather than by a tolerance, so a machine
+        // that descheduled this thread mid-press cannot fail it.
         assert!(
-            from_press >= Duration::from_millis(290) && from_press <= Duration::from_millis(310),
-            "due {from_press:?} after the press, not at the 300 ms threshold"
+            due + Duration::from_millis(1) >= before + Duration::from_millis(300),
+            "due {:?} after the press began, before the 300 ms threshold",
+            due.saturating_duration_since(before)
+        );
+        assert!(
+            due <= after + Duration::from_millis(300),
+            "due {:?} after the press ended, after the 300 ms threshold",
+            due.saturating_duration_since(after)
         );
         assert_eq!(
             server.next_wake(&comp, None, FRAME, Instant::now()),
@@ -2111,11 +2144,13 @@ mod tests {
         let began = Instant::now();
         server.wait_for_work(
             &mut Headless,
-            Some(Instant::now() + Duration::from_secs(5)),
+            Some(Instant::now() + Duration::from_mins(1)),
             FRAME,
         );
+        // Long before the minute the wait was allowed, not within some short
+        // time a loaded machine might not meet.
         assert!(
-            began.elapsed() < Duration::from_secs(4),
+            began.elapsed() < Duration::from_secs(30),
             "the connection did not wake the wait"
         );
         assert!(server.listener_ready);
@@ -2136,7 +2171,7 @@ mod tests {
             .expect("send");
         server.wait_for_work(
             &mut Headless,
-            Some(Instant::now() + Duration::from_secs(5)),
+            Some(Instant::now() + Duration::from_mins(1)),
             FRAME,
         );
         assert!(

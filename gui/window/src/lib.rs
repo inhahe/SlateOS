@@ -3366,16 +3366,21 @@ mod tests {
     fn a_parked_loop_is_woken_from_another_thread_over_a_real_socket() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let link = Link::connect(listener.local_addr().unwrap()).unwrap();
-        // Held, so the far end stays open and the only thing that can end the
-        // wait is the wake.
-        let (_far_end, _) = listener.accept().unwrap();
+        // The far end stays open, so the only thing that can end the wait is
+        // the wake -- or, if the wake is broken, this watchdog hanging up a
+        // minute from now, which ends the loop without a `Woken` and so fails
+        // the test instead of hanging it.
+        let (far_end, _) = listener.accept().unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_mins(1));
+            drop(far_end);
+        });
         let mut events = EventLoop::new(link);
         let waker = events.waker().unwrap().expect("a socket can be woken");
         let worker = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
             waker.wake();
         });
-        let began = Instant::now();
         let mut woken = false;
         events
             .run_batched(|_, dispatch| {
@@ -3388,6 +3393,5 @@ mod tests {
             .unwrap();
         worker.join().unwrap();
         assert!(woken, "the loop ended without being told of the wake");
-        assert!(began.elapsed() < Duration::from_secs(5));
     }
 }

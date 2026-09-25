@@ -368,23 +368,31 @@ fn self_test_inner() {
     set_connectivity(ConnectivityStatus::Connected).expect("restore");
     crate::serial_println!("  [7/10] set connectivity: OK");
 
-    // 8: List results.
+    // 8: The refusals recorded nothing.
+    //
+    // Steps 8-10 used to assert four stored results and ping/trace/lookup
+    // counts of 2/1/1 -- the invented answers' bookkeeping. When the three
+    // diagnostics began refusing (2026-09-21) step 5b was added to assert the
+    // opposite and these three were left as they were, so the suite asserted
+    // both "nothing was counted" and "four results were counted": the first
+    // boot to reach it would have panicked on `assert_eq!(0, 4)`. None did --
+    // the two boots after the change stopped earlier -- which is how it
+    // survived four days.
     let results = list_results(10);
-    assert_eq!(results.len(), 4); // ping×2 + trace + dns
-    crate::serial_println!("  [8/10] list results: OK");
+    assert!(results.is_empty(), "a refused diagnostic stored a result");
+    crate::serial_println!("  [8/10] refusals stored no results: OK");
 
-    // 9: Get specific result.
-    let first_id = results[0].id;
-    let r = get_result(first_id).expect("get");
-    assert_eq!(r.id, first_id);
-    crate::serial_println!("  [9/10] get result: OK");
+    // 9: Looking up a result that was never stored is refused, not invented.
+    assert!(matches!(get_result(1), Err(KernelError::NotFound)));
+    crate::serial_println!("  [9/10] get_result of a missing id is NotFound: OK");
 
-    // 10: Stats.
+    // 10: Stats count only what happened: no results and no diagnostics, but
+    // the connectivity calls above did go through the table.
     let (count, pings, traces, lookups, ops) = stats();
-    assert_eq!(count, 4);
-    assert_eq!(pings, 2);
-    assert_eq!(traces, 1);
-    assert_eq!(lookups, 1);
+    assert_eq!(count, 0);
+    assert_eq!(pings, 0);
+    assert_eq!(traces, 0);
+    assert_eq!(lookups, 0);
     assert!(ops > 0);
     crate::serial_println!("  [10/10] stats: OK");
 

@@ -160043,6 +160043,23 @@ points -- as a new file named for the moment, never over another, and opens
 it. 129 tests; `apps/soundrecorder/mutate.py` has 27 rows. The missing sound
 path for applications is its own entry below. Seventeen examined; four to go.
 
+**`apps/metronome`, 2026-09-25 -- a silent metronome that never said so.** It
+cannot make a sound (no application can, the [E] entry below) and drew nothing
+to say it, so a user who started it and heard nothing would look for a muted
+speaker. Nothing answered the pointer: not the tempo, not the beats, not the
+practice settings. Practice mode always began at 80 BPM -- `practice_start_bpm`
+had no writer -- under a panel whose other values could be changed, and its
+keys worked only once practice mode was already on. The beats were accented
+with the digits, so beats ten to twelve of a 12/8 measure could not be. Now:
+the window says the beat is shown, not heard; every control answers the
+pointer (tempo steps of one and ten, the wheel over the tempo, tap and forget,
+time signature, subdivision, a press on any beat to accent it, start, reset,
+practice, settings); the practice settings are rows -- practice itself, the
+start tempo, the target, the step, the measures -- that Up and Down walk and
+Left and Right change, set before practice starts, with a start above the
+target pulling it up; and F1 or `?` lists every key. 82 tests;
+`apps/metronome/mutate.py` has 15 rows. Eighteen examined; three to go.
+
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 
 **In short:** a `cargo test --workspace` failed with exactly one failing test,

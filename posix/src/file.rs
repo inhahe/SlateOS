@@ -6880,23 +6880,27 @@ pub extern "C" fn __lxstat64(_ver: i32, path: *const u8, statbuf: *mut crate::st
 
 /// `__read_chk` — fortified `read`.
 ///
-/// `buflen` is the size of the buffer `buf` points to.  We ignore it
-/// (no runtime overflow check) and delegate to `read`.
+/// `buflen` is the size of the object `buf` points to. glibc aborts when
+/// `count > buflen`; this reads at most `buflen` bytes instead, since a short
+/// read is part of `read`'s contract and every caller must already handle one
+/// (`crate::fortify` has the rule, design-decisions.md §1105). It ignored
+/// `buflen` altogether until 2026-09-25.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __read_chk(fd: Fd, buf: *mut u8, count: SizeT, _buflen: SizeT) -> SsizeT {
-    read(fd, buf, count)
+pub extern "C" fn __read_chk(fd: Fd, buf: *mut u8, count: SizeT, buflen: SizeT) -> SsizeT {
+    read(fd, buf, count.min(buflen))
 }
 
-/// `__pread_chk` — fortified `pread`.
+/// `__pread_chk` — fortified `pread`: reads at most `buflen` bytes, as
+/// [`__read_chk`] does.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __pread_chk(
     fd: Fd,
     buf: *mut u8,
     count: SizeT,
     offset: OffT,
-    _buflen: SizeT,
+    buflen: SizeT,
 ) -> SsizeT {
-    pread(fd, buf, count, offset)
+    pread(fd, buf, count.min(buflen), offset)
 }
 
 /// `__pread64_chk` — LP64 alias for `__pread_chk`.

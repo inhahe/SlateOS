@@ -165104,9 +165104,11 @@ shells tolerate for `fork`, but it is not what `posix_spawn` promises, and it
 does not help the signal attributes at all. File with the cwd request if lane A
 takes that one, since both widen the same struct.
 
-### [D] TD-D-FORTIFY-MEM-AND-STR-CHK-IGNORE-THE-OBJECT-SIZE — 2026-09-24 — OPEN (low)
+### [D] TD-D-FORTIFY-MEM-AND-STR-CHK-IGNORE-THE-OBJECT-SIZE — 2026-09-24 — FIXED 2026-09-25
 
-**Status:** OPEN, low priority — found while fixing `__getcwd_chk`.
+**Status:** FIXED 2026-09-25. `__chk_fail` exists (`posix/src/fortify.rs`), glibc's message and then `abort()`. The ten memory and string copies check their bound and abort before writing. `__read_chk`/`__pread_chk` clamp to the object instead. When each kind applies, and why, is design-decisions.md §1105. Host tests cover every copy at its exact bound and with an unknown object size. The aborting side needs a process that can die: `services/ctest-fortify-abort`, whose rung is requested in `requests/d-a-run-the-ctest-fortify-abort-fixture.md`. glibc `_chk` entry points this libc still lacks altogether, which fail to link rather than fail to check, include `__fdelt_chk` (`FD_SET`), the `__open_2` family, `__explicit_bzero_chk`, the wide-character copies, `__poll_chk`, `__recv_chk` and `__longjmp_chk`.
+
+*(As filed:)* found while fixing `__getcwd_chk`.
 
 **What:** the `_FORTIFY_SOURCE` entry points for memory and strings —
 `__memcpy_chk`, `__memmove_chk`, `__mempcpy_chk`, `__memset_chk`,

@@ -4298,30 +4298,117 @@ mod tests {
         let offset = ret as usize - dst.as_ptr() as usize;
         assert_eq!(offset, 2);
     }
+
+    // -- the bound each fortified copy checks --
+    //
+    // A copy that does not fit calls `__chk_fail`, which aborts the process,
+    // so the host can only show the other side of each bound: an operation
+    // that exactly fills its object, and one whose object size the compiler
+    // did not know (`(size_t)-1`), both go through. The aborting side is
+    // `services/ctest-fortify-abort`'s, in ring 3, where a child can die of it.
+    // The byte past each object is a guard that must survive.
+
+    const UNKNOWN: usize = usize::MAX;
+
+    #[test]
+    fn fortified_memory_copies_may_fill_their_object_exactly() {
+        let src = [7u8; 8];
+        let mut buf = [0u8; 9];
+        unsafe {
+            __memcpy_chk(buf.as_mut_ptr(), src.as_ptr(), 8, 8);
+            assert_eq!((&buf[..8], buf[8]), (&[7u8; 8][..], 0), "memcpy");
+            __memset_chk(buf.as_mut_ptr(), 3, 8, 8);
+            assert_eq!((&buf[..8], buf[8]), (&[3u8; 8][..], 0), "memset");
+            __memmove_chk(buf.as_mut_ptr(), src.as_ptr(), 8, 8);
+            assert_eq!(buf[8], 0, "memmove");
+            let end = __mempcpy_chk(buf.as_mut_ptr(), src.as_ptr(), 8, 8);
+            assert_eq!(end, buf.as_mut_ptr().add(8), "mempcpy");
+            assert_eq!(buf[8], 0);
+        }
+    }
+
+    #[test]
+    fn fortified_string_copies_may_fill_their_object_exactly() {
+        let mut buf = [0xeeu8; 5];
+        unsafe {
+            // "abc" and its terminator: four bytes, in a four-byte object.
+            __strcpy_chk(buf.as_mut_ptr(), b"abc\0".as_ptr(), 4);
+            assert_eq!(&buf, b"abc\0\xee");
+            buf = [0xee; 5];
+            let end = __stpcpy_chk(buf.as_mut_ptr(), b"abc\0".as_ptr(), 4);
+            assert_eq!(end.cast_const(), buf.as_ptr().add(3));
+            assert_eq!(&buf, b"abc\0\xee");
+            // strncpy writes exactly n bytes, so n == object size fits.
+            buf = [0xee; 5];
+            __strncpy_chk(buf.as_mut_ptr(), b"ab\0".as_ptr(), 4, 4);
+            assert_eq!(&buf, b"ab\0\0\xee");
+            buf = [0xee; 5];
+            __stpncpy_chk(buf.as_mut_ptr(), b"ab\0".as_ptr(), 4, 4);
+            assert_eq!(&buf, b"ab\0\0\xee");
+        }
+    }
+
+    #[test]
+    fn fortified_concatenation_may_fill_its_object_exactly() {
+        let mut buf = [0xeeu8; 7];
+        buf[..3].copy_from_slice(b"ab\0");
+        unsafe {
+            // "ab" + "cde" + NUL = six bytes, in a six-byte object.
+            __strcat_chk(buf.as_mut_ptr(), b"cde\0".as_ptr(), 6);
+            assert_eq!(&buf, b"abcde\0\xee");
+            buf = [0xee; 7];
+            buf[..3].copy_from_slice(b"ab\0");
+            // At most three of "cdefg": the same six bytes.
+            __strncat_chk(buf.as_mut_ptr(), b"cdefg\0".as_ptr(), 3, 6);
+            assert_eq!(&buf, b"abcde\0\xee");
+        }
+    }
+
+    /// `(size_t)-1` is the compiler saying it could not tell; that must never
+    /// be read as a small object.
+    #[test]
+    fn an_unknown_object_size_is_never_refused() {
+        let mut buf = [0u8; 16];
+        unsafe {
+            __memcpy_chk(buf.as_mut_ptr(), b"0123456789".as_ptr(), 10, UNKNOWN);
+            __strcpy_chk(buf.as_mut_ptr(), b"hello\0".as_ptr(), UNKNOWN);
+            __strcat_chk(buf.as_mut_ptr(), b" you\0".as_ptr(), UNKNOWN);
+            __strncat_chk(buf.as_mut_ptr(), b"!!!\0".as_ptr(), 1, UNKNOWN);
+        }
+        assert_eq!(&buf[..11], b"hello you!\0");
+    }
 }
 
 // ===========================================================================
 // glibc FORTIFY_SOURCE _chk functions
 // ===========================================================================
 //
-// Programs compiled with `-D_FORTIFY_SOURCE=2` (default on many distros)
-// call these `__*_chk` wrappers instead of the plain functions.  The
-// `destlen` parameter enables runtime buffer overflow detection.  We
-// ignore it and delegate to the underlying function — our runtime is
-// the only code running, so any overflow is our own bug.
+// Programs compiled against glibc's headers with `-D_FORTIFY_SOURCE` call
+// these `__*_chk` wrappers instead of the plain functions, passing the
+// destination object's size (`destlen`; `(size_t)-1` when unknown). Each
+// checks that the copy fits and calls `__chk_fail` -- glibc's message, then
+// `abort()` -- when it does not, *before* writing anything. Copies abort
+// rather than clamp: a copy shorter than asked is a different bug, not a safe
+// one (`crate::fortify` has the rule, and which `_chk`s clamp instead).
+//
+// They ignored `destlen` until 2026-09-25 (known-issues.md
+// TD-D-FORTIFY-MEM-AND-STR-CHK-IGNORE-THE-OBJECT-SIZE).
 
 /// `__memcpy_chk` — fortified `memcpy`.
 ///
 /// # Safety
 ///
-/// Same as `memcpy`.  `destlen` is ignored.
+/// Same as `memcpy`.  Aborts, through `__chk_fail`, when `n > destlen`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __memcpy_chk(
     dest: *mut u8,
     src: *const u8,
     n: usize,
-    _destlen: usize,
+    destlen: usize,
 ) -> *mut u8 {
+    if !crate::fortify::fits(n, destlen) {
+        crate::fortify::__chk_fail();
+    }
     unsafe { memcpy(dest, src, n) }
 }
 
@@ -4329,14 +4416,17 @@ pub unsafe extern "C" fn __memcpy_chk(
 ///
 /// # Safety
 ///
-/// Same as `memmove`.  `destlen` is ignored.
+/// Same as `memmove`.  Aborts, through `__chk_fail`, when `n > destlen`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __memmove_chk(
     dest: *mut u8,
     src: *const u8,
     n: usize,
-    _destlen: usize,
+    destlen: usize,
 ) -> *mut u8 {
+    if !crate::fortify::fits(n, destlen) {
+        crate::fortify::__chk_fail();
+    }
     unsafe { memmove(dest, src, n) }
 }
 
@@ -4344,9 +4434,12 @@ pub unsafe extern "C" fn __memmove_chk(
 ///
 /// # Safety
 ///
-/// Same as `memset`.  `destlen` is ignored.
+/// Same as `memset`.  Aborts, through `__chk_fail`, when `n > destlen`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn __memset_chk(dest: *mut u8, c: i32, n: usize, _destlen: usize) -> *mut u8 {
+pub unsafe extern "C" fn __memset_chk(dest: *mut u8, c: i32, n: usize, destlen: usize) -> *mut u8 {
+    if !crate::fortify::fits(n, destlen) {
+        crate::fortify::__chk_fail();
+    }
     unsafe { memset(dest, c, n) }
 }
 
@@ -4354,9 +4447,13 @@ pub unsafe extern "C" fn __memset_chk(dest: *mut u8, c: i32, n: usize, _destlen:
 ///
 /// # Safety
 ///
-/// Same as `strcpy`.  `destlen` is ignored.
+/// Same as `strcpy`.  Aborts, through `__chk_fail`, when `src` and its
+/// terminator are longer than `destlen`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn __strcpy_chk(dest: *mut u8, src: *const u8, _destlen: usize) -> *mut u8 {
+pub unsafe extern "C" fn __strcpy_chk(dest: *mut u8, src: *const u8, destlen: usize) -> *mut u8 {
+    if !crate::fortify::fits_with_terminator(unsafe { strlen(src) }, destlen) {
+        crate::fortify::__chk_fail();
+    }
     unsafe { strcpy(dest, src) }
 }
 
@@ -4364,14 +4461,18 @@ pub unsafe extern "C" fn __strcpy_chk(dest: *mut u8, src: *const u8, _destlen: u
 ///
 /// # Safety
 ///
-/// Same as `strncpy`.  `destlen` is ignored.
+/// Same as `strncpy`.  Aborts, through `__chk_fail`, when `n > destlen`:
+/// `strncpy` writes exactly `n` bytes, padding with NULs.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __strncpy_chk(
     dest: *mut u8,
     src: *const u8,
     n: usize,
-    _destlen: usize,
+    destlen: usize,
 ) -> *mut u8 {
+    if !crate::fortify::fits(n, destlen) {
+        crate::fortify::__chk_fail();
+    }
     unsafe { strncpy(dest, src, n) }
 }
 
@@ -4379,9 +4480,14 @@ pub unsafe extern "C" fn __strncpy_chk(
 ///
 /// # Safety
 ///
-/// Same as `strcat`.  `destlen` is ignored.
+/// Same as `strcat`.  Aborts, through `__chk_fail`, when the string already
+/// in `dest`, `src` and a terminator do not fit `destlen` -- or when `dest`
+/// holds no terminator within `destlen` at all.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn __strcat_chk(dest: *mut u8, src: *const u8, _destlen: usize) -> *mut u8 {
+pub unsafe extern "C" fn __strcat_chk(dest: *mut u8, src: *const u8, destlen: usize) -> *mut u8 {
+    if !unsafe { crate::fortify::concatenation_fits(dest, strlen(src), destlen) } {
+        crate::fortify::__chk_fail();
+    }
     unsafe { strcat(dest, src) }
 }
 
@@ -4389,14 +4495,19 @@ pub unsafe extern "C" fn __strcat_chk(dest: *mut u8, src: *const u8, _destlen: u
 ///
 /// # Safety
 ///
-/// Same as `strncat`.  `destlen` is ignored.
+/// Same as `strncat`.  Aborts, through `__chk_fail`, when the string already
+/// in `dest`, at most `n` bytes of `src` and a terminator do not fit
+/// `destlen`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __strncat_chk(
     dest: *mut u8,
     src: *const u8,
     n: usize,
-    _destlen: usize,
+    destlen: usize,
 ) -> *mut u8 {
+    if !unsafe { crate::fortify::concatenation_fits(dest, strnlen(src, n), destlen) } {
+        crate::fortify::__chk_fail();
+    }
     unsafe { strncat(dest, src, n) }
 }
 
@@ -4404,9 +4515,13 @@ pub unsafe extern "C" fn __strncat_chk(
 ///
 /// # Safety
 ///
-/// Same as `stpcpy`.  `destlen` is ignored.
+/// Same as `stpcpy`.  Aborts, through `__chk_fail`, when `src` and its
+/// terminator are longer than `destlen`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn __stpcpy_chk(dest: *mut u8, src: *const u8, _destlen: usize) -> *mut u8 {
+pub unsafe extern "C" fn __stpcpy_chk(dest: *mut u8, src: *const u8, destlen: usize) -> *mut u8 {
+    if !crate::fortify::fits_with_terminator(unsafe { strlen(src) }, destlen) {
+        crate::fortify::__chk_fail();
+    }
     unsafe { stpcpy(dest, src) }
 }
 
@@ -4414,14 +4529,18 @@ pub unsafe extern "C" fn __stpcpy_chk(dest: *mut u8, src: *const u8, _destlen: u
 ///
 /// # Safety
 ///
-/// Same as `stpncpy`.  `destlen` is ignored.
+/// Same as `stpncpy`.  Aborts, through `__chk_fail`, when `n > destlen`:
+/// `stpncpy` writes exactly `n` bytes, padding with NULs.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __stpncpy_chk(
     dest: *mut u8,
     src: *const u8,
     n: usize,
-    _destlen: usize,
+    destlen: usize,
 ) -> *mut u8 {
+    if !crate::fortify::fits(n, destlen) {
+        crate::fortify::__chk_fail();
+    }
     unsafe { stpncpy(dest, src, n) }
 }
 
@@ -4429,14 +4548,17 @@ pub unsafe extern "C" fn __stpncpy_chk(
 ///
 /// # Safety
 ///
-/// Same as `mempcpy`.  `destlen` is ignored.
+/// Same as `mempcpy`.  Aborts, through `__chk_fail`, when `n > destlen`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __mempcpy_chk(
     dest: *mut u8,
     src: *const u8,
     n: usize,
-    _destlen: usize,
+    destlen: usize,
 ) -> *mut u8 {
+    if !crate::fortify::fits(n, destlen) {
+        crate::fortify::__chk_fail();
+    }
     unsafe { mempcpy(dest, src, n) }
 }
 

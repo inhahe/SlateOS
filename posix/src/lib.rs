@@ -364,6 +364,7 @@ pub mod fdtable;
 pub mod file;
 pub mod fmtmsg;
 pub mod fnmatch;
+pub mod fortify;
 pub mod fortify_printf;
 pub mod fts;
 pub mod ftw;

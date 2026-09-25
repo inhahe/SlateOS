@@ -22,3 +22,15 @@ doc-valid-idents = [
     "OpenGL",
     "..",
 ]
+
+# `arithmetic_side_effects` exists to catch integer arithmetic that can panic
+# or wrap, and it already exempts `f32`/`f64` because IEEE arithmetic does
+# neither: an out-of-range result is an infinity, an invalid one a NaN.
+# `ExtF80` (coreutils' software x87 80-bit float, `userspace/coreutils/src/
+# extfloat.rs`) is the same IEEE arithmetic done in software, so every `a + b`
+# on one was being flagged for a hazard the operation does not have. The
+# integer arithmetic *inside* `extfloat.rs`, where a real overflow could live,
+# stays under the lint. Two names, because clippy matches the type's printed
+# path: `extfloat::ExtF80` in the crate that defines it,
+# `coreutils::extfloat::ExtF80` in the binaries that use it.
+arithmetic-side-effects-allowed = ["coreutils::extfloat::ExtF80", "extfloat::ExtF80"]

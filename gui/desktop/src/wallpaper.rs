@@ -375,13 +375,11 @@ impl SlideshowState {
 
     /// Current image path, if any.
     pub fn current_path(&self) -> Option<&Path> {
-        // Borrows a `&Path` from the `String` the playlist already holds,
-        // rather than converting the playlist. The slideshow is not reachable
-        // -- `roadmap-detailed.md` §3.4 records that nothing outside the
-        // shell's tests calls `set_slideshow` -- so converting its model would
-        // be making dead code byte-correct, which is what persuades the next
-        // reader it is load-bearing. This is the one line needed to keep it
-        // compiling beside a caller that now speaks in paths.
+        // The playlist is `Vec<PathBuf>` since the rotation folder was wired
+        // to `appearance.yaml` on 2026-09-17 (see `paths`), so this is a plain
+        // borrow. The comment that stood here until 2026-09-24 described the
+        // playlist as `String`s and the slideshow as unreachable -- both true
+        // the day it was written, and both false for a week afterwards.
         self.paths
             .get(self.effective_index()?)
             .map(PathBuf::as_path)

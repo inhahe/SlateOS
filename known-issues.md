@@ -156156,6 +156156,13 @@ crate it broke.
 
 ## TD-C-THE-WALLPAPER-SUBSYSTEM-CARRIES-PATHS-AS-TEXT-THROUGHOUT -- 2026-09-16
 
+**Status:** FIXED 2026-09-16 (`9ce32d61f`) for the live chain -- the setting,
+the shell and the settings app all carry a `PathBuf`, percent-encoded on disk
+behind a version marker -- and the slideshow playlist followed on 2026-09-17
+when rotation gained a consumer. Stamped 2026-09-24 by lane C, which found the
+entry still reading as open a week later, and a comment in `wallpaper.rs`
+still describing the playlist as text.
+
 **In short:** choose a wallpaper whose filename is not text and the setting
 that gets saved names a different file: the wallpaper silently does not appear
 and the settings page shows a path nobody picked. The fix is not one line at

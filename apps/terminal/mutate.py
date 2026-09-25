@@ -702,6 +702,19 @@ MUTATIONS = [
         "            cell_width: 6.0,",
         ["a_character_fits_its_cell"],
     ),
+    # -- blinking text (2026-09-25) --
+    (
+        "blinking text sits still",
+        "                if cell.ch != ' ' && (self.text_blink_on || !cell.attrs.blink) {",
+        "                if cell.ch != ' ' {",
+        ["blinking_text_blinks_and_only_while_it_is_on_screen"],
+    ),
+    (
+        "blinking text is given no clock",
+        "        let aging = (blinking || self.bell_flash_ms > 0 || self.shows_blinking_text())",
+        "        let aging = (blinking || self.bell_flash_ms > 0)",
+        ["blinking_text_blinks_and_only_while_it_is_on_screen"],
+    ),
     # -- woken, not asked (2026-09-25) --
     (
         "a link that wakes is asked on a clock anyway",

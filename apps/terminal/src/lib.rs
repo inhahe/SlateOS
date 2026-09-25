@@ -651,6 +651,14 @@ pub struct TerminalState {
 
     /// How far through the current half of the cursor's blink we are.
     blink_ms: u64,
+    /// Whether text marked blinking (SGR 5) is in the lit half of its blink.
+    ///
+    /// Its own clock, not the cursor's: the cursor's stops when the window
+    /// loses the keyboard or the user turns it off, and a program that asked
+    /// for blinking text asked for it regardless of either.
+    text_blink_on: bool,
+    /// How far through the current half of the text's blink we are.
+    text_blink_ms: u64,
     /// Whether the cursor is in the lit half of its blink.
     ///
     /// `config.cursor_blink` defaulted to `true` and nothing in the program
@@ -806,6 +814,8 @@ impl TerminalState {
             bell_flash_ms: 0,
             blink_ms: 0,
             blink_on: true,
+            text_blink_on: true,
+            text_blink_ms: 0,
             focused: true,
             tick_changed: false,
             size: (
@@ -1242,7 +1252,29 @@ impl TerminalState {
             self.blink_on = true;
             changed = true;
         }
+        if self.shows_blinking_text() {
+            self.text_blink_ms = self.text_blink_ms.saturating_add(elapsed_ms);
+            while self.text_blink_ms >= BLINK_MS {
+                self.text_blink_ms = self.text_blink_ms.saturating_sub(BLINK_MS);
+                self.text_blink_on = !self.text_blink_on;
+                changed = true;
+            }
+        } else if !self.text_blink_on {
+            // Nothing blinking is left on screen; the next thing that blinks
+            // starts lit.
+            self.text_blink_on = true;
+            self.text_blink_ms = 0;
+        }
         changed
+    }
+
+    /// Whether any cell on screen is marked blinking -- the only time the
+    /// text's blink needs a clock.
+    fn shows_blinking_text(&self) -> bool {
+        (0..self.rows()).any(|row| {
+            self.line_at(self.buffer_row_of(row))
+                .is_some_and(|line| line.cells.iter().any(|c| c.attrs.blink && c.ch != ' '))
+        })
     }
 
     /// Everything a tick does: age the clocks, then read the child.
@@ -2898,7 +2930,10 @@ terminal, so what you type goes nowhere.\r\n"
                     fill(f, Rect::new(x, y, l.cell_w, l.cell_h), bg_color);
                 }
 
-                if cell.ch != ' ' {
+                // Blinking text is not drawn in the dark half of its blink.
+                // SGR 5 was recorded and read by nothing, so a program's
+                // blinking warning sat still.
+                if cell.ch != ' ' && (self.text_blink_on || !cell.attrs.blink) {
                     let font_weight = if cell.attrs.bold {
                         FontWeightHint::Bold
                     } else {
@@ -3514,7 +3549,8 @@ impl App for TerminalState {
         // prompt with a solid cursor has nothing to age, and a program that
         // asks for a clock it does not need holds the whole desktop awake.
         let blinking = self.config.cursor_blink && self.cursor_visible && self.focused;
-        let aging = (blinking || self.bell_flash_ms > 0).then_some(BLINK_MS / 5);
+        let aging = (blinking || self.bell_flash_ms > 0 || self.shows_blinking_text())
+            .then_some(BLINK_MS / 5);
         // A live child is something moving too: its output reaches the screen
         // only on a tick. Fast while the two are talking, slower once they are
         // not -- see `ACTIVE_POLL_MS`.
@@ -5590,6 +5626,52 @@ mod tests {
             term.attach_waker(std::task::Waker::noop().clone());
         }
         (term, script)
+    }
+
+    /// Text marked blinking blinks, on a clock of its own, and the clock stops
+    /// when no such text is left on screen. SGR 5 was recorded and nothing
+    /// read it.
+    #[test]
+    fn blinking_text_blinks_and_only_while_it_is_on_screen() {
+        let mut term = TerminalState::new(TerminalConfig {
+            cursor_blink: false,
+            ..TerminalConfig::default()
+        });
+        assert_eq!(term.tick_interval(), None, "control: nothing moving");
+        term.feed(b"\x1b[5mB\x1b[0mS");
+        let glyphs = |t: &TerminalState| -> Vec<String> {
+            t.frame(400.0, 200.0)
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(
+            glyphs(&term).contains(&"B".to_string()),
+            "lit to begin with"
+        );
+        assert!(
+            term.tick_interval().is_some(),
+            "blinking text needs a clock"
+        );
+
+        assert!(term.tick(BLINK_MS), "half a blink is a change");
+        let dark = glyphs(&term);
+        assert!(!dark.contains(&"B".to_string()), "the dark half: {dark:?}");
+        assert!(
+            dark.contains(&"S".to_string()),
+            "and only the blinking text goes"
+        );
+
+        term.tick(BLINK_MS);
+        assert!(glyphs(&term).contains(&"B".to_string()), "and back");
+
+        term.feed(b"\x1b[2J");
+        term.tick(BLINK_MS);
+        assert_eq!(term.tick_interval(), None, "no blinking text, no clock");
     }
 
     #[test]

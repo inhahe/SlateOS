@@ -342,20 +342,9 @@ apps/sysmonitor/src/main.rs:process_count
 apps/sysmonitor/src/main.rs:running_count
 
 # apps/terminal --
-# `bracketed_paste` is set by DECSET 2004 and `blink` by SGR 5. Neither can be
-# applied: this terminal has no paste path at all -- it copies a selection out
-# and nothing pastes in -- and `blink` has no timer behind the renderer. Both
-# are RIGHT to record rather than drop: a program has asked for a mode, and
-# 'we forgot you asked' is worse than 'not yet'. Revisit when paste exists.
-# `blink` additionally needs a decision about whether this terminal blinks at
-# all, which is a taste question as much as a technical one.
-apps/terminal/src/main.rs:blink
-apps/terminal/src/main.rs:bracketed_paste
-
-# apps/tmux --
-# Not yet triaged individually. Each is a value computed and discarded, and
-# none is on a path a user can currently reach.
-apps/tmux/src/main.rs:copy_end
+# `bracketed_paste` and `blink` were here, and both are read now (lane E,
+# 2026-09-25): `TerminalState::paste` fences a paste when a program asked for
+# bracketed paste, and text marked blinking blinks on a clock of its own.
 
 # apps/torrent --
 # Not yet triaged individually. Each is a value computed and discarded, and

@@ -58742,6 +58742,17 @@ test of the fixture, not of the bound.
   a second close). Reversing it is one branch. User-visible, so the operator
   may want it the other way; nothing else depends on it.
 
+- **Text a program marks blinking (SGR 5) blinks.** (2026-09-25,
+  `apps/terminal/src/lib.rs` -> `TerminalState::tick`, `text_blink_on`, the
+  guard in `draw_cells`.) Half a second lit, half a second not, on a clock
+  of its own that runs only while blinking text is on screen. It was recorded
+  and drawn steady, and the write-only-field gate's baseline said whether to
+  blink at all was "a taste question". Blinking is what VT100, xterm, VTE and
+  Windows Terminal do; the alternatives are drawing it bold or bright (xterm's
+  `showBlinkAsBold`) or ignoring it. Blinking can trouble some readers, so a
+  setting to turn it off would be the next step if anyone asks; reversing it
+  is the one guard in `draw_cells`.
+
 - **The habit tracker keeps its record in the settings directory.**
   (2026-09-25, `apps/habits/src/main.rs` -> `CONFIG_NAME`, `store_habit`,
   `load_habits`.) Check-ins are a record of the user's days -- data, not

@@ -160009,8 +160009,10 @@ Every other profile is listed as "Not available", saying which half --
 decoder or encoder -- is missing, and is refused before it is queued. On the
 way: with a file chosen, the source list could not be scrolled, because every
 frame scrolled it back to the choice. 89 tests, 14 in `wavpcm` and six new in
-`safeio`; `apps/mediaconvert/mutate.py` has 28 rows, `apps/wavpcm/mutate.py`
-12 and `apps/safeio/mutate.py` 6. The music player and the sound recorder
+`safeio`; `apps/mediaconvert/mutate.py` has 29 rows, `apps/wavpcm/mutate.py`
+21 and `apps/safeio/mutate.py` 6. (A first cut read a WAV's length from the
+megabyte it reads for the header, so anything longer showed the wrong length;
+`wavpcm::parse_header_prefix` measures against the file.) The music player and the sound recorder
 read and write WAV with their own code; moving them onto `wavpcm` is part of
 examining the recorder, next. Sixteen examined; five to go.
 

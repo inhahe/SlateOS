@@ -1135,7 +1135,9 @@ impl SourceFile {
                 .map(str::to_ascii_lowercase)
                 .unwrap_or_default();
             if ext == "wav" {
-                match wavpcm::parse_header(&head.bytes) {
+                // The file's own length, not the part read: a data chunk
+                // running past the part looks like a streaming file's.
+                match wavpcm::parse_header_prefix(&head.bytes, meta.len()) {
                     Ok(info) => {
                         source.duration_secs = Some(info.seconds());
                         source.source_format = format!(
@@ -3902,6 +3904,12 @@ mod tests {
         assert_eq!(src.file_size, std::fs::metadata(&wav).unwrap().len());
         assert!((src.duration_secs.unwrap() - 2.0).abs() < 1e-6);
         assert_eq!(src.source_format, "WAV 8000 Hz 1ch 16-bit");
+        // Past the megabyte that is read for the header, the length is still
+        // the file's: it read as 65 seconds.
+        let long = dir.wav("long.wav", 8000, 1, 70.0);
+        let id = app.add_file(&long).unwrap();
+        let src = app.find_source(id).unwrap();
+        assert!((src.duration_secs.unwrap() - 70.0).abs() < 1e-6);
         assert!(app.add_file(&wav).is_err(), "the same file was added twice");
         assert!(app.add_file(&dir.0.join("missing.wav")).is_err());
         std::fs::write(dir.0.join("notes.txt"), b"hi").unwrap();
@@ -3917,8 +3925,8 @@ mod tests {
         let mut folder = MediaConvertApp::new();
         assert_eq!(
             folder.add_folder(&dir.0),
-            Ok(2),
-            "the folder's media files were not both added"
+            Ok(3),
+            "the folder's three media files were not all added"
         );
     }
 

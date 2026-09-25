@@ -80,6 +80,12 @@ MUTATIONS = [
         ["a_file_is_added_as_it_really_is"],
     ),
     (
+        "a long WAV's length is read from the part read",
+        "                match wavpcm::parse_header_prefix(&head.bytes, meta.len()) {",
+        "                match wavpcm::parse_header(&head.bytes) {",
+        ["a_file_is_added_as_it_really_is"],
+    ),
+    (
         "the same file is added twice",
         "        if self.sources.iter().any(|s| s.path == path) {",
         "        if false {",

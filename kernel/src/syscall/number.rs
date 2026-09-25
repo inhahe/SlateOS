@@ -2383,9 +2383,9 @@ pub const SYS_TTY_GET_TERMIOS: u64 = 541;
 /// `TCSETSW` collapses onto this: there is no output queue to drain.
 /// `TCSETSF` does not quite: since 2026-09-24 a terminal has a kernel-side
 /// input queue (the line discipline runs as input arrives), and the Linux
-/// shim's `TCSETSF` empties it. This native call has no flush variant yet, so
-/// a native `tcsetattr(TCSAFLUSH)` sets the termios without discarding
-/// type-ahead — see todo.txt, "native tcflush".
+/// shim's `TCSETSF` empties it. The native equivalent is this call followed by
+/// [`SYS_TTY_FLUSH`] with `TCIFLUSH`, which is how libc's
+/// `tcsetattr(TCSAFLUSH)` should compose it.
 ///
 /// This is what makes raw mode work for a native-ABI program.  libc's
 /// `tcsetattr` previously accepted the call and threw it away ("our console
@@ -5418,6 +5418,28 @@ pub const SYS_KEYLAYOUT_SET: u64 = 1074;
 ///
 /// Chosen number 1075, next free slot after 1074.
 pub const SYS_BRIGHTNESS_SET: u64 = 1075;
+
+/// Discard a terminal's unread input, its unsent output, or both
+/// (`tcflush(3)`, and the flush half of `tcsetattr(TCSAFLUSH)`).
+///
+/// `arg0`: the terminal, under the family's convention — `0` is the caller's
+/// controlling terminal, `>= 2` an owned pty handle. `arg1`: the queue, with
+/// Linux's values — `TCIFLUSH` 0 (input), `TCOFLUSH` 1 (output), `TCIOFLUSH`
+/// 2 (both). Anything else is `InvalidArgument`.
+///
+/// **Why it exists.** Since 2026-09-24 a terminal has a kernel-side input
+/// queue — the line discipline runs as input arrives — so "discard what was
+/// typed ahead" finally has something to discard. The Linux shim's `TCFLSH`
+/// and `TCSETSF` reach it; the native ABI had no way to ask, so a native
+/// password prompt calling `tcflush(0, TCIFLUSH)` read whatever had been typed
+/// before it. Output flushing drops what a pty slave wrote and its master has
+/// not read; the console has no output queue, so there it does nothing.
+///
+/// A **background** caller is stopped with `SIGTTOU`, as for any change to a
+/// terminal it does not own the foreground of.
+///
+/// Chosen number 1076, next free slot after 1075.
+pub const SYS_TTY_FLUSH: u64 = 1076;
 
 // ---------------------------------------------------------------------------
 // Version info

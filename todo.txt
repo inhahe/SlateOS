@@ -54859,19 +54859,6 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   the one artifact actually missing is the only one the verdict cannot
 ##   mention. See the known-issues entry of 2026-09-18.
 
-##
-## native tcflush (2026-09-24): a native-ABI program has no way to discard
-##   type-ahead. Since the line discipline moved to the receive side
-##   (known-issues A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER) a terminal HAS a
-##   kernel-side input queue, and `tty::flush_input(id)` empties it; the
-##   Linux shim's TCSETSF now calls it. The native side has only
-##   SYS_TTY_SET_TERMIOS (542), with no flush flag, so posix's
-##   tcsetattr(TCSAFLUSH) and tcflush(TCIFLUSH) cannot reach it -- a
-##   password prompt using them reads whatever was typed ahead.
-##   PROPER FIX: a new SYS_TTY_FLUSH(queue_selector) (TCIFLUSH/TCOFLUSH/
-##   TCIOFLUSH; output = the pty output ring), terminal named under the
-##   resolve_tty_arg convention like the rest of the family, then a request
-##   to lane D to route tcflush and TCSAFLUSH to it. Kernel half ~15 min.
 ## ############################################################################
 ## Lane B — POSIX & userland
 ## ############################################################################

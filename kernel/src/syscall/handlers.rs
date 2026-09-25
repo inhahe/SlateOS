@@ -5375,6 +5375,63 @@ pub fn tty_set_termios_from_user(tty: crate::tty::TtyId, arg: u64) -> TtyCtlOutc
     TtyCtlOutcome::Done
 }
 
+/// `tcflush(3)` queue selectors — Linux's values, which both ABIs pass through.
+pub mod tcflush_queue {
+    /// Discard unread input.
+    pub const TCIFLUSH: u64 = 0;
+    /// Discard unsent output.
+    pub const TCOFLUSH: u64 = 1;
+    /// Discard both.
+    pub const TCIOFLUSH: u64 = 2;
+}
+
+/// Discard a terminal's unread input, its unsent output, or both
+/// (`tcflush(3)`), applying POSIX job control first.
+///
+/// Shared by the native [`sys_tty_flush`] and the Linux shim's `TCFLSH`, for
+/// the reason [`tty_set_termios_from_user`] is shared: one policy, one copy.
+///
+/// Job control comes before the selector check, in Linux's order —
+/// `tty_check_change` runs before `__tty_perform_flush` looks at the argument —
+/// so a background caller is stopped even when its request is malformed.
+pub fn tty_flush(tty: crate::tty::TtyId, queue: u64) -> TtyCtlOutcome {
+    match tty_job_control_check_for(tty, crate::proc::signal::SIGTTOU) {
+        TtyCtlOutcome::Done => {}
+        other => return other,
+    }
+    let (input, output) = match queue {
+        tcflush_queue::TCIFLUSH => (true, false),
+        tcflush_queue::TCOFLUSH => (false, true),
+        tcflush_queue::TCIOFLUSH => (true, true),
+        _ => return TtyCtlOutcome::Fail(KernelError::InvalidArgument),
+    };
+    if input {
+        crate::tty::flush_input(tty);
+    }
+    if output {
+        crate::tty::flush_output(tty);
+    }
+    TtyCtlOutcome::Done
+}
+
+/// `SYS_TTY_FLUSH` — discard a terminal's unread input and/or unsent output
+/// (`tcflush(3)`, and the flush half of `tcsetattr(TCSAFLUSH)`).
+///
+/// `arg0`: the terminal, under the [`resolve_tty_arg`] convention. `arg1`: the
+/// queue — [`tcflush_queue::TCIFLUSH`], [`tcflush_queue::TCOFLUSH`] or
+/// [`tcflush_queue::TCIOFLUSH`]. See [`tty_flush`].
+pub fn sys_tty_flush(args: &SyscallArgs) -> SyscallResult {
+    let tty = match resolve_tty_arg(args.arg0) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match tty_flush(tty, args.arg1) {
+        TtyCtlOutcome::Done => SyscallResult::ok(0),
+        TtyCtlOutcome::Restart(r) => r,
+        TtyCtlOutcome::Fail(e) => SyscallResult::err(e),
+    }
+}
+
 /// Hand the console to process group `pgid` on behalf of `pid`
 /// (`tcsetpgrp(3)`), applying POSIX job control first.
 ///

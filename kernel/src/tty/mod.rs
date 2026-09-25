@@ -601,6 +601,18 @@ pub fn set_termios(id: TtyId, new: Termios) {
     }
 }
 
+/// Discard a terminal's unsent output (`tcflush(TCOFLUSH)`).
+///
+/// For a pty that is what the program wrote and the master has not read. The
+/// console has no output queue — its writes go straight to the screen — so
+/// there is nothing to discard, and this does nothing, which is also what a
+/// Linux console with an empty output buffer does.
+pub fn flush_output(id: TtyId) {
+    if with_device(id, |d| d.backend) == Some(Backend::Pty) {
+        pty::flush_output(id);
+    }
+}
+
 /// Discard a terminal's unread input (`TCSETSF`, `tcflush(TCIFLUSH)`).
 ///
 /// For the console that includes keystrokes still in the keyboard ring: they

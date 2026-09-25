@@ -254,6 +254,12 @@ impl Ring {
         n
     }
 
+    /// Discard everything buffered.
+    fn clear(&mut self) {
+        self.head = 0;
+        self.len = 0;
+    }
+
     /// Remove up to `out.len()` bytes. Returns how many were taken.
     #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
     fn read(&mut self, out: &mut [u8]) -> usize {
@@ -852,6 +858,24 @@ pub(crate) fn take_input_waiters(id: TtyId) -> Vec<TaskId> {
 /// waiting read is waiting for.
 pub(crate) fn wake_input_waiters(id: TtyId) {
     wake_all(take_input_waiters(id));
+}
+
+/// Discard program output the master has not read yet — `tcflush(TCOFLUSH)`
+/// on the slave.
+///
+/// Wakes the output ring's waiters: a slave writer parked on a full ring now
+/// has room, and a master reader re-checks and finds nothing, which is the
+/// truth after a flush.
+pub(crate) fn flush_output(id: TtyId) {
+    let woken = {
+        let mut table = PTYS.lock();
+        let Some(pty) = table.get_mut(&id) else {
+            return;
+        };
+        pty.output.clear();
+        pty.output_waiters.take_all()
+    };
+    wake_all(woken);
 }
 
 // ---------------------------------------------------------------------------

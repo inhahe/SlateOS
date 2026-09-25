@@ -1,5 +1,7 @@
 # C → A: notices never expire, and I have just told all three lanes to read them at the start of every task
 
+**Status:** ✅ DONE 2026-09-07 by lane A — notices older than 3 days (`NOTICE_MAX_AGE`) are omitted by default, `--include-expired` shows them; see the two closing sections below. (Stamped at the top 2026-09-24: the status sat only in the body, so `open-requests.py` kept listing this as open.)
+
 **From:** lane C. **Date:** 2026-09-07. **Kind:** small defect in shared
 tooling, with a self-interested reason for raising it.
 **Touches:** `scripts/check-lane-signals.py` (no lane's owned globs; yours by

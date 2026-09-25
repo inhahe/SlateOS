@@ -96,7 +96,7 @@ use super::number::{
     SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN,
     SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_RESUME,
     SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
-    SYS_TTY_ACQUIRE_CTTY, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ,
+    SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ,
     SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND, SYS_UDP_CLOSE,
     SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE, SYS_UDP_RECV,
     SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE, SYS_YIELD,
@@ -489,6 +489,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_TTY_GET_TERMIOS as usize] = Some(handlers::sys_tty_get_termios);
     handlers[SYS_TTY_SET_TERMIOS as usize] = Some(handlers::sys_tty_set_termios);
     handlers[SYS_TTY_READ as usize] = Some(handlers::sys_tty_read);
+    handlers[SYS_TTY_FLUSH as usize] = Some(handlers::sys_tty_flush);
 
     // Pseudo-terminals (544–554). The same line discipline as above, driven by
     // a program instead of the keyboard driver — what a terminal emulator, an
@@ -990,6 +991,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_process_group_syscalls()?;
     test_dispatch_ctty_syscalls()?;
     test_dispatch_termios_syscalls()?;
+    test_tty_flush()?;
     test_dispatch_pty_syscalls()?;
     test_dispatch_rlimit_syscalls()?;
     test_dispatch_spawn_ex2_registered()?;
@@ -2110,6 +2112,78 @@ fn test_dispatch_termios_syscalls() -> KernelResult<()> {
     }
 
     serial_println!("[syscall]   Native termios (541/542) reaches the line discipline: OK");
+    Ok(())
+}
+
+/// `SYS_TTY_FLUSH` is registered, refuses a queue selector it does not know,
+/// and — through [`handlers::tty_flush`], which both ABIs share — discards
+/// exactly the queue it is asked to on a real pty.
+///
+/// The pty half calls the shared function rather than the syscall because a
+/// pty handle is owned by a *process* and this runs on a kernel task; the
+/// dispatch half proves the number is wired, using the caller's own terminal
+/// with a selector that is refused before anything is flushed.
+fn test_tty_flush() -> KernelResult<()> {
+    use crate::tty::{self, pty};
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: tty flush: {}", msg);
+        Err(KernelError::InternalError)
+    }
+
+    let bad = SyscallArgs {
+        arg0: 0,
+        arg1: 7,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    if dispatch(SYS_TTY_FLUSH, &bad).value != i64::from(KernelError::InvalidArgument.code()) {
+        return fail("selector 7 should be InvalidArgument (is SYS_TTY_FLUSH registered?)");
+    }
+
+    let (m, s) = pty::create()?;
+    let id = m.id();
+    let result = (|| -> KernelResult<()> {
+        // Input: a complete line queued and half of another in the editor.
+        let _ = pty::master_write(m, b"queued\nhalf")?;
+        // Output: something the program printed that the master has not read.
+        let _ = pty::slave_write(s, b"printed")?;
+
+        match handlers::tty_flush(id, handlers::tcflush_queue::TCOFLUSH) {
+            handlers::TtyCtlOutcome::Done => {}
+            _ => return fail("TCOFLUSH on a pty should succeed"),
+        }
+        if pty::readable_bytes(m) != 0 {
+            return fail("TCOFLUSH left output for the master to read");
+        }
+        if tty::input_bytes(id) == 0 {
+            return fail("TCOFLUSH discarded input too");
+        }
+
+        match handlers::tty_flush(id, handlers::tcflush_queue::TCIFLUSH) {
+            handlers::TtyCtlOutcome::Done => {}
+            _ => return fail("TCIFLUSH on a pty should succeed"),
+        }
+        let mut buf = [0u8; 16];
+        if tty::try_read(id, &mut buf) != tty::ConsoleRead::WouldBlock {
+            return fail("TCIFLUSH left a queued line behind");
+        }
+        // The half-typed line went too: finishing it now yields only what is
+        // typed after the flush.
+        let _ = pty::master_write(m, b"x\n")?;
+        if tty::try_read(id, &mut buf) != tty::ConsoleRead::Data(2) {
+            return fail("TCIFLUSH left the half-typed line in the editor");
+        }
+        Ok(())
+    })();
+    let _ = pty::close(m);
+    let _ = pty::close(s);
+    result?;
+
+    serial_println!(
+        "[syscall]   SYS_TTY_FLUSH registered; TCOFLUSH/TCIFLUSH discard exactly their queue on a pty: OK"
+    );
     Ok(())
 }
 

@@ -9178,6 +9178,10 @@ pub mod ioctl_cmd {
     /// terminal's input queue and the line being edited
     /// (`crate::tty::flush_input`).
     pub const TCSETSF: u32 = 0x5404;
+    /// `TCFLSH` — discard unread input and/or unsent output, `arg` being the
+    /// queue selector itself (`TCIFLUSH` 0, `TCOFLUSH` 1, `TCIOFLUSH` 2), not
+    /// a pointer. `tcflush(3)` issues this.
+    pub const TCFLSH: u32 = 0x540B;
     /// `TIOCGWINSZ` — read the terminal window size into `*arg`
     /// (`struct winsize`).
     pub const TIOCGWINSZ: u32 = 0x5413;
@@ -9267,6 +9271,15 @@ fn console_terminal_ioctl(
                     }
                     SyscallResult::ok(0)
                 }
+                super::handlers::TtyCtlOutcome::Restart(r) => r,
+                super::handlers::TtyCtlOutcome::Fail(e) => linux_err(linux_errno_for(e)),
+            }
+        }
+        ioctl_cmd::TCFLSH => {
+            // Shared with the native `SYS_TTY_FLUSH`: one policy (SIGTTOU for
+            // a background caller, then the selector) for both ABIs.
+            match super::handlers::tty_flush(tty_id, arg) {
+                super::handlers::TtyCtlOutcome::Done => SyscallResult::ok(0),
                 super::handlers::TtyCtlOutcome::Restart(r) => r,
                 super::handlers::TtyCtlOutcome::Fail(e) => linux_err(linux_errno_for(e)),
             }
@@ -9676,6 +9689,7 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
         | ioctl_cmd::TCSETS
         | ioctl_cmd::TCSETSW
         | ioctl_cmd::TCSETSF
+        | ioctl_cmd::TCFLSH
         | ioctl_cmd::TIOCGWINSZ
         | ioctl_cmd::TIOCSWINSZ
         | ioctl_cmd::TIOCGPGRP

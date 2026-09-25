@@ -51,7 +51,7 @@ use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
 use guitk::probe::Probe;
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::text;
 use guitk::wheel;
 use oswindow::app::{App, Response};
@@ -62,10 +62,15 @@ use std::collections::VecDeque;
 // Window geometry
 // ============================================================================
 
-/// The natural window size: an eighty-by-twenty-four grid, the size every
-/// terminal has opened at since the VT100, plus the scrollback bar.
+/// A window size for the tests to aim into: roughly an eighty-by-twenty-four
+/// grid plus the scrollback bar.
+///
+/// Roughly, because the real cell is the fixed-pitch face's and is measured
+/// at run time -- a `const` cannot ask the font. The window the terminal
+/// actually opens at is worked out from the measured cell in
+/// [`App::initial_size`]; this is only the probe's.
 const WINDOW_WIDTH: f32 = 80.0 * 8.4 + BAR_W;
-/// Twenty-four rows of the default cell height.
+/// Twenty-four rows of roughly the default cell height.
 const WINDOW_HEIGHT: f32 = 24.0 * 18.0;
 
 /// How wide the scrollback bar down the right-hand edge is.
@@ -113,6 +118,9 @@ const ACTIVE_WINDOW_MS: u64 = 2_000;
 /// must not hold the window for the whole of its output. The rest waits for
 /// the next tick, which comes at [`ACTIVE_POLL_MS`] while output is flowing.
 const MAX_READ_PER_DRAIN: usize = 64 * 1024;
+
+/// The size of the grid's text, in pixels.
+const FONT_SIZE: f32 = 14.0;
 
 /// What a click can land on.
 ///
@@ -313,9 +321,16 @@ impl Default for TerminalConfig {
         Self {
             cols: 80,
             rows: 24,
-            font_size: 14.0,
-            cell_width: 8.4,
-            cell_height: 18.0,
+            font_size: FONT_SIZE,
+            // The fixed-pitch face's own cell, measured. 8.4 by 18 was a
+            // guess, and the glyphs were drawn in the proportional UI face,
+            // where a `W` is far wider than an `i`: wide letters overhung
+            // their neighbours' backgrounds and the block cursor sat beside
+            // the character it marked. `apps/tmux` found this in its own
+            // grid and fixed it there; its panes are drawn by this code now,
+            // so the fix lives here.
+            cell_width: text::cell_advance(FONT_SIZE, FontWeightHint::Regular),
+            cell_height: text::line_height_in(FONT_SIZE, FontWeightHint::Regular, FontFamily::Mono),
             scrollback_limit: 10_000,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
@@ -565,6 +580,15 @@ pub struct TerminalState {
     screen: Vec<TermLine>,
     /// Scrollback buffer (oldest lines at front).
     scrollback: VecDeque<TermLine>,
+    /// How many lines at the back of the scrollback a shrinking grid put
+    /// there, which a growing one gives back.
+    ///
+    /// Only those: growing used to pull back *any* history, so a window
+    /// made shorter and then taller again -- a multiplexer pane split and
+    /// then closed -- came back with a prompt that had been at the top
+    /// pushed down under lines the user had cleared away. tmux keeps the
+    /// same count, as `hscrolled`, for the same reason.
+    resized_into_scrollback: usize,
     /// Alternate screen buffer (for smcup/rmcup).
     alt_screen: Vec<TermLine>,
     /// Whether we are currently on the alternate screen.
@@ -709,12 +733,13 @@ pub struct TerminalState {
     /// Bracketed paste mode.
     bracketed_paste: bool,
 
-    /// Saved cursor attributes (DECSC/DECRC).
-    saved_attrs: CellAttrs,
-    /// Saved cursor row.
-    saved_row: usize,
-    /// Saved cursor col.
-    saved_col: usize,
+    /// DECSC's saved cursor, one per screen: `[main, alternate]`.
+    ///
+    /// One slot served both, so a full-screen program that saved its own
+    /// cursor on the alternate screen overwrote the one `?1049` had saved
+    /// for the shell, and leaving the program put the shell's cursor where
+    /// the program's had been. xterm keeps one per screen.
+    saved: [SavedCursor; 2],
 }
 
 impl TerminalState {
@@ -738,6 +763,7 @@ impl TerminalState {
             config: config.clone(),
             screen,
             scrollback: VecDeque::new(),
+            resized_into_scrollback: 0,
             alt_screen,
             alt_screen_active: false,
             saved_cursor_main: (0, 0),
@@ -782,9 +808,7 @@ impl TerminalState {
             app_cursor_keys: false,
             app_keypad: false,
             bracketed_paste: false,
-            saved_attrs: CellAttrs::default(),
-            saved_row: 0,
-            saved_col: 0,
+            saved: [SavedCursor::default(); 2],
         }
     }
 
@@ -1580,21 +1604,46 @@ terminal, so what you type goes nowhere.\r\n"
     }
 
     fn save_cursor(&mut self) {
-        self.saved_row = self.cursor_row;
-        self.saved_col = self.cursor_col;
-        self.saved_attrs = self.current_attrs;
+        let saved = SavedCursor {
+            row: self.cursor_row,
+            col: self.cursor_col,
+            attrs: self.current_attrs,
+        };
+        if let Some(slot) = self.saved.get_mut(usize::from(self.alt_screen_active)) {
+            *slot = saved;
+        }
     }
 
     fn restore_cursor(&mut self) {
-        self.cursor_row = self.saved_row;
-        self.cursor_col = self.saved_col;
-        self.current_attrs = self.saved_attrs;
+        let saved = self
+            .saved
+            .get(usize::from(self.alt_screen_active))
+            .copied()
+            .unwrap_or_default();
+        self.cursor_row = saved.row;
+        self.cursor_col = saved.col;
+        self.current_attrs = saved.attrs;
         self.clamp_cursor();
     }
 
+    /// `ESC c`: the emulator as it was made -- screen, modes, tab stops,
+    /// attributes -- keeping everything that is not the emulator's.
+    ///
+    /// It rebuilt the whole of `self` from the config, and so dropped the
+    /// link to the child along with everything else. Dropping the link
+    /// hangs up: **a user who typed `reset` at a shell killed the shell.**
+    /// The child, the window's size and focus, and what is queued for the
+    /// child all survive it now.
     fn full_reset(&mut self) {
-        let config = self.config.clone();
-        *self = Self::new(config);
+        let mut fresh = Self::new(self.config.clone());
+        fresh.child = self.child.take();
+        fresh.child_exit = self.child_exit;
+        fresh.quiet_ms = self.quiet_ms;
+        fresh.close_requested = self.close_requested;
+        fresh.size = self.size;
+        fresh.focused = self.focused;
+        fresh.output_buffer = std::mem::take(&mut self.output_buffer);
+        *self = fresh;
     }
 
     /// Ensure cursor is within grid bounds.
@@ -2123,6 +2172,7 @@ terminal, so what you type goes nowhere.\r\n"
                 }
                 if mode == 3 {
                     self.scrollback.clear();
+                    self.resized_into_scrollback = 0;
                 }
             }
             _ => {}
@@ -2276,7 +2326,6 @@ terminal, so what you type goes nowhere.\r\n"
             return;
         }
 
-        let old_rows = self.config.rows;
         self.config.cols = new_cols;
         self.config.rows = new_rows;
 
@@ -2290,79 +2339,38 @@ terminal, so what you type goes nowhere.\r\n"
             }
         }
 
-        // Resize screen lines
-        //
-        // Narrowing can cut a double-width character in half: the continuation
-        // is truncated away and the lead is left at the last column, still
-        // drawing as a wide glyph in a cell that is now the edge of the screen.
-        // A lead is only recognisable by asking the width table what its
-        // character is, because `continuation` marks the *second* half and the
-        // second half is the one that just vanished.
-        //
-        // This is not reflow. `resize` truncates and pads rather than
-        // rewrapping, so no line's text moves between rows and there is no
-        // pair to split anywhere else. An earlier commit here said "rewrap on
-        // resize remains", which named a thing this terminal does not do.
-        for line in &mut self.screen {
-            line.resize(new_cols);
-            if let Some(last) = new_cols.checked_sub(1)
-                && let Some(cell) = line.cells.get_mut(last)
-                && charwidth::char_width(cell.ch) == Some(2)
-            {
-                cell.ch = ' ';
-                cell.continuation = false;
-            }
+        // Both screens, the hidden one too. While a full-screen program runs,
+        // the shell's screen waits in `alt_screen` with its cursor in
+        // `saved_cursor_main`, and it was cut from the bottom here with its
+        // cursor left where it was -- so a window resized under `vim` lost the
+        // prompt it was typed at, and the cursor came back pointing past it.
+        fit_cols(&mut self.screen, new_cols);
+        fit_cols(&mut self.alt_screen, new_cols);
+        let mut history = History {
+            lines: &mut self.scrollback,
+            owed: &mut self.resized_into_scrollback,
+            limit: self.config.scrollback_limit,
+            forgotten: 0,
+        };
+        // Each screen's saved cursor moves with its screen, or `?1049`'s
+        // restore would put the shell's cursor back on the row it was on
+        // before the window changed height.
+        let [saved_main, saved_alt] = &mut self.saved;
+        let size = (new_rows, new_cols);
+        if self.alt_screen_active {
+            let shown = (&mut self.cursor_row, &mut saved_alt.row);
+            fit_rows(&mut self.screen, shown, size, None);
+            let hidden = (&mut self.saved_cursor_main.0, &mut saved_main.row);
+            fit_rows(&mut self.alt_screen, hidden, size, Some(&mut history));
+        } else {
+            let shown = (&mut self.cursor_row, &mut saved_main.row);
+            fit_rows(&mut self.screen, shown, size, Some(&mut history));
+            let hidden = (&mut self.saved_cursor_alt.0, &mut saved_alt.row);
+            fit_rows(&mut self.alt_screen, hidden, size, None);
         }
-
-        // Add or remove rows
-        if new_rows > old_rows {
-            // Pull lines back from scrollback if available
-            let extra = new_rows.saturating_sub(old_rows);
-            for _ in 0..extra {
-                if let Some(line) = self.scrollback.pop_back() {
-                    let mut resized = line;
-                    resized.resize(new_cols);
-                    self.screen.insert(0, resized);
-                    // Adjust cursor row to keep it in place
-                    if self.cursor_row < new_rows.saturating_sub(1) {
-                        self.cursor_row = self.cursor_row.saturating_add(1);
-                    }
-                } else {
-                    self.screen.push(TermLine::new(new_cols));
-                }
-            }
-        } else if new_rows < old_rows {
-            // Push excess lines to scrollback
-            let excess = old_rows.saturating_sub(new_rows);
-            for _ in 0..excess {
-                if self.screen.len() > new_rows {
-                    let line = self.screen.remove(0);
-                    if !self.alt_screen_active {
-                        self.scrollback.push_back(line);
-                        if self.scrollback.len() > self.config.scrollback_limit {
-                            self.scrollback.pop_front();
-                            self.forget_oldest_row();
-                        }
-                    }
-                    self.cursor_row = self.cursor_row.saturating_sub(1);
-                }
-            }
+        for _ in 0..history.forgotten {
+            self.forget_oldest_row();
         }
-
-        // Ensure screen has exactly new_rows lines
-        while self.screen.len() < new_rows {
-            self.screen.push(TermLine::new(new_cols));
-        }
-        self.screen.truncate(new_rows);
-
-        // Resize alt screen
-        for line in &mut self.alt_screen {
-            line.resize(new_cols);
-        }
-        while self.alt_screen.len() < new_rows {
-            self.alt_screen.push(TermLine::new(new_cols));
-        }
-        self.alt_screen.truncate(new_rows);
 
         // Update scroll region to full screen
         self.scroll_top = 0;
@@ -2802,8 +2810,15 @@ terminal, so what you type goes nowhere.\r\n"
         // a band of desktop showing through the bottom of the terminal.
         fill(&mut f, l.window, scheme.background);
 
+        // The grid is drawn in the face its cells were measured in. Without
+        // this scope the compositor fills a fixed-pitch grid with the
+        // proportional UI face, which no cell width fits.
+        f.push(RenderCommand::PushFont {
+            family: FontFamily::Mono,
+        });
         self.draw_cells(&mut f, &l);
         self.draw_cursor(&mut f, &l);
+        f.push(RenderCommand::PopFont);
         self.draw_bar(&mut f, &l);
 
         // The bell flashes over everything, including the bar, because it is a
@@ -2870,12 +2885,11 @@ terminal, so what you type goes nowhere.\r\n"
                     };
                     glyph(
                         f,
-                        x,
-                        y,
+                        (x, y),
                         cell.ch,
                         fg_color,
-                        self.config.font_size,
-                        font_weight,
+                        (self.config.font_size, font_weight),
+                        l.cell_w * cells_covered(line, col),
                     );
                 }
 
@@ -2923,23 +2937,27 @@ terminal, so what you type goes nowhere.\r\n"
 
         match self.cursor_style {
             CursorStyle::Block => {
+                // As wide as the character under it: a block on the first
+                // half of a wide character covering only that half would
+                // cut the glyph drawn over it in two.
+                let line = self.screen.get(self.cursor_row);
+                let span = l.cell_w * line.map_or(1.0, |line| cells_covered(line, self.cursor_col));
                 fill(
                     f,
-                    Rect::new(cx, cy, l.cell_w, l.cell_h),
+                    Rect::new(cx, cy, span, l.cell_h),
                     Color::rgba(cursor_color.r, cursor_color.g, cursor_color.b, 180),
                 );
-                if let Some(line) = self.screen.get(self.cursor_row)
+                if let Some(line) = line
                     && let Some(cell) = line.cells.get(self.cursor_col)
                     && cell.ch != ' '
                 {
                     glyph(
                         f,
-                        cx,
-                        cy,
+                        (cx, cy),
                         cell.ch,
                         scheme.background,
-                        self.config.font_size,
-                        FontWeightHint::Regular,
+                        (self.config.font_size, FontWeightHint::Regular),
+                        span,
                     );
                 }
             }
@@ -3199,6 +3217,121 @@ terminal, so what you type goes nowhere.\r\n"
     }
 }
 
+/// A cursor saved by DECSC -- `ESC 7`, `CSI s`, and on the way into
+/// `CSI ? 1049 h`.
+#[derive(Clone, Copy, Debug, Default)]
+struct SavedCursor {
+    row: usize,
+    col: usize,
+    attrs: CellAttrs,
+}
+
+/// The scrollback, as a resize of the main screen sees it.
+struct History<'a> {
+    /// The lines themselves, oldest first.
+    lines: &'a mut VecDeque<TermLine>,
+    /// How many at the back a shrink put there (`resized_into_scrollback`).
+    owed: &'a mut usize,
+    /// The most lines kept.
+    limit: usize,
+    /// How many fell off the front, for the caller to account for: every
+    /// buffer row after them now means one row less.
+    forgotten: usize,
+}
+
+/// Fit every line to `cols` columns.
+///
+/// Narrowing can cut a double-width character in half: the continuation is
+/// truncated away and the lead is left at the last column, still drawing as a
+/// wide glyph in a cell that is now the edge of the screen. A lead is only
+/// recognisable by asking the width table what its character is, because
+/// `continuation` marks the *second* half and the second half is the one that
+/// just vanished.
+///
+/// This is not reflow. Lines are truncated and padded rather than rewrapped,
+/// so no line's text moves between rows and there is no pair to split
+/// anywhere else.
+fn fit_cols(lines: &mut [TermLine], cols: usize) {
+    for line in lines {
+        line.resize(cols);
+        if let Some(last) = cols.checked_sub(1)
+            && let Some(cell) = line.cells.get_mut(last)
+            && charwidth::char_width(cell.ch) == Some(2)
+        {
+            cell.ch = ' ';
+            cell.continuation = false;
+        }
+    }
+}
+
+/// Fit a screen to `rows` rows around its cursor, by tmux's rule.
+///
+/// Shrinking takes the rows below the cursor first -- at a shell prompt, the
+/// blank ones the next output will go into -- and only what still does not
+/// fit leaves from the top, into `history` when the screen has one. Taking
+/// every row from the top, as this used to, moved a prompt at the top of the
+/// screen into history: split a multiplexer pane in two and the half that
+/// kept the shell showed none of it. Growing gives back what shrinking took
+/// and adds blank rows for the rest.
+///
+/// `history` is `None` for the alternate screen, which has no scrollback:
+/// what leaves its top is gone, and it grows with blank rows.
+///
+/// `(cursor_row, saved_row)` are the screen's cursor and its DECSC saved
+/// cursor. The rows below the *cursor* are the ones taken first; both move
+/// by however far the lines they are on moved.
+fn fit_rows(
+    lines: &mut Vec<TermLine>,
+    (cursor_row, saved_row): (&mut usize, &mut usize),
+    (rows, cols): (usize, usize),
+    mut history: Option<&mut History<'_>>,
+) {
+    let old = lines.len();
+    if rows < old {
+        let excess = old.saturating_sub(rows);
+        let below = old.saturating_sub(cursor_row.saturating_add(1));
+        lines.truncate(old.saturating_sub(excess.min(below)));
+        for _ in 0..excess.saturating_sub(below) {
+            if lines.is_empty() {
+                break;
+            }
+            let line = lines.remove(0);
+            *cursor_row = cursor_row.saturating_sub(1);
+            *saved_row = saved_row.saturating_sub(1);
+            if let Some(h) = history.as_deref_mut() {
+                h.lines.push_back(line);
+                *h.owed = h.owed.saturating_add(1);
+                if h.lines.len() > h.limit {
+                    h.lines.pop_front();
+                    h.forgotten = h.forgotten.saturating_add(1);
+                }
+                *h.owed = (*h.owed).min(h.lines.len());
+            }
+        }
+    } else {
+        for _ in old..rows {
+            let pulled = history.as_deref_mut().and_then(|h| {
+                if (*h.owed).min(h.lines.len()) == 0 {
+                    return None;
+                }
+                let line = h.lines.pop_back()?;
+                *h.owed = h.owed.saturating_sub(1);
+                Some(line)
+            });
+            match pulled {
+                Some(mut line) => {
+                    line.resize(cols);
+                    lines.insert(0, line);
+                    *cursor_row = cursor_row.saturating_add(1);
+                    *saved_row = saved_row.saturating_add(1);
+                }
+                None => lines.push(TermLine::new(cols)),
+            }
+        }
+    }
+    lines.resize_with(rows, || TermLine::new(cols));
+}
+
 // ============================================================================
 // Drawing helpers
 // ============================================================================
@@ -3219,14 +3352,17 @@ fn fill(f: &mut Frame<Target>, r: Rect, color: Color) {
 }
 
 /// One character, bounded to its own cell.
+///
+/// `span` is the width of the cells the character covers -- one, or two for
+/// a wide character -- and the glyph is clipped to it. It was clipped to a
+/// `W` measured in the proportional face instead, which is no cell's width.
 fn glyph(
     f: &mut Frame<Target>,
-    x: f32,
-    y: f32,
+    (x, y): (f32, f32),
     ch: char,
     color: Color,
-    font_size: f32,
-    font_weight: FontWeightHint,
+    (font_size, font_weight): (f32, FontWeightHint),
+    span: f32,
 ) {
     let mut text = String::new();
     text.push(ch);
@@ -3237,9 +3373,19 @@ fn glyph(
         color,
         font_size,
         font_weight,
-        max_width: Some(text::measure("W", font_size, font_weight).max(font_size)),
+        max_width: Some(span),
         overflow: TextOverflow::Clip,
     });
+}
+
+/// How many cells the character at `col` covers: two when the next cell is
+/// its continuation, one otherwise.
+fn cells_covered(line: &TermLine, col: usize) -> f32 {
+    let next_is_continuation = col
+        .checked_add(1)
+        .and_then(|next| line.cells.get(next))
+        .is_some_and(|c| c.continuation);
+    if next_is_continuation { 2.0 } else { 1.0 }
 }
 
 /// A horizontal rule.
@@ -3307,7 +3453,11 @@ impl App for TerminalState {
     }
 
     fn initial_size(&self) -> (u32, u32) {
-        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        // The grid the config was born with, in the cells it is drawn in:
+        // eighty by twenty-four of the fixed-pitch face, plus the bar.
+        let w = usize_f32(self.config.cols) * self.config.cell_width + BAR_W;
+        let h = usize_f32(self.config.rows) * self.config.cell_height;
+        (pixels_u16(w.ceil()).into(), pixels_u16(h.ceil()).into())
     }
 
     fn tick_interval(&self) -> Option<std::time::Duration> {
@@ -3417,12 +3567,20 @@ mod tests {
     use super::child::Exit;
     use super::child::script::{Script, ScriptLink};
     use super::{
-        ACTIVE_POLL_MS, ACTIVE_WINDOW_MS, BAR_W, BELL_MS, BLINK_MS, Color, CursorStyle,
+        ACTIVE_POLL_MS, ACTIVE_WINDOW_MS, BAR_W, BELL_MS, BLINK_MS, Color, CursorStyle, FONT_SIZE,
         IDLE_POLL_MS, Layout, MAX_READ_PER_DRAIN, Rect, RenderCommand, Target, TerminalConfig,
         TerminalState, cells_that_fit, ratio, scale, u32_f32,
     };
+    use guitk::render::{FontFamily, FontWeightHint};
+    use guitk::text;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    /// The default cell, which the fixed-pitch face decides.
+    fn cell() -> (f32, f32) {
+        let config = TerminalConfig::default();
+        (config.cell_width, config.cell_height)
+    }
 
     impl TerminalState {
         /// This terminal, attached to a scripted child.
@@ -3495,7 +3653,7 @@ mod tests {
             t.put_char(ch);
         }
         t.selection_start(0.0, 0.0);
-        t.selection_extend(8.4 * 100.0, 0.0);
+        t.selection_extend(cell().0 * 100.0, 0.0);
         let copied = t.get_selection_text().expect("something was selected");
         assert!(
             copied.starts_with("\u{4E2D}\u{6587}"),
@@ -4210,7 +4368,8 @@ mod tests {
         let grid = rect_of_sized(&term, Target::Grid, AIM).expect("the grid is hit-boxed");
         assert!(grid.w > 0.0 && grid.h > 0.0);
 
-        term.click_at(8.4 * 4.5, 18.0 * 1.5, MouseButton::Left, AIM);
+        let (cw, ch) = cell();
+        term.click_at(cw * 4.5, ch * 1.5, MouseButton::Left, AIM);
         let sel = term.selection.as_ref().expect("a click starts a selection");
         assert_eq!(sel.start_col, 4, "the fifth column");
         assert_eq!(
@@ -4241,7 +4400,7 @@ mod tests {
             .collect::<String>();
 
         term.selection_start(0.0, 0.0);
-        term.selection_extend(8.4 * 100.0, 0.0);
+        term.selection_extend(cell().0 * 100.0, 0.0);
         let copied = term.get_selection_text().expect("something was selected");
         assert_eq!(
             copied.trim_end(),
@@ -4264,8 +4423,9 @@ mod tests {
         let mut term = fed_terminal(60);
         term.resize_to_window(AIM.0, AIM.1);
         term.scroll_viewport_up(15);
-        term.selection_start(0.0, 18.0 * 2.0);
-        term.selection_extend(8.4 * 6.0, 18.0 * 2.0);
+        let (cw, ch) = cell();
+        term.selection_start(0.0, ch * 2.0);
+        term.selection_extend(cw * 6.0, ch * 2.0);
 
         let row = term.buffer_row_of(2);
         assert!(term.is_selected(row, 0), "the painted row is not selected");
@@ -4297,9 +4457,10 @@ mod tests {
         let mut term = fed_terminal(60);
         term.resize_to_window(AIM.0, AIM.1);
         term.scroll_viewport_up(15);
-        let aimed_y = 18.0 * 2.0;
+        let (cw, ch) = cell();
+        let aimed_y = ch * 2.0;
         term.selection_start(0.0, aimed_y);
-        term.selection_extend(8.4 * 6.0, aimed_y);
+        term.selection_extend(cw * 6.0, aimed_y);
 
         let sel_bg = term.config.colors.selection_bg;
         let mut highlights = Vec::new();
@@ -4321,7 +4482,7 @@ mod tests {
                 "a highlight at y {y}, not on the row at y {aimed_y} the pointer landed on"
             );
             assert!(
-                *x <= 8.4 * 6.0 + 0.01,
+                *x <= cw * 6.0 + 0.01,
                 "a highlight at x {x}, past the column the drag ended on"
             );
         }
@@ -4539,7 +4700,7 @@ mod tests {
             .map(|c| c.ch)
             .collect::<String>();
         term.selection_start(0.0, 0.0);
-        term.selection_extend(8.4 * 200.0, 0.0);
+        term.selection_extend(cell().0 * 200.0, 0.0);
         let copied_before = term.get_selection_text().expect("a selection");
         assert_eq!(copied_before.trim_end(), text_before.trim_end());
 
@@ -5351,5 +5512,239 @@ mod tests {
         let (mut term, script) = scripted();
         term.hang_up();
         assert_eq!(script.borrow().hang_ups, 1);
+    }
+
+    // -- resizing, which a multiplexer does on every split --
+
+    /// The text of screen row `row`, trailing blanks trimmed.
+    fn row_text(term: &TerminalState, row: usize) -> String {
+        term.line_at(term.buffer_row_of(row))
+            .map(|l| l.cells.iter().map(|c| c.ch).collect::<String>())
+            .unwrap_or_default()
+            .trim_end()
+            .to_string()
+    }
+
+    fn with_lines(n: usize) -> TerminalState {
+        let mut term = TerminalState::new(TerminalConfig::default());
+        for i in 0..n {
+            term.feed(format!("line {i}\r\n").as_bytes());
+        }
+        term
+    }
+
+    #[test]
+    fn shrinking_keeps_a_prompt_at_the_top_on_screen() {
+        // Every row used to leave from the top, so a shell's prompt on row 0
+        // went into the scrollback the moment the grid got shorter -- and a
+        // pane split in two showed none of the shell it had.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        term.feed(b"$ ");
+        term.resize(80, 10);
+        assert_eq!(row_text(&term, 0), "$", "the prompt stays on screen");
+        assert_eq!(term.buffer_len(), 10, "nothing went into the scrollback");
+        assert_eq!((term.cursor_row, term.cursor_col), (0, 2));
+    }
+
+    #[test]
+    fn shrinking_a_full_screen_sends_its_top_into_the_scrollback() {
+        // With the cursor on the last row there is nothing below it to take,
+        // so the top goes -- into the history, not away.
+        let mut term = with_lines(30);
+        term.feed(b"$ ");
+        let before = term.buffer_len();
+        term.resize(80, 10);
+        assert_eq!(row_text(&term, 9), "$", "the prompt is on the last row");
+        assert_eq!(term.cursor_row, 9);
+        assert_eq!(
+            term.buffer_len(),
+            before,
+            "nothing was lost: the fourteen rows went into the history"
+        );
+        assert_eq!(
+            term.scroll_offset, 0,
+            "and the view is still the live screen"
+        );
+        assert_eq!(row_text(&term, 0), "line 21");
+    }
+
+    #[test]
+    fn growing_back_returns_exactly_what_shrinking_took() {
+        let mut term = with_lines(30);
+        term.feed(b"$ ");
+        let screen = |t: &TerminalState| (0..t.rows()).map(|r| row_text(t, r)).collect::<Vec<_>>();
+        let (before, len) = (screen(&term), term.buffer_len());
+        term.resize(80, 10);
+        term.resize(80, 24);
+        assert_eq!(screen(&term), before);
+        assert_eq!(term.buffer_len(), len);
+        assert_eq!((term.cursor_row, term.cursor_col), (23, 2));
+    }
+
+    #[test]
+    fn growing_does_not_pull_down_history_the_shrink_did_not_take() {
+        // Growing used to pull back any history at all, so a prompt at the top
+        // of a cleared screen was pushed down under the lines the user had
+        // just cleared away -- every time a split pane was closed again.
+        let mut term = with_lines(40);
+        term.feed(b"\x1b[H\x1b[2J$ ");
+        term.resize(80, 10);
+        term.resize(80, 24);
+        assert_eq!(row_text(&term, 0), "$", "the prompt is still at the top");
+        assert_eq!(term.cursor_row, 0);
+    }
+
+    #[test]
+    fn resizing_under_a_full_screen_program_keeps_the_shells_prompt() {
+        // The shell's screen waits, hidden, while `vim` has the alternate one.
+        // It was cut from the bottom with its cursor left where it was, so
+        // the prompt was gone when the program exited.
+        let mut term = with_lines(30);
+        term.feed(b"$ ");
+        term.feed(b"\x1b[?1049h\x1b[5;5Hvim");
+        term.resize(80, 10);
+        term.feed(b"\x1b[?1049l");
+        assert_eq!(
+            row_text(&term, term.cursor_row),
+            "$",
+            "the prompt came back"
+        );
+        assert_eq!((term.cursor_row, term.cursor_col), (9, 2));
+
+        term.feed(b"\x1b[?1049h");
+        term.resize(80, 24);
+        term.feed(b"\x1b[?1049l");
+        assert_eq!(
+            (term.cursor_row, term.cursor_col),
+            (23, 2),
+            "and back again"
+        );
+        assert_eq!(row_text(&term, 23), "$");
+        assert_eq!(row_text(&term, 0), "line 7");
+    }
+
+    #[test]
+    fn a_saved_cursor_moves_with_its_line_when_the_grid_shrinks() {
+        // Saved on row 20, then three more lines: shrinking by fourteen takes
+        // fourteen rows off the top, so the saved line is now row 6. Left at
+        // row 20 it would be clamped to the last row, which holds a different
+        // line.
+        let mut term = with_lines(20);
+        term.feed(b"\x1b7a\r\nb\r\nc\r\n$ ");
+        term.resize(80, 10);
+        term.feed(b"\x1b8");
+        assert_eq!((term.cursor_row, term.cursor_col), (6, 0));
+        assert_eq!(row_text(&term, 6), "a", "on the line it was saved on");
+    }
+
+    #[test]
+    fn a_programs_own_saved_cursor_does_not_replace_the_shells() {
+        // One saved-cursor slot served both screens, so a program that saved
+        // its cursor on the alternate screen handed its position back to the
+        // shell on the way out.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        term.feed(b"abc");
+        term.feed(b"\x1b[?1049h\x1b[5;5H\x1b7\x1b[1;1H");
+        term.feed(b"\x1b[?1049l");
+        assert_eq!((term.cursor_row, term.cursor_col), (0, 3));
+        term.feed(b"\x1b[?1049h\x1b8");
+        assert_eq!(
+            (term.cursor_row, term.cursor_col),
+            (4, 4),
+            "the alternate screen's slot is its own: the program's save is still there"
+        );
+    }
+
+    #[test]
+    fn a_reset_keeps_the_shell() {
+        // `ESC c` rebuilt the whole terminal, link and all, and dropping the
+        // link hangs up: typing `reset` at a shell killed the shell.
+        let (mut term, script) = scripted();
+        term.resize_to_window(500.0, 300.0);
+        let size = term.win_size();
+        script.borrow_mut().pending.extend_from_slice(b"junk\x1bc");
+        term.handle_event(&Event::Tick { elapsed_ms: 20 });
+        assert_eq!(script.borrow().hang_ups, 0, "the shell was hung up on");
+        assert!(term.child_is_live());
+        assert_eq!(term.win_size(), size, "the grid kept the window's size");
+        assert_eq!(row_text(&term, 0), "", "and the screen was reset");
+        term.handle_event(&Event::Key(typing("x")));
+        assert_eq!(script.borrow().sent, b"x", "the shell still hears the keys");
+    }
+
+    // -- the grid's face --
+
+    /// A character has to fit the cell drawn behind it. Measured in the
+    /// family the glyphs are drawn in: in the proportional UI face a `W` came
+    /// out far wider than an `i`, over its neighbour's background and beside
+    /// the block cursor meant to mark it.
+    #[test]
+    fn a_character_fits_its_cell() {
+        let (w, _) = cell();
+        for weight in [FontWeightHint::Regular, FontWeightHint::Bold] {
+            for ch in ['0', 'W', 'i', '#', 'é', 'M', '@'] {
+                let drawn = text::measure_in(&ch.to_string(), FONT_SIZE, weight, FontFamily::Mono);
+                assert!(
+                    drawn <= w + 0.01,
+                    "{ch:?} ({weight:?}) draws {drawn} px in a {w} px cell"
+                );
+            }
+        }
+    }
+
+    /// The row pitch has to clear the face's ascent, or rows overlap.
+    #[test]
+    fn rows_do_not_overlap() {
+        let (w, h) = cell();
+        assert!(w > 0.0 && h > 0.0);
+        assert!(h >= text::ascent_in(FONT_SIZE, FontWeightHint::Regular, FontFamily::Mono));
+    }
+
+    /// The grid's glyphs are drawn inside a fixed-pitch scope, and nothing
+    /// else is -- the cells were measured in that face.
+    #[test]
+    fn the_grid_is_drawn_in_the_family_it_was_measured_in() {
+        let term = with_lines(3);
+        let frame = term.frame(400.0, 200.0);
+        let (mut depth, mut deepest, mut glyphs, mut outside) = (0_i32, 0_i32, 0, 0);
+        for cmd in frame.commands() {
+            match cmd {
+                RenderCommand::PushFont { family } => {
+                    assert_eq!(family, &FontFamily::Mono);
+                    depth += 1;
+                    deepest = deepest.max(depth);
+                }
+                RenderCommand::PopFont => depth -= 1,
+                RenderCommand::Text { .. } if depth > 0 => glyphs += 1,
+                RenderCommand::Text { .. } => outside += 1,
+                _ => {}
+            }
+        }
+        assert_eq!((depth, deepest), (0, 1), "one scope, balanced");
+        assert!(glyphs > 0, "no glyph inside the scope");
+        assert_eq!(outside, 0, "a glyph drawn in the proportional face");
+    }
+
+    /// A glyph is clipped to the cells it covers: two for a wide character,
+    /// one otherwise. It was clipped to a proportional `W`.
+    #[test]
+    fn a_glyph_is_clipped_to_the_cells_it_covers() {
+        let mut term = TerminalState::new(TerminalConfig::default());
+        term.feed("a\u{4E2D}".as_bytes());
+        let (w, _) = cell();
+        let widths: Vec<(String, f32)> = term
+            .frame(400.0, 200.0)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text, max_width, ..
+                } => Some((text.clone(), max_width.unwrap_or(0.0))),
+                _ => None,
+            })
+            .collect();
+        let of = |s: &str| widths.iter().find(|(t, _)| t == s).map(|(_, m)| *m);
+        assert_eq!(of("a"), Some(w));
+        assert_eq!(of("\u{4E2D}"), Some(w * 2.0));
     }
 }

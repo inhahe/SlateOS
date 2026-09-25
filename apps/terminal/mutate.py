@@ -179,7 +179,7 @@ MUTATIONS = [
     ),
     (
         "a glyph is drawn unbounded, so a proportional face walks off the row",
-        '        max_width: Some(text::measure("W", font_size, font_weight).max(font_size)),',
+        "        max_width: Some(span),",
         "        max_width: None,",
         ["no_glyph_runs_off_the_window_it_is_drawn_in"],
     ),
@@ -551,7 +551,7 @@ MUTATIONS = [
     ),
     (
         "the window opens at a size its own default grid does not fit in",
-        "        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)",
+        "        (pixels_u16(w.ceil()).into(), pixels_u16(h.ceil()).into())",
         "        (320, 240)",
         ["the_window_opens_at_a_size_the_default_grid_fits_in"],
     ),
@@ -634,6 +634,73 @@ MUTATIONS = [
         "                self.feed(msg.as_bytes());\n            }\n        }\n    }",
         "                drop(msg);\n            }\n        }\n    }",
         ["a_shell_that_cannot_start_is_named_on_the_screen"],
+    ),
+    # -- resizing, resetting, and the grid's face (2026-09-25) --
+    (
+        "shrinking takes every row from the top",
+        "        lines.truncate(old.saturating_sub(excess.min(below)));\n        for _ in 0..excess.saturating_sub(below) {",
+        "        for _ in 0..excess {",
+        ["shrinking_keeps_a_prompt_at_the_top_on_screen"],
+    ),
+    (
+        "growing pulls back any history",
+        "                if (*h.owed).min(h.lines.len()) == 0 {",
+        "                if h.lines.is_empty() {",
+        ["growing_does_not_pull_down_history_the_shrink_did_not_take"],
+    ),
+    (
+        "a shrink does not count what it took",
+        "                *h.owed = h.owed.saturating_add(1);\n",
+        "",
+        ["growing_back_returns_exactly_what_shrinking_took"],
+    ),
+    (
+        "a saved cursor stays put when its lines go up",
+        "            *saved_row = saved_row.saturating_sub(1);\n",
+        "",
+        ["a_saved_cursor_moves_with_its_line_when_the_grid_shrinks"],
+    ),
+    (
+        "a saved cursor stays put when its lines come down",
+        "                    *saved_row = saved_row.saturating_add(1);\n",
+        "",
+        ["resizing_under_a_full_screen_program_keeps_the_shells_prompt"],
+    ),
+    (
+        "the hidden screen is cut from the bottom",
+        "            let hidden = (&mut self.saved_cursor_main.0, &mut saved_main.row);\n            fit_rows(&mut self.alt_screen, hidden, size, Some(&mut history));",
+        "            let hidden = (&mut 0, &mut saved_main.row);\n            fit_rows(&mut self.alt_screen, hidden, size, None);",
+        ["resizing_under_a_full_screen_program_keeps_the_shells_prompt"],
+    ),
+    (
+        "one saved cursor serves both screens",
+        "        if let Some(slot) = self.saved.get_mut(usize::from(self.alt_screen_active)) {",
+        "        if let Some(slot) = self.saved.get_mut(0) {",
+        ["a_programs_own_saved_cursor_does_not_replace_the_shells"],
+    ),
+    (
+        "a reset hangs up the shell",
+        "        fresh.child = self.child.take();\n",
+        "",
+        ["a_reset_keeps_the_shell"],
+    ),
+    (
+        "the grid is drawn in the proportional face",
+        "        f.push(RenderCommand::PushFont {\n            family: FontFamily::Mono,\n        });\n",
+        "",
+        ["the_grid_is_drawn_in_the_family_it_was_measured_in"],
+    ),
+    (
+        "a wide glyph is clipped to one cell",
+        "    if next_is_continuation { 2.0 } else { 1.0 }",
+        "    let _ = next_is_continuation;\n    1.0",
+        ["a_glyph_is_clipped_to_the_cells_it_covers"],
+    ),
+    (
+        "the cell is a guess",
+        "            cell_width: text::cell_advance(FONT_SIZE, FontWeightHint::Regular),",
+        "            cell_width: 6.0,",
+        ["a_character_fits_its_cell"],
     ),
 ]
 

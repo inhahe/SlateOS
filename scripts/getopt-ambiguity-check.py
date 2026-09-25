@@ -410,19 +410,51 @@ def parse_table(tree: gittree.Tree, rel: str) -> Table | None:
     return table
 
 
+class RunnerUnavailable(Exception):
+    """WSL is installed and did not answer -- which is not "no GNU userland"."""
+
+
+#: How long to wait for WSL to answer, in turn. A loaded machine can take well
+#: past the first to start its VM, and reading that as "there is no WSL" let a
+#: push through with its tables unjudged: the check printed "nothing to check"
+#: and exited 0, and the hook counted the gate as run. Found 2026-09-25 by
+#: `test-checkers-honour-head.py`'s gate-5 case failing inside a boot test on a
+#: busy host, with WSL working in every shell around it. The longer waits are
+#: only ever paid after the first has failed.
+PROBE_TIMEOUTS = (30, 60, 120)
+
+
 def find_runner() -> list[str] | None:
-    """How to run a GNU utility, as an argv prefix, or ``None``."""
+    """How to run a GNU utility, as an argv prefix, or ``None`` if there is none.
+
+    ``None`` means this host has no GNU userland to compare against: no WSL,
+    or a WSL that answers every probe with an error (no distribution
+    installed) -- a property of the machine, and the documented skip.
+
+    Raises :class:`RunnerUnavailable` when WSL is installed and a probe *timed
+    out*: the userland is there and could not be reached this time, which says
+    nothing about the tables and must not be reported as though it did.
+    """
     if sys.platform.startswith("linux"):
         return []
     wsl = shutil.which("wsl")
-    if wsl:
+    if not wsl:
+        return None
+    timed_out = []
+    for timeout in PROBE_TIMEOUTS:
         try:
             subprocess.run(
-                [wsl, "-e", "true"], capture_output=True, timeout=30, check=True
+                [wsl, "-e", "true"], capture_output=True, timeout=timeout, check=True
             )
+            return [wsl, "-e"]
+        except subprocess.TimeoutExpired:
+            timed_out.append(f"no answer in {timeout}s")
         except (subprocess.SubprocessError, OSError):
-            return None
-        return [wsl, "-e"]
+            # Answered, with an error: tried again in case it was starting up,
+            # and read as absent if it never gets past it.
+            continue
+    if timed_out:
+        raise RunnerUnavailable("; ".join(timed_out))
     return None
 
 
@@ -947,7 +979,18 @@ def main() -> int:
         # reading any revision of the repository.
         return selftest()
     wanted = set(args.bins)
-    runner = find_runner()
+    try:
+        runner = find_runner()
+    except RunnerUnavailable as exc:
+        # Exit 2, the hook's "no verdict": it refuses the push rather than
+        # publishing tables nobody compared, and a retry once WSL answers is
+        # the remedy (or ALLOW_GETOPT_DRIFT=1, which says so out loud).
+        print(
+            f"getopt-ambiguity-check: WSL is installed but did not answer "
+            f"({exc}); the tables were not compared",
+            file=sys.stderr,
+        )
+        return 2
     if runner is None:
         # ASCII only: this console's code page is not UTF-8 and mangles the rest.
         print("no GNU userland available (no WSL, not Linux); nothing to check")

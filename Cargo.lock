@@ -3035,6 +3035,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "termchild"
+version = "0.1.0"
+dependencies = [
+ "libcall",
+]
+
+[[package]]
 name = "terminal"
 version = "0.1.0"
 dependencies = [
@@ -3043,6 +3050,7 @@ dependencies = [
  "guitk",
  "libcall",
  "oswindow",
+ "termchild",
 ]
 
 [[package]]

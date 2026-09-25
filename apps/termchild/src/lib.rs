@@ -1,4 +1,7 @@
-//! The program on the far side of the terminal.
+//! The program on the far side of a terminal.
+//!
+//! Shared by `apps/terminal`, where it began as `child.rs`, and
+//! `apps/tmux`, whose every pane is a terminal of its own: one link a pane.
 //!
 //! A terminal emulator is the *master* end of a pseudo-terminal. It writes
 //! what the user types into the master and draws what comes back out of it.
@@ -708,7 +711,10 @@ mod pty_link {
 /// it draws for a byte, when it says the child has gone. A shell would make
 /// every one of them depend on a process, a clock and a platform; this makes
 /// them depend on nothing, and the real link has its own tests above.
-#[cfg(test)]
+///
+/// Behind the `testing` feature, which the applications turn on in their
+/// `[dev-dependencies]`, so their tests can attach one.
+#[cfg(any(test, feature = "testing"))]
 pub mod script {
     use super::{Exit, Link};
     use libcall::pty::WinSize;

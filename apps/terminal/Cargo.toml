@@ -25,6 +25,12 @@ oswindow = { path = "../../gui/window" }
 # and keep state, so a program reaches them through the C ABI and never by
 # depending on `posix` (design-decisions 768). This is that door.
 libcall = { path = "../../libcall" }
+# The link to the shell -- this file's `child.rs` until `apps/tmux` needed one
+# for every pane.
+termchild = { path = "../termchild" }
+
+[dev-dependencies]
+termchild = { path = "../termchild", features = ["testing"] }
 
 [lints]
 workspace = true

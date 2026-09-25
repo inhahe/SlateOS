@@ -1,0 +1,19 @@
+[package]
+name = "termchild"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS: the program on the far side of a terminal -- a shell on a kernel pseudo-terminal, as a link a terminal emulator drives."
+
+[dependencies]
+# `forkpty` and `TIOCSWINSZ` are the C library's and keep state, so a program
+# reaches them through the C ABI and never by depending on `posix`
+# (design-decisions 768). This is that door.
+libcall = { path = "../../libcall" }
+
+[features]
+# `script::ScriptLink`, a child made of a script, for the tests of the
+# emulators that drive a link. Off in every real build.
+testing = []
+
+[lints]
+workspace = true

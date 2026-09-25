@@ -307,8 +307,8 @@ MUTATIONS = [
     # with one, against the scripted link the suite attaches.  The real link --
     # the user's shell on a kernel pseudo-terminal -- is `cfg(unix)` and is not
     # compiled by this sweep, which builds for the Windows host; it is covered
-    # by `child.rs`'s `pty_link` tests, run against a real shell on a Linux
-    # host (`cargo test -p terminal --target x86_64-unknown-linux-gnu`).
+    # by `apps/termchild`'s `pty_link` tests, run against a real shell on a
+    # Linux host (`cargo test -p termchild --target x86_64-unknown-linux-gnu`).
     (
         "nothing is ever sent to the child",
         "        let taken = link.send(&self.output_buffer).min(self.output_buffer.len());",

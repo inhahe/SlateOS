@@ -32,7 +32,8 @@
 //! Renders via the guitk RenderTree, producing Text and FillRect commands
 //! for each visible cell in the terminal grid.
 
-pub mod child;
+// The child link lives in `apps/termchild`, shared with `apps/tmux`.
+pub use termchild as child;
 
 use child::{Exit, Link};
 use libcall::pty::WinSize;

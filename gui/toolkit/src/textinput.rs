@@ -24,6 +24,7 @@
 //! that set the text without moving the caret would leave an offset pointing
 //! into the middle of a character, and the next arrow key would panic.
 
+use crate::event::{Key, KeyEvent};
 use crate::render::FontWeightHint;
 use crate::text;
 use crate::text::TextCursor;
@@ -336,6 +337,116 @@ impl TextInput {
     }
 }
 
+/// What [`TextInput::edit_key`] did with a keystroke.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyEdit {
+    /// Not an editing key -- Enter, Escape, Tab, Up, Down and the like. The
+    /// field's owner decides what it means.
+    Unhandled,
+    /// An editing key that left the text as it was: the caret or selection
+    /// moved, a copy was taken, or a Backspace had nothing before it.
+    Handled,
+    /// The text changed.
+    Changed,
+}
+
+impl KeyEdit {
+    /// `Changed` if `after` differs from `before`, else `Handled`.
+    fn of(before: &str, after: &str) -> Self {
+        if before == after {
+            Self::Handled
+        } else {
+            Self::Changed
+        }
+    }
+}
+
+impl TextInput {
+    /// Apply one keystroke's editing meaning, and say what it did.
+    ///
+    /// The caret keys (Left, Right, Home, End, with Shift extending the
+    /// selection), Backspace and Delete, Ctrl+A/X/C/V, and typed text. Every
+    /// field in the tree wants exactly this set, and each spelled it out: the
+    /// desktop's Run box does it in a forty-line `match`, and the module doc
+    /// above counts twenty-two hand-rolled copies of the typing half alone.
+    ///
+    /// `font_size` and `weight` are what the field is drawn at, because moving
+    /// the caret *visually* through mixed-direction text needs the shaped
+    /// glyphs; see [`move_cursor_left`](Self::move_cursor_left).
+    ///
+    /// A release, and a keystroke that typed only control characters, is
+    /// [`KeyEdit::Unhandled`]: Enter and Escape produce text (`\r`, `\x1b`) on
+    /// most layouts, and a field that swallowed them would never let its owner
+    /// see them.
+    ///
+    /// The clipboard chords want Ctrl *without* Alt. Windows reports AltGr as
+    /// Ctrl+Alt, and AltGr on a letter is how several layouts type a character
+    /// -- Polish `ą` is AltGr+A -- so taking every Ctrl+A as "select all" would
+    /// make that character impossible to type here.
+    pub fn edit_key(&mut self, key: &KeyEvent, font_size: f32, weight: FontWeightHint) -> KeyEdit {
+        if !key.pressed {
+            return KeyEdit::Unhandled;
+        }
+        let shift = key.modifiers.shift;
+        let chord = key.modifiers.ctrl && !key.modifiers.alt;
+        match key.key {
+            Key::A if chord => {
+                self.select_all();
+                KeyEdit::Handled
+            }
+            Key::C if chord => {
+                self.copy();
+                KeyEdit::Handled
+            }
+            Key::X if chord => {
+                let before = self.text.clone();
+                self.cut();
+                KeyEdit::of(&before, &self.text)
+            }
+            Key::V if chord => {
+                let before = self.text.clone();
+                self.paste();
+                KeyEdit::of(&before, &self.text)
+            }
+            Key::Left => {
+                self.move_cursor_left(shift, font_size, weight);
+                KeyEdit::Handled
+            }
+            Key::Right => {
+                self.move_cursor_right(shift, font_size, weight);
+                KeyEdit::Handled
+            }
+            Key::Home => {
+                self.move_home(shift);
+                KeyEdit::Handled
+            }
+            Key::End => {
+                self.move_end(shift);
+                KeyEdit::Handled
+            }
+            Key::Backspace => {
+                let before = self.text.clone();
+                self.backspace();
+                KeyEdit::of(&before, &self.text)
+            }
+            Key::Delete => {
+                let before = self.text.clone();
+                self.delete();
+                KeyEdit::of(&before, &self.text)
+            }
+            _ => {
+                if !key.types_text() {
+                    return KeyEdit::Unhandled;
+                }
+                for ch in key.typed() {
+                    self.insert_char(ch);
+                }
+                KeyEdit::Changed
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -540,5 +651,125 @@ mod tests {
             rightwards.push(input.cursor().byte());
         }
         assert_eq!(rightwards, vec![1, 2, 4, 2, 7, 8]);
+    }
+
+    fn key(k: crate::event::Key, ctrl: bool, text: &str) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: crate::event::Modifiers {
+                ctrl,
+                ..crate::event::Modifiers::NONE
+            },
+            text: text.to_string(),
+        }
+    }
+
+    fn edit(input: &mut TextInput, k: crate::event::Key, ctrl: bool, text: &str) -> KeyEdit {
+        input.edit_key(&key(k, ctrl, text), FONT_SIZE, FontWeightHint::Regular)
+    }
+
+    #[test]
+    fn edit_key_types_moves_and_deletes_and_says_which() {
+        use crate::event::Key;
+        let mut input = TextInput::new();
+        assert_eq!(edit(&mut input, Key::A, false, "a"), KeyEdit::Changed);
+        assert_eq!(edit(&mut input, Key::B, false, "b"), KeyEdit::Changed);
+        assert_eq!(input.text(), "ab");
+        assert_eq!(edit(&mut input, Key::Left, false, ""), KeyEdit::Handled);
+        assert_eq!(edit(&mut input, Key::Delete, false, ""), KeyEdit::Changed);
+        assert_eq!(input.text(), "a");
+        assert_eq!(
+            edit(&mut input, Key::Delete, false, ""),
+            KeyEdit::Handled,
+            "nothing after the caret: handled, and unchanged"
+        );
+        assert_eq!(edit(&mut input, Key::Home, false, ""), KeyEdit::Handled);
+        assert_eq!(
+            edit(&mut input, Key::Backspace, false, ""),
+            KeyEdit::Handled,
+            "nothing before the caret"
+        );
+        assert_eq!(edit(&mut input, Key::End, false, ""), KeyEdit::Handled);
+        assert_eq!(
+            edit(&mut input, Key::Backspace, false, ""),
+            KeyEdit::Changed
+        );
+        assert_eq!(input.text(), "");
+    }
+
+    #[test]
+    fn edit_key_leaves_the_owners_keys_to_the_owner() {
+        use crate::event::Key;
+        let mut input = TextInput::new();
+        input.set_text("x");
+        // Enter and Escape *type* control characters on most layouts; a field
+        // that took them would never let its owner see them.
+        assert_eq!(
+            edit(&mut input, Key::Enter, false, "\r"),
+            KeyEdit::Unhandled
+        );
+        assert_eq!(
+            edit(&mut input, Key::Escape, false, "\u{1b}"),
+            KeyEdit::Unhandled
+        );
+        assert_eq!(edit(&mut input, Key::Up, false, ""), KeyEdit::Unhandled);
+        assert_eq!(edit(&mut input, Key::Tab, false, "\t"), KeyEdit::Unhandled);
+        let mut release = key(Key::A, false, "a");
+        release.pressed = false;
+        assert_eq!(
+            input.edit_key(&release, FONT_SIZE, FontWeightHint::Regular),
+            KeyEdit::Unhandled
+        );
+        assert_eq!(input.text(), "x", "none of them touched the text");
+    }
+
+    #[test]
+    fn edit_key_does_the_clipboard_chords() {
+        use crate::event::Key;
+        let mut input = TextInput::new();
+        input.set_text("hello");
+        assert_eq!(edit(&mut input, Key::A, true, "\u{1}"), KeyEdit::Handled);
+        assert_eq!(edit(&mut input, Key::C, true, "\u{3}"), KeyEdit::Handled);
+        assert_eq!(input.clipboard(), "hello");
+        assert_eq!(edit(&mut input, Key::X, true, "\u{18}"), KeyEdit::Changed);
+        assert_eq!(input.text(), "");
+        assert_eq!(edit(&mut input, Key::V, true, "\u{16}"), KeyEdit::Changed);
+        assert_eq!(edit(&mut input, Key::V, true, "\u{16}"), KeyEdit::Changed);
+        assert_eq!(input.text(), "hellohello");
+        // A cut with nothing selected changes nothing.
+        assert_eq!(edit(&mut input, Key::X, true, "\u{18}"), KeyEdit::Handled);
+    }
+
+    #[test]
+    fn edit_key_types_every_character_a_keystroke_produced() {
+        use crate::event::Key;
+        // A dead key that did not compose types both characters (§550).
+        let mut input = TextInput::new();
+        assert_eq!(edit(&mut input, Key::X, false, "\u{b4}x"), KeyEdit::Changed);
+        assert_eq!(input.text(), "\u{b4}x");
+    }
+
+    #[test]
+    fn edit_key_lets_altgr_type_where_ctrl_would_be_a_chord() {
+        use crate::event::{Key, Modifiers};
+        // Windows reports AltGr as Ctrl+Alt; AltGr+A is Polish `a-ogonek`.
+        let mut input = TextInput::new();
+        input.set_text("x");
+        let altgr_a = KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            text: "\u{105}".to_string(),
+        };
+        assert_eq!(
+            input.edit_key(&altgr_a, FONT_SIZE, FontWeightHint::Regular),
+            KeyEdit::Changed
+        );
+        assert_eq!(input.text(), "x\u{105}", "typed, not select-all");
     }
 }

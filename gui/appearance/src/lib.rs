@@ -1207,6 +1207,11 @@ pub enum IconSize {
 }
 
 impl IconSize {
+    /// Every size, smallest first. See [`ThemeMode::ALL`]: the desktop's View
+    /// menu and the Settings application both offer these, and each listing
+    /// them itself is how the two would come to offer different sizes.
+    pub const ALL: &'static [Self] = &[Self::Small, Self::Medium, Self::Large, Self::ExtraLarge];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Small => "Small (32px)",
@@ -2587,6 +2592,24 @@ mod tests {
         assert_eq!(IconSize::Medium.pixels(), 48);
         assert_eq!(IconSize::Large.pixels(), 64);
         assert_eq!(IconSize::ExtraLarge.pixels(), 96);
+    }
+
+    /// `IconSize::ALL` is every size, smallest first. The match stops
+    /// compiling when a size is added, which is the moment `ALL` needs it.
+    #[test]
+    fn every_icon_size_is_in_all_smallest_first() {
+        for size in IconSize::ALL {
+            match size {
+                IconSize::Small | IconSize::Medium | IconSize::Large | IconSize::ExtraLarge => {}
+            }
+        }
+        assert_eq!(IconSize::ALL.len(), 4);
+        assert!(
+            IconSize::ALL
+                .windows(2)
+                .all(|pair| pair[0].pixels() < pair[1].pixels()),
+            "not smallest first"
+        );
     }
 
     // ---- CursorSize ----

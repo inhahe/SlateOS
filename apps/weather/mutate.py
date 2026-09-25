@@ -87,7 +87,9 @@ MUTATIONS = [
         "the keys change the units without keeping them",
         "                self.change_setting(Setting::Temperature);",
         "                self.toggle_temp_unit();",
-        ["the_units_are_kept_between_sessions"],
+        # Pressed alone: in a sequence the next key's store kept U's change
+        # for it, and this row survived.
+        ["each_unit_key_keeps_its_own_change"],
     ),
     (
         "the pointer lights nothing",

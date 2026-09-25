@@ -234,11 +234,12 @@ MUTATIONS = [
         ["the_library_says_when_it_is_full"],
     ),
     (
+        # The backdrop is the dialog's whole modality: a guard in `activate`
+        # said the same, survived this row's first form, and was deleted.
         "the save dialog lets presses through",
-        "    fn activate(&mut self, target: Target, x: f32, y: f32) -> bool {\n"
-        "        if self.save_name.is_some() {",
-        "    fn activate(&mut self, target: Target, x: f32, y: f32) -> bool {\n"
-        "        if self.save_name.is_some() && !matches!(target, Target::Tab(_)) {",
+        "        f.hit(\n            Target::ModalBackdrop,\n"
+        "            Rect::new(0.0, 0.0, self.window_width, self.window_height),\n        );",
+        "",
         ["the_save_dialog_is_modal_and_cancel_saves_nothing"],
     ),
     (
@@ -273,9 +274,19 @@ MUTATIONS = [
         ["the_pointer_lights_what_it_is_over_and_the_status_bar_says_what_it_does"],
     ),
     (
+        # The card's hit box is its whole modality: a second rule in
+        # `handle_mouse` said the same, survived this row's first form, and
+        # was deleted.
         "a press goes through the shortcut card",
-        "        if self.show_help {\n            if matches!(event.kind, MouseEventKind::Press(_)) {",
-        "        if self.show_help && false {\n            if matches!(event.kind, MouseEventKind::Press(_)) {",
+        "            f.hit(\n                Target::HelpCard,\n"
+        "                Rect::new(0.0, 0.0, self.window_width, self.window_height),\n            );",
+        "",
+        ["a_press_puts_the_shortcut_card_away_and_reaches_nothing_under_it"],
+    ),
+    (
+        "a press on the shortcut card leaves it up",
+        "            Target::HelpCard => {\n                self.show_help = false;",
+        "            Target::HelpCard => {\n                let _ = self.show_help;",
         ["a_press_puts_the_shortcut_card_away_and_reaches_nothing_under_it"],
     ),
     (

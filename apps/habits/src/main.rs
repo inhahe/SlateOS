@@ -5372,8 +5372,23 @@ mod tests {
     fn a_row_press_chooses_its_habit() {
         let mut app = HabitTrackerApp::with_sample_habits();
         let habit = app.active_habits()[3];
-        assert!(probe::click(&mut app, Target::HabitRow(habit)));
+        // On the habit's name, at the row's left: the row's middle is a day
+        // cell, which chooses the habit too, so a press there could not tell
+        // whether the row itself does.
+        let row = probe::rect_of(&app, Target::HabitRow(habit)).unwrap();
+        let (x, y) = (row.x + 24.0, row.y + row.h / 2.0);
+        assert_eq!(app.frame().hit_test(x, y), Some(Target::HabitRow(habit)));
+        let checked = app.habits[habit].check_ins.clone();
+        assert!(app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })));
         assert_eq!(app.selected_habit, 3);
+        assert_eq!(
+            app.habits[habit].check_ins, checked,
+            "a row press checked in"
+        );
     }
 
     /// Archiving was `A` and only `A`.
@@ -5416,13 +5431,25 @@ mod tests {
             assert!(!probe::click(&mut app, Target::ConfirmCard));
             assert!(app.pending_delete.is_some(), "a press on the card answered");
             if keep == Target::ConfirmBackdrop {
-                // Anywhere outside the card: where the New Habit button is.
-                let r = probe::rect_of(&app, Target::NewHabit).unwrap();
+                // Outside the card, over a day cell: a press that reached the
+                // cell would check a habit in, where one that reached the New
+                // Habit button would only answer the question as a key does
+                // -- which is how a missing backdrop hid from this test.
+                app.pending_delete = None;
+                let cell =
+                    probe::rect_of(&app, Target::DayCell(app.active_habits()[0], 0)).unwrap();
+                app.ask_to_delete(0);
+                let first = app.active_habits()[0];
+                let checked = app.habits[first].check_ins.clone();
                 app.handle_event(&Event::Mouse(MouseEvent {
-                    x: r.x + 2.0,
-                    y: r.y + 2.0,
+                    x: cell.x + cell.w / 2.0,
+                    y: cell.y + cell.h / 2.0,
                     kind: MouseEventKind::Press(MouseButton::Left),
                 }));
+                assert_eq!(
+                    app.habits[first].check_ins, checked,
+                    "the press reached the day cell"
+                );
             } else {
                 assert!(probe::click(&mut app, keep));
             }

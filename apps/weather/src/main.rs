@@ -4801,6 +4801,35 @@ mod tests {
         });
     }
 
+    /// Each unit key keeps its own change, pressed alone. Every store writes
+    /// all four units, so in a sequence one key that forgot to keep its
+    /// change was covered by the next key's store -- which is how a
+    /// mutation that dropped U's store survived the test above.
+    #[test]
+    fn each_unit_key_keeps_its_own_change() {
+        for (key, tag) in [
+            (Key::U, "wx_u"),
+            (Key::W, "wx_w"),
+            (Key::P, "wx_p"),
+            (Key::T, "wx_t"),
+        ] {
+            settingsfile::testing::with_scratch_config(tag, |_| {
+                let mut app = WeatherApp::new(900.0, 800.0);
+                let before = format!("{:?}", app.settings);
+                app.handle_event(&press(key));
+                let after = format!("{:?}", app.settings);
+                assert_ne!(before, after, "{key:?} changed no unit");
+                let mut next = WeatherApp::new(900.0, 800.0);
+                next.load_units(&settingsfile::load(CONFIG_NAME));
+                assert_eq!(
+                    format!("{:?}", next.settings),
+                    after,
+                    "{key:?}'s change was not kept"
+                );
+            });
+        }
+    }
+
     #[test]
     fn a_unit_word_nobody_knows_leaves_that_unit_at_its_default() {
         let doc = yamldoc::Document::parse("units:\n  temperature: kelvin\n  wind: knots\n");

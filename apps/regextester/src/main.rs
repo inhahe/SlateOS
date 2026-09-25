@@ -4063,8 +4063,8 @@ impl App {
         }
     }
 
-    /// A key with Ctrl held, or `None` for one that is an editing chord for
-    /// the field with the keyboard.
+    /// A key with Ctrl held, or `None` for one this does not bind, which
+    /// goes on to the field with the keyboard.
     ///
     /// Chords and not bare letters, because every printable character is
     /// typed into whichever field has focus -- an `i` belongs in somebody's
@@ -4098,9 +4098,12 @@ impl App {
                 };
                 self.set_library_filter(LIBRARY_FILTERS.get(wrapped).copied().flatten())
             }
-            // Editing chords belong to the field with the keyboard.
-            Key::A | Key::C | Key::X | Key::V | Key::Home | Key::End => return None,
-            _ => false,
+            // Anything else goes on to the field with the keyboard: its
+            // editing chords (A, C, X, V, Home, End) act there, and its guard
+            // types nothing for a chord it does not know. This answered every
+            // other chord itself first, which left that guard -- the one rule
+            // `apps/flashcards`' copy has -- with nothing to do.
+            _ => return None,
         })
     }
 
@@ -4403,13 +4406,9 @@ impl App {
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
         // The card is modal: a press anywhere puts it away, and nothing
         // under it hears one.
-        if self.show_help {
-            if matches!(event.kind, MouseEventKind::Press(_)) {
-                self.show_help = false;
-                return true;
-            }
-            return false;
-        }
+        // The shortcut card is modal through its hit box, which covers the
+        // window: a press lands on `Target::HelpCard` and puts it away, and
+        // the wheel finds nothing under it. A second rule here said the same.
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
                 let Some(target) = self.frame().hit_test(event.x, event.y) else {
@@ -4551,29 +4550,28 @@ impl App {
 
     /// Do what pressing `target` at `(x, y)` means.
     fn activate(&mut self, target: Target, x: f32, y: f32) -> bool {
-        if self.save_name.is_some() {
-            return match target {
-                Target::SaveConfirm => self.confirm_save(),
-                Target::SaveCancel => {
-                    self.save_name = None;
-                    self.save_error = None;
-                    true
-                }
-                Target::SaveName => {
-                    let field = self
-                        .frame()
-                        .rect_of(|t| *t == Target::SaveName)
-                        .unwrap_or_default();
-                    if let Some(name) = self.save_name.as_mut() {
-                        Self::place_line_caret(name, field, x);
-                    }
-                    true
-                }
-                // The dialog is modal: nothing behind it hears a press.
-                _ => false,
-            };
-        }
+        // The save dialog is modal through its backdrop, which covers the
+        // window: a press behind the dialog lands on `ModalBackdrop`, and
+        // nothing else can arrive while it is up. A guard here said the same
+        // thing a second time, and a mutation sweep showed it by exempting a
+        // tab from it with every test still passing.
         match target {
+            Target::SaveConfirm => self.confirm_save(),
+            Target::SaveCancel => {
+                self.save_name = None;
+                self.save_error = None;
+                true
+            }
+            Target::SaveName => {
+                let field = self
+                    .frame()
+                    .rect_of(|t| *t == Target::SaveName)
+                    .unwrap_or_default();
+                if let Some(name) = self.save_name.as_mut() {
+                    Self::place_line_caret(name, field, x);
+                }
+                true
+            }
             Target::Tab(tab) => self.set_tab(tab),
             Target::Flag(flag) => self.toggle_flag(flag),
             Target::MatchPrev => {
@@ -4641,10 +4639,7 @@ impl App {
                 self.show_help = false;
                 true
             }
-            Target::SaveName
-            | Target::SaveConfirm
-            | Target::SaveCancel
-            | Target::ModalBackdrop
+            Target::ModalBackdrop
             | Target::ResultArea
             | Target::ResultsBody
             | Target::LibraryBody

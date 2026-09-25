@@ -1813,6 +1813,23 @@ word; text inside them that says "lane C" is history.
   — `todo.txt` → Lane E lists what to check the first time one does. Still
   polls for output, pending `requests/e-f-wake-an-application-for-its-own-descriptor.md`.
 
+- `[-]` `[E]` **Twenty applications draw an interface the pointer cannot
+  touch** — `known-issues.md` → `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`.
+  Measured 2026-09-25 (`grep -c "Event::Mouse\|MouseEvent"` over each app's
+  whole `src/`, which is one `main.rs` in every case): weather, reminders,
+  rssreader, markdowneditor, habits, pinball, slides, flashcards, finance,
+  logviewer, qrcode, torrent, mediaconvert, regextester, tmux, soundrecorder,
+  renamer, email, filesearch, metronome. For each, two questions in order:
+  **can everything it offers be reached by something** (the entry's
+  question — `notes` had nine operations nothing reached), and then, where
+  what it draws is shaped for a pointer (rows, tabs, buttons), does the
+  pointer work on it. The repair for the second is the pattern `notes`,
+  `photomanager` and `explorer` share: hit-tests computed by the same
+  geometry functions the renderer draws from, so a click and a drawing
+  cannot disagree about where a control is. Most-used first. Each app's
+  verdict — including "keyboard by design, and here is the comment that
+  says so" — is recorded in the known-issues entry as it is examined.
+
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane
 C's standing note before the split). **Baseline, 2026-09-24:** every `apps/*`

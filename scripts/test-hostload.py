@@ -72,13 +72,18 @@ for label, series, t0, t1, want in [
 print()
 print("ConcurrentProbe (live)")
 probe = hostload.ConcurrentProbe(2)
+# Waited for, not assumed: a starved host starts a spinner late, and one that
+# began after the stop-file took a single sample (2026-09-25, in the push hook).
+check("both spinners start", probe.wait_started(), True)
 t_start = time.monotonic()
 time.sleep(0.3)
 t_mid = time.monotonic()
 series = probe.finish()
 check("one series per spinner", len(series), 2)
 for i, samples in enumerate(series):
-    check_true(f"spinner {i} took samples", len(samples) >= 2, samples[:3])
+    # At least one sample is all a started spinner guarantees: a host can
+    # leave it unscheduled for the whole 0.3 s after that.
+    check_true(f"spinner {i} took samples", len(samples) >= 1, samples[:3])
     check_true(f"spinner {i}'s clock only moves forward",
                all(b[0] >= a[0] for a, b in zip(samples, samples[1:])),
                samples[:5])

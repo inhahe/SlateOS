@@ -615,13 +615,6 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
         }
         cfg.files = read_files0(&list).map_err(fatal)?;
     }
-    if cfg.check.is_some() && cfg.files.len() > 1 {
-        let extra = cfg.files.get(1).map_or_else(String::new, quoteaf_os);
-        return Err(fatal(format!("extra operand {extra} not allowed with -c")));
-    }
-    if cfg.files.is_empty() {
-        cfg.files.push(OsString::from("-"));
-    }
 
     // Inheritance, in GNU's order: keys that named no ordering take the global
     // one; if there are no keys at all and the global names an ordering, it
@@ -636,6 +629,17 @@ fn parse_args(raw: &[OsString]) -> Result<Option<Config>, Fatal> {
         cfg.keys.push(global.clone());
     }
     cfg.reverse = global.reverse;
+    // Only now, with every key final -- upstream's
+    // check_ordering_compatibility, and the reason it is not done per key.
+    keydef::check_compatibility(&cfg.keys).map_err(fatal)?;
+
+    if cfg.check.is_some() && cfg.files.len() > 1 {
+        let extra = cfg.files.get(1).map_or_else(String::new, quoteaf_os);
+        return Err(fatal(format!("extra operand {extra} not allowed with -c")));
+    }
+    if cfg.files.is_empty() {
+        cfg.files.push(OsString::from("-"));
+    }
     Ok(Some(cfg))
 }
 
@@ -764,17 +768,17 @@ fn long_option(
         "dictionary-order" => global.ignore = Some(Ignore::NonDictionary),
         "ignore-nonprinting" => global.ignore = Some(Ignore::NonPrinting),
         "ignore-case" => global.fold = true,
-        "general-numeric-sort" => global.kind = Kind::General,
-        "human-numeric-sort" => global.kind = Kind::Human,
-        "month-sort" => global.kind = Kind::Month,
-        "numeric-sort" => global.kind = Kind::Numeric,
-        "version-sort" => global.kind = Kind::Version,
+        "general-numeric-sort" => global.name(Kind::General),
+        "human-numeric-sort" => global.name(Kind::Human),
+        "month-sort" => global.name(Kind::Month),
+        "numeric-sort" => global.name(Kind::Numeric),
+        "version-sort" => global.name(Kind::Version),
         "reverse" => global.reverse = true,
         "unique" => cfg.unique = true,
         "stable" => cfg.stable = true,
         "merge" => cfg.merge = true,
         "zero-terminated" => cfg.delim = 0,
-        "sort" => global.kind = parse_sort_word(&need())?,
+        "sort" => global.name(parse_sort_word(&need())?),
         "check" => {
             cfg.check = Some(match value.as_deref() {
                 None => Check::Diagnose,
@@ -1103,7 +1107,7 @@ mod tests {
         let forged = fail_msg(&["--fo\nsort: /etc/shadow: Permission denied"]);
         assert_eq!(
             forged,
-            r#"unrecognized option '--fo\nsort: /etc/shadow: Permission denied'"#
+            r"unrecognized option '--fo\nsort: /etc/shadow: Permission denied'"
         );
         assert!(!forged.contains('\n'));
         // A short option too, and a byte that is not ASCII at all: reported as

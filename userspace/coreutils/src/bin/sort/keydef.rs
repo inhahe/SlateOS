@@ -44,18 +44,21 @@ pub enum Kind {
     Version,
 }
 
-impl Kind {
-    /// The option letter that selects this kind, for diagnostics.
-    fn letter(self) -> char {
-        match self {
-            Kind::Default => ' ',
-            Kind::Numeric => 'n',
-            Kind::General => 'g',
-            Kind::Human => 'h',
-            Kind::Month => 'M',
-            Kind::Version => 'V',
-        }
-    }
+/// Every ordering a key named -- GNU's separate `numeric`, `general_numeric`,
+/// `human_numeric`, `month` and `version` flags.
+///
+/// [`KeySpec::kind`] holds the one the comparison uses. This holds all of them,
+/// because naming two is an error that is only *reported* once the whole
+/// command line has been read (see [`check_compatibility`]), and by then the
+/// first one alone cannot say what the second was.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // One flag per option letter, as upstream keeps them.
+pub struct Named {
+    pub numeric: bool,
+    pub general: bool,
+    pub human: bool,
+    pub month: bool,
+    pub version: bool,
 }
 
 /// One key: where it starts, where it ends, and how it is compared.
@@ -77,6 +80,8 @@ pub struct KeySpec {
     /// `b` on the end position.
     pub skip_end_blanks: bool,
     pub kind: Kind,
+    /// Every ordering named, for [`check_compatibility`].
+    pub named: Named,
     pub ignore: Option<Ignore>,
     pub fold: bool,
     pub reverse: bool,
@@ -121,7 +126,27 @@ impl KeySpec {
         self.skip_start_blanks = global.skip_start_blanks;
         self.skip_end_blanks = global.skip_end_blanks;
         self.kind = global.kind;
+        self.named = global.named;
         self.reverse = global.reverse;
+    }
+
+    /// Name an ordering on this key: `-n`, `--month-sort`, `--sort=version`
+    /// and the letters inside a `-k` spec all arrive here.
+    ///
+    /// The first one named is the one compared by; every one is recorded, so a
+    /// second can be refused later with both in the message.
+    pub fn name(&mut self, kind: Kind) {
+        if self.kind == Kind::Default {
+            self.kind = kind;
+        }
+        match kind {
+            Kind::Default => {}
+            Kind::Numeric => self.named.numeric = true,
+            Kind::General => self.named.general = true,
+            Kind::Human => self.named.human = true,
+            Kind::Month => self.named.month = true,
+            Kind::Version => self.named.version = true,
+        }
     }
 
     /// The slice of `line` this key selects.
@@ -308,7 +333,6 @@ pub fn parse_key(spec: &[u8]) -> Result<KeySpec, String> {
     if !rest.is_empty() {
         return Err(bad("stray character in field spec"));
     }
-    check_kinds(spec, &key)?;
     Ok(key)
 }
 
@@ -367,7 +391,7 @@ pub fn parse_obsolete_end(spec: &[u8], key: &mut KeySpec) -> Result<(), String> 
             coreutils::quote::quote(spec)
         ));
     }
-    check_kinds(spec, key)
+    Ok(())
 }
 
 /// Which position the `b` flag applies to.
@@ -399,11 +423,11 @@ pub fn set_ordering<'a>(s: &'a [u8], key: &mut KeySpec, blanks: Blanks) -> &'a [
             b'd' => key.ignore = Some(Ignore::NonDictionary),
             b'i' => key.ignore = Some(Ignore::NonPrinting),
             b'f' => key.fold = true,
-            b'g' => key.kind = pick(key.kind, Kind::General),
-            b'h' => key.kind = pick(key.kind, Kind::Human),
-            b'M' => key.kind = pick(key.kind, Kind::Month),
-            b'n' => key.kind = pick(key.kind, Kind::Numeric),
-            b'V' => key.kind = pick(key.kind, Kind::Version),
+            b'g' => key.name(Kind::General),
+            b'h' => key.name(Kind::Human),
+            b'M' => key.name(Kind::Month),
+            b'n' => key.name(Kind::Numeric),
+            b'V' => key.name(Kind::Version),
             b'r' => key.reverse = true,
             _ => break,
         }
@@ -412,45 +436,56 @@ pub fn set_ordering<'a>(s: &'a [u8], key: &mut KeySpec, blanks: Blanks) -> &'a [
     rest
 }
 
-/// Record a second ordering kind by leaving the first in place.
+/// GNU's `check_ordering_compatibility`: the first key that combines orderings
+/// which cannot be combined, reported with every option it carries.
 ///
-/// Two kinds on one key is an error, but the error is reported once the whole
-/// spec is read (GNU's `check_ordering_compatibility`), so the conflict has to
-/// survive until then. Keeping the *first* means the sentinel below sees a
-/// change it can detect.
-fn pick(current: Kind, new: Kind) -> Kind {
-    if current == Kind::Default {
-        new
-    } else {
-        current
-    }
-}
-
-/// Reject a key that names two orderings, the way GNU does.
+/// It runs once, after the whole command line is read and the global options
+/// have been inherited -- not as each `-k` is parsed -- because that is where
+/// upstream runs it, and the difference is visible. `sort -nM` is refused
+/// through the whole-line key the global options become; `sort -nM -k1` through
+/// a key that inherited both; `sort -nM -k1,1r` and `sort -nM -k1d` not at all,
+/// since those keys name an ordering of their own and inherit nothing. And
+/// `sort -k1nM -k0` reports the zero field, which parsing reaches first.
 ///
-/// This cannot be done inside [`set_ordering`] because the second letter may
-/// be on the *other* position — `-k1n,2M` is as wrong as `-k1nM`.
-fn check_kinds(spec: &[u8], _key: &KeySpec) -> Result<(), String> {
-    let mut seen: Option<Kind> = None;
-    for &c in spec {
-        let kind = match c {
-            b'g' => Kind::General,
-            b'h' => Kind::Human,
-            b'M' => Kind::Month,
-            b'n' => Kind::Numeric,
-            b'V' => Kind::Version,
-            _ => continue,
-        };
-        match seen {
-            Some(first) if first != kind => {
-                return Err(format!(
-                    "options '-{}{}' are incompatible",
-                    first.letter(),
-                    kind.letter()
-                ));
-            }
-            _ => seen = Some(kind),
+/// Numeric, general-numeric, human and month count one each. Version and the
+/// ignore options (`-d`, `-i`) share a single slot, which is why `-k1Vd` is
+/// accepted and `-k1nd` is not; upstream counts `-R` there too, which is
+/// refused as unimplemented before this runs. The message lists the key's
+/// options in upstream's order with `b` and `r` left out -- `-dMn`, `-fin` --
+/// so `f` is printed although it is never what makes a key incompatible.
+///
+/// # Errors
+///
+/// `options '-…' are incompatible`, for the first such key.
+pub fn check_compatibility(keys: &[KeySpec]) -> Result<(), String> {
+    for key in keys {
+        let n = key.named;
+        let slots = [
+            n.numeric,
+            n.general,
+            n.human,
+            n.month,
+            n.version || key.ignore.is_some(),
+        ];
+        if slots.iter().filter(|&&set| set).count() <= 1 {
+            continue;
         }
+        let letters = [
+            (key.ignore == Some(Ignore::NonDictionary), 'd'),
+            (key.fold, 'f'),
+            (n.general, 'g'),
+            (n.human, 'h'),
+            (key.ignore == Some(Ignore::NonPrinting), 'i'),
+            (n.month, 'M'),
+            (n.numeric, 'n'),
+            (n.version, 'V'),
+        ];
+        let opts: String = letters
+            .iter()
+            .filter(|(set, _)| *set)
+            .map(|&(_, c)| c)
+            .collect();
+        return Err(format!("options '-{opts}' are incompatible"));
     }
     Ok(())
 }
@@ -566,7 +601,34 @@ mod tests {
             err("1."),
             "invalid number after '.': invalid count at start of ‘’"
         );
-        assert_eq!(err("1n,2M"), "options '-nM' are incompatible");
+    }
+
+    /// Upstream's canonical letter order, and its counting: version and the
+    /// ignore options share one slot, `f` is listed but never counted.
+    #[test]
+    fn incompatible_orderings_are_reported_in_upstream_order() {
+        let check = |specs: &[&str]| {
+            let keys: Vec<KeySpec> = specs
+                .iter()
+                .map(|s| parse_key(s.as_bytes()).unwrap())
+                .collect();
+            check_compatibility(&keys)
+        };
+        let refused = |specs: &[&str]| check(specs).unwrap_err();
+        assert_eq!(refused(&["1n,2M"]), "options '-Mn' are incompatible");
+        assert_eq!(refused(&["1nd"]), "options '-dn' are incompatible");
+        assert_eq!(refused(&["1nMf"]), "options '-fMn' are incompatible");
+        assert_eq!(refused(&["1fin"]), "options '-fin' are incompatible");
+        assert_eq!(refused(&["1bnr,1M"]), "options '-Mn' are incompatible");
+        assert_eq!(refused(&["1nV"]), "options '-nV' are incompatible");
+        // The first offending key in command-line order is the one named.
+        assert_eq!(
+            refused(&["1", "2gi", "3nM"]),
+            "options '-gi' are incompatible"
+        );
+        assert!(check(&["1Vd"]).is_ok());
+        assert!(check(&["1nf"]).is_ok());
+        assert!(check(&["1,1n", "2,2M"]).is_ok());
     }
 
     #[test]

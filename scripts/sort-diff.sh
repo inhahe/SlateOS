@@ -607,6 +607,29 @@ run_msg -k1,0
 run_msg -k1,x
 run_msg -k1.
 run_msg -k1n,2M
+# Which combinations upstream refuses, and through which key. Global options
+# are checked as the whole-line key they become, or through the first key that
+# inherits them; a key naming an ordering of its own (`d`, even `r`) inherits
+# nothing and so is never checked against them. Version and -d/-i share one
+# slot, so the -Vd pair is accepted; `f` is listed but never counted.
+run_msg -nM
+run_msg -n -d
+run_msg -gi
+run_msg -k1nd
+run_msg -fin
+run_msg -dMn
+run_msg -Vn
+run_msg --numeric-sort --month-sort
+run_msg --sort=month -n
+run_msg -nM -k1
+run_msg -nd -k1,1 -k2,2M
+run_msg -nM -k2 -k1n
+run_msg -k1nM -k0
+run_stdin 'b\na\n' -k1Vd
+run_stdin 'b\na\n' -k1nf
+run_stdin 'b\na\n' -Vi
+run_stdin 'b\na\n' -nM -k1,1r
+run_stdin 'b\na\n' -nM -k1d
 run_stdin '10\n9\n' --sort=hum
 run_stdin '10\n9\n' --sort=n
 run_stdin 'b\na\n' --check=q

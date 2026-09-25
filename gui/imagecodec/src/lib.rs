@@ -68,10 +68,13 @@
 //!
 //! JPEG (JFIF), baseline sequential: the format a photograph is almost always
 //! in, and the one a wallpaper is likely to be. Huffman-coded, any sampling
-//! factors, restart intervals, greyscale or YCbCr. Checked against a reference
-//! decoder pixel for pixel -- no channel differs by more than 2 and the mean
-//! difference is 0.03 of a level, which is the difference between rounding the
-//! inverse DCT differently and decoding differently.
+//! factors, restart intervals, greyscale or YCbCr. Its colour is brought back
+//! to full resolution with libjpeg's own filter, and a scaled decode -- a
+//! thumbnail -- is libjpeg-turbo's scaled decode, so both can be checked
+//! against the decoder everything else uses: every colour layout, at full size
+//! and at a half, a quarter and an eighth, comes out within 3 levels of it and
+//! a mean well under a tenth of one, which is the difference between rounding
+//! the inverse DCT differently and decoding differently.
 //!
 //! **Progressive** JPEG too, every pass of it: the coefficients are gathered
 //! across the scans and reconstructed once they are all in, so a progressive

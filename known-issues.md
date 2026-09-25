@@ -165263,3 +165263,28 @@ have the disc's colour at partial alpha.
 
 **How to see it.** Thumbnail a GIF or PNG with an opaque coloured shape on a
 transparent background over a light background: the shape has a dark rim.
+
+### [F] Lossless WebP decodes at half libwebp's speed -- 2026-09-25
+
+**Status:** OPEN — lane F's; tech debt, not a bug.
+
+**In short:** opening a large lossless WebP takes about twice as long here as
+in a browser: 0.31 s for a 2000x1500 picture against libwebp's 0.15 s. The
+pictures are right to the bit; only the speed is behind. Lossless WebP is rare
+for photographs (those are almost always lossy), so this is felt mainly on big
+lossless screenshots and artwork.
+
+**Where.** `gui/imagecodec/src/webp/lossless.rs`, `decode_image`'s pixel loop.
+
+**The proper fix,** each measurable on its own against
+`examples/time_decode.rs`:
+1. Look the prefix-code group up once per block of `2^prefix_bits` pixels
+   rather than per pixel, as libwebp does.
+2. When a group's red, blue and alpha codes are all single-symbol or short,
+   decode a literal's four channels from one table lookup (libwebp's "packed"
+   tables).
+3. Undo the transforms a row at a time into one buffer instead of one pass per
+   transform over the whole picture, so the image stays in cache.
+
+**How to see it.** `cargo run --release -p imagecodec --example time_decode --
+<lossless.webp>`, against Pillow's `Image.open(...).load()` on the same file.

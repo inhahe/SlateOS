@@ -90,6 +90,11 @@
 //! it does what browsers do, since that is how anyone has seen the file. See
 //! [`gif`].
 //!
+//! WebP lossless (`VP8L`), in the simple and the extended container: every
+//! transform, the colour cache and the meta prefix codes, decoding to exactly
+//! what libwebp does. Lossy and animated WebP are refused by name for now. See
+//! [`webp`].
+//!
 //! # Picture files for *other* crates' tests
 //!
 //! [`testing`] emits real, small PNGs. It is public rather than `#[cfg(test)]`
@@ -110,6 +115,7 @@ pub mod jpeg;
 pub mod png;
 mod scale;
 pub mod testing;
+pub mod webp;
 
 /// A decoded picture: densely packed `0xAARRGGBB`, row-major, no padding.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -307,6 +313,9 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
     if gif::is_gif(bytes) {
         return gif::decode(bytes, limits);
     }
+    if webp::is_webp(bytes) {
+        return webp::decode(bytes, limits);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -341,6 +350,9 @@ pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> Im
     if gif::is_gif(bytes) {
         return gif::decode_scaled(bytes, limits, max_w, max_h);
     }
+    if webp::is_webp(bytes) {
+        return webp::decode_scaled(bytes, limits, max_w, max_h);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -363,6 +375,9 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     }
     if gif::is_gif(bytes) {
         return gif::dimensions(bytes);
+    }
+    if webp::is_webp(bytes) {
+        return webp::dimensions(bytes);
     }
     Err(ImageError::UnknownFormat)
 }
@@ -405,9 +420,12 @@ mod tests {
         );
         // A format this crate does not read yet.
         assert_eq!(
-            dimensions(b"RIFF\0\0\0\0WEBPVP8 "),
+            dimensions(b"II*\0\x08\0\0\0"),
             Err(ImageError::UnknownFormat)
         );
+        // WebP it does: a RIFF header with no chunk after it is a truncated
+        // WebP, not an unknown format.
+        assert_eq!(dimensions(b"RIFF\0\0\0\0WEBP"), Err(ImageError::Truncated));
         // And one it does, too short to say anything: that is a truncated
         // GIF, not an unknown format.
         assert_eq!(dimensions(b"GIF89a"), Err(ImageError::Truncated));

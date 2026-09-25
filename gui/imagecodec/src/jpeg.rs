@@ -31,7 +31,7 @@
 //!
 //! **Progressive** files (`SOF2`) send the whole picture several times, each
 //! pass adding frequencies or precision, so their coefficients are gathered
-//! across every scan and reconstructed at the end; see [`progressive`]. They
+//! across every scan and reconstructed at the end; see `jpeg/progressive.rs`. They
 //! share everything after the entropy decoding with baseline -- dequantising,
 //! the inverse DCT, upsampling, colour -- so the two decode the same
 //! coefficients to the same pixels.
@@ -1346,7 +1346,7 @@ fn to_pixels(width: usize, height: usize, planes: &[Samples], fancy: bool) -> Ve
     out
 }
 
-/// [`ycbcr_to_rgb`]'s four chroma products, for every byte a chroma sample can
+/// `ycbcr_to_rgb`'s four chroma products, for every byte a chroma sample can
 /// be.
 ///
 /// Each entry is the very expression `ycbcr_to_rgb` evaluates — the same
@@ -1386,7 +1386,7 @@ impl Chroma {
         tables
     }
 
-    /// [`ycbcr_to_rgb`], by table.
+    /// `ycbcr_to_rgb` (the test-only definition), by table.
     fn rgb(&self, y: u8, cb: u8, cr: u8) -> u32 {
         let y = f32::from(y);
         let (cb, cr) = (usize::from(cb), usize::from(cr));

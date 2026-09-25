@@ -24,7 +24,7 @@
 //!
 //! The decompressed stream is every row of the picture plus a filter byte each
 //! — as large as the picture itself — and it is never held whole. Rows are
-//! pulled out of the decompressor as they are reconstructed ([`Scanlines`]),
+//! pulled out of the decompressor as they are reconstructed (`Scanlines`),
 //! so a decode holds its output, two rows and the decompressor's 32 KiB
 //! window. That is what makes a thumbnail of any picture cost a thumbnail:
 //! [`decode_scaled`] accumulates rows straight into a destination-sized box

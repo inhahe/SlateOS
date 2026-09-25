@@ -719,6 +719,18 @@ fi
 # commits touching `posix/` or `userspace/`, so a lane A or C push never pays
 # for it and can never be blocked by it.
 #
+# The converse does not hold, and that is worth knowing before it surprises
+# you: the TRIGGER is `posix/`+`userspace/` but the SCAN is every `.rs` in the
+# tree. So a finding in another lane's crate never stops that lane's push and
+# does stop the next lane-B or lane-D push after it reaches `main`. On
+# 2026-09-24 a lane-B push was refused over `gui/vulkan` (lane F): a false
+# positive, since fixed in the checker, plus a real coverage gap, since added
+# to gate 42. Left whole-tree deliberately -- it is the only thing that grades
+# raced globals outside these two trees at all, and narrowing the verdict to
+# match the trigger would quietly stop that. The fix that removes the
+# asymmetry is to widen the trigger, which costs every lane this gate's run
+# time; that is a cross-lane call, not this gate's to make.
+#
 # WHY IT JUDGES THE COMMIT, NOT THE WORKTREE. `--head "$sha"` makes the checker
 # read that revision — every `.rs`, every `Cargo.toml`, and the baseline — via
 # scripts/gittree.py. Without it the gate enumerates the commits being pushed
@@ -827,14 +839,14 @@ toi="${repo_root:-.}/scripts/check-test-order-independence.py"
 # times on an empty list while `note_gate` recorded them as having run. This
 # gate runs the suite once against the working tree, so there is no loop to
 # degrade to nothing. `touches` alone decides whether it runs.
-# All three crates in CRATES, or a push touching only one of them would
-# skip the gate entirely. The invocation is not scoped to the touched
+# Every crate in CRATES, or a push touching only one of them would skip the
+# gate entirely. (Three until 2026-09-24, when `gui/vulkan` joined.) The invocation is not scoped to the touched
 # crate: measured 2026-09-15, posix is ~150s of the ~230s total, authlib
 # ~27s and coreutils (--lib) ~51s, so a scoped run would save real time
 # on a coreutils-only push. Left unscoped because `touches` answers
 # yes/no rather than which, and a wrong answer there silently narrows
 # the gate -- the failure this whole gate family keeps producing.
-touches posix/ userspace/authlib/ userspace/coreutils/         scripts/check-test-order-independence.py || skip_toi=1
+touches posix/ userspace/authlib/ userspace/coreutils/ gui/vulkan/ scripts/check-test-order-independence.py || skip_toi=1
 note_gate test-order "$skip_toi"
 
 toi_failed=0

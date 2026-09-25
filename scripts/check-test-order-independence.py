@@ -94,10 +94,17 @@ RANDOM_ORDERS = 2
 # the 83 binaries. Unscoped it would build and shuffle all of them -- about
 # twenty minutes an order, an hour for the three -- to re-shuffle 353 lib
 # tests that take seventeen seconds.
+#
+# `vkloader` (`gui/vulkan`) since 2026-09-24: its messenger tests share six
+# statics behind an `Order` guard, which `raced-globals.py` found qualifying
+# the moment it learned to read that guard as a lock. Scoped to `--lib`
+# because that is where the statics are. Measured before adding it: 141 tests
+# pass under three shuffle seeds, including the pinned one, in under 0.1s each.
 CRATES = (
     ("posix", "posix", ()),
     ("authlib", "userspace/authlib", ()),
     ("coreutils", "userspace/coreutils", ("--lib",)),
+    ("vkloader", "gui/vulkan", ("--lib",)),
 )
 
 HOST_TARGET = "x86_64-pc-windows-gnu"
@@ -225,6 +232,25 @@ def selftest():
         ck(declared == pkg,
            "package name for " + d + " should be " + pkg
            + ", manifest says " + str(declared))
+
+    # And every crate must be in the pre-push hook's `touches` line for this
+    # gate, or a push that changes only that crate skips the gate that exists
+    # to grade it. The tuple above and that line are two copies of one list,
+    # and this is what keeps them one: `gui/vulkan` joined CRATES on 2026-09-24
+    # and nothing would have noticed the hook line being missed -- the gate
+    # would simply never have run for the one lane that can break that crate.
+    hook = os.path.join(ROOT, "scripts", "hooks", "pre-push")
+    scope = None
+    if os.path.isfile(hook):
+        with open(hook, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.lstrip().startswith("touches ") and "skip_toi=1" in line:
+                    scope = line.split()
+                    break
+    ck(scope is not None, "the pre-push hook's gate-42 `touches` line must be findable")
+    for _pkg, d, _extra in CRATES:
+        ck(scope is not None and (d.rstrip("/") + "/") in scope,
+           "the pre-push gate-42 `touches` line should name " + d + "/")
 
     print("selftest: " + str(checks - bad) + "/" + str(checks) + " cases pass")
     return 1 if bad else 0

@@ -212,7 +212,15 @@ _TEST_ATTR = re.compile(r"^\s*#\[(?:\w+::)*test\]")
 # Any of these in a test body means the author thought about serialisation. We
 # do not try to check they took the *right* lock -- that is a judgement call, and
 # a checker that second-guesses it would be wrong more often than the author.
-_LOCK_HINT = re.compile(r"\.lock\(\)|\block_\w+|\b\w*_LOCK\b|#\[serial\]")
+#
+# `::lock()` as well as `.lock()`: an RAII guard type whose constructor spins
+# on a flag is written `let _order = Order::lock();`, and it serialises exactly
+# as a `Mutex` guard does. `gui/vulkan/src/messenger.rs` took that shape on
+# 2026-09-22 and all six of its tests -- each taking the guard as its first
+# statement -- were reported as racing six globals, the guard's own flag among
+# them. The false positive was only seen when a lane-B push ran this gate over
+# a lane-F file (the `touches` scope below does not include `gui/`).
+_LOCK_HINT = re.compile(r"(?:\.|::)lock\(\)|\block_\w+|\b\w*_LOCK\b|#\[serial\]")
 
 # False positives, each with the reason it is one. Keyed by "<relpath>:<NAME>",
 # or "*:<NAME>" to excuse a name everywhere.
@@ -936,6 +944,49 @@ fn b() { let _g = COUNT_TEST_LOCK.lock().unwrap(); bump(); }
     )
     expect("lock/unserialised", got.get("COUNT", ([], []))[0], [])
     expect("lock/serialised", sorted(got.get("COUNT", ([], []))[1]), ["a", "b"])
+
+    # 2b. A guard TYPE's associated `lock()` serialises too -- the spin-flag
+    #     shape `gui/vulkan`'s messenger tests use. `c` is the control: it
+    #     drives the same global without the guard and must still be reported,
+    #     or the new spelling would be excusing every test in the file.
+    rule("associated-fn lock")
+    got = classify(
+        """
+static ORDER: AtomicBool = AtomicBool::new(false);
+static CREATED: AtomicUsize = AtomicUsize::new(0);
+struct Order;
+impl Order {
+    fn lock() -> Self {
+        while ORDER.compare_exchange(false, true, Acquire, Relaxed).is_err() {}
+        Self
+    }
+}
+impl Drop for Order { fn drop(&mut self) { ORDER.store(false, Release); } }
+fn reset() { CREATED.store(0, SeqCst); }
+#[test]
+fn a() { let _order = Order::lock(); reset(); }
+#[test]
+fn b() { let _order = Order::lock(); reset(); }
+#[test]
+fn c() { reset(); }
+"""
+    )
+    expect("associated-fn lock/serialised", sorted(got.get("CREATED", ([], []))[1]), ["a", "b"])
+    expect("associated-fn lock/control still reported", got.get("CREATED", ([], []))[0], ["c"])
+    expect("associated-fn lock/the guard's own flag", got.get("ORDER", ([], []))[0], [])
+    # Nor may a word that merely ends in "lock" count: `.clock()`, `::block()`.
+    got = classify(
+        """
+static mut COUNT: u32 = 0;
+fn bump() { unsafe { COUNT = 1; } }
+#[test]
+fn a() { let _t = sys::block(); let _c = t.clock(); bump(); }
+#[test]
+fn b() { bump(); }
+"""
+    )
+    expect("associated-fn lock/not a suffix match",
+           sorted(got.get("COUNT", ([], []))[0]), ["a", "b"])
 
     # 3. Comments must not make a function a toucher. Without the stripper
     #    `unrelated` names COUNT and both tests get dragged in.

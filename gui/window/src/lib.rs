@@ -1467,6 +1467,49 @@ impl<T: Transport> EventLoop<T> {
         self.wake_at(window, deadline);
     }
 
+    /// Ask to be woken with an [`Event::Tick`] at `deadline` or sooner: arm
+    /// the window if it is not armed, and bring an armed deadline forward if
+    /// this one is earlier — but never push one later.
+    ///
+    /// What a clock whose rate changes needs. [`Self::wake_at`] moves the
+    /// deadline whichever way it is told, so a caller re-arming on every event
+    /// would push the next tick further away with each one and an animation
+    /// would stall while the pointer moved. Leaving an armed deadline alone
+    /// avoids that, and instead makes an application that *speeds its clock
+    /// up* — a terminal going from its idle rate to its busy one on a
+    /// keystroke — wait out the slow interval first. This does neither.
+    ///
+    /// Bringing a deadline forward keeps the interval the tick will report
+    /// measured from where it was: only when the tick fires changes, not what
+    /// it says has elapsed.
+    pub fn wake_no_later_than(&mut self, window: u64, deadline: Instant) {
+        self.bring_forward(window, deadline, Instant::now());
+    }
+
+    /// [`Self::wake_no_later_than`] after `delay` from now, clamped as
+    /// [`Self::wake_after`] clamps. The usual way to keep an application's
+    /// declared interval in force from outside its tick handler.
+    pub fn wake_within(&mut self, window: u64, delay: Duration) {
+        let now = Instant::now();
+        let deadline = now.checked_add(delay.min(FURTHEST_WAKE)).unwrap_or(now);
+        self.bring_forward(window, deadline, now);
+    }
+
+    /// [`Self::wake_no_later_than`] with the clock passed in, as
+    /// [`Self::arm`] takes it, so the interval arithmetic is testable against a
+    /// synthetic clock.
+    fn bring_forward(&mut self, window: u64, deadline: Instant, now: Instant) {
+        if let Some(w) = self.wakeups.iter_mut().find(|w| w.window == window) {
+            if deadline < w.deadline {
+                // Only the deadline moves. `since` stays where the clock last
+                // ran from, so the deltas still partition wall time.
+                w.deadline = deadline;
+            }
+            return;
+        }
+        self.arm(window, deadline, now);
+    }
+
     /// Withdraw a window's wake-up, if it has one. Idempotent.
     ///
     /// This is how an animation stops. It also drops the reference point the
@@ -3393,5 +3436,57 @@ mod tests {
             .unwrap();
         worker.join().unwrap();
         assert!(woken, "the loop ended without being told of the wake");
+    }
+
+    // ---- a clock that changes rate ----------------------------------------
+
+    #[test]
+    fn an_earlier_deadline_brings_an_armed_one_forward() {
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        events.arm(7, t0 + ms(100), t0);
+        events.bring_forward(7, t0 + ms(10), t0);
+        assert_eq!(events.next_wakeup(), Some(t0 + ms(10)));
+    }
+
+    #[test]
+    fn a_later_deadline_leaves_an_armed_one_alone() {
+        // The property that keeps an animation running while the pointer
+        // moves: a re-arm on every event must never push the tick away.
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        events.arm(7, t0 + ms(10), t0);
+        events.bring_forward(7, t0 + ms(100), t0 + ms(5));
+        assert_eq!(events.next_wakeup(), Some(t0 + ms(10)));
+    }
+
+    #[test]
+    fn an_idle_window_is_armed_by_a_no_later_than() {
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        assert!(!events.is_waking(7));
+        events.bring_forward(7, t0 + ms(16), t0);
+        assert_eq!(events.next_wakeup(), Some(t0 + ms(16)));
+    }
+
+    #[test]
+    fn bringing_a_tick_forward_keeps_the_interval_it_reports() {
+        // Only when the tick fires moves. What it says has elapsed is still
+        // measured from where the clock last ran, so the deltas an animation
+        // accumulates still cover every millisecond.
+        let (mut events, _server) = wired();
+        let t0 = Instant::now();
+        events.arm(7, t0 + ms(16), t0);
+        let first = events.due_at(t0 + ms(16));
+        // Re-armed at the slow rate...
+        events.arm(7, t0 + ms(116), t0 + ms(20));
+        // ...then sped up before that came due.
+        events.bring_forward(7, t0 + ms(36), t0 + ms(30));
+        let second = events.due_at(t0 + ms(36));
+        assert_eq!(
+            tick_ms(&first) + tick_ms(&second),
+            36,
+            "the deltas should cover every millisecond from t0 to t0+36"
+        );
     }
 }

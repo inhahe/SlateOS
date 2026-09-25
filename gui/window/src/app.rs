@@ -800,13 +800,16 @@ fn apply_images<T: Transport>(
 /// Bring a window's wake-up into agreement with what the application now wants.
 fn sync_clock<T: Transport, A: App + ?Sized>(events: &mut EventLoop<T>, window: u64, app: &A) {
     match app.tick_interval() {
-        Some(interval) if !events.is_waking(window) => events.wake_after(window, interval),
-        // Already armed: leave the existing deadline alone. Re-arming here
-        // would push the next tick further away with every event, so an
-        // application would animate only while the pointer was still — the
+        // No later than one interval from now: arms an idle clock, and brings
+        // an armed one forward when the application has just sped up, but
+        // never pushes a deadline later. Pushing it later on every event would
+        // mean an application animated only while the pointer was still — the
         // frozen-clock defect wearing a subtler coat, since it would look
-        // correct in every test that does not move the mouse.
-        Some(_) => {}
+        // correct in every test that does not move the mouse — while leaving
+        // an armed deadline alone would make a clock that speeds up (a
+        // terminal waking from its idle rate on a keystroke) wait out the slow
+        // interval first. `requests/e-f-wake-an-application-for-its-own-descriptor.md`.
+        Some(interval) => events.wake_within(window, interval),
         None => events.cancel_wake(window),
     }
 }
@@ -1698,6 +1701,44 @@ mod tests {
             !events.is_waking(window),
             "the wake-up outlived the animation that wanted it"
         );
+    }
+
+    /// A clock that speeds up takes effect at once: the armed slow deadline
+    /// does not have to be waited out first. `requests/e-f-wake-an-application-for-its-own-descriptor.md`
+    /// ask 2 — a terminal dropping from its idle rate to its busy one on a
+    /// keystroke.
+    #[test]
+    fn a_clock_that_speeds_up_takes_effect_at_once() {
+        let mut app = Recorder::new(Response::Idle);
+        let (mut events, window) = opened(&app);
+        app.interval = Some(Duration::from_hours(1));
+        sync_clock(&mut events, window, &app);
+
+        app.interval = Some(Duration::from_millis(16));
+        sync_clock(&mut events, window, &app);
+        let after = std::time::Instant::now();
+        let next = events.next_wakeup().expect("still armed");
+        assert!(
+            next <= after + Duration::from_millis(16),
+            "the hour-long deadline was kept after the app asked for 16 ms"
+        );
+    }
+
+    /// And one that slows down, or merely stays the same across a burst of
+    /// events, never pushes the tick it has already been promised further
+    /// away.
+    #[test]
+    fn a_clock_that_slows_down_does_not_push_its_next_tick_away() {
+        let mut app = Recorder::new(Response::Idle);
+        let (mut events, window) = opened(&app);
+        app.interval = Some(Duration::from_millis(16));
+        sync_clock(&mut events, window, &app);
+        let promised = events.next_wakeup().expect("armed");
+
+        sync_clock(&mut events, window, &app);
+        app.interval = Some(Duration::from_hours(1));
+        sync_clock(&mut events, window, &app);
+        assert_eq!(events.next_wakeup(), Some(promised));
     }
 
     /// Re-arming on every event would push the deadline further away with each

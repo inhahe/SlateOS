@@ -1574,8 +1574,11 @@ name = "logviewer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "ere",
  "guitk",
+ "journalrec",
  "oswindow",
+ "safeio",
 ]
 
 [[package]]

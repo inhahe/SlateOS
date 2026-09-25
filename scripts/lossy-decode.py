@@ -311,6 +311,19 @@ IGNORE = (
      "let path_str = entry.path.to_string_lossy().to_ascii_lowercase();",
      "a search query matched against a path; the hit carries `entry`, whose "
      "path is exact, so the file opened is still the right one"),
+    #
+    # A log line, and a log's name, rendered to be DRAWN. A log is text that
+    # need not be: a line can hold any bytes. What leaves the program -- an
+    # export, the name an export is offered under, every path opened --
+    # comes from the file and its path, never from these renderings.
+    ("apps/logviewer/src/main.rs",
+     "let text = String::from_utf8_lossy(line);",
+     "a log line decoded to be drawn and searched; an export writes the "
+     "file's own bytes (`LogFile::exact_lines`), never this rendering"),
+    ("apps/logviewer/src/main.rs",
+     "|n| n.to_string_lossy().into_owned(),",
+     "the tab's label and the window title; the export's name and every "
+     "path use `LogFile::source`, which is exact"),
 
     ("stat", "from_utf8_lossy(TERSE_FILE)",
      "TERSE_FILE is a const format string in this file; ASCII by construction"),

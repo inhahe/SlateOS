@@ -12,5 +12,13 @@ guitk = { path = "../../gui/toolkit" }
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
 
+# The search's regular expressions: the POSIX engine grep and the shell use
+# here, so a pattern means the same thing in the viewer as at the prompt.
+ere = { path = "../../userspace/ere" }
+# Where the system journal is, as the program that writes it says.
+journalrec = { path = "../../userspace/journalrec" }
+# An export is written atomically, like every other file an app writes.
+safeio = { path = "../safeio" }
+
 [lints]
 workspace = true

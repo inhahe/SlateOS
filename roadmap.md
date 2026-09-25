@@ -1835,9 +1835,10 @@ word; text inside them that says "lane C" is history.
   `filesearch` (2026-09-25 — every control; opening results, scrolling,
   saved searches, and a Content mode that reads the files), `renamer`
   (2026-09-25 — every control, and a rule editor, so every kind of rule can
-  be added at last).
-  **Next:** logviewer, regextester — local tools a person opens with a
-  mouse — then the rest.
+  be added at last), `logviewer` (2026-09-25 — every control, and a log:
+  it reads files, follows them, and exports the file's own bytes).
+  **Next:** regextester — a local tool a person opens with a mouse — then
+  the rest.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

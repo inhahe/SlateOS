@@ -61348,7 +61348,33 @@ that make it likely to recur:
 inert rather than wrong. The remaining string-keyed apps have not been converted
 yet, and each is an opportunity to hit this again.
 
-### TD-C-LOGVIEWER-TAILS-A-STRING-COMPILED-INTO-ITSELF — 2026-09-04 — OPEN
+### TD-C-LOGVIEWER-TAILS-A-STRING-COMPILED-INTO-ITSELF — 2026-09-04 — FIXED 2026-09-25
+
+**Fixed 2026-09-25 (lane E, which owns `apps/` since the six-lane split).** The
+viewer reads files. `main` opens the system journal
+(`journalrec::MAIN_LOG_PATH`, `/var/log/syslog.jsonl`), and Open or Ctrl+O opens
+any other log in a tab of its own. The details the entry below names are all
+handled, and each has a test and a mutation that proves the test sees it:
+
+- **Following.** While a log with a file is open the window takes a one-second
+  clock (`tick_interval`) and reads what the file has grown by. Following
+  decides only whether the selection goes to what arrives.
+- **A half-written last line** is shown -- a file that ends without a newline is
+  complete as far as anyone can know -- and kept aside as bytes; when the rest
+  arrives, that entry is read again with it, so it becomes one entry, keeps a
+  bookmark given to its first half, and a character cut in two by the read is
+  whole.
+- **A log truncated or replaced** under the viewer (shorter than what was read)
+  is read again from the start.
+- **A log too large to read whole** is read from its end, at the first whole
+  line after the last 64 MiB; at most the newest 100 000 entries are kept, and
+  lines that would be let go at once are not parsed at all.
+- **Export** writes the exact bytes of the lines the filter shows, re-read from
+  the file and checked against a fingerprint of what was read, so a log changed
+  on disk since is refused rather than exported as lines that are not the ones
+  shown; it will not write over the log itself.
+
+The twenty invented entries survive as `App::with_sample`, for tests only.
 
 **In short.** The log viewer's own description promises "real-time log tailing
 with auto-scroll", and it draws an auto-scroll indicator in the status bar that
@@ -159713,6 +159739,25 @@ or a choice made could not be added (its own entry,
 newest rule could be selected, the file list and the extension filter had no
 way to scroll or be typed into, and the layout ignored the window's size. All
 reachable now, by pointer and by key. Five examined; fifteen to go.
+
+**`apps/logviewer`, 2026-09-25 -- wholesale, and there was no log.** Beyond the
+missing pointer, the viewer read no file: its entries were a string compiled
+into it (`TD-C-LOGVIEWER-TAILS-A-STRING-COMPILED-INTO-ITSELF`, now fixed), so
+its tailing, its follow switch and its "export filtered view" were words. The
+list could not be scrolled at all -- `scroll_offset` was written by nothing, and
+the keyboard walked the selection off the bottom of the window -- N and P moved
+a counter in the filter bar and not the selection, the search was a substring
+under a doc comment promising regular expressions, the time range could not be
+set by any route, a source filter could be cleared only by clearing everything,
+the detail view cut its message and raw line to one elided line each, and
+unbound chords ran the bare key under them (`Ctrl+D` raised the level floor).
+Now it opens the system journal at start and any log by Open or Ctrl+O, follows
+what is written with a line caught half-written becoming one entry, reads a
+rotated log again, exports the entries shown as the file's own bytes, searches
+by POSIX ERE (the engine `grep -E` uses) on Ctrl+R, and every control answers
+the pointer. Following now stops when the reader selects an earlier entry, since
+on a busy log the next line would otherwise drag the selection away before it
+could be read. Six examined; fourteen to go.
 
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 

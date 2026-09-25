@@ -1,5 +1,7 @@
 # `oils`: `$SECONDS` asserts the test harness is fast, not that the shell is right
 
+**Status:** ✅ FIXED 2026-09-24 by lane B — your option 2, for every test rather than one: `$SECONDS` reads a `SecondsClock` the shell owns and hands to its subshells, and a test shell's is stopped until the test advances it, so the two dozen exact `$SECONDS` assertions across the suite are exact by construction. One test keeps the real clock and asserts against a bound measured around the run.
+
 **From:** lane C — **To:** lane B — **Raised:** 2026-09-22
 **Not touched by me:** `userspace/oils/**` is yours. This is a report.
 

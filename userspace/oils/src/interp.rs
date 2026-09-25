@@ -3892,6 +3892,92 @@ impl Job {
 /// shortest delay bash was seen to notice within.
 const JOB_EXIT_NOTICE_GRACE: std::time::Duration = std::time::Duration::from_millis(20);
 
+/// How long a pipeline stage waits for the stage before it to reach its first
+/// command before it gives up waiting and starts anyway. See
+/// [`Shell::pipeline_start_wait`], which is what the executor actually reads:
+/// this is the value every shell starts with and hands to its subshells.
+///
+/// A liveness bound, not a timing guess. A stage that blocks before its first
+/// command (`echo $(cat) | cat` with no input yet) must not hold the whole
+/// pipeline up, and no arrangement of stages may deadlock; within the bound the
+/// order is exact, past it the stages simply run.
+const PIPELINE_START_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Where `$SECONDS` reads "now" from.
+///
+/// `$SECONDS` is the whole seconds between an anchor -- the shell's start, or
+/// its last assignment -- and now, so its value depends on how long the machine
+/// took between two statements. A real shell must read the real clock for
+/// that. A test shell must not: whether a loaded `cargo test --workspace` gets
+/// from building a shell to expanding the variable inside one second is a
+/// property of the machine, not of the shell, and an exact `0` asserted there
+/// was a test of scheduling latency that went red now and then
+/// (requests/c-b-seconds-is-the-second-oils-test-that-asserts-a-clock.md).
+///
+/// So the clock belongs to the shell, a subshell inherits it together with the
+/// anchor it is measured against, and a test shell's clock only moves when the
+/// test moves it. Every anchor is taken from the same clock that later measures
+/// it, which is what keeps a stopped clock's readings consistent: an assignment
+/// sets the anchor to the stopped "now", and the next read measures zero from
+/// it until the test advances the clock.
+#[derive(Clone, Copy, Debug)]
+enum SecondsClock {
+    /// The monotonic system clock -- what every shell outside a test reads.
+    Monotonic,
+    /// A clock stopped at `origin + offset`, which only
+    /// [`SecondsClock::advance`] moves.
+    ///
+    /// Readings only ever ADD to `origin`, an instant taken when the clock was
+    /// made. `Instant` counts from an arbitrary epoch (on Windows, roughly the
+    /// boot) and subtracting from one panics on a machine that has not been up
+    /// that long -- the defect
+    /// requests/c-b-an-oils-test-panics-on-a-machine-booted-less-than-an-hour-ago.md
+    /// found in a test that needed an instant in the past.
+    #[cfg(test)]
+    Manual {
+        origin: std::time::Instant,
+        offset: std::time::Duration,
+    },
+}
+
+impl SecondsClock {
+    /// The present instant on this clock.
+    fn now(self) -> std::time::Instant {
+        match self {
+            Self::Monotonic => std::time::Instant::now(),
+            #[cfg(test)]
+            Self::Manual { origin, offset } => origin + offset,
+        }
+    }
+
+    /// Whole seconds from `anchor` to now on this clock; zero rather than a
+    /// panic if `anchor` is somehow later, which only a clock mixed up with
+    /// another could produce.
+    fn whole_seconds_since(self, anchor: std::time::Instant) -> u64 {
+        self.now().saturating_duration_since(anchor).as_secs()
+    }
+
+    /// A clock stopped at the present instant.
+    #[cfg(test)]
+    fn stopped() -> Self {
+        Self::Manual {
+            origin: std::time::Instant::now(),
+            offset: std::time::Duration::ZERO,
+        }
+    }
+
+    /// Move a stopped clock forward. Panics on the monotonic clock, because a
+    /// test that asks to move a clock that moves itself has built its shell
+    /// wrongly and would otherwise pass or fail on the machine's speed again.
+    #[cfg(test)]
+    fn advance(&mut self, by: std::time::Duration) {
+        match self {
+            Self::Manual { offset, .. } => *offset += by,
+            Self::Monotonic => panic!("advance() on the monotonic clock: it moves itself"),
+        }
+    }
+}
+
 /// Which of bash's two redirection-word shapes a target word is.
 ///
 /// The two are expanded alike everywhere except posix mode, where bash's
@@ -5061,6 +5147,20 @@ pub struct Shell {
     /// Cloned into subshells (not moved) because a stage whose body is itself a
     /// subshell — `(yes) | head` — would otherwise never signal until it ended.
     stage_started: Option<mpsc::Sender<()>>,
+    /// How long each stage of a threaded pipeline waits for the one before it
+    /// to begin — the bounded half of [`Shell::exec_threaded_pipeline`]'s start
+    /// handshake. [`PIPELINE_START_WAIT`] in every shell a user runs, and
+    /// inherited by subshells so a nested pipeline waits the same way.
+    ///
+    /// A field rather than the constant read directly because a test of the
+    /// ORDERING needs a budget no scheduler can exhaust: 100 ms is enormous on
+    /// an idle machine and ordinary to lose on one running a whole
+    /// `cargo test --workspace`, and when it lapses the stages start out of
+    /// order by design (requests/c-b-a-pipeline-start-order-test-asserts-a-guarantee-the-handshake-gives-best-effort.md).
+    /// Lengthening the bound for everyone would only move that threshold, and
+    /// would make every stage that genuinely blocks before its first command
+    /// hold its pipeline up for longer.
+    pipeline_start_wait: std::time::Duration,
     /// The builtins currently running, innermost last — the name a write-failure
     /// diagnostic uses (`echo: write error: …`, see [`Shell::finish_write`]).
     /// A stack because a builtin can run commands of its own (`eval`, `command`,
@@ -5351,8 +5451,12 @@ pub struct Shell {
     /// `declare -n OPTERR=q; q=0` moves what `$OPTERR` expands to and leaves
     /// the diagnostics on. See [`Shell::getopts_opterr_reset`].
     getopts_opterr: bool,
-    /// Anchor instant for `$SECONDS` (reset when `SECONDS` is assigned).
+    /// Anchor instant for `$SECONDS` (reset when `SECONDS` is assigned), on
+    /// [`Shell::seconds_clock`]'s timeline — never on any other.
     seconds_anchor: std::time::Instant,
+    /// The clock `$SECONDS` is measured on, and every anchor taken from. The
+    /// monotonic clock except in a test shell; see [`SecondsClock`].
+    seconds_clock: SecondsClock,
     /// When this shell started. Unlike `seconds_anchor` this is never
     /// rebased, because it answers a different question: posix mode's bare
     /// `time` reports the *shell's* elapsed lifetime, not any command's, and
@@ -6801,6 +6905,7 @@ impl Shell {
             pipefail: false,
             pipe_broken: false,
             stage_started: None,
+            pipeline_start_wait: PIPELINE_START_WAIT,
             builtin_names: Vec::new(),
             pid: std::process::id(),
             ppid: parent_pid(),
@@ -6837,7 +6942,8 @@ impl Shell {
             // the startup seeds is the same answer written down, so a value
             // inherited from the environment never reaches this.
             getopts_opterr: true,
-            seconds_anchor: std::time::Instant::now(),
+            seconds_anchor: SecondsClock::Monotonic.now(),
+            seconds_clock: SecondsClock::Monotonic,
             birth: std::time::Instant::now(),
             seconds_base: 0,
             // Seed `$RANDOM` from the wall clock so successive runs differ.
@@ -10391,8 +10497,10 @@ impl Shell {
         // anyway: a stage that blocks before its first command (`echo $(cat) |
         // cat` with no input yet) must not be able to hold the whole pipeline
         // up, and no arrangement of stages may deadlock. The ordering is thus a
-        // strong preference, not a lock — which is also what bash offers.
-        let start_wait = std::time::Duration::from_millis(100);
+        // strong preference, not a lock — which is also what bash offers. The
+        // bound is the shell's own (see [`Shell::pipeline_start_wait`]), which
+        // is [`PIPELINE_START_WAIT`] everywhere but in a test of the ordering.
+        let start_wait = self.pipeline_start_wait;
 
         // Scoped threads let each stage borrow the shared AST (`cmds`) while
         // owning its subshell clone and pipe endpoints (all `Send`). `out` is
@@ -13514,6 +13622,7 @@ impl Shell {
             // stage waits for it in vain. Extra sends are harmless — the waiter
             // receives once.
             stage_started: self.stage_started.clone(),
+            pipeline_start_wait: self.pipeline_start_wait,
             // A subshell is a fresh execution context: whatever builtin forked
             // it is not the one whose writes the clone will report.
             builtin_names: Vec::new(),
@@ -13611,6 +13720,7 @@ impl Shell {
             getopts_charindex: self.getopts_charindex,
             getopts_opterr: self.getopts_opterr,
             seconds_anchor: self.seconds_anchor,
+            seconds_clock: self.seconds_clock,
             birth: self.birth,
             seconds_base: self.seconds_base,
             rng: std::cell::Cell::new(self.rng.get()),
@@ -14307,7 +14417,7 @@ impl Shell {
             }
             "SECONDS" => {
                 self.seconds_base = n;
-                self.seconds_anchor = std::time::Instant::now();
+                self.seconds_anchor = self.seconds_clock.now();
             }
             "BASH_SUBSHELL" => {
                 // The counter bash's assign function writes is the very one a
@@ -35895,7 +36005,8 @@ impl Shell {
             "SECONDS" => Some(
                 self.seconds_base
                     .saturating_add(
-                        i64::try_from(self.seconds_anchor.elapsed().as_secs()).unwrap_or(i64::MAX),
+                        i64::try_from(self.seconds_clock.whole_seconds_since(self.seconds_anchor))
+                            .unwrap_or(i64::MAX),
                     )
                     .to_string()
                     .into_bytes(),
@@ -70567,6 +70678,14 @@ mod tests {
         sh.put_var("PATH".to_string(), harness_path());
         sh.exported.insert("PATH".to_string());
         sh.refresh_dirstack();
+        // `$SECONDS` on a clock only the test moves, so an expected `0` means
+        // the shell said 0 and not that the machine was quick (see
+        // [`SecondsClock`]). The anchor is retaken from that clock because an
+        // anchor and the clock that measures it must share a timeline.
+        // `seconds_on_the_real_clock_count_whole_seconds_since_the_anchor` is
+        // the one test that puts the monotonic clock back.
+        sh.seconds_clock = SecondsClock::stopped();
+        sh.seconds_anchor = sh.seconds_clock.now();
         sh
     }
 
@@ -86407,11 +86526,78 @@ st=1
         assert!(run("declare -p PPID").0.starts_with("declare -ir PPID="));
     }
 
+    /// `$SECONDS` counts whole seconds from the shell's start, or from its
+    /// last assignment on from the number assigned.
+    ///
+    /// Exact because the test shell's clock is stopped until the test moves it
+    /// ([`SecondsClock`]). This test used to assert `echo $SECONDS` is `0` on
+    /// the real clock, which asserted that the harness got from building a
+    /// shell to the `echo` inside one second: red on a loaded workspace run,
+    /// green alone (requests/c-b-seconds-is-the-second-oils-test-that-asserts-a-clock.md).
     #[test]
     fn special_var_seconds_and_epoch() {
+        let second = std::time::Duration::from_secs(1);
         assert_eq!(run("echo $SECONDS").0, "0\n");
         assert_eq!(run("SECONDS=100; echo $SECONDS").0, "100\n");
+
+        // The clock moving is what the variable is FOR, and a stopped clock
+        // makes that assertable to the second.
+        let mut sh = new_shell();
+        sh.seconds_clock.advance(5 * second);
+        assert_eq!(run_in(&mut sh, "echo $SECONDS").0, "5\n");
+        // An assignment rebases: the number given, then counting on from it.
+        run_in(&mut sh, "SECONDS=100");
+        assert_eq!(run_in(&mut sh, "echo $SECONDS").0, "100\n");
+        sh.seconds_clock.advance(3 * second);
+        assert_eq!(run_in(&mut sh, "echo $SECONDS").0, "103\n");
+        // bash counts on from a negative number too: -3, then -1 two seconds
+        // later.
+        run_in(&mut sh, "SECONDS=-3");
+        sh.seconds_clock.advance(2 * second);
+        assert_eq!(run_in(&mut sh, "echo $SECONDS").0, "-1\n");
+        // A subshell inherits the clock with the anchor, so `( … )` and `$( … )`
+        // read what the shell itself reads.
+        let nested = "echo $SECONDS $( echo $SECONDS ); ( echo $SECONDS )";
+        assert_eq!(run_in(&mut sh, nested).0, "-1 -1\n-1\n");
+
         assert_eq!(run("[ $EPOCHSECONDS -gt 1000000000 ] && echo ok").0, "ok\n");
+    }
+
+    /// The monotonic clock, which is what every shell outside a test reads.
+    ///
+    /// [`special_var_seconds_and_epoch`] pins the arithmetic on a stopped clock;
+    /// this is the one test of the real one, and it asserts against a bound
+    /// measured AROUND each run instead of an exact number. The shell's anchor
+    /// is taken after `t0` and its reading before `t0.elapsed()`, so the value
+    /// can never exceed the whole seconds that elapsed -- and on any machine
+    /// that got through the run inside a second the bound IS the exact
+    /// assertion. It widens only by the seconds the run actually took, so a
+    /// loaded machine cannot turn it red and a wrong clock still does.
+    #[test]
+    fn seconds_on_the_real_clock_count_whole_seconds_since_the_anchor() {
+        let real_run = |src: &str| -> (i64, i64) {
+            let t0 = std::time::Instant::now();
+            let mut sh = new_shell();
+            sh.seconds_clock = SecondsClock::Monotonic;
+            sh.seconds_anchor = sh.seconds_clock.now();
+            let out = run_in(&mut sh, src).0;
+            let slack = i64::try_from(t0.elapsed().as_secs()).expect("elapsed fits i64");
+            let got = out
+                .trim_end()
+                .parse::<i64>()
+                .unwrap_or_else(|e| panic!("$SECONDS is not a number: {out:?} ({e})"));
+            (got, slack)
+        };
+        let (got, slack) = real_run("echo $SECONDS");
+        assert!(
+            (0..=slack).contains(&got),
+            "$SECONDS read {got} with {slack} whole seconds elapsed"
+        );
+        let (got, slack) = real_run("SECONDS=100; echo $SECONDS");
+        assert!(
+            (100..=100 + slack).contains(&got),
+            "$SECONDS read {got} after SECONDS=100 with {slack} whole seconds elapsed"
+        );
     }
 
     #[test]
@@ -102654,6 +102840,10 @@ st=1
         // next `jobs` sweeps it and prints nothing.
         //
         // Forcing the poll makes the race a certainty rather than a 1-in-100.
+        //
+        // `origin` is what the second half pins `born_at` to once the grace
+        // has elapsed since it; taken first, so it is never in the future.
+        let origin = std::time::Instant::now();
         let mut sh = new_shell();
         sh.run_source("( exit 7 ) &".as_bytes());
         // Land INSIDE the window -- body finished, grace not yet passed --
@@ -102729,16 +102919,38 @@ st=1
             !sh.jobs.iter().any(|j| j.exit_seen),
             "the grace must NOT have passed yet"
         );
-        // ...and now an hour BEHIND, so the grace has provably elapsed for
+        // ...and now far enough BEHIND that the grace has provably elapsed for
         // everything after this point. THE BUDGET HAS TWO DIRECTIONS, which is
         // what the future-instant fix alone misses: with `born_at` left in the
         // future the grace can never pass, `settle_jobs` never sets
         // `exit_seen`, and the test fails on the very property it exists to
         // prove. Verified by trying lane C's suggestion exactly as given --
         // `left: 0, right: 1`.
-        let long_past = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        //
+        // NOTHING IS SUBTRACTED to get there. This read `Instant::now() - 1h`
+        // until lane C hit it on a freshly booted machine
+        // (requests/c-b-an-oils-test-panics-on-a-machine-booted-less-than-an-hour-ago.md):
+        // `Instant` counts from an arbitrary monotonic epoch -- on Windows,
+        // roughly the boot -- and `Instant - Duration` PANICS rather than
+        // saturating, so the test was red on every host up for less than an
+        // hour and green on every other, which is a defect that cures itself
+        // on a timer and so trains everyone who meets it to re-run rather
+        // than look. `checked_sub` with a fallback to `now()` is the same trap
+        // one step removed: the grace would be unpassed and the assertion
+        // below would fail on the future-instant problem again.
+        //
+        // So `origin` was taken before the job existed, and this waits on the
+        // CONDITION that the grace has elapsed since it. A monotonic clock
+        // keeps it elapsed from then on, which makes it true by construction
+        // for the rest of the test -- the same shape as the first half, with
+        // no arithmetic that depends on how long the machine has been up. It
+        // costs at most one grace (20 ms) of sleeping, and none on a machine
+        // slow enough to have spent that long reaching here.
+        while origin.elapsed() < JOB_EXIT_NOTICE_GRACE {
+            std::thread::sleep(JOB_EXIT_NOTICE_GRACE.saturating_sub(origin.elapsed()));
+        }
         for j in &mut sh.jobs {
-            j.born_at = long_past;
+            j.born_at = origin;
         }
         settle_jobs(&mut sh);
         assert_eq!(sh.run_source("wait".as_bytes()), 0);
@@ -104230,8 +104442,25 @@ st=1
     /// with the stages downstream. It has to — a stage that had to finish before
     /// the next one began would deadlock the moment it filled its pipe — and
     /// bash promises no more, its stages being concurrent processes.
+    ///
+    /// The shells here wait a minute for each predecessor rather than
+    /// [`PIPELINE_START_WAIT`]'s 100 ms. The handshake's promise is "in order,
+    /// unless a stage takes longer than the budget to reach its first command",
+    /// and under a full `cargo test --workspace` a worker thread losing 100 ms
+    /// is ordinary: the budget lapsed, `:` traced first, and this test went red
+    /// with nothing wrong in the shell
+    /// (requests/c-b-a-pipeline-start-order-test-asserts-a-guarantee-the-handshake-gives-best-effort.md).
+    /// Only the budget changes: every stage below reaches its first command at
+    /// once, so a minute is never spent, and what is left to assert is exactly
+    /// the wiring of the chain -- which is what a lost handshake breaks. The
+    /// lapse itself is `a_pipeline_stage_that_never_starts_holds_nothing_up_past_the_budget`'s.
     #[test]
     fn a_pipelines_stages_begin_in_pipeline_order() {
+        let run = |src: &str| {
+            let mut sh = new_shell();
+            sh.pipeline_start_wait = std::time::Duration::from_secs(60);
+            run_in(&mut sh, src)
+        };
         // Every stage here is a builtin, so the whole pipeline runs in-process
         // on the threaded executor, and none of them writes to stdout — the
         // trace is the only output, so nothing else can perturb the order.
@@ -104261,6 +104490,39 @@ st=1
         );
         assert_eq!(out.matches("+ true\n").count(), 1, "{out:?}");
         assert_eq!(out.matches("+ :\n").count(), 1, "{out:?}");
+    }
+
+    /// The other half of the start handshake's contract: a stage that has not
+    /// reached its first command within [`Shell::pipeline_start_wait`] holds
+    /// nothing up. Its successor simply starts, out of order -- which is all
+    /// bash's concurrent processes would promise either.
+    ///
+    /// Constructed rather than timed. Stage 0 cannot reach its first command
+    /// until stage 1 has RUN one: it spins on `[[ ]]` and `(( ))`, which are not
+    /// simple commands and so never signal, until the file stage 1 creates
+    /// appears. Were a lapsed wait not to release stage 1, each stage would be
+    /// waiting on the other for good, so the spin also gives up at a deadline
+    /// and prints `stuck` rather than hanging the suite. Everything here is a
+    /// builtin, so no host tool can change the answer.
+    #[test]
+    fn a_pipeline_stage_that_never_starts_holds_nothing_up_past_the_budget() {
+        let mut sh = new_shell();
+        assert_eq!(
+            sh.pipeline_start_wait, PIPELINE_START_WAIT,
+            "a test shell starts with the budget every real shell has"
+        );
+        let (out, status) = run_in(
+            &mut sh,
+            "deadline=$(( EPOCHSECONDS + 30 ))\n\
+             { while [[ ! -e lapse-flag ]] && (( EPOCHSECONDS < deadline )); do (( 1 )); done\n\
+               [[ -e lapse-flag ]] && echo released || echo stuck; } |\n\
+             { > lapse-flag; read -r line; echo \"$line\"; }",
+        );
+        assert_eq!(
+            (out.as_str(), status),
+            ("released\n", 0),
+            "stage 1 never ran before stage 0's first command"
+        );
     }
 
     /// `set -x` word quoting, measured against bash 5.2 byte by byte over the

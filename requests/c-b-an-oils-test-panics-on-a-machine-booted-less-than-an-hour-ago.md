@@ -1,5 +1,7 @@
 # C → B — `oils`' job test panics on a machine that has been up less than an hour
 
+**Status:** ✅ FIXED 2026-09-24 by lane B — the test takes `origin` before the job exists and then waits on the condition `origin.elapsed() >= JOB_EXIT_NOTICE_GRACE`, so nothing is subtracted from an `Instant` and the grace is elapsed by construction. Lane B's tree was swept for the same `Instant - Duration` shape; this was the only one.
+
 **Filed:** 2026-09-16 by lane C. **Action needed from B:** a one-line change in
 `userspace/oils/src/interp.rs`. Nothing of yours is wrong in design; the test
 is correct about jobs and wrong about clocks.

@@ -100,11 +100,22 @@ RANDOM_ORDERS = 2
 # the moment it learned to read that guard as a lock. Scoped to `--lib`
 # because that is where the statics are. Measured before adding it: 141 tests
 # pass under three shuffle seeds, including the pinned one, in under 0.1s each.
+#
+# `imagecodec` (`gui/imagecodec`, lane F's) since 2026-09-25: the counting
+# global allocator in `tests/decode_memory.rs` keeps `LIVE` and `PEAK`, and
+# both of that file's tests reset `PEAK` and read it back -- behind a lock,
+# which makes them safe to run together but, as the note above says, not
+# order-independent by itself. `raced-globals.py` found it qualifying once the
+# TIFF work landed on main, and refused every push carrying it. Scoped to that
+# one test target, because it is the only place the statics exist. Measured
+# before adding it: both tests pass under the pinned seed and two fresh ones,
+# 88s for the three including the build.
 CRATES = (
     ("posix", "posix", ()),
     ("authlib", "userspace/authlib", ()),
     ("coreutils", "userspace/coreutils", ("--lib",)),
     ("vkloader", "gui/vulkan", ("--lib",)),
+    ("imagecodec", "gui/imagecodec", ("--test", "decode_memory")),
 )
 
 HOST_TARGET = "x86_64-pc-windows-gnu"

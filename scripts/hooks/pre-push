@@ -846,7 +846,7 @@ toi="${repo_root:-.}/scripts/check-test-order-independence.py"
 # on a coreutils-only push. Left unscoped because `touches` answers
 # yes/no rather than which, and a wrong answer there silently narrows
 # the gate -- the failure this whole gate family keeps producing.
-touches posix/ userspace/authlib/ userspace/coreutils/ gui/vulkan/ scripts/check-test-order-independence.py || skip_toi=1
+touches posix/ userspace/authlib/ userspace/coreutils/ gui/vulkan/ gui/imagecodec/ scripts/check-test-order-independence.py || skip_toi=1
 note_gate test-order "$skip_toi"
 
 toi_failed=0

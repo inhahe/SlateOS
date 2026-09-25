@@ -3072,10 +3072,13 @@ all, and most people never turn it on, so they should not carry 142 MB for it.
 If you would rather it were always there, **A with 1** and the 75 MB "tiny"
 model is the compact version of the same choice.
 
-Feasibility is expected rather than measured: whisper.cpp is C and C++, and
-CMake — the first C++ program ported — already links against our C library
-with the C++ runtime we use. Its link test is lane E's next step on this item
-either way; it measures whether it builds, not which engine is right.
+**Feasibility, measured 2026-09-25:** whisper.cpp 1.9.4 links against our C
+library and the C++ runtime we use with nothing missing, on the first attempt
+(a quick link test, not yet a committed recipe). So A is possible today; this
+question is only about which engine is right, and where its model lives. It
+does not yet say how fast it runs: the virtual machine the tests boot in has
+none of the wide arithmetic instructions whisper.cpp uses on real hardware, so
+it will be much slower there than on a real computer.
 
 ### If never answered
 

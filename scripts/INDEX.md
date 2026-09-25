@@ -157,7 +157,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/df-diff.sh` | Differential test: our df against GNU df. |
 | `scripts/diff-diff.sh` | Differential test: our `diff` against GNU diffutils. |
 | `scripts/diff-wsl.sh` | shellcheck disable=SC3043  # `local`; see "Which dialect" below. |
-| `scripts/digest-diff.sh` | Differential test: our md5sum/sha256sum against GNU coreutils'. |
+| `scripts/digest-diff.sh` | Differential test: our md5sum/sha1sum/sha256sum against GNU coreutils'. |
 | `scripts/display_rename.py` | Display-name pass: SlateOS -> "Slate OS" in user-facing text of .rs files. |
 | `scripts/du-diff.sh` | Differential test: our du against GNU du. |
 | `scripts/dup-bins-survey.py` | Survey the utility names that two crates both build, and say how to decide |
@@ -241,6 +241,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/positional-model-limits.py` | Where the positional contamination model can and cannot see, derived from its code. |
 | `scripts/pre-boot.py` | Run everything `boot-test.sh` checks before it builds, without building anything. |
 | `scripts/printable-audit.py` | Compare our printability rule against glibc's `iswprint` under `C.UTF-8`. |
+| `scripts/printenv-diff.sh` | printenv-diff.sh — compare our `printenv` against the real GNU one, inside WSL. |
 | `scripts/printf-cases.py` | Generate the case file for ``scripts/printf-diff.sh``. |
 | `scripts/printf-diff.sh` | Differential test: our `printf` against GNU's. |
 | `scripts/printf-probe.sh` | One side of the `printf` differential test. |
@@ -394,4 +395,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_384 scripts._
+_385 scripts._

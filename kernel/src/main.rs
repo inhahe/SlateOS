@@ -6513,6 +6513,14 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::queryable::self_test(),
             );
+            // After the four suites whose tables it drives: ACLs, flags, seals
+            // and indexed attributes must end with their file and move with
+            // its name, through the real VFS on /tmp (fs::perfile).
+            selftest::dispatch_debug(
+                "per-file state",
+                selftest::Severity::Diagnostic,
+                fs::perfile::self_test(),
+            );
             selftest::dispatch_debug(
                 "readdir-plus",
                 selftest::Severity::Diagnostic,

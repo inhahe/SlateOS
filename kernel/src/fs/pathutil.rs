@@ -74,6 +74,40 @@ pub fn path_strictly_under<P: AsRef<Path>, D: AsRef<Path>>(path: P, dir: D) -> b
     path.starts_with(dir) && path.components().count() > dir.components().count()
 }
 
+/// Where `path` ends up when the subtree at `from` is moved to `to`, or `None`
+/// if `path` is not in that subtree.
+///
+/// This is what a rename does to every name at or below the renamed object:
+/// `from` itself becomes `to`, and `from/x/y` becomes `to/x/y`. The match is
+/// component-aligned, like [`path_in_subtree`], so renaming `/a` never moves
+/// `/ab`.
+///
+/// A `from` with no components (`/`, or empty) matches nothing rather than
+/// everything: no rename moves the root, and a caller that passed one by
+/// mistake would otherwise rewrite every name it holds.
+///
+/// # Examples
+/// ```ignore
+/// assert_eq!(rebase("/a", "/a", "/b"), Some("/b".into()));
+/// assert_eq!(rebase("/a/x/y", "/a", "/b"), Some("/b/x/y".into()));
+/// assert_eq!(rebase("/ab", "/a", "/b"), None);
+/// ```
+#[must_use]
+pub fn rebase<P: AsRef<Path>, F: AsRef<Path>, T: AsRef<Path>>(
+    path: P,
+    from: F,
+    to: T,
+) -> Option<PathBuf> {
+    let (from, to) = (from.as_ref(), to.as_ref());
+    // The root (no components) moves nothing; see above.
+    from.components().next()?;
+    let rest = path.as_ref().strip_prefix(from)?;
+    if rest.as_path().components().next().is_none() {
+        return Some(to.to_path_buf());
+    }
+    Some(to.join(&rest))
+}
+
 /// Join `rel` underneath the directory `base`, refusing anything that could
 /// escape it.
 ///
@@ -441,6 +475,50 @@ fn check_dot_and_substring() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// One [`rebase`] case: `(path, from, to, expected)`.
+type RebaseCase = (
+    &'static [u8],
+    &'static [u8],
+    &'static [u8],
+    Option<&'static [u8]>,
+);
+
+/// [`rebase`] -- what a rename does to the names at and below it.
+fn check_rebase() -> crate::error::KernelResult<()> {
+    const CASES: &[RebaseCase] = &[
+        (b"/a", b"/a", b"/b", Some(b"/b")),
+        (b"/a/x/y", b"/a", b"/b", Some(b"/b/x/y")),
+        (b"/a/x", b"/a/", b"/b", Some(b"/b/x")),
+        (b"/a/x", b"/a", b"/b/", Some(b"/b/x")),
+        (b"/a/x", b"/a", b"/p/q", Some(b"/p/q/x")),
+        // Component-aligned: a sibling sharing a byte prefix does not move.
+        (b"/ab", b"/a", b"/b", None),
+        (b"/c", b"/a", b"/b", None),
+        // An ancestor of the renamed object is not inside it.
+        (b"/a", b"/a/x", b"/b", None),
+        // The root moves nothing, rather than everything.
+        (b"/x", b"/", b"/b", None),
+        // Any byte but `/` and NUL is a name, UTF-8 or not.
+        (b"/a/\xFF", b"/a", b"/\xFE", Some(b"/\xFE/\xFF")),
+    ];
+    for &(path, from, to, want) in CASES {
+        let got = rebase(Path::new(path), Path::new(from), Path::new(to));
+        if got.as_ref().map(|p| p.as_path().as_bytes()) != want {
+            crate::serial_println!(
+                "[pathutil]   FAIL: rebase({:?}, {:?}, {:?}) = {:?}, expected {:?}",
+                Path::new(path),
+                Path::new(from),
+                Path::new(to),
+                got,
+                want.map(Path::new)
+            );
+            return Err(crate::error::KernelError::InternalError);
+        }
+    }
+    crate::serial_println!("[pathutil]   rebase ({} cases): OK", CASES.len());
+    Ok(())
+}
+
 /// Boot self-test for the path predicates.
 ///
 /// Runs entirely on constants — no disk, no allocator pressure beyond a few
@@ -459,6 +537,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     check_confine_joins()?;
     check_confine_escapes()?;
     check_dot_and_substring()?;
+    check_rebase()?;
     crate::serial_println!("[pathutil] Self-test PASSED");
     Ok(())
 }

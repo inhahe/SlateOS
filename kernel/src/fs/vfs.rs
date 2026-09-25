@@ -1131,6 +1131,16 @@ static NEXT_FS_ID: AtomicU64 = AtomicU64::new(1);
 /// the same underlying object (e.g. hard links on ext4); two objects on
 /// different mounts that happen to share an `ino` are distinguished by `fs_id`.
 ///
+/// **Unique among live objects only.** `fs_id` is never reused, but an inode
+/// number is, once its object is gone: ext4 hands a freed inode to the next
+/// file it creates, so a `FileId` read before a deletion can name a different
+/// file after it. (memfs counts up and never reuses one, which is why this
+/// went unnoticed on `/tmp`.) State keyed on a `FileId` that can outlive its
+/// file must therefore end with the file: the page cache is invalidated on
+/// every removal (`invalidate_identity`), and the tables of per-file state --
+/// ACLs, flags, seals, indexed attributes -- are told through
+/// [`super::perfile`], where any new such table must be registered.
+///
 /// This is the key type for the read-only page cache (design-decisions
 /// §23/§36): cached frames are keyed by `(FileId, page-offset)` so that N
 /// processes mapping the same shared library share one set of physical frames.
@@ -1863,8 +1873,14 @@ impl Vfs {
         // not cleared when unmounting `/mnt` (and, unlike the byte-prefix
         // idiom this replaces, a `/mnt/` spelling does not silently keep every
         // child's lock alive).
-        let mut table = LOCK_TABLE.lock();
-        table.retain(|entry| !crate::fs::pathutil::path_in_subtree(&entry.path, mount_path));
+        LOCK_TABLE
+            .lock()
+            .retain(|entry| !crate::fs::pathutil::path_in_subtree(&entry.path, mount_path));
+
+        // And the state kept about its files outside it: no identity on this
+        // filesystem can match again (`super::perfile`). After the lock above
+        // is released, so that it orders against nothing.
+        super::perfile::filesystem_unmounted(fs_id);
 
         Ok(())
     }
@@ -2788,7 +2804,7 @@ impl Vfs {
         // Auto-version: save the file content before deleting.
         // Allows `fhist restore` to recover accidentally deleted files.
         super::history::try_auto_record(&path);
-        let cache_inval = {
+        let (cache_inval, unlinked) = {
             let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
             let mut guard = fs.lock();
             // Capture identity *before* removal — the inode (and its number)
@@ -2796,12 +2812,17 @@ impl Vfs {
             // file.  Dropping the cached pages now prevents a later file that
             // reuses this inode from being served the removed file's bytes.
             let id = cache_identity(&mut guard, fs_id, &relative);
+            // The same hazard for the state kept about files outside the
+            // filesystem -- an ACL, flags, seals, attributes -- which a file
+            // reusing the number would otherwise inherit (`super::perfile`).
+            let unlinked = unlinked_object(&mut guard, fs_id, &relative);
             guard.remove(&relative)?;
-            id
+            (id, unlinked)
         };
         if let Some((fs_id, ino)) = cache_inval {
             crate::mm::page_cache::invalidate_identity(fs_id, ino);
         }
+        super::perfile::name_removed(unlinked, &path);
         // Release quota usage for deleted file.
         if file_size > 0 {
             super::quota::release_bytes(0, 0, file_size);
@@ -2960,10 +2981,15 @@ impl Vfs {
         check_writable(&path)?;
         // Intercept: let pre-operation handlers approve/deny.
         super::intercept::pre_delete(&path)?;
-        {
-            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-            fs.lock().rmdir(&relative)?;
-        }
+        let unlinked = {
+            let (fs, fs_id, _opts, relative) = resolve_mount(&path)?;
+            let mut guard = fs.lock();
+            // A directory's state ends with it, as a file's does; see `remove`.
+            let unlinked = unlinked_object(&mut guard, fs_id, &relative);
+            guard.rmdir(&relative)?;
+            unlinked
+        };
+        super::perfile::name_removed(unlinked, &path);
         // Release inode quota for removed directory.
         super::quota::release_inode(0, 0);
         // Removing a directory invalidates any cached paths through it.
@@ -3311,7 +3337,7 @@ impl Vfs {
             // relative paths live on the one filesystem, so a single per-mount
             // lock keeps the no-replace check and the rename atomic w.r.t. that
             // filesystem (the old global-lock guarantee, now scoped per mount).
-            let dest_inval = {
+            let (dest_inval, displaced) = {
                 let mut guard = fs_to.lock();
                 if noreplace {
                     // Atomic RENAME_NOREPLACE: the destination-existence check
@@ -3330,12 +3356,21 @@ impl Vfs {
                 // source's identity is unchanged (same inode, new name), so its
                 // cached pages stay valid.
                 let id = cache_identity(&mut guard, fs_id_to, &rel_to);
+                // The same removal, for the state kept about files outside the
+                // filesystem (`super::perfile`).
+                let displaced = displaced_object(&mut guard, fs_id_to, &rel_from, &rel_to);
                 guard.rename(&rel_from, &rel_to)?;
-                id
+                (id, displaced)
             };
             if let Some((fs_id, ino)) = dest_inval {
                 crate::mm::page_cache::invalidate_identity(fs_id, ino);
             }
+            // The replaced file first, so that its state is gone before the
+            // moved file's names arrive where its were.
+            if let Some(unlinked) = displaced {
+                super::perfile::object_unlinked(unlinked, &to);
+            }
+            super::perfile::names_moved(&from, &to);
         } else {
             // Cross-mount: refuse with `CrossDevice` (-> `EXDEV`), which is
             // what POSIX defines and every other Unix returns.
@@ -3427,6 +3462,8 @@ impl Vfs {
             // Same FS — perform the atomic swap under the per-mount lock.
             fs_b.lock().rename_exchange(&rel_a, &rel_b)?;
         }
+        // Both files keep their identities and swap names (`super::perfile`).
+        super::perfile::names_exchanged(&a, &b);
 
         // Both entries moved: invalidate caches and notify for each.
         {
@@ -3726,7 +3763,7 @@ impl Vfs {
             super::history::try_auto_record(&child);
         }
 
-        let cache_inval = {
+        let (cache_inval, unlinked) = {
             let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
             let mut guard = fs.lock();
             // Pass 2, under the same guard as the removal itself.  Anything
@@ -3735,8 +3772,10 @@ impl Vfs {
             verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
             let child_rel = dir_rel.join(name);
             if remove_dir {
+                // See `remove` for why this is read before the removal.
+                let unlinked = unlinked_object(&mut guard, fs_id, &child_rel);
                 guard.rmdir(&child_rel)?;
-                None
+                (None, unlinked)
             } else {
                 // `unlink` never follows a trailing symlink, and must not
                 // silently swallow a directory: without this, `unlinkat`
@@ -3746,14 +3785,16 @@ impl Vfs {
                     return Err(KernelError::IsADirectory);
                 }
                 let id = cache_identity(&mut guard, fs_id, &child_rel);
+                let unlinked = unlinked_object(&mut guard, fs_id, &child_rel);
                 guard.remove(&child_rel)?;
-                id
+                (id, unlinked)
             }
         };
 
         if let Some((fs_id, ino)) = cache_inval {
             crate::mm::page_cache::invalidate_identity(fs_id, ino);
         }
+        super::perfile::name_removed(unlinked, &child);
         if file_size > 0 {
             super::quota::release_bytes(0, 0, file_size);
         }
@@ -4392,7 +4433,7 @@ impl Vfs {
         check_writable(&new_child)?;
         super::intercept::pre_rename(&old_child, &new_child)?;
 
-        let dest_inval = {
+        let (dest_inval, displaced) = {
             // Every mount-table lookup happens before any filesystem guard is
             // taken, so no ordering between the VFS lock and a filesystem lock
             // can arise.
@@ -4417,7 +4458,7 @@ impl Vfs {
                     guard.rename_exchange(&old_rel, &new_rel)?;
                     // Both names still exist afterwards, so nothing is
                     // unlinked and no page cache identity dies.
-                    None
+                    (None, None)
                 }
                 RenameMode::NoReplace => {
                     // The existence check and the rename run under the *same*
@@ -4431,7 +4472,7 @@ impl Vfs {
                     }
                     guard.rename(&old_rel, &new_rel)?;
                     // Nothing was displaced -- the check above proved it.
-                    None
+                    (None, None)
                 }
                 RenameMode::Replace => {
                     // A replacing rename unlinks whatever held the destination
@@ -4439,8 +4480,11 @@ impl Vfs {
                     // its cached pages must go. Captured before the rename,
                     // while the name still reaches it.
                     let id = cache_identity(&mut guard, new_fs_id, &new_rel);
+                    // And the state kept about it outside the filesystem
+                    // (`super::perfile`).
+                    let displaced = displaced_object(&mut guard, new_fs_id, &old_rel, &new_rel);
                     guard.rename(&old_rel, &new_rel)?;
-                    id
+                    (id, displaced)
                 }
             }
         };
@@ -4463,10 +4507,16 @@ impl Vfs {
                 super::notify::emit_renamed(&new_child, &old_child);
                 super::index::on_file_changed(&old_child);
                 super::index::on_file_changed(&new_child);
+                super::perfile::names_exchanged(&old_child, &new_child);
             }
             RenameMode::Replace | RenameMode::NoReplace => {
                 super::notify::emit_renamed(&old_child, &new_child);
                 super::index::on_file_renamed(&old_child, &new_child);
+                // The replaced file first; see `rename_inner`.
+                if let Some(unlinked) = displaced {
+                    super::perfile::object_unlinked(unlinked, &new_child);
+                }
+                super::perfile::names_moved(&old_child, &new_child);
             }
         }
         super::journal::record_rename(&old_child, &new_child);
@@ -6096,6 +6146,45 @@ fn cache_identity(fs: &mut Box<dyn FileSystem>, fs_id: u64, relative: &Path) -> 
         return None;
     }
     Some((fs_id, ino))
+}
+
+/// What removing the name `relative` ends, for the tables that keep state
+/// about files outside the filesystem ([`super::perfile`]). Read under the
+/// guard that performs the removal, while the name still resolves.
+///
+/// `lmetadata`, not `metadata`: removing a symlink removes the link, and
+/// following it would end the state of the file it points to. `None` if the
+/// name cannot be read; [`super::perfile::name_removed`] reports that case
+/// when the removal then succeeds regardless.
+fn unlinked_object(
+    fs: &mut Box<dyn FileSystem>,
+    fs_id: u64,
+    relative: &Path,
+) -> Option<super::perfile::Unlinked> {
+    fs.lmetadata(relative)
+        .ok()
+        .map(|meta| super::perfile::Unlinked::from_meta(fs_id, &meta))
+}
+
+/// What a rename of `rel_from` onto `rel_to` removes from `rel_to`: the object
+/// that name held, or `None` when it held nothing -- or held the moving object
+/// itself, which POSIX makes a rename that does nothing. That case needs the
+/// check: a directory, or a file on a filesystem without inode numbers, would
+/// otherwise read as losing its last name to a rename that removed nothing.
+fn displaced_object(
+    fs: &mut Box<dyn FileSystem>,
+    fs_id: u64,
+    rel_from: &Path,
+    rel_to: &Path,
+) -> Option<super::perfile::Unlinked> {
+    if rel_from == rel_to {
+        return None;
+    }
+    let to = fs.lmetadata(rel_to).ok()?;
+    if to.ino != 0 && fs.lmetadata(rel_from).is_ok_and(|from| from.ino == to.ino) {
+        return None;
+    }
+    Some(super::perfile::Unlinked::from_meta(fs_id, &to))
 }
 
 /// Longest single path component an fd-relative operation will accept.

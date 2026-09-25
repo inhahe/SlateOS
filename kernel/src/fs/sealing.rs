@@ -312,14 +312,89 @@ pub fn check_seals(path: impl AsRef<Path>, op: SealOp) -> KernelResult<()> {
     }
 }
 
-/// Remove all seals for a file (used when the file is deleted).
+/// Remove all seals for a file, as its deletion does.
 ///
-/// This is the only way to remove seals — by deleting the file itself.
-/// Regular unseal operations are not supported by design.
+/// Deleting the file is the only way to remove a seal; there is no unseal, by
+/// design. The VFS now performs this itself when a file's last name is
+/// removed, through [`PER_FILE_STATE`] (see [`super::perfile`]) -- until
+/// 2026-09-25 nothing called this function, so a deleted file's seals stayed
+/// in the table for good. What remains is the direct form, which this
+/// module's self-test uses; it looks the file up while the name still
+/// resolves, as the VFS does before a removal.
+///
+/// It also used to compare names only, so after the identity conversion it
+/// could not find a seal that had been placed under a second name.
 pub fn remove_on_delete(path: impl AsRef<Path>) {
     let path = path.as_ref();
-    let mut table = SEAL_TABLE.lock();
-    table.retain(|e| e.path.as_path() != path);
+    // Derived before the lock; see `add_seals`.
+    let id = crate::fs::Vfs::file_identity(path).unwrap_or(None);
+    forget_file(id, path);
+}
+
+// ---------------------------------------------------------------------------
+// File lifecycle (see `super::perfile`)
+// ---------------------------------------------------------------------------
+
+/// This table's part in the file lifecycle: seals end with their file -- the
+/// one removal the design allows -- and move with it when it is renamed. See
+/// [`super::perfile`] for why a `FileId`-keyed seal that outlived its file
+/// would seal a stranger.
+pub(crate) const PER_FILE_STATE: super::perfile::Table = super::perfile::Table {
+    name: "sealing",
+    forget: forget_file,
+    rename: rename_names,
+    unmounted: forget_filesystem,
+    plant: plant_for_test,
+    finds: finds_for_test,
+    reports: reports_for_test,
+};
+
+/// The file is gone: drop every seal that applied to it.
+///
+/// Uses [`seal_entry_matches`], the same test `get_seals` answers with, so
+/// what is dropped is exactly what a lookup of this file would have found --
+/// including a path-keyed seal placed on the name before the file existed.
+fn forget_file(id: Option<crate::fs::vfs::FileId>, path: &Path) {
+    SEAL_TABLE
+        .lock()
+        .retain(|e| !seal_entry_matches(e, path, id));
+}
+
+/// Names moved: rewrite every stored name `rename` maps to a new one. For an
+/// identity-keyed seal that is only the name it is reported under; for a
+/// path-keyed one the name is the key.
+fn rename_names(rename: &super::perfile::NameMap<'_>) {
+    for e in SEAL_TABLE.lock().iter_mut() {
+        if let Some(new) = rename(&e.path) {
+            e.path = new;
+        }
+    }
+}
+
+/// Self-test support: a `GROW` seal. Seals are not enforced yet (see the
+/// module docs), so none restricts what the lifecycle rungs do; `GROW` is the
+/// one that would stay harmless once they are, since the rungs never extend a
+/// file after planting.
+fn plant_for_test(path: &Path) -> KernelResult<()> {
+    add_seals(path, SealFlags::GROW).map(|_| ())
+}
+
+/// Self-test support: whether a lookup through `path` finds the `GROW` seal.
+fn finds_for_test(path: &Path) -> bool {
+    get_seals(path).contains(SealFlags::GROW)
+}
+
+/// Self-test support: whether a seal is reported under `name`.
+fn reports_for_test(name: &Path) -> bool {
+    SEAL_TABLE.lock().iter().any(|e| e.path.as_path() == name)
+}
+
+/// A filesystem was unmounted: its mount id is never reused, so no identity
+/// on it can match again, and its seals are only garbage.
+fn forget_filesystem(fs_id: u64) {
+    SEAL_TABLE
+        .lock()
+        .retain(|e| e.id.is_none_or(|id| id.fs_id != fs_id));
 }
 
 /// List all sealed files.

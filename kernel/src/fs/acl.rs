@@ -30,9 +30,18 @@
 //!
 //! ## Storage
 //!
-//! ACLs are stored in the VFS xattr system under the key
-//! `system.posix_acl_access`.  This is compatible with Linux ext4's
-//! ACL storage.  In-memory, a BTreeMap caches ACLs for fast lookup.
+//! **In memory only.** ACLs live in this module's table and nowhere else: they
+//! do not survive a reboot, and nothing reads or writes the
+//! `system.posix_acl_access` xattr that Linux keeps them in. (This section
+//! used to say they were stored there, with the table as a cache; no code ever
+//! did that.) The xattr is where they belong -- it would make an ACL persist,
+//! and end with its inode -- and `known-issues.md`
+//! `A-PER-FILE-STATE-OUTLIVED-ITS-FILE` records that as the long-term home.
+//!
+//! The table is keyed on the file's identity, so it has to be told when a
+//! file goes: an ext4 inode number is reused by the next file created, and an
+//! ACL left behind would govern that stranger. The VFS does tell it -- see
+//! [`super::perfile`] and [`PER_FILE_STATE`].
 //!
 //! ## Reference
 //!
@@ -233,7 +242,9 @@ enum AclKey {
     Path(PathBuf),
 }
 
-/// Derive the key for a path. **The only place an `AclKey` is constructed.**
+/// Derive the key for a path. Every key is built by [`key_from`], which this
+/// and the file-lifecycle hooks share, so a key can never be derived one way
+/// at `insert` and another at `remove`.
 ///
 /// MUST be called before taking the `ACLS` lock: `file_identity` calls into
 /// the VFS, and a module global held across that call inverts
@@ -246,10 +257,110 @@ enum AclKey {
 /// leave `ino: 0` at 0 of 15 and 0 of 16 construction sites), so a file that
 /// resolves to no identity is one that cannot be hard-linked anyway.
 fn acl_key(path: &Path) -> AclKey {
-    match crate::fs::Vfs::file_identity(path) {
-        Ok(Some(id)) => AclKey::Id(id),
-        _ => AclKey::Path(path.to_path_buf()),
+    key_from(crate::fs::Vfs::file_identity(path).unwrap_or(None), path)
+}
+
+/// The key for a file whose identity is already known -- the one place an
+/// `AclKey` is built, which [`acl_key`] and the file-lifecycle hooks share.
+///
+/// The hooks need it because they run after the name is gone: the VFS reads
+/// the identity while the name still resolves and hands it over, and looking
+/// the name up again would find nothing (or, for a replaced name, the wrong
+/// file).
+fn key_from(id: Option<crate::fs::vfs::FileId>, path: &Path) -> AclKey {
+    match id {
+        Some(id) => AclKey::Id(id),
+        None => AclKey::Path(path.to_path_buf()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// File lifecycle (see `super::perfile`)
+// ---------------------------------------------------------------------------
+
+/// This table's part in the file lifecycle: an ACL ends with its file, and
+/// moves with it when it is renamed. See [`super::perfile`] for why a
+/// `FileId`-keyed entry that outlived its file would be a stranger's ACL.
+pub(crate) const PER_FILE_STATE: super::perfile::Table = super::perfile::Table {
+    name: "acl",
+    forget: forget_file,
+    rename: rename_names,
+    unmounted: forget_filesystem,
+    plant: plant_for_test,
+    finds: finds_for_test,
+    reports: reports_for_test,
+};
+
+/// The file is gone: drop its ACL.
+fn forget_file(id: Option<crate::fs::vfs::FileId>, path: &Path) {
+    // Every removal on the system passes through here, and almost no file has
+    // an ACL; the count is the same filter `check_access`'s callers use.
+    if ACL_COUNT.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let key = key_from(id, path);
+    let mut inner = ACLS.lock();
+    if inner.acls.remove(&key).is_some() {
+        ACL_COUNT.store(inner.acls.len(), Ordering::Relaxed);
+    }
+}
+
+/// Names moved: rewrite every stored name `rename` maps to a new one.
+///
+/// An identity key stays as it is -- the file is the same file -- and only the
+/// name kept to report it changes. A path key IS the name (the two are equal
+/// by construction in [`set_acl`]), so it moves with it.
+fn rename_names(rename: &super::perfile::NameMap<'_>) {
+    if ACL_COUNT.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let mut inner = ACLS.lock();
+    // Collected first: a map key cannot be changed in place.
+    let moved: Vec<(AclKey, PathBuf)> = inner
+        .acls
+        .iter()
+        .filter_map(|(key, (name, _))| rename(name).map(|new| (key.clone(), new)))
+        .collect();
+    for (key, new_name) in moved {
+        let Some((_, acl)) = inner.acls.remove(&key) else {
+            continue;
+        };
+        let new_key = match key {
+            AclKey::Id(id) => AclKey::Id(id),
+            AclKey::Path(_) => AclKey::Path(new_name.clone()),
+        };
+        inner.acls.insert(new_key, (new_name, acl));
+    }
+    ACL_COUNT.store(inner.acls.len(), Ordering::Relaxed);
+}
+
+/// Self-test support: an ACL granting read and write to everyone -- the
+/// lifecycle rungs need no more, and it refuses nothing they do.
+fn plant_for_test(path: &Path) -> KernelResult<()> {
+    set_acl(path, from_mode(0o666))
+}
+
+/// Self-test support: whether a lookup through `path` finds an ACL.
+fn finds_for_test(path: &Path) -> bool {
+    get_acl(path).is_some()
+}
+
+/// Self-test support: whether an ACL is reported under `name`.
+fn reports_for_test(name: &Path) -> bool {
+    ACLS.lock().acls.values().any(|(p, _)| p.as_path() == name)
+}
+
+/// A filesystem was unmounted: its mount id is never reused, so no identity
+/// on it can match again, and its entries are only garbage.
+fn forget_filesystem(fs_id: u64) {
+    if ACL_COUNT.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let mut inner = ACLS.lock();
+    inner
+        .acls
+        .retain(|key, _| !matches!(key, AclKey::Id(id) if id.fs_id == fs_id));
+    ACL_COUNT.store(inner.acls.len(), Ordering::Relaxed);
 }
 static ACLS: Mutex<AclInner> = Mutex::new(AclInner {
     acls: BTreeMap::new(),
@@ -265,8 +376,9 @@ static ACLS: Mutex<AclInner> = Mutex::new(AclInner {
 /// would put a lock on that path for the overwhelmingly common case of a
 /// system with no ACLs set. A relaxed load costs nothing.
 ///
-/// Kept in step with the map by [`set_acl`], [`remove_acl`] and [`clear`] —
-/// the only three functions that change its size. Relaxed is sufficient: a
+/// Kept in step with the map by every function that changes its size:
+/// [`set_acl`], [`remove_acl`], [`clear`], and the file-lifecycle hooks
+/// (`forget_file`, `rename_names`, `forget_filesystem`). Relaxed is sufficient: a
 /// reader that misses a just-inserted ACL by a few cycles behaves exactly
 /// like a reader that ran a moment earlier, and `check_access` re-reads the
 /// map under the lock anyway, so the count is a filter and never the answer.

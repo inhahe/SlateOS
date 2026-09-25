@@ -195,16 +195,25 @@ enum FlagKey {
     Path(PathBuf),
 }
 
-/// Derive the key for a path. **The only place a key is constructed.**
+/// Derive the key for a path.
 ///
-/// Every call site uses this. The compiler catches a wrong value type but
-/// not a key derived one way at `insert` and another at `remove` -- that
+/// Every call site that starts from a name uses this, and every key of any
+/// origin is built by [`key_from`]. The compiler catches a wrong value type
+/// but not a key derived one way at `insert` and another at `remove` -- that
 /// would leak entries and silently drop protection, so the derivation has
 /// exactly one home.
 fn flag_key(path: &Path) -> FlagKey {
-    match crate::fs::Vfs::file_identity(path) {
-        Ok(Some(id)) => FlagKey::Id(id),
-        _ => FlagKey::Path(path.to_path_buf()),
+    key_from(crate::fs::Vfs::file_identity(path).unwrap_or(None), path)
+}
+
+/// The key for a file whose identity is already known: the one place a
+/// `FlagKey` is built, shared by [`flag_key`] and the file-lifecycle hooks,
+/// which run after the name is gone and are handed the identity the VFS read
+/// while it still resolved.
+fn key_from(id: Option<crate::fs::vfs::FileId>, path: &Path) -> FlagKey {
+    match id {
+        Some(id) => FlagKey::Id(id),
+        None => FlagKey::Path(path.to_path_buf()),
     }
 }
 
@@ -384,43 +393,112 @@ pub fn check_link(path: impl AsRef<Path>) -> KernelResult<()> {
 // Rename support
 // ---------------------------------------------------------------------------
 
-/// Update flag table when a file is renamed.
+/// Move the flags recorded under `old_path` (and, for a directory, under
+/// every name below it) to `new_path`.
 ///
-/// **Still uncalled, but it now matters far less than it did.**
+/// The VFS does this itself on every rename, through [`PER_FILE_STATE`]
+/// (see [`super::perfile`]), so production code has no reason to call it; it
+/// stays public as the direct form of that one event, which is what this
+/// module's self-test exercises. For a row keyed by identity only the
+/// reported name moves -- the file is the same file -- and a row keyed by
+/// path (devfs, procfs, sysfs: `ino == 0`) moves its key, since there the
+/// name is the key.
 ///
-/// This table was converted to key on [`FlagKey`] on 2026-09-21. For a row
-/// keyed by `Id`, a rename changes nothing that matters: the inode is the
-/// key, so the flags follow the file with no compensation. What goes stale
-/// is only the *display* path stored alongside them, which `list_flagged`
-/// reports.
+/// This used to derive both keys by looking the names up, which could not be
+/// right at any moment: before the rename, `new_path` names nothing (or the
+/// file about to be replaced), and after it `old_path` names nothing.
+/// Rewriting stored names needs no lookup at all.
 ///
-/// It is still needed for `Path`-keyed rows -- filesystems reporting
-/// `ino == 0`, i.e. devfs, procfs and sysfs -- where a name genuinely is the
-/// key. Renames are not a normal event on those, which is why the gap was
-/// survivable before the conversion and is close to theoretical after it.
+/// # Errors
 ///
-/// A `grep` for `immutable::rename_path` across `kernel/src` still returns
-/// only this definition and two calls from this module's own self-test. The
-/// test is green because it calls the missing link directly -- it exercises
-/// the one path production does not take. That was worth recording before
-/// the conversion, when it meant protection was silently lost on every
-/// rename; it is recorded here after, because a reader finding an uncalled
-/// function deserves to know whether that is a bug or a remnant.
-///
+/// Never; the `Result` is kept for the callers that already handle one. A
+/// name with no flags is not an error -- there is nothing to move.
 pub fn rename_path(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) -> KernelResult<()> {
-    // Both keys derived before the lock; see `get_flags`.
-    let old_key = flag_key(old_path.as_ref());
-    let new_key = flag_key(new_path.as_ref());
+    let (old_path, new_path) = (old_path.as_ref(), new_path.as_ref());
+    rename_names(&|p: &Path| super::pathutil::rebase(p, old_path, new_path));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// File lifecycle (see `super::perfile`)
+// ---------------------------------------------------------------------------
+
+/// This table's part in the file lifecycle: flags end with their file, and
+/// move with it when it is renamed. See [`super::perfile`] for why a
+/// `FileId`-keyed row that outlived its file would flag a stranger.
+pub(crate) const PER_FILE_STATE: super::perfile::Table = super::perfile::Table {
+    name: "immutable",
+    forget: forget_file,
+    rename: rename_names,
+    unmounted: forget_filesystem,
+    plant: plant_for_test,
+    finds: finds_for_test,
+    reports: reports_for_test,
+};
+
+/// The file is gone: drop its flags.
+///
+/// Whatever they were. Nothing in the VFS consults this module (see the
+/// module docs), so no removal is refused on its account -- not even under
+/// `IMMUTABLE` or `NO_DELETE` -- and a row can reach here holding any flag.
+fn forget_file(id: Option<crate::fs::vfs::FileId>, path: &Path) {
+    let key = key_from(id, path);
+    TABLE.lock().entries.remove(&key);
+}
+
+/// Names moved: rewrite every stored name `rename` maps to a new one.
+///
+/// An identity key stays as it is and only the reported name changes; a path
+/// key IS the name (equal by construction in [`set_flags`]), so it moves.
+fn rename_names(rename: &super::perfile::NameMap<'_>) {
     let mut table = TABLE.lock();
-    if let Some((_, flags)) = table.entries.remove(&old_key) {
-        table
-            .entries
-            .insert(new_key, (new_path.as_ref().to_path_buf(), flags));
-        Ok(())
-    } else {
-        // No flags on this file — nothing to do.
-        Ok(())
+    // Collected first: a map key cannot be changed in place.
+    let moved: Vec<(FlagKey, PathBuf)> = table
+        .entries
+        .iter()
+        .filter_map(|(key, (name, _))| rename(name).map(|new| (key.clone(), new)))
+        .collect();
+    for (key, new_name) in moved {
+        let Some((_, flags)) = table.entries.remove(&key) else {
+            continue;
+        };
+        let new_key = match key {
+            FlagKey::Id(id) => FlagKey::Id(id),
+            FlagKey::Path(_) => FlagKey::Path(new_name.clone()),
+        };
+        table.entries.insert(new_key, (new_name, flags));
     }
+}
+
+/// Self-test support: `NO_BACKUP`, a flag with no bearing on anything the
+/// lifecycle rungs do. None of this module's flags is consulted by the VFS
+/// yet (see the module docs), but a rung that planted `IMMUTABLE` or
+/// `NO_DELETE` would start failing the day one is.
+fn plant_for_test(path: &Path) -> KernelResult<()> {
+    set_flags(path, FileFlags::NO_BACKUP)
+}
+
+/// Self-test support: whether a lookup through `path` finds `NO_BACKUP`.
+fn finds_for_test(path: &Path) -> bool {
+    get_flags(path) & FileFlags::NO_BACKUP != 0
+}
+
+/// Self-test support: whether flags are reported under `name`.
+fn reports_for_test(name: &Path) -> bool {
+    TABLE
+        .lock()
+        .entries
+        .values()
+        .any(|(p, _)| p.as_path() == name)
+}
+
+/// A filesystem was unmounted: its mount id is never reused, so no identity
+/// on it can match again, and its rows are only garbage.
+fn forget_filesystem(fs_id: u64) {
+    TABLE
+        .lock()
+        .entries
+        .retain(|key, _| !matches!(key, FlagKey::Id(id) if id.fs_id == fs_id));
 }
 
 // ---------------------------------------------------------------------------

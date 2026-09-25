@@ -165009,3 +165009,63 @@ and reading them at start-up. Why that does not reopen `design-decisions.md`
 instead of being ignored. Oils uses it for every command, so refusing it would
 turn "runs in the wrong directory" into "runs nothing", and the fix for both is
 the same kernel half.
+
+### [D] TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES — 2026-09-24 — OPEN
+
+**Status:** OPEN — lane D's code; the proper fix needs spawn-time fields in
+lane A's `SpawnEx2Args`, not yet requested.
+
+**In short:** a program can ask `posix_spawn` to start its child in a new
+process group, with certain signals blocked or reset, or in a new session. All
+of those requests are accepted and then ignored: the child starts in the
+parent's group, with the parent's signal mask. Job-control shells and anything
+using Rust's `Command::process_group` get a child that `^C` and `fg`/`bg` will
+treat as part of the parent.
+
+**Where:** `posix/src/spawn.rs` — `posix_spawn` and `posix_spawnp` take
+`attrp` and hand nothing of it to `spawn_impl`. `posix_spawnattr_set*` store
+their values faithfully (and have tests), so the object is right and the
+consumer is missing: `POSIX_SPAWN_SETPGROUP`, `SETSIGMASK`, `SETSIGDEF`,
+`SETSID`, `RESETIDS` and `SETSCHEDULER` are all no-ops. The module doc's claim
+that `SETPGROUP` "is meaningfully supported" is not true of the code.
+
+**Who reaches it:** Rust `std` on this target takes the `posix_spawn` path for
+any `Command` without a `pre_exec` closure; `process_group(pgid)` there
+becomes `POSIX_SPAWN_SETPGROUP`. (Oils uses `pre_exec`, so it takes the
+`fork` + `execvp` path and calls `setpgid` itself — not affected.)
+
+**Proper fix:** the child must be in its group and have its mask *before* its
+first instruction, which the parent cannot arrange after the spawn returns
+without a race. That means `SpawnEx2Args` fields — `pgid`, `sigmask`,
+`sigdefault`, a `setsid` flag — applied by the kernel as `SpawnOptions` already
+applies `cwd` and `uid_gid`; `struct_size` makes them additive. The interim of
+calling `setpgid(child, pgid)` from the parent after the syscall is the race
+shells tolerate for `fork`, but it is not what `posix_spawn` promises, and it
+does not help the signal attributes at all. File with the cwd request if lane A
+takes that one, since both widen the same struct.
+
+### [D] TD-D-FORTIFY-MEM-AND-STR-CHK-IGNORE-THE-OBJECT-SIZE — 2026-09-24 — OPEN (low)
+
+**Status:** OPEN, low priority — found while fixing `__getcwd_chk`.
+
+**What:** the `_FORTIFY_SOURCE` entry points for memory and strings —
+`__memcpy_chk`, `__memmove_chk`, `__mempcpy_chk`, `__memset_chk`,
+`__strcpy_chk`, `__stpcpy_chk`, `__strncpy_chk`, `__stpncpy_chk`,
+`__strcat_chk`, `__strncat_chk` in `posix/src/string.rs`, and `__read_chk` /
+`__pread_chk` / `__pread64_chk` in `posix/src/file.rs` — ignore the object size
+they are passed and do the unchecked operation. There is no `__chk_fail`. So an
+object compiled against glibc headers with `-D_FORTIFY_SOURCE` and linked here
+gets none of the overflow protection it was built to have.
+
+**Why low:** nothing we build calls them. `zig cc` compiles against musl's
+headers, and musl deliberately does not implement `_FORTIFY_SOURCE`, so no C
+fixture or port generates these calls; only a prebuilt glibc-compiled object
+would. The printf `_chk` family already makes a documented choice — clamp to
+the object size rather than abort (`services/ctest-fortify/main.c`) — and
+`__readlink_chk` and now `__getcwd_chk` clamp too.
+
+**Proper fix:** add `__chk_fail` (write `*** buffer overflow detected ***:
+terminated` to stderr, then `abort()`, as glibc) and have each wrapper check
+its bound. For the copy functions clamping is not a meaningful alternative — a
+`memcpy` that copies less than asked is a different bug, not a safe one — so
+these want the abort even though the printf family clamps.

@@ -1482,18 +1482,12 @@ impl App {
         }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
-            Event::Mouse(mouse) => {
-                // The card is modal: a press anywhere puts it away, and nothing
-                // under it hears one.
-                if self.show_help {
-                    if matches!(mouse.kind, MouseEventKind::Press(_)) {
-                        self.show_help = false;
-                        return EventResult::Consumed;
-                    }
-                    return EventResult::Ignored;
-                }
-                self.handle_mouse(mouse)
-            }
+            // The card is modal through its hit box alone: it covers the
+            // window, so a press anywhere lands on `Target::HelpCard` and puts
+            // it away, and the wheel finds no list under it. A second rule
+            // here said the same thing, which a mutation sweep showed by
+            // deleting it with every test still passing.
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Resize { width, height } => {
                 #[allow(
                     clippy::cast_precision_loss,

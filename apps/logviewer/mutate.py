@@ -349,9 +349,19 @@ MUTATIONS = [
         ["a_double_press_on_an_entry_opens_it"],
     ),
     (
+        # The card's hit box is the whole of its modality: an earlier row broke
+        # a second rule in `handle_event` that said the same thing, survived,
+        # and the rule was deleted as dead.
         "a press goes through the shortcut card",
-        "                if self.show_help {\n                    if matches!(mouse.kind, MouseEventKind::Press(_)) {",
-        "                if self.show_help && false {\n                    if matches!(mouse.kind, MouseEventKind::Press(_)) {",
+        "            cmds.hit(\n                Target::HelpCard,\n"
+        "                Rect::new(0.0, 0.0, self.win_w, self.win_h),\n            );",
+        "",
+        ["a_press_puts_the_shortcut_card_away_and_reaches_nothing_under_it"],
+    ),
+    (
+        "a press on the shortcut card leaves it up",
+        "            Target::HelpCard => {\n                self.show_help = false;",
+        "            Target::HelpCard => {\n                let _ = self.show_help;",
         ["a_press_puts_the_shortcut_card_away_and_reaches_nothing_under_it"],
     ),
     (

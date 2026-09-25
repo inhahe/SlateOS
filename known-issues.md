@@ -23978,6 +23978,36 @@ other way round: decide whether the consumer lives, and only then wire the
 preference to it. Doing it in the prescribed order produces a green audit and
 an unchanged desktop.
 
+## TD-C-CTRL-CLICK-CANNOT-ADD-A-DESKTOP-ICON-TO-THE-SELECTION
+
+**Status:** OPEN — 2026-09-25. Waits on lane F for one field:
+`requests/c-f-a-pointer-event-cannot-say-ctrl-is-held.md`.
+
+**In short:** On the desktop, Ctrl+click replaces the icon selection instead
+of adding to it, and so does a rubber band dragged with Ctrl held. The only
+way to select several icons is to drag a rubber band around them. Nothing that
+worked has stopped working; a standard gesture is missing.
+
+**Where:** `DesktopIconLayer::handle_mouse_down` and `handle_mouse_move`
+(`gui/desktop/src/icons.rs`) take `ctrl_held` and implement both gestures;
+`DesktopShell` passes `false` at both call sites in `gui/desktop/src/lib.rs`
+(`handle_press`'s `Hit::Desktop` arm, and the motion arm of `handle_mouse`).
+
+**Why not fixed here:** a pointer event carries no modifier state —
+`guitk::event::MouseEvent` is `{x, y, kind}` — and the shell cannot recover it
+from key events the way `apps/editor` does for Shift+click, because the
+desktop's surface is rarely focused: a Ctrl pressed while another window has
+focus goes to that window, and the click that follows reaches the desktop
+with the shell never having seen a key. Only the compositor knows the
+keyboard state at the moment of the click.
+
+**The fix:** the compositor stamps its modifier state on every pointer event,
+on the input envelope (`guiremote::input::InputEvent`) rather than on
+`MouseEvent`, for the reason `InputEvent::scancode` is on the envelope:
+`MouseEvent` is built by struct literal at 499 places across `gui/` and
+`apps/`. Then `ShellSession` hands `ctrl` to the shell and the shell to the
+layer, with a session test that drives Ctrl+click through `TestDesktop`.
+
 ## TD-APPS-ESTIMATE-TEXT-WIDTH — apps still guess at text width instead of measuring it
 
 **Status.** **Closed for the original defect** as of 2026-08-14. `gui/**` was
@@ -125920,6 +125950,24 @@ no caller outside `#[cfg(test)]` and read the *names*. Here the list was
 restore, create, import, unlock. Seven verbs, and they are the seven things the
 program is for. A dead-code list that reads like a feature list is not dead
 code; it is a missing caller at the top.
+
+### Lesson 404: a variant's name is not its behaviour, and a tick that trusts the name ticks nothing (lane C, 2026-09-25)
+
+`design.txt` asks for "two options for desktop icon placement: snap to grid,
+or place freely". `roadmap.md` §3.4 ticked "free placement + auto-arrange
+modes" from the day `gui/desktop/src/icons.rs` was written, and the code
+seemed to agree: `ArrangementMode` had a variant called `FreeWithSnap`. It
+snapped every drop — "free" only meant the icon went to whichever cell it was
+dropped nearest. There was no free placement at all; the other mode re-sorted
+by name after every drop, so a drag in it did nothing; and no control let a
+user choose either. Three claims — the tick, the variant's name, the list of
+modes — and each was true only of its words. Fixed 2026-09-25
+(`design-decisions.md` §869).
+
+The tell was one `grep`: every arm that handled the `Free…` variant called
+`snap`. **Before trusting a done-mark, find the code path that would behave
+differently if the feature were missing — here, a drop in the free mode — and
+read that, not the type that names it.**
 
 ### Lesson 114: a constant used as a size is a window that ignores its window (lane C, 2026-09-04)
 

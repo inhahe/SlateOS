@@ -81,13 +81,16 @@ fn a_session_starts_with_what_was_saved() {
                 .map(|a| a.executable_path.clone())
                 .expect("the builtin app database is empty");
             shell.pin_app(&exec, "Pinned");
+            // A cell, since on the grid -- the default -- a cell is the only
+            // place an icon can be left.
+            let (x, y) = shell.icons.cell_origin(6, 4);
             let id = shell.icons.icon_ids().first().copied().expect("no icons");
             if let Some(icon) = shell.icons.get_icon_mut(id) {
-                icon.x = 512;
-                icon.y = 384;
+                icon.x = x;
+                icon.y = y;
             }
             shell
-                .save_icon_positions()
+                .save_icon_layout()
                 .expect("the scratch config directory should be writable");
             exec
         };
@@ -125,12 +128,13 @@ fn a_session_starts_with_what_was_saved() {
             shell.is_pinned(&exec),
             "the pin did not come back: a pin that only reaches the disk is lost"
         );
+        let left_at = shell.icons.cell_origin(6, 4);
         let moved = shell
             .icons
             .icon_ids()
             .into_iter()
             .filter_map(|id| shell.icons.get_icon(id))
-            .any(|i| (i.x, i.y) == (512, 384));
+            .any(|i| (i.x, i.y) == left_at);
         assert!(moved, "no icon came back where it was left");
     });
 }
@@ -4283,6 +4287,196 @@ fn an_exclusion_pattern_removes_a_picture_from_the_rotation() {
         ["final.png", "keep.png"],
         "the wrong pictures survived the filter"
     );
+}
+
+// ---- the desktop icons' layout ----
+
+/// Where the icon labelled `label` is.
+fn icon_at(shell: &DesktopShell, label: &str) -> (i32, i32) {
+    shell
+        .icons
+        .icon_ids()
+        .into_iter()
+        .filter_map(|id| shell.icons.get_icon(id))
+        .find(|i| i.label == label)
+        .map(|i| (i.x, i.y))
+        .unwrap_or_else(|| panic!("no icon labelled {label}"))
+}
+
+/// **An icon dragged in a running session is where it was left after a
+/// restart** -- through the input a compositor delivers and the pump that
+/// saves, not a call to the saver.
+///
+/// The release used to write the file itself; it now marks the layout and the
+/// pump writes it, so a failure can be reported. This is the test that the
+/// two halves are joined.
+#[test]
+fn an_icon_dragged_in_a_session_is_where_it_was_left_after_a_restart() {
+    settingsfile::testing::with_scratch_config("session-icon-drag", |_root| {
+        let (mut session, desktop, _turn) = session();
+        let label = {
+            let shell = session.shell();
+            let id = *shell.icons.icon_ids().first().expect("no icons");
+            shell.icons.get_icon(id).expect("an icon").label.clone()
+        };
+        let (fx, fy) = icon_at(session.shell(), &label);
+        let target = session.shell().icons.cell_origin(5, 3);
+        drag(
+            &desktop,
+            session.background(),
+            (fx as f32 + 10.0, fy as f32 + 10.0),
+            (target.0 as f32 + 10.0, target.1 as f32 + 10.0),
+        );
+        session.pump().expect("pump");
+        assert_eq!(
+            icon_at(session.shell(), &label),
+            target,
+            "the drop did not land in the cell it was aimed at"
+        );
+        drop(session);
+
+        let (restarted, _d2, _turn2) = self::session();
+        assert_eq!(
+            icon_at(restarted.shell(), &label),
+            target,
+            "the move did not reach the file: the pump did not save the layout"
+        );
+    });
+}
+
+/// **What the View menu chooses survives a restart**: the arrangement in the
+/// icon layout, the size in `appearance.yaml`, and the icons' cells through
+/// both.
+#[test]
+fn the_view_menu_choices_survive_a_restart() {
+    settingsfile::testing::with_scratch_config("session-view-menu", |_root| {
+        let (mut session, _desktop, _turn) = session();
+        let large = DesktopShell::MENU_ICON_SIZE_BASE
+            + u64::try_from(
+                appearance::IconSize::ALL
+                    .iter()
+                    .position(|s| *s == appearance::IconSize::Large)
+                    .expect("Large is a size"),
+            )
+            .expect("a handful of sizes");
+        assert!(
+            session
+                .shell_mut()
+                .activate_desktop_menu_item(DesktopShell::MENU_AUTO_ARRANGE)
+        );
+        assert!(session.shell_mut().activate_desktop_menu_item(large));
+        session.pump().expect("pump");
+        let before: Vec<(String, (i32, i32))> = {
+            let shell = session.shell();
+            shell
+                .icons
+                .icon_ids()
+                .into_iter()
+                .filter_map(|id| shell.icons.get_icon(id))
+                .map(|i| (i.label.clone(), (i.x, i.y)))
+                .collect()
+        };
+        drop(session);
+
+        let (mut restarted, _d2, _turn2) = self::session();
+        restarted.load_appearance();
+        let shell = restarted.shell();
+        assert_eq!(
+            shell.icons.arrangement(),
+            crate::icons::ArrangementMode::AutoArrange,
+            "the arrangement was not saved, or not read back"
+        );
+        assert_eq!(
+            shell.icons.icon_px(),
+            appearance::IconSize::Large.pixels(),
+            "the size was not saved, or not read back"
+        );
+        for (label, at) in before {
+            assert_eq!(
+                icon_at(shell, &label),
+                at,
+                "{label} moved across the restart"
+            );
+        }
+    });
+}
+
+/// **An icon layout that cannot be saved says so -- once, and beside a
+/// widget layout failing too.** The release used to write the icon layout
+/// itself and drop the error, so a desktop whose layout could not be saved
+/// lost every move at the next login without a word.
+/// `a_widget_layout_that_cannot_be_saved_says_so_once_and_not_as_the_wallpaper`
+/// is the widget half on its own; this is the icon half, and the two failing
+/// at once without reposting each other.
+#[test]
+fn an_icon_layout_that_cannot_be_saved_says_so_once_beside_a_failing_widget_layout() {
+    settingsfile::testing::with_scratch_config("session-save-fails", |root| {
+        // A file where the configuration directory should be: every save
+        // fails, the way it would on a full or read-only disk. Before the
+        // session starts, so nothing it does at start-up can have made the
+        // directory first.
+        std::fs::write(root.join("slateos"), b"not a directory")
+            .expect("the scratch root is writable");
+        let (mut session, _desktop, _turn) = session();
+        let reports = |session: &Session| -> Vec<String> {
+            session
+                .shell()
+                .notifications
+                .notifications()
+                .iter()
+                .filter(|n| n.title == "Desktop layout not saved")
+                .map(|n| n.body.clone())
+                .collect()
+        };
+        assert!(reports(&session).is_empty());
+
+        for _ in 0..3 {
+            assert!(
+                session
+                    .shell_mut()
+                    .activate_desktop_menu_item(DesktopShell::MENU_ALIGN_TO_GRID)
+            );
+            session.pump().expect("a failed save is not a failed pump");
+        }
+        let posted = reports(&session);
+        assert_eq!(
+            posted.len(),
+            1,
+            "one failure, one report, not one per change: {posted:?}"
+        );
+        assert!(
+            posted[0].starts_with("The icon layout could not be written"),
+            "{posted:?}"
+        );
+        assert_eq!(
+            session.wallpaper_error(),
+            None,
+            "a layout that was not saved is not a wallpaper that was not shown"
+        );
+
+        // The widget layout fails on its own account and says so under its
+        // own name -- and the two failing together do not repost each other.
+        assert!(
+            session
+                .shell_mut()
+                .activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK)
+        );
+        session.pump().expect("pump");
+        assert!(
+            session
+                .shell_mut()
+                .activate_desktop_menu_item(DesktopShell::MENU_ALIGN_TO_GRID)
+        );
+        session.pump().expect("pump");
+        let posted = reports(&session);
+        assert_eq!(posted.len(), 2, "{posted:?}");
+        assert!(
+            posted
+                .iter()
+                .any(|b| b.starts_with("The widget layout could not be written")),
+            "{posted:?}"
+        );
+    });
 }
 
 /// **A widget layout that cannot be saved says so -- once, and under its own

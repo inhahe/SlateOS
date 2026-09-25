@@ -1700,7 +1700,7 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
   - [ ] **Sub-app / tab granularity where the app supplies it.** For multiplexed apps that host many independent sound sources — most importantly **Chromium**, which can play audio from many tabs — the history should identify *which tab* (or sub-context) played the sound, not just "Chromium". Surface this via app-supplied metadata embedded in / attached to the audio stream (e.g. a per-stream name such as the tab title/URL, or a sub-stream identifier the app registers). Same mechanism generalizes to any app that names its individual output streams (media players with multiple sources, multi-document apps, etc.).
 
 #### Desktop
-- [ ] Desktop icons: snap-to-grid or free placement (user option)
+- [x] Desktop icons: snap-to-grid or free placement (user option) — 2026-09-25. The desktop's right-click View submenu: Align icons to grid (snap) or not (free), Auto arrange icons, and the icon size; Sort by name beside it. Saved in `deskicons.yaml`. `gui/desktop/src/icons.rs`; `design-decisions.md` §869.
 - [ ] Drag and drop icons between pinned apps, desktop, and start menu
 - [ ] Multi-monitor support
 

@@ -1626,6 +1626,19 @@ live.
   `guitk::textinput::TextInput::edit_key`. What stays open is C-Q24 (how few
   shortcuts to ship) and the emoji/Unicode hotkey action.
 
+- `[C]` **Desktop icons: snap to grid or place freely, as a user option** —
+  done 2026-09-25 (`design.txt`: "two options for desktop icon placement:
+  snap to grid, or place freely"). §3.4 below had ticked "free placement"
+  since the icon layer was written; it had no free placement — the mode named
+  `FreeWithSnap` snapped every drop — and nothing let the user choose. The
+  desktop's right-click menu now has View (Small/Medium/Large/Extra large
+  icons, Auto arrange icons, Align icons to grid) and Sort by name. On the grid
+  a drop never hides another icon; auto-arrange keeps the order the user drags
+  icons into (`design-decisions.md` §869); the layout file records its grid,
+  so an icon-size change no longer scrambles saved positions; and a layout
+  save that fails is reported instead of dropped.
+  `gui/desktop/src/icons.rs`, `DesktopShell::desktop_menu_items`.
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's
@@ -7349,7 +7362,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Theme system (Catppuccin Mocha default palette)
 - [x] Z-order stacking and window focus tracking
 - [x] Desktop with draggable icons (snap-to-grid or free placement)
-  - [x] Grid snapping (configurable 80x90 cells), free placement + auto-arrange modes
+  - [x] Grid snapping (cells sized by the icon-size setting), free placement + auto-arrange modes, chosen from the desktop menu's View submenu and saved in `deskicons.yaml` — **really done 2026-09-25**: this line was ticked from the start while the only modes were a snap and an always-sorted arrange, with no way to choose; see lane C's entry above and `design-decisions.md` §869
   - [x] Rubber-band selection, Ctrl+Click toggle, Ctrl+A select all
   - [x] Drag-and-drop repositioning with ghost indicator, multi-select drag
   - [x] Default icons (This PC, Recycle Bin, Documents, Home), icon types (9 variants)

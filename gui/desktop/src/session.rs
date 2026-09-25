@@ -1526,6 +1526,11 @@ impl<T: Transport> ShellSession<T> {
         if self.shell.take_widgets_dirty() {
             self.save_widgets();
         }
+        // The icon layout on the same terms: a drop that moved something, or a
+        // choice from the desktop's View menu.
+        if self.shell.take_icons_dirty() {
+            self.save_icon_layout();
+        }
 
         // The shell writes `appearance.yaml` itself for the quick toggles --
         // night light is one -- and the compositor reads that file rather than
@@ -1678,6 +1683,14 @@ impl<T: Transport> ShellSession<T> {
     fn save_widgets(&mut self) {
         let saved = self.shell.save_widgets();
         self.report_save("The widget layout", saved);
+    }
+
+    /// Write the icon layout. The shell used to write it itself, on every
+    /// release, and drop the error -- so a desktop whose layout could not be
+    /// saved lost every move at the next login without a word.
+    fn save_icon_layout(&mut self) {
+        let saved = self.shell.save_icon_layout();
+        self.report_save("The icon layout", saved);
     }
 
     /// Tell the user that `what` could not be written -- once per distinct

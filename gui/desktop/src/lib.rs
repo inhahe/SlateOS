@@ -1170,24 +1170,37 @@ pub struct DesktopShell {
     /// Set when the shell itself has written `appearance.yaml` and the
     /// compositor has not been told.
     appearance_dirty: bool,
-    /// The menu that opens on a right-click over bare desktop.
+    /// The menu that opens on a right-click over the desktop.
     ///
-    /// Built once and reused rather than rebuilt per click: its item list is
-    /// fixed, and `ContextMenu::new` measures the panel width from the labels,
-    /// which is work with no reason to repeat.
+    /// Rebuilt at each opening by
+    /// [`open_desktop_menu`](Self::open_desktop_menu): what it lists depends
+    /// on what was clicked -- a widget or bare desktop -- and its View submenu
+    /// ticks the icon size and arrangement in force, so a menu built once
+    /// would show whatever was true when it was built.
     pub desktop_menu: ContextMenu,
-    /// Widget panels drawn on the desktop background.
-    ///
     /// The icons on the desktop, and where the user left them.
     ///
     /// `design-decisions.md` 933 (open-questions A-Q8) makes this layer the
     /// layout authority: icon positions are not a kernel concern. Lane A
     /// deleted `fs::deskicons` and `/proc/deskicons` once this read and wrote
     /// them, which it has -- checked 2026-09-16, neither exists. It is
-    /// populated and its saved positions applied in
-    /// [`new`](Self::new), so the first frame draws them where they were left
-    /// rather than where the defaults put them and then jumping.
+    /// populated and its saved layout applied by
+    /// [`populate_icons`](Self::populate_icons), which the session calls
+    /// before its first frame, so the icons are drawn where they were left
+    /// rather than where the defaults put them and then jumping. Not in
+    /// [`new`](Self::new), which must not read the user's files.
     pub icons: icons::DesktopIconLayer,
+    /// Whether the icon layout has changed since it was last written: a drop
+    /// that moved something, or a choice from the View submenu.
+    ///
+    /// A flag the session drains, like [`widgets_dirty`](Self::widgets_dirty),
+    /// rather than a write here, for the two reasons that one is: a pump that
+    /// changed the layout twice writes it once, and a failed write reaches the
+    /// session, which can say so -- the shell has nowhere to. The release used
+    /// to write the file itself and drop the error.
+    icons_dirty: bool,
+    /// Widget panels drawn on the desktop background.
+    ///
     /// Empty until the user adds one from [`desktop_menu`](Self::desktop_menu),
     /// which is what keeps an untouched desktop identical to how it was before
     /// widgets existed -- and keeps it idle, since a desktop with no widgets
@@ -1682,10 +1695,16 @@ impl DesktopShell {
             overview_config: overview::OverviewConfig::default(),
             appearance: AppearanceSettings::default(),
             appearance_dirty: false,
-            desktop_menu: ContextMenu::new(Self::desktop_menu_items()),
+            // Closed, and rebuilt from the state in force whenever it opens;
+            // what it is built with here is never shown.
+            desktop_menu: ContextMenu::new(Self::desktop_menu_items(
+                AppearanceSettings::default().icon_size,
+                icons::ArrangementMode::default(),
+            )),
             // 40 is the `taskbar_height` two lines below; both are the
             // literal because this is the initialiser that establishes it.
             icons: icons::DesktopIconLayer::new(screen_width, screen_height, 40),
+            icons_dirty: false,
             widgets: DesktopWidgetManager::new(),
             menu_widget: None,
             widget_drag: None,
@@ -2976,15 +2995,15 @@ impl DesktopShell {
                 // returns it, so a release routed anywhere else would strand
                 // the layer in `PendingDrag` for the rest of the session.
                 if self.icons.is_interacting() {
-                    self.icons
-                        .handle_mouse_up(event.x, event.y, icon_button(button));
                     // Where the icons ended up is what the user just chose, so
-                    // it is written now rather than at some later checkpoint
-                    // that may never come. The failure is dropped *here* and
-                    // nowhere else: this is a pointer release, and a modal
-                    // complaint about a configuration file is not an answer to
-                    // one. It is visible in the next save's success or failure.
-                    let _ = self.save_icon_positions();
+                    // it is saved at the end of this pump rather than at some
+                    // later checkpoint that may never come -- by the session,
+                    // which can report a failure; see `icons_dirty`. Only when
+                    // something moved: a click that selected an icon has
+                    // nothing to write.
+                    self.icons_dirty |=
+                        self.icons
+                            .handle_mouse_up(event.x, event.y, icon_button(button));
                     return ShellAction::Consumed;
                 }
                 if self.hit_test(event.x, event.y).is_shell_chrome() {
@@ -4363,41 +4382,6 @@ impl DesktopShell {
         (!typed.is_empty()).then_some(overview::OverviewKey::Text(typed))
     }
 
-    /// Carry out a shortcut that has already been recognised.
-    ///
-    /// Every binding but [`DismissPopup`](HotkeyAction::DismissPopup) consumes
-    /// the press; that one is bare Escape, and a key the shell claims
-    /// unconditionally is a key no window can ever see. Closing a dialog is what
-    /// Escape does far more often than closing the start menu.
-    ///
-    /// The arms divide into three kinds, and the division is the whole point of
-    /// the return type. The start menu, the Alt-Tab switcher's *stepping*, and
-    /// popup dismissal are the shell's own surfaces and are done here. Anything
-    /// naming a window — close, minimise, maximise, tile, raise — is a
-    /// [`WindowRequest`] handed back for the caller to send. This method used to
-    /// do the second kind itself, against the shell's private copy of the window
-    /// list, which on a live session the next
-    /// [`apply_window_list`](DesktopShell::apply_window_list) discards: Alt+F4
-    /// removed a taskbar button and left the window open. The third kind starts
-    /// a program, and is handed back for the same reason in
-    /// [`launches`](HotkeyOutcome::launches): the shell has no connection to the
-    /// process server either.
-    /// Write the newly-chosen keyboard layout to `input.yaml`.
-    ///
-    /// This is what makes the switch reach the *keys*. The shell decides which
-    /// layout is active; the compositor decides what a scancode means, and it
-    /// reads that from the settings file it already watches. Going through the
-    /// file rather than inventing a protocol message has three things to
-    /// recommend it: the mechanism exists and is tested, a layout chosen with
-    /// the keyboard and one chosen in the Settings panel cannot disagree
-    /// because they are the same value in the same place, and the choice
-    /// survives a restart, which is what a user expects of a layout.
-    ///
-    /// A failure is swallowed deliberately, and is the one place in this file
-    /// where that is right: the layout has already changed in the shell's own
-    /// model and the indicator will show it, so a read-only configuration
-    /// directory costs the user persistence, not the feature. Refusing the
-    /// keystroke because a file could not be written would be worse.
     /// Flip night light, and leave the file and the compositor agreeing.
     ///
     /// Load, modify, save -- the shape
@@ -4426,6 +4410,37 @@ impl DesktopShell {
         self.appearance_dirty = true;
     }
 
+    /// Draw the desktop icons at `size` -- the View submenu's size items.
+    /// Answers whether anything changed.
+    ///
+    /// Written to `appearance.yaml`, not kept here: the icon size is an
+    /// appearance setting the Settings application edits too, and the file
+    /// is the one place both read. Load, modify, save, for the reason
+    /// [`toggle_night_light`](Self::toggle_night_light) gives, and a failed
+    /// write is reported and the desktop still changes size, for the reason it
+    /// gives too.
+    ///
+    /// The compositor is not told: it reads nothing about desktop icons, which
+    /// this shell draws itself, so a "read the file again" would be a reload
+    /// that changes nothing. The shell's own watcher will see the write and
+    /// hand back the size it already has.
+    fn choose_icon_size(&mut self, size: appearance::IconSize) -> bool {
+        if self.appearance.icon_size == size {
+            return false;
+        }
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.icon_size = size;
+        if let Err(err) = file.save() {
+            eprintln!("desktop: could not save appearance.yaml: {err}");
+        }
+        self.appearance.icon_size = size;
+        self.icons.set_icon_size(size.pixels());
+        // The icons moved with their cells, onto a grid of a different pitch;
+        // the layout file records both.
+        self.icons_dirty = true;
+        true
+    }
+
     /// Whether the shell has rewritten `appearance.yaml` since this was last
     /// asked, clearing the flag.
     ///
@@ -4436,6 +4451,22 @@ impl DesktopShell {
         core::mem::take(&mut self.appearance_dirty)
     }
 
+    /// Write the newly-chosen keyboard layout to `input.yaml`.
+    ///
+    /// This is what makes the switch reach the *keys*. The shell decides which
+    /// layout is active; the compositor decides what a scancode means, and it
+    /// reads that from the settings file it already watches. Going through the
+    /// file rather than inventing a protocol message has three things to
+    /// recommend it: the mechanism exists and is tested, a layout chosen with
+    /// the keyboard and one chosen in the Settings panel cannot disagree
+    /// because they are the same value in the same place, and the choice
+    /// survives a restart, which is what a user expects of a layout.
+    ///
+    /// A failure is swallowed deliberately, and is the one place in this file
+    /// where that is right: the layout has already changed in the shell's own
+    /// model and the indicator will show it, so a read-only configuration
+    /// directory costs the user persistence, not the feature. Refusing the
+    /// keystroke because a file could not be written would be worse.
     fn persist_input_layout(&mut self) {
         let Some(id) = self.input_methods.active_layout_id() else {
             return;
@@ -4445,10 +4476,29 @@ impl DesktopShell {
             return;
         }
         file.settings.keyboard.layout = id.to_string();
-        // See the note above on why this is not propagated.
+        // Swallowed on purpose; see this method's doc comment.
         let _ = file.save();
     }
 
+    /// Carry out a shortcut that has already been recognised.
+    ///
+    /// Every binding but [`DismissPopup`](HotkeyAction::DismissPopup) consumes
+    /// the press; that one is bare Escape, and a key the shell claims
+    /// unconditionally is a key no window can ever see. Closing a dialog is what
+    /// Escape does far more often than closing the start menu.
+    ///
+    /// The arms divide into three kinds, and the division is the whole point of
+    /// the return type. The start menu, the Alt-Tab switcher's *stepping*, and
+    /// popup dismissal are the shell's own surfaces and are done here. Anything
+    /// naming a window — close, minimise, maximise, tile, raise — is a
+    /// [`WindowRequest`] handed back for the caller to send. This method used to
+    /// do the second kind itself, against the shell's private copy of the window
+    /// list, which on a live session the next
+    /// [`apply_window_list`](DesktopShell::apply_window_list) discards: Alt+F4
+    /// removed a taskbar button and left the window open. The third kind starts
+    /// a program, and is handed back for the same reason in
+    /// [`launches`](HotkeyOutcome::launches): the shell has no connection to the
+    /// process server either.
     fn run_desktop_action(&mut self, action: &HotkeyAction) -> HotkeyOutcome {
         match action {
             HotkeyAction::SwitchInputLayout => {
@@ -6672,42 +6722,113 @@ impl DesktopShell {
             .as_secs()
     }
 
-    /// Menu item ids. Stable numbers rather than positions, so inserting an
-    /// item cannot silently reassign what the ones below it do.
     /// The pin menu's only row. Numbered well clear of the desktop menu's
     /// ids, which are a different menu with a different handler.
     const MENU_PIN_TOGGLE: u64 = 900;
 
+    // The desktop menu's item ids. Stable numbers rather than positions, so
+    // inserting an item cannot silently reassign what the ones below it do;
+    // `the_desktop_menu_ids_are_all_distinct` keeps them apart.
     const MENU_ADD_CLOCK: u64 = 1;
     const MENU_ADD_CALENDAR: u64 = 2;
     const MENU_ADD_SYSTEM_MONITOR: u64 = 3;
     const MENU_REMOVE_WIDGETS: u64 = 4;
     const MENU_REMOVE_ONE_WIDGET: u64 = 5;
+    const MENU_AUTO_ARRANGE: u64 = 6;
+    const MENU_ALIGN_TO_GRID: u64 = 7;
+    const MENU_SORT_BY_NAME: u64 = 8;
+    const MENU_ADD_WIDGET_SUBMENU: u64 = 100;
+    const MENU_VIEW_SUBMENU: u64 = 101;
+    /// The first icon size's id; the others follow in
+    /// [`IconSize::ALL`](appearance::IconSize::ALL)'s order. A block of its
+    /// own, far from the rest, so a size added to the setting cannot land on
+    /// an id something else already has.
+    const MENU_ICON_SIZE_BASE: u64 = 200;
 
-    /// The desktop menu's fixed item list.
-    fn desktop_menu_items() -> Vec<MenuItem> {
-        let add = |id: u64, label: &str| MenuItem::Action {
+    /// The View submenu's words for an icon size.
+    ///
+    /// The desktop's own rather than [`appearance::IconSize::label`], which
+    /// is the Settings application's "Large (64px)": a menu offering "View >
+    /// Large (64px)" reads as a specification, and every desktop with this
+    /// menu says "Large icons".
+    fn icon_size_menu_label(size: appearance::IconSize) -> &'static str {
+        match size {
+            appearance::IconSize::Small => "Small icons",
+            appearance::IconSize::Medium => "Medium icons",
+            appearance::IconSize::Large => "Large icons",
+            appearance::IconSize::ExtraLarge => "Extra large icons",
+        }
+    }
+
+    /// The icon size a menu item id names, if it names one.
+    fn menu_icon_size(id: MenuItemId) -> Option<appearance::IconSize> {
+        let index = usize::try_from(id.checked_sub(Self::MENU_ICON_SIZE_BASE)?).ok()?;
+        appearance::IconSize::ALL.get(index).copied()
+    }
+
+    /// The desktop menu's items, the View submenu ticking `icon_size` and
+    /// what `arrangement` means for its two switches.
+    ///
+    /// "Auto arrange icons" and "Align icons to grid" are two switches over
+    /// three states -- see [`icons::ArrangementMode`] for why -- so both are
+    /// ticked under auto-arrange, which is aligned by construction.
+    fn desktop_menu_items(
+        icon_size: appearance::IconSize,
+        arrangement: icons::ArrangementMode,
+    ) -> Vec<MenuItem> {
+        let item = |id: u64, label: &str, checked: Option<bool>| MenuItem::Action {
             id,
             label: label.to_string(),
             shortcut: None,
             icon: None,
             enabled: true,
-            checked: None,
+            checked,
         };
+        let mut view: Vec<MenuItem> = appearance::IconSize::ALL
+            .iter()
+            .zip(Self::MENU_ICON_SIZE_BASE..)
+            .map(|(&size, id)| {
+                item(
+                    id,
+                    Self::icon_size_menu_label(size),
+                    Some(size == icon_size),
+                )
+            })
+            .collect();
+        view.push(MenuItem::Separator);
+        view.push(item(
+            Self::MENU_AUTO_ARRANGE,
+            "Auto arrange icons",
+            Some(arrangement == icons::ArrangementMode::AutoArrange),
+        ));
+        view.push(item(
+            Self::MENU_ALIGN_TO_GRID,
+            "Align icons to grid",
+            Some(arrangement.aligns_to_grid()),
+        ));
         vec![
             MenuItem::Submenu {
-                id: 100,
+                id: Self::MENU_VIEW_SUBMENU,
+                label: "View".to_string(),
+                icon: None,
+                enabled: true,
+                children: view,
+            },
+            item(Self::MENU_SORT_BY_NAME, "Sort by name", None),
+            MenuItem::Separator,
+            MenuItem::Submenu {
+                id: Self::MENU_ADD_WIDGET_SUBMENU,
                 label: "Add widget".to_string(),
                 icon: None,
                 enabled: true,
                 children: vec![
-                    add(Self::MENU_ADD_CLOCK, "Clock"),
-                    add(Self::MENU_ADD_CALENDAR, "Calendar"),
-                    add(Self::MENU_ADD_SYSTEM_MONITOR, "System monitor"),
+                    item(Self::MENU_ADD_CLOCK, "Clock", None),
+                    item(Self::MENU_ADD_CALENDAR, "Calendar", None),
+                    item(Self::MENU_ADD_SYSTEM_MONITOR, "System monitor", None),
                 ],
             },
             MenuItem::Separator,
-            add(Self::MENU_REMOVE_WIDGETS, "Remove all widgets"),
+            item(Self::MENU_REMOVE_WIDGETS, "Remove all widgets", None),
         ]
     }
 
@@ -6733,6 +6854,14 @@ impl DesktopShell {
     /// Taken rather than read so a caller cannot ask twice and save twice.
     pub fn take_widgets_dirty(&mut self) -> bool {
         core::mem::replace(&mut self.widgets_dirty, false)
+    }
+
+    /// Whether the icon layout needs writing, clearing the flag -- taken
+    /// rather than read for the reason
+    /// [`take_widgets_dirty`](Self::take_widgets_dirty) is. The session writes
+    /// it with [`save_icon_layout`](Self::save_icon_layout).
+    pub fn take_icons_dirty(&mut self) -> bool {
+        core::mem::take(&mut self.icons_dirty)
     }
 
     /// Read processor and memory from `/proc`, for the next frame to report.
@@ -7007,7 +7136,9 @@ impl DesktopShell {
     /// about *that* widget, bare desktop gets the one about the desktop. Built
     /// per opening rather than kept as two menus, because `ContextMenu::new`
     /// measures its panel from the labels and the two lists are different
-    /// widths -- one menu reused would keep whichever width it was built with.
+    /// widths -- one menu reused would keep whichever width it was built with
+    /// -- and because the desktop's View submenu ticks the icon size and
+    /// arrangement in force now.
     ///
     /// Dismisses first, for the reason every other popup here does: two menus
     /// on screen at once have no rule about which the next click belongs to.
@@ -7017,7 +7148,7 @@ impl DesktopShell {
         let items = if self.menu_widget.is_some() {
             Self::widget_menu_items()
         } else {
-            Self::desktop_menu_items()
+            Self::desktop_menu_items(self.appearance.icon_size, self.icons.arrangement())
         };
         self.desktop_menu = ContextMenu::new(items);
         self.desktop_menu.show(x, y, self.viewport());
@@ -7065,9 +7196,47 @@ impl DesktopShell {
     /// ids are constants — a position is only meaningful next to the item list
     /// it indexes.
     pub fn activate_desktop_menu_item(&mut self, id: MenuItemId) -> bool {
+        if let Some(changed) = self.activate_icon_menu_item(id) {
+            return changed;
+        }
         let changed = self.activate_desktop_menu_item_inner(id);
         self.widgets_dirty |= changed;
         changed
+    }
+
+    /// The items about the desktop's icons: the View submenu and "Sort by
+    /// name". `None` for an id that is not one of them; otherwise whether the
+    /// icon layout changed, which is when it needs saving.
+    ///
+    /// Kept apart from the widget items so that choosing one does not mark
+    /// the *widget* layout dirty and rewrite a file nothing changed in.
+    ///
+    /// The two switches map onto [`icons::ArrangementMode`]'s three states
+    /// the way every desktop with both does: auto-arrange implies alignment,
+    /// so turning it on aligns, turning it off leaves the icons aligned where
+    /// they are, and turning alignment off stops arranging too.
+    fn activate_icon_menu_item(&mut self, id: MenuItemId) -> Option<bool> {
+        use icons::ArrangementMode as Mode;
+        let current = self.icons.arrangement();
+        let changed = match id {
+            Self::MENU_AUTO_ARRANGE => {
+                self.icons.set_arrangement(if current == Mode::AutoArrange {
+                    Mode::SnapToGrid
+                } else {
+                    Mode::AutoArrange
+                })
+            }
+            Self::MENU_ALIGN_TO_GRID => self.icons.set_arrangement(if current.aligns_to_grid() {
+                Mode::Free
+            } else {
+                Mode::SnapToGrid
+            }),
+            Self::MENU_SORT_BY_NAME => self.icons.arrange_by_name(),
+            // `choose_icon_size` marks the layout itself.
+            _ => return Self::menu_icon_size(id).map(|size| self.choose_icon_size(size)),
+        };
+        self.icons_dirty |= changed;
+        Some(changed)
     }
 
     fn activate_desktop_menu_item_inner(&mut self, id: MenuItemId) -> bool {
@@ -7160,28 +7329,30 @@ impl DesktopShell {
         self.icons.render(&Palette::from_settings(&self.appearance))
     }
 
-    /// Put the default icons on the desktop and move them to where they were
-    /// last left.
+    /// Put the default icons on the desktop and lay them out as they were
+    /// last left -- positions and arrangement both.
     ///
     /// The order is load-bearing: positions are filed against the icons that
     /// exist, so nothing can be restored before the icons are there to restore.
     pub fn populate_icons(&mut self) {
         self.icons.populate_defaults();
-        self.icons.load_positions();
+        self.icons.load_layout();
     }
 
-    /// Write the icon positions back.
+    /// Write the icon layout back: every icon's position, the grid they are
+    /// on and the arrangement.
     ///
-    /// To be called when a drag or an auto-arrange finishes rather than on
-    /// every frame: positions only change when the user moves something, and a
-    /// save per frame would rewrite the file sixty times a second to record
-    /// that nothing happened.
+    /// Called by the session when [`take_icons_dirty`](Self::take_icons_dirty)
+    /// says something changed rather than on every frame: the layout only
+    /// changes when the user moves something or chooses from the View menu,
+    /// and a save per frame would rewrite the file sixty times a second to
+    /// record that nothing happened.
     ///
     /// The failure is handed back rather than swallowed here, because this
     /// object has nowhere to say it -- the surface that can tell the user is
-    /// the session, which is also what owns the event that triggers a save.
-    pub fn save_icon_positions(&self) -> std::io::Result<()> {
-        self.icons.save_positions()
+    /// the session.
+    pub fn save_icon_layout(&self) -> std::io::Result<()> {
+        self.icons.save_layout()
     }
 
     /// A double-click, which only the desktop icons act on.
@@ -14929,5 +15100,355 @@ mod taskbar_pin_tests {
                 "the pinned button is not to the left of the window's"
             );
         });
+    }
+}
+
+/// The desktop menu's View submenu and "Sort by name": the user's way to
+/// choose how the desktop icons are placed and how big they are.
+#[cfg(test)]
+mod view_menu_tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
+    use super::{AppearanceSettings, DesktopShell, MenuItem, icons};
+    use appearance::IconSize;
+    use appearance::config::testing::with_scratch_config;
+    use guitk::event::{Key, KeyEvent, Modifiers};
+    use guitk::render::RenderCommand;
+    use icons::ArrangementMode as Mode;
+
+    /// The check mark the menu draws beside a ticked item.
+    const TICK: &str = "\u{2713}";
+
+    fn tap(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    /// Every item id in a menu tree, submenus included.
+    fn ids(items: &[MenuItem], out: &mut Vec<u64>) {
+        for item in items {
+            match item {
+                MenuItem::Action { id, .. } => out.push(*id),
+                MenuItem::Submenu { id, children, .. } => {
+                    out.push(*id);
+                    ids(children, out);
+                }
+                MenuItem::Separator => {}
+            }
+        }
+    }
+
+    /// The View submenu's items, as `(label, ticked)`.
+    fn view_items(size: IconSize, mode: Mode) -> Vec<(String, bool)> {
+        let items = DesktopShell::desktop_menu_items(size, mode);
+        let Some(MenuItem::Submenu { children, .. }) = items
+            .iter()
+            .find(|i| matches!(i, MenuItem::Submenu { label, .. } if label == "View"))
+        else {
+            panic!("no View submenu in {items:?}");
+        };
+        children
+            .iter()
+            .filter_map(|c| match c {
+                MenuItem::Action { label, checked, .. } => {
+                    Some((label.clone(), *checked == Some(true)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ticked(size: IconSize, mode: Mode) -> Vec<String> {
+        view_items(size, mode)
+            .into_iter()
+            .filter(|(_, t)| *t)
+            .map(|(l, _)| l)
+            .collect()
+    }
+
+    /// The id of the View item for `size`.
+    fn size_item(size: IconSize) -> u64 {
+        let index = IconSize::ALL.iter().position(|s| *s == size).unwrap();
+        DesktopShell::MENU_ICON_SIZE_BASE + u64::try_from(index).unwrap()
+    }
+
+    /// Two ids the same would make one item do another's job, silently: the
+    /// dispatch matches on the number, not on the label drawn.
+    #[test]
+    fn the_desktop_menu_ids_are_all_distinct() {
+        for size in IconSize::ALL {
+            for mode in Mode::ALL {
+                let mut all = Vec::new();
+                ids(&DesktopShell::desktop_menu_items(*size, mode), &mut all);
+                ids(&DesktopShell::widget_menu_items(), &mut all);
+                // The widget menu repeats "Remove all widgets" on purpose --
+                // the same item, so the same id -- and nothing else.
+                let remove_all = all
+                    .iter()
+                    .filter(|id| **id == DesktopShell::MENU_REMOVE_WIDGETS)
+                    .count();
+                assert_eq!(remove_all, 2);
+                let mut unique = all.clone();
+                unique.sort_unstable();
+                unique.dedup();
+                assert_eq!(unique.len(), all.len() - 1, "a repeated id in {all:?}");
+                assert!(!all.contains(&DesktopShell::MENU_PIN_TOGGLE));
+            }
+        }
+    }
+
+    /// Every size the setting offers has an item, and the item names it back.
+    #[test]
+    fn every_icon_size_has_an_item_that_names_it() {
+        let items = view_items(IconSize::Medium, Mode::SnapToGrid);
+        for size in IconSize::ALL {
+            let label = DesktopShell::icon_size_menu_label(*size);
+            assert!(
+                items.iter().any(|(l, _)| l == label),
+                "no item for {size:?}"
+            );
+        }
+        let mut all = Vec::new();
+        ids(
+            &DesktopShell::desktop_menu_items(IconSize::Medium, Mode::SnapToGrid),
+            &mut all,
+        );
+        let named: Vec<IconSize> = all
+            .iter()
+            .filter_map(|id| DesktopShell::menu_icon_size(*id))
+            .collect();
+        assert_eq!(
+            named,
+            IconSize::ALL,
+            "the size items and the sizes disagree"
+        );
+        assert_eq!(
+            DesktopShell::menu_icon_size(DesktopShell::MENU_ADD_CLOCK),
+            None
+        );
+    }
+
+    /// The ticks say what is in force: one size, and the switches as the
+    /// arrangement means them -- both under auto-arrange, which is aligned by
+    /// construction.
+    #[test]
+    fn the_view_submenu_ticks_what_is_in_force() {
+        assert_eq!(
+            ticked(IconSize::Large, Mode::Free),
+            ["Large icons"],
+            "placing freely: neither switch"
+        );
+        assert_eq!(
+            ticked(IconSize::Small, Mode::SnapToGrid),
+            ["Small icons", "Align icons to grid"]
+        );
+        assert_eq!(
+            ticked(IconSize::ExtraLarge, Mode::AutoArrange),
+            [
+                "Extra large icons",
+                "Auto arrange icons",
+                "Align icons to grid"
+            ]
+        );
+    }
+
+    /// **The two switches move between the three arrangements the way a
+    /// desktop's do.** Auto-arrange on aligns; off leaves the icons aligned;
+    /// alignment off stops arranging too.
+    #[test]
+    fn the_two_switches_map_onto_the_three_arrangements() {
+        let cases = [
+            (
+                Mode::Free,
+                DesktopShell::MENU_AUTO_ARRANGE,
+                Mode::AutoArrange,
+            ),
+            (
+                Mode::SnapToGrid,
+                DesktopShell::MENU_AUTO_ARRANGE,
+                Mode::AutoArrange,
+            ),
+            (
+                Mode::AutoArrange,
+                DesktopShell::MENU_AUTO_ARRANGE,
+                Mode::SnapToGrid,
+            ),
+            (
+                Mode::Free,
+                DesktopShell::MENU_ALIGN_TO_GRID,
+                Mode::SnapToGrid,
+            ),
+            (
+                Mode::SnapToGrid,
+                DesktopShell::MENU_ALIGN_TO_GRID,
+                Mode::Free,
+            ),
+            (
+                Mode::AutoArrange,
+                DesktopShell::MENU_ALIGN_TO_GRID,
+                Mode::Free,
+            ),
+        ];
+        for (from, item, to) in cases {
+            let mut shell = DesktopShell::new(1920, 1080);
+            shell.icons.set_arrangement(from);
+            assert!(shell.activate_desktop_menu_item(item), "{from:?} + {item}");
+            assert_eq!(shell.icons.arrangement(), to, "{from:?} + {item}");
+            assert!(
+                shell.take_icons_dirty(),
+                "{from:?} + {item}: the new arrangement is not saved"
+            );
+            assert!(
+                !shell.take_widgets_dirty(),
+                "{from:?} + {item}: an icon item rewrote the widget layout"
+            );
+        }
+    }
+
+    /// **Choosing a size from the menu resizes the icons and writes the
+    /// setting** where the Settings application reads it.
+    #[test]
+    fn choosing_an_icon_size_resizes_the_icons_and_writes_the_setting() {
+        with_scratch_config("view-menu-icon-size", |_root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            assert_ne!(
+                shell.appearance.icon_size,
+                IconSize::Large,
+                "proves nothing"
+            );
+
+            assert!(shell.activate_desktop_menu_item(size_item(IconSize::Large)));
+            assert_eq!(shell.icons.icon_px(), IconSize::Large.pixels());
+            assert_eq!(shell.appearance.icon_size, IconSize::Large);
+            assert_eq!(
+                appearance::AppearanceFile::load().settings.icon_size,
+                IconSize::Large,
+                "the setting did not reach appearance.yaml"
+            );
+            assert!(
+                shell.take_icons_dirty(),
+                "the icons moved and nothing will save where"
+            );
+            assert!(!shell.take_widgets_dirty());
+            assert!(
+                !shell.take_appearance_change(),
+                "the compositor reads nothing about desktop icons"
+            );
+
+            // The same size again is no change.
+            assert!(!shell.activate_desktop_menu_item(size_item(IconSize::Large)));
+            assert!(!shell.take_icons_dirty());
+        });
+    }
+
+    /// Choosing a size keeps every other setting the file holds: load, modify,
+    /// save -- not a rewrite from the shell's own copy, which may be behind.
+    #[test]
+    fn choosing_an_icon_size_leaves_the_rest_of_the_file_alone() {
+        with_scratch_config("view-menu-keeps-file", |_root| {
+            let mut file = appearance::AppearanceFile::load();
+            file.settings.night_light = true;
+            file.save().expect("scratch is writable");
+            // The shell's own copy says otherwise, as it would a moment after
+            // the Settings application saved.
+            let mut shell = DesktopShell::new(1920, 1080);
+            assert!(!shell.appearance.night_light);
+
+            assert!(shell.activate_desktop_menu_item(size_item(IconSize::Small)));
+            let saved = appearance::AppearanceFile::load().settings;
+            assert_eq!(saved.icon_size, IconSize::Small);
+            assert!(
+                saved.night_light,
+                "a setting the menu did not touch was overwritten"
+            );
+        });
+    }
+
+    /// **The menu opened for real ticks what is in force, and a size chosen
+    /// from it with the keyboard is applied** -- the route a user takes,
+    /// through `handle_hotkey`, not the dispatch table.
+    #[test]
+    fn the_view_menu_works_from_the_keyboard() {
+        with_scratch_config("view-menu-keyboard", |_root| {
+            let mut shell = DesktopShell::new(1920, 1080);
+            shell.set_appearance(AppearanceSettings {
+                icon_size: IconSize::Small,
+                ..AppearanceSettings::default()
+            });
+            shell.open_desktop_menu(400.0, 300.0);
+            // Down onto "View", Right into it.
+            for key in [Key::Down, Key::Right] {
+                drop(shell.handle_hotkey(&tap(key)));
+            }
+            let drawn: Vec<(f32, String)> = shell
+                .render_desktop_menu()
+                .expect("the menu is open")
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { y, text, .. } => Some((*y, text.clone())),
+                    _ => None,
+                })
+                .collect();
+            let ticked: Vec<&str> = drawn
+                .iter()
+                .filter(|(_, t)| t == TICK)
+                .filter_map(|(y, _)| {
+                    drawn
+                        .iter()
+                        .find(|(ly, l)| (ly - y).abs() < 0.5 && l != TICK)
+                        .map(|(_, l)| l.as_str())
+                })
+                .collect();
+            assert_eq!(ticked, ["Small icons", "Align icons to grid"]);
+
+            // Down past Small and Medium to Large, and take it.
+            for key in [Key::Down, Key::Down, Key::Down, Key::Enter] {
+                drop(shell.handle_hotkey(&tap(key)));
+            }
+            assert!(!shell.desktop_menu.is_visible(), "choosing closes the menu");
+            assert_eq!(shell.icons.icon_px(), IconSize::Large.pixels());
+        });
+    }
+
+    /// "Sort by name" sorts, and marks the layout for saving only when
+    /// something moved.
+    #[test]
+    fn sort_by_name_sorts_the_icons() {
+        let mut shell = DesktopShell::new(1920, 1080);
+        for (name, col) in [("pear", 0), ("apple", 2)] {
+            let (x, y) = shell.icons.cell_origin(col, 3);
+            shell.icons.add_icon(
+                name,
+                icons::IconType::File,
+                icons::IconAction::Custom(name.to_string()),
+                x,
+                y,
+            );
+        }
+        assert!(shell.activate_desktop_menu_item(DesktopShell::MENU_SORT_BY_NAME));
+        let labels: Vec<String> = shell
+            .icons
+            .icon_ids()
+            .into_iter()
+            .filter_map(|id| shell.icons.get_icon(id).map(|i| i.label.clone()))
+            .collect();
+        assert_eq!(labels, ["apple", "pear"]);
+        assert!(shell.take_icons_dirty());
+        assert!(!shell.activate_desktop_menu_item(DesktopShell::MENU_SORT_BY_NAME));
+        assert!(
+            !shell.take_icons_dirty(),
+            "nothing moved, so nothing to save"
+        );
     }
 }

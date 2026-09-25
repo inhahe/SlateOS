@@ -1576,7 +1576,12 @@ fn double_clicking_an_icon_launches_what_it_points_at() {
     });
 }
 
-/// **Dragging an icon moves it, and a release writes where it landed.**
+/// **Dragging an icon moves it, and the release marks the layout for saving.**
+///
+/// The session does the write, at the end of the pump -- see
+/// `an_icon_dragged_in_a_session_is_where_it_was_left_after_a_restart` in the
+/// session's tests for that half. This one holds the shell to its part: a
+/// move that is only on screen, and not marked, is lost at the next restart.
 #[test]
 fn dragging_an_icon_moves_it_and_the_move_is_kept() {
     settingsfile::testing::with_scratch_config("icons-drag", |_root| {
@@ -1612,8 +1617,14 @@ fn dragging_an_icon_moves_it_and_the_move_is_kept() {
             "the release did not end the gesture, so the layer is stranded"
         );
 
-        // And it reached the file, which is the half a release is responsible
-        // for: a move that is only on screen is lost at the next restart.
+        // And it is marked, and what is written is what was dropped.
+        assert!(
+            shell.take_icons_dirty(),
+            "the move was not marked, so nothing will save it"
+        );
+        shell
+            .save_icon_layout()
+            .expect("the scratch config directory should be writable");
         let mut restarted = shell_with_icons();
         assert_eq!(
             restarted.icons.get_icon(id).map(|i| (i.x, i.y)),

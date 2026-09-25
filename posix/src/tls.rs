@@ -247,12 +247,34 @@ impl TlsImage {
 }
 
 /// Read this program's `PT_TLS` segment, or [`TlsImage::EMPTY`] if it has
-/// none.
+/// none -- or if its program headers cannot be found.
 ///
 /// Locates the program headers through the linker-defined `__ehdr_start`
 /// symbol, which in a static non-PIE link resolves to the load address of
 /// our own `Elf64_Ehdr` — the same information a Linux crt would take from
-/// `AT_PHDR`/`AT_PHNUM`.
+/// `AT_PHDR`/`AT_PHNUM`. Native processes get no auxiliary vector, so this is
+/// the only source.
+///
+/// ## When `__ehdr_start` is 0
+///
+/// The linker can only give the header an address if a loaded segment
+/// contains it. A linker script that starts its one `PT_LOAD` at the first
+/// section instead (`PHDRS { load PT_LOAD FLAGS(7); }` without `FILEHDR
+/// PHDRS`, as `coreutils`, `oils` and `shell` were linked until 2026-09-25)
+/// leaves the headers out of memory, and lld resolves `__ehdr_start` to 0.
+/// This used to read through it anyway: every such program died on its first
+/// instructions with a page fault at address 0x36, `e_phentsize`'s offset,
+/// which said nothing about why
+/// (`requests/a-bd-coreutils-cannot-start-two-link-faults.md`).
+///
+/// It now answers "no TLS image", which is what glibc (weak `__ehdr_start`,
+/// null-checked in `_dl_aux_init`) and musl (no `AT_PHDR`, so its `PT_TLS`
+/// walk runs zero times) both do. The cost of that answer is known and
+/// narrow: a program whose headers are unmapped *and* which has a `PT_TLS`
+/// segment -- C `__thread`, since the slateos target sets `has-thread-local`
+/// false -- runs with an empty TLS block, so its thread-locals start at
+/// zero instead of their initialisers. Every program linked with lld's
+/// default layout maps its headers and is unaffected.
 #[cfg(target_os = "none")]
 #[must_use]
 pub fn image() -> TlsImage {
@@ -261,14 +283,34 @@ pub fn image() -> TlsImage {
         static __ehdr_start: u8;
     }
 
-    let ehdr = core::ptr::addr_of!(__ehdr_start);
+    let mut ehdr = core::ptr::addr_of!(__ehdr_start);
+    // The compiler may assume the address of a (non-weak) static is never
+    // null and fold the check below away, and the null case is exactly the
+    // one it exists for. This empty `asm!` makes the value opaque: it claims
+    // to be able to change `ehdr`, so nothing about it can be assumed after.
+    //
+    // SAFETY: the template is empty; the block reads and writes nothing but
+    // the register it is handed, and touches no memory, stack or flags.
+    #[allow(clippy::pointers_in_nomem_asm_block)]
+    // the pointer is never dereferenced: only its value is laundered
+    unsafe {
+        core::arch::asm!(
+            "/* {0} */",
+            inout(reg) ehdr,
+            options(pure, nomem, nostack, preserves_flags)
+        );
+    }
+    if ehdr.is_null() {
+        return TlsImage::EMPTY;
+    }
     // Elf64_Ehdr field offsets: e_phoff @0x20 (u64), e_phentsize @0x36
     // (u16), e_phnum @0x38 (u16).  Use unaligned reads — the header is a
     // packed byte layout at a symbol address of unknown alignment.
     //
-    // SAFETY: `__ehdr_start` is the load address of our own ELF header,
-    // always mapped read-only in a static executable, and the offsets read
-    // here are within the 64-byte Elf64_Ehdr.
+    // SAFETY: `__ehdr_start` is non-null (checked above), so the linker gave
+    // it the load address of our own ELF header, which it does only when a
+    // loaded segment maps the header; the offsets read here are within the
+    // 64-byte Elf64_Ehdr.
     let (e_phoff, e_phentsize, e_phnum) = unsafe {
         (
             core::ptr::read_unaligned(ehdr.add(0x20).cast::<u64>()),

@@ -10,6 +10,7 @@ linker = "rust-lld"
 # no GOT.  See init/.cargo/config.toml for rationale.
 rustflags = [
     "-C", "link-arg=-Tlinker.ld",
+    "-C", "link-arg=--orphan-handling=error",
     "-C", "relocation-model=static",
     "-C", "code-model=large",
 ]

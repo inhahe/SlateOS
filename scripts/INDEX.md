@@ -160,6 +160,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/diff-diff.sh` | Differential test: our `diff` against GNU diffutils. |
 | `scripts/diff-wsl.sh` | shellcheck disable=SC3043  # `local`; see "Which dialect" below. |
 | `scripts/digest-diff.sh` | Differential test: our md5sum/sha1sum/sha256sum against GNU coreutils'. |
+| `scripts/dircolors-diff.sh` | dircolors-diff.sh — compare our `dircolors` against GNU's, inside WSL. |
 | `scripts/display_rename.py` | Display-name pass: SlateOS -> "Slate OS" in user-facing text of .rs files. |
 | `scripts/du-diff.sh` | Differential test: our du against GNU du. |
 | `scripts/dup-bins-survey.py` | Survey the utility names that two crates both build, and say how to decide |
@@ -406,4 +407,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_396 scripts._
+_397 scripts._

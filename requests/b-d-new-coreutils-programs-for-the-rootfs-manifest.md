@@ -6,13 +6,13 @@
 
 ## In short
 
-The `coreutils` crate now builds fourteen programs it did not build when the
+The `coreutils` crate now builds fifteen programs it did not build when the
 manifest was written: `sha1sum`, `printenv`, `link`, `unlink`, `sync`,
-`truncate`, `groups`, `arch`, `pathchk`, `users`, `nproc`, `chgrp`, `mknod` and
-`hostid`. Each is a port of GNU coreutils 9.4 and has been checked against a
+`truncate`, `groups`, `arch`, `pathchk`, `users`, `nproc`, `chgrp`, `mknod`,
+`hostid` and `dircolors`. Each is a port of GNU coreutils 9.4 and has been checked against a
 build of 9.4 (a script runs both on the same inputs and compares their output,
 errors and exit status). A binary the manifest does not name does not go on
-the image, so today all fourteen are built and then left out. Please add
+the image, so today all fifteen are built and then left out. Please add
 them.
 
 ## Why they belong by the manifest's own rule
@@ -24,13 +24,13 @@ bin list. The only coreutils names it leaves out on purpose are:
 - `sort`, for the same reason;
 - `sh`, because `/bin/sh` is dash.
 
-These fourteen are none of those. They are missing only because they did not
+These fifteen are none of those. They are missing only because they did not
 exist when the list was generated. Nothing else stages these names:
 `create-ext4-rootfs.sh`'s `PROMOTED` map has none of them. So listing them
 takes no name away from anything.
 
 **Size.** At the manifest's own average of about 813 KiB per static binary,
-fourteen come to roughly 11 MiB. The header records 59 MiB used of a 96 MiB
+fifteen come to roughly 12 MiB. The header records 59 MiB used of a 96 MiB
 budget.
 
 ## The programs
@@ -51,6 +51,7 @@ budget.
 | `chgrp` | change a file's group (POSIX); `chown :GROUP` does the same, but scripts say `chgrp` | `scripts/chgrp-diff.sh` |
 | `mknod` | make a FIFO or a device node, what a chroot or container `/dev` is set up with | `scripts/mknod-diff.sh` |
 | `hostid` | the host's numeric identifier, as the libc's `gethostid` reports it | `scripts/hostid-diff.sh` |
+| `dircolors` | the `LS_COLORS` setup every stock shell start-up file runs (`eval "$(dircolors -b)"`) | `scripts/dircolors-diff.sh` |
 
 **One alias as well: `[ = test`.** Our `test` already behaves as `[` when it
 is started under that name: it then insists on the closing `]`. But nothing

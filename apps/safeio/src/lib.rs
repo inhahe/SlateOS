@@ -60,7 +60,8 @@ static WRITES: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "audit")]
 static COPIES: AtomicU64 = AtomicU64::new(0);
 
-/// How many [`write_atomically`] calls have succeeded in this process.
+/// How many [`write_atomically`] and [`write_new_atomically`] calls have
+/// succeeded in this process.
 ///
 /// This exists so a caller can *test* that its saves go through this crate.
 /// It cannot be tested any other way: a successful atomic write and a
@@ -95,32 +96,6 @@ pub fn copies_performed() -> u64 {
     COPIES.load(Ordering::Relaxed)
 }
 
-/// Write `contents` to `path` so that `path` is never left partially written.
-///
-/// On success `path` holds exactly `contents`. On failure `path` is untouched
-/// — it keeps whatever it held before, including not existing — and no
-/// temporary file is left behind.
-///
-/// # Symlinks
-///
-/// A symlink target is followed, and the *resolved* file is replaced. This
-/// matters because rename-over replaces whatever it renames onto: without
-/// resolving, saving a file the user opened through a symlink would delete
-/// their symlink and leave a regular file in its place, which is not what
-/// "save" means. Editing dotfiles through a symlinked config directory is the
-/// ordinary case here, not an exotic one.
-///
-/// # Permissions
-///
-/// When the target already exists its permissions are copied onto the
-/// replacement, because the new file would otherwise be created with the
-/// process's default mode. A save must not quietly make a private file
-/// world-readable.
-///
-/// # Errors
-///
-/// Returns the underlying [`io::Error`] if the directory cannot be written,
-/// the data cannot be flushed, or the rename fails.
 /// What a bounded read actually returned.
 ///
 /// The three fields exist because a caller needs all three to say something
@@ -367,6 +342,36 @@ fn not_utf8() -> io::Error {
     )
 }
 
+/// Write `contents` to `path` so that `path` is never left partially written.
+///
+/// On success `path` holds exactly `contents`. On failure `path` is untouched
+/// — it keeps whatever it held before, including not existing — and no
+/// temporary file is left behind.
+///
+/// A name that must still be free when the write lands -- one chosen a while
+/// ago, which somebody else's file may have taken since -- wants
+/// [`write_new_atomically`] instead: this replaces whatever is there.
+///
+/// # Symlinks
+///
+/// A symlink target is followed, and the *resolved* file is replaced. This
+/// matters because rename-over replaces whatever it renames onto: without
+/// resolving, saving a file the user opened through a symlink would delete
+/// their symlink and leave a regular file in its place, which is not what
+/// "save" means. Editing dotfiles through a symlinked config directory is the
+/// ordinary case here, not an exotic one.
+///
+/// # Permissions
+///
+/// When the target already exists its permissions are copied onto the
+/// replacement, because the new file would otherwise be created with the
+/// process's default mode. A save must not quietly make a private file
+/// world-readable.
+///
+/// # Errors
+///
+/// Returns the underlying [`io::Error`] if the directory cannot be written,
+/// the data cannot be flushed, or the rename fails.
 pub fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
     // Resolve a symlink to the file it points at. `canonicalize` fails when
     // the path does not exist yet, which is the ordinary "save a new file"
@@ -473,6 +478,99 @@ fn create_temp_in(dir: &Path, target: &Path) -> io::Result<(fs::File, PathBuf)> 
 /// As [`write_atomically`].
 pub fn write_str_atomically(path: &Path, contents: &str) -> io::Result<()> {
     write_atomically(path, contents.as_bytes())
+}
+
+/// [`write_atomically`] for a name that must still be free: the write fails
+/// with [`io::ErrorKind::AlreadyExists`] rather than replace anything.
+///
+/// For a program that picks a free name some time before it writes -- a
+/// converter planning a queue of outputs, an exporter whose "save as" was
+/// answered a minute ago. A name that was free when it was chosen is not free
+/// when it is written merely because it once was, and [`write_atomically`]
+/// would rename over whatever arrived in between: somebody's file, under the
+/// very name the program had checked was not in use.
+///
+/// The contents go to a temporary beside the target and are flushed, as in
+/// [`write_atomically`]. The temporary is then *linked* at the target's name,
+/// which the filesystem refuses if the name is in use -- the check and the
+/// claim are one operation, so nothing can arrive between them, and the name
+/// is never seen holding part of the file. A filesystem without hard links
+/// (FAT, exFAT) is served by claiming the name with an exclusive create and
+/// renaming the temporary over that claim: just as unable to replace anything,
+/// but a crash between the two leaves an empty file at the name.
+///
+/// # Errors
+///
+/// [`io::ErrorKind::AlreadyExists`] when anything has the name -- a file, a
+/// directory, a symlink, dangling or not; otherwise the underlying error. On
+/// any failure nothing at `path` has changed and no temporary is left behind.
+pub fn write_new_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
+    write_new_with(path, contents, |from, to| fs::hard_link(from, to))
+}
+
+/// [`write_new_atomically`] with its link step given, so that the route for a
+/// filesystem without hard links can be tested on one that has them.
+fn write_new_with(
+    path: &Path,
+    contents: &[u8],
+    link: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    // Not canonicalised, unlike `write_atomically`: a symlink at the name is
+    // something at the name, and following it would create a file wherever it
+    // points -- a place the caller never chose.
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir: PathBuf = parent.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+
+    let (mut file, tmp_path) = create_temp_in(&dir, path)?;
+    let written = file.write_all(contents).and_then(|()| file.sync_all());
+    // Closed before the link or the rename: Windows refuses to rename a file
+    // that is still open.
+    drop(file);
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp_path); // Best effort; the write error is the one worth reporting.
+        return Err(e);
+    }
+
+    if link(&tmp_path, path).is_ok() {
+        // The temporary is now a second name for the file at `path`.
+        let _ = fs::remove_file(&tmp_path); // Best effort; a stray second name for a whole file loses nothing.
+    } else if let Err(e) = claim_then_rename(&tmp_path, path) {
+        // The link's own error is not the one reported. Either this
+        // filesystem has no hard links, which the claim serves; or the name
+        // is in use, or the folder is in trouble, and the claim meets that
+        // again and says so itself.
+        let _ = fs::remove_file(&tmp_path); // Best effort; the publish error is the one worth reporting.
+        // Whatever the platform calls it. Windows answers an exclusive create
+        // over a directory with "access denied", which would send a caller
+        // looking at permissions for what is a name in use.
+        if e.kind() != io::ErrorKind::AlreadyExists && fs::symlink_metadata(path).is_ok() {
+            return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+        }
+        return Err(e);
+    }
+
+    // Counted after the file is in place, as in `write_atomically`.
+    #[cfg(feature = "audit")]
+    WRITES.fetch_add(1, Ordering::Relaxed);
+
+    Ok(())
+}
+
+/// Put a finished temporary at `target` on a filesystem without hard links:
+/// claim the name with an exclusive create, which fails if anything has it,
+/// then rename the temporary over the empty claim.
+fn claim_then_rename(tmp_path: &Path, target: &Path) -> io::Result<()> {
+    let claim = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)?;
+    drop(claim);
+    if let Err(e) = fs::rename(tmp_path, target) {
+        // The claim is ours and empty: a name held by nothing anybody wrote.
+        let _ = fs::remove_file(target); // Best effort; the rename error is the one worth reporting.
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Copy `src` to `dest` so that `dest` never exists in a partial state.
@@ -949,6 +1047,127 @@ mod tests {
                 .filter(|p| !p.as_os_str().is_empty()),
             None,
             "a bare name has no usable parent, so the fallback is the branch taken"
+        );
+    }
+
+    /// Every name in `dir`, sorted.
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A free name is written, and nothing else is left beside it -- in
+    /// particular not the temporary, which the link leaves as a second name
+    /// for the same file.
+    #[test]
+    fn a_free_name_is_written_and_nothing_else_is_left() {
+        let scratch = temp_dir("new_free");
+        let dir = scratch.dir().to_path_buf();
+        let path = dir.join("out.wav");
+
+        write_new_atomically(&path, b"RIFF").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"RIFF");
+        assert_eq!(names_in(&dir), vec!["out.wav".to_string()]);
+    }
+
+    /// The point of the function: a name in use is refused, and what has it
+    /// is exactly as it was.
+    #[test]
+    fn a_name_in_use_is_refused_and_left_as_it_was() {
+        let scratch = temp_dir("new_taken");
+        let dir = scratch.dir().to_path_buf();
+        let path = dir.join("out.wav");
+        fs::write(&path, b"somebody's file").unwrap();
+
+        let err = write_new_atomically(&path, b"a conversion").unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).unwrap(), b"somebody's file");
+        assert_eq!(
+            names_in(&dir),
+            vec!["out.wav".to_string()],
+            "no temporary left"
+        );
+    }
+
+    /// A directory has a name too.
+    #[test]
+    fn a_directory_at_the_name_is_refused() {
+        let scratch = temp_dir("new_dir");
+        let dir = scratch.dir().to_path_buf();
+        let path = dir.join("out.wav");
+        fs::create_dir(&path).unwrap();
+
+        let err = write_new_atomically(&path, b"a conversion").unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert!(path.is_dir());
+        assert_eq!(names_in(&dir), vec!["out.wav".to_string()]);
+    }
+
+    /// Without hard links (FAT, exFAT) the name is claimed by an exclusive
+    /// create instead: the file still lands whole, and a name in use is still
+    /// refused and untouched.
+    #[test]
+    fn without_hard_links_the_name_is_still_claimed_exclusively() {
+        let scratch = temp_dir("new_nolink");
+        let dir = scratch.dir().to_path_buf();
+        let path = dir.join("out.wav");
+        let no_links = |_: &Path, _: &Path| Err(io::Error::from(io::ErrorKind::Unsupported));
+
+        write_new_with(&path, b"first", no_links).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        assert_eq!(names_in(&dir), vec!["out.wav".to_string()]);
+
+        let err = write_new_with(&path, b"second", no_links).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        assert_eq!(names_in(&dir), vec!["out.wav".to_string()]);
+    }
+
+    /// A folder that is not there is reported, and not made.
+    #[test]
+    fn a_missing_folder_is_reported_and_not_made() {
+        let scratch = temp_dir("new_nofolder");
+        let dir = scratch.dir().to_path_buf();
+        let missing = dir.join("no-such-folder").join("out.wav");
+
+        let err = write_new_atomically(&missing, b"x").unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(
+            names_in(&dir).is_empty(),
+            "left behind: {:?}",
+            names_in(&dir)
+        );
+    }
+
+    /// A symlink at the name is something at the name, dangling or not; and
+    /// it is not followed, so nothing appears where it points.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_name_is_refused_and_not_followed() {
+        let scratch = temp_dir("new_symlink");
+        let dir = scratch.dir().to_path_buf();
+        let path = dir.join("out.wav");
+        let pointee = dir.join("elsewhere.wav");
+        std::os::unix::fs::symlink(&pointee, &path).unwrap();
+
+        let err = write_new_atomically(&path, b"x").unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert!(!pointee.exists(), "the link was not followed");
+        assert!(
+            fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
         );
     }
 }

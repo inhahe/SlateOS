@@ -12,19 +12,43 @@
  * The segment has RWX permissions (flags 7).  This is acceptable for
  * userspace programs until a more sophisticated loader is implemented
  * that handles split permissions properly.
+ *
+ * The segment starts with the ELF file header and the program headers
+ * (FILEHDR PHDRS), and the sections follow them at SIZEOF_HEADERS.  That
+ * is what gives `__ehdr_start` its real address: posix's crt finds the
+ * program headers through it (`posix::tls::image`), and with the headers
+ * outside every segment lld resolved it to 0, so every program linked
+ * with this script faulted at address 0x36 on its first instructions
+ * (requests/a-bd-coreutils-cannot-start-two-link-faults.md, fault 1).
+ *
+ * The PT_NOTE segment carries `.note.slateos`, the marker by which the
+ * kernel knows a binary is SlateOS-native rather than Linux
+ * (design-decisions.md §33; fault 2 of the same request).  The note is
+ * emitted by the C runtime every native program links; this script only
+ * has to keep it, and to claim it before the `*(.note*)` discard below.
+ * It sits at the front of the segment, before `.text`: after `.bss` it
+ * would force `.bss` to be written into the file as zeros.
  */
 
 ENTRY(_start)
 
 PHDRS
 {
-    load PT_LOAD FLAGS(7); /* PF_R | PF_W | PF_X */
+    load PT_LOAD FILEHDR PHDRS FLAGS(7); /* PF_R | PF_W | PF_X */
+    note PT_NOTE;
 }
 
 SECTIONS
 {
-    /* Code starts at 256 GiB in user virtual address space. */
-    . = 0x0000004000000000;
+    /* The image starts at 256 GiB in user virtual address space, with the
+     * headers first and the sections after them. */
+    . = 0x0000004000000000 + SIZEOF_HEADERS;
+
+    /* The SlateOS ABI marker: in the load segment, and the whole of the note
+     * segment. */
+    .note.slateos : {
+        KEEP(*(.note.slateos))
+    } :load :note
 
     .text ALIGN(16) : {
         *(.text._start)   /* Entry point first. */

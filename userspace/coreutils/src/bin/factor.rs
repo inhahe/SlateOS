@@ -758,21 +758,24 @@ fn render_factors<T: PartialEq>(
     let mut out = Vec::new();
     let mut i = 0usize;
     while let Some(p) = factors.get(i) {
-        let mut e = 1usize;
-        while factors.get(i.saturating_add(e)) == Some(p) {
-            e = e.saturating_add(1);
+        // The multiplicity of `p`. Not `e`: that name is an `io::Error`
+        // everywhere else in this tree, and `scripts/host-errmsg.py` reads a
+        // `{e}` in a format string as one.
+        let mut power = 1usize;
+        while factors.get(i.saturating_add(power)) == Some(p) {
+            power = power.saturating_add(1);
         }
-        if exponents && e > 1 {
+        if exponents && power > 1 {
             out.push(b' ');
             out.extend_from_slice(&show(p));
-            out.extend_from_slice(format!("^{e}").as_bytes());
+            out.extend_from_slice(format!("^{power}").as_bytes());
         } else {
-            for _ in 0..e {
+            for _ in 0..power {
                 out.push(b' ');
                 out.extend_from_slice(&show(p));
             }
         }
-        i = i.saturating_add(e);
+        i = i.saturating_add(power);
     }
     out
 }

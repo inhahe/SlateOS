@@ -64,7 +64,6 @@ userspace/fw/src/main.rs:argv-as-string
 userspace/fwupd/src/main.rs:argv-as-string
 userspace/getent/src/main.rs:argv-as-string
 userspace/getopt/src/main.rs:argv-as-string
-userspace/getopt/src/main.rs:env-as-string
 userspace/grub2/src/main.rs:argv-as-string
 userspace/gzip/src/main.rs:argv-as-string
 userspace/hardlink/src/main.rs:argv-as-string

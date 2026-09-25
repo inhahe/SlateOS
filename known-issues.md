@@ -61711,6 +61711,13 @@ corrupted; the app is a picture of a weather app. The reason to write it down is
 that the settings screen actively asserts otherwise, and a future reader could
 spend a while looking for the fetch that the interval configures.
 
+**Update 2026-09-25 (lane E): the settings screen no longer asserts it.** The
+interval row is gone from the settings view, as the proper fix above says it
+should be until it drives something; `Settings::update_interval_min` and
+`set_update_interval` stay for the source to use. What remains open is the
+source itself. (The sample weather the entry describes had already been
+removed on 2026-09-15; the app opens on a notice that it cannot fetch.)
+
 ### TD-C-FINANCE-IS-A-VIEWER-OVER-SAMPLE-DATA — 2026-09-04 — OPEN
 
 **In short.** The finance app now opens a window and responds to the keyboard,
@@ -159780,6 +159787,22 @@ the library saves patterns with their flags to the user's settings, and every
 control answers the pointer. Seven examined; fourteen to go -- the counts in
 the paragraphs above are each one short, because the list is twenty apps
 *besides* `notes`, which was the first examined.
+
+**`apps/weather`, 2026-09-25 -- a pointer layer, and three things that failed
+only with nothing fetched, which is every real run.** The app has no data
+source and says so; that part was right. But with nothing fetched F1 raised a
+shortcut card that was never drawn -- the draw returned before reaching it --
+while the card, being modal, swallowed every key, so the window looked frozen
+until F1 or Escape happened to be pressed. The Settings tab showed the same
+"cannot fetch" notice as every other tab, so U, W, P and T changed units
+nobody could see; and the units were forgotten at every start. Now the card
+and the settings draw whatever was fetched, a settings row changes its value
+on a press, the units are kept in the user's settings, the six tabs, the
+places and the hourly strip (under the wheel, either way) answer the pointer,
+and the update interval -- shown as "30 min", unchangeable, with nothing to
+refresh -- is absent until something refreshes, as
+`TD-C-WEATHER-HAS-A-REFRESH-INTERVAL-AND-NOTHING-TO-REFRESH` said it should be.
+Eight examined; thirteen to go.
 
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 

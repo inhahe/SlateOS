@@ -18,6 +18,12 @@
 //! That is tracked in `deferred-questions.md`, not as a live question, since
 //! nothing can act on it until the transport exists.
 //!
+//! What does work with nothing fetched: the six tabs, the settings -- the
+//! units a reading will be given in, which are the user's to choose now and
+//! are kept in their settings (`settingsfile`, `weather.yaml`) -- and the F1
+//! card. Every control answers the pointer: the renderer records a hit box
+//! where it draws each one (`guitk::frame::Frame`).
+//!
 //! The layouts below are real and tested, and draw when a model is supplied
 //! (which today only tests do):
 //! - Current conditions with detailed metrics
@@ -34,10 +40,12 @@
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
-use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -967,6 +975,14 @@ pub struct WeatherApp {
     palette: Palette,
     /// Whether the shortcut card is up.
     show_help: bool,
+    /// What the pointer is over, so it can be drawn lit.
+    hover: Option<Target>,
+    /// Every box the last paint recorded, for hover and the wheel.
+    last_hits: Vec<(Target, Rect)>,
+    /// The wheel's remainder over the hourly strip.
+    wheel: wheel::Accumulator,
+    /// Why the units could not be kept, when they could not.
+    settings_error: Option<String>,
 }
 
 impl WeatherApp {
@@ -991,6 +1007,10 @@ impl WeatherApp {
             hourly_scroll_offset: 0.0,
             width,
             height,
+            hover: None,
+            last_hits: Vec::new(),
+            wheel: wheel::Accumulator::default(),
+            settings_error: None,
         }
     }
 
@@ -1154,6 +1174,7 @@ impl WeatherApp {
                 // Not `Consumed`: a resize is not by itself a reason to redraw.
                 EventResult::Ignored
             }
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => EventResult::Ignored,
         }
     }
@@ -1217,19 +1238,19 @@ impl WeatherApp {
             Key::Down => self.step_location(1),
             // Unit toggles, on the initial of the thing they change.
             Key::U => {
-                self.toggle_temp_unit();
+                self.change_setting(Setting::Temperature);
                 EventResult::Consumed
             }
             Key::W => {
-                self.cycle_wind_unit();
+                self.change_setting(Setting::Wind);
                 EventResult::Consumed
             }
             Key::P => {
-                self.cycle_pressure_unit();
+                self.change_setting(Setting::Pressure);
                 EventResult::Consumed
             }
             Key::T => {
-                self.toggle_time_format();
+                self.change_setting(Setting::Time);
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -1304,9 +1325,38 @@ impl WeatherApp {
     /// Named `render_commands` and not `render`: at equal arity an inherent
     /// method silently wins method lookup over `oswindow::app::App::render`, so
     /// an app that keeps the name draws nothing and reports no error.
+    #[cfg(test)]
     pub fn render_commands(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+        self.frame().into_tree().commands
+    }
 
+    /// Draw the window, recording every control where it is drawn: both the
+    /// picture and the hit test.
+    fn frame(&self) -> Frame<Target> {
+        let mut f = Frame::new(self.width, self.height);
+        self.draw(&mut f);
+        // Over everything, because it is the one thing a reader asked for --
+        // and whether or not anything was fetched. It was drawn after the
+        // fetched views only, so with nothing fetched F1 raised a card that
+        // was never drawn and that swallowed every key until it was closed.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (self.width, self.height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+            f.hit(
+                Target::HelpCard,
+                Rect::new(0.0, 0.0, self.width, self.height),
+            );
+        }
+        f
+    }
+
+    fn draw(&self, cmds: &mut Frame<Target>) {
         // Background
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
@@ -1318,47 +1368,44 @@ impl WeatherApp {
         });
 
         // Alert banner (if any)
-        let content_y = self.render_alerts_banner(&mut cmds, 0.0);
+        let content_y = self.render_alerts_banner(cmds, 0.0);
 
         // Title bar
-        let title_y = self.render_title_bar(&mut cmds, content_y);
+        let title_y = self.render_title_bar(cmds, content_y);
+
+        // The settings are not a reading, so they are shown whether or not
+        // anything was fetched: the units a reading will be given in are the
+        // user's to choose now. Before, the Settings tab showed the same
+        // "cannot fetch" as every other, and U, W, P and T changed values
+        // nobody could see.
+        if self.active_view == ActiveView::SettingsView {
+            self.render_settings_view(cmds, title_y);
+            return;
+        }
 
         // Nothing has been fetched, so there is no view to draw. Every panel
         // below reports a reading, and a panel with no reading to report
         // either shows a default -- 0 degrees, Clear -- or an empty space, and
         // both are read as observations.
         let Some(current) = self.current.clone() else {
-            self.render_cannot_fetch(&mut cmds, title_y);
-            return cmds;
+            self.render_cannot_fetch(cmds, title_y);
+            return;
         };
 
         // Main content area depends on active view
         match self.active_view {
-            ActiveView::Dashboard => self.render_dashboard(&mut cmds, title_y, &current),
-            ActiveView::HourlyDetail => self.render_hourly_detail(&mut cmds, title_y),
-            ActiveView::DailyDetail => self.render_daily_detail(&mut cmds, title_y),
-            ActiveView::Alerts => self.render_alerts_view(&mut cmds, title_y),
-            ActiveView::Locations => self.render_locations_view(&mut cmds, title_y),
-            ActiveView::SettingsView => self.render_settings_view(&mut cmds, title_y),
+            ActiveView::Dashboard => self.render_dashboard(cmds, title_y, &current),
+            ActiveView::HourlyDetail => self.render_hourly_detail(cmds, title_y),
+            ActiveView::DailyDetail => self.render_daily_detail(cmds, title_y),
+            ActiveView::Alerts => self.render_alerts_view(cmds, title_y),
+            ActiveView::Locations => self.render_locations_view(cmds, title_y),
+            ActiveView::SettingsView => self.render_settings_view(cmds, title_y),
         }
-
-        if self.show_help {
-            guitk::shortcut::render_card(
-                &mut cmds,
-                &self.palette,
-                (self.width, self.height),
-                0.0,
-                SHORTCUTS,
-                "F1 or ? closes this",
-            );
-        }
-
-        cmds
     }
 
     /// Render alert banner at the top. Returns the Y position after the banner.
     /// Say, in the window, that no weather has been fetched.
-    fn render_cannot_fetch(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
+    fn render_cannot_fetch(&self, cmds: &mut Frame<Target>, y: f32) {
         for (i, line) in CANNOT_FETCH_LINES.iter().enumerate() {
             cmds.push(RenderCommand::Text {
                 x: 16.0,
@@ -1382,7 +1429,7 @@ impl WeatherApp {
         }
     }
 
-    fn render_alerts_banner(&self, cmds: &mut Vec<RenderCommand>, y: f32) -> f32 {
+    fn render_alerts_banner(&self, cmds: &mut Frame<Target>, y: f32) -> f32 {
         if self.alerts.is_empty() {
             return y;
         }
@@ -1435,7 +1482,7 @@ impl WeatherApp {
     }
 
     /// Render the title bar. Returns the Y position after the title.
-    fn render_title_bar(&self, cmds: &mut Vec<RenderCommand>, y: f32) -> f32 {
+    fn render_title_bar(&self, cmds: &mut Frame<Target>, y: f32) -> f32 {
         let title_height = 50.0;
 
         self.palette
@@ -1487,18 +1534,13 @@ impl WeatherApp {
             ));
             tx -= text_width + 16.0;
             let is_active = *view == self.active_view;
+            let tab = Rect::new(tx - 4.0, y + 8.0, text_width + 24.0, 30.0);
 
-            if is_active {
-                self.palette.push_surface(
-                    cmds,
-                    tx - 4.0,
-                    y + 8.0,
-                    text_width + 24.0,
-                    30.0,
-                    6.0,
-                    Surface::Selected,
-                );
+            if is_active || self.hover == Some(Target::Tab(*view)) {
+                self.palette
+                    .push_surface(cmds, tab.x, tab.y, tab.w, tab.h, 6.0, Surface::Selected);
             }
+            cmds.hit(Target::Tab(*view), tab);
 
             cmds.push(RenderCommand::Text {
                 x: tx + 8.0,
@@ -1524,7 +1566,7 @@ impl WeatherApp {
     }
 
     /// Render the dashboard view (main overview).
-    fn render_dashboard(&self, cmds: &mut Vec<RenderCommand>, y: f32, current: &CurrentWeather) {
+    fn render_dashboard(&self, cmds: &mut Frame<Target>, y: f32, current: &CurrentWeather) {
         let padding = 16.0;
         let mut cy = y + padding;
 
@@ -1551,7 +1593,7 @@ impl WeatherApp {
     /// Render the current weather card. Returns the Y after the card.
     fn render_current_weather_card(
         &self,
-        cmds: &mut Vec<RenderCommand>,
+        cmds: &mut Frame<Target>,
         x: f32,
         y: f32,
         current: &CurrentWeather,
@@ -1730,7 +1772,7 @@ impl WeatherApp {
     }
 
     /// Render the hourly forecast strip. Returns Y after.
-    fn render_hourly_strip(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) -> f32 {
+    fn render_hourly_strip(&self, cmds: &mut Frame<Target>, x: f32, y: f32) -> f32 {
         let strip_w = self.width - x * 2.0;
         let strip_h = 120.0;
         let item_w = 72.0;
@@ -1755,12 +1797,15 @@ impl WeatherApp {
         // Clip the scrollable area
         let scroll_y = y + 30.0;
         let scroll_h = strip_h - 34.0;
-        cmds.push(RenderCommand::PushClip {
-            x: x + 8.0,
-            y: scroll_y,
-            width: strip_w - 16.0,
-            height: scroll_h,
-        });
+        // The wheel scrolls it, sideways: it is the one thing on screen wider
+        // than the window.
+        cmds.hit(Target::HourlyStrip, Rect::new(x, y, strip_w, strip_h));
+        cmds.clip(Rect::new(
+            x + 8.0,
+            scroll_y,
+            (strip_w - 16.0).max(0.0),
+            scroll_h,
+        ));
 
         for (i, hf) in self.hourly.iter().enumerate() {
             let ix = x + 12.0 + i as f32 * (item_w + item_gap) - self.hourly_scroll_offset;
@@ -1835,13 +1880,13 @@ impl WeatherApp {
             }
         }
 
-        cmds.push(RenderCommand::PopClip);
+        cmds.unclip();
 
         y + strip_h
     }
 
     /// Render the temperature graph. Returns Y after.
-    fn render_temp_graph(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) -> f32 {
+    fn render_temp_graph(&self, cmds: &mut Frame<Target>, x: f32, y: f32) -> f32 {
         let graph_w = self.width - x * 2.0;
         let graph_h = 160.0;
         let plot_x = x + 50.0;
@@ -1989,7 +2034,7 @@ impl WeatherApp {
     }
 
     /// Render the daily forecast table. Returns Y after.
-    fn render_daily_table(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) -> f32 {
+    fn render_daily_table(&self, cmds: &mut Frame<Target>, x: f32, y: f32) -> f32 {
         let table_w = self.width - x * 2.0;
         let header_h = 34.0;
         let row_h = 36.0;
@@ -2154,7 +2199,7 @@ impl WeatherApp {
     /// Render the air quality card. Returns Y after.
     fn render_air_quality_card(
         &self,
-        cmds: &mut Vec<RenderCommand>,
+        cmds: &mut Frame<Target>,
         x: f32,
         y: f32,
         current: &CurrentWeather,
@@ -2237,7 +2282,7 @@ impl WeatherApp {
     }
 
     /// Render hourly detail view.
-    fn render_hourly_detail(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
+    fn render_hourly_detail(&self, cmds: &mut Frame<Target>, y: f32) {
         let padding = 16.0;
         let mut cy = y + padding;
 
@@ -2339,7 +2384,7 @@ impl WeatherApp {
     }
 
     /// Render daily detail view.
-    fn render_daily_detail(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
+    fn render_daily_detail(&self, cmds: &mut Frame<Target>, y: f32) {
         let padding = 16.0;
         let mut cy = y + padding;
 
@@ -2442,7 +2487,7 @@ impl WeatherApp {
     }
 
     /// Render alerts view.
-    fn render_alerts_view(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
+    fn render_alerts_view(&self, cmds: &mut Frame<Target>, y: f32) {
         let padding = 16.0;
         let mut cy = y + padding;
 
@@ -2555,7 +2600,7 @@ impl WeatherApp {
     }
 
     /// Render locations view.
-    fn render_locations_view(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
+    fn render_locations_view(&self, cmds: &mut Frame<Target>, y: f32) {
         let padding = 16.0;
         let mut cy = y + padding;
 
@@ -2583,11 +2628,15 @@ impl WeatherApp {
                 self.width - padding * 2.0,
                 row_h,
                 8.0,
-                if is_active {
+                if is_active || self.hover == Some(Target::Location(i)) {
                     Surface::Selected
                 } else {
                     Surface::Card
                 },
+            );
+            cmds.hit(
+                Target::Location(i),
+                Rect::new(padding, cy, self.width - padding * 2.0, row_h),
             );
 
             // Active indicator
@@ -2655,7 +2704,7 @@ impl WeatherApp {
     }
 
     /// Render settings view.
-    fn render_settings_view(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
+    fn render_settings_view(&self, cmds: &mut Frame<Target>, y: f32) {
         let padding = 16.0;
         let mut cy = y + padding;
 
@@ -2671,8 +2720,15 @@ impl WeatherApp {
         });
         cy += 36.0;
 
-        let settings_items: Vec<(&str, String)> = vec![
+        // The update interval is not here. It was shown as "30 min" with no
+        // way to change it and nothing behind it -- there is no source to
+        // refresh (known-issues.md,
+        // TD-C-WEATHER-HAS-A-REFRESH-INTERVAL-AND-NOTHING-TO-REFRESH, whose
+        // proper fix says the control should be absent until it drives
+        // something).
+        let settings_items: Vec<(Setting, &str, String)> = vec![
             (
+                Setting::Temperature,
                 "Temperature Unit",
                 match self.settings.temp_unit {
                     TempUnit::Celsius => "Celsius (\u{00B0}C)".to_string(),
@@ -2680,38 +2736,55 @@ impl WeatherApp {
                 },
             ),
             (
+                Setting::Wind,
                 "Wind Speed Unit",
                 self.settings.wind_unit.label().to_string(),
             ),
             (
+                Setting::Pressure,
                 "Pressure Unit",
                 self.settings.pressure_unit.label().to_string(),
             ),
             (
+                Setting::Time,
                 "Time Format",
                 match self.settings.time_format {
                     TimeFormat::H12 => "12-hour".to_string(),
                     TimeFormat::H24 => "24-hour".to_string(),
                 },
             ),
-            (
-                "Update Interval",
-                format!("{} min", self.settings.update_interval_min),
-            ),
         ];
 
-        for (label, value) in &settings_items {
+        for (setting, label, value) in &settings_items {
             let row_h = 50.0;
+            let row = Rect::new(padding, cy, self.width - padding * 2.0, row_h);
 
             self.palette.push_surface(
                 cmds,
-                padding,
-                cy,
-                self.width - padding * 2.0,
-                row_h,
+                row.x,
+                row.y,
+                row.w,
+                row.h,
                 8.0,
-                Surface::Card,
+                if self.hover == Some(Target::Setting(*setting)) {
+                    Surface::Selected
+                } else {
+                    Surface::Card
+                },
             );
+            // What a press does, and the key that does the same.
+            let hint = format!("Click to change  ·  {}", setting.key());
+            cmds.push(RenderCommand::Text {
+                x: text::right_x(&hint, row.right() - 16.0, 12.0, FontWeightHint::Regular),
+                y: cy + 18.0,
+                text: hint,
+                font_size: 12.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+            cmds.hit(Target::Setting(*setting), row);
 
             cmds.push(RenderCommand::Text {
                 x: padding + 16.0,
@@ -2736,6 +2809,240 @@ impl WeatherApp {
             });
 
             cy += row_h + 8.0;
+        }
+
+        if let Some(error) = &self.settings_error {
+            cmds.push(RenderCommand::Text {
+                x: padding,
+                y: cy + 4.0,
+                text: error.clone(),
+                font_size: 12.0,
+                color: self.palette.ink(self.palette.red),
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(self.width - padding * 2.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+    }
+}
+
+// ============================================================================
+// Pointer targets
+// ============================================================================
+
+/// Everything in the window a pointer can press, as the renderer records it.
+///
+/// The weather app drew six tabs, a settings list and a list of places, and
+/// handled no pointer event (`known-issues.md` →
+/// `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Tab(ActiveView),
+    /// A settings row: a press moves it to its next value.
+    Setting(Setting),
+    /// A saved place: a press makes it the one shown.
+    Location(usize),
+    /// The hourly strip, which the wheel scrolls.
+    HourlyStrip,
+    HelpCard,
+}
+
+/// A row of the settings view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Setting {
+    Temperature,
+    Wind,
+    Pressure,
+    Time,
+}
+
+impl Setting {
+    /// The key that changes the same thing.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Temperature => "U",
+            Self::Wind => "W",
+            Self::Pressure => "P",
+            Self::Time => "T",
+        }
+    }
+}
+
+/// Where the units are kept (`settingsfile`), under `units`.
+const CONFIG_NAME: &str = "weather";
+
+impl WeatherApp {
+    /// Move `setting` to its next value, and keep the choice.
+    fn change_setting(&mut self, setting: Setting) {
+        match setting {
+            Setting::Temperature => self.toggle_temp_unit(),
+            Setting::Wind => self.cycle_wind_unit(),
+            Setting::Pressure => self.cycle_pressure_unit(),
+            Setting::Time => self.toggle_time_format(),
+        }
+        self.store_units();
+    }
+
+    /// The units as words, for the settings file.
+    fn unit_words(&self) -> [(&'static str, &'static str); 4] {
+        [
+            (
+                "temperature",
+                match self.settings.temp_unit {
+                    TempUnit::Celsius => "celsius",
+                    TempUnit::Fahrenheit => "fahrenheit",
+                },
+            ),
+            (
+                "wind",
+                match self.settings.wind_unit {
+                    WindSpeedUnit::Kmh => "kmh",
+                    WindSpeedUnit::Mph => "mph",
+                    WindSpeedUnit::Ms => "ms",
+                    WindSpeedUnit::Knots => "knots",
+                },
+            ),
+            (
+                "pressure",
+                match self.settings.pressure_unit {
+                    PressureUnit::Hpa => "hpa",
+                    PressureUnit::InHg => "inhg",
+                    PressureUnit::MmHg => "mmhg",
+                },
+            ),
+            (
+                "time",
+                match self.settings.time_format {
+                    TimeFormat::H24 => "24h",
+                    TimeFormat::H12 => "12h",
+                },
+            ),
+        ]
+    }
+
+    /// Keep the units in the user's settings, so a choice outlives the window.
+    /// They were reset to Celsius, km/h, hPa and 24-hour at every start.
+    fn store_units(&mut self) {
+        let mut doc = settingsfile::load(CONFIG_NAME);
+        for (key, word) in self.unit_words() {
+            doc.set_str(&["units", key], word);
+        }
+        self.settings_error = settingsfile::store(CONFIG_NAME, &doc)
+            .err()
+            .map(|e| format!("The units could not be kept for next time: {e}"));
+    }
+
+    /// Read the units from the user's settings. A word this does not know
+    /// leaves that unit at its default.
+    pub fn load_units(&mut self, doc: &yamldoc::Document) {
+        let word = |key: &str| doc.get_str(&["units", key]);
+        match word("temperature").as_deref() {
+            Some("celsius") => self.settings.temp_unit = TempUnit::Celsius,
+            Some("fahrenheit") => self.settings.temp_unit = TempUnit::Fahrenheit,
+            _ => {}
+        }
+        match word("wind").as_deref() {
+            Some("kmh") => self.settings.wind_unit = WindSpeedUnit::Kmh,
+            Some("mph") => self.settings.wind_unit = WindSpeedUnit::Mph,
+            Some("ms") => self.settings.wind_unit = WindSpeedUnit::Ms,
+            Some("knots") => self.settings.wind_unit = WindSpeedUnit::Knots,
+            _ => {}
+        }
+        match word("pressure").as_deref() {
+            Some("hpa") => self.settings.pressure_unit = PressureUnit::Hpa,
+            Some("inhg") => self.settings.pressure_unit = PressureUnit::InHg,
+            Some("mmhg") => self.settings.pressure_unit = PressureUnit::MmHg,
+            _ => {}
+        }
+        match word("time").as_deref() {
+            Some("24h") => self.settings.time_format = TimeFormat::H24,
+            Some("12h") => self.settings.time_format = TimeFormat::H12,
+            _ => {}
+        }
+    }
+
+    /// What is under `(x, y)` in the frame last shown.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        if self.last_hits.is_empty() {
+            return self.frame().hit_test(x, y);
+        }
+        self.last_hits
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(x, y))
+            .map(|(target, _)| *target)
+    }
+
+    /// Route a pointer event.
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        // The card is modal: a press anywhere puts it away, and nothing under
+        // it hears one.
+        if self.show_help {
+            if matches!(event.kind, MouseEventKind::Press(_)) {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
+        match event.kind {
+            MouseEventKind::Press(MouseButton::Left) => self
+                .frame()
+                .hit_test(event.x, event.y)
+                .map_or(EventResult::Ignored, |target| self.activate(target)),
+            MouseEventKind::Move => {
+                let over = self.target_at(event.x, event.y);
+                if over == self.hover {
+                    return EventResult::Ignored;
+                }
+                self.hover = over;
+                EventResult::Consumed
+            }
+            MouseEventKind::Leave => {
+                if self.hover.take().is_some() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            MouseEventKind::Scroll { dx, dy } => {
+                if self.target_at(event.x, event.y) != Some(Target::HourlyStrip) {
+                    return EventResult::Ignored;
+                }
+                // Sideways either way: the vertical wheel is the one most
+                // people have, and the strip only goes across.
+                let turn = if dx.abs() > dy.abs() { -dx } else { dy };
+                let rows = self.wheel.rows(turn);
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "a wheel turn is a handful of notches"
+                )]
+                let delta = rows as f32 * Self::HOURLY_SCROLL_STEP;
+                self.scroll_and_report(delta)
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Do what pressing `target` means.
+    fn activate(&mut self, target: Target) -> EventResult {
+        match target {
+            Target::Tab(view) => self.set_view(view),
+            Target::Setting(setting) => {
+                self.change_setting(setting);
+                EventResult::Consumed
+            }
+            Target::Location(i) => {
+                if i == self.active_location_idx || i >= self.locations.len() {
+                    return EventResult::Ignored;
+                }
+                self.set_active_location(i);
+                EventResult::Consumed
+            }
+            Target::HelpCard => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
+            Target::HourlyStrip => EventResult::Ignored,
         }
     }
 }
@@ -2795,14 +3102,16 @@ impl App for WeatherApp {
         // for, and the first frame is drawn before any `Resize` arrives.
         self.width = width;
         self.height = height;
-        RenderTree {
-            commands: self.render_commands(),
-        }
+        let frame = self.frame();
+        self.last_hits = frame.hits().to_vec();
+        frame.into_tree()
     }
 }
 
 fn main() -> ExitCode {
     let mut weather = WeatherApp::new(900.0, 800.0);
+    // The units the user chose last time.
+    weather.load_units(&settingsfile::load(CONFIG_NAME));
     app::launch("weather", &mut weather)
 }
 
@@ -2815,7 +3124,7 @@ mod tests {
     // A test that overflows, indexes out of range or unwraps a `None` should
     // fail loudly and point at the line that did it — that is the diagnosis.
     // The defensive lints exist to keep panics out of code that runs on a
-    // user'"'"'s data, which this is not.
+    // user's data, which this is not.
     #![allow(
         clippy::unwrap_used,
         clippy::expect_used,
@@ -2862,70 +3171,74 @@ mod tests {
     /// forecast in it refuses them correctly.
     #[test]
     fn every_advertised_key_does_something() {
-        for (label, what) in SHORTCUTS {
-            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
-                // Two views, because `set_view` deliberately answers `Ignored`
-                // for the view you are already looking at -- pressing `2` on
-                // the hourly page redraws nothing, on purpose. So no single
-                // state can answer all six digits, and the union of these two
-                // answers every one.
-                let answered = [ActiveView::Dashboard, ActiveView::HourlyDetail]
-                    .into_iter()
-                    .any(|view| {
-                        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
-                        app.active_view = view;
-                        app.scroll_hourly(40.0);
-                        // Off the first place, so `Up` has somewhere to go
-                        // back to -- stepping past either end is refused, and
-                        // correctly.
-                        app.step_location(1);
-                        app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
-                    });
-                assert!(
-                    answered,
-                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
-                    stroke.key
-                );
+        settingsfile::testing::with_scratch_config("wx_advertised", |_| {
+            for (label, what) in SHORTCUTS {
+                for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                    // Two views, because `set_view` deliberately answers `Ignored`
+                    // for the view you are already looking at -- pressing `2` on
+                    // the hourly page redraws nothing, on purpose. So no single
+                    // state can answer all six digits, and the union of these two
+                    // answers every one.
+                    let answered = [ActiveView::Dashboard, ActiveView::HourlyDetail]
+                        .into_iter()
+                        .any(|view| {
+                            let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
+                            app.active_view = view;
+                            app.scroll_hourly(40.0);
+                            // Off the first place, so `Up` has somewhere to go
+                            // back to -- stepping past either end is refused, and
+                            // correctly.
+                            app.step_location(1);
+                            app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                        });
+                    assert!(
+                        answered,
+                        "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                        stroke.key
+                    );
+                }
             }
-        }
+        });
     }
 
     /// **The shortcut list reaches the window, and nothing acts behind it.**
     #[test]
     fn the_shortcut_list_reaches_the_window() {
-        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
-        assert!(
-            !drawn(&app).contains("F1 or ? closes this"),
-            "the list is up before anybody asked for it"
-        );
+        settingsfile::testing::with_scratch_config("wx_card", |_| {
+            let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
+            assert!(
+                !drawn(&app).contains("F1 or ? closes this"),
+                "the list is up before anybody asked for it"
+            );
 
-        app.handle_event(&press(Key::F1));
-        let shown = drawn(&app);
-        for (keys, what) in SHORTCUTS {
-            assert!(shown.contains(keys), "{keys:?} never reached the window");
-            assert!(shown.contains(what), "{what:?} never reached the window");
-        }
+            app.handle_event(&press(Key::F1));
+            let shown = drawn(&app);
+            for (keys, what) in SHORTCUTS {
+                assert!(shown.contains(keys), "{keys:?} never reached the window");
+                assert!(shown.contains(what), "{what:?} never reached the window");
+            }
 
-        // `U` behind the card must not change the units of a reading the
-        // reader cannot see.
-        let units = app.settings.temp_unit;
-        app.handle_event(&press(Key::U));
-        assert_eq!(
-            app.settings.temp_unit, units,
-            "U changed the units through the card"
-        );
+            // `U` behind the card must not change the units of a reading the
+            // reader cannot see.
+            let units = app.settings.temp_unit;
+            app.handle_event(&press(Key::U));
+            assert_eq!(
+                app.settings.temp_unit, units,
+                "U changed the units through the card"
+            );
 
-        app.handle_event(&press(Key::Escape));
-        assert!(
-            !drawn(&app).contains("F1 or ? closes this"),
-            "Escape did not close it"
-        );
+            app.handle_event(&press(Key::Escape));
+            assert!(
+                !drawn(&app).contains("F1 or ? closes this"),
+                "Escape did not close it"
+            );
 
-        app.handle_event(&press(Key::U));
-        assert_ne!(
-            app.settings.temp_unit, units,
-            "control: U does nothing even with the card down"
-        );
+            app.handle_event(&press(Key::U));
+            assert_ne!(
+                app.settings.temp_unit, units,
+                "control: U does nothing even with the card down"
+            );
+        });
     }
 
     #[test]
@@ -3041,20 +3354,22 @@ mod tests {
 
     #[test]
     fn the_unit_keys_change_the_units_they_are_named_for() {
-        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
-        let before = app.settings.clone();
-        app.handle_event(&press(Key::U));
-        assert_ne!(app.settings.temp_unit, before.temp_unit);
-        assert_eq!(
-            app.settings.wind_unit, before.wind_unit,
-            "the temperature key should not touch the wind unit"
-        );
-        app.handle_event(&press(Key::W));
-        assert_ne!(app.settings.wind_unit, before.wind_unit);
-        app.handle_event(&press(Key::P));
-        assert_ne!(app.settings.pressure_unit, before.pressure_unit);
-        app.handle_event(&press(Key::T));
-        assert_ne!(app.settings.time_format, before.time_format);
+        settingsfile::testing::with_scratch_config("wx_unit_keys", |_| {
+            let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
+            let before = app.settings.clone();
+            app.handle_event(&press(Key::U));
+            assert_ne!(app.settings.temp_unit, before.temp_unit);
+            assert_eq!(
+                app.settings.wind_unit, before.wind_unit,
+                "the temperature key should not touch the wind unit"
+            );
+            app.handle_event(&press(Key::W));
+            assert_ne!(app.settings.wind_unit, before.wind_unit);
+            app.handle_event(&press(Key::P));
+            assert_ne!(app.settings.pressure_unit, before.pressure_unit);
+            app.handle_event(&press(Key::T));
+            assert_ne!(app.settings.time_format, before.time_format);
+        });
     }
 
     #[test]
@@ -4384,5 +4699,266 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // The pointer, and what is shown when nothing was fetched
+    //
+    // `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`.
+    // ------------------------------------------------------------------
+
+    use guitk::probe::{self, Probe};
+
+    impl Probe for WeatherApp {
+        type Target = Target;
+        type Outcome = EventResult;
+        const SIZE: (f32, f32) = (900.0, 800.0);
+
+        /// Drawn at the app's own size, which these tests leave at `SIZE`.
+        fn draw(&self, _size: (f32, f32)) -> Frame<Target> {
+            self.frame()
+        }
+
+        fn click_at(
+            &mut self,
+            x: f32,
+            y: f32,
+            button: MouseButton,
+            _size: (f32, f32),
+        ) -> EventResult {
+            self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }))
+        }
+
+        fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> EventResult {
+            self.handle_event(&Event::Key(key.clone()))
+        }
+
+        fn scroll_at(&mut self, x: f32, y: f32, dy: f32, _size: (f32, f32)) -> Option<EventResult> {
+            Some(self.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })))
+        }
+    }
+
+    fn mouse(x: f32, y: f32, kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    /// With nothing fetched -- which is always, today -- F1 raised a card that
+    /// was never drawn and that swallowed every key until it was closed.
+    #[test]
+    fn with_nothing_fetched_the_shortcut_card_is_drawn_and_a_press_closes_it() {
+        let mut app = WeatherApp::new(900.0, 800.0);
+        assert!(app.current.is_none());
+        app.handle_event(&press(Key::F1));
+        let shown = drawn(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} is not on the card");
+            assert!(shown.contains(what), "{what:?} is not on the card");
+        }
+        // The card is the whole window while it is up; a press on it anywhere
+        // puts it away.
+        assert_eq!(probe::click(&mut app, Target::HelpCard), EventResult::Consumed);
+        assert!(!app.show_help);
+        // And keys reach the app again.
+        assert_eq!(app.handle_event(&press(Key::Num2)), EventResult::Consumed);
+    }
+
+    /// The settings are not a reading, so they are shown with nothing fetched
+    /// -- and a press on a row changes it.
+    #[test]
+    fn with_nothing_fetched_the_settings_can_be_seen_and_changed() {
+        settingsfile::testing::with_scratch_config("wx_settings_view", |_| {
+            let mut app = WeatherApp::new(900.0, 800.0);
+            assert_eq!(
+                probe::click(&mut app, Target::Tab(ActiveView::SettingsView)),
+                EventResult::Consumed
+            );
+            let shown = drawn(&app);
+            assert!(shown.contains("Temperature Unit"), "{shown}");
+            assert!(shown.contains("Celsius"));
+            assert!(
+                !shown.contains(CANNOT_FETCH_LINES[0]),
+                "the settings are hidden behind the cannot-fetch notice"
+            );
+            probe::click(&mut app, Target::Setting(Setting::Temperature));
+            assert_eq!(app.settings.temp_unit, TempUnit::Fahrenheit);
+            assert!(drawn(&app).contains("Fahrenheit"));
+            probe::click(&mut app, Target::Setting(Setting::Wind));
+            assert_eq!(app.settings.wind_unit, WindSpeedUnit::Mph);
+            probe::click(&mut app, Target::Setting(Setting::Pressure));
+            assert_eq!(app.settings.pressure_unit, PressureUnit::InHg);
+            probe::click(&mut app, Target::Setting(Setting::Time));
+            assert_eq!(app.settings.time_format, TimeFormat::H12);
+            // The other views still say nothing was fetched.
+            probe::click(&mut app, Target::Tab(ActiveView::Dashboard));
+            assert!(drawn(&app).contains(CANNOT_FETCH_LINES[0]));
+        });
+    }
+
+    /// The interval was shown as "30 min" with no way to change it and
+    /// nothing to refresh.
+    #[test]
+    fn the_update_interval_is_not_offered_while_nothing_refreshes() {
+        let mut app = WeatherApp::new(900.0, 800.0);
+        app.active_view = ActiveView::SettingsView;
+        assert!(!drawn(&app).contains("Update Interval"));
+    }
+
+    #[test]
+    fn the_units_are_kept_between_sessions() {
+        settingsfile::testing::with_scratch_config("wx_units_kept", |_| {
+            let mut app = WeatherApp::new(900.0, 800.0);
+            app.handle_event(&press(Key::U));
+            app.handle_event(&press(Key::W));
+            app.handle_event(&press(Key::W));
+            app.handle_event(&press(Key::T));
+            assert_eq!(app.settings_error, None);
+            let mut next = WeatherApp::new(900.0, 800.0);
+            next.load_units(&settingsfile::load(CONFIG_NAME));
+            assert_eq!(next.settings.temp_unit, TempUnit::Fahrenheit);
+            assert_eq!(next.settings.wind_unit, WindSpeedUnit::Ms);
+            assert_eq!(next.settings.pressure_unit, PressureUnit::Hpa);
+            assert_eq!(next.settings.time_format, TimeFormat::H12);
+        });
+    }
+
+    #[test]
+    fn a_unit_word_nobody_knows_leaves_that_unit_at_its_default() {
+        let doc = yamldoc::Document::parse("units:\n  temperature: kelvin\n  wind: knots\n");
+        let mut app = WeatherApp::new(900.0, 800.0);
+        app.load_units(&doc);
+        assert_eq!(app.settings.temp_unit, TempUnit::Celsius);
+        assert_eq!(app.settings.wind_unit, WindSpeedUnit::Knots);
+    }
+
+    #[test]
+    fn every_tab_is_a_button() {
+        let mut app = WeatherApp::new(900.0, 800.0);
+        for view in [
+            ActiveView::HourlyDetail,
+            ActiveView::DailyDetail,
+            ActiveView::Alerts,
+            ActiveView::Locations,
+            ActiveView::SettingsView,
+            ActiveView::Dashboard,
+        ] {
+            assert_eq!(
+                probe::click(&mut app, Target::Tab(view)),
+                EventResult::Consumed
+            );
+            assert_eq!(app.active_view, view);
+        }
+        assert_eq!(
+            probe::click(&mut app, Target::Tab(ActiveView::Dashboard)),
+            EventResult::Ignored,
+            "the view already shown"
+        );
+    }
+
+    #[test]
+    fn a_place_is_chosen_by_pressing_it() {
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
+        app.active_view = ActiveView::Locations;
+        assert_eq!(
+            probe::click(&mut app, Target::Location(2)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.active_location_idx, 2);
+        assert!(oswindow::app::App::title(&app).contains(&app.locations[2].name));
+        assert_eq!(
+            probe::click(&mut app, Target::Location(2)),
+            EventResult::Ignored,
+            "the place already shown"
+        );
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_hourly_strip_either_way() {
+        let mut app = WeatherApp::with_sample_weather(900.0, 800.0);
+        assert_eq!(
+            probe::scroll_at_point(&mut app, Target::HourlyStrip, -1.0),
+            EventResult::Consumed
+        );
+        let scrolled = app.hourly_scroll_offset;
+        assert!(scrolled > 0.0, "a notch moved nothing");
+        let (x, y) = probe::rect_of(&app, Target::HourlyStrip).unwrap().centre();
+        app.handle_event(&mouse(x, y, MouseEventKind::Scroll { dx: 1.0, dy: 0.0 }));
+        assert!(
+            app.hourly_scroll_offset > scrolled,
+            "the sideways wheel moved nothing"
+        );
+        // And over something else, the wheel does not move the strip.
+        let (tx, ty) = probe::rect_of(&app, Target::Tab(ActiveView::Alerts))
+            .unwrap()
+            .centre();
+        assert_eq!(
+            app.handle_event(&mouse(tx, ty, MouseEventKind::Scroll { dx: 0.0, dy: -1.0 })),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn the_pointer_lights_the_tab_it_is_over() {
+        let mut app = WeatherApp::new(900.0, 800.0);
+        let (x, y) = probe::rect_of(&app, Target::Tab(ActiveView::Alerts))
+            .unwrap()
+            .centre();
+        assert_eq!(
+            app.handle_event(&mouse(x, y, MouseEventKind::Move)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.hover, Some(Target::Tab(ActiveView::Alerts)));
+        assert_eq!(
+            app.handle_event(&mouse(x, y, MouseEventKind::Move)),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            app.handle_event(&mouse(x, y, MouseEventKind::Leave)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.hover, None);
+    }
+
+    /// **Every control drawn is the one a press on it reaches**, and between
+    /// them the states draw every kind there is.
+    #[test]
+    fn every_control_drawn_is_the_one_a_press_on_it_reaches() {
+        let mut settings = WeatherApp::new(900.0, 800.0);
+        settings.active_view = ActiveView::SettingsView;
+        let dashboard = WeatherApp::with_sample_weather(900.0, 800.0);
+        let mut places = WeatherApp::with_sample_weather(900.0, 800.0);
+        places.active_view = ActiveView::Locations;
+        let mut kinds = std::collections::BTreeSet::new();
+        for (what, app) in [
+            ("the settings", settings),
+            ("the dashboard", dashboard),
+            ("the places", places),
+        ] {
+            let frame = app.frame();
+            for (target, rect) in frame.hits() {
+                kinds.insert(probe::variant_name(*target));
+                let (x, y) = rect.centre();
+                assert_eq!(
+                    frame.hit_test(x, y),
+                    Some(*target),
+                    "{target:?} in {what} is covered by something else"
+                );
+            }
+        }
+        let mut help = WeatherApp::new(900.0, 800.0);
+        help.handle_event(&press(Key::F1));
+        for (target, _) in help.frame().hits() {
+            kinds.insert(probe::variant_name(*target));
+        }
+        for kind in ["Tab", "Setting", "Location", "HourlyStrip", "HelpCard"] {
+            assert!(kinds.contains(kind), "no state draws a {kind}: {kinds:?}");
+        }
     }
 }

@@ -1838,8 +1838,10 @@ word; text inside them that says "lane C" is history.
   be added at last), `logviewer` (2026-09-25 — every control, and a log:
   it reads files, follows them, and exports the file's own bytes),
   `regextester` (2026-09-25 — every control, a multi-line test input, and a
-  library that loads and saves).
-  **Next:** weather, rssreader, habits — then the rest. (`reminders` was
+  library that loads and saves), `weather` (2026-09-25 — every control; the
+  shortcut card and the settings work with nothing fetched, and the units are
+  kept).
+  **Next:** rssreader, habits, slides — then the rest. (`reminders` was
   examined 2026-09-18: keyboard-driven by design, its two gaps fixed.)
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;

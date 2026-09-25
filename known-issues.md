@@ -166493,3 +166493,38 @@ Fax (scanned documents) and JPEG (photographs) are the ones in real use.
 `tif_getimage.c`'s `YCbCr` routines; `tif_fax3.c`; JPEG through this crate's
 JPEG decoder with the file's `JPEGTables`; then the rare codecs. Fixtures from
 the same libtiff oracle.
+
+### [E] Document applications closed over unsaved work, and the hex editor and the JSON viewer could not save at all -- 2026-09-25
+**Status:** FIXED for the text editor, the markdown editor and the hex editor (lane E, 2026-09-25); OPEN for the JSON viewer, which edits and still cannot save -- lane E's next.
+
+**In short:** closing the window of an editor threw away every unsaved change
+without a word -- the window library closed a window on any close request,
+whatever the application answered, until lane F added `Response::KeepOpen`
+(`requests/e-f-let-an-application-decline-a-close-so-it-can-ask-about-unsaved-work.md`).
+Worse, two of the editors could not save at all: the hex editor's toolbar drew
+a Save button (and New, Open, Undo, Redo, Find and GoTo) that answered nothing,
+and no key saved; the JSON viewer keeps a "modified" mark and has no save. So
+every edit either program made was lost when its window closed.
+
+**What changed.** The markdown editor answers `KeepOpen` while its Save / Don't
+save / Cancel question is up (it was drawn into a window already gone). The
+text editor asks at all -- closing a modified tab had been refused with a
+message offering Ctrl+Shift+W to discard, a key nothing bound. The hex editor
+saves (Ctrl+S, Ctrl+Shift+S, the toolbar), atomically through `safeio`, and
+**refuses to save a file it read only in part** over the file itself -- it reads
+the first 16 MiB of a larger file, and writing those back would cut the file
+short; Save As writes them to a new file instead. Its toolbar and tabs answer
+the pointer, and closing a tab or the window over unsaved work asks, with
+Save as file for a document that has none. Its documents now keep the real
+path they came from, not the lossy display string, so a file whose name is not
+valid UTF-8 is saved to itself rather than to some other name.
+
+**Where.** `apps/editor/src/{main,input}.rs` (`CloseScope`, `answer_close`,
+`close_prompt_key`), `apps/markdowneditor/src/main.rs` (`GEvent::CloseRequested`),
+`apps/hexeditor/src/main.rs` (`save_active`, `save_to_own_file`, `picked`,
+`TOOLBAR_BUTTONS`, `tab_rects`, `request_quit`). Mutation tables: `apps/editor/mutate.py`
+(new), `apps/markdowneditor/mutate.py`, `apps/hexeditor/mutate.py` (new).
+
+**Still open: `apps/jsonviewer`.** It sets `dirty` on every edit and has no
+save; the fix is the hex editor's -- a save path through `safeio`, Save As
+through the picker, and the close question.

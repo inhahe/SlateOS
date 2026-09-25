@@ -3669,7 +3669,7 @@ mod loop_tests {
         assert_eq!(
             drawn.len(),
             3,
-            "the initial frame, one for the keystroke and one for the question,              not one per event: {drawn:?}"
+            "the initial frame, one for the keystroke and one for the question -- not one per event: {drawn:?}"
         );
         assert!(
             drawn.iter().all(|(w, count)| *w == window && *count > 0),

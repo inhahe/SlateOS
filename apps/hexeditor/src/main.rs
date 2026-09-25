@@ -41,6 +41,7 @@ use guitk::wheel;
 #[allow(unused_imports)]
 use guitk::widget::{Widget, WidgetId, WidgetTree};
 use oswindow::app::{self, App, Response};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -542,8 +543,16 @@ pub struct HighlightPattern {
 pub struct HexDocument {
     /// The raw file data.
     pub data: Vec<u8>,
-    /// File path (if loaded from / saved to disk).
-    pub file_path: Option<String>,
+    /// The file this document was read from or last saved to.
+    ///
+    /// A path, not the string a path displays as: that string had been
+    /// through a lossy conversion, so a file whose name was not valid UTF-8
+    /// would have been saved to some other name.
+    pub path: Option<PathBuf>,
+    /// The file's whole length, when only its first [`MAX_OPEN_BYTES`] were
+    /// read. Such a document is never saved over its file -- that would cut
+    /// off everything past what was read.
+    pub whole_len: Option<usize>,
     /// Whether the buffer has been modified since last save.
     pub modified: bool,
     /// Undo stack (most recent at the end).
@@ -575,7 +584,8 @@ impl HexDocument {
     pub fn new() -> Self {
         Self {
             data: Vec::new(),
-            file_path: None,
+            path: None,
+            whole_len: None,
             modified: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -599,23 +609,23 @@ impl HexDocument {
         }
     }
 
-    /// Create a document from a file path and data.
-    pub fn from_file(path: &str, data: Vec<u8>) -> Self {
+    /// Create a document from a file path and data; `whole_len` when `data`
+    /// is only the first part of the file.
+    pub fn from_file(path: &Path, data: Vec<u8>, whole_len: Option<usize>) -> Self {
         Self {
             data,
-            file_path: Some(path.to_string()),
+            path: Some(path.to_path_buf()),
+            whole_len,
             ..Self::new()
         }
     }
 
     /// Display name for tabs.
     pub fn display_name(&self) -> String {
-        if let Some(ref path) = self.file_path {
-            // Extract filename from path.
-            path.rsplit('/').next().unwrap_or(path.as_str()).to_string()
-        } else {
-            String::from("Untitled")
-        }
+        self.path.as_deref().and_then(Path::file_name).map_or_else(
+            || String::from("Untitled"),
+            |n| Path::new(n).display().to_string(),
+        )
     }
 
     /// Total number of lines in the hex dump.
@@ -1500,6 +1510,74 @@ pub struct HexEditor {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// What the file picker is choosing a path for, since one picker serves
+    /// opening and saving.
+    pub picker_purpose: PickerPurpose,
+    /// "Unsaved changes -- save them?", while it is being asked.
+    pub close_prompt: Option<CloseScope>,
+    /// Set when the window may close. The next response is `Exit`.
+    pub quit: bool,
+}
+
+/// What the file picker is choosing a path for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerPurpose {
+    /// A file to read into a new tab.
+    Open,
+    /// Where to write the active document.
+    SaveAs,
+    /// Where to write tab `usize`, which then closes.
+    SaveThenClose(usize),
+    /// Where to write tab `usize`, and then carry on closing the window.
+    SaveThenQuit(usize),
+}
+
+/// What a pending close would close.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseScope {
+    /// One document's tab.
+    Tab(usize),
+    /// The whole window.
+    Window,
+}
+
+/// The answers to "this has unsaved changes".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseChoice {
+    /// Save, then close if the save worked.
+    Save,
+    /// Close without saving.
+    Discard,
+    /// Do not close.
+    Cancel,
+}
+
+/// The toolbar's buttons: label, what it does, and where it is drawn -- the
+/// one list the drawing and the click both read, so a button is clicked where
+/// it is drawn. They were drawn and nothing answered them.
+const TOOLBAR_BUTTONS: [(&str, ToolbarAction, f32); 7] = [
+    ("New", ToolbarAction::New, 8.0),
+    ("Open", ToolbarAction::Open, 58.0),
+    ("Save", ToolbarAction::Save, 114.0),
+    ("Undo", ToolbarAction::Undo, 174.0),
+    ("Redo", ToolbarAction::Redo, 224.0),
+    ("Find", ToolbarAction::Find, 284.0),
+    ("GoTo", ToolbarAction::GoTo, 334.0),
+];
+
+/// A toolbar button's width and height, and its top.
+const TOOLBAR_BUTTON: (f32, f32, f32) = (44.0, 28.0, 4.0);
+
+/// What a toolbar button does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolbarAction {
+    New,
+    Open,
+    Save,
+    Undo,
+    Redo,
+    Find,
+    GoTo,
 }
 
 /// Every key this program answers, and what it does.
@@ -1524,6 +1602,12 @@ const SHORTCUTS: &[(&str, &str)] = &[
         "Delete the byte at / before the cursor",
     ),
     ("Ctrl+O", "Open a file"),
+    ("Ctrl+S", "Save"),
+    ("Ctrl+Shift+S", "Save as a new file"),
+    (
+        "Ctrl+W",
+        "Close the tab, asking first if it is not saved -- in the search bar, wrap round or not",
+    ),
     ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
     ("Ctrl+C / Ctrl+V", "Copy / paste the selection"),
     ("Ctrl+F", "Find"),
@@ -1558,6 +1642,9 @@ impl HexEditor {
             show_file_info: false,
             clipboard: Vec::new(),
             status_message: String::new(),
+            picker_purpose: PickerPurpose::Open,
+            close_prompt: None,
+            quit: false,
         }
     }
 
@@ -1653,8 +1740,8 @@ impl HexEditor {
     /// Open a new tab with the given document.
     pub fn open_tab(&mut self, doc: HexDocument) {
         // Track in recent files.
-        if let Some(ref path) = doc.file_path {
-            self.add_recent_file(path);
+        if let Some(path) = doc.path.as_deref() {
+            self.add_recent_file(&path.display().to_string());
         }
         self.documents.push(doc);
         self.active_tab = self.documents.len().saturating_sub(1);
@@ -1839,11 +1926,41 @@ impl HexEditor {
             return EventResult::Consumed;
         }
 
+        // The close question has the keyboard while it is up: a byte typed
+        // into the document under it would be a change nobody was asked about.
+        if self.close_prompt.is_some() {
+            let typed = key.typed().next().map(|c| c.to_ascii_lowercase());
+            let choice = match (key.key, typed) {
+                (Key::Enter, _) | (Key::S, _) | (_, Some('s')) => Some(CloseChoice::Save),
+                (Key::D, _) | (_, Some('d')) => Some(CloseChoice::Discard),
+                (Key::Escape, _) => Some(CloseChoice::Cancel),
+                _ => None,
+            };
+            if let Some(choice) = choice {
+                self.answer_close(choice);
+            }
+            return EventResult::Consumed;
+        }
+
         // Global shortcuts (regardless of focus).
         if key.modifiers.ctrl {
             match key.key {
                 Key::O => {
                     self.open_file_dialog();
+                    return EventResult::Consumed;
+                }
+                Key::S => {
+                    if key.modifiers.shift {
+                        self.save_active_as();
+                    } else {
+                        self.save_active();
+                    }
+                    return EventResult::Consumed;
+                }
+                // Not while the search bar has the keyboard, where Ctrl+W
+                // says whether the search wraps round.
+                Key::W if self.focused_panel != FocusedPanel::SearchBar => {
+                    self.request_close_tab(self.active_tab);
                     return EventResult::Consumed;
                 }
                 Key::Z => {
@@ -2496,7 +2613,330 @@ impl HexEditor {
     /// the convention `apps/fileassoc`, `apps/photomanager` and
     /// `apps/filesearch` all follow.
     pub fn open_file_dialog(&mut self) {
+        self.picker_purpose = PickerPurpose::Open;
         self.picker.open_to_read();
+    }
+
+    /// A new empty document in a tab of its own.
+    pub fn new_document(&mut self) {
+        self.documents.push(HexDocument::new());
+        self.active_tab = self.documents.len().saturating_sub(1);
+    }
+
+    /// Save the active document: to its file, or through the picker if it has
+    /// none.
+    ///
+    /// It could not be saved at all. The toolbar drew a Save button that
+    /// nothing answered and no key saved, so every edit this program made was
+    /// lost when its window closed.
+    pub fn save_active(&mut self) {
+        let idx = self.active_tab;
+        if self.documents.get(idx).is_some_and(|d| d.path.is_none()) {
+            self.ask_where_to_save(PickerPurpose::SaveAs);
+            return;
+        }
+        self.status_message = self.save_to_own_file(idx);
+    }
+
+    /// Save As: the picker, seeded with the document's name.
+    pub fn save_active_as(&mut self) {
+        self.ask_where_to_save(PickerPurpose::SaveAs);
+    }
+
+    /// Put up the picker to choose where to write.
+    fn ask_where_to_save(&mut self, purpose: PickerPurpose) {
+        let name = self.active_doc().display_name();
+        self.picker_purpose = purpose;
+        self.picker.open_to_write(&name);
+    }
+
+    /// Write tab `idx` over the file it came from. What to say about it.
+    ///
+    /// Refused for a document holding only part of its file: writing it back
+    /// would cut the file off where the reading stopped.
+    fn save_to_own_file(&mut self, idx: usize) -> String {
+        let Some(doc) = self.documents.get_mut(idx) else {
+            return String::from("Nothing to save");
+        };
+        let Some(path) = doc.path.clone() else {
+            return String::from("It has no file yet");
+        };
+        if let Some(whole) = doc.whole_len {
+            return format!(
+                "Not saved: only the first {} of its {whole} bytes were read, and writing them over {} would cut it short -- save as a new file instead",
+                doc.data.len(),
+                path.display()
+            );
+        }
+        match safeio::write_atomically(&path, &doc.data) {
+            Ok(()) => {
+                doc.modified = false;
+                format!("Saved {} bytes to {}", doc.data.len(), path.display())
+            }
+            Err(err) => format!("Could not save {}: {err}", path.display()),
+        }
+    }
+
+    /// Write tab `idx` to `path`, which becomes its file. What to say.
+    fn save_to(&mut self, idx: usize, path: &Path) -> Result<String, String> {
+        let Some(doc) = self.documents.get_mut(idx) else {
+            return Err(String::from("Nothing to save"));
+        };
+        match safeio::write_atomically(path, &doc.data) {
+            Ok(()) => {
+                doc.path = Some(path.to_path_buf());
+                // All of it now lives in the new file: nothing left to cut.
+                doc.whole_len = None;
+                doc.modified = false;
+                Ok(format!(
+                    "Saved {} bytes to {}",
+                    doc.data.len(),
+                    path.display()
+                ))
+            }
+            Err(err) => Err(format!("Could not save to {}: {err}", path.display())),
+        }
+    }
+
+    /// The picker chose `path`: do what it was put up for.
+    fn picked(&mut self, path: &Path) {
+        match self.picker_purpose {
+            PickerPurpose::Open => self.last_open = Some(self.open_path(path)),
+            PickerPurpose::SaveAs => {
+                let idx = self.active_tab;
+                self.status_message = match self.save_to(idx, path) {
+                    Ok(said) | Err(said) => said,
+                };
+            }
+            PickerPurpose::SaveThenClose(idx) => {
+                self.status_message = match self.save_to(idx, path) {
+                    Ok(said) => {
+                        self.close_tab(idx);
+                        said
+                    }
+                    Err(said) => said,
+                };
+            }
+            PickerPurpose::SaveThenQuit(idx) => match self.save_to(idx, path) {
+                Ok(_) => self.continue_quitting(),
+                Err(said) => self.status_message = said,
+            },
+        }
+    }
+
+    /// Close tab `idx`, or ask first if it has unsaved changes.
+    pub fn request_close_tab(&mut self, idx: usize) {
+        match self.documents.get(idx).map(|d| d.modified) {
+            Some(true) => {
+                self.active_tab = idx;
+                self.close_prompt = Some(CloseScope::Tab(idx));
+            }
+            Some(false) => self.close_tab(idx),
+            None => {}
+        }
+    }
+
+    /// The window has been asked to close. Whether it may go now; if not,
+    /// the question is up.
+    pub fn request_quit(&mut self) -> bool {
+        if self.documents.iter().any(|d| d.modified) {
+            self.close_prompt = Some(CloseScope::Window);
+            false
+        } else {
+            self.quit = true;
+            true
+        }
+    }
+
+    /// Answer the pending close.
+    pub fn answer_close(&mut self, choice: CloseChoice) {
+        let Some(scope) = self.close_prompt.take() else {
+            return;
+        };
+        match (scope, choice) {
+            (_, CloseChoice::Cancel) => {}
+            (CloseScope::Tab(idx), CloseChoice::Discard) => self.close_tab(idx),
+            (CloseScope::Tab(idx), CloseChoice::Save) => {
+                self.active_tab = idx;
+                if self
+                    .documents
+                    .get(idx)
+                    .is_some_and(|d| d.path.is_none() || d.whole_len.is_some())
+                {
+                    self.ask_where_to_save(PickerPurpose::SaveThenClose(idx));
+                } else {
+                    let said = self.save_to_own_file(idx);
+                    if self.documents.get(idx).is_some_and(|d| !d.modified) {
+                        self.close_tab(idx);
+                    }
+                    self.status_message = said;
+                }
+            }
+            (CloseScope::Window, CloseChoice::Discard) => self.quit = true,
+            (CloseScope::Window, CloseChoice::Save) => self.continue_quitting(),
+        }
+    }
+
+    /// Carry on closing the window: save what can go back to its own file,
+    /// ask where to put the first thing that cannot, and quit once nothing is
+    /// left unsaved. Stops at the first failure.
+    fn continue_quitting(&mut self) {
+        for idx in 0..self.documents.len() {
+            let own_file = self
+                .documents
+                .get(idx)
+                .is_some_and(|d| d.modified && d.path.is_some() && d.whole_len.is_none());
+            if own_file {
+                let said = self.save_to_own_file(idx);
+                if self.documents.get(idx).is_some_and(|d| d.modified) {
+                    self.status_message = format!("{said} -- so the window stays open");
+                    return;
+                }
+            }
+        }
+        match self.documents.iter().position(|d| d.modified) {
+            Some(idx) => {
+                self.active_tab = idx;
+                self.ask_where_to_save(PickerPurpose::SaveThenQuit(idx));
+            }
+            None => self.quit = true,
+        }
+    }
+
+    /// Where the close question's card is.
+    fn close_prompt_card(&self) -> (f32, f32, f32, f32) {
+        let dw = 440.0_f32.min(self.window_width - 40.0).max(0.0);
+        let dh = 150.0_f32;
+        (
+            (self.window_width - dw) / 2.0,
+            (self.window_height - dh) / 2.0,
+            dw,
+            dh,
+        )
+    }
+
+    /// The close question's three answers, where they are drawn and clicked.
+    pub fn close_prompt_buttons(&self) -> [(CloseChoice, f32, f32, f32, f32); 3] {
+        let (x, y, w, h) = self.close_prompt_card();
+        let bw = (w - 48.0) / 3.0;
+        let by = y + h - 44.0;
+        [
+            (CloseChoice::Save, x + 12.0, by, bw, 30.0),
+            (CloseChoice::Discard, x + 24.0 + bw, by, bw, 30.0),
+            (CloseChoice::Cancel, x + 36.0 + bw * 2.0, by, bw, 30.0),
+        ]
+    }
+
+    /// Where each tab is drawn: the one walk the drawing and the click share.
+    fn tab_rects(&self) -> Vec<(usize, f32, f32)> {
+        let mut x = 4.0_f32;
+        self.documents
+            .iter()
+            .enumerate()
+            .map(|(i, doc)| {
+                let w = tab_label_width(&tab_label(doc));
+                let at = (i, x, w);
+                x += w + 2.0;
+                at
+            })
+            .collect()
+    }
+
+    /// Do what a toolbar button does.
+    pub fn toolbar(&mut self, action: ToolbarAction) {
+        match action {
+            ToolbarAction::New => self.new_document(),
+            ToolbarAction::Open => self.open_file_dialog(),
+            ToolbarAction::Save => self.save_active(),
+            ToolbarAction::Undo => {
+                self.active_doc_mut().undo();
+            }
+            ToolbarAction::Redo => {
+                self.active_doc_mut().redo();
+            }
+            ToolbarAction::Find => {
+                self.search.visible = true;
+                self.focused_panel = FocusedPanel::SearchBar;
+            }
+            ToolbarAction::GoTo => {
+                self.goto_visible = true;
+                self.focused_panel = FocusedPanel::GoToDialog;
+            }
+        }
+    }
+
+    /// The close question, over everything the editor draws.
+    fn render_close_prompt(&self, tree: &mut RenderTree, scope: CloseScope) {
+        tree.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: self.window_width,
+            height: self.window_height,
+            color: Color::rgba(0x11, 0x11, 0x1B, 0xB0),
+            corner_radii: CornerRadii::ZERO,
+        });
+        let (dx, dy, dw, dh) = self.close_prompt_card();
+        self.palette
+            .push_surface(tree, dx, dy, dw, dh, 8.0, Surface::Panel);
+        let body = match scope {
+            CloseScope::Tab(idx) => format!(
+                "{} has changes that are not saved.",
+                self.documents
+                    .get(idx)
+                    .map_or_else(|| String::from("This document"), HexDocument::display_name)
+            ),
+            CloseScope::Window => {
+                let names: Vec<String> = self
+                    .documents
+                    .iter()
+                    .filter(|d| d.modified)
+                    .map(HexDocument::display_name)
+                    .collect();
+                format!("Not saved: {}.", names.join(", "))
+            }
+        };
+        for (i, (text, size, color)) in [
+            ("Unsaved changes".to_string(), 13.0, self.palette.yellow),
+            (body, UI_FONT_SIZE, self.palette.text),
+            (
+                "Save them before closing?".to_string(),
+                UI_FONT_SIZE,
+                self.palette.subtext0,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            tree.push(RenderCommand::Text {
+                x: dx + 12.0,
+                y: dy + 12.0 + i as f32 * 22.0,
+                text,
+                color,
+                font_size: size,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(dw - 24.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        for (choice, bx, by, bw, bh) in self.close_prompt_buttons() {
+            let label = match choice {
+                CloseChoice::Save => "S — Save",
+                CloseChoice::Discard => "D — Don't save",
+                CloseChoice::Cancel => "Esc — Cancel",
+            };
+            self.palette
+                .push_surface(tree, bx, by, bw, bh, 4.0, Surface::Card);
+            tree.push(RenderCommand::Text {
+                x: bx + 8.0,
+                y: by + 8.0,
+                text: label.to_string(),
+                color: self.palette.text,
+                font_size: UI_FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(bw - 16.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
     }
 
     /// Read `path` into a document. Returns what to say about it.
@@ -2523,7 +2963,7 @@ impl HexEditor {
             bytes
         };
         let len = data.len();
-        let doc = HexDocument::from_file(&shown, data);
+        let doc = HexDocument::from_file(path, data, truncated.then_some(whole));
 
         // Replace an untouched empty document rather than opening a second
         // tab beside it: the editor starts with one, and leaving it there
@@ -2561,7 +3001,7 @@ impl HexEditor {
             .handle(event, self.window_width, self.window_height)
         {
             Picked::Chose(path) => {
-                self.last_open = Some(self.open_path(&path));
+                self.picked(&path);
                 return EventResult::Consumed;
             }
             // Cancelled grouped with Handled: this caller keeps no dialog
@@ -2590,6 +3030,43 @@ impl HexEditor {
 
     /// Apply a mouse event.
     fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        // The close question is modal: its buttons, and nothing else.
+        if self.close_prompt.is_some() {
+            if matches!(ev.kind, MouseEventKind::Press(MouseButton::Left))
+                && let Some((choice, ..)) =
+                    self.close_prompt_buttons()
+                        .into_iter()
+                        .find(|(_, x, y, w, h)| {
+                            ev.x >= *x && ev.x < x + w && ev.y >= *y && ev.y < y + h
+                        })
+            {
+                self.answer_close(choice);
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
+        if matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
+            let (bw, bh, by) = TOOLBAR_BUTTON;
+            if let Some(&(_, action, _)) = TOOLBAR_BUTTONS
+                .iter()
+                .find(|(_, _, x)| ev.x >= *x && ev.x < x + bw && ev.y >= by && ev.y < by + bh)
+            {
+                self.toolbar(action);
+                return EventResult::Consumed;
+            }
+            let strip = TOOLBAR_HEIGHT..TOOLBAR_HEIGHT + TAB_BAR_HEIGHT;
+            if strip.contains(&ev.y) {
+                if let Some(&(i, ..)) = self
+                    .tab_rects()
+                    .iter()
+                    .find(|(_, x, w)| ev.x >= *x && ev.x < x + w)
+                {
+                    self.active_tab = i;
+                    return EventResult::Consumed;
+                }
+                return EventResult::Ignored;
+            }
+        }
         match ev.kind {
             MouseEventKind::Press(MouseButton::Left) => {
                 // The compositor's mouse event carries no modifier state, so
@@ -2649,6 +3126,9 @@ impl HexEditor {
         if self.goto_visible {
             self.render_goto_dialog(&mut tree);
         }
+        if let Some(scope) = self.close_prompt {
+            self.render_close_prompt(&mut tree, scope);
+        }
 
         tree
     }
@@ -2667,19 +3147,10 @@ impl HexEditor {
         );
 
         // Toolbar buttons.
-        let buttons = [
-            ("New", 8.0),
-            ("Open", 58.0),
-            ("Save", 114.0),
-            ("Undo", 174.0),
-            ("Redo", 224.0),
-            ("Find", 284.0),
-            ("GoTo", 334.0),
-        ];
-
-        for &(label, x) in &buttons {
+        let (bw, bh, by) = TOOLBAR_BUTTON;
+        for &(label, _, x) in &TOOLBAR_BUTTONS {
             self.palette
-                .push_surface(tree, x, 4.0, 44.0, 28.0, 4.0, Surface::Card);
+                .push_surface(tree, x, by, bw, bh, 4.0, Surface::Card);
             tree.push(RenderCommand::Text {
                 x: x + 6.0,
                 y: 10.0,
@@ -3511,11 +3982,7 @@ impl App for HexEditor {
 
     fn title(&self) -> String {
         let doc = self.active_doc();
-        let name = doc
-            .file_path
-            .as_deref()
-            .and_then(|p| p.rsplit('/').next())
-            .unwrap_or("untitled");
+        let name = doc.display_name();
         if doc.modified {
             // The marker goes in the title because a minimised window is a
             // taskbar entry and nothing else, and this program edits bytes in
@@ -3547,10 +4014,21 @@ impl App for HexEditor {
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
+        // It closed at once whatever it held -- and it could not have saved
+        // what it held anyway. `KeepOpen` while it asks: any other answer to
+        // a close request closes the window, question and all.
         if matches!(event, Event::CloseRequested) {
+            return if self.request_quit() {
+                Response::Exit
+            } else {
+                Response::KeepOpen
+            };
+        }
+        let result = self.handle_event(event);
+        if self.quit {
             return Response::Exit;
         }
-        match self.handle_event(event) {
+        match result {
             EventResult::Consumed => Response::Redraw,
             EventResult::Ignored => Response::Idle,
         }
@@ -3654,7 +4132,7 @@ mod tests {
         let mut editor = HexEditor::new(1200.0, 800.0);
         let sample: Vec<u8> = (0..=255).collect();
         let mut doc = HexDocument::from_data(sample);
-        doc.file_path = Some(String::from("/demo/sample.bin"));
+        doc.path = Some(PathBuf::from("/demo/sample.bin"));
         if let Some(first) = editor.documents.first_mut() {
             *first = doc;
         }
@@ -3985,10 +4463,243 @@ mod tests {
         let doc = editor.documents.get(editor.active_tab).expect("a document");
         assert_eq!(doc.data, vec![0xDE, 0xAD, 0xBE, 0xEF], "{said}");
         assert_eq!(
-            doc.file_path.as_deref(),
-            Some(scratch.0.display().to_string().as_str()),
+            doc.path.as_deref(),
+            Some(scratch.0.as_path()),
             "the document does not name the file it came from"
         );
+    }
+
+    // -- saving, which it could not do at all --
+
+    fn ctrl_key(key: Key, shift: bool) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                shift,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        }
+    }
+
+    fn typed_key(c: char) -> KeyEvent {
+        KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: c.to_string(),
+        }
+    }
+
+    #[test]
+    fn an_edited_file_is_saved_back_to_itself() {
+        let scratch = Scratch::with("save", &[0x00, 0x11, 0x22]);
+        let mut editor = HexEditor::new(1200.0, 800.0);
+        editor.open_path(&scratch.0);
+        editor.handle_key(&key_press(Key::A, Modifiers::NONE));
+        editor.handle_key(&key_press(Key::B, Modifiers::NONE));
+        assert!(
+            editor.active_doc().modified,
+            "control: the typing edited it"
+        );
+        editor.handle_key(&ctrl_key(Key::S, false));
+        assert_eq!(std::fs::read(&scratch.0).unwrap(), vec![0xAB, 0x11, 0x22]);
+        assert!(!editor.active_doc().modified);
+        assert!(
+            editor.status_message.starts_with("Saved 3 bytes"),
+            "{}",
+            editor.status_message
+        );
+    }
+
+    #[test]
+    fn a_file_read_only_in_part_is_never_saved_over() {
+        // Writing the first sixteen mebibytes back would cut the file there.
+        let scratch = Scratch::with("partial", &[1, 2, 3, 4]);
+        let mut editor = HexEditor::new(1200.0, 800.0);
+        editor.documents[0] = HexDocument::from_file(&scratch.0, vec![1, 2], Some(4));
+        editor.active_doc_mut().modified = true;
+        editor.handle_key(&ctrl_key(Key::S, false));
+        assert_eq!(
+            std::fs::read(&scratch.0).unwrap(),
+            vec![1, 2, 3, 4],
+            "it was cut short"
+        );
+        assert!(
+            editor.status_message.starts_with("Not saved"),
+            "{}",
+            editor.status_message
+        );
+
+        // Save As to a new file is how those bytes are kept.
+        let out = Scratch::with("partial-out", &[]);
+        editor.handle_key(&ctrl_key(Key::S, true));
+        assert!(editor.picker.is_saving());
+        editor.picked(&out.0);
+        assert_eq!(std::fs::read(&out.0).unwrap(), vec![1, 2]);
+        assert_eq!(
+            editor.active_doc().whole_len,
+            None,
+            "the new file holds all of it"
+        );
+    }
+
+    #[test]
+    fn an_untitled_document_is_saved_where_the_picker_says() {
+        let out = Scratch::with("untitled-out", &[]);
+        let mut editor = make_test_editor(vec![9, 8, 7]);
+        editor.handle_key(&ctrl_key(Key::S, false));
+        assert!(editor.picker.is_saving(), "no file yet, so it asks where");
+        editor.picked(&out.0);
+        assert_eq!(std::fs::read(&out.0).unwrap(), vec![9, 8, 7]);
+        assert_eq!(editor.active_doc().path.as_deref(), Some(out.0.as_path()));
+        assert!(!editor.active_doc().modified);
+    }
+
+    // -- the chrome, which was drawn and answered nothing --
+
+    fn click(editor: &mut HexEditor, x: f32, y: f32) -> EventResult {
+        editor.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }))
+    }
+
+    fn click_button(editor: &mut HexEditor, action: ToolbarAction) {
+        let (bw, bh, by) = TOOLBAR_BUTTON;
+        let &(_, _, x) = TOOLBAR_BUTTONS
+            .iter()
+            .find(|b| b.1 == action)
+            .expect("a button");
+        assert_eq!(
+            click(editor, x + bw / 2.0, by + bh / 2.0),
+            EventResult::Consumed
+        );
+    }
+
+    #[test]
+    fn every_toolbar_button_does_what_it_says() {
+        let mut editor = make_test_editor(vec![0; 16]);
+        click_button(&mut editor, ToolbarAction::New);
+        assert_eq!(editor.documents.len(), 2);
+        assert_eq!(editor.active_tab, 1);
+
+        click_button(&mut editor, ToolbarAction::Open);
+        assert!(editor.picker.is_open() && !editor.picker.is_saving());
+        editor.picker.close();
+
+        click_button(&mut editor, ToolbarAction::Save);
+        assert!(
+            editor.picker.is_saving(),
+            "an untitled document is saved as"
+        );
+        editor.picker.close();
+
+        editor.active_tab = 0;
+        editor.handle_key(&key_press(Key::F, Modifiers::NONE));
+        editor.handle_key(&key_press(Key::F, Modifiers::NONE));
+        assert_eq!(editor.active_doc().data[0], 0xFF);
+        // A nibble is an edit of its own, so one Undo takes back the second F.
+        click_button(&mut editor, ToolbarAction::Undo);
+        assert_eq!(editor.active_doc().data[0], 0xF0);
+        click_button(&mut editor, ToolbarAction::Redo);
+        assert_eq!(editor.active_doc().data[0], 0xFF);
+
+        click_button(&mut editor, ToolbarAction::Find);
+        assert!(editor.search.visible);
+        click_button(&mut editor, ToolbarAction::GoTo);
+        assert!(editor.goto_visible);
+    }
+
+    #[test]
+    fn a_tab_is_chosen_by_clicking_it() {
+        let mut editor = make_test_editor(vec![1]);
+        editor.new_document();
+        assert_eq!(editor.active_tab, 1);
+        let (_, x, w) = editor.tab_rects()[0];
+        assert_eq!(
+            click(
+                &mut editor,
+                x + w / 2.0,
+                TOOLBAR_HEIGHT + TAB_BAR_HEIGHT / 2.0
+            ),
+            EventResult::Consumed
+        );
+        assert_eq!(editor.active_tab, 0);
+    }
+
+    // -- closing over unsaved work --
+
+    #[test]
+    fn closing_the_window_over_unsaved_work_asks_and_each_answer_is_kept() {
+        let mut editor = make_test_editor(vec![0; 4]);
+        assert!(matches!(
+            editor.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+
+        let mut editor = make_test_editor(vec![0; 4]);
+        editor.active_doc_mut().modified = true;
+        assert!(matches!(
+            editor.on_event(&Event::CloseRequested),
+            Response::KeepOpen
+        ));
+        assert_eq!(editor.close_prompt, Some(CloseScope::Window));
+        editor.handle_key(&key_press(Key::F, Modifiers::NONE));
+        assert_eq!(
+            editor.active_doc().data[0],
+            0,
+            "a key typed under the question edited the file"
+        );
+        editor.handle_key(&key_press(Key::Escape, Modifiers::NONE));
+        assert_eq!(editor.close_prompt, None);
+
+        editor.on_event(&Event::CloseRequested);
+        let (_, x, y, w, h) = editor.close_prompt_buttons()[1];
+        let _ = click(&mut editor, x + w / 2.0, y + h / 2.0);
+        assert!(editor.quit, "Don't save, clicked, lets it go");
+    }
+
+    #[test]
+    fn saving_on_close_writes_the_files_and_asks_where_for_the_untitled() {
+        let titled = Scratch::with("close-titled", &[0x10]);
+        let out = Scratch::with("close-out", &[]);
+        let mut editor = HexEditor::new(1200.0, 800.0);
+        editor.open_path(&titled.0);
+        editor.handle_key(&key_press(Key::Num2, Modifiers::NONE));
+        editor.handle_key(&key_press(Key::Num2, Modifiers::NONE));
+        editor.new_document();
+        editor.active_doc_mut().data = vec![7];
+        editor.active_doc_mut().modified = true;
+
+        editor.on_event(&Event::CloseRequested);
+        assert!(!matches!(
+            editor.on_event(&Event::Key(key_press(Key::S, Modifiers::NONE))),
+            Response::Exit
+        ));
+        assert_eq!(std::fs::read(&titled.0).unwrap(), vec![0x22]);
+        assert!(
+            editor.picker.is_saving(),
+            "the untitled one needs somewhere to go"
+        );
+        editor.picked(&out.0);
+        assert!(editor.quit);
+        assert_eq!(std::fs::read(&out.0).unwrap(), vec![7]);
+    }
+
+    #[test]
+    fn ctrl_w_asks_before_closing_a_modified_tab() {
+        let mut editor = make_test_editor(vec![1]);
+        editor.new_document();
+        editor.active_doc_mut().modified = true;
+        editor.handle_key(&ctrl_key(Key::W, false));
+        assert_eq!(editor.documents.len(), 2, "closed unsaved work");
+        assert_eq!(editor.close_prompt, Some(CloseScope::Tab(1)));
+        editor.handle_key(&typed_key('d'));
+        assert_eq!(editor.documents.len(), 1);
     }
 
     /// A file that cannot be read says so rather than doing nothing.
@@ -4303,14 +5014,15 @@ mod tests {
 
     #[test]
     fn test_document_from_file() {
-        let doc = HexDocument::from_file("/test/foo.bin", vec![0xAA, 0xBB]);
-        assert_eq!(doc.file_path, Some(String::from("/test/foo.bin")));
+        let doc = HexDocument::from_file(Path::new("/test/foo.bin"), vec![0xAA, 0xBB], None);
+        assert_eq!(doc.path.as_deref(), Some(Path::new("/test/foo.bin")));
+        assert_eq!(doc.display_name(), "foo.bin");
         assert_eq!(doc.data.len(), 2);
     }
 
     #[test]
     fn test_document_display_name_with_path() {
-        let doc = HexDocument::from_file("/some/path/file.bin", vec![]);
+        let doc = HexDocument::from_file(Path::new("/some/path/file.bin"), vec![], None);
         assert_eq!(doc.display_name(), "file.bin");
     }
 
@@ -4743,7 +5455,7 @@ mod tests {
 
     #[test]
     fn a_tab_label_carries_its_modified_marker() {
-        let mut doc = HexDocument::from_file("/tmp/file.bin", vec![1, 2, 3]);
+        let mut doc = HexDocument::from_file(Path::new("/tmp/file.bin"), vec![1, 2, 3], None);
         assert_eq!(tab_label(&doc), "file.bin");
         doc.modified = true;
         assert_eq!(tab_label(&doc), "file.bin *");

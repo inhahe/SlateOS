@@ -8519,7 +8519,11 @@ mod tests {
         );
 
         unsafe { freeaddrinfo(res) };
-        assert_eq!(live_allocations::count(), before, "freeaddrinfo leaked a node");
+        assert_eq!(
+            live_allocations::count(),
+            before,
+            "freeaddrinfo leaked a node"
+        );
     }
 
     // -- socketpair argument validation --

@@ -4352,11 +4352,18 @@ mod tests {
 
     #[test]
     fn a_table_that_is_not_opened_from_settings_writes_nothing() {
-        settingsfile::testing::with_scratch_config("pinball-quiet", |dir| {
+        settingsfile::testing::with_scratch_config("pinball-quiet", |_| {
             let mut app = test_app();
             app.score = 900;
             app.update_high_scores();
-            assert!(!dir.join("pinball").exists());
+            // Where a kept table would be -- the settings directory is not the
+            // scratch root, so this asks the function that decides.
+            let path = scores_path().expect("a scratch settings directory");
+            assert!(!path.exists(), "{} was written", path.display());
+            assert!(
+                !path.parent().is_some_and(Path::exists),
+                "nor its directory made"
+            );
         });
     }
 

@@ -72,7 +72,12 @@ upstream's `src/dlmalloc.rs` at the version above.
 
 The file is also exempt from this workspace's lints (the `#![allow]` at its top
 says which and why): it is upstream's code, and restyling it would make every
-future comparison with upstream a diff of noise.
+future comparison with upstream a diff of noise. `dead_code` is not in that
+list: the ten items this libc never calls — upstream's configuration API,
+upstream API with no caller here, and two helpers of the merging that change 2
+removed — each carry their own `#[allow(dead_code)]` with the reason, because a
+blanket allow cannot tell a kept-for-fidelity function from a forgotten one
+(the pre-push gate refuses one).
 
 ## Updating
 

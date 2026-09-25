@@ -17,8 +17,7 @@
     clippy::panic,
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
-    unsafe_op_in_unsafe_fn,
-    dead_code
+    unsafe_op_in_unsafe_fn
 )]
 
 // This is a version of dlmalloc.c ported to Rust. You can find the original
@@ -94,6 +93,10 @@ const MMAP_THRESHOLD: usize = 256 * 1024;
 // a non-`malloc_alignment`-aligned residual `topsize`, which corrupts the
 // flag bits packed into the top chunk's size encoding. Kept equal to the
 // runtime `malloc_alignment()` so chunk math stays sound.
+// LOCAL CHANGE (SlateOS): upstream's configuration API. This libc keeps
+// upstream's defaults and never calls it; upstream's own tests do. Kept so
+// the file stays comparable with upstream (VENDORED.md).
+#[allow(dead_code)]
 const MIN_GRANULARITY: usize = 2 * mem::size_of::<usize>();
 
 #[repr(C)]
@@ -171,10 +174,18 @@ impl<A> Dlmalloc<A> {
         }
     }
 
+    // LOCAL CHANGE (SlateOS): upstream's configuration API. This libc keeps
+    // upstream's defaults and never calls it; upstream's own tests do. Kept so
+    // the file stays comparable with upstream (VENDORED.md).
+    #[allow(dead_code)]
     pub fn allocator(&self) -> &A {
         &self.system_allocator
     }
 
+    // LOCAL CHANGE (SlateOS): upstream's configuration API. This libc keeps
+    // upstream's defaults and never calls it; upstream's own tests do. Kept so
+    // the file stays comparable with upstream (VENDORED.md).
+    #[allow(dead_code)]
     pub fn allocator_mut(&mut self) -> &mut A {
         &mut self.system_allocator
     }
@@ -187,6 +198,10 @@ impl<A> Dlmalloc<A> {
     /// from the new value (or to `usize::MAX` when disabling). This ensures a
     /// disabled -> enabled transition takes effect on the next free rather
     /// than after `usize::MAX` decrements.
+    // LOCAL CHANGE (SlateOS): upstream's configuration API. This libc keeps
+    // upstream's defaults and never calls it; upstream's own tests do. Kept so
+    // the file stays comparable with upstream (VENDORED.md).
+    #[allow(dead_code)]
     pub const fn set_max_release_check_rate(&mut self, rate: usize) {
         self.max_release_check_rate = rate;
         self.release_checks = self.release_check_target();
@@ -209,6 +224,10 @@ impl<A> Dlmalloc<A> {
     ///
     /// For best results call this before the first allocation; existing
     /// segments retain their original alignment.
+    // LOCAL CHANGE (SlateOS): upstream's configuration API. This libc keeps
+    // upstream's defaults and never calls it; upstream's own tests do. Kept so
+    // the file stays comparable with upstream (VENDORED.md).
+    #[allow(dead_code)]
     pub const fn set_granularity(&mut self, granularity: usize) -> bool {
         if !granularity.is_power_of_two() || granularity < MIN_GRANULARITY {
             return false;
@@ -861,6 +880,10 @@ impl<A: Allocator> Dlmalloc<A> {
         }
     }
 
+    // LOCAL CHANGE (SlateOS): used only by the region merging that local change 2
+    // removed (VENDORED.md); kept so the diff against upstream shows the removal
+    // and nothing else.
+    #[allow(dead_code)]
     unsafe fn prepend_alloc(&mut self, newbase: *mut u8, oldbase: *mut u8, size: usize) -> *mut u8 {
         let p = self.align_as_chunk(newbase);
         let mut oldfirst = self.align_as_chunk(oldbase);
@@ -1312,6 +1335,11 @@ impl<A: Allocator> Dlmalloc<A> {
         }
     }
 
+    // LOCAL CHANGE (SlateOS): upstream API with no caller in this libc (`trim`
+    // would back a `malloc_trim`, which known-issues
+    // TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA lists as missing). Kept so the
+    // file stays comparable with upstream (VENDORED.md).
+    #[allow(dead_code)]
     pub unsafe fn validate_size(&mut self, ptr: *mut u8, size: usize) {
         let p = Chunk::from_mem(ptr);
         let psize = Chunk::size(p);
@@ -1823,10 +1851,20 @@ impl<A: Allocator> Dlmalloc<A> {
         0
     }
 
+    // LOCAL CHANGE (SlateOS): upstream API with no caller in this libc (`trim`
+    // would back a `malloc_trim`, which known-issues
+    // TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA lists as missing). Kept so the
+    // file stays comparable with upstream (VENDORED.md).
+    #[allow(dead_code)]
     pub unsafe fn trim(&mut self, pad: usize) -> bool {
         self.sys_trim(pad)
     }
 
+    // LOCAL CHANGE (SlateOS): upstream API with no caller in this libc (`trim`
+    // would back a `malloc_trim`, which known-issues
+    // TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA lists as missing). Kept so the
+    // file stays comparable with upstream (VENDORED.md).
+    #[allow(dead_code)]
     pub unsafe fn destroy(mut self) -> usize {
         let mut freed = 0;
         let mut sp: *mut Segment = &mut self.seg;
@@ -1969,6 +2007,10 @@ impl Segment {
         system_allocator.can_release_part((*seg).flags >> 1)
     }
 
+    // LOCAL CHANGE (SlateOS): used only by the region merging that local change 2
+    // removed (VENDORED.md); kept so the diff against upstream shows the removal
+    // and nothing else.
+    #[allow(dead_code)]
     unsafe fn sys_flags(seg: *mut Segment) -> u32 {
         (*seg).flags >> 1
     }

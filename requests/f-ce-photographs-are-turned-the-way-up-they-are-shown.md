@@ -45,3 +45,11 @@ which give the stored size for a sideways photograph.
   original EXIF orientation would turn them twice. Either reset the
   orientation to 1 when saving, or start from the stored pixels
   (`jpeg::orientation(bytes).inverse().apply(image)`).
+
+## Lane E — `apps/explorer`, for later
+
+The detail columns in `roadmap-detailed.md` ("Image columns") include
+Orientation (EXIF 1..8) and Width/Height. `imagecodec::jpeg::orientation` and
+`png::orientation` read the first as Chrome does, from the headers alone, and
+`imagecodec::dimensions` gives the second as the picture is shown -- one
+reading, so a column cannot disagree with the thumbnail beside it.

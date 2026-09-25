@@ -987,6 +987,43 @@ mod tests {
         assert!(rms(&err) < 2.0 / 32_768.0, "{}", rms(&err));
     }
 
+    /// Dither keeps a signal quieter than one step of the target: without
+    /// it, a steady 0.3 of a least significant bit rounds to silence every
+    /// time; with it, it survives as the average.
+    #[test]
+    fn dither_keeps_what_is_quieter_than_a_step() {
+        let level = 0.3 / 32_768.0;
+        let audio = Audio {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![level; 20_000],
+        };
+        let back = decode(&encode(&audio, SampleFormat::I16, 9).unwrap()).unwrap();
+        let mean = back.samples.iter().sum::<f32>() / back.samples.len() as f32;
+        assert!(
+            (mean - level).abs() < 0.1 / 32_768.0,
+            "{} steps",
+            mean * 32_768.0
+        );
+    }
+
+    /// A data chunk of odd length is padded to even, and the sizes say so.
+    #[test]
+    fn an_odd_chunk_is_padded() {
+        let audio = Audio {
+            sample_rate: 8000,
+            channels: 1,
+            samples: vec![0.0; 3],
+        };
+        let bytes = encode(&audio, SampleFormat::U8, 1).unwrap();
+        assert_eq!(bytes.len(), 44 + 3 + 1);
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            44 + 3 + 1 - 8
+        );
+        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 3);
+    }
+
     #[test]
     fn a_file_too_long_for_a_wav_is_refused() {
         // Not built -- a fake length is enough to reach the check.

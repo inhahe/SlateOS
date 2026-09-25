@@ -472,6 +472,7 @@ pub mod filekind;
 pub mod fnmatch;
 pub mod fsattr;
 pub mod getopt;
+pub mod grouplist;
 pub mod hardlink;
 pub mod human;
 pub mod overwrite;

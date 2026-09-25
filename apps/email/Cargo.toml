@@ -9,5 +9,15 @@ appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 
+# Mail kept in files, read with a cap and written -- drafts, flags, a saved
+# message -- without ever truncating what was there before.
+safeio = { path = "../safeio" }
+settingsfile = { path = "../../gui/settingsfile" }
+# The message body: a text field of many lines.
+textarea = { path = "../textarea" }
+
+[dev-dependencies]
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+
 [lints]
 workspace = true

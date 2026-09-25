@@ -42,6 +42,9 @@ use appearance::Surface;
 use std::collections::BTreeMap;
 use std::fmt;
 
+mod decode;
+mod store;
+
 // ─── Email Address Parsing ───────────────────────────────────────────
 
 /// Parsed email address with optional display name
@@ -169,22 +172,9 @@ impl ContentType {
             ("text".to_string(), "plain".to_string())
         };
 
-        let mut params = BTreeMap::new();
-        if let Some(param_str) = parts.next() {
-            for param in param_str.split(';') {
-                let param = param.trim();
-                if let Some(eq) = param.find('=') {
-                    let key = param.get(..eq).unwrap_or("").trim().to_lowercase();
-                    let val = param
-                        .get(eq.saturating_add(1)..)
-                        .unwrap_or("")
-                        .trim()
-                        .trim_matches('"')
-                        .to_string();
-                    params.insert(key, val);
-                }
-            }
-        }
+        // Split at semicolons outside quotes, with RFC 2231's `name*=` forms
+        // put together: a split at every `;` cut `name="a;b.pdf"` in two.
+        let params = parts.next().map(decode::params).unwrap_or_default();
 
         Self {
             media_type,
@@ -238,26 +228,11 @@ impl ContentDisposition {
     pub fn parse(value: &str) -> Self {
         let mut parts = value.splitn(2, ';');
         let disposition = parts.next().unwrap_or("inline").trim().to_lowercase();
-        let mut filename = None;
-
-        if let Some(param_str) = parts.next() {
-            for param in param_str.split(';') {
-                let param = param.trim();
-                if let Some(eq) = param.find('=') {
-                    let key = param.get(..eq).unwrap_or("").trim().to_lowercase();
-                    let val = param
-                        .get(eq.saturating_add(1)..)
-                        .unwrap_or("")
-                        .trim()
-                        .trim_matches('"')
-                        .to_string();
-                    if key == "filename" {
-                        filename = Some(val);
-                    }
-                }
-            }
-        }
-
+        // `filename*=UTF-8''...` is how a name that is not ASCII arrives.
+        let filename = parts
+            .next()
+            .map(decode::params)
+            .and_then(|mut p| p.remove("filename"));
         Self {
             disposition,
             filename,
@@ -383,14 +358,19 @@ impl MimePart {
             })
     }
 
-    /// Get body as text (if text/* content type)
+    /// Get body as text (if text/* content type), in the charset the part
+    /// names. It read only UTF-8, so a Latin-1 message had no text at all.
     #[must_use]
     pub fn body_text(&self) -> Option<String> {
-        if self.content_type.is_text() {
-            String::from_utf8(self.body.clone()).ok()
-        } else {
-            None
-        }
+        self.text().map(|d| d.text)
+    }
+
+    /// The part's text and what was assumed to read it, for a text part.
+    #[must_use]
+    pub fn text(&self) -> Option<decode::Decoded> {
+        self.content_type
+            .is_text()
+            .then(|| decode::decode_charset(&self.body, self.content_type.charset()))
     }
 }
 
@@ -432,12 +412,20 @@ impl EmailMessage {
 
         let headers = EmailHeaders::parse(header_text);
 
-        let from = headers.get("From").and_then(EmailAddress::parse);
+        let from = headers
+            .get("From")
+            .and_then(EmailAddress::parse)
+            .map(decoded_name);
         let to = parse_address_list(headers.get("To").unwrap_or(""));
         let cc = parse_address_list(headers.get("Cc").unwrap_or(""));
         let bcc = parse_address_list(headers.get("Bcc").unwrap_or(""));
-        let reply_to = headers.get("Reply-To").and_then(EmailAddress::parse);
-        let subject = headers.get("Subject").unwrap_or("(no subject)").to_string();
+        let reply_to = headers
+            .get("Reply-To")
+            .and_then(EmailAddress::parse)
+            .map(decoded_name);
+        let subject = headers
+            .get("Subject")
+            .map_or_else(|| String::from("(no subject)"), decode::header_words);
         let date = headers.get("Date").map(String::from);
         let message_id = headers
             .get("Message-ID")
@@ -475,6 +463,47 @@ impl EmailMessage {
         })
     }
 
+    /// A message from its bytes as stored.
+    ///
+    /// UTF-8 when they are; otherwise one byte one character (ISO 8859-1),
+    /// which is exact both ways, and each part that was not transfer-encoded
+    /// gets its bytes back from it unchanged, to be read in the charset it
+    /// names. `parse` takes text, and a message with a Latin-1 body in 8-bit
+    /// was not text it could be given.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::parse`].
+    pub fn parse_bytes(raw: &[u8]) -> Result<Self, String> {
+        if let Ok(text) = std::str::from_utf8(raw) {
+            return Self::parse(text);
+        }
+        let text: String = raw.iter().map(|&b| char::from(b)).collect();
+        let mut message = Self::parse(&text)?;
+        restore_bytes(&mut message.body);
+        Ok(message)
+    }
+
+    /// What a reader shows as the message: the plain text part, or the HTML
+    /// one read as text, or a line saying there is neither -- with a note
+    /// when the text had to be read in a charset other than the one named.
+    #[must_use]
+    pub fn readable_body(&self) -> decode::Decoded {
+        if let Some(plain) = find_part(&self.body, "plain").and_then(MimePart::text) {
+            return plain;
+        }
+        if let Some(html) = find_part(&self.body, "html").and_then(MimePart::text) {
+            return decode::Decoded {
+                text: decode::html_to_text(&html.text),
+                note: html.note,
+            };
+        }
+        decode::Decoded {
+            text: String::from("(This message has no text to show.)"),
+            note: None,
+        }
+    }
+
     /// Get plain text body
     #[must_use]
     pub fn plain_text(&self) -> Option<String> {
@@ -496,14 +525,40 @@ impl EmailMessage {
     }
 }
 
-/// Parse a comma-separated list of email addresses
+/// Parse a comma-separated list of email addresses.
+///
+/// Split at the commas outside quotes and angle brackets: `"Doe, Jane"
+/// <jane@example.com>` is one address, which a split at every comma made two
+/// broken ones. Display names are decoded (`=?UTF-8?B?...?=`).
 fn parse_address_list(s: &str) -> Vec<EmailAddress> {
-    if s.trim().is_empty() {
-        return Vec::new();
+    let mut out = Vec::new();
+    let mut piece = String::new();
+    let mut quoted = false;
+    let mut angle = false;
+    for c in s.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            '<' if !quoted => angle = true,
+            '>' if !quoted => angle = false,
+            ',' if !quoted && !angle => {
+                out.extend(EmailAddress::parse(piece.trim()).map(decoded_name));
+                piece.clear();
+                continue;
+            }
+            _ => {}
+        }
+        piece.push(c);
     }
-    s.split(',')
-        .filter_map(|addr| EmailAddress::parse(addr.trim()))
-        .collect()
+    out.extend(EmailAddress::parse(piece.trim()).map(decoded_name));
+    out
+}
+
+/// An address with its display name's encoded words decoded.
+fn decoded_name(address: EmailAddress) -> EmailAddress {
+    EmailAddress {
+        display_name: address.display_name.map(|d| decode::header_words(&d)),
+        ..address
+    }
 }
 
 /// Parse MIME body from text given content type
@@ -597,6 +652,41 @@ fn parse_single_part(text: &str) -> MimePart {
     parse_mime_body(&ct, body_text, &headers)
 }
 
+/// The bytes of every part not transfer-encoded, recovered from a message
+/// read one byte one character.
+fn restore_bytes(part: &mut MimePart) {
+    let encoding = part
+        .headers
+        .get("Content-Transfer-Encoding")
+        .unwrap_or("7bit")
+        .trim()
+        .to_ascii_lowercase();
+    if part.parts.is_empty()
+        && encoding != "base64"
+        && encoding != "quoted-printable"
+        && let Ok(text) = std::str::from_utf8(&part.body)
+    {
+        part.body = text
+            .chars()
+            .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
+            .collect();
+    }
+    for sub in &mut part.parts {
+        restore_bytes(sub);
+    }
+}
+
+/// The first text part of `subtype` that is not an attachment.
+fn find_part<'a>(part: &'a MimePart, subtype: &str) -> Option<&'a MimePart> {
+    if part.parts.is_empty() {
+        return (part.content_type.media_type == "text"
+            && part.content_type.subtype == subtype
+            && !part.is_attachment())
+        .then_some(part);
+    }
+    part.parts.iter().find_map(|p| find_part(p, subtype))
+}
+
 /// Find text part with given subtype in MIME tree
 fn find_text_part(part: &MimePart, subtype: &str) -> Option<String> {
     if part.content_type.media_type == "text" && part.content_type.subtype == subtype {
@@ -610,9 +700,16 @@ fn find_text_part(part: &MimePart, subtype: &str) -> Option<String> {
     None
 }
 
-/// Collect all attachment parts
+/// Collect all attachment parts: those marked so, and any other part with a
+/// name that is not the message's text -- older mailers name an attachment
+/// only in its `Content-Type`, and give it no disposition at all.
 fn collect_attachments<'a>(part: &'a MimePart, result: &mut Vec<&'a MimePart>) {
-    if part.is_attachment() {
+    let named_file = part.parts.is_empty()
+        && part.filename().is_some()
+        && !(part.content_type.media_type == "text"
+            && matches!(part.content_type.subtype.as_str(), "plain" | "html")
+            && part.disposition.is_none());
+    if part.is_attachment() || named_file {
         result.push(part);
     }
     for sub in &part.parts {
@@ -620,73 +717,15 @@ fn collect_attachments<'a>(part: &'a MimePart, result: &mut Vec<&'a MimePart>) {
     }
 }
 
-/// Decode base64
+/// Decode base64 (`decode::base64`, which encoded words use too).
 fn base64_decode(input: &str) -> Vec<u8> {
-    let mut result = Vec::new();
-    let mut buf: u32 = 0;
-    let mut bits: u32 = 0;
-
-    for &b in input.as_bytes() {
-        let val = match b {
-            b'A'..=b'Z' => Some(u32::from(b.wrapping_sub(b'A'))),
-            b'a'..=b'z' => Some(u32::from(b.wrapping_sub(b'a').wrapping_add(26))),
-            b'0'..=b'9' => Some(u32::from(b.wrapping_sub(b'0').wrapping_add(52))),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        };
-        if let Some(v) = val {
-            buf = (buf << 6) | v;
-            bits = bits.saturating_add(6);
-            if bits >= 8 {
-                bits = bits.saturating_sub(8);
-                result.push((buf >> bits) as u8);
-                buf &= (1u32 << bits).wrapping_sub(1);
-            }
-        }
-    }
-
-    result
+    decode::base64(input)
 }
 
-/// Encode to base64.
-//
-// All `CHARS[idx]` index ops below are masked with `& 0x3F`, so idx is
-// always in 0..64 and CHARS is exactly 64 bytes. Clippy can't see this
-// arithmetic invariant, so we suppress `indexing_slicing` for the whole
-// function rather than reaching for `.get(...).unwrap_or(b'A')` four
-// times — that would *hide* an out-of-range bug if the mask ever
-// changed.
-#[allow(clippy::indexing_slicing)]
+/// Encode to base64 (`decode::base64_encode`, which the attachments and the
+/// encoded words of a message written here use too).
 fn base64_encode(data: &[u8]) -> String {
-    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-    let mut i = 0;
-
-    while i < data.len() {
-        let b0 = u32::from(data.get(i).copied().unwrap_or(0));
-        let b1 = u32::from(data.get(i.saturating_add(1)).copied().unwrap_or(0));
-        let b2 = u32::from(data.get(i.saturating_add(2)).copied().unwrap_or(0));
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-
-        result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
-        result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
-
-        if i.saturating_add(1) < data.len() {
-            result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-        if i.saturating_add(2) < data.len() {
-            result.push(CHARS[(triple & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-
-        i = i.saturating_add(3);
-    }
-
-    result
+    decode::base64_encode(data)
 }
 
 /// Decode quoted-printable
@@ -1294,6 +1333,10 @@ fn display_phrase(s: &str) -> String {
     };
     if cleaned.chars().all(is_atext) {
         cleaned
+    } else if !cleaned.is_ascii() {
+        // A phrase may be encoded words; it may not be raw UTF-8, which a
+        // reader that is not RFC 6532's would show as mojibake.
+        decode::header_word(&cleaned)
     } else {
         quoted_string(&cleaned)
     }
@@ -1514,6 +1557,17 @@ impl EmailDraft {
     /// than a formatting blemish.
     #[must_use]
     pub fn build_message(&self, from: &EmailAddress) -> BuiltMessage {
+        self.build_message_at(Some(from), None)
+    }
+
+    /// [`Self::build_message`], with the sender optional -- a draft may not
+    /// have one yet -- and a `Date:` header when `date` is given.
+    #[must_use]
+    pub fn build_message_at(
+        &self,
+        from: Option<&EmailAddress>,
+        date: Option<&str>,
+    ) -> BuiltMessage {
         let mut msg = String::new();
         let mut rejected: Vec<String> = Vec::new();
 
@@ -1538,7 +1592,12 @@ impl EmailDraft {
         let cc = accept(&self.cc, &mut rejected);
         let bcc = accept(&self.bcc, &mut rejected);
 
-        msg.push_str(&format!("From: {}\r\n", from.to_header()));
+        if let Some(from) = from {
+            msg.push_str(&format!("From: {}\r\n", from.to_header()));
+        }
+        if let Some(date) = date {
+            msg.push_str(&format!("Date: {}\r\n", header_text(date)));
+        }
         if !to.is_empty() {
             msg.push_str(&format!("To: {}\r\n", to.join(", ")));
         }
@@ -1548,7 +1607,10 @@ impl EmailDraft {
         if !bcc.is_empty() {
             msg.push_str(&format!("Bcc: {}\r\n", bcc.join(", ")));
         }
-        msg.push_str(&format!("Subject: {}\r\n", header_text(&self.subject)));
+        msg.push_str(&format!(
+            "Subject: {}\r\n",
+            decode::header_word(&header_text(&self.subject))
+        ));
         msg.push_str("MIME-Version: 1.0\r\n");
 
         // These come from the message being replied to, so they are the one
@@ -1599,7 +1661,7 @@ impl EmailDraft {
             msg.push_str(&format!("Content-Type: {ct}; charset=utf-8\r\n"));
             msg.push_str("Content-Transfer-Encoding: quoted-printable\r\n");
             msg.push_str("\r\n");
-            msg.push_str(&full_body);
+            msg.push_str(&decode::quoted_printable(&full_body));
         } else {
             // Multipart mixed. The boundary is derived from the body rather
             // than fixed, so a body that happens to quote this delimiter
@@ -1620,7 +1682,7 @@ impl EmailDraft {
             msg.push_str(&format!("Content-Type: {ct}; charset=utf-8\r\n"));
             msg.push_str("Content-Transfer-Encoding: quoted-printable\r\n");
             msg.push_str("\r\n");
-            msg.push_str(&full_body);
+            msg.push_str(&decode::quoted_printable(&full_body));
             msg.push_str("\r\n");
 
             // Attachments
@@ -1631,12 +1693,18 @@ impl EmailDraft {
                 } else {
                     "attachment"
                 };
-                let name = quoted_string(&att.filename);
+                // Control characters out first -- a name is a header value --
+                // then RFC 2231 for a name that is not ASCII.
+                let cleaned = header_text(&att.filename);
                 msg.push_str(&format!(
-                    "Content-Type: {}; name={name}\r\n",
+                    "Content-Type: {}; {}\r\n",
                     media_type_or_default(&att.mime_type),
+                    decode::param("name", &cleaned),
                 ));
-                msg.push_str(&format!("Content-Disposition: {disp}; filename={name}\r\n"));
+                msg.push_str(&format!(
+                    "Content-Disposition: {disp}; {}\r\n",
+                    decode::param("filename", &cleaned)
+                ));
                 msg.push_str("Content-Transfer-Encoding: base64\r\n");
                 if let Some(ref cid) = att.content_id {
                     let cid = angle_token(cid);
@@ -1646,7 +1714,7 @@ impl EmailDraft {
                 }
                 msg.push_str("\r\n");
                 // Wrap base64 at 76 chars per line
-                let encoded = base64_encode(&att.data);
+                let encoded = decode::base64_encode(&att.data);
                 let mut pos = 0;
                 while pos < encoded.len() {
                     let end = (pos.saturating_add(76)).min(encoded.len());
@@ -3562,6 +3630,148 @@ fn create_sample_messages(account_id: u32) -> Vec<MessageSummary> {
 )]
 mod tests {
     use super::*;
+
+    // -- Mail as it is stored --------------------------------------------------
+
+    /// A message whose body is Latin-1 in 8-bit reads in its own charset --
+    /// `parse` takes text, and these bytes were not UTF-8 it could be given.
+    #[test]
+    fn an_eight_bit_latin_1_message_reads_as_written() {
+        let mut raw = b"From: =?ISO-8859-1?Q?Ren=E9?= <rene@example.com>\r\n\
+            Subject: =?UTF-8?B?Q2Fmw6k=?= menu\r\n\
+            Content-Type: text/plain; charset=iso-8859-1\r\n\
+            Content-Transfer-Encoding: 8bit\r\n\r\n"
+            .to_vec();
+        raw.extend_from_slice(b"Cr\xe8me br\xfbl\xe9e\r\n");
+        let msg = EmailMessage::parse_bytes(&raw).unwrap();
+        assert_eq!(msg.subject, "Caf\u{e9} menu");
+        assert_eq!(
+            msg.from.as_ref().unwrap().display_name.as_deref(),
+            Some("Ren\u{e9}")
+        );
+        let body = msg.readable_body();
+        assert_eq!(body.text.trim_end(), "Cr\u{e8}me br\u{fb}l\u{e9}e");
+        assert_eq!(body.note, None);
+    }
+
+    /// Mixed within alternative within mixed: the plain text is the body, the
+    /// attachment's name arrives in RFC 2231 form and its bytes decode.
+    #[test]
+    fn nested_parts_give_the_text_and_every_attachment() {
+        let raw = "From: a@example.com\r\n\
+            Subject: report\r\n\
+            MIME-Version: 1.0\r\n\
+            Content-Type: multipart/mixed; boundary=\"outer\"\r\n\r\n\
+            --outer\r\n\
+            Content-Type: multipart/alternative; boundary=\"inner\"\r\n\r\n\
+            --inner\r\n\
+            Content-Type: text/plain; charset=utf-8\r\n\
+            Content-Transfer-Encoding: quoted-printable\r\n\r\n\
+            Totals attached =E2=80=94 see page 2.\r\n\
+            --inner\r\n\
+            Content-Type: text/html; charset=utf-8\r\n\r\n\
+            <p>Totals attached</p>\r\n\
+            --inner--\r\n\
+            --outer\r\n\
+            Content-Type: application/pdf\r\n\
+            Content-Disposition: attachment; filename*=UTF-8''%E2%82%AC%20totals.pdf\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\n\
+            JVBERi0xLjQK\r\n\
+            --outer\r\n\
+            Content-Type: image/png; name=\"chart.png\"\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\n\
+            iVBORw0K\r\n\
+            --outer--\r\n";
+        let msg = EmailMessage::parse(raw).unwrap();
+        assert_eq!(
+            msg.readable_body().text.trim_end(),
+            "Totals attached \u{2014} see page 2."
+        );
+        let attachments = msg.attachments();
+        let names: Vec<&str> = attachments.iter().filter_map(|a| a.filename()).collect();
+        assert_eq!(
+            names,
+            ["\u{20AC} totals.pdf", "chart.png"],
+            "a name only in Content-Type is an attachment too"
+        );
+        assert_eq!(attachments[0].body, b"%PDF-1.4\n");
+    }
+
+    /// A message with only HTML is read as text, not shown as markup and not
+    /// shown as nothing.
+    #[test]
+    fn an_html_only_message_is_read_as_text() {
+        let raw = "From: a@example.com\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
+            <html><body><p>Hi&nbsp;there</p><p>Two</p></body></html>";
+        let msg = EmailMessage::parse(raw).unwrap();
+        assert_eq!(msg.readable_body().text, "Hi\u{a0}there\n\nTwo");
+        let bare = EmailMessage::parse("From: a@example.com\r\nContent-Type: image/png\r\n\r\nxx")
+            .unwrap();
+        assert!(bare.readable_body().text.contains("no text to show"));
+    }
+
+    /// A message written here reads back as it was written: the body, its
+    /// `=` signs and its accents, the subject, the sender's name and the
+    /// attachment's name and bytes.
+    ///
+    /// The body was declared quoted-printable and written raw, so `x=41`
+    /// came back as `xA`, and a subject or a file name that was not ASCII
+    /// went into the headers as raw UTF-8.
+    #[test]
+    fn a_message_written_here_reads_back_as_written() {
+        let mut draft = EmailDraft::new(0);
+        draft.to = vec![String::from("bob@example.com")];
+        draft.subject = String::from("R\u{e9}sum\u{e9} for 3=3");
+        draft.body = String::from("Totals: x=41, caf\u{e9}\nsecond line  ");
+        draft.attachments.push(Attachment::new(
+            "\u{20AC} totals.pdf",
+            "application/pdf",
+            b"%PDF".to_vec(),
+        ));
+        let from = EmailAddress {
+            display_name: Some(String::from("Ren\u{e9} Dupont")),
+            local_part: String::from("rene"),
+            domain: String::from("example.com"),
+        };
+        let built = draft.build_message_at(Some(&from), Some("Fri, 25 Sep 2026 12:03:07 +0000"));
+        assert!(
+            built.text.is_ascii(),
+            "a header or a body line is not ASCII"
+        );
+        let back = EmailMessage::parse(&built.text).unwrap();
+        assert_eq!(back.subject, draft.subject);
+        assert_eq!(
+            back.from
+                .as_ref()
+                .and_then(|f| f.display_name.clone())
+                .as_deref(),
+            Some("Ren\u{e9} Dupont")
+        );
+        assert_eq!(
+            back.date.as_deref(),
+            Some("Fri, 25 Sep 2026 12:03:07 +0000")
+        );
+        assert_eq!(
+            back.readable_body().text,
+            draft.body,
+            "exactly, line end and all"
+        );
+        let attachments = back.attachments();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].filename(), Some("\u{20AC} totals.pdf"));
+        assert_eq!(attachments[0].body, b"%PDF");
+    }
+
+    /// A display name with a comma in quotes is one address, not two broken
+    /// ones.
+    #[test]
+    fn a_quoted_comma_does_not_split_an_address() {
+        let list = parse_address_list("\"Doe, Jane\" <jane@example.com>, bob@example.com");
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].display_name.as_deref(), Some("Doe, Jane"));
+        assert_eq!(list[0].address(), "jane@example.com");
+        assert_eq!(list[1].address(), "bob@example.com");
+    }
 
     /// A fresh client has no account and no mail.
     ///

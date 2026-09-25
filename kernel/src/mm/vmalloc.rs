@@ -59,9 +59,10 @@
 //! CPU using the stale entry would read and write the *previous* frame. So
 //! [`vfree`] (and a failed `vmalloc`'s rollback) shoot down the whole range
 //! on every CPU before a single frame goes back to the allocator. Like any
-//! TLB shootdown, that must not be done with interrupts disabled while
-//! other CPUs are online: the shootdown waits for every CPU to acknowledge
-//! an IPI.
+//! TLB shootdown, it waits for every other CPU to acknowledge, so it must not
+//! run while holding a lock another CPU may be spinning on with interrupts
+//! disabled (see `tlb::broadcast`; two CPUs shooting down at once no longer
+//! deadlock each other).
 //!
 //! ## Guard Pages
 //!
@@ -394,8 +395,9 @@ pub fn vmalloc(size: usize) -> KernelResult<*mut u8> {
 /// released earlier, a concurrent [`vmalloc`] could map the range again
 /// and this call would then unmap *its* pages.
 ///
-/// Must not be called from interrupt context, nor with interrupts disabled
-/// while other CPUs are online (the TLB shootdown waits for them).
+/// Must not be called from interrupt context, nor while holding a lock that
+/// another CPU may spin on with interrupts disabled: the TLB shootdown waits
+/// for every other CPU to acknowledge.
 ///
 /// # Errors
 ///
@@ -831,9 +833,10 @@ fn test_stale_translation_flushed() -> KernelResult<()> {
     let kernel = page_table::kernel_pml4_phys()?;
     // No task switch from the first touch to the check: a switch to a task
     // on other page tables reloads CR3 and would flush the stale entry this
-    // test exists to catch. Preemption rather than interrupts is disabled,
-    // because `vfree` performs a TLB shootdown, and a CPU waiting for one
-    // with interrupts off can deadlock against another CPU doing the same.
+    // test exists to catch. Preemption rather than interrupts is disabled:
+    // `vfree` performs a TLB shootdown, and the fewer places in the kernel
+    // that shoot down with interrupts off, the fewer ways another CPU can be
+    // left unable to acknowledge one.
     crate::sched::preempt_disable();
     let result = (|| -> KernelResult<()> {
         let first = vmalloc(FRAME_SIZE)?;
@@ -849,19 +852,30 @@ fn test_stale_translation_flushed() -> KernelResult<()> {
         unsafe { vfree(first)? };
 
         // Hold the old frame so the next allocation cannot be backed by it,
-        // and mark it through the direct map.
+        // and note what it holds now -- whatever freeing it left there (its
+        // old contents, or zero or poison if the allocator scrubs on free).
+        // Only read through the direct map, never written: the check is that
+        // nothing *else* writes to it.
         let mut held: [Option<PhysFrame>; 8] = [None; 8];
-        let mut holding_old = false;
+        let mut old_baseline = None;
         for slot in &mut held {
             let Ok(f) = frame::alloc_frame() else { break };
             *slot = Some(f);
             if f.addr() == old_phys {
-                holding_old = true;
                 // SAFETY: we own the frame again, and the direct map covers it.
-                unsafe { core::ptr::write_volatile((old_phys + hhdm) as *mut u8, 0x33) };
+                old_baseline =
+                    Some(unsafe { core::ptr::read_volatile((old_phys + hhdm) as *const u8) });
                 break;
             }
         }
+        // The value written through the reused range must differ from what
+        // the old frame already holds, or a write landing there would be
+        // invisible.
+        let marker: u8 = if old_baseline == Some(0x22) {
+            0x44
+        } else {
+            0x22
+        };
 
         let result = (|| -> KernelResult<()> {
             let second = vmalloc(FRAME_SIZE)?;
@@ -877,24 +891,26 @@ fn test_stale_translation_flushed() -> KernelResult<()> {
                 // SAFETY: second is a live one-frame vmalloc allocation; both
                 // physical addresses are frames the direct map covers.
                 let (landed, old) = unsafe {
-                    core::ptr::write_volatile(second, 0x22);
+                    core::ptr::write_volatile(second, marker);
                     (
                         core::ptr::read_volatile((new_phys + hhdm) as *const u8),
                         core::ptr::read_volatile((old_phys + hhdm) as *const u8),
                     )
                 };
-                if landed != 0x22 {
+                if landed != marker {
                     return Err(fail(format_args!(
                         "a write through the reused range missed its own frame ({:#x} reads {:#x}): \
                          a stale translation still named the freed frame",
                         new_phys, landed
                     )));
                 }
-                if holding_old && old != 0x33 {
-                    return Err(fail(format_args!(
-                        "the freed frame {:#x} was written through a stale translation (reads {:#x})",
-                        old_phys, old
-                    )));
+                if let Some(baseline) = old_baseline {
+                    if old != baseline {
+                        return Err(fail(format_args!(
+                            "the freed frame {:#x} changed from {:#x} to {:#x} while it was held: a stale translation wrote to it",
+                            old_phys, baseline, old
+                        )));
+                    }
                 }
                 Ok(())
             })();

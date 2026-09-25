@@ -5388,16 +5388,9 @@ fn run_main() -> ExitCode {
         term: var("TERM"),
         posixly_correct: std::env::var_os("POSIXLY_CORRECT").is_some(),
         stdout_isatty: std::io::stdout().is_terminal(),
-        // `hard_locale (LC_TIME)`: false for exactly `C` and `POSIX`, and the
-        // three variables are consulted in the order the C library does.
-        hard_locale_time: !matches!(
-            var("LC_ALL")
-                .or_else(|| var("LC_TIME"))
-                .or_else(|| var("LANG"))
-                .unwrap_or_default()
-                .as_slice(),
-            b"" | b"C" | b"POSIX"
-        ),
+        // Shared with `cmp` and `pinky`. The private copy this replaces read
+        // `LC_ALL=` as naming `C`, where the C library skips an empty variable.
+        hard_locale_time: crate::locale::hard_locale_with(crate::locale::Category::Time, var),
     };
 
     // `Stream` and not `io::stderr()`, whose failures the runtime hides: a

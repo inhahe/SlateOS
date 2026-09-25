@@ -2,7 +2,7 @@
 name = "coreutils"
 version = "0.1.0"
 edition = "2024"
-description = "Coreutils for SlateOS (86 binaries)"
+description = "Coreutils for SlateOS: one binary per program, most of them ports of GNU coreutils 9.4"
 
 [build-dependencies]
 # Tells cargo that the hand-built sysroot libc.a is an input, so a

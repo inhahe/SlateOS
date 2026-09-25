@@ -4094,11 +4094,13 @@ _Port ext4 first. Don't write a custom filesystem._
     (§539; `sha2` extended, `blake2` and `sm3` new) and `md5sum` onto the shared `md5` crate it had duplicated;
     `dir` and `vdir` (`ls` is `coreutils::ls` now, one `Mode` per bin, as upstream builds `ls.c` three times);
     `shred` (with gnulib's `randint`/`randread` as `coreutils::randint`, so `--random-source=FILE` shreds a
-    file into the very bytes GNU's does);
+    file into the very bytes GNU's does); `pinky` (utmp through `utmpfile`, users through `pwdb`, its date
+    format chosen by `coreutils::locale`'s `hard_locale`, which `ls` and `cmp` now share; checked in a private
+    namespace against fixture utmp, passwd and home directories);
     and `nproc`,
     re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
-    names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32).
-    **Still missing:** `pinky`, `pr`, `ptx`. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
+    names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
+    **Still missing:** `pr`, `ptx`. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
     `LD_PRELOAD` into a dynamically linked program). `[` is `test` under another name and needs only the image alias. None
     ships until lane D lists it: `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.
 - [x] Port rsync (replaces robocopy need) — Rust implementation: recursive, archive mode, checksums, delete, exclude/include, dry-run, progress, stats

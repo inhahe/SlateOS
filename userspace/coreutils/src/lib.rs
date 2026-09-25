@@ -7,7 +7,8 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are twenty-eight so far. Three are about the interface these programs share
+//! Twenty-eight of them are narrated one at a time below, and the rest are
+//! listed after those. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -454,6 +455,28 @@
 //!   which is what makes the walk safe on a kernel whose `openat` still
 //!   resolves textually.
 //!
+//! The rest are one upstream source file built into several programs, or one
+//! gnulib module several programs link, and are here for the plain reason that
+//! a second copy would be a second home for every bug:
+//!
+//! - [`basenc`] — `base64`, `base32` and `basenc`, which upstream builds from
+//!   one `basenc.c`.
+//! - [`chowncore`] — the walk and the reporting `chown` and `chgrp` share
+//!   (`chown-core.c`).
+//! - [`cksum`] — the POSIX CRC, for `cksum` with and without `-a crc`.
+//! - [`sum`] — the BSD and System V checksums, for `sum` and for `cksum -a
+//!   bsd` and `-a sysv`.
+//! - [`grouplist`] — the group list `id -G`, `id` and `groups` print.
+//! - [`locale`] — the locale `setlocale (LC_ALL, "")` would select, and
+//!   gnulib's `hard_locale`, for `ls`, `cmp` and `pinky`. Two private copies
+//!   had disagreed about whether `LC_ALL=` is set.
+//! - [`ls`] — `ls`, `dir` and `vdir`: `ls.c` built three times.
+//! - [`randint`] — gnulib's `randread` and `randint`, for `shred`.
+//! - [`remove`] — what `rm` and `mv` must agree on about deleting a tree.
+//! - [`setfields`] — the `cut`-style LIST of fields, for `cut` and `numfmt
+//!   --field` (`set-fields.c`).
+//! - [`utsname`] — the `uname(2)` answers `uname` and `arch` both print.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -478,6 +501,7 @@ pub mod getopt;
 pub mod grouplist;
 pub mod hardlink;
 pub mod human;
+pub mod locale;
 pub mod ls;
 pub mod overwrite;
 pub mod pathname;

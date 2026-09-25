@@ -6,16 +6,16 @@
 
 ## In short
 
-The `coreutils` crate now builds twenty-eight programs it did not build when
+The `coreutils` crate now builds twenty-nine programs it did not build when
 the manifest was written: `sha1sum`, `printenv`, `link`, `unlink`, `sync`,
 `truncate`, `groups`, `arch`, `pathchk`, `users`, `nproc`, `chgrp`, `mknod`,
 `hostid`, `dircolors`, `numfmt`, `sum`, `base32`, `basenc`, `factor`,
-`sha224sum`, `sha384sum`, `sha512sum`, `b2sum`, `cksum`, `dir`, `vdir` and
-`shred`. Each is a port of
+`sha224sum`, `sha384sum`, `sha512sum`, `b2sum`, `cksum`, `dir`, `vdir`,
+`shred` and `pinky`. Each is a port of
 GNU coreutils 9.4 and is checked against a build of 9.4 (a script runs both on
 the same inputs and compares their output, errors and exit status). A binary
 the manifest does not name does not go on the image, so today all
-twenty-eight are built and then left out. Please add them.
+twenty-nine are built and then left out. Please add them.
 
 ## Why they belong by the manifest's own rule
 
@@ -26,13 +26,13 @@ bin list. The only coreutils names it leaves out on purpose are:
 - `sort`, for the same reason;
 - `sh`, because `/bin/sh` is dash.
 
-These twenty-eight are none of those. They are missing only because they did not
+These twenty-nine are none of those. They are missing only because they did not
 exist when the list was generated. Nothing else stages these names:
 `create-ext4-rootfs.sh`'s `PROMOTED` map has none of them. So listing them
 takes no name away from anything.
 
 **Size.** At the manifest's own average of about 813 KiB per static binary,
-twenty-eight come to roughly 22 MiB. The header records 59 MiB used of a 96 MiB
+twenty-nine come to roughly 23 MiB. The header records 59 MiB used of a 96 MiB
 budget.
 
 ## The programs
@@ -67,6 +67,7 @@ budget.
 | `dir` | `ls -C -b`: columns and escaped names whether or not output is a terminal | `scripts/ls-diff.sh` |
 | `vdir` | `ls -l -b`: the long listing, the same way | `scripts/ls-diff.sh` |
 | `shred` | overwrite a file (and optionally remove it) so its contents are harder to recover | `scripts/shred-diff.sh` |
+| `pinky` | who is logged in, with real names, idle times and where from; or what is known about named users | `scripts/pinky-diff.sh` |
 
 **One alias as well: `[ = test`.** Our `test` already behaves as `[` when it
 is started under that name: it then insists on the closing `]`. But nothing
@@ -76,11 +77,11 @@ example `find . -exec [ -s {} ] \; -print` or `env [ -d /tmp ]`. The
 manifest's alias syntax (`name = producer`) covers it, and `test` is
 already listed.
 
-Eleven of these names used to be answered, partly, by other crates that read
+Twelve of these names used to be answered, partly, by other crates that read
 `argv[0]` to decide what to be: `getopt` had `printenv`, `sync` and `cksum`, `pv` had
 `shred` and
 `truncate`, `nproc` had `arch`, `pathchk` and `users`, `shuf` had `numfmt`
-and `factor`, and `base64` had `base32`. Those branches were
+and `factor`, `base64` had `base32`, and `finger` had `pinky`. Those branches were
 removed, because under design-decisions §1005 `coreutils` is the one home for
 these tools and a duplicate is deleted. The `userspace/nproc` crate went
 entirely, its own `nproc` being replaced by the port above. None of those
@@ -88,8 +89,8 @@ crates was on the image, so no name moves from one program to another there.
 
 ## This list may grow before you read it
 
-I am porting the rest of the programs GNU 9.4 has and we do not (`pinky`,
-`pr` and `ptx`). Each one that lands before
+I am porting the rest of the programs GNU 9.4 has and we do not (`pr` and
+`ptx`). Each one that lands before
 this request reaches `main` will be added to the table above, not filed as a
 separate request. Whatever the table says when you read it is the whole ask.
 

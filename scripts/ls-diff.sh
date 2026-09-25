@@ -394,6 +394,14 @@ ls -l --time-style=+%Y-%m-%d%n%H:%M t
 ls -l --full-time t
 TIME_STYLE=long-iso ls -l t
 TIME_STYLE=+%s ls -l t
+# `posix-` strips itself only in a hard `LC_TIME`. `LC_ALL=`, set but empty,
+# counts as unset, so `LANG` decides: ours read it as `C` until
+# `coreutils::locale` was shared.
+LC_ALL=C ls -l --time-style=posix-iso t
+LC_ALL=C.UTF-8 ls -l --time-style=posix-iso t
+LC_ALL= LANG=C.UTF-8 ls -l --time-style=posix-iso t
+LC_ALL= LC_TIME=POSIX LANG=C.UTF-8 ls -l --time-style=posix-long-iso t
+LC_ALL= LC_TIME= LANG=POSIX ls -l --time-style=posix-full-iso t
 
 # --- other output shapes ---
 ls --zero t

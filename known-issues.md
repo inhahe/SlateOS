@@ -2272,10 +2272,10 @@ copy lacked (`free` gained `-l/--lohi`, `--tebi` and the GNU long forms;
 every entry point was shadowed, unreachable, or an outright refusal. The
 unreachable ledger stands at 169.
 
-**UPDATE 2026-09-25: the unreachable ledger stands at 156.** Thirteen names have
+**UPDATE 2026-09-25: the unreachable ledger stands at 155.** Fourteen names have
 left it since the 169 above. Two, `blockdev:blkzone` and `cal:ncal`, went on
 2026-09-12 (commit 888598b8f: `blkzone` printed hard-coded zones for any
-device and reported zone resets it never attempted). Eleven were closed the
+device and reported zone resets it never attempted). Twelve were closed the
 §1005 way -- the name becomes a `coreutils` bin, ported from GNU
 9.4 and checked against a build of it by a `scripts/<name>-diff.sh` harness,
 and the dead branch is deleted -- rather than by adding a link to the
@@ -2283,8 +2283,9 @@ personality: `printenv`, `sync` and `cksum` (from `getopt`, which with all
 three gone is `getopt` alone), `truncate` and `shred` (from `pv`, which with both
 gone is `pv` alone),
 `arch`, `pathchk` and `users` (from `nproc`), `numfmt` and `factor` (from
-`shuf`, which with both gone is `shuf` alone), and `base32` (from `base64`,
-whose own `base64` waits on TD-B-BASE64-IS-STILL-THE-OLD-CRATE-UNTIL-UUENCODE-MOVES).
+`shuf`, which with both gone is `shuf` alone), `base32` (from `base64`,
+whose own `base64` waits on TD-B-BASE64-IS-STILL-THE-OLD-CRATE-UNTIL-UUENCODE-MOVES),
+and `pinky` (from `finger`, which with it gone is `finger` alone).
 None of the deleted branches was worth keeping: `nproc`'s `users` read the
 terminal field as the user name, from wtmp instead of utmp; its `pathchk -p`
 checked against 4096 and 255 instead of POSIX's 256 and 14; its `arch`
@@ -2296,13 +2297,15 @@ was refused; `getopt`'s `cksum` had the CRC and nothing else of 9.4's -- no
 `-a`, no `--check` -- and read each file whole into memory first; `pv`'s `shred`
 wrote xorshift output three times under a help text promising `/dev/urandom`,
 where GNU's schedules its passes from a table of bit patterns and, given
-`--random-source`, writes bytes this port now reproduces exactly. With its last three personalities gone, **`userspace/nproc`
+`--random-source`, writes bytes this port now reproduces exactly; `finger`'s
+`pinky` printed finger's own layout under pinky's options, so `-b` hid the
+plan where GNU's hides the home directory and shell, and `-w` and `-i` were
+accepted and did nothing. With its last three personalities gone, **`userspace/nproc`
 itself was retired**: `nproc` is a `coreutils` bin too now, a port of GNU's
 (gnulib's `num_processors` -- affinity mask, `OMP_NUM_THREADS`,
 `OMP_THREAD_LIMIT`), where the crate had counted `/sys` ranges and told a
-process pinned to two CPUs that it had twelve. Still here and next in line,
-the one GNU program that lives as a personality of something else:
-`finger:pinky`. None of the new bins is on the
+process pinned to two CPUs that it had twelve. No GNU program lives as a
+personality of something else any more. None of the new bins is on the
 image yet: that is lane D's
 manifest, `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.
 

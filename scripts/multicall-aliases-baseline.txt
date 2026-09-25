@@ -50,7 +50,6 @@ dmidecode:biosdecode
 efibootmgr:efivar
 eject:volname
 findmnt:mountpoint
-finger:pinky
 fio:fio-verify
 firejail:firecfg
 firejail:firemon

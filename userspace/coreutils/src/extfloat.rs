@@ -412,6 +412,67 @@ impl ExtF80 {
         ExtF80 { neg, exp, sig }
     }
 
+    /// The ten bytes x87 stores for this value, in memory order: the inverse
+    /// of [`ExtF80::from_x87_bytes`], and the form a test compares against a
+    /// value glibc computed.
+    #[must_use]
+    pub fn to_x87_bytes(self) -> [u8; 10] {
+        let [s0, s1, s2, s3, s4, s5, s6, s7] = self.sig.to_le_bytes();
+        let word = self.exp | if self.neg { 0x8000 } else { 0 };
+        let [w0, w1] = word.to_le_bytes();
+        [s0, s1, s2, s3, s4, s5, s6, s7, w0, w1]
+    }
+
+    /// `v`, exactly: every `i64` fits the 64-bit significand, which is why C's
+    /// `(long double) intmax` loses nothing on x86-64.
+    #[must_use]
+    pub fn from_i64(v: i64) -> Self {
+        round(v < 0, u128::from(v.unsigned_abs()), 0, false)
+    }
+
+    /// `v`, exactly, for the same reason.
+    #[must_use]
+    pub fn from_u64(v: u64) -> Self {
+        round(false, u128::from(v), 0, false)
+    }
+
+    /// C's `(intmax_t) v` on x86-64: truncation toward zero, and for a NaN, an
+    /// infinity or a value outside `i64` the x87 "integer indefinite",
+    /// `INT64_MIN`, which is what `fisttp` stores there.
+    #[must_use]
+    pub fn to_i64_trunc(self) -> i64 {
+        if !self.is_finite() {
+            return i64::MIN;
+        }
+        if self.is_zero() {
+            return 0;
+        }
+        let (m, e) = self.decompose();
+        let magnitude = if e >= 0 {
+            let Ok(shift) = u32::try_from(e) else {
+                return i64::MIN;
+            };
+            // Out of range the moment a set bit would be shifted out.
+            if shift >= 64 || m.leading_zeros() < shift {
+                return i64::MIN;
+            }
+            // Guarded above: no set bit is shifted out.
+            m.wrapping_shl(shift)
+        } else {
+            m.checked_shr(e.unsigned_abs()).unwrap_or(0)
+        };
+        if self.neg {
+            if magnitude == 1 << 63 {
+                i64::MIN
+            } else {
+                // `v` is below 2^63 here, so negating it cannot wrap.
+                i64::try_from(magnitude).map_or(i64::MIN, i64::wrapping_neg)
+            }
+        } else {
+            i64::try_from(magnitude).unwrap_or(i64::MIN)
+        }
+    }
+
     /// The value as `m * 2^e` with `m` a 64-bit integer. Meaningless for
     /// infinities and NaNs, which callers exclude first.
     fn decompose(self) -> (u64, i32) {
@@ -447,6 +508,74 @@ impl ExtF80 {
         let (ma, ea) = self.decompose();
         let (mb, eb) = other.decompose();
         round(neg, u128::from(ma) * u128::from(mb), ea + eb, false)
+    }
+
+    /// `self / other`, rounded to nearest with ties to even.
+    ///
+    /// Long division of the two significands, each normalised so its top bit
+    /// is set: two 128-by-64 steps give a quotient of 64 + 64 bits, of which
+    /// the top 66 or 67 are kept -- enough for the rounding bit -- and every
+    /// bit below them, plus the final remainder, becomes the sticky bit.
+    /// [`round`] does the rest, as it does for every other operation.
+    ///
+    /// Checked bit for bit against glibc's x87 division over 757 operand
+    /// pairs: `tests/extfloat_div_glibc.rs`.
+    // The shifts and divisions here are bounded by construction: both
+    // significands are normalised to exactly 64 bits, so `ma << 64` and
+    // `r1 << 64` fit a `u128`, the divisor is never zero, and the quotients
+    // are below 2^65 and 2^64.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn div_impl(self, other: Self) -> Self {
+        if self.is_nan() || other.is_nan() {
+            return ExtF80::NAN;
+        }
+        let neg = self.neg ^ other.neg;
+        if self.is_infinite() {
+            // Infinity over infinity is the one quotient with no limit.
+            if other.is_infinite() {
+                return ExtF80::NAN;
+            }
+            return ExtF80 {
+                neg,
+                ..ExtF80::INFINITY
+            };
+        }
+        if other.is_infinite() {
+            return ExtF80 {
+                neg,
+                ..ExtF80::ZERO
+            };
+        }
+        if other.is_zero() {
+            // So is zero over zero; anything else over zero is infinite.
+            if self.is_zero() {
+                return ExtF80::NAN;
+            }
+            return ExtF80 {
+                neg,
+                ..ExtF80::INFINITY
+            };
+        }
+        if self.is_zero() {
+            return ExtF80 {
+                neg,
+                ..ExtF80::ZERO
+            };
+        }
+        let (ma, ea) = self.decompose();
+        let (mb, eb) = other.decompose();
+        let (sa, sb) = (ma.leading_zeros(), mb.leading_zeros());
+        // Shifted left to the top: the exponents drop by the same amount.
+        #[allow(clippy::cast_possible_wrap)]
+        let (ea, eb) = (ea - sa as i32, eb - sb as i32);
+        let (ma, mb) = (u128::from(ma << sa), u128::from(mb << sb));
+        let num = ma << 64;
+        let (q1, r1) = (num / mb, num % mb);
+        let num = r1 << 64;
+        let (q2, r2) = (num / mb, num % mb);
+        let quotient = (q1 << 2) | (q2 >> 62);
+        let sticky = q2 & ((1 << 62) - 1) != 0 || r2 != 0;
+        round(neg, quotient, ea - eb - 66, sticky)
     }
 
     /// `self + other`, rounded to nearest with ties to even.
@@ -590,6 +719,22 @@ impl std::ops::Add for ExtF80 {
     type Output = Self;
     fn add(self, other: Self) -> Self {
         self.add_impl(other)
+    }
+}
+
+impl std::ops::Sub for ExtF80 {
+    type Output = Self;
+    /// IEEE subtraction is addition of the negation, zeros and infinities
+    /// included: `(+0) - (+0)` is `+0` and `inf - inf` is a NaN either way.
+    fn sub(self, other: Self) -> Self {
+        self.add_impl(-other)
+    }
+}
+
+impl std::ops::Div for ExtF80 {
+    type Output = Self;
+    fn div(self, other: Self) -> Self {
+        self.div_impl(other)
     }
 }
 

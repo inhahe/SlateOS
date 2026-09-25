@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -21,19 +20,32 @@
 //! targets, and ramps. Scoring awards 100 for bumper hits, 500 for target
 //! hits, and 1000 for ramp completions, with combo multipliers. Players
 //! get 3 balls per game (extra balls from score milestones). Includes
-//! tilt detection, multi-ball bonus, high score tracking, and variable-power
-//! ball launching.
+//! nudging and tilt, multi-ball, variable-power ball launching, and a table of
+//! high scores kept between games in the settings directory.
+//!
+//! Played with the keys (F1 lists them) or the pointer: hold on the table's
+//! left or right half for that flipper, hold on the plunger lane to pull the
+//! plunger and let go to launch, and the sidebar's buttons start, pause and
+//! nudge. Nothing answered the pointer before 2026-09-25; "tilt" was pressing
+//! the flippers fast, which is playing rather than cheating; the high-score
+//! table was five scores nobody had made, forgotten when the window closed; and
+//! N threw away a game in progress without asking (`known-issues.md` ->
+//! `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`).
 
+use appearance::Palette;
 use guitk::color::Color;
 #[cfg(test)]
 use guitk::event::Modifiers;
-use guitk::event::{Event, Key, KeyEvent};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use oswindow::app::{self, App, Response};
 use randrange::{RandomSource, SeededRng, seeded_from_system};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -115,14 +127,21 @@ const COMBO_WINDOW_MS: u64 = 2000;
 const MAX_COMBO: u32 = 5;
 /// Number of high score slots.
 const HIGH_SCORE_SLOTS: usize = 5;
-/// Tilt threshold: max rapid inputs in a window before tilt.
-const TILT_THRESHOLD: u32 = 15;
-/// Tilt detection window in milliseconds.
-const TILT_WINDOW_MS: u64 = 1000;
-/// Tilt penalty duration in milliseconds.
-const TILT_PENALTY_MS: u64 = 3000;
-/// Number of targets that must be hit to activate multi-ball.
-const MULTIBALL_TARGET_COUNT: usize = 5;
+/// How far back nudges are counted towards a tilt.
+const TILT_WINDOW_MS: u64 = 5000;
+/// How many nudges within the window are warnings. One more tilts the table.
+const TILT_WARNINGS: usize = 2;
+/// How long a warning's DANGER stays on the sidebar.
+const DANGER_MS: u64 = 1500;
+/// How hard a nudge shoves each ball up the table (pixels per second).
+const NUDGE_IMPULSE: f32 = 160.0;
+/// And at most how hard sideways, one way or the other.
+const NUDGE_SIDEWAYS: f32 = 60.0;
+/// The first line of the high-score file, naming its format.
+const SCORES_HEADER: &str = "pinball high scores 1";
+/// The largest high-score file read. Five lines are a hundred bytes; this is
+/// room for a file somebody has edited and then some.
+const MAX_SCORES_BYTES: usize = 64 * 1024;
 
 // ── Flipper geometry ────────────────────────────────────────────────
 const FLIPPER_LENGTH: f32 = 60.0;
@@ -246,21 +265,6 @@ impl Vec2 {
             self
         }
     }
-
-    /// Rotate this vector by `angle` radians.
-    fn rotate(self, angle: f32) -> Self {
-        let c = angle.cos();
-        let s = angle.sin();
-        Self {
-            x: self.x * c - self.y * s,
-            y: self.x * s + self.y * c,
-        }
-    }
-
-    /// Distance to another point.
-    fn distance_to(self, other: Self) -> f32 {
-        self.sub(other).length()
-    }
 }
 
 // ── Ball ────────────────────────────────────────────────────────────
@@ -334,14 +338,6 @@ impl DropTarget {
 
     fn is_flashing(&self, current_ms: u64) -> bool {
         current_ms.saturating_sub(self.hit_flash_ms) < BUMPER_FLASH_MS
-    }
-
-    /// Check if a point is inside this target rectangle.
-    fn contains(&self, p: Vec2) -> bool {
-        p.x >= self.pos.x
-            && p.x <= self.pos.x + self.width
-            && p.y >= self.pos.y
-            && p.y <= self.pos.y + self.height
     }
 }
 
@@ -473,61 +469,203 @@ enum GamePhase {
 }
 
 // ── High score entry ────────────────────────────────────────────────
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct HighScoreEntry {
     score: u32,
+    /// The day it was made, `YYYY-MM-DD` in UTC, or empty if the clock was not
+    /// set.
+    day: String,
 }
 
 // ── Tilt tracker ────────────────────────────────────────────────────
+/// Shoving the table, and what shoving it too much does.
+///
+/// A nudge moves the ball; a nudge too many -- more than [`TILT_WARNINGS`]
+/// within [`TILT_WINDOW_MS`] -- tilts the table, as a real machine's tilt bob
+/// does: the flippers go dead and nothing scores until the ball drains.
+///
+/// It used to count *flipper presses*, fifteen in a second, and dead the
+/// flippers for three seconds. Pressing the flippers quickly is playing the
+/// game, not cheating at it, and there was no way to shove the table at all.
 #[derive(Clone, Debug)]
 struct TiltTracker {
-    /// Timestamps (in total ms) of recent flipper inputs.
-    inputs: Vec<u64>,
-    /// Whether tilt has been triggered.
+    /// When each recent nudge came, in total ms.
+    nudges: Vec<u64>,
+    /// Whether the table is tilted, until the ball drains.
     tilted: bool,
-    /// When the tilt was triggered (ms).
-    tilt_start_ms: u64,
+    /// When the last warning came, for the sidebar's DANGER.
+    warned_ms: Option<u64>,
+}
+
+/// What a nudge came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Nudge {
+    /// The table moved; this many nudges are now counted against it.
+    Warned(usize),
+    /// That was one too many.
+    Tilted,
+    /// Already tilted: the table is not listening.
+    Ignored,
 }
 
 impl TiltTracker {
     fn new() -> Self {
         Self {
-            inputs: Vec::new(),
+            nudges: Vec::new(),
             tilted: false,
-            tilt_start_ms: 0,
+            warned_ms: None,
         }
     }
 
+    /// A new ball: a clean slate.
     fn reset(&mut self) {
-        self.inputs.clear();
+        self.nudges.clear();
         self.tilted = false;
-        self.tilt_start_ms = 0;
+        self.warned_ms = None;
     }
 
-    /// Record a flipper input and check if tilt threshold is exceeded.
-    fn record_input(&mut self, current_ms: u64) {
-        self.inputs.push(current_ms);
-        // Remove old inputs outside the window.
-        let cutoff = current_ms.saturating_sub(TILT_WINDOW_MS);
-        self.inputs.retain(|&t| t >= cutoff);
-        if self.inputs.len() >= TILT_THRESHOLD as usize && !self.tilted {
+    /// A nudge at `now`.
+    fn nudge(&mut self, now: u64) -> Nudge {
+        if self.tilted {
+            return Nudge::Ignored;
+        }
+        self.nudges
+            .retain(|&t| now.saturating_sub(t) < TILT_WINDOW_MS);
+        self.nudges.push(now);
+        if self.nudges.len() > TILT_WARNINGS {
             self.tilted = true;
-            self.tilt_start_ms = current_ms;
+            Nudge::Tilted
+        } else {
+            self.warned_ms = Some(now);
+            Nudge::Warned(self.nudges.len())
         }
     }
 
-    /// Check if the tilt penalty has expired.
-    fn is_tilt_active(&self, current_ms: u64) -> bool {
-        self.tilted && current_ms.saturating_sub(self.tilt_start_ms) < TILT_PENALTY_MS
+    /// Whether the DANGER warning is showing at `now`.
+    fn danger(&self, now: u64) -> bool {
+        !self.tilted
+            && self
+                .warned_ms
+                .is_some_and(|at| now.saturating_sub(at) < DANGER_MS)
     }
+}
 
-    /// Clear tilt if the penalty has expired.
-    fn update(&mut self, current_ms: u64) {
-        if self.tilted && !self.is_tilt_active(current_ms) {
-            self.tilted = false;
-            self.inputs.clear();
-        }
+/// What the pointer is holding down, to be let go when the button comes up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hold {
+    LeftFlipper,
+    RightFlipper,
+    Plunger,
+}
+
+/// What a click can land on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    /// The table's left half: the left flipper, while the button is held.
+    LeftFlipper,
+    /// The table's right half.
+    RightFlipper,
+    /// The plunger lane before a launch: hold to pull, let go to launch.
+    Plunger,
+    /// The sidebar's buttons.
+    NewGame,
+    Pause,
+    Nudge,
+    Keys,
+    /// The pause screen's button.
+    Resume,
+    /// The game-over screen's button.
+    PlayAgain,
+    /// The question before a game in progress is thrown away.
+    ConfirmNewGame,
+    KeepPlaying,
+    /// The shortcut card, anywhere on it: closes it.
+    HelpCard,
+}
+
+/// Every key the game answers, as the card shows them.
+///
+/// The flippers answer the Shift keys as well; the card names the letters,
+/// which every keyboard has in the same place.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Z", "Left flipper (or Left Shift)"),
+    ("M", "Right flipper (or Right Shift)"),
+    ("Space", "Hold to pull the plunger, let go to launch"),
+    ("Up", "Nudge the table -- too often and it tilts"),
+    ("P", "Pause, and carry on"),
+    ("N", "New game (asks first during a game)"),
+    ("Esc", "Close this list, or keep playing"),
+];
+
+/// The wall clock, in seconds since the epoch, or `None` if it is not set.
+fn system_clock() -> Option<i64> {
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    i64::try_from(since.as_secs()).ok()
+}
+
+/// Where the high scores are kept.
+fn scores_path() -> Option<PathBuf> {
+    settingsfile::config_dir().map(|dir| dir.join("pinball").join("high-scores.txt"))
+}
+
+/// The high-score table as it is written: a line naming the format, then one
+/// line a score -- the score, a tab, and the day.
+fn scores_text(scores: &[HighScoreEntry]) -> String {
+    let mut text = String::from(SCORES_HEADER);
+    text.push('\n');
+    for entry in scores {
+        text.push_str(&format!("{}\t{}\n", entry.score, entry.day));
     }
+    text
+}
+
+/// Read a high-score file whole, or say which line is wrong.
+///
+/// All or nothing: a file with one line not understood is not read at all,
+/// because the next game over saves the table -- and a table saved from a
+/// partial read deletes the lines that were not understood.
+fn parse_scores(text: &str) -> Result<Vec<HighScoreEntry>, String> {
+    let mut lines = text.lines();
+    if lines.next() != Some(SCORES_HEADER) {
+        return Err(String::from("its first line does not name this format"));
+    }
+    let mut scores = Vec::new();
+    for (n, line) in lines.enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let number = n.saturating_add(2);
+        let (score, day) = line
+            .split_once('\t')
+            .ok_or_else(|| format!("line {number} has no tab"))?;
+        let score = score
+            .parse::<u32>()
+            .map_err(|_| format!("line {number}: {score:?} is not a score"))?;
+        let day_ok = day.is_empty()
+            || (day.len() == 10
+                && day.bytes().enumerate().all(|(i, b)| {
+                    if i == 4 || i == 7 {
+                        b == b'-'
+                    } else {
+                        b.is_ascii_digit()
+                    }
+                }));
+        if !day_ok {
+            return Err(format!("line {number}: {day:?} is not a day"));
+        }
+        scores.push(HighScoreEntry {
+            score,
+            day: day.to_string(),
+        });
+    }
+    if scores.len() > HIGH_SCORE_SLOTS {
+        return Err(format!(
+            "it holds {} scores, not at most {HIGH_SCORE_SLOTS}",
+            scores.len()
+        ));
+    }
+    Ok(scores)
 }
 
 // ── Main app struct ─────────────────────────────────────────────────
@@ -581,6 +719,24 @@ struct Pinball {
     total_target_hits: u32,
     /// Total ramp completions this game.
     total_ramp_completions: u32,
+    /// Whether the high scores are read from and written to their file.
+    /// Off in [`Pinball::new`], so a test's table touches no file;
+    /// [`Pinball::from_settings`] turns it on.
+    persist: bool,
+    /// Why the high scores are not being kept, when they are not.
+    scores_note: Option<String>,
+    /// Where the day a score was made comes from.
+    clock: fn() -> Option<i64>,
+    /// Whether the list of keys is up.
+    show_help: bool,
+    /// Whether N, in the middle of a game, is waiting for a second N.
+    confirm_new_game: bool,
+    /// What the pointer is holding down.
+    held: Option<Hold>,
+    /// The size of the window being drawn in.
+    window: (f32, f32),
+    /// The user's colours, for the card; the table keeps its own.
+    palette: Palette,
 }
 
 impl Pinball {
@@ -624,13 +780,10 @@ impl Pinball {
             score: 0,
             balls_remaining: STARTING_BALLS,
             balls_used: 0,
-            high_scores: vec![
-                HighScoreEntry { score: 10000 },
-                HighScoreEntry { score: 7500 },
-                HighScoreEntry { score: 5000 },
-                HighScoreEntry { score: 2500 },
-                HighScoreEntry { score: 1000 },
-            ],
+            // Empty until somebody plays. It was five invented scores --
+            // 10000 down to 1000 -- which the table presented as the best
+            // games played on this machine.
+            high_scores: Vec::new(),
             combo: 1,
             last_score_ms: None,
             total_ms: 0,
@@ -644,9 +797,88 @@ impl Pinball {
             total_bumper_hits: 0,
             total_target_hits: 0,
             total_ramp_completions: 0,
+            persist: false,
+            scores_note: None,
+            clock: system_clock,
+            show_help: false,
+            confirm_new_game: false,
+            held: None,
+            window: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
         };
         app.prepare_ball();
         app
+    }
+
+    /// The table the window plays: its high scores read from, and kept in,
+    /// the settings directory.
+    fn from_settings() -> Self {
+        let mut app = Self::new();
+        app.persist = true;
+        match scores_path() {
+            Some(path) => app.load_scores(&path),
+            None => {
+                app.persist = false;
+                app.scores_note = Some(String::from("No home directory: scores are not kept."));
+            }
+        }
+        app
+    }
+
+    /// Read the high scores at `path`; none there yet is a first game.
+    ///
+    /// A file that cannot be read whole is left exactly as it is, and the
+    /// sidebar says so: saving over it would keep only what was understood.
+    fn load_scores(&mut self, path: &Path) {
+        let refused =
+            |why: String| format!("{} not read ({why}); scores are not kept.", path.display());
+        let read = match safeio::read_to_string_capped(path, MAX_SCORES_BYTES) {
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+            Err(err) => {
+                self.persist = false;
+                self.scores_note = Some(refused(err.to_string()));
+                return;
+            }
+        };
+        if read.truncated {
+            self.persist = false;
+            self.scores_note = Some(refused(String::from("it is too large")));
+            return;
+        }
+        match parse_scores(&read.text) {
+            Ok(scores) => self.high_scores = scores,
+            Err(why) => {
+                self.persist = false;
+                self.scores_note = Some(refused(why));
+            }
+        }
+    }
+
+    /// Keep the high scores, if they are being kept.
+    fn save_scores(&mut self) {
+        if !self.persist {
+            return;
+        }
+        let Some(path) = scores_path() else {
+            return;
+        };
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| safeio::write_str_atomically(&path, &scores_text(&self.high_scores)));
+        self.scores_note = match written {
+            Ok(()) => None,
+            Err(err) => Some(format!("Scores not saved to {}: {err}", path.display())),
+        };
+    }
+
+    /// Today, `YYYY-MM-DD` in UTC, or empty if the clock is not set.
+    fn today(&self) -> String {
+        (self.clock)().map_or_else(String::new, |secs| {
+            let (y, m, d) = guitk::date::Date::from_unix_utc(secs).ymd();
+            format!("{y:04}-{m:02}-{d:02}")
+        })
     }
 
     /// Place a new ball in the plunger lane.
@@ -670,19 +902,123 @@ impl Pinball {
         self.launch_power = 0.0;
     }
 
-    /// Start a new game, preserving high scores.
+    /// Start a new game, keeping everything that is not the game's: the high
+    /// scores and where they are kept, the clock, the window, the colours.
     fn new_game(&mut self) {
-        let high_scores = self.high_scores.clone();
         // Carry the generator into the next table rather than reseeding one
         // from the other's output. Same effect on the stream, and it cannot
         // accidentally hand two tables in a session the same seed.
-        let rng = self.rng.clone();
-        *self = Self::with_rng(rng);
-        self.high_scores = high_scores;
+        let mut fresh = Self::with_rng(self.rng.clone());
+        fresh.high_scores = std::mem::take(&mut self.high_scores);
+        fresh.persist = self.persist;
+        fresh.scores_note = self.scores_note.take();
+        fresh.clock = self.clock;
+        fresh.window = self.window;
+        fresh.palette = self.palette;
+        *self = fresh;
     }
 
-    /// Award points with combo multiplier.
+    /// Whether a game is under way that N would throw away.
+    fn game_in_progress(&self) -> bool {
+        self.phase != GamePhase::GameOver && (self.score > 0 || self.balls_used > 0)
+    }
+
+    /// N: a new game -- at once between games, and after a second N during
+    /// one. It started a new game at once whatever was happening, so a stray
+    /// key ended a game in progress without a word.
+    fn ask_new_game(&mut self) {
+        if !self.game_in_progress() || self.confirm_new_game {
+            self.confirm_new_game = false;
+            self.new_game();
+            return;
+        }
+        self.confirm_new_game = true;
+        self.release_all();
+    }
+
+    /// Nudge the table: the balls get a shove, and too many shoves tilt it.
+    fn nudge(&mut self) -> Nudge {
+        if self.phase != GamePhase::Playing {
+            return Nudge::Ignored;
+        }
+        let outcome = self.tilt.nudge(self.total_ms);
+        if outcome == Nudge::Ignored {
+            return outcome;
+        }
+        for ball in self.balls.iter_mut().filter(|b| b.active) {
+            let sideways = if self.rng.flip() {
+                NUDGE_SIDEWAYS
+            } else {
+                -NUDGE_SIDEWAYS
+            };
+            ball.vel = ball.vel.add(Vec2::new(sideways, -NUDGE_IMPULSE));
+        }
+        if outcome == Nudge::Tilted {
+            // The flippers go dead at once, held or not.
+            self.left_flipper.pressed = false;
+            self.right_flipper.pressed = false;
+        }
+        outcome
+    }
+
+    /// Press or let go of a flipper. A tilted table's flippers are dead.
+    fn set_flipper(&mut self, side: FlipperSide, pressed: bool) {
+        let pressed = pressed && !self.tilt.tilted;
+        match side {
+            FlipperSide::Left => self.left_flipper.pressed = pressed,
+            FlipperSide::Right => self.right_flipper.pressed = pressed,
+        }
+    }
+
+    /// Start pulling the plunger, if there is a ball to launch.
+    fn pull_plunger(&mut self) {
+        if self.phase == GamePhase::ReadyToLaunch {
+            self.phase = GamePhase::Launching;
+            self.launch_power = 0.0;
+        }
+    }
+
+    /// Let the plunger go.
+    fn release_plunger(&mut self) {
+        if self.phase == GamePhase::Launching {
+            self.launch_ball();
+        }
+    }
+
+    /// Let go of everything held -- for a window that has lost the keyboard or
+    /// the pointer, whose releases will never arrive.
+    fn release_all(&mut self) {
+        self.left_flipper.pressed = false;
+        self.right_flipper.pressed = false;
+        if self.phase == GamePhase::Launching {
+            // Not launched: a plunger let go because the window went away is
+            // not a shot the player took.
+            self.phase = GamePhase::ReadyToLaunch;
+            self.launch_power = 0.0;
+        }
+        self.held = None;
+    }
+
+    /// P: pause, or carry on.
+    fn toggle_pause(&mut self) {
+        match self.phase {
+            GamePhase::Paused => self.phase = self.phase_before_pause,
+            GamePhase::GameOver => {}
+            _ => {
+                // Let go first: a plunger half pulled goes back to rest, so
+                // carrying on does not launch a ball nobody is holding.
+                self.release_all();
+                self.phase_before_pause = self.phase;
+                self.phase = GamePhase::Paused;
+            }
+        }
+    }
+
+    /// Award points with combo multiplier. A tilted table scores nothing.
     fn award_points(&mut self, base_points: u32) {
+        if self.tilt.tilted {
+            return;
+        }
         // Update combo. The first scoring event (or one after the combo window
         // has lapsed) starts a fresh combo at x1; a hit within the window of the
         // previous one increments the multiplier.
@@ -763,17 +1099,29 @@ impl Pinball {
         }
     }
 
-    /// Insert the current score into the high score table if it qualifies.
+    /// Insert the current score into the high score table if it qualifies,
+    /// and keep the table.
+    ///
+    /// A game that scored nothing is not a high score, even on an empty table.
     fn update_high_scores(&mut self) {
         let score = self.score;
-        // Find the position to insert.
+        if score == 0 {
+            return;
+        }
+        let entry = HighScoreEntry {
+            score,
+            day: self.today(),
+        };
         let pos = self.high_scores.iter().position(|h| score > h.score);
         if let Some(idx) = pos {
-            self.high_scores.insert(idx, HighScoreEntry { score });
+            self.high_scores.insert(idx, entry);
             self.high_scores.truncate(HIGH_SCORE_SLOTS);
         } else if self.high_scores.len() < HIGH_SCORE_SLOTS {
-            self.high_scores.push(HighScoreEntry { score });
+            self.high_scores.push(entry);
+        } else {
+            return;
         }
+        self.save_scores();
     }
 
     // ── Physics ─────────────────────────────────────────────────────
@@ -783,15 +1131,6 @@ impl Pinball {
         // Update flippers.
         self.left_flipper.update(dt);
         self.right_flipper.update(dt);
-
-        // Update tilt tracker.
-        self.tilt.update(self.total_ms);
-
-        // If tilted, disable flippers.
-        if self.tilt.is_tilt_active(self.total_ms) {
-            self.left_flipper.angle = 0.0;
-            self.right_flipper.angle = 0.0;
-        }
 
         let ball_count = self.balls.len();
         for i in 0..ball_count {
@@ -1076,79 +1415,165 @@ impl Pinball {
 
     // ── Event handling ──────────────────────────────────────────────
 
-    fn handle_event(&mut self, event: &Event) {
+    fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
             Event::Key(ke) => self.handle_key(ke),
-            Event::Tick { elapsed_ms } => self.handle_tick(*elapsed_ms),
-            _ => {}
+            Event::Mouse(me) => self.handle_mouse(me),
+            Event::Tick { elapsed_ms } => {
+                self.handle_tick(*elapsed_ms);
+                EventResult::Consumed
+            }
+            Event::Resize { width, height } => {
+                self.window = (*width as f32, *height as f32);
+                EventResult::Consumed
+            }
+            // A game that goes on while its window is behind another loses
+            // the ball with nobody watching; and a flipper held when the
+            // window lost the keyboard never hears its key come up.
+            Event::FocusOut => {
+                if matches!(
+                    self.phase,
+                    GamePhase::Playing | GamePhase::Launching | GamePhase::ReadyToLaunch
+                ) && self.balls_used > 0
+                {
+                    self.toggle_pause();
+                } else {
+                    self.release_all();
+                }
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
         }
     }
 
-    fn handle_key(&mut self, ke: &KeyEvent) {
+    fn handle_key(&mut self, ke: &KeyEvent) -> EventResult {
+        // The flippers and the plunger answer the key coming up as well as
+        // going down; everything else only its press.
+        if ke.key == Key::F1 {
+            if ke.pressed {
+                self.show_help = !self.show_help;
+                self.release_all();
+            }
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // The list is up: a flipper pressed through it would move a
+            // flipper nobody can see.
+            if ke.pressed && matches!(ke.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+        if self.confirm_new_game {
+            if ke.pressed {
+                match ke.key {
+                    Key::N | Key::Enter => self.ask_new_game(),
+                    Key::Escape => self.confirm_new_game = false,
+                    _ => {}
+                }
+            }
+            return EventResult::Consumed;
+        }
         match ke.key {
             // Left flipper: Left Shift or Z.
-            Key::LeftShift | Key::Z => {
-                if ke.pressed {
-                    self.left_flipper.pressed = true;
-                    if self.phase == GamePhase::Playing {
-                        self.tilt.record_input(self.total_ms);
-                    }
-                } else {
-                    self.left_flipper.pressed = false;
-                }
-            }
+            Key::LeftShift | Key::Z => self.set_flipper(FlipperSide::Left, ke.pressed),
             // Right flipper: Right Shift or M.
-            Key::RightShift | Key::M => {
-                if ke.pressed {
-                    self.right_flipper.pressed = true;
-                    if self.phase == GamePhase::Playing {
-                        self.tilt.record_input(self.total_ms);
-                    }
-                } else {
-                    self.right_flipper.pressed = false;
-                }
-            }
-            // Space: launch ball (hold for power).
+            Key::RightShift | Key::M => self.set_flipper(FlipperSide::Right, ke.pressed),
+            // Space: hold to pull the plunger, let go to launch.
             Key::Space => {
                 if ke.pressed {
-                    if self.phase == GamePhase::ReadyToLaunch {
-                        self.phase = GamePhase::Launching;
-                        self.launch_power = 0.0;
+                    self.pull_plunger();
+                } else {
+                    self.release_plunger();
+                }
+            }
+            Key::Up if ke.pressed => {
+                self.nudge();
+            }
+            Key::N if ke.pressed => self.ask_new_game(),
+            Key::P if ke.pressed => self.toggle_pause(),
+            _ => return EventResult::Ignored,
+        }
+        EventResult::Consumed
+    }
+
+    /// The pointer: the table's halves are the flippers, the plunger lane the
+    /// plunger, and the buttons are buttons.
+    fn handle_mouse(&mut self, me: &MouseEvent) -> EventResult {
+        match me.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                match self.frame_at(self.window).hit_test(me.x, me.y) {
+                    Some(target) => {
+                        self.press(target);
+                        EventResult::Consumed
                     }
-                } else if self.phase == GamePhase::Launching {
-                    self.launch_ball();
+                    None => EventResult::Ignored,
                 }
             }
-            // N: new game.
-            Key::N if ke.pressed => {
-                self.new_game();
-            }
-            // P: pause/unpause.
-            Key::P if ke.pressed => match self.phase {
-                GamePhase::Paused => {
-                    self.phase = self.phase_before_pause;
+            MouseEventKind::Release(MouseButton::Left) => match self.held.take() {
+                Some(Hold::LeftFlipper) => {
+                    self.set_flipper(FlipperSide::Left, false);
+                    EventResult::Consumed
                 }
-                GamePhase::GameOver => {}
-                other => {
-                    self.phase_before_pause = other;
-                    self.phase = GamePhase::Paused;
+                Some(Hold::RightFlipper) => {
+                    self.set_flipper(FlipperSide::Right, false);
+                    EventResult::Consumed
                 }
+                Some(Hold::Plunger) => {
+                    self.release_plunger();
+                    EventResult::Consumed
+                }
+                None => EventResult::Ignored,
             },
-            _ => {}
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// A left press on `target`.
+    fn press(&mut self, target: Target) {
+        match target {
+            Target::LeftFlipper => {
+                self.set_flipper(FlipperSide::Left, true);
+                self.held = Some(Hold::LeftFlipper);
+            }
+            Target::RightFlipper => {
+                self.set_flipper(FlipperSide::Right, true);
+                self.held = Some(Hold::RightFlipper);
+            }
+            Target::Plunger => {
+                self.pull_plunger();
+                self.held = Some(Hold::Plunger);
+            }
+            Target::NewGame | Target::ConfirmNewGame | Target::PlayAgain => self.ask_new_game(),
+            Target::KeepPlaying => self.confirm_new_game = false,
+            Target::Pause | Target::Resume => self.toggle_pause(),
+            Target::Nudge => {
+                self.nudge();
+            }
+            Target::Keys => self.show_help = true,
+            Target::HelpCard => self.show_help = false,
         }
     }
 
     fn handle_tick(&mut self, elapsed_ms: u64) {
         self.total_ms = self.total_ms.saturating_add(elapsed_ms);
+        let dt = elapsed_ms as f32 / 1000.0;
 
         match self.phase {
             GamePhase::Launching => {
-                let dt = elapsed_ms as f32 / 1000.0;
                 self.launch_power =
                     (self.launch_power + LAUNCH_POWER_RATE * dt / MAX_LAUNCH_POWER).min(1.0);
+                // The flippers work before the ball is in play too; they only
+                // moved inside the physics step, so a flipper pressed while
+                // the ball sat in the plunger lane did not move.
+                self.left_flipper.update(dt);
+                self.right_flipper.update(dt);
+            }
+            GamePhase::ReadyToLaunch => {
+                self.left_flipper.update(dt);
+                self.right_flipper.update(dt);
             }
             GamePhase::Playing => {
-                let dt = elapsed_ms as f32 / 1000.0;
                 // Substep for stability.
                 let steps = 4;
                 let sub_dt = dt / steps as f32;
@@ -1165,7 +1590,204 @@ impl Pinball {
         }
     }
 
+    /// Whether anything on the table moves by itself: the ball, a flipper on
+    /// its way, the plunger being pulled, the pause after a lost ball, a
+    /// warning or a bumper's flash fading.
+    fn moving(&self) -> bool {
+        let flipper_moving = |f: &Flipper| f.pressed || f.angle > 0.0;
+        matches!(
+            self.phase,
+            GamePhase::Playing | GamePhase::Launching | GamePhase::BallLost
+        ) || flipper_moving(&self.left_flipper)
+            || flipper_moving(&self.right_flipper)
+            || self.tilt.danger(self.total_ms)
+            || self.bumpers.iter().any(|b| b.is_flashing(self.total_ms))
+            || self.targets.iter().any(|t| t.is_flashing(self.total_ms))
+    }
+
     // ── Rendering ───────────────────────────────────────────────────
+
+    /// The window at `size`, with every control's hit box.
+    ///
+    /// The table is drawn at its own size -- every collision bound in the
+    /// physics is measured in it -- and a larger window puts it in the middle
+    /// rather than in the corner.
+    fn frame_at(&self, (width, height): (f32, f32)) -> Frame<Target> {
+        let window = Rect::new(0.0, 0.0, width.max(0.0), height.max(0.0));
+        let mut f = Frame::new(window.w, window.h);
+        f.clip(window);
+        fill(&mut f, window, BASE, 0.0);
+        let dx = ((window.w - WINDOW_WIDTH) / 2.0).max(0.0).floor();
+        let dy = ((window.h - WINDOW_HEIGHT) / 2.0).max(0.0).floor();
+        f.translate(dx, dy);
+
+        f.draw_with(|cmds| cmds.extend(self.render_commands()));
+        self.hit_table(&mut f);
+        self.draw_buttons(&mut f);
+        self.draw_overlay_buttons(&mut f);
+        if self.confirm_new_game {
+            self.draw_confirm(&mut f);
+        }
+        f.untranslate();
+
+        if self.show_help {
+            // Modal: nothing behind the card can be clicked.
+            f.discard_hits();
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (window.w, window.h),
+                0.0,
+                SHORTCUTS,
+                "F1 or Esc closes this",
+            );
+            f.hit(Target::HelpCard, window);
+        }
+        f.unclip();
+        f
+    }
+
+    /// The table's halves are the flippers while there is a ball to flip, and
+    /// the plunger lane is the plunger while there is one to launch.
+    fn hit_table(&self, f: &mut Frame<Target>) {
+        let flipping = matches!(
+            self.phase,
+            GamePhase::Playing
+                | GamePhase::ReadyToLaunch
+                | GamePhase::Launching
+                | GamePhase::BallLost
+        );
+        if !flipping || self.confirm_new_game {
+            return;
+        }
+        let (tx, ty) = (Self::table_origin_x(), Self::table_origin_y());
+        let launching = matches!(self.phase, GamePhase::ReadyToLaunch | GamePhase::Launching);
+        let playfield = if launching {
+            TABLE_WIDTH - PLUNGER_LANE_WIDTH
+        } else {
+            TABLE_WIDTH
+        };
+        let half = playfield / 2.0;
+        f.hit(Target::LeftFlipper, Rect::new(tx, ty, half, TABLE_HEIGHT));
+        f.hit(
+            Target::RightFlipper,
+            Rect::new(tx + half, ty, playfield - half, TABLE_HEIGHT),
+        );
+        if launching {
+            f.hit(
+                Target::Plunger,
+                Rect::new(tx + playfield, ty, PLUNGER_LANE_WIDTH, TABLE_HEIGHT),
+            );
+        }
+    }
+
+    /// The sidebar's buttons, along its bottom.
+    fn draw_buttons(&self, f: &mut Frame<Target>) {
+        let (sx, sy) = (PADDING, PADDING);
+        let sw = SIDEBAR_WIDTH - PADDING;
+        let w = (sw - 20.0 - 4.0) / 2.0;
+        let row1 = sy + TABLE_HEIGHT - 64.0;
+        let row2 = sy + TABLE_HEIGHT - 34.0;
+        let (left, right) = (sx + 10.0, sx + 10.0 + w + 4.0);
+        let paused = self.phase == GamePhase::Paused;
+        button(
+            f,
+            Rect::new(left, row1, w, 26.0),
+            "New game",
+            Target::NewGame,
+            true,
+        );
+        button(
+            f,
+            Rect::new(right, row1, w, 26.0),
+            if paused { "Resume" } else { "Pause" },
+            Target::Pause,
+            self.phase != GamePhase::GameOver,
+        );
+        button(
+            f,
+            Rect::new(left, row2, w, 26.0),
+            "Nudge",
+            Target::Nudge,
+            self.phase == GamePhase::Playing && !self.tilt.tilted,
+        );
+        button(
+            f,
+            Rect::new(right, row2, w, 26.0),
+            "Keys (F1)",
+            Target::Keys,
+            true,
+        );
+    }
+
+    /// The pause and game-over screens' buttons, under their words.
+    fn draw_overlay_buttons(&self, f: &mut Frame<Target>) {
+        if self.confirm_new_game {
+            return;
+        }
+        let (tx, ty) = (Self::table_origin_x(), Self::table_origin_y());
+        let r = Rect::new(
+            tx + TABLE_WIDTH / 2.0 - 55.0,
+            ty + TABLE_HEIGHT / 2.0 + 45.0,
+            110.0,
+            28.0,
+        );
+        match self.phase {
+            GamePhase::Paused => button(f, r, "Resume", Target::Resume, true),
+            GamePhase::GameOver => button(f, r, "Play again", Target::PlayAgain, true),
+            _ => {}
+        }
+    }
+
+    /// The question before N throws a game away.
+    fn draw_confirm(&self, f: &mut Frame<Target>) {
+        let (tx, ty) = (Self::table_origin_x(), Self::table_origin_y());
+        fill(
+            f,
+            Rect::new(tx, ty, TABLE_WIDTH, TABLE_HEIGHT),
+            Color::rgba(0, 0, 0, 170),
+            8.0,
+        );
+        // Modal: the table and the sidebar take no press while it is asked.
+        f.discard_hits();
+        let card = Rect::new(
+            tx + 20.0,
+            ty + TABLE_HEIGHT / 2.0 - 70.0,
+            TABLE_WIDTH - 40.0,
+            140.0,
+        );
+        fill(f, card, SURFACE0, 8.0);
+        centred(
+            f,
+            Rect::new(card.x, card.y + 12.0, card.w, 24.0),
+            "New game?",
+            OVERLAY_FONT_SIZE,
+            TEXT_COLOR,
+        );
+        centred(
+            f,
+            Rect::new(card.x, card.y + 42.0, card.w, 18.0),
+            &format!("This one ends, at {}.", self.score),
+            LABEL_FONT_SIZE,
+            SUBTEXT0,
+        );
+        let w = (card.w - 36.0) / 2.0;
+        let y = card.bottom() - 42.0;
+        button(
+            f,
+            Rect::new(card.x + 12.0, y, w, 28.0),
+            "New game (N)",
+            Target::ConfirmNewGame,
+            true,
+        );
+        button(
+            f,
+            Rect::new(card.x + 24.0 + w, y, w, 28.0),
+            "Keep playing",
+            Target::KeepPlaying,
+            true,
+        );
+    }
 
     /// Named `render_commands` and not `render`, so that a bare
     /// `self.render_commands()` inside the `App` impl cannot resolve to the trait
@@ -1313,12 +1935,12 @@ impl Pinball {
             });
         }
 
-        // Tilt warning.
-        if self.tilt.tilted {
+        // Tilt, and the warnings before it.
+        if self.tilt.tilted || self.tilt.danger(self.total_ms) {
             cmds.push(RenderCommand::Text {
                 x: sx + 10.0,
                 y: sy + 180.0,
-                text: "TILT!".to_string(),
+                text: if self.tilt.tilted { "TILT!" } else { "DANGER" }.to_string(),
                 color: RED,
                 font_size: SCORE_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
@@ -1405,18 +2027,48 @@ impl Pinball {
             cmds.push(RenderCommand::Text {
                 x: sx + 10.0,
                 y: hs_y + 20.0 + i as f32 * 18.0,
-                text: format!("{}. {}", i.saturating_add(1), entry.score),
+                text: score_line(i, entry),
                 color: rank_color,
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some(sw - 20.0),
+                overflow: TextOverflow::Ellipsis,
             });
         }
+        if self.high_scores.is_empty() {
+            cmds.push(RenderCommand::Text {
+                x: sx + 10.0,
+                y: hs_y + 20.0,
+                text: "No scores yet".to_string(),
+                color: OVERLAY0,
+                font_size: LABEL_FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(sw - 20.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        // Why the scores are not kept, whole: a clipped reason is no reason.
+        if let Some(note) = &self.scores_note {
+            let note_y = hs_y + 20.0 + HIGH_SCORE_SLOTS as f32 * 18.0;
+            let lines =
+                guitk::text::wrap(note, sw - 20.0, FOOTER_FONT_SIZE, FontWeightHint::Regular);
+            for (n, line) in lines.iter().take(3).enumerate() {
+                cmds.push(RenderCommand::Text {
+                    x: sx + 10.0,
+                    y: note_y + n as f32 * 13.0,
+                    text: line.clone(),
+                    color: PEACH,
+                    font_size: FOOTER_FONT_SIZE,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(sw - 20.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
 
-        // Launch power bar (when launching).
+        // Launch power bar (when launching). Above the buttons.
         if self.phase == GamePhase::Launching || self.phase == GamePhase::ReadyToLaunch {
-            let bar_y = sy + sh - 80.0;
+            let bar_y = sy + sh - 110.0;
             cmds.push(RenderCommand::Text {
                 x: sx + 10.0,
                 y: bar_y,
@@ -1856,9 +2508,8 @@ impl Pinball {
         cmds.push(RenderCommand::Text {
             x: PADDING,
             y: fy + 12.0,
-            text:
-                "L-Shift/Z: Left Flip | R-Shift/M: Right Flip | Space: Launch | N: New | P: Pause"
-                    .to_string(),
+            text: "Z: Left | M: Right | Space: Launch | Up: Nudge | P: Pause | F1: Keys"
+                .to_string(),
             color: OVERLAY0,
             font_size: FOOTER_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
@@ -1986,13 +2637,11 @@ impl Pinball {
             overflow: TextOverflow::Clip,
         });
     }
+}
 
-    // ── Query methods (used by tests) ───────────────────────────────
-
-    fn active_ball_count(&self) -> usize {
-        self.balls.iter().filter(|b| b.active).count()
-    }
-
+/// Queries the tests read the table through.
+#[cfg(test)]
+impl Pinball {
     fn is_paused(&self) -> bool {
         self.phase == GamePhase::Paused
     }
@@ -2119,26 +2768,113 @@ impl App for Pinball {
 
     fn tick_interval(&self) -> Option<Duration> {
         // Without this the ball does not move: everything on this table is
-        // driven by `handle_tick`, and input only nudges the flippers.
-        Some(TICK)
+        // driven by `handle_tick`. But only while something is moving: a
+        // paused game, a finished one, or a ball waiting in the plunger lane
+        // held the whole desktop awake sixty times a second to redraw the
+        // same picture.
+        self.moving().then_some(TICK)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
             return Response::Exit;
         }
-        self.handle_event(event);
-        // Always a redraw: a ball in flight changes the picture on every tick
-        // whether or not the event that arrived was about it, and
-        // `handle_event` returns `()` so there is nothing honest to branch on.
-        Response::Redraw
+        // A tick while anything moves is a new picture; a key or a click the
+        // game did not take is not.
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
     }
 
-    fn render(&mut self, _width: f32, _height: f32) -> RenderTree {
-        // Fixed size, so the reported one is not used -- see `initial_size`.
-        RenderTree {
-            commands: self.render_commands(),
-        }
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        self.window = (width, height);
+        self.frame_at((width, height)).into_tree()
+    }
+
+    fn theme_changed(&mut self, palette: &Palette) {
+        // The card and its colours follow the user's theme; the table keeps
+        // its own, which are the machine's rather than the desktop's.
+        self.palette = *palette;
+    }
+}
+
+impl Probe for Pinball {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame_at(size)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> EventResult {
+        self.window = size;
+        self.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }))
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> EventResult {
+        self.window = size;
+        self.handle_event(&Event::Key(key.clone()))
+    }
+}
+
+/// A high score as the sidebar lists it: its place, the score, and the day
+/// it was made.
+fn score_line(i: usize, entry: &HighScoreEntry) -> String {
+    let day = entry
+        .day
+        .get(5..7)
+        .and_then(|m| m.parse::<u32>().ok())
+        .zip(entry.day.get(8..10).and_then(|d| d.parse::<u32>().ok()))
+        .map(|(m, d)| format!("  {} {d}", guitk::date::month_short_name(m)))
+        .unwrap_or_default();
+    format!("{}. {}{day}", i.saturating_add(1), entry.score)
+}
+
+/// One filled rectangle.
+fn fill(f: &mut Frame<Target>, r: Rect, color: Color, radius: f32) {
+    f.push(RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii: CornerRadii::all(radius),
+    });
+}
+
+/// A line of text centred in `r`.
+fn centred(f: &mut Frame<Target>, r: Rect, s: &str, size: f32, color: Color) {
+    let w = guitk::text::measure(s, size, FontWeightHint::Bold).min(r.w);
+    f.push(RenderCommand::Text {
+        x: r.x + (r.w - w) / 2.0,
+        y: r.y + (r.h - size) / 2.0 - 1.0,
+        text: s.to_string(),
+        color,
+        font_size: size,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(r.w),
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
+/// A button: drawn dim and taking no press when it would do nothing.
+fn button(f: &mut Frame<Target>, r: Rect, label: &str, target: Target, enabled: bool) {
+    fill(f, r, if enabled { SURFACE1 } else { SURFACE0 }, 5.0);
+    centred(
+        f,
+        r,
+        label,
+        LABEL_FONT_SIZE,
+        if enabled { TEXT_COLOR } else { OVERLAY0 },
+    );
+    if enabled {
+        f.hit(target, r);
     }
 }
 
@@ -2153,7 +2889,7 @@ fn main() -> ExitCode {
         }
     };
     refuse_arguments(args.rest.first().map(|a| std::ffi::OsStr::new(a.as_str())));
-    let mut game = Pinball::new();
+    let mut game = Pinball::from_settings();
     app::launch_with("pinball", args.display.as_deref(), &mut game)
 }
 
@@ -2332,7 +3068,7 @@ mod tests {
     #[test]
     fn test_initial_target_count() {
         let app = test_app();
-        assert_eq!(app.targets.len(), MULTIBALL_TARGET_COUNT);
+        assert_eq!(app.targets.len(), 5);
     }
 
     #[test]
@@ -2354,9 +3090,11 @@ mod tests {
     }
 
     #[test]
-    fn test_initial_high_scores_populated() {
+    fn a_new_table_invents_no_high_scores() {
+        // It began with five scores -- 10000 down to 1000 -- that nobody made.
         let app = test_app();
-        assert_eq!(app.high_scores.len(), HIGH_SCORE_SLOTS);
+        assert!(app.high_scores.is_empty());
+        assert!(texts_of(&app).iter().any(|t| t == "No scores yet"));
     }
 
     #[test]
@@ -2483,21 +3221,6 @@ mod tests {
         assert!((c.y - 4.0).abs() < 0.001);
     }
 
-    #[test]
-    fn test_vec2_rotate_90() {
-        let v = Vec2::new(1.0, 0.0);
-        let r = v.rotate(core::f32::consts::FRAC_PI_2);
-        assert!((r.x).abs() < 0.001);
-        assert!((r.y - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_vec2_distance_to() {
-        let a = Vec2::new(0.0, 0.0);
-        let b = Vec2::new(3.0, 4.0);
-        assert!((a.distance_to(b) - 5.0).abs() < 0.001);
-    }
-
     // ── Randomness ──────────────────────────────────────────────────
     //
     // The generator itself belongs to `randrange` and is tested there. What
@@ -2612,25 +3335,6 @@ mod tests {
         assert!(target.active);
     }
 
-    #[test]
-    fn test_target_contains_inside() {
-        let target = DropTarget::new(50.0, 50.0, 30.0, 10.0);
-        assert!(target.contains(Vec2::new(60.0, 55.0)));
-    }
-
-    #[test]
-    fn test_target_contains_outside() {
-        let target = DropTarget::new(50.0, 50.0, 30.0, 10.0);
-        assert!(!target.contains(Vec2::new(10.0, 10.0)));
-    }
-
-    #[test]
-    fn test_target_contains_edge() {
-        let target = DropTarget::new(50.0, 50.0, 30.0, 10.0);
-        assert!(target.contains(Vec2::new(50.0, 50.0)));
-        assert!(target.contains(Vec2::new(80.0, 60.0)));
-    }
-
     // ── Ramp ────────────────────────────────────────────────────────
 
     #[test]
@@ -2707,7 +3411,7 @@ mod tests {
         f.update(0.5);
         let tip_active = f.tip();
         // Tip should have moved.
-        assert!(tip_rest.distance_to(tip_active) > 1.0);
+        assert!(tip_rest.sub(tip_active).length() > 1.0);
     }
 
     #[test]
@@ -2715,64 +3419,102 @@ mod tests {
         let f = Flipper::new(FlipperSide::Left, Vec2::new(80.0, 500.0));
         let closest = f.closest_point(Vec2::new(80.0, 480.0));
         // Should be near the pivot.
-        assert!(closest.distance_to(f.pivot) < FLIPPER_LENGTH);
+        assert!(closest.sub(f.pivot).length() < FLIPPER_LENGTH);
     }
 
-    // ── Tilt tracker ────────────────────────────────────────────────
+    // ── Nudging and tilt ────────────────────────────────────────────
 
     #[test]
-    fn test_tilt_initially_not_tilted() {
-        let t = TiltTracker::new();
-        assert!(!t.tilted);
-    }
-
-    #[test]
-    fn test_tilt_not_triggered_few_inputs() {
+    fn a_nudge_or_two_is_a_warning_and_one_more_tilts() {
         let mut t = TiltTracker::new();
-        for i in 0..5 {
-            t.record_input(i * 50);
-        }
-        assert!(!t.tilted);
-    }
-
-    #[test]
-    fn test_tilt_triggered_many_rapid_inputs() {
-        let mut t = TiltTracker::new();
-        for i in 0..TILT_THRESHOLD {
-            t.record_input(i as u64 * 50);
-        }
+        assert_eq!(t.nudge(0), Nudge::Warned(1));
+        assert!(t.danger(100));
+        assert!(!t.danger(DANGER_MS + 1), "the warning fades");
+        assert_eq!(t.nudge(1000), Nudge::Warned(2));
+        assert_eq!(t.nudge(2000), Nudge::Tilted);
         assert!(t.tilted);
-    }
-
-    #[test]
-    fn test_tilt_active_during_penalty() {
-        let mut t = TiltTracker::new();
-        for i in 0..TILT_THRESHOLD {
-            t.record_input(i as u64 * 50);
-        }
-        let trigger_time = (TILT_THRESHOLD - 1) as u64 * 50;
-        assert!(t.is_tilt_active(trigger_time + 100));
-    }
-
-    #[test]
-    fn test_tilt_expires_after_penalty() {
-        let mut t = TiltTracker::new();
-        for i in 0..TILT_THRESHOLD {
-            t.record_input(i as u64 * 50);
-        }
-        let trigger_time = (TILT_THRESHOLD - 1) as u64 * 50;
-        assert!(!t.is_tilt_active(trigger_time + TILT_PENALTY_MS + 1));
-    }
-
-    #[test]
-    fn test_tilt_reset_clears() {
-        let mut t = TiltTracker::new();
-        for i in 0..TILT_THRESHOLD {
-            t.record_input(i as u64 * 50);
-        }
+        assert_eq!(
+            t.nudge(2500),
+            Nudge::Ignored,
+            "a tilted table is not listening"
+        );
         t.reset();
-        assert!(!t.tilted);
-        assert!(t.inputs.is_empty());
+        assert!(!t.tilted && t.nudges.is_empty());
+    }
+
+    #[test]
+    fn nudges_far_apart_never_tilt() {
+        let mut t = TiltTracker::new();
+        for n in 0..20 {
+            assert_ne!(t.nudge(n * TILT_WINDOW_MS), Nudge::Tilted, "nudge {n}");
+        }
+    }
+
+    #[test]
+    fn pressing_the_flippers_fast_is_not_a_tilt() {
+        // Fifteen flipper presses in a second tilted the table and killed the
+        // flippers: the penalty fell on playing well.
+        let mut app = test_app();
+        launch_and_play(&mut app);
+        for _ in 0..40 {
+            app.handle_event(&key_press(Key::Z));
+            app.handle_event(&tick(10));
+            app.handle_event(&key_release(Key::Z));
+        }
+        assert!(!app.tilt.tilted);
+        app.handle_event(&key_press(Key::Z));
+        assert!(app.left_flipper.pressed, "the flipper still answers");
+    }
+
+    #[test]
+    fn a_nudge_shoves_the_ball_up_the_table() {
+        let mut app = test_app();
+        launch_and_play(&mut app);
+        app.balls[0].vel = Vec2::new(0.0, 100.0);
+        app.handle_event(&key_press(Key::Up));
+        assert!(app.balls[0].vel.y < 100.0 - NUDGE_IMPULSE + 0.01);
+        assert!((app.balls[0].vel.x.abs() - NUDGE_SIDEWAYS).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_nudge_does_nothing_before_the_ball_is_in_play() {
+        let mut app = test_app();
+        app.handle_event(&key_press(Key::Up));
+        assert!(app.tilt.nudges.is_empty());
+        assert_eq!(app.balls[0].vel, Vec2::ZERO);
+    }
+
+    #[test]
+    fn a_tilted_table_has_dead_flippers_and_scores_nothing() {
+        let mut app = test_app();
+        launch_and_play(&mut app);
+        app.handle_event(&key_press(Key::Z));
+        for _ in 0..=TILT_WARNINGS {
+            app.handle_event(&key_press(Key::Up));
+        }
+        assert!(app.tilt.tilted);
+        assert!(!app.left_flipper.pressed, "a held flipper drops");
+        app.handle_event(&key_press(Key::M));
+        assert!(!app.right_flipper.pressed);
+        let score = app.score;
+        app.award_points(BUMPER_POINTS);
+        assert_eq!(app.score, score);
+        let texts = texts_of(&app);
+        assert!(texts.iter().any(|t| t == "TILT!"));
+
+        // Until the ball drains: the next one is clean.
+        app.drain_ball(0);
+        app.handle_event(&tick(1600));
+        assert!(app.is_ready_to_launch());
+        assert!(!app.tilt.tilted);
+    }
+
+    #[test]
+    fn a_warning_says_danger() {
+        let mut app = test_app();
+        launch_and_play(&mut app);
+        app.handle_event(&key_press(Key::Up));
+        assert!(texts_of(&app).iter().any(|t| t == "DANGER"));
     }
 
     // ── Launching ───────────────────────────────────────────────────
@@ -2932,7 +3674,14 @@ mod tests {
         let mut app = test_app();
         app.score = 5000;
         app.handle_event(&key_press(Key::N));
+        assert_eq!(
+            app.score, 5000,
+            "a game in progress is not thrown away on one key"
+        );
+        assert!(app.confirm_new_game);
+        app.handle_event(&key_press(Key::N));
         assert_eq!(app.score, 0);
+        assert!(!app.confirm_new_game);
     }
 
     #[test]
@@ -2946,12 +3695,28 @@ mod tests {
     #[test]
     fn test_new_game_preserves_high_scores() {
         let mut app = test_app();
+        app.high_scores = vec![entry(900, "2026-09-25"), entry(400, "")];
         let hs = app.high_scores.clone();
         app.handle_event(&key_press(Key::N));
-        assert_eq!(app.high_scores.len(), hs.len());
-        for (a, b) in app.high_scores.iter().zip(hs.iter()) {
-            assert_eq!(a.score, b.score);
-        }
+        assert_eq!(app.high_scores, hs);
+    }
+
+    #[test]
+    fn escape_keeps_the_game_going() {
+        let mut app = test_app();
+        launch_and_play(&mut app);
+        app.score = 700;
+        app.handle_event(&key_press(Key::N));
+        assert!(app.confirm_new_game);
+        assert!(
+            texts_of(&app).iter().any(|t| t == "This one ends, at 700."),
+            "the question says what is lost"
+        );
+        app.handle_event(&key_press(Key::Z));
+        assert!(!app.left_flipper.pressed, "the question has the keyboard");
+        app.handle_event(&key_press(Key::Escape));
+        assert!(!app.confirm_new_game);
+        assert_eq!(app.score, 700);
     }
 
     #[test]
@@ -3033,18 +3798,38 @@ mod tests {
     #[test]
     fn test_high_score_truncated() {
         let mut app = test_app();
+        app.high_scores = (1..=5).map(|n| entry(n * 1000, "")).rev().collect();
         app.score = 50000;
         app.update_high_scores();
         assert_eq!(app.high_scores.len(), HIGH_SCORE_SLOTS);
+        assert_eq!(app.high_scores[0].score, 50000);
+        assert_eq!(app.high_scores[HIGH_SCORE_SLOTS - 1].score, 2000);
     }
 
     #[test]
     fn test_low_score_not_inserted() {
         let mut app = test_app();
+        app.high_scores = (1..=5).map(|n| entry(n * 1000, "")).rev().collect();
+        app.score = 500;
+        app.update_high_scores();
+        assert_eq!(app.high_scores[HIGH_SCORE_SLOTS - 1].score, 1000);
+        let mut app = test_app();
         app.score = 0;
         app.update_high_scores();
-        // Score of 0 is not higher than any existing score, so no insertion.
-        assert_eq!(app.high_scores[HIGH_SCORE_SLOTS - 1].score, 1000);
+        assert!(
+            app.high_scores.is_empty(),
+            "a game that scored nothing is no high score"
+        );
+    }
+
+    #[test]
+    fn a_high_score_is_dated_by_the_clock() {
+        let mut app = test_app();
+        app.clock = fixed_clock;
+        app.score = 1200;
+        app.update_high_scores();
+        assert_eq!(app.high_scores[0], entry(1200, "2025-09-25"));
+        assert!(texts_of(&app).iter().any(|t| t == "1. 1200  Sep 25"));
     }
 
     // ── Physics ─────────────────────────────────────────────────────
@@ -3305,6 +4090,316 @@ mod tests {
             .iter()
             .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == PEACH));
         assert!(has_plunger);
+    }
+
+    // ── Helpers for what follows ────────────────────────────────────
+
+    fn entry(score: u32, day: &str) -> HighScoreEntry {
+        HighScoreEntry {
+            score,
+            day: day.to_string(),
+        }
+    }
+
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "it stands in for `system_clock`, whose type it must have"
+    )]
+    fn fixed_clock() -> Option<i64> {
+        // 2025-09-25 11:33:20 UTC.
+        Some(1_758_800_000)
+    }
+
+    /// Every string the window draws.
+    fn texts_of(app: &Pinball) -> Vec<String> {
+        app.frame_at((WINDOW_WIDTH, WINDOW_HEIGHT))
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn mouse(app: &mut Pinball, target: Target, down: bool) {
+        let (x, y) = guitk::probe::rect_of(app, target)
+            .unwrap_or_else(|| panic!("{target:?} is not on screen"))
+            .centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: if down {
+                MouseEventKind::Press(MouseButton::Left)
+            } else {
+                MouseEventKind::Release(MouseButton::Left)
+            },
+        }));
+    }
+
+    // ── The pointer ─────────────────────────────────────────────────
+
+    #[test]
+    fn the_whole_game_can_be_played_with_the_pointer() {
+        let mut app = test_app();
+        // The plunger: hold, and let go to launch.
+        mouse(&mut app, Target::Plunger, true);
+        assert!(app.is_launching());
+        app.handle_event(&tick(300));
+        mouse(&mut app, Target::Plunger, false);
+        assert!(app.is_playing(), "letting go launched the ball");
+
+        // The table's halves are the flippers, while the button is held.
+        mouse(&mut app, Target::LeftFlipper, true);
+        assert!(app.left_flipper_pressed() && !app.right_flipper_pressed());
+        mouse(&mut app, Target::LeftFlipper, false);
+        assert!(!app.left_flipper_pressed());
+        mouse(&mut app, Target::RightFlipper, true);
+        assert!(app.right_flipper_pressed());
+        mouse(&mut app, Target::RightFlipper, false);
+        assert!(!app.right_flipper_pressed());
+        assert!(
+            guitk::probe::rect_of(&app, Target::Plunger).is_none(),
+            "the lane is not a plunger with the ball in play"
+        );
+
+        guitk::probe::click(&mut app, Target::Nudge);
+        assert_eq!(app.tilt.nudges.len(), 1);
+
+        guitk::probe::click(&mut app, Target::Pause);
+        assert!(app.is_paused());
+        guitk::probe::click(&mut app, Target::Resume);
+        assert!(app.is_playing());
+
+        guitk::probe::click(&mut app, Target::Keys);
+        assert!(app.show_help);
+        assert!(
+            guitk::probe::rect_of(&app, Target::NewGame).is_none(),
+            "behind the card, nothing can be clicked"
+        );
+        guitk::probe::click(&mut app, Target::HelpCard);
+        assert!(!app.show_help);
+
+        app.score = 300;
+        guitk::probe::click(&mut app, Target::NewGame);
+        assert!(app.confirm_new_game);
+        guitk::probe::click(&mut app, Target::KeepPlaying);
+        assert!(!app.confirm_new_game && app.score == 300);
+        guitk::probe::click(&mut app, Target::NewGame);
+        guitk::probe::click(&mut app, Target::ConfirmNewGame);
+        assert_eq!(app.score, 0);
+        assert!(app.is_ready_to_launch());
+
+        app.phase = GamePhase::GameOver;
+        guitk::probe::click(&mut app, Target::PlayAgain);
+        assert!(app.is_ready_to_launch(), "play again starts a game");
+    }
+
+    #[test]
+    fn a_button_that_would_do_nothing_takes_no_press() {
+        let mut app = test_app();
+        assert!(
+            guitk::probe::rect_of(&app, Target::Nudge).is_none(),
+            "no nudging a ball in the plunger lane"
+        );
+        app.phase = GamePhase::GameOver;
+        assert!(guitk::probe::rect_of(&app, Target::Pause).is_none());
+        assert!(guitk::probe::rect_of(&app, Target::LeftFlipper).is_none());
+    }
+
+    #[test]
+    fn a_larger_window_puts_the_table_in_the_middle() {
+        let app = test_app();
+        let small =
+            guitk::probe::rect_of_sized(&app, Target::NewGame, (WINDOW_WIDTH, WINDOW_HEIGHT))
+                .unwrap();
+        let big = guitk::probe::rect_of_sized(
+            &app,
+            Target::NewGame,
+            (WINDOW_WIDTH + 200.0, WINDOW_HEIGHT + 100.0),
+        )
+        .unwrap();
+        assert!((big.x - small.x - 100.0).abs() < 0.01 && (big.y - small.y - 50.0).abs() < 0.01);
+        let frame = app.frame_at((WINDOW_WIDTH + 200.0, WINDOW_HEIGHT + 100.0));
+        assert!(frame.is_balanced());
+    }
+
+    // ── Keys ────────────────────────────────────────────────────────
+
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                // Before the ball, with it in play, with the list up, and with
+                // the new-game question up: Esc means something only in the
+                // last two.
+                let answered = (0..4).any(|state| {
+                    let mut app = test_app();
+                    if state > 0 {
+                        launch_and_play(&mut app);
+                        app.score = 100;
+                    }
+                    app.show_help = state == 2;
+                    app.confirm_new_game = state == 3;
+                    app.handle_key(&stroke) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_list_of_keys_reaches_the_window_and_holds_the_keyboard() {
+        let mut app = test_app();
+        app.handle_event(&key_press(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&texts_of(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+        app.handle_event(&key_press(Key::Space));
+        assert!(
+            app.is_ready_to_launch(),
+            "Space pulled the plunger through the card"
+        );
+        app.handle_event(&key_press(Key::Escape));
+        assert!(!app.show_help);
+        app.handle_event(&key_press(Key::Space));
+        assert!(
+            app.is_launching(),
+            "control: Space pulls it with the card down"
+        );
+    }
+
+    #[test]
+    fn the_flippers_work_before_the_ball_is_launched() {
+        // They moved only inside the physics step, which runs only with the
+        // ball in play.
+        let mut app = test_app();
+        app.handle_event(&key_press(Key::Z));
+        app.handle_event(&tick(50));
+        assert!(app.left_flipper.angle > 0.0);
+        app.handle_event(&key_release(Key::Z));
+        app.handle_event(&tick(200));
+        assert!(app.left_flipper.angle.abs() < f32::EPSILON);
+    }
+
+    // ── The window ──────────────────────────────────────────────────
+
+    #[test]
+    fn losing_the_keyboard_pauses_a_game_and_lets_go_of_the_flippers() {
+        let mut app = test_app();
+        launch_and_play(&mut app);
+        app.handle_event(&key_press(Key::Z));
+        app.handle_event(&Event::FocusOut);
+        assert!(app.is_paused(), "the ball would drain with nobody watching");
+        assert!(!app.left_flipper_pressed(), "its key-up will never come");
+        app.handle_event(&key_press(Key::P));
+        assert!(app.is_playing());
+
+        let mut fresh = test_app();
+        fresh.handle_event(&key_press(Key::Space));
+        fresh.handle_event(&Event::FocusOut);
+        assert!(
+            fresh.is_ready_to_launch(),
+            "a half-pulled plunger goes back, unlaunched"
+        );
+        assert!(!fresh.is_paused(), "nothing to pause before the first ball");
+    }
+
+    #[test]
+    fn the_clock_is_asked_for_only_while_something_moves() {
+        let mut app = test_app();
+        app.handle_event(&tick(300));
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "a ball waiting to be launched moves nothing"
+        );
+        app.handle_event(&key_press(Key::Z));
+        assert_eq!(app.tick_interval(), Some(TICK), "a flipper on its way");
+        app.handle_event(&key_release(Key::Z));
+        app.handle_event(&tick(300));
+        launch_and_play(&mut app);
+        assert_eq!(app.tick_interval(), Some(TICK));
+        app.handle_event(&key_press(Key::P));
+        app.handle_event(&tick(300));
+        assert_eq!(app.tick_interval(), None, "a paused game");
+    }
+
+    // ── Kept scores ─────────────────────────────────────────────────
+
+    #[test]
+    fn high_scores_are_kept_and_read_back() {
+        settingsfile::testing::with_scratch_config("pinball-kept", |_| {
+            let mut app = Pinball::from_settings();
+            assert!(app.high_scores.is_empty() && app.scores_note.is_none());
+            app.clock = fixed_clock;
+            app.score = 4200;
+            app.drain_ball(0);
+            app.balls_remaining = 1;
+            app.drain_ball(0);
+            assert!(app.is_game_over());
+            let path = scores_path().unwrap();
+            let written = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(written, "pinball high scores 1\n4200\t2025-09-25\n");
+
+            let again = Pinball::from_settings();
+            assert_eq!(again.high_scores, vec![entry(4200, "2025-09-25")]);
+        });
+    }
+
+    #[test]
+    fn a_table_that_is_not_opened_from_settings_writes_nothing() {
+        settingsfile::testing::with_scratch_config("pinball-quiet", |dir| {
+            let mut app = test_app();
+            app.score = 900;
+            app.update_high_scores();
+            assert!(!dir.join("pinball").exists());
+        });
+    }
+
+    #[test]
+    fn a_scores_file_that_cannot_be_read_whole_is_left_alone() {
+        settingsfile::testing::with_scratch_config("pinball-broken", |_| {
+            let path = scores_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let broken = "pinball high scores 1\n900\t2025-09-01\nlots\t2025-09-02\n";
+            std::fs::write(&path, broken).unwrap();
+            let mut app = Pinball::from_settings();
+            assert!(app.high_scores.is_empty());
+            let note = app.scores_note.clone().expect("the sidebar says why");
+            assert!(note.contains("line 3"), "{note}");
+            app.score = 5000;
+            app.update_high_scores();
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                broken,
+                "nothing saved over it"
+            );
+            assert!(texts_of(&app).iter().any(|t| t.contains("not read")));
+        });
+    }
+
+    #[test]
+    fn the_scores_file_is_its_own_format_and_nothing_else() {
+        assert_eq!(parse_scores("pinball high scores 1\n"), Ok(Vec::new()));
+        assert!(parse_scores("").is_err());
+        assert!(
+            parse_scores("pinball high scores 2\n").is_err(),
+            "a later format"
+        );
+        assert!(parse_scores("pinball high scores 1\n5\t2025-9-1\n").is_err());
+        assert!(parse_scores("pinball high scores 1\n5 2025-09-01\n").is_err());
+        let six: String = (0..6).fold(String::new(), |mut s, n| {
+            s.push_str(&n.to_string());
+            s.push_str("\t\n");
+            s
+        });
+        assert!(parse_scores(&format!("pinball high scores 1\n{six}")).is_err());
+        let kept = vec![entry(10, "2025-01-02"), entry(9, "")];
+        assert_eq!(parse_scores(&scores_text(&kept)), Ok(kept), "a round trip");
     }
 }
 

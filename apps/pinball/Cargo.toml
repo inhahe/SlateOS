@@ -9,6 +9,17 @@ oswindow = { path = "../../gui/window" }
 # The shared random source. Was a local LCG reduced with `% bound` -- the
 # copy-pasted one randrange's module docs dissect.
 randrange = { path = "../../randrange" }
+# The user's colours, for the list of keys. The table keeps its own.
+appearance = { path = "../../gui/appearance" }
+# The high scores are kept in the user's settings directory
+# (`settingsfile::config_dir`), read capped and written atomically.
+settingsfile = { path = "../../gui/settingsfile" }
+safeio = { path = "../safeio" }
+
+[dev-dependencies]
+# `with_scratch_config`, so a test that keeps scores keeps them in a scratch
+# directory rather than the user's.
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
 
 [lints]
 workspace = true

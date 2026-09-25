@@ -159635,7 +159635,7 @@ computes how many rows fit with `(height - 30.0) / 24.0` and then advances
 812 pixels, so the last few are drawn past the bottom of the panel they are
 in. One of the two numbers is wrong and they should be one constant.
 
-## `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED` (lane C, 2026-09-17)
+## `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED` (lane C, 2026-09-17) -- **ALL EXAMINED 2026-09-25 (lane E)**
 
 **In short:** twenty-one applications draw a graphical interface and handle no
 mouse events at all. Not "handle clicks badly" -- they never receive one:
@@ -160132,6 +160132,31 @@ and its grid was drawn in the proportional face at a guessed cell size. 62
 tests in tmux (91 in the terminal); `apps/tmux/mutate.py` has 42 rows and
 `apps/terminal/mutate.py` 90. Sessions end with the window -- see `[E] tmux is
 not a server`. Twenty examined; one to go.
+
+**`apps/pinball`, 2026-09-25 -- the last, and the case for "keyboard by design"
+did not hold.** It is a game played with the keys, and could have been left
+so -- but its table, its plunger lane and its New game were all drawn for a
+pointer that did nothing, and reading it found false features besides.
+"Tilt" was pressing the flippers fifteen times in a second, which killed the
+flippers for three seconds: the penalty fell on playing well, and there was no
+way to shove the table at all. The high-score table was five scores -- 10000
+down to 1000 -- that nobody had made, and nothing was kept when the window
+closed. N threw away a game in progress on one key. The flippers moved only
+inside the physics step, so they did not move while a ball waited in the
+plunger lane. The game ran on while its window was behind another, and a
+flipper held when the window lost the keyboard stayed up for good. And it asked
+for a tick sixty times a second whether or not anything was moving. Now: the
+pointer plays the whole game -- hold on the table's left or right half for that
+flipper, hold on the plunger lane to pull and let go to launch -- and the
+sidebar has New game, Pause, Nudge and Keys (F1, which lists every key); Up
+nudges the table and shoves the ball, and the third nudge in five seconds tilts
+it: dead flippers and no scoring until the ball drains; high scores are real,
+dated, and kept in `pinball/high-scores.txt` under the settings directory -- a
+file that cannot be read whole is left alone and the sidebar says why; N during
+a game asks first and says what is lost; losing the keyboard pauses the game
+and lets go of everything held; and the clock runs only while something moves.
+132 tests; `apps/pinball/mutate.py` has 31 rows. **All twenty-one examined** --
+two (`reminders`, `notes`) before the list was lane E's, nineteen since.
 
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 

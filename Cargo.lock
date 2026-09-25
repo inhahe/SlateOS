@@ -2199,9 +2199,12 @@ dependencies = [
 name = "pinball"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "randrange",
+ "safeio",
+ "settingsfile",
 ]
 
 [[package]]

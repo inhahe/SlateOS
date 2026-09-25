@@ -1822,8 +1822,8 @@ word; text inside them that says "lane C" is history.
   measured in, a paste is fenced when the program asked for bracketed paste,
   and a terminal without the keyboard draws its cursor as an outline.
 
-- `[-]` `[E]` **Twenty applications draw an interface the pointer cannot
-  touch** — `known-issues.md` → `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`.
+- `[x]` `[E]` **Twenty applications draw an interface the pointer cannot
+  touch** — all examined 2026-09-25 — `known-issues.md` → `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`.
   Measured 2026-09-25 (`grep -c "Event::Mouse\|MouseEvent"` over each app's
   whole `src/`, which is one `main.rs` in every case): weather, reminders,
   rssreader, markdowneditor, habits, pinball, slides, flashcards, finance,
@@ -1882,9 +1882,11 @@ word; text inside them that says "lane C" is history.
   kept apart from mail it never rewrites; and a builder that writes what it
   declares), `tmux` (2026-09-25 — every control; a shell in every pane, on
   the terminal app's own emulator, shared as a library; tmux's meanings for
-  its splits, layouts and keys; closing asks first; the wall clock).
-  **Next:** pinball. (`reminders` was
-  examined 2026-09-18: keyboard-driven by design, its two gaps fixed.)
+  its splits, layouts and keys; closing asks first; the wall clock),
+  `pinball` (2026-09-25 — played whole with the pointer; nudging, and a tilt
+  that is a tilt; real high scores, kept; N asks during a game; pauses when
+  the window loses the keyboard). (`reminders` was examined 2026-09-18:
+  keyboard-driven by design, its two gaps fixed.) The list is finished.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

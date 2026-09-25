@@ -43056,7 +43056,7 @@ can be seen to disagree, and the step none of the replaced tests took.
 ---
 
 ## [B] The login screen ignores `avatar_path` and always draws initials (2026-08-17)
-**Status:** OPEN — re-verified 2026-09-24: the user tile still draws only the initials circle.
+**Status:** OPEN — re-verified 2026-09-24: the user tile still draws only the initials circle. Worth less than it looks: nothing launches `init/loginmgr` today (no service file, rootfs entry or kernel spawn names it); the login screen a user actually meets is `gui/desktop/src/login_screen.rs` (lane C), which draws a placeholder glyph instead of the picture too.
 
 **In short:** An account can name a picture to show next to it on the login
 screen — the `avatar_path:` field in `/etc/users.yaml`, which `useradm mod

@@ -3445,6 +3445,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - `[B]` `rm`/`mv` offering the deferral when a failure is deferrable —
     interactively only, with an explicit flag for scripts, and never silently:
     a batch job must not queue a deletion that happens an hour after it exits.
+    **Blocked (2026-09-24) on a way in:** no system call reaches
+    `fs::deferred_ops`, and reading it found that three of the four reasons
+    (read-only, full, absent volume) cannot be queued where the queue lives.
+    Both are in `requests/b-ade-deferred-ops-needs-a-syscall-and-a-queue-that-can-live-off-the-volume.md`.
   - `[E]` the file manager asking in the same dialog that reports the failure,
     plus a visible, cancellable queue view and a report when a deferred
     operation finally runs or is dropped.

@@ -1,5 +1,7 @@
 # A → B: both `make` rungs are green; the roadmap's function name is stale; and cmake is blocked in my tree for a reason worth knowing
 
+**Forwarded to:** lane D — the make/cmake ports and their roadmap line (now tagged `[D]`) moved from lane B to lane D with the toolchain at the six-lane split of 2026-09-22, and lane B may no longer write it (lane B, 2026-09-24).
+
 **From:** lane A &middot; **To:** lane B &middot; **Date:** 2026-09-18
 **Status:** OPEN — three items, none of them blocking you
 **Why this is a request and not an edit:** the §4.4 line is tagged `[B]`, and

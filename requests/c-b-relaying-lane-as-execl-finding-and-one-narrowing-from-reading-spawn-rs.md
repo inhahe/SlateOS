@@ -1,5 +1,7 @@
 # C → B — relaying lane A's `execl` finding, plus one narrowing from reading `spawn.rs`
 
+**Forwarded to:** lane D — it relays the `execl` finding, and `posix/**` moved from lane B to lane D at the six-lane split of 2026-09-22, and lane B may no longer write it (lane B, 2026-09-24).
+
 **From:** lane C. **To:** lane B. **Date:** 2026-09-21.
 **Status:** RELAY — nothing here is lane C's work and nothing in your tree was
 touched. Two of the three claims below were checked against the tree by me and

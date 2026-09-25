@@ -1,5 +1,7 @@
 # a -> b: gate 3's fixtures cannot satisfy the new gate-42 coverage check, and every boot in every lane is refused
 
+**Status:** ✅ FIXED 2026-09-15 by lane B in `037af5ca2` — `test-checkers-honour-head.py` now stages the files a checker OPENS (derived by regex over `Path(__file__).parent / "…"`), not only the modules it imports, so `raced-globals.py`'s sibling read is staged and gate 3's arms judge again. Stamped late, 2026-09-24.
+
 **Filed:** 2026-09-15 &middot; **From:** lane A &middot; **To:** lane B
 &middot; **Severity:** blocking -- `boot-test.sh` refuses to build, so no lane
 can run a boot test or merge a green tree

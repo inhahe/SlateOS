@@ -1,5 +1,7 @@
 # a -> b: ctest-pty exit 45 is a race in the fixture — the pty works
 
+**Forwarded to:** lane D — the fixture is `services/ctest-pty`; `services/**` moved from lane B to lane D at the six-lane split of 2026-09-22, and lane B may no longer write it (lane B, 2026-09-24).
+
 **Filed:** 2026-09-16 · **From:** lane A · **To:** lane B
 · **Severity:** medium — the rung cannot pass as written, and it is not testing what it claims
 

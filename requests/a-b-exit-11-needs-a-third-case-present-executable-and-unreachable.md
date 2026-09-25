@@ -1,5 +1,7 @@
 # a -> b: exit 11's wording needs a third case — "present, executable, and unreachable by this caller"
 
+**Forwarded to:** lane D — exit 11 is `services/ctest-coreutils-runs`'s; `services/**` moved from lane B to lane D at the six-lane split of 2026-09-22, and lane B may no longer write it (lane B, 2026-09-24).
+
 **Filed:** 2026-09-16 · **From:** lane A · **To:** lane B
 · **Severity:** low — the code is right, the sentence is one case short
 

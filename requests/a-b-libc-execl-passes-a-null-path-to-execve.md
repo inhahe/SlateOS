@@ -1,5 +1,7 @@
 # a -> b: libc's `execl` passes a NULL path to `execve` (EFAULT), so no C program can exec by the list form
 
+**Forwarded to:** lane D — `execl` is in `posix/**`, which moved from lane B to lane D at the six-lane split of 2026-09-22, and lane B may no longer write it (lane B, 2026-09-24).
+
 **Filed:** 2026-09-16 · **From:** lane A · **To:** lane B
 · **Severity:** high — it is why "staged is not run" has never been answerable
 

@@ -1044,6 +1044,152 @@ def test_multi_recipient_request_reaches_every_recipient(mod):
               "a-bc-x.md" in buf.getvalue(), want)
 
 
+# --------------------------------------------------------------------------
+# Forwarding: a request whose paths changed owner, re-routed without a rename
+# --------------------------------------------------------------------------
+
+def test_the_forwarding_marker_names_the_new_lanes(mod):
+    """`**Forwarded to:** lane X` in the header re-routes a request.
+
+    The form lanes will write, in each of its spellings; and the prose after
+    the letters -- which is where the reason goes -- must never add a lane.
+    """
+    cases = [
+        ("**Forwarded to:** lane D -- `services/**` moved at the split.", "d"),
+        ("**Forwarded to:** lane D", "d"),
+        ("**Forwarded to**: lane E (apps/** is lane E's)", "e"),
+        ("**Forwarded to:** lanes D and F -- both halves moved", "df"),
+        ("**Forwarded to:** lanes D, F.", "df"),
+        ("**Forwarded to:** lanes D & F", "df"),
+        # Prose after the letter is reason, not routing: `a` is a lane letter
+        # in lower case, and `Another` starts with one in upper case.
+        ("**Forwarded to:** lane D and a note on why", "d"),
+        ("**Forwarded to:** lane D and Another thing", "d"),
+        # Named twice is still one lane.
+        ("**Forwarded to:** lanes D and D", "d"),
+        # No marker at all.
+        ("**Status:** open", None),
+        ("", None),
+    ]
+    for head, want in cases:
+        check(f"forwarded_to({head!r})", mod.forwarded_to(head), want)
+
+
+def test_an_unreadable_forwarding_marker_is_an_error_not_silence(mod):
+    """A marker the report cannot read must not be dropped quietly.
+
+    Ignoring it would leave the request with the lane its author just said
+    cannot act on it -- the expensive direction. So `forwarded_to` raises, and
+    `collect` keeps the filename's routing and says why in the reason.
+    """
+    for head in (
+        "**Forwarded to:** D",          # no `lane`
+        "**Forwarded to:** lane G",     # not a lane
+        "**Forwarded to:** the libc lane",
+        "**Forwarded to:**",
+    ):
+        try:
+            got = mod.forwarded_to(head)
+        except ValueError:
+            got = "ValueError"
+        check(f"forwarded_to({head!r}) refuses", got, "ValueError")
+
+
+def test_a_forwarding_marker_in_a_fence_is_not_this_requests_routing(mod, tmp_request):
+    """A quoted example of the marker -- as the script's own comment has --
+    must not route the request that quotes it."""
+    path = tmp_request(
+        "a-b-quotes-the-marker.md",
+        "# a quoting request\n\n```\n**Forwarded to:** lane D\n```\n",
+    )
+    head, _tail = mod.head_and_tail(path)
+    check("a fenced marker is not read", mod.forwarded_to(head), None)
+
+
+def test_a_forwarded_request_reaches_its_new_lane_and_leaves_its_old_one(mod):
+    """The routing half: `[a->b=>d]` is lane D's work and no longer lane B's."""
+    import contextlib
+    import io
+    import pathlib
+    entry = ("a", "d", pathlib.Path("a-b-moved.md"), True, "no status marker", "x")
+    for lane, want in (("d", True), ("b", False), ("a", False), ("c", False)):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            mod.report([entry], lane=lane, outgoing=False, show_all=False)
+        verb = "sees" if want else "does not see"
+        check(f"lane {lane} {verb} a request forwarded from b to d",
+              "a-b-moved.md" in buf.getvalue(), want)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        mod.report([entry], lane="d", outgoing=False, show_all=False)
+    check("the report shows where it came from and where it went",
+          "[a->b=>d]" in buf.getvalue(), True)
+    # The sender still finds it among what it filed.
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        mod.report([entry], lane="a", outgoing=True, show_all=False)
+    check("the sender still sees it as outgoing", "a-b-moved.md" in buf.getvalue(), True)
+
+
+def test_a_request_forwarded_back_to_its_sender_is_the_senders_work(mod):
+    """A lane's own requests are hidden from it -- but not one forwarded to it,
+    which is the whole meaning of the forward."""
+    import contextlib
+    import io
+    import pathlib
+    entry = ("a", "a", pathlib.Path("a-b-back-home.md"), True, "no status marker", "x")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        mod.report([entry], lane="a", outgoing=False, show_all=False)
+    check("lane a sees a request forwarded back to it",
+          "a-b-back-home.md" in buf.getvalue(), True)
+
+
+def test_collect_routes_by_the_header_and_reports_an_unreadable_one(mod, tmp_request):
+    """End to end through `collect`, on real files in a scratch dropbox."""
+    tmp_request("a-b-forwarded.md", "# moved\n\n**Forwarded to:** lane D -- moved\n")
+    tmp_request("a-b-garbled.md", "# garbled\n\n**Forwarded to:** the new lane\n")
+    tmp_request("a-b-plain.md", "# plain\n")
+    got = {e[2].name: (e[1], e[4]) for e in mod.collect()}
+    check("a forwarded request is routed to its new lane", got["a-b-forwarded.md"][0], "d")
+    check("an unforwarded request keeps its filename's lane", got["a-b-plain.md"][0], "b")
+    check("a garbled marker keeps the filename's lane", got["a-b-garbled.md"][0], "b")
+    check("...and the reason says the marker could not be read",
+          "unreadable forwarding marker" in got["a-b-garbled.md"][1], True)
+
+
+def test_the_real_dropbox_has_no_unreadable_forwarding_marker(mod):
+    """Every forward a lane actually wrote parses. A garbled one would still be
+    routed somewhere -- by its name -- but to the lane that was told to let go."""
+    import pathlib
+    bad = []
+    for path in sorted(pathlib.Path(REQUESTS_DIR).glob("*.md")):
+        head, _tail = mod.head_and_tail(path)
+        try:
+            mod.forwarded_to(head)
+        except ValueError as exc:
+            bad.append(f"{path.name}: {exc}")
+    check("every forwarding marker in requests/ parses", bad, [])
+
+
+def _tmp_request_factory(mod):
+    """A `tmp_request(name, text)` fixture writing into a scratch dropbox.
+
+    Points `mod.REQUESTS_DIR` at the scratch directory for the duration of one
+    test, so `collect` reads only what the test wrote; `main` restores it.
+    """
+    import pathlib
+    import tempfile
+    root = pathlib.Path(tempfile.mkdtemp(prefix="open-requests-test-"))
+
+    def write(name, text):
+        path = root / name
+        path.write_text(text, encoding="utf-8", newline="\n")
+        return path
+
+    return root, write
+
+
 def main():
     mod = load_module()
     tests = [(name, fn) for name, fn in list(globals().items())
@@ -1054,10 +1200,21 @@ def main():
         print(f"FATAL: test discovery found only {len(tests)} tests; the suite "
               f"has at least 15. Discovery is broken, not the code.")
         return 1
+    import shutil
     for name, fn in tests:
         params = inspect.signature(fn).parameters
         avail = {"mod": mod}
-        fn(**{p: avail[p] for p in params if p in avail})
+        scratch = None
+        saved_dir = mod.REQUESTS_DIR
+        if "tmp_request" in params:
+            scratch, avail["tmp_request"] = _tmp_request_factory(mod)
+            mod.REQUESTS_DIR = scratch
+        try:
+            fn(**{p: avail[p] for p in params if p in avail})
+        finally:
+            mod.REQUESTS_DIR = saved_dir
+            if scratch is not None:
+                shutil.rmtree(scratch, ignore_errors=True)
 
     print()
     if _FAILURES:

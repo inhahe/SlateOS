@@ -188,6 +188,7 @@ mod ffi {
 
     // Messages.
     pub const WM_DESTROY: u32 = 0x0002;
+    pub const WM_PAINT: u32 = 0x000F;
     pub const WM_CLOSE: u32 = 0x0010;
     pub const WM_SETCURSOR: u32 = 0x0020;
     pub const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -268,6 +269,7 @@ mod ffi {
         pub fn GetDC(hwnd: HWND) -> HDC;
         pub fn ReleaseDC(hwnd: HWND, dc: HDC) -> i32;
         pub fn GetClientRect(hwnd: HWND, rect: *mut RECT) -> i32;
+        pub fn ValidateRect(hwnd: HWND, rect: *const RECT) -> i32;
         pub fn AdjustWindowRect(rect: *mut RECT, style: u32, menu: i32) -> i32;
         pub fn SetWindowTextW(hwnd: HWND, text: *const u16) -> i32;
     }
@@ -472,6 +474,11 @@ pub fn event_for_message(message: u32, w_param: usize, l_param: isize) -> Option
 thread_local! {
     static PENDING: RefCell<Vec<InputEvent>> = const { RefCell::new(Vec::new()) };
     static CLOSED: Cell<bool> = const { Cell::new(false) };
+    /// Set when Windows asks for the window to be repainted — it was
+    /// uncovered, restored, or dragged back on screen — and cleared once the
+    /// last frame has been put back. Not repainted inside the window procedure,
+    /// which cannot reach the `Window` holding the frame.
+    static REPAINT: Cell<bool> = const { Cell::new(false) };
     // Whether a `WM_MOUSELEAVE` has been asked for and not yet delivered.
     // `TrackMouseEvent` is one-shot — the request is spent when the leave
     // arrives — so the next move back into the window has to ask again.
@@ -503,6 +510,20 @@ unsafe extern "system" fn wnd_proc(
         ffi::WM_DESTROY => {
             CLOSED.set(true);
             unsafe { ffi::PostQuitMessage(0) };
+            0
+        }
+        // Part of the window was uncovered and Windows has thrown its pixels
+        // away. `DefWindowProcW` would mark it valid and draw nothing, leaving
+        // whatever covered it until the desktop next changed — which, for a
+        // compositor that waits for work rather than redrawing every frame,
+        // can be indefinitely. So it is marked valid here, which stops Windows
+        // asking again, and the last frame goes back up on the loop's next
+        // pass (`Window::input`).
+        ffi::WM_PAINT => {
+            // SAFETY: `hwnd` is the window this procedure was called for, and
+            // a null rectangle means the whole client area.
+            unsafe { ffi::ValidateRect(hwnd, std::ptr::null()) };
+            REPAINT.set(true);
             0
         }
         // Over the client area, show no host pointer: the compositor draws its
@@ -797,6 +818,9 @@ struct Staging {
     picture: Option<(u64, u32, u32)>,
     /// Where the pointer was laid over [`Self::pixels`], to be put back.
     pointer_drawn: Option<Rect>,
+    /// The size of what [`Self::pixels`] holds, once it holds a whole frame,
+    /// so that the window can be repainted from it without a new one.
+    size: Option<(u32, u32)>,
 }
 
 impl Staging {
@@ -830,7 +854,16 @@ impl Staging {
         if let Some(pointer) = frame.pointer {
             self.pointer_drawn = pointer.blend_over(&mut self.pixels, frame.width, frame.height);
         }
+        self.size = Some((frame.width, frame.height));
         Some(&self.pixels)
+    }
+
+    /// The last frame staged, as `(pixels, width, height)`, if there has been
+    /// one. The pixels are exactly `width * height`: `stage` records a size
+    /// only once it holds that many.
+    fn staged(&self) -> Option<(&[u32], u32, u32)> {
+        let (width, height) = self.size?;
+        Some((&self.pixels, width, height))
     }
 
     /// Copy `rect` of `picture` (rows of `width`) back over the same
@@ -862,22 +895,23 @@ impl Staging {
     }
 }
 
-impl super::Present for Window {
-    fn show(&mut self, frame: &Frame<'_>) {
-        self.pump();
-        let (width, height) = (frame.width, frame.height);
+impl Window {
+    /// Put the last staged frame on the window, scaled to its client area.
+    ///
+    /// What [`super::Present::show`] does once a frame is staged, and what a
+    /// repaint does with no new frame at all. Before the first frame there is
+    /// nothing to put back, and nothing is drawn.
+    fn blit_staged(&mut self) {
+        REPAINT.set(false);
+        let (cw, ch) = self.client_size();
+        self.size = (cw, ch);
+        let Some((pixels, width, height)) = self.staging.staged() else {
+            return;
+        };
         let (Ok(w), Ok(h)) = (i32::try_from(width), i32::try_from(height)) else {
             return;
         };
-        let (cw, ch) = self.client_size();
-        self.size = (cw, ch);
         let (Ok(dest_w), Ok(dest_h)) = (i32::try_from(cw), i32::try_from(ch)) else {
-            return;
-        };
-        // A short buffer is the caller's bug. Drawing part of it would read
-        // past the end inside GDI, so the frame is skipped: a display server
-        // must not be brought down by a bad frame.
-        let Some(pixels) = self.staging.stage(frame) else {
             return;
         };
 
@@ -930,9 +964,27 @@ impl super::Present for Window {
             );
         }
     }
+}
+
+impl super::Present for Window {
+    fn show(&mut self, frame: &Frame<'_>) {
+        self.pump();
+        // A short buffer is the caller's bug. Drawing part of it would read
+        // past the end inside GDI, so the frame is skipped: a display server
+        // must not be brought down by a bad frame.
+        if self.staging.stage(frame).is_none() {
+            return;
+        }
+        self.blit_staged();
+    }
 
     fn input(&mut self) -> Vec<InputEvent> {
         self.pump();
+        // Windows asked for the window back while the loop was elsewhere; the
+        // last frame is all there is to give it.
+        if REPAINT.get() {
+            self.blit_staged();
+        }
         PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()))
     }
 
@@ -1355,5 +1407,25 @@ mod tests {
         let mut staging = Staging::default();
         assert!(staging.stage(&Frame::new(&[0u32; 5], 3, 2)).is_none());
         assert!(staging.stage(&Frame::new(&[], 0, 0)).is_none());
+        assert!(
+            staging.staged().is_none(),
+            "a refused frame must leave nothing to repaint from"
+        );
+    }
+
+    #[test]
+    fn a_staged_frame_can_be_put_back_without_a_new_one() {
+        // What a repaint has to go on: the last frame, at its own size, with
+        // the pointer still over it.
+        let mut staging = Staging::default();
+        assert!(staging.staged().is_none(), "nothing yet");
+        let picture = [0xFF11_2233u32; 6];
+        let staged_copy = staging
+            .stage(&Frame::new(&picture, 3, 2).with_serial(1))
+            .expect("a whole frame")
+            .to_vec();
+        let (pixels, w, h) = staging.staged().expect("staged");
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(pixels, staged_copy.as_slice());
     }
 }

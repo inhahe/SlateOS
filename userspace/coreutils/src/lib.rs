@@ -462,6 +462,7 @@ pub mod backup;
 mod bignat;
 pub mod canon;
 pub mod cfmt;
+pub mod chowncore;
 pub mod copy;
 pub mod digest;
 pub mod dirfd;

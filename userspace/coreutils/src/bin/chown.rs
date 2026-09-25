@@ -9,18 +9,25 @@
 //!
 //! `chown` hands a file to another user, so an implementation that can be
 //! talked into handing over the *wrong* file is a way to take over an account.
-//! Two rules keep that from happening, and both were once broken
+//! Two rules keep that from happening by default, and both were once broken
 //! (`known-issues.md` → `B-chown-FOLLOWS-SYMLINKS-WHILE-RECURSING`):
 //!
-//! 1. **`-R` does not follow symlinks unless asked.** It used to test
+//! 1. **`-R` does not walk through symlinks unless asked.** It used to test
 //!    `path.is_dir()`, which follows them, so `chown -R alice srv/` on a tree
 //!    containing `srv/x -> /etc` walked into `/etc` and gave alice the lot.
-//!    POSIX makes `-P` the default for exactly this reason; `-L` restores the
-//!    old behaviour for anyone who genuinely wants it, and then only with
-//!    symlink-loop protection.
-//! 2. **A symlink met during traversal is changed, not its target.** The
+//!    POSIX makes `-P` the default for exactly this reason.
+//! 2. **Under `-R` alone, a symlink met is changed, not its target.** The
 //!    `chown(2)` call follows links, so `srv/x -> /etc/shadow` used to hand
-//!    `/etc/shadow` to alice. Traversal now uses `lchown(2)`.
+//!    `/etc/shadow` to alice. The walk uses `lchown(2)` -- and
+//!    `-R --dereference`, which asks for the opposite with nothing walked
+//!    through, is refused, as upstream refuses it.
+//!
+//! `-H` and `-L` are the caller asking for symlinks to be followed, and then
+//! GNU's rules apply exactly, including the one that surprises: a symlink met
+//! *inside* the tree has its target changed unless `-h` is given as well. The
+//! walk and those rules are [`coreutils::chowncore`], shared with `chgrp` as
+//! upstream shares `chown-core.c`; design-decisions.md §1029 records why they
+//! follow GNU rather than the stricter mixture this file used to have.
 //!
 //! `-r` is **not** accepted as a spelling of `-R`. It is not an option at all
 //! in POSIX chown, and quietly treating a typo as "recurse" is how a change
@@ -89,13 +96,14 @@
 
 #![cfg_attr(not(unix), allow(dead_code))]
 
+use coreutils::chowncore::{Dereference, Traverse, Verbosity, walk_policy};
 #[cfg(not(unix))]
 use coreutils::diag;
 use coreutils::getopt::{self, Opt, Program, Takes};
-use coreutils::quote::{os_bytes, quote, quoteaf_os};
+use coreutils::quote::{os_bytes, quote};
 use coreutils::userspec::{Spec, parse_user_spec};
 use pwdb::Db;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 
 /// `chown`'s usage status is 1 — measured: `chown; echo $?` prints 1.
 const CHOWN: Program = Program::new("chown", 1);
@@ -137,33 +145,6 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
 /// `quiet`, and GNU accepts it. Measured: `chown --s` reaches `missing operand`.
 const LONG_ALIASES: &[(&str, &str)] = &[("silent", "quiet")];
 
-/// How much `chown` says about each file it visits.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-enum Verbosity {
-    /// `-v`: a line for every file, changed or not.
-    High,
-    /// `-c`: a line only for a file whose ownership actually moved.
-    ChangesOnly,
-    /// The default: nothing.
-    #[default]
-    Off,
-}
-
-/// Which symlinks a recursive run may walk through. POSIX's `-H`/`-L`/`-P`.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-enum Traverse {
-    /// `-P`, and the default: follow none. A symlink is a thing to change,
-    /// never a door to walk through.
-    #[default]
-    Never,
-    /// `-H`: follow a symlink named on the command line, but none found
-    /// inside the tree.
-    CommandLine,
-    /// `-L`: follow every symlink. Needs loop protection, which is why the
-    /// traversal carries a visited set.
-    Always,
-}
-
 /// Where the new ownership comes from.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Source {
@@ -178,9 +159,10 @@ enum Source {
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Settings {
     recursive: bool,
-    /// `-h`: act on the link itself even for a command-line operand.
-    no_dereference: bool,
+    /// The traversal in effect, after [`walk_policy`].
     traverse: Traverse,
+    /// Change a symlink's target rather than the link, after [`walk_policy`].
+    affect_referent: bool,
     verbosity: Verbosity,
     /// `-f`: keep going quietly. The exit status still reflects the failures;
     /// only the messages are suppressed.
@@ -264,7 +246,7 @@ Examples:
 /// An unknown or ambiguous option, or too few operands.
 fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     let mut recursive = false;
-    let mut no_dereference = false;
+    let mut dereference = Dereference::default();
     let mut traverse = Traverse::default();
     let mut verbosity = Verbosity::Off;
     let mut force_silent = false;
@@ -283,11 +265,11 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // that was typed rather than to the alias's target — the alias map
             // settles ambiguity and nothing else. See `resolve_long_aliased`.
             Opt::Short(b'f', _) | Opt::Long("quiet" | "silent", _) => force_silent = true,
-            Opt::Short(b'h', _) | Opt::Long("no-dereference", _) => no_dereference = true,
-            Opt::Long("dereference", _) => no_dereference = false,
+            Opt::Short(b'h', _) | Opt::Long("no-dereference", _) => dereference = Dereference::Link,
+            Opt::Long("dereference", _) => dereference = Dereference::Referent,
             Opt::Short(b'H', _) => traverse = Traverse::CommandLine,
-            Opt::Short(b'L', _) => traverse = Traverse::Always,
-            Opt::Short(b'P', _) => traverse = Traverse::Never,
+            Opt::Short(b'L', _) => traverse = Traverse::Logical,
+            Opt::Short(b'P', _) => traverse = Traverse::Physical,
             Opt::Long("preserve-root", _) => preserve_root = true,
             Opt::Long("no-preserve-root", _) => preserve_root = false,
             Opt::Long("from", value) => from = value,
@@ -304,6 +286,12 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Short(other, _) => return Err(CHOWN.invalid_option(other)),
         }
     }
+
+    // Checked before the operands, as upstream checks it: `chown -R
+    // --dereference` alone is this message, not `missing operand`. Upstream's
+    // `error (EXIT_FAILURE, …)`, so status 1 and no referral.
+    let (traverse, affect_referent) = walk_policy(recursive, traverse, dereference)
+        .map_err(|message| CHOWN.usage(message.to_string()))?;
 
     // `--reference` supplies the ownership, so it needs one fewer operand.
     let wanted = if reference.is_some() { 1 } else { 2 };
@@ -328,8 +316,8 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
 
     Ok(Request::Run(Box::new(Settings {
         recursive,
-        no_dereference,
         traverse,
+        affect_referent,
         verbosity,
         force_silent,
         preserve_root,
@@ -337,35 +325,6 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
         source,
         files,
     })))
-}
-
-// ----------------------------------------------------------- symlink rules ---
-
-/// Whether a **command-line operand** is resolved through a symlink
-/// (`chown(2)`) or changed as the link itself (`lchown(2)`).
-///
-/// Pure, and compiled on every platform, because it is the decision the
-/// symlink bug was made of and the walk around it only exists under
-/// `cfg(unix)` — an untestable security rule is one that regresses quietly.
-///
-/// * Without `-R` the default is to follow: `chown alice link` is
-///   conventionally about the file, and `-h` is how you say otherwise.
-/// * With `-R` the default is `-P`, so a command-line symlink is *changed*
-///   rather than walked into unless `-H` or `-L` overrides it.
-fn follow_operand(recursive: bool, no_dereference: bool, traverse: Traverse) -> bool {
-    if no_dereference {
-        return false;
-    }
-    !recursive || traverse != Traverse::Never
-}
-
-/// Whether an entry found **inside** a traversal is followed.
-///
-/// Only `-L` says yes. `-H`'s exception is the command line, and it has
-/// already been spent by the time this is asked; `-P` never follows. This is
-/// the rule whose absence let `chown -R` walk out of the tree it was given.
-fn follow_child(traverse: Traverse) -> bool {
-    traverse == Traverse::Always
 }
 
 // ------------------------------------------------------------- owner specs ---
@@ -399,146 +358,6 @@ fn resolve_spec(text: &[u8], db: &Db) -> Result<(Spec, bool), &'static str> {
     Ok((spec, dotted))
 }
 
-// -------------------------------------------------------------- reporting ---
-
-/// `chown-core.c`'s `user_group_str`: `USER:GROUP`, or whichever half exists.
-///
-/// `None` when neither does, which is a distinct case rather than an empty
-/// string — it selects a different sentence in [`describe_change`].
-fn user_group_str(user: Option<&[u8]>, group: Option<&[u8]>) -> Option<Vec<u8>> {
-    match (user, group) {
-        (Some(user), Some(group)) => {
-            let mut out = user.to_vec();
-            out.push(b':');
-            out.extend_from_slice(group);
-            Some(out)
-        }
-        (Some(one), None) | (None, Some(one)) => Some(one.to_vec()),
-        (None, None) => None,
-    }
-}
-
-/// What happened to one file, as `chown-core.c`'s `enum Change_status`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ChangeStatus {
-    Succeeded,
-    Failed,
-    /// The ownership was already what was asked for — or `--from` did not
-    /// match, which upstream reports the same way and does not call an error.
-    NoChangeRequested,
-    /// `lchown` on a symlink was refused for lack of support. POSIX requires
-    /// that this *not* be an error, so it is a fourth outcome rather than a
-    /// failure: nothing changed, and nothing was wrong.
-    NotApplied,
-}
-
-/// `chown-core.c`'s `describe_change`, verbatim in behaviour.
-///
-/// `user`/`group` are the *new* names — [`Spec`]'s, or the plain number when no
-/// name was resolved — and `old_user`/`old_group` are the file's current ones,
-/// or `None` when the file could not be stat'd at all.
-///
-/// Which of the four sentences is used turns on whether `user` is present, not
-/// on what actually changed; that is the load-bearing subtlety and the module
-/// docs explain what it is for.
-fn describe_change(
-    file: &OsStr,
-    status: ChangeStatus,
-    old_user: Option<&[u8]>,
-    old_group: Option<&[u8]>,
-    user: Option<&[u8]>,
-    group: Option<&[u8]>,
-) -> String {
-    let mut spec = user_group_str(user, group);
-    // The old spec names only the fields the new one does: `chown 1000 f`
-    // reports `from root`, not `from root:root`, because the group is not part
-    // of what was asked.
-    let mut old_spec = user_group_str(user.and(old_user), group.and(old_group));
-
-    let text =
-        |value: &Option<Vec<u8>>| -> String { value.as_deref().map(name_text).unwrap_or_default() };
-
-    let name = quoteaf_os(file);
-    match status {
-        // Names neither what was asked for nor what is there, because nothing
-        // moved and nothing was wrong.
-        ChangeStatus::NotApplied => {
-            format!("neither symbolic link {name} nor referent has been changed")
-        }
-        ChangeStatus::Succeeded => {
-            if user.is_some() {
-                format!(
-                    "changed ownership of {name} from {} to {}",
-                    text(&old_spec),
-                    text(&spec)
-                )
-            } else if group.is_some() {
-                format!(
-                    "changed group of {name} from {} to {}",
-                    text(&old_spec),
-                    text(&spec)
-                )
-            } else {
-                format!("no change to ownership of {name}")
-            }
-        }
-        ChangeStatus::Failed => {
-            if old_spec.is_some() {
-                if user.is_some() {
-                    format!(
-                        "failed to change ownership of {name} from {} to {}",
-                        text(&old_spec),
-                        text(&spec)
-                    )
-                } else if group.is_some() {
-                    format!(
-                        "failed to change group of {name} from {} to {}",
-                        text(&old_spec),
-                        text(&spec)
-                    )
-                } else {
-                    format!("failed to change ownership of {name}")
-                }
-            } else {
-                // No stat, so there is no "from". Upstream shifts the *new*
-                // spec into the first slot rather than printing an empty one,
-                // which is why `chown -v 1234 nosuch` says
-                // `failed to change ownership of 'nosuch' to 1234`.
-                old_spec = spec.take();
-                if user.is_some() {
-                    format!(
-                        "failed to change ownership of {name} to {}",
-                        text(&old_spec)
-                    )
-                } else if group.is_some() {
-                    format!("failed to change group of {name} to {}", text(&old_spec))
-                } else {
-                    format!("failed to change ownership of {name}")
-                }
-            }
-        }
-        ChangeStatus::NoChangeRequested => {
-            if user.is_some() {
-                format!("ownership of {name} retained as {}", text(&old_spec))
-            } else if group.is_some() {
-                format!("group of {name} retained as {}", text(&old_spec))
-            } else {
-                format!("ownership of {name} retained")
-            }
-        }
-    }
-}
-
-/// Render a name for a message. Names come from `/etc/passwd`, which is bytes,
-/// and a byte that is not text must not become a raw control character in a
-/// diagnostic — the same argument as for file names.
-fn name_text(bytes: &[u8]) -> String {
-    match std::str::from_utf8(bytes) {
-        Ok(text) if !text.bytes().any(|b| b < 0x20 || b == 0x7f) => text.to_string(),
-        _ => coreutils::quote::escape_unprintable(bytes),
-    }
-}
-
 #[cfg(not(unix))]
 fn main() -> std::process::ExitCode {
     diag!("chown: unix-only utility; not supported on this platform");
@@ -549,72 +368,20 @@ fn main() -> std::process::ExitCode {
 
 #[cfg(unix)]
 mod imp {
-    use super::{
-        ChangeStatus, Request, Settings, Source, Spec, Verbosity, describe_change, follow_child,
-        follow_operand, help_text, parse_args, parse_user_spec, resolve_spec,
-    };
+    use super::{CHOWN, Request, Settings, Source, help_text, parse_args, parse_user_spec, resolve_spec};
+    use coreutils::chowncore::{Ids, Options, chown_files};
     use coreutils::diag;
     use coreutils::errmsg::strerror;
-    use coreutils::quote::{os_bytes, quote, quoteaf_os, quotef_os};
-    use coreutils::userspec::{gid_to_name, uid_to_name};
+    use coreutils::quote::{os_bytes, quote, quoteaf_os};
+    use coreutils::stdfd::{self, Stream};
+    use coreutils::userspec::{Spec, gid_to_name, uid_to_name};
     use pwdb::Db;
-    use std::collections::HashSet;
     use std::ffi::OsString;
-    use std::fs::{self, Metadata};
-    use std::io::{self, Write};
-    use std::os::unix::ffi::OsStrExt;
+    use std::fs;
+    use std::io::Write;
     use std::os::unix::fs::MetadataExt;
-    use std::os::unix::io::AsRawFd;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::ExitCode;
-
-    // libc-level chown/lchown — our POSIX layer provides both. `lchown` is what
-    // makes rule 2 of the module docs enforceable: `chown` follows symlinks by
-    // definition, so there is no flag that makes it safe during traversal.
-    unsafe extern "C" {
-        fn chown(path: *const u8, owner: u32, group: u32) -> i32;
-        fn lchown(path: *const u8, owner: u32, group: u32) -> i32;
-        /// The descriptor-based form, which is what makes [`restricted_chown`]
-        /// possible: it names an inode we already hold rather than a path
-        /// someone else could re-point.
-        fn fchown(fd: i32, owner: u32, group: u32) -> i32;
-    }
-
-    /// POSIX's "leave this field alone" sentinel for `chown(2)`: `(uid_t)-1`.
-    ///
-    /// Passing it is better than reading the current owner and passing that
-    /// back: the read-then-write version has a window in which the file can be
-    /// replaced, and it turns a no-op field into a real ownership write.
-    const UNCHANGED: u32 = u32::MAX;
-
-    /// Everything the walk needs that does not change from file to file.
-    struct Job {
-        settings: Settings,
-        db: Db,
-        /// The ownership to write, already resolved.
-        spec: Spec,
-        /// `--from`: change a file only if its current ids match. Each half is
-        /// independently optional, and an absent half matches anything.
-        required: (Option<u32>, Option<u32>),
-        /// `(dev, ino)` of `/`, when `--preserve-root` and `-R` are both on.
-        root_dev_ino: Option<(u64, u64)>,
-        /// `(dev, ino)` of every directory already entered, so `-L` on a tree
-        /// that links back to one of its own ancestors terminates instead of
-        /// recursing until the stack runs out.
-        seen: HashSet<(u64, u64)>,
-        status: u8,
-    }
-
-    impl Job {
-        /// Report a failure, unless `-f` said not to. The status moves either
-        /// way: silence is about the message, not about the answer.
-        fn fail(&mut self, message: &str) {
-            if !self.settings.force_silent {
-                diag!("chown: {message}");
-            }
-            self.status = 1;
-        }
-    }
 
     /// Resolve the spec the whole run will apply, before touching any operand.
     ///
@@ -660,9 +427,9 @@ mod imp {
     }
 
     /// Resolve `--from`, discarding the names: only the ids are compared.
-    fn resolve_from(settings: &Settings, db: &Db) -> Result<(Option<u32>, Option<u32>), u8> {
+    fn resolve_from(settings: &Settings, db: &Db) -> Result<Ids, u8> {
         let Some(text) = &settings.from else {
-            return Ok((None, None));
+            return Ok(Ids::default());
         };
         let bytes = os_bytes(text);
         let (spec, dotted) = parse_user_spec(&bytes, db).map_err(|message| {
@@ -672,23 +439,30 @@ mod imp {
         if dotted {
             diag!("chown: warning: '.' should be ':': {}", quote(&bytes));
         }
-        Ok((spec.uid, spec.gid))
+        Ok(Ids {
+            uid: spec.uid,
+            gid: spec.gid,
+        })
     }
 
     pub fn main() -> ExitCode {
+        stdfd::restore();
         let args: Vec<OsString> = std::env::args_os().skip(1).collect();
         let settings = match parse_args(&args) {
+            Ok(Request::Run(settings)) => *settings,
             Ok(Request::Help) => {
-                print!("{}", help_text());
-                return ExitCode::SUCCESS;
+                let mut out = Stream::stdout();
+                // Deliberately unread: `close_stdout` reports a failed write.
+                let _ = out.write_all(help_text().as_bytes());
+                return stdfd::close_stdout("chown", out, ExitCode::SUCCESS);
             }
             Ok(Request::Version) => {
-                println!("chown (SlateOS coreutils) 0.1.0");
-                return ExitCode::SUCCESS;
+                let mut out = Stream::stdout();
+                let _ = out.write_all(b"chown (SlateOS coreutils) 0.1.0\n");
+                return stdfd::close_stdout("chown", out, ExitCode::SUCCESS);
             }
-            Ok(Request::Run(settings)) => *settings,
             Err(e) => {
-                diag!("chown: {e}");
+                CHOWN.report(&e);
                 return ExitCode::from(u8::try_from(e.status).unwrap_or(1));
             }
         };
@@ -723,389 +497,38 @@ mod imp {
             None
         };
 
-        let mut job = Job {
-            settings,
-            db,
-            spec,
-            required,
+        let options = Options {
+            program: "chown",
+            recursive: settings.recursive,
+            traverse: settings.traverse,
+            affect_referent: settings.affect_referent,
+            verbosity: settings.verbosity,
+            force_silent: settings.force_silent,
             root_dev_ino,
-            seen: HashSet::new(),
-            status: 0,
+            user_name: spec.user_name.clone(),
+            group_name: spec.group_name.clone(),
         };
-
-        let follow = follow_operand(
-            job.settings.recursive,
-            job.settings.no_dereference,
-            job.settings.traverse,
+        // `-v` and `-c` lines go through a `Stream`, so a full or closed stdout
+        // is reported once, at the end, as `write error` -- `println!` would
+        // have panicked on the first line instead.
+        let mut out = Stream::stdout();
+        let ok = chown_files(
+            &settings.files,
+            Ids {
+                uid: spec.uid,
+                gid: spec.gid,
+            },
+            required,
+            &options,
+            &db,
+            &mut out,
         );
-        for file in job.settings.files.clone() {
-            visit(&mut job, &PathBuf::from(&file), follow);
-        }
-
-        // A closed stdout must not pass for success when `-v` had things to say.
-        if io::stdout().flush().is_err() {
-            job.status = 1;
-        }
-        ExitCode::from(job.status)
-    }
-
-    /// Stat one path the way `follow` asks, distinguishing the two failures the
-    /// way GNU does.
-    ///
-    /// The link is stat'd first even when following, so that a dangling symlink
-    /// reports `cannot dereference` rather than `cannot access` — those are
-    /// different problems and a script that retries on one should not retry on
-    /// the other.
-    fn stat(job: &mut Job, path: &Path, follow: bool) -> Option<Metadata> {
-        let link = match fs::symlink_metadata(path) {
-            Ok(meta) => meta,
-            Err(e) => {
-                job.fail(&format!(
-                    "cannot access {}: {}",
-                    quoteaf_os(path),
-                    strerror(&e)
-                ));
-                return None;
-            }
-        };
-        if !follow || !link.file_type().is_symlink() {
-            return Some(link);
-        }
-        match fs::metadata(path) {
-            Ok(meta) => Some(meta),
-            Err(e) => {
-                job.fail(&format!(
-                    "cannot dereference {}: {}",
-                    quoteaf_os(path),
-                    strerror(&e)
-                ));
-                None
-            }
-        }
-    }
-
-    /// Apply the ownership to one path, and — under `-R`, and only for a real
-    /// directory — to everything beneath it.
-    ///
-    /// Errors are reported and recorded rather than returned, because a walk
-    /// that stops at the first failure leaves the caller with a tree in an
-    /// unknown state.
-    fn visit(job: &mut Job, path: &Path, follow: bool) {
-        let Some(meta) = stat(job, path, follow) else {
-            // The file could not be looked at, so there is no "from" to report;
-            // `describe_change` has a shape for exactly that.
-            report(job, path, ChangeStatus::Failed, None);
-            return;
-        };
-
-        if let Some(root) = job.root_dev_ino
-            && meta.is_dir()
-            && (meta.dev(), meta.ino()) == root
-        {
-            refuse_root(job, path);
-            return;
-        }
-
-        // A symlink we are not following is a leaf: change the link, do not
-        // look at what is on the other side of it. `is_dir()` on the old code
-        // answered about the *target*, which is how `-R` escaped the tree.
-        if job.settings.recursive && meta.is_dir() {
-            if !job.seen.insert((meta.dev(), meta.ino())) {
-                // Only reachable under `-L`, where a symlink can point at an
-                // ancestor. Without this the recursion is unbounded.
-                job.fail(&format!(
-                    "{}: directory loop detected; not descending again",
-                    quotef_os(path)
-                ));
-                return;
-            }
-
-            let entries = match fs::read_dir(path) {
-                Ok(entries) => entries,
-                Err(e) => {
-                    // Upstream's `FTS_DNR`: the directory is *not* changed
-                    // either. It reaches the reporting code with `ok` already
-                    // false, so `-v` calls it a failure and nothing is written.
-                    job.fail(&format!(
-                        "cannot read directory {}: {}",
-                        quoteaf_os(path),
-                        strerror(&e)
-                    ));
-                    report(job, path, ChangeStatus::Failed, Some(&meta));
-                    return;
-                }
-            };
-            let child_follow = follow_child(job.settings.traverse);
-            for entry in entries {
-                match entry {
-                    Ok(entry) => visit(job, &entry.path(), child_follow),
-                    Err(e) => job.fail(&format!("{}: {}", quotef_os(path), strerror(&e))),
-                }
-            }
-        }
-
-        // A directory is changed *after* its children, not before. That is
-        // GNU's order — it acts on `FTS_DP`, the post-order visit, and returns
-        // early from the pre-order `FTS_D` whenever `-R` is on — and the order
-        // is load-bearing rather than cosmetic: handing a directory to another
-        // owner first can cost us the search permission we still need to reach
-        // what is inside it. It is also what `-v` output looks like, so a
-        // script reading that output sees the children first.
-        apply(job, path, follow, &meta);
-    }
-
-    /// The `--preserve-root` refusal, which is two sentences upstream and is
-    /// kept as two here so `-f` silences them together — a lone
-    /// "use --no-preserve-root" would be baffling.
-    fn refuse_root(job: &mut Job, path: &Path) {
-        job.fail(&format!(
-            "it is dangerous to operate recursively on {}",
-            quoteaf_os(path)
-        ));
-        job.fail("use --no-preserve-root to override this failsafe");
-    }
-
-    /// `chown(2)` or `lchown(2)` on a NUL-terminated path.
-    ///
-    /// `follow` decides between the two; there is no third option, and getting
-    /// it wrong is the whole bug this file exists to not have.
-    fn chown_path(c_path: &[u8], uid: u32, gid: u32, follow: bool) -> io::Result<()> {
-        // SAFETY: `c_path` is NUL-terminated and contains no interior NUL (the
-        // caller checked), and outlives the call. Both functions come from the
-        // POSIX layer and take a borrowed C string they do not retain.
-        let ret = unsafe {
-            if follow {
-                chown(c_path.as_ptr(), uid, gid)
-            } else {
-                lchown(c_path.as_ptr(), uid, gid)
-            }
-        };
-        if ret == 0 {
-            Ok(())
+        let earned = if ok {
+            ExitCode::SUCCESS
         } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-
-    /// What [`restricted_chown`] managed to do.
-    enum Restricted {
-        /// The descriptor was chowned; nothing further to do.
-        Done,
-        /// Not worth protecting, or not openable in a way that would help.
-        /// Fall back to changing the file by name.
-        ByName,
-        /// The open, the re-stat, or the `fchown` failed.
-        Failed(io::Error),
-        /// The file changed identity under us, or stopped matching `--from`
-        /// between the two stats. Upstream gives no diagnostic here — its
-        /// source carries a FIXME asking whether it should — but still fails
-        /// the run.
-        Excluded,
-    }
-
-    /// `chown-core.c`'s `restricted_chown`: change the file through an open
-    /// descriptor rather than by name.
-    ///
-    /// Reachable only with `--from` *and* symlink-following, which is exactly
-    /// the combination that is attackable. In that combination we stat a file,
-    /// decide from the result that its owner matches `--from`, and would then
-    /// change it *by name*. Anyone who can write the containing directory can
-    /// replace the file with a symlink inside that window and have us change
-    /// the ownership of its target instead — a file they could not otherwise
-    /// touch, chowned with our privileges.
-    ///
-    /// Opening the file, checking that the descriptor still refers to the inode
-    /// we stat'd, and changing the *descriptor* closes the window: a descriptor
-    /// cannot be redirected once it is open.
-    ///
-    /// Without `--from` there is nothing to protect — the decision to change
-    /// the file did not depend on reading it — so that case is left by name,
-    /// as upstream leaves it.
-    fn restricted_chown(
-        path: &Path,
-        orig: &Metadata,
-        uid: u32,
-        gid: u32,
-        required: (Option<u32>, Option<u32>),
-    ) -> Restricted {
-        if required.0.is_none() && required.1.is_none() {
-            return Restricted::ByName;
-        }
-        let is_regular = orig.file_type().is_file();
-        if !is_regular && !orig.is_dir() {
-            // Opening a FIFO would block for a writer, and opening a device can
-            // have side effects on the device. Upstream declines both rather
-            // than risk either, and takes the race.
-            return Restricted::ByName;
-        }
-
-        let opened = fs::File::open(path).or_else(|e| {
-            // A file we may not read may still be one we may write, and either
-            // descriptor pins the inode equally well.
-            if e.kind() == io::ErrorKind::PermissionDenied && is_regular {
-                fs::OpenOptions::new().write(true).open(path)
-            } else {
-                Err(e)
-            }
-        });
-        let file = match opened {
-            Ok(file) => file,
-            // Not openable at all: no protection is available, so do what we
-            // would have done anyway rather than refuse the whole operation.
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Restricted::ByName,
-            Err(e) => return Restricted::Failed(e),
+            ExitCode::FAILURE
         };
-
-        let now = match file.metadata() {
-            Ok(now) => now,
-            Err(e) => return Restricted::Failed(e),
-        };
-        if (now.dev(), now.ino()) != (orig.dev(), orig.ino()) {
-            return Restricted::Excluded;
-        }
-        // Re-checked against the descriptor's own stat, not the earlier one:
-        // the earlier one is the answer we are refusing to trust.
-        if !(required.0.is_none_or(|uid| uid == now.uid())
-            && required.1.is_none_or(|gid| gid == now.gid()))
-        {
-            return Restricted::Excluded;
-        }
-
-        // SAFETY: `file` owns the descriptor and is still alive here, so the
-        // number is valid for the duration of the call.
-        if unsafe { fchown(file.as_raw_fd(), uid, gid) } == 0 {
-            Restricted::Done
-        } else {
-            Restricted::Failed(io::Error::last_os_error())
-        }
-    }
-
-    /// Change one file's owner, honouring `--from`, and report as `-v`/`-c` ask.
-    fn apply(job: &mut Job, path: &Path, follow: bool, meta: &Metadata) {
-        let (want_uid, want_gid) = (job.spec.uid, job.spec.gid);
-        let matches_from = job.required.0.is_none_or(|uid| uid == meta.uid())
-            && job.required.1.is_none_or(|gid| gid == meta.gid());
-
-        if !matches_from {
-            // Upstream does not treat this as an error, and neither does the
-            // exit status: the file simply was not one of the ones asked for.
-            report(job, path, ChangeStatus::NoChangeRequested, Some(meta));
-            return;
-        }
-
-        // Paths are bytes. An older version went through `to_str()` and refused
-        // anything that was not UTF-8, which on this OS is a legal filename
-        // (`design.txt`: every byte but `/` and NUL). A NUL cannot arrive from
-        // argv or a directory read — both are NUL-terminated at the source — so
-        // this is a guard against a future caller, not against today's.
-        let bytes = path.as_os_str().as_bytes();
-        if bytes.contains(&0) {
-            job.fail(&format!("{}: path contains a NUL byte", quotef_os(path)));
-            report(job, path, ChangeStatus::Failed, Some(meta));
-            return;
-        }
-        let mut c_path: Vec<u8> = Vec::with_capacity(bytes.len().saturating_add(1));
-        c_path.extend_from_slice(bytes);
-        c_path.push(0);
-
-        let uid = want_uid.unwrap_or(UNCHANGED);
-        let gid = want_gid.unwrap_or(UNCHANGED);
-
-        // Upstream's `symlink_changed`: the one outcome that is neither success
-        // nor failure. POSIX allows a system to refuse to change a symlink's
-        // own ownership and requires that refusal not be an error.
-        let mut symlink_changed = true;
-        // `Err(None)` is a failure with no message of its own.
-        let result: Result<(), Option<io::Error>> = if follow {
-            match restricted_chown(path, meta, uid, gid, job.required) {
-                Restricted::Done => Ok(()),
-                Restricted::ByName => chown_path(&c_path, uid, gid, true).map_err(Some),
-                Restricted::Failed(e) => Err(Some(e)),
-                Restricted::Excluded => Err(None),
-            }
-        } else {
-            match chown_path(&c_path, uid, gid, false) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == io::ErrorKind::Unsupported => {
-                    symlink_changed = false;
-                    Ok(())
-                }
-                Err(e) => Err(Some(e)),
-            }
-        };
-
-        if let Err(error) = result {
-            if let Some(error) = error {
-                // The message names which half was asked for, as upstream does:
-                // a `chgrp`-shaped invocation should not report an ownership
-                // failure.
-                let what = if want_uid.is_some() {
-                    "changing ownership of"
-                } else {
-                    "changing group of"
-                };
-                job.fail(&format!(
-                    "{what} {}: {}",
-                    quoteaf_os(path),
-                    strerror(&error)
-                ));
-            } else {
-                job.status = 1;
-            }
-            report(job, path, ChangeStatus::Failed, Some(meta));
-            return;
-        }
-
-        if !symlink_changed {
-            report(job, path, ChangeStatus::NotApplied, Some(meta));
-            return;
-        }
-
-        // "Changed" means the ids actually moved, not that a change was asked
-        // for: `chown -c 1000 f` on a file already owned by 1000 prints nothing.
-        let changed = !(want_uid.is_none_or(|uid| uid == meta.uid())
-            && want_gid.is_none_or(|gid| gid == meta.gid()));
-        let status = if changed {
-            ChangeStatus::Succeeded
-        } else {
-            ChangeStatus::NoChangeRequested
-        };
-        report(job, path, status, Some(meta));
-    }
-
-    /// Print a `-v`/`-c` line, if this run wants one for this outcome.
-    fn report(job: &mut Job, path: &Path, status: ChangeStatus, meta: Option<&Metadata>) {
-        let changed = status == ChangeStatus::Succeeded;
-        if job.settings.verbosity == Verbosity::Off
-            || (!changed && job.settings.verbosity != Verbosity::High)
-        {
-            return;
-        }
-        let old_user = meta.map(|m| uid_to_name(&job.db, m.uid()));
-        let old_group = meta.map(|m| gid_to_name(&job.db, m.gid()));
-        // The new name, or the plain number when nothing was resolved — this is
-        // `chown-core.c`'s `chopt->user_name ? … : uid_to_str (uid)`.
-        let user = job
-            .spec
-            .user_name
-            .clone()
-            .or_else(|| job.spec.uid.map(|uid| uid.to_string().into_bytes()));
-        let group = job
-            .spec
-            .group_name
-            .clone()
-            .or_else(|| job.spec.gid.map(|gid| gid.to_string().into_bytes()));
-        println!(
-            "{}",
-            describe_change(
-                path.as_os_str(),
-                status,
-                old_user.as_deref(),
-                old_group.as_deref(),
-                user.as_deref(),
-                group.as_deref(),
-            )
-        );
+        stdfd::close_stdout("chown", out, earned)
     }
 }
 
@@ -1122,6 +545,8 @@ fn main() -> std::process::ExitCode {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use coreutils::chowncore::{ChangeStatus, describe_change, user_group_str};
+    use std::ffi::OsStr;
 
     fn argv(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
@@ -1256,34 +681,56 @@ mod tests {
 
     #[test]
     fn parse_no_dereference() {
-        assert!(run(&["-h", "1000", "link"]).no_dereference);
-        assert!(run(&["--no-dereference", "1000", "link"]).no_dereference);
+        assert!(!run(&["-h", "1000", "link"]).affect_referent);
+        assert!(!run(&["--no-dereference", "1000", "link"]).affect_referent);
+        // Without -h an operand's target is what changes.
+        assert!(run(&["1000", "link"]).affect_referent);
     }
 
     #[test]
     fn parse_dereference_overrides_h() {
         // Last one wins, as with GNU.
-        assert!(!run(&["-h", "--dereference", "1000", "link"]).no_dereference);
+        assert!(run(&["-h", "--dereference", "1000", "link"]).affect_referent);
+        assert!(!run(&["--dereference", "-h", "1000", "link"]).affect_referent);
     }
 
+    /// -P is the default, and under -R it also means every symlink met is
+    /// changed as a link: without both, `-R` on a tree containing a symlink to
+    /// /etc would walk into /etc or hand its target away.
     #[test]
-    fn parse_traverse_defaults_to_never() {
-        // -P is the default: without it, `-R` on a tree containing a symlink
-        // to /etc would walk into /etc.
-        assert_eq!(run(&["-R", "1000", "d"]).traverse, Traverse::Never);
+    fn parse_traverse_defaults_to_physical_and_links() {
+        let a = run(&["-R", "1000", "d"]);
+        assert_eq!((a.traverse, a.affect_referent), (Traverse::Physical, false));
     }
 
     #[test]
     fn parse_traverse_flags() {
+        let a = run(&["-R", "-H", "1000", "d"]);
+        assert_eq!((a.traverse, a.affect_referent), (Traverse::CommandLine, true));
+        let a = run(&["-R", "-L", "1000", "d"]);
+        assert_eq!((a.traverse, a.affect_referent), (Traverse::Logical, true));
+        let a = run(&["-R", "-L", "-h", "1000", "d"]);
+        assert_eq!((a.traverse, a.affect_referent), (Traverse::Logical, false));
+        // The last of -H/-L/-P wins.
+        assert_eq!(run(&["-R", "-L", "-P", "1000", "d"]).traverse, Traverse::Physical);
+        // Without -R nothing is walked, whatever was asked.
+        assert_eq!(run(&["-L", "1000", "d"]).traverse, Traverse::Physical);
+    }
+
+    /// Measured: refused before the operands are counted, with no referral.
+    #[test]
+    fn parse_r_dereference_needs_h_or_l() {
         assert_eq!(
-            run(&["-R", "-H", "1000", "d"]).traverse,
-            Traverse::CommandLine
+            err(&["-R", "--dereference", "1000", "d"]),
+            "-R --dereference requires either -H or -L"
         );
-        assert_eq!(run(&["-R", "-L", "1000", "d"]).traverse, Traverse::Always);
         assert_eq!(
-            run(&["-R", "-L", "-P", "1000", "d"]).traverse,
-            Traverse::Never
+            err(&["-R", "--dereference"]),
+            "-R --dereference requires either -H or -L"
         );
+        assert!(run(&["-R", "-H", "--dereference", "1000", "d"]).affect_referent);
+        // Without -R there is nothing to require.
+        assert!(run(&["--dereference", "1000", "d"]).affect_referent);
     }
 
     #[test]
@@ -1350,7 +797,7 @@ mod tests {
         // The only way to address a file called `-R`.
         let a = run(&["--", "1000", "-R", "-h"]);
         assert!(!a.recursive);
-        assert!(!a.no_dereference);
+        assert!(a.affect_referent);
         assert_eq!(owner_of(&a), "1000");
         assert_eq!(a.files, argv(&["-R", "-h"]));
     }
@@ -1372,58 +819,6 @@ mod tests {
             panic!("expected Run");
         };
         assert_eq!(settings.files, vec![name]);
-    }
-
-    // ---------------- symlink policy ----------------
-    //
-    // This is the security rule, stated once. `chown -R` used to test
-    // `path.is_dir()`, which resolves symlinks, and then call `chown(2)`,
-    // which also resolves them -- so a symlink inside the tree was both a
-    // door out of it and a way to hand its target away. known-issues.md ->
-    // B-chown-FOLLOWS-SYMLINKS-WHILE-RECURSING.
-
-    #[test]
-    fn follow_operand_without_r_dereferences_by_default() {
-        // `chown alice link` is about the file, not the link.
-        assert!(follow_operand(false, false, Traverse::Never));
-    }
-
-    #[test]
-    fn follow_operand_h_wins_everywhere() {
-        for recursive in [false, true] {
-            for t in [Traverse::Never, Traverse::CommandLine, Traverse::Always] {
-                assert!(!follow_operand(recursive, true, t), "{recursive} {t:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn follow_operand_with_r_defaults_to_not_following() {
-        // The POSIX default is -P. This single `false` is what stops
-        // `chown -R alice srv/` from walking into `/etc` via `srv/x -> /etc`.
-        assert!(!follow_operand(true, false, Traverse::Never));
-    }
-
-    #[test]
-    fn follow_operand_h_and_l_opt_back_in() {
-        assert!(follow_operand(true, false, Traverse::CommandLine));
-        assert!(follow_operand(true, false, Traverse::Always));
-    }
-
-    #[test]
-    fn follow_child_only_under_dash_l() {
-        assert!(!follow_child(Traverse::Never));
-        // -H's exception is the command line only, and it is already spent.
-        assert!(!follow_child(Traverse::CommandLine));
-        assert!(follow_child(Traverse::Always));
-    }
-
-    #[test]
-    fn default_args_never_follow_a_symlink_during_recursion() {
-        // End to end through the parser: the plain, everyday invocation.
-        let a = run(&["-R", "1000", "dir"]);
-        assert!(!follow_operand(a.recursive, a.no_dereference, a.traverse));
-        assert!(!follow_child(a.traverse));
     }
 
     // ---------------- resolve_spec ----------------

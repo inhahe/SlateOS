@@ -59,6 +59,7 @@ if [ "$(id -u)" = "0" ]; then
 fi
 
 pass=0; fail=0; xfail=0; xpass=0
+TO_FULL=
 
 ME=$(id -un)
 MYUID=$(id -u)
@@ -89,6 +90,11 @@ printf 'c\n' > "$proto/dir/sub/deep.txt"
 ln -s file.txt "$proto/link-to-file"
 ln -s dir "$proto/link-to-dir"
 ln -s nowhere "$proto/dangling"
+# Inside a directory, so that `-R` meets them rather than being handed them:
+# what separates `-H` from `-L`, and `--dereference` from `-h`, is what happens
+# to exactly these.
+ln -s ../file.txt "$proto/dir/in-link"
+ln -s .. "$proto/dir/sub/up"
 
 # The check that the comment above promises. A link that escapes would make
 # `-R -L` chown something outside the fixture tree, so this refuses rather than
@@ -130,8 +136,13 @@ compare() {
   cp -a "$proto/." "$o_dir/"; cp -a "$proto/." "$g_dir/"
   o_err=$(mktemp); g_err=$(mktemp)
   local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
-  run_side "$o_dir" ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-  run_side "$g_dir" gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+  if [ -n "$TO_FULL" ]; then
+    run_side "$o_dir" ours "$@" </dev/null >/dev/full 2>"$o_err"; o_rc=$?
+    run_side "$g_dir" gnu  "$@" </dev/null >/dev/full 2>"$g_err"; g_rc=$?
+  else
+    run_side "$o_dir" ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    run_side "$g_dir" gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+  fi
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   local o_msg g_msg o_tree g_tree
   o_msg=$(cat "$o_err"); g_msg=$(cat "$g_err")
@@ -163,7 +174,11 @@ report() {
   return 0
 }
 
-run_case() { compare "$@"; report "chown $*"; }
+run_case() {
+  local label="chown $*${TO_FULL:+  [>/dev/full]}"
+  compare "$@"; TO_FULL=
+  report "$label"
+}
 
 xfail_case() {
   local why=$1; shift
@@ -261,6 +276,37 @@ run_case --recur ":$ALTGROUP" dir
 run_case --no-deref ":$ALTGROUP" link-to-file
 run_case --ref=dir/inner.txt file.txt
 run_case --chang ":$ALTGROUP" file.txt
+
+# --- the two symlink settings, where links are met inside the tree ------------------------------------
+# `-P`/`-H`/`-L` decide which links the walk goes through; `--dereference`/`-h`
+# decide whether a link met is changed or its target is. Measured against GNU
+# 9.4, and each of these once differed: under `-R -H` a link inside the tree
+# has its TARGET changed; under `-R -L -h` links are changed even while walked
+# through; `-R --dereference` alone is refused; a loop under `-L` is silently
+# not re-entered.
+run_case -R -H ":$ALTGROUP" .
+run_case -R -H -h ":$ALTGROUP" .
+run_case -R -H --dereference ":$ALTGROUP" .
+run_case -R -L ":$ALTGROUP" .
+run_case -R -L -h ":$ALTGROUP" .
+run_case -R -L ":$ALTGROUP" dir
+run_case -R -P ":$ALTGROUP" .
+run_case -R --dereference ":$ALTGROUP" dir
+run_case -R -P --dereference ":$ALTGROUP" dir
+run_case -R --dereference
+run_case -R -H -P --dereference ":$ALTGROUP" dir
+run_case -R -H -v ":$ALTGROUP" dir
+run_case -R -L -v ":$ALTGROUP" dir
+run_case -Rv ":$ALTGROUP" dir
+run_case -Rc ":$ALTGROUP" .
+run_case -R -H "--from=$ME" ":$ALTGROUP" .
+run_case -c ":$ALTGROUP" dangling
+xfail_case "upstream's from-half is uninitialised memory" -v ":$ALTGROUP" dangling
+
+# --- a full stdout ----------------------------------------------------------------------------------------------------
+TO_FULL=1; run_case -v ":$ALTGROUP" file.txt
+TO_FULL=1; run_case ":$ALTGROUP" file.txt
+TO_FULL=1; run_case -R -v ":$ALTGROUP" dir
 
 # --- the two whose text is ours -----------------------------------------------------------------------------------
 xfail_case "our help text, not the GNU project's" --help

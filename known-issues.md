@@ -69328,6 +69328,19 @@ into `/etc` and hand alice the system's configuration, and a link pointing at
 home that is not the person running the command. Fixed: the walk no longer
 follows links, and the links it meets are changed rather than their targets.
 
+**UPDATE 2026-09-25: still fixed for the default, and the rest now follows
+GNU exactly.** The walk moved into `coreutils::chowncore`, shared with the new
+`chgrp`, as a port of `chown-core.c`. `chown -R` with no `-H`/`-L` is
+unchanged -- nothing walked through, every link changed as a link -- and
+`-R --dereference` without `-H`/`-L`, which asks for the opposite, is now
+refused as GNU refuses it. What changed is the two corners where the caller
+*asked* for symlinks to be followed, which the fix below had merged into one
+rule: under `-R -H` a link met inside the tree now has its target changed
+(GNU 9.4, measured), and under `-R -L -h` links are changed rather than their
+targets. design-decisions.md §1029 has the reasoning; `scripts/chown-diff.sh`
+gained the in-tree links and the loop that tell the rules apart, and against
+the old implementation 16 of its cases fail.
+
 ### Two separate escapes, either of which is enough
 
 `userspace/coreutils/src/bin/chown.rs`, both fixed:

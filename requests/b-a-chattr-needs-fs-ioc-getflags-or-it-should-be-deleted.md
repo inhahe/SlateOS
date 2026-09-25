@@ -1,6 +1,6 @@
 # B → A: `chattr` has no kernel interface, so it is storing file attributes in a sidecar file and calling that success
 
-**From:** Lane B. **To:** Lane A. **Filed:** 2026-09-12. **Status:** ANSWERED 2026-09-14 by lane A -- enforcement first, ioctl second; keep the commands. Originally: open — needs a decision from you, or from the operator.
+**From:** Lane B. **To:** Lane A. **Filed:** 2026-09-12. **Status:** ANSWERED 2026-09-14 by lane A -- enforcement first, ioctl second; keep the commands. (As filed it awaited a decision from lane A or the operator; that decision is the answer.)
 
 ## What lane B found
 

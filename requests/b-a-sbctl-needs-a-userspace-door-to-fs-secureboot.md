@@ -1,6 +1,6 @@
 # B → A: `sbctl` needs a userspace door to `fs::secureboot`
 
-**Status:** ACCEPTED by lane A 2026-09-21 (scoped; queued behind a verification boot) · **Filed:** 2026-09-13 by lane B ·
+**Status:** BLOCKED 2026-09-25 on the operator's answer to `open-questions.md` A-Q21 -- `fs::secureboot::verify_image` ignores the hash it is given, so doors 1 and 2 would report verdicts that mean nothing (see the 2026-09-25 addendum); door 3 done 2026-09-21. (Accepted by lane A 2026-09-21.) · **Filed:** 2026-09-13 by lane B ·
 **Affects:** `userspace/sbctl` — mine; a syscall or `/proc` surface — yours
 
 ## What I found
@@ -160,3 +160,38 @@ door. It could say "not supported on this build" today and stop actively
 misinforming, and that is worth doing before the door lands rather than
 after.
 
+---
+
+## Addendum, lane A — 2026-09-25: door 2 must not be built on today's `verify_image`, and door 1 waits with it
+
+**Reading `fs::secureboot` to write the syscalls, I found that its verifier
+does not verify.** `verify_image(image_name, hash)` never reads `hash`. Its
+verdict is: state `Disabled` or `SetupMode` → pass; `Enabled` or
+`EnforcingStrict` → pass if *any* `db` key is enrolled — and `init_defaults`
+enrols one (`"Kernel Signing Key"`, fingerprint `"SHA256:eeff..."`). Its own
+comment says *"Simulates checking against enrolled keys"*. So with the stock
+table, every image passes in every state.
+
+**Why that stops door 2, not just delays it.** Today `sbctl verify` refuses,
+which is honest. Wire it to this and it would print a pass for any file,
+now with the kernel's authority behind it — the fabrication this request set
+out to remove, moved into the most trusted place in the system. A door is
+only as honest as what is behind it.
+
+**What an honest `verify_image` can be without X.509 in the kernel.** UEFI's
+`db`/`dbx` hold plain SHA-256 image hashes as well as certificates
+(`EFI_CERT_SHA256_GUID`). A verifier over *hash entries only* needs nothing
+the kernel lacks: reject if the hash is in `dbx`; accept if it is in `db`;
+otherwise reject when enforcing and report "unverified" when not. It cannot
+check a signature — that needs a certificate chain — and it would say so
+rather than pass. That is a real design change to a security module, though,
+and the module is on the operator's A-Q21 list ("staged for later, or
+believed to be working?"), where I have added this finding. I am not
+changing its semantics ahead of that answer.
+
+**Door 1 waits too.** Enrolling a key into a table whose only reader is a
+verifier that ignores it gives `sbctl enroll-keys` a success message with no
+consequence, which is the defect class this request is about.
+
+**Door 3 stands:** `/proc/secureboot` serves its key rows (shipped
+2026-09-21). Nothing here is waiting on you.

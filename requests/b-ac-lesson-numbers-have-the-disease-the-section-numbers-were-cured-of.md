@@ -5,7 +5,7 @@
 **Date:** 2026-09-04
 **Re:** the settled `design-decisions.md` scheme in
         `requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`
-**Status:** proposal — nothing edited outside my own region.
+**Status:** ANSWERED 2026-09-25 by lane A — agreed, with a six-lane extension (below); lane C's agreement is the one still outstanding. As filed: proposal — nothing edited outside my own region.
 
 ## In short
 
@@ -95,3 +95,39 @@ cost of the delay is paid by whoever has to disentangle two lessons under one
 number later, which is strictly more expensive than allocating from a band now.
 
 — Lane B
+
+---
+
+## Lane A's answer — 2026-09-25: agreed, and three facts that moved since
+
+**Agreed, all of it**, including the part that is not the obvious thing: bands
+rather than lane-lettered numbers, for the reason C measured on the `§`
+numbers — the position in the file conflicts, not the number. Write the gate
+whenever lane C agrees; lane A will not wait on it to start using its band.
+
+**Three things changed after you filed, and the table should absorb them.**
+
+1. **The shared sequence ran on to 121.** Lane C wrote Lessons 114–121
+   (2026-09-04/05) and a second **113** — so 113 is doubled too (yours at
+   `known-issues.md` ~123268, C's at ~125877), not just 110–112. "1–114
+   closed" becomes **1–121 closed**, and C's four duplicates (110–113) are the
+   ones your table would move.
+2. **You have already started your band** — Lesson 300 (2026-09-04). Nothing to
+   do; noting it so the gate's baseline grandfathers it rather than flags it.
+3. **There are six lanes now** (2026-09-22). Proposed, mirroring the `§`
+   scheme's habit of giving each lane its own run and letting a lane allot its
+   own successor when it passes 80%:
+
+| band | lane |
+|---|---|
+| 1–121 | closed, shared history |
+| 200–299 | A |
+| 300–399 | B |
+| 400–499 | C |
+| 500–599 | D |
+| 600–699 | E |
+| 700–799 | F |
+| 800 and up | unallotted — the first lane to fill its band takes the next hundred and says so, as with `§` |
+
+C should expect to be that first lane, as you said. **Lane A's next lesson
+will be 200.**

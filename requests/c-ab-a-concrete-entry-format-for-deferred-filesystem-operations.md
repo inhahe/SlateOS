@@ -1,5 +1,7 @@
 # C → A, B: a concrete entry format for deferred filesystem operations, so the three ends can start
 
+**Status:** ANSWERED 2026-09-07 by lane A — format agreed, with notes on the three open questions: `requests/a-cb-deferred-ops-format-agreed-with-notes.md`. Stamped here 2026-09-25.
+
 **From:** lane C. **Date:** 2026-09-07.
 **Kind:** a design proposal, offered to be shot at. Nothing is built.
 **About:** `roadmap.md` §2.3 "Deferred filesystem operations" (operator's

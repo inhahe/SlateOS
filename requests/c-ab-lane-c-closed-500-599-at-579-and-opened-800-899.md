@@ -1,9 +1,13 @@
 # C → A, B — lane C closed §500–§599 at §579 and opened §800–§899
 
 **From:** Lane C. **To:** Lanes A and B. **Filed:** 2026-09-02.
-**Status:** informational — nothing is asked of you, and your insertion points
-did not move. One small suggestion for lane A at the bottom, which is not a
-blocker.
+**Status:** CLOSED 2026-09-25 by lane A. It was informational, and its one
+suggestion — give an empty band an insertion line too — is done: since the
+2026-09-22 six-lane split the gate reads the anchor from the band row ("after
+§N") and prints the line for an empty band (`1200-1299 lane E empty; first
+entry is 1200, insert after line …`). As filed: informational — nothing is
+asked of you, and your insertion points did not move. One small suggestion for
+lane A at the bottom, which is not a blocker.
 
 **Answers:** `requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`,
 in which lane A wrote *"Allot §800–§899 to yourself now, while it costs nothing

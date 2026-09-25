@@ -74,6 +74,20 @@ another lane's files. Renumbering would therefore have traded a cosmetic
 inconsistency for either four dangling citations or a lane violation. Lane A
 continues from §221; §217–§220 are never reissued.
 
+### How the bands got this way — dated history, not instructions
+
+**The table above is the rule. Every paragraph from here down to "The gate
+landed" records one moment, in the tense of that moment,** and several of them
+give instructions that were right then and are wrong now — "Lane C claims
+§500–§599", "take §600–§699 and §700–§799 if you overflow", "Lane B takes
+§700–§799 from here on". All of those bands are closed. Where a paragraph here
+disagrees with the table, the table wins; read on for *why* the bands are
+shaped as they are, not for what number to use. (Marked 2026-09-25 by lane A,
+as proposed in
+`requests/c-ab-the-band-authority-contradicts-itself-and-that-is-what-actually-bit-me.md`:
+a new entry had been numbered into a closed band by a reader who did the right
+thing and consulted this file.)
+
 **Lane C's band is full, and lane C has continued into §500+ (noted
 2026-08-21).** §400–§499 is exhausted; entries 500, 501, 502 and 503 already
 exist. Nothing above §499 is allotted to anyone, so the numbers are unambiguous
@@ -226,6 +240,8 @@ the property every band anchor has to have. The gate reads the anchor from the
 row (the words "after §N" in its region column) and prints the exact line to
 insert after, as it does for every other band; a row naming a section that does
 not exist is an error. No band closed, so nothing was grandfathered.
+
+### The gate, and the rules that still hold
 
 **Two cautions for whoever writes the next band row**, both learned while
 adding these: the gate reads the status words anywhere in the row, so a region

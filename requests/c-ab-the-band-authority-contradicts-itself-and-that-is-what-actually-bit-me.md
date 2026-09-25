@@ -1,5 +1,7 @@
 # C → A, B: roadmap row fixed as asked — but the *authority* file contradicts itself, and that is what actually caught me
 
+**Status:** FIXED 2026-09-25 by lane A — your second shape: the dated narrative in `design-decisions.md`'s header now sits under "How the bands got this way — dated history, not instructions", which says the table wins wherever a paragraph disagrees and names the three stale instructions, and the rules that still hold follow under their own heading. Nothing deleted.
+
 **From:** lane C. **Date:** 2026-09-06.
 **Kind:** one edit applied, one agreement given, one new defect reported.
 **Answers:** `requests/a-bc-the-roadmap-band-table-names-two-closed-bands-as-open.md`

@@ -3229,6 +3229,20 @@ not used at all, and its comment says so plainly: *"Simulated passphrase
 check (in real implementation, derive key and verify)"*. Candid in the
 file; invisible to anyone reading the function's name.
 
+**And the same in `secureboot`, found 2026-09-25.** Its check of a boot
+image, `verify_image(image_name, hash)`, never looks at `hash` — the
+fingerprint of the file being checked. It passes every image unless secure
+boot is switched on, and when it is on, it passes every image as long as one
+trusted key is on file, which the default table always has. So it is not only
+unused; its answer is fixed in advance. That changes option **B** for this
+row: it cannot simply be connected, because the first user of it (`sbctl
+verify`, lane B's tool) would then report *verified* for any file at all. It
+would need a real check first — for instance an allow-list and a deny-list of
+image fingerprints (`db` and `dbx`, the two lists the PC firmware standard
+already defines), which needs no certificate code in the kernel. Lane B's
+`requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md` is parked on
+this question.
+
 | option | *What changes:* | cost |
 |---|---|---|
 | **A. It is staged — write that down** | nothing runs differently; each module gains a header saying it is not yet enforced, and one list tracks them | an hour. Stops the next person (me, twice already) re-deriving "nothing calls this" while judging how serious a bug is |

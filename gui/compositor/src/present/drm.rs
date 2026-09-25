@@ -906,6 +906,20 @@ impl<S: KmsSys> Present for DrmScanout<S> {
         self.heads.iter().any(|h| h.alive)
     }
 
+    /// The next hotplug probe. Nothing tells this module a cable moved (see
+    /// [`PROBE_INTERVAL`]), so a desktop nobody is touching must still wake
+    /// this often for a monitor plugged into it to light up.
+    ///
+    /// None for a zero interval, which asks to be probed whenever the loop
+    /// runs, not to make it run: as a deadline it would be permanently past,
+    /// and the loop would spin.
+    fn deadline(&self) -> Option<Instant> {
+        if self.probe_interval.is_zero() {
+            return None;
+        }
+        self.last_probe.checked_add(self.probe_interval)
+    }
+
     fn monitors(&mut self) -> Option<Vec<MonitorInfo>> {
         if self.last_probe.elapsed() >= self.probe_interval {
             self.reprobe();

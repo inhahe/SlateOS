@@ -30,21 +30,35 @@
 //! facing untrusted peers that had an unbounded step anywhere would be a peer's
 //! choice of how long a frame takes.
 //!
-//! ## Why it polls
+//! ## How it waits
 //!
-//! A tick runs once per frame interval and returns whether or not anything
-//! happened. The obvious alternative — block until a socket is readable —
-//! needs a readiness primitive over many descriptors (`poll`, `epoll`, `IOCP`),
-//! and the standard library exposes none. The cost is bounded and small: a
-//! client's request waits at most one frame interval to be seen, which is the
-//! same delay its result would wait for anyway before being composited. It is
-//! still waste on a wholly idle desktop, and it is logged as such in
-//! `known-issues.md` → `TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING`.
+//! Between ticks the loop *blocks*, on everything that could give it work at
+//! once ([`guiremote::WaitSet`]): the listening socket, every client, the
+//! display's input devices, and a deadline — the earliest of the next frame
+//! that is owed, the display's own schedule (a hotplug probe, a key repeat) and
+//! the compositor's (a slow key's threshold, a window's idle deadline). So a
+//! request is read the moment it arrives rather than at the next frame, and a
+//! desktop nobody is touching does not wake at all until one of those things
+//! happens.
 //!
-//! What the loop does do about it is stop polling at frame rate once there is
-//! demonstrably nothing to poll — see [`IdleBackoff`]. That does not shorten
-//! the latency floor for a connected client, and is not meant to; it is the
-//! half of the waste that can be removed without a readiness primitive.
+//! It used to poll instead — wake once a frame and ask everything whether it
+//! had anything — because the standard library has no way to wait on several
+//! sockets at once. That put up to a frame of latency under every request and
+//! woke an idle desktop sixty times a second to find nothing
+//! (`known-issues.md` → `TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING`). `WaitSet`
+//! is that missing primitive.
+//!
+//! **Frames are still paced.** A burst of requests or a fast mouse wakes the
+//! loop as often as it likes, and every wake serves what arrived; but a frame
+//! is shown at most once per display refresh, and one that is owed sooner
+//! waits for its slot. Otherwise a 1000 Hz mouse would redraw the pointer a
+//! thousand times a second on a sixty-hertz screen.
+//!
+//! **A wake knows what woke it.** A client the wait did not report is not read
+//! on that tick, and the listener is not asked for connections nobody is
+//! making. On SlateOS every socket call is a round trip to the network daemon,
+//! so an event loop that read every client on every mouse movement would cost
+//! more than the polling it replaced.
 
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -52,11 +66,12 @@ use std::time::{Duration, Instant};
 
 use guiremote::client::Transport;
 use guiremote::socket::{Listener, Socket};
+use guiremote::{LISTENER_READINESS, WaitSet};
 use inputsettings::InputSettings;
 
 use appearance::ColorFilter;
 
-use crate::present::{Frame, Headless, Present};
+use crate::present::{Frame, Headless, Present, earliest};
 use crate::wire::ClientLink;
 use crate::{Compositor, CursorCache, Display, PointerSprite, PointerState, WindowId};
 
@@ -89,86 +104,6 @@ const POINTER_OVER_DIRECT_SCANOUT: bool = true;
 /// connections in a loop hold the compositor there indefinitely, and the
 /// desktop would stop drawing. Whatever is left waits one frame.
 pub const MAX_ACCEPTS_PER_TICK: usize = 16;
-
-/// How long the loop waits between ticks, and when it stops waiting a whole
-/// frame for work that is not coming.
-///
-/// # What it is for
-///
-/// The loop is a poll: once per frame interval it asks the listener whether
-/// anyone is connecting and every socket whether it has bytes. With no clients
-/// and nothing on screen there is no one to ask, and asking sixty times a
-/// second is a wakeup source that keeps a laptop out of a deep idle state —
-/// battery spent to discover that nothing happened.
-///
-/// # Why the condition is "no clients" and not "nothing composed"
-///
-/// A desktop sitting still with clients connected composes nothing either, and
-/// backing off there would add up to [`IdleBackoff::IDLE_INTERVAL`] to every
-/// request those clients make. The point of the frame timer is to pace
-/// *composition*; the point of polling at frame rate is to keep the request
-/// latency under one frame. Only when there are no sockets at all does the
-/// second reason disappear, and then nothing can change except a new
-/// connection or local input — both of which are noticed on the next tick and
-/// snap the rate straight back.
-///
-/// # Why it settles rather than switching at once
-///
-/// A single quiet tick is normal. Dropping to a tenth of the rate on one and
-/// back up on the next would make the interval jitter across every gap in
-/// activity. [`IdleBackoff::SETTLE_TICKS`] of *consecutive* idleness is
-/// roughly a second, which no interactive gap reaches.
-#[derive(Debug, Default)]
-pub struct IdleBackoff {
-    /// Consecutive ticks that found nothing to do.
-    ticks: u32,
-}
-
-impl IdleBackoff {
-    /// Consecutive idle ticks before the loop slows down — about a second at
-    /// 60 Hz.
-    pub const SETTLE_TICKS: u32 = 60;
-
-    /// How often to look for work once settled. Long enough to matter to an
-    /// idle CPU, short enough that a program starting up does not notice it
-    /// waiting for its connection to be accepted.
-    pub const IDLE_INTERVAL: Duration = Duration::from_millis(100);
-
-    /// A loop that has just started, and is not idle until it proves it.
-    #[must_use]
-    pub fn new() -> Self {
-        Self { ticks: 0 }
-    }
-
-    /// Whether the loop is currently running at the reduced rate.
-    #[must_use]
-    pub fn is_settled(&self) -> bool {
-        self.ticks >= Self::SETTLE_TICKS
-    }
-
-    /// Record what a tick found, and return how long to wait after it.
-    ///
-    /// `busy` is the tick's own answer to "was there anything here" — a
-    /// connected client, an input event, or a frame that composed. Any one of
-    /// them resets the count, so the rate snaps back on the first sign of
-    /// work rather than easing back up.
-    ///
-    /// The result never goes *below* `frame`: a display slower than
-    /// [`Self::IDLE_INTERVAL`] would otherwise be polled faster while idle
-    /// than while busy, which is the opposite of the point.
-    pub fn after_tick(&mut self, busy: bool, frame: Duration) -> Duration {
-        if busy {
-            self.ticks = 0;
-            return frame;
-        }
-        self.ticks = self.ticks.saturating_add(1);
-        if self.is_settled() {
-            Self::IDLE_INTERVAL.max(frame)
-        } else {
-            frame
-        }
-    }
-}
 
 /// How many undecodable bytes a client may have outstanding before it is
 /// dropped.
@@ -250,6 +185,12 @@ struct Client {
     /// where the failure is noticed, because its windows must be reclaimed
     /// first and that needs the compositor, which is borrowed by the loop.
     ending: Option<Disconnect>,
+    /// Whether this tick should read the socket: `false` only when the wait
+    /// before the tick found nothing on it. Put back to `true` once the tick
+    /// has looked, so a caller driving [`Server::tick`] without waiting —
+    /// every test, and every harness in the tree — reads everyone, as it
+    /// always did.
+    readable: bool,
 }
 
 /// The compositor's listening front end.
@@ -282,13 +223,22 @@ pub struct Server {
     /// The serial advances exactly when the key changes, which is what lets a
     /// presenter that keeps a copy of the picture skip re-copying it.
     shown: Option<(ShownKey, u64)>,
-    /// How long the loop is currently waiting between ticks.
+    /// When a frame was last handed to the display.
     ///
-    /// On the server rather than local to [`Self::run_with`] so that the whole
-    /// rule -- including the client-count term, which is the part most likely
-    /// to be wrong -- can be driven and asserted on by a test. A loop that
-    /// only ends when its window closes is not a thing a unit test can run.
-    backoff: IdleBackoff,
+    /// The pacing clock: a frame is shown at most once per display refresh
+    /// however often the loop wakes, and one owed sooner than that waits for
+    /// its slot ([`Self::next_wake`]).
+    last_shown: Option<Instant>,
+    /// Whether this tick should ask the listener for connections: `false` only
+    /// when the wait before it found none waiting. Same rule as
+    /// `Client::readable`, for the same reason.
+    listener_ready: bool,
+    /// What the loop waits on between ticks, rebuilt before each wait and kept
+    /// so that one wait allocates nothing after the first.
+    waits: WaitSet,
+    /// Whether the last wait failed, so a failure is reported when it starts
+    /// and when it stops rather than sixty times a second in between.
+    wait_failing: bool,
     /// Stands in for a process id. A TCP peer cannot be asked what process it
     /// is — there is no `SO_PEERCRED` across a network, and a remote client has
     /// no pid in this machine's namespace at all — so the compositor is given a
@@ -333,7 +283,10 @@ impl Server {
             cursors: CursorCache::new(),
             shown_pointer: None,
             shown: None,
-            backoff: IdleBackoff::new(),
+            last_shown: None,
+            listener_ready: true,
+            waits: WaitSet::new(),
+            wait_failing: false,
             // Zero is left free as "no client", matching the convention the
             // rest of the compositor uses for ids that may be absent.
             next_client_id: 1,
@@ -354,28 +307,6 @@ impl Server {
 
     /// How many clients are connected.
     #[must_use]
-    /// Score the tick that has just run, and return how long to wait after it.
-    ///
-    /// `composed` and `had_input` are the tick's own findings; the third
-    /// signal, whether any client is connected, is the server's own and is
-    /// read here rather than passed in. It must be read *after* the tick, so
-    /// that a connection accepted during it counts as work -- scoring it
-    /// before would let a new client's very first tick be called idle.
-    ///
-    /// See `IdleBackoff` for why the condition is "no clients" rather than
-    /// "nothing composed".
-    pub fn settle(&mut self, composed: bool, had_input: bool, frame: Duration) -> Duration {
-        let busy = composed || had_input || self.client_count() > 0;
-        self.backoff.after_tick(busy, frame)
-    }
-
-    /// Whether the loop has backed off to the reduced polling rate.
-    #[must_use]
-    pub fn is_idle(&self) -> bool {
-        self.backoff.is_settled()
-    }
-
-    #[must_use]
     pub fn client_count(&self) -> usize {
         self.clients.len()
     }
@@ -390,6 +321,11 @@ impl Server {
     ///
     /// Does not compose — [`Self::run`] does that, and a caller driving the
     /// server itself may want to compose on its own schedule.
+    ///
+    /// Reads every client and asks the listener for connections — unless the
+    /// loop's wait has just said which of them have anything, in which case
+    /// only those. That narrowing lasts one tick, so a caller that never waits
+    /// always gets the whole round.
     ///
     /// # Errors
     ///
@@ -410,6 +346,11 @@ impl Server {
 
     /// Take whatever connections are pending, up to the per-tick bound.
     fn accept_pending(&mut self) -> io::Result<()> {
+        // The wait found nobody connecting, so asking would be a system call
+        // (on SlateOS, a round trip to the network daemon) to be told so.
+        if !std::mem::replace(&mut self.listener_ready, true) {
+            return Ok(());
+        }
         for _ in 0..MAX_ACCEPTS_PER_TICK {
             let Some(socket) = self.listener.accept()? else {
                 break;
@@ -427,6 +368,9 @@ impl Server {
                 socket,
                 link: ClientLink::new(id),
                 ending: None,
+                // A new connection may already have sent something; the wait
+                // that found the listener ready knew nothing about this socket.
+                readable: true,
             });
             self.stats.accepted = self.stats.accepted.saturating_add(1);
         }
@@ -437,6 +381,13 @@ impl Server {
     fn read_and_serve(&mut self, compositor: &mut Compositor) {
         for client in &mut self.clients {
             if client.ending.is_some() {
+                continue;
+            }
+            // Nothing arrived on it, so there is nothing to read, nothing new
+            // to serve (`serve` acts on complete frames, and it completed every
+            // one it had last time), and no hang-up to notice — a peer going
+            // away is itself something the wait reports.
+            if !std::mem::replace(&mut client.readable, true) {
                 continue;
             }
             self.scratch.clear();
@@ -619,6 +570,7 @@ impl Server {
 
         let pointer = Self::pointer_to_show(compositor);
         self.shown_pointer = pointer;
+        self.last_shown = Some(Instant::now());
         let sprite = pointer.and_then(|state| self.cursors.sprite(&state));
 
         // The compositor's own count of the frames it has produced names the
@@ -828,8 +780,10 @@ impl Server {
     /// The loop, in order: take whatever the user did and give it to the
     /// compositor, serve the clients (so that a click which raised a window is
     /// reflected in the events those clients are told about *this* frame, not
-    /// next), composite, and show the result. Input first is the whole reason
-    /// the ordering is written down here rather than left to look arbitrary.
+    /// next), composite and show if a frame is owed and its slot has come, and
+    /// then wait — for a client, the user, or the next thing due. Input first
+    /// is the whole reason the ordering is written down here rather than left
+    /// to look arbitrary.
     ///
     /// Monitors are reconciled before any of it, so that a frame is never
     /// composed for an arrangement the display has already stopped driving.
@@ -841,7 +795,8 @@ impl Server {
     /// # Errors
     ///
     /// Only a failure of the listening socket, which ends the server. Every
-    /// per-client failure ends that client instead.
+    /// per-client failure ends that client instead, and a wait that fails is
+    /// reported and replaced by sleeping, not treated as fatal.
     pub fn run_with<P: Present>(
         &mut self,
         compositor: &mut Compositor,
@@ -856,59 +811,180 @@ impl Server {
         // the `Present` it is run with.
         let mut pushed_input: Option<InputSettings> = None;
         while present.is_open() {
-            let began = Instant::now();
             Self::reconcile_monitors(compositor, present);
             // Before the poll, not after: the events this tick returns were
             // scaled by whatever the source is holding when it is asked, so
             // pushing afterwards would spend one frame moving the pointer at
             // the old speed after the user let go of the slider.
             Self::reconcile_input(compositor, present, &mut pushed_input);
-            let events = present.input();
-            let had_input = !events.is_empty();
-            for event in events {
+            for event in present.input() {
                 compositor.handle_input(event);
             }
             // A keystroke held back by slow keys is delivered here, once its
-            // threshold has expired with the key still down -- see
-            // `design-decisions.md` §821.
-            let delivered = compositor.poll_deferred_key();
+            // threshold has expired with the key still down
+            // (`design-decisions.md` §821). The loop wakes for exactly that
+            // moment: it is one of the deadlines `Compositor::wake_at` reports.
+            compositor.poll_deferred_key();
             self.tick(compositor)?;
-            let composed = self.compose(compositor);
-            // A pointer that moved over a still desktop is a frame too: the
-            // picture is unchanged, and the presenter repaints only where the
-            // pointer was and is.
-            if composed || self.pointer_changed(compositor) {
-                self.show(compositor, present);
-            }
+            self.present_if_due(compositor, present, interval);
 
-            let wait = self.settle(
-                composed,
-                frame_was_busy(had_input, delivered, compositor),
-                interval,
+            // Checked again before waiting, not only at the top: a display
+            // that closed during this tick — the close button, a recording
+            // that has seen what it came for — has nothing left to wake for,
+            // and a wait for it could last for ever.
+            if !present.is_open() {
+                break;
+            }
+            let now = Instant::now();
+            let wake = earliest(
+                self.next_wake(compositor, present.deadline(), interval, now),
+                accept_deadline(LISTENER_READINESS, now, interval),
             );
-
-            // Whatever is left of the interval. Subtracting the work already
-            // done rather than sleeping a flat one, so a tick that took eight
-            // milliseconds does not push the next frame to twenty-four.
-            if let Some(rest) = wait.checked_sub(began.elapsed()) {
-                std::thread::sleep(rest);
-            }
+            self.wait_for_work(present, wake, interval);
         }
         Ok(())
     }
+
+    /// Compose and show a frame, if one is owed and its slot has come.
+    ///
+    /// A frame is owed when there is something to draw or the pointer has
+    /// moved; its slot comes one refresh after the last frame shown. A frame
+    /// owed before its slot is left for [`Self::next_wake`] to wake the loop
+    /// for.
+    fn present_if_due<P: Present>(
+        &mut self,
+        compositor: &mut Compositor,
+        present: &mut P,
+        interval: Duration,
+    ) {
+        let now = Instant::now();
+        let slot_open = self
+            .last_shown
+            .is_none_or(|at| now.saturating_duration_since(at) >= interval);
+        if !slot_open {
+            return;
+        }
+        let composed = self.compose(compositor);
+        // A pointer that moved over a still desktop is a frame too: the
+        // picture is unchanged, and the presenter repaints only where the
+        // pointer was and is.
+        if composed || self.pointer_changed(compositor) {
+            self.show(compositor, present);
+        }
+    }
+
+    /// When the loop must run next if nothing arrives first, or `None` if
+    /// nothing is due at all.
+    ///
+    /// The earliest of:
+    ///
+    /// * `display` — the display's own schedule ([`Present::deadline`]);
+    /// * the compositor's ([`Compositor::wake_at`]): a slow key's threshold, a
+    ///   window's idle deadline;
+    /// * the next frame, if one is owed — damage to draw or a pointer that
+    ///   moved — at its slot: one refresh (`interval`) after the last frame
+    ///   shown, and not before the compositor's own frame clock allows
+    ///   ([`crate::FrameStats::next_compose_at`]). `now` stands in for the slot
+    ///   when nothing has been shown yet.
+    ///
+    /// Public, and taking the time as an argument, so that the rule can be
+    /// asserted on directly: a loop that ends only when its window closes is
+    /// not a thing a test can watch deciding when to wake.
+    #[must_use]
+    pub fn next_wake(
+        &self,
+        compositor: &Compositor,
+        display: Option<Instant>,
+        interval: Duration,
+        now: Instant,
+    ) -> Option<Instant> {
+        let mut wake = earliest(display, compositor.wake_at());
+        let damage = compositor.frame_owed();
+        if damage || self.pointer_changed(compositor) {
+            let mut due = self
+                .last_shown
+                .and_then(|at| at.checked_add(interval))
+                .unwrap_or(now);
+            if damage && let Some(ready) = compositor.frame_stats().next_compose_at() {
+                // The later of the two: waking at the slot to find the
+                // compositor's clock not yet willing would only mean waking
+                // again, a moment later, with nothing done in between.
+                due = due.max(ready);
+            }
+            wake = earliest(wake, Some(due));
+        }
+        wake
+    }
+
+    /// Block until a client or the display has something, or `wake` comes.
+    ///
+    /// Notes what the wait found, so the tick after it reads only what has
+    /// something to read. A wait that fails — which would be a fault in the
+    /// platform's machinery, not in any client — is reported once and replaced
+    /// by sleeping to the deadline or for a frame, whichever is sooner, with
+    /// everything left to be read: the loop degrades to polling rather than
+    /// stopping the desktop or spinning.
+    fn wait_for_work<P: Present>(
+        &mut self,
+        present: &mut P,
+        wake: Option<Instant>,
+        interval: Duration,
+    ) {
+        self.waits.clear();
+        let listener = self.waits.add_source(&self.listener);
+        let first_client = self.waits.len();
+        for client in &self.clients {
+            self.waits.add_source(&client.socket);
+        }
+        present.wait_on(&mut self.waits);
+
+        let timeout = wake.map(|at| at.saturating_duration_since(Instant::now()));
+        match present.wait(&mut self.waits, timeout) {
+            Ok(()) => {
+                if self.wait_failing {
+                    eprintln!("compositor: waiting for work succeeds again");
+                    self.wait_failing = false;
+                }
+                self.listener_ready =
+                    listener_worth_asking(LISTENER_READINESS, self.waits.is_ready(listener));
+                for (offset, client) in self.clients.iter_mut().enumerate() {
+                    client.readable = self.waits.is_ready(first_client.saturating_add(offset));
+                }
+            }
+            Err(e) => {
+                if !self.wait_failing {
+                    eprintln!(
+                        "compositor: cannot wait for work ({e}); looking for it every frame instead"
+                    );
+                    self.wait_failing = true;
+                }
+                std::thread::sleep(timeout.map_or(interval, |t| t.min(interval)));
+            }
+        }
+    }
 }
 
-/// Whether this frame counts as activity for the idle backoff.
+/// Whether the tick after a wait should ask the listener for connections.
 ///
-/// A keystroke waiting out its slow-keys threshold counts, and that is the
-/// whole reason this is a named function rather than an expression inline in
-/// the loop. To the backoff such a key is perfect quiet -- no input arrived,
-/// nothing was damaged, nothing needs drawing -- so it would settle and start
-/// polling every [`IdleBackoff::IDLE_INTERVAL`], delivering the key late by a
-/// varying amount on top of a threshold that defaults to 300 ms. See
-/// `design-decisions.md` §821.
-fn frame_was_busy(had_input: bool, delivered: bool, compositor: &Compositor) -> bool {
-    had_input || delivered || compositor.has_deferred_key()
+/// Only when the wait said one is waiting — where the platform can say so at
+/// all (`reported`, which is [`LISTENER_READINESS`]). Where it cannot, silence
+/// from the listener means nothing, and asking every tick is the only way to
+/// learn anyone connected.
+const fn listener_worth_asking(reported: bool, ready: bool) -> bool {
+    !reported || ready
+}
+
+/// The latest the loop may wait before asking the listener again, where the
+/// platform will not wake it for a connection (`reported` false): one frame,
+/// which is how long a program starting up waited to be accepted before the
+/// loop learned to wait at all. `None` where a connection wakes the loop by
+/// itself.
+fn accept_deadline(reported: bool, now: Instant, interval: Duration) -> Option<Instant> {
+    if reported {
+        None
+    } else {
+        now.checked_add(interval)
+    }
 }
 
 #[cfg(test)]
@@ -1538,6 +1614,12 @@ mod tests {
             self.log.push("reload");
             self.reloads.push(settings.clone());
         }
+
+        /// Always due: this display ends the loop by counting ticks, and a
+        /// count of ticks only advances if the loop keeps ticking.
+        fn deadline(&self) -> Option<Instant> {
+            Some(Instant::now())
+        }
     }
 
     /// A listening display that ends the loop after `ticks` ticks.
@@ -1646,24 +1728,227 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Idle back-off
+    // Waiting for work
     //
-    // The loop these serve runs until a window closes, which a unit test
-    // cannot drive, so the decision is a value rather than a branch buried
-    // in the loop, and these test the value.
+    // The loop blocks between ticks, and these check both halves of that: it
+    // wakes for everything it should — a client, the display, a deadline —
+    // and for nothing else. The second half is the one a timer loop gets
+    // wrong without any test noticing, since a loop that wakes too often is
+    // still a correct loop, only a wasteful one.
     // ------------------------------------------------------------------
 
     const FRAME: Duration = Duration::from_micros(16_667);
 
-    /// Drive `n` consecutive idle ticks at `frame` and return the last wait.
-    /// A frame with a keystroke waiting out its slow-keys threshold is not an
-    /// idle frame, however quiet it looks.
-    ///
-    /// Without this the backoff settles and polls every 100 ms, so the key --
-    /// which is supposed to land exactly when its threshold expires -- arrives
-    /// late by a different amount each time. `design-decisions.md` §821.
+    /// A desktop nobody is touching does not wake: after its first frame, the
+    /// loop sleeps until the display goes away. The timer loop this replaced
+    /// woke eighteen times in the same 300 ms.
     #[test]
-    fn a_keystroke_waiting_on_its_threshold_keeps_the_frame_busy() {
+    fn an_idle_desktop_does_not_wake_until_something_happens() {
+        let (mut server, mut compositor, _addr) = server();
+        let mut display = Recording::new();
+        display.close_at = Some(Instant::now() + Duration::from_millis(300));
+        server.run_with(&mut compositor, &mut display).expect("run");
+
+        assert_eq!(display.shown(), 1, "the first frame, and nothing after it");
+        assert!(
+            display.ticks() <= 3,
+            "the loop woke {} times on a desktop where nothing happened",
+            display.ticks()
+        );
+    }
+
+    /// A client's request wakes the loop and is answered at once, rather than
+    /// at the next frame — and the loop does not otherwise tick.
+    #[test]
+    fn a_request_wakes_the_loop_and_is_answered_without_a_timer() {
+        let watchdog = Instant::now() + Duration::from_secs(2);
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+        // Built on the loop's own thread, as the shipped binary builds it: the
+        // loop owns both for as long as it runs.
+        let loop_thread = std::thread::spawn(move || {
+            let (mut server, mut compositor, addr) = server();
+            addr_tx.send(addr).expect("the test is waiting for this");
+            let mut display = Recording::new();
+            display.close_at = Some(watchdog);
+            server.run_with(&mut compositor, &mut display).expect("run");
+            (
+                server.stats().accepted,
+                compositor.window_count(),
+                display.ticks(),
+            )
+        });
+        let addr = addr_rx.recv().expect("the loop started");
+
+        let began = Instant::now();
+        let mut conn = Connection::new(Socket::connect(addr).expect("connect"));
+        let seq = conn
+            .send(RequestBody::CreateWindow(WindowSpec::new(
+                "Quick", 200, 100,
+            )))
+            .expect("send");
+        let reply = loop {
+            conn.pump().expect("pump");
+            if let Some(reply) = conn.take_reply(seq) {
+                break reply;
+            }
+            assert!(Instant::now() < watchdog, "the request was never answered");
+            conn.transport_mut()
+                .set_wait_timeout(Some(Duration::from_millis(50)))
+                .expect("a non-zero timeout");
+            conn.transport_mut().wait().expect("wait");
+        };
+        let round_trip = began.elapsed();
+        let (accepted, windows, ticks) = loop_thread.join().expect("the loop");
+
+        assert!(
+            matches!(reply, ResponseBody::WindowCreated { .. }),
+            "{reply:?}"
+        );
+        assert!(
+            round_trip < Duration::from_secs(1),
+            "the answer took {round_trip:?}: the loop did not wake for the client"
+        );
+        assert_eq!(windows, 1);
+        assert_eq!(accepted, 1);
+        // Connecting, the request and the window's first frame are a handful
+        // of wakes; a timer loop would have ticked 120 times in the two
+        // seconds this ran.
+        assert!(ticks < 30, "the loop ticked {ticks} times for one request");
+    }
+
+    /// A pointer that moves just after a frame is shown when its slot comes,
+    /// without anything else happening to wake the loop.
+    #[test]
+    fn the_loop_shows_a_frame_when_only_the_pointer_moved() {
+        let (mut server, mut compositor, _addr) = server();
+        let mut display = Recording::new();
+        display.feed(Vec::new());
+        display.feed(vec![InputEvent::MouseMove { x: 30, y: 40 }]);
+        display.close_once_shown = Some(2);
+        display.close_at = Some(Instant::now() + Duration::from_secs(5));
+        server
+            .run_with(&mut compositor, &mut display)
+            .expect("the loop");
+        assert_eq!(
+            display.shown(),
+            2,
+            "the first frame, then one for the pointer"
+        );
+        let pointer = display.last_pointer().expect("a pointer");
+        assert_eq!(
+            pointer.x + i32::try_from(pointer.image.hot_x).unwrap(),
+            30,
+            "the frame shown was not the one with the pointer moved"
+        );
+    }
+
+    /// A mouse far faster than the display is drawn once per refresh, at
+    /// wherever it has got to: every movement is taken in, and the frames are
+    /// not multiplied to match.
+    #[test]
+    fn a_fast_pointer_is_shown_once_per_refresh_at_its_latest_position() {
+        let (mut server, mut compositor, _addr) = server();
+        let mut display = Recording::new();
+        let moves = 40;
+        for i in 1..=moves {
+            display.feed(vec![InputEvent::MouseMove { x: i * 10, y: 50 }]);
+        }
+        display.close_at = Some(Instant::now() + Duration::from_millis(300));
+        server
+            .run_with(&mut compositor, &mut display)
+            .expect("the loop");
+
+        let pointer = display.last_pointer().expect("a pointer");
+        assert_eq!(
+            pointer.x + i32::try_from(pointer.image.hot_x).unwrap(),
+            moves * 10,
+            "the last frame did not show where the pointer ended up"
+        );
+        assert!(
+            display.shown() < u64::try_from(moves / 4).unwrap(),
+            "{} frames for {moves} movements: the pointer is not paced to the display",
+            display.shown()
+        );
+    }
+
+    /// Nothing owed, nothing scheduled: no reason to wake at all.
+    #[test]
+    fn with_nothing_owed_the_loop_has_no_deadline() {
+        let (mut server, mut compositor, _addr) = server();
+        let mut display = Recording::new();
+        assert!(server.compose(&mut compositor));
+        server.show(&compositor, &mut display);
+        let now = Instant::now();
+        assert_eq!(server.next_wake(&compositor, None, FRAME, now), None);
+
+        let later = now + Duration::from_secs(1);
+        assert_eq!(
+            server.next_wake(&compositor, Some(later), FRAME, now),
+            Some(later),
+            "the display's own schedule is passed through"
+        );
+    }
+
+    /// Something to draw is due one refresh after the last frame shown.
+    #[test]
+    fn damage_is_due_at_the_next_frame_slot() {
+        let (mut server, mut compositor, _addr) = server();
+        let mut display = Recording::new();
+        assert!(server.compose(&mut compositor));
+        server.show(&compositor, &mut display);
+        let shown_at = server.last_shown.expect("a frame was shown");
+
+        compositor.create_window("Fresh".to_owned(), 300, 200, 1);
+        assert!(
+            compositor.frame_owed(),
+            "the test premise: a window to draw"
+        );
+        let wake = server
+            .next_wake(&compositor, None, FRAME, Instant::now())
+            .expect("a frame is owed");
+        assert!(
+            wake >= shown_at + FRAME,
+            "due before its slot: {:?}",
+            wake - shown_at
+        );
+        assert!(
+            wake <= shown_at + FRAME + Duration::from_millis(1),
+            "due long after its slot: {:?}",
+            wake - shown_at
+        );
+    }
+
+    /// A pointer that moved is owed a frame too, at the same slot.
+    #[test]
+    fn a_moved_pointer_is_due_at_the_next_frame_slot() {
+        let (mut server, mut compositor, _addr) = server();
+        let mut display = Recording::new();
+        assert!(server.compose(&mut compositor));
+        server.show(&compositor, &mut display);
+        let shown_at = server.last_shown.expect("a frame was shown");
+
+        compositor.handle_input(InputEvent::MouseMove { x: 5, y: 6 });
+        assert!(!compositor.frame_owed(), "a pointer move is not damage");
+        assert_eq!(
+            server.next_wake(&compositor, None, FRAME, Instant::now()),
+            Some(shown_at + FRAME)
+        );
+    }
+
+    /// Before any frame has been shown, an owed one is due now.
+    #[test]
+    fn the_first_frame_is_due_at_once() {
+        let (server, compositor, _addr) = server();
+        assert!(compositor.frame_owed(), "a new desktop has to be drawn");
+        let now = Instant::now();
+        assert_eq!(server.next_wake(&compositor, None, FRAME, now), Some(now));
+    }
+
+    /// A keystroke waiting out its slow-keys threshold is a deadline the loop
+    /// wakes for, not a reason to keep ticking — and nothing else would wake
+    /// it, because to a loop waiting for input a held-back key is silence.
+    #[test]
+    fn a_keystroke_waiting_on_its_threshold_is_a_deadline() {
         let mut comp = Compositor::new(320, 240, 60).unwrap();
         comp.create_window("Editor".to_string(), 200, 150, 1);
         comp.set_accessibility_keys(inputsettings::AccessibilityKeysConfig {
@@ -1674,12 +1959,15 @@ mod tests {
             },
             ..inputsettings::AccessibilityKeysConfig::default()
         });
+        // Everything drawn and shown first, so that the key is the only thing
+        // the loop has to wake for.
+        let mut server = Server::bind("127.0.0.1:0").expect("bind");
+        assert!(server.compose(&mut comp));
+        server.show(&comp, &mut Recording::new());
+        assert_eq!(comp.wake_at(), None, "nothing is waiting yet");
+        assert_eq!(server.next_wake(&comp, None, FRAME, Instant::now()), None);
 
-        assert!(
-            !frame_was_busy(false, false, &comp),
-            "a genuinely idle frame must still be allowed to back off"
-        );
-
+        let pressed = Instant::now();
         // 0x1E is A. Pressing it starts the threshold rather than typing.
         comp.handle_input(InputEvent::KeyDown {
             scancode: 0x1E,
@@ -1689,163 +1977,182 @@ mod tests {
             comp.has_deferred_key(),
             "the test premise: a key is waiting"
         );
+        let due = comp.wake_at().expect("the threshold is a deadline");
+        let from_press = due.saturating_duration_since(pressed);
         assert!(
-            frame_was_busy(false, false, &comp),
-            "a frame with a keystroke pending was treated as idle, so the backoff would deliver it up to IDLE_INTERVAL late"
+            from_press >= Duration::from_millis(290) && from_press <= Duration::from_millis(310),
+            "due {from_press:?} after the press, not at the 300 ms threshold"
         );
-    }
-
-    fn idle_for(backoff: &mut IdleBackoff, n: u32, frame: Duration) -> Duration {
-        let mut wait = frame;
-        for _ in 0..n {
-            wait = backoff.after_tick(false, frame);
-        }
-        wait
-    }
-
-    #[test]
-    fn a_busy_loop_always_waits_one_frame() {
-        let mut backoff = IdleBackoff::new();
-        for _ in 0..1000 {
-            assert_eq!(backoff.after_tick(true, FRAME), FRAME);
-        }
-        assert!(!backoff.is_settled(), "work never lets it settle");
-    }
-
-    #[test]
-    fn one_quiet_tick_does_not_slow_the_loop() {
-        let mut backoff = IdleBackoff::new();
         assert_eq!(
-            backoff.after_tick(false, FRAME),
-            FRAME,
-            "a single quiet tick is normal and must not change the rate"
+            server.next_wake(&comp, None, FRAME, Instant::now()),
+            Some(due),
+            "the loop would not wake for the key"
         );
     }
 
-    /// Both sides of the threshold, deliberately. A test of only the far side
-    /// passes with `SETTLE_TICKS` set to one, which would reintroduce exactly
-    /// the jitter the settling exists to prevent.
+    /// Released before its threshold, the key is dropped — and so is the
+    /// deadline, or the loop would wake for a keystroke that no longer exists.
     #[test]
-    fn the_loop_slows_down_only_once_the_quiet_run_is_long_enough() {
-        let mut backoff = IdleBackoff::new();
-        assert_eq!(
-            idle_for(&mut backoff, IdleBackoff::SETTLE_TICKS - 1, FRAME),
-            FRAME,
-            "one tick short of the threshold is still frame rate"
-        );
-        assert!(!backoff.is_settled());
-
-        assert_eq!(
-            backoff.after_tick(false, FRAME),
-            IdleBackoff::IDLE_INTERVAL,
-            "the tick that reaches the threshold is the one that slows down"
-        );
-        assert!(backoff.is_settled());
+    fn a_slow_key_released_early_leaves_no_deadline_behind() {
+        let mut comp = Compositor::new(320, 240, 60).unwrap();
+        comp.create_window("Editor".to_string(), 200, 150, 1);
+        comp.set_accessibility_keys(inputsettings::AccessibilityKeysConfig {
+            filter: inputsettings::FilterKeysConfig {
+                enabled: true,
+                slow_keys_ms: 300,
+                ..inputsettings::FilterKeysConfig::default()
+            },
+            ..inputsettings::AccessibilityKeysConfig::default()
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x1E,
+            character: None,
+        });
+        assert!(comp.wake_at().is_some());
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x1E });
+        assert!(!comp.has_deferred_key());
+        assert_eq!(comp.wake_at(), None);
     }
 
+    /// An idle watch is a deadline the loop wakes for: the moment the session
+    /// has been quiet for as long as the watcher asked.
     #[test]
-    fn any_sign_of_work_snaps_the_rate_straight_back() {
-        let mut backoff = IdleBackoff::new();
-        idle_for(&mut backoff, IdleBackoff::SETTLE_TICKS, FRAME);
-        assert!(backoff.is_settled(), "settled first");
+    fn an_idle_watch_is_a_deadline_until_it_fires() {
+        let mut comp = Compositor::new(320, 240, 60).unwrap();
+        let window = comp.create_window("Locker".to_string(), 200, 150, 1);
+        comp.watch_idle(window, Duration::from_mins(5)).unwrap();
+        let due = comp.last_input() + Duration::from_mins(5);
+        assert_eq!(comp.wake_at(), Some(due));
 
+        // Two watchers: the sooner one is the deadline.
+        let other = comp.create_window("Dimmer".to_string(), 200, 150, 1);
+        comp.watch_idle(other, Duration::from_mins(2)).unwrap();
         assert_eq!(
-            backoff.after_tick(true, FRAME),
-            FRAME,
-            "one busy tick returns to frame rate, without easing back up"
+            comp.wake_at(),
+            Some(comp.last_input() + Duration::from_mins(2))
         );
-        assert!(!backoff.is_settled());
 
-        // And the count restarted rather than resuming just under the
-        // threshold, which would settle again on the next quiet tick.
+        // Once both have fired there is nothing left to wake for...
+        comp.queue_idle_notifications(due);
+        assert_eq!(comp.wake_at(), None, "a fired watch is not a deadline");
+
+        // ...until input arms them again, measured from the new input.
+        comp.handle_input(InputEvent::MouseMove { x: 1, y: 1 });
         assert_eq!(
-            idle_for(&mut backoff, IdleBackoff::SETTLE_TICKS - 1, FRAME),
-            FRAME
-        );
-    }
-
-    /// A display slower than the idle interval must not be polled *faster*
-    /// for being idle, which is what an unguarded constant does at 5 Hz.
-    #[test]
-    fn a_slow_display_is_never_polled_faster_for_being_idle() {
-        let slow = Duration::from_millis(200);
-        assert!(slow > IdleBackoff::IDLE_INTERVAL, "the case being tested");
-
-        let mut backoff = IdleBackoff::new();
-        let wait = idle_for(&mut backoff, IdleBackoff::SETTLE_TICKS, slow);
-
-        assert!(backoff.is_settled());
-        assert_eq!(
-            wait, slow,
-            "the frame interval wins when it is the longer of the two"
+            comp.wake_at(),
+            Some(comp.last_input() + Duration::from_mins(2))
         );
     }
 
-    /// A connected client keeps the loop at frame rate, however quiet it is.
-    ///
-    /// This is the term the tests above cannot reach: they drive `IdleBackoff`
-    /// directly and so can only assert what happens for a given `busy`, not
-    /// that the server computes `busy` correctly. A client that connects and
-    /// then says nothing composes no frames and sends no input, so every other
-    /// signal reads idle -- and backing off there would add up to
-    /// `IDLE_INTERVAL` to every request it goes on to make.
+    /// The narrowing a wait gives a tick lasts for that tick only: a caller
+    /// that goes on to tick without waiting reads everyone again.
     #[test]
-    fn a_connected_client_keeps_the_loop_at_frame_rate() {
+    fn a_wait_narrows_one_tick_and_no_more() {
         let (mut server, mut compositor, addr) = server();
-        let _conn = dial(&mut server, &mut compositor, addr);
-        assert_eq!(server.client_count(), 1, "connected");
-
-        for _ in 0..IdleBackoff::SETTLE_TICKS * 2 {
-            assert_eq!(
-                server.settle(false, false, FRAME),
-                FRAME,
-                "a silent client is still a client"
-            );
-        }
-        assert!(!server.is_idle());
-    }
-
-    /// With nobody connected there is nothing to poll for, and the loop says
-    /// so.
-    #[test]
-    fn a_server_nobody_connects_to_backs_off() {
-        let (mut server, _compositor, _addr) = server();
-        assert_eq!(server.client_count(), 0);
-
-        let mut wait = FRAME;
-        for _ in 0..IdleBackoff::SETTLE_TICKS {
-            wait = server.settle(false, false, FRAME);
-        }
-
-        assert!(
-            server.is_idle(),
-            "nothing to poll, so stop polling at 60 Hz"
+        let mut conn = dial(&mut server, &mut compositor, addr);
+        // Nothing sent yet, so a short wait finds nothing.
+        server.wait_for_work(
+            &mut Headless,
+            Some(Instant::now() + Duration::from_millis(20)),
+            FRAME,
         );
-        assert_eq!(wait, IdleBackoff::IDLE_INTERVAL);
-    }
-
-    /// Local input with no clients still snaps the rate back -- there is a
-    /// cursor on screen and it must not lag a tenth of a second behind.
-    #[test]
-    fn input_alone_is_enough_to_keep_the_rate_up() {
-        let (mut server, _compositor, _addr) = server();
-        let mut wait = FRAME;
-        for _ in 0..IdleBackoff::SETTLE_TICKS {
-            wait = server.settle(false, false, FRAME);
-        }
-        assert!(server.is_idle(), "settled first");
-        assert_eq!(wait, IdleBackoff::IDLE_INTERVAL);
-
-        assert_eq!(server.settle(false, true, FRAME), FRAME);
-        assert!(!server.is_idle(), "the pointer moved, so wake up");
-    }
-
-    #[test]
-    fn the_idle_interval_is_a_real_reduction() {
         assert!(
-            IdleBackoff::IDLE_INTERVAL > FRAME,
-            "backing off to something faster than a frame would be pointless"
+            !server.clients[0].readable,
+            "the wait found the client quiet"
         );
+        assert_eq!(
+            server.listener_ready, !LISTENER_READINESS,
+            "and nobody connecting -- which a platform that cannot say so must not believe"
+        );
+
+        let seq = conn
+            .send(RequestBody::CreateWindow(WindowSpec::new("Late", 100, 100)))
+            .expect("send");
+        // The tick the wait narrowed does not read it...
+        server.tick(&mut compositor).expect("tick");
+        assert!(server.clients[0].readable, "the narrowing was put back");
+        // ...and the next one, not narrowed, does.
+        let reply = await_reply(&mut server, &mut compositor, &mut conn, seq);
+        assert!(matches!(reply, ResponseBody::WindowCreated { .. }));
+    }
+
+    /// Where the platform reports a connection waiting on the listener, the
+    /// listener is asked only when it does; where it cannot (SlateOS until
+    /// lane A's fix), it is asked every tick, and the loop never waits longer
+    /// than a frame, so a program starting up is still accepted within one.
+    #[test]
+    fn a_listener_the_platform_cannot_vouch_for_is_asked_every_frame() {
+        assert!(listener_worth_asking(true, true));
+        assert!(
+            !listener_worth_asking(true, false),
+            "a reported silence is believed"
+        );
+        assert!(
+            listener_worth_asking(false, false),
+            "an unreported one is not"
+        );
+        assert!(listener_worth_asking(false, true));
+
+        let now = Instant::now();
+        assert_eq!(
+            accept_deadline(true, now, FRAME),
+            None,
+            "the connection wakes the loop"
+        );
+        assert_eq!(accept_deadline(false, now, FRAME), Some(now + FRAME));
+    }
+
+    /// A connection arriving while the loop waits wakes it, and the client is
+    /// accepted by the tick after — the listener half of waiting for work.
+    #[test]
+    fn a_connection_wakes_the_wait_and_is_accepted() {
+        let (mut server, mut compositor, addr) = server();
+        let _socket = Socket::connect(addr).expect("connect");
+        let began = Instant::now();
+        server.wait_for_work(
+            &mut Headless,
+            Some(Instant::now() + Duration::from_secs(5)),
+            FRAME,
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(4),
+            "the connection did not wake the wait"
+        );
+        assert!(server.listener_ready);
+        server.tick(&mut compositor).expect("tick");
+        assert_eq!(server.client_count(), 1);
+    }
+
+    /// A client with something to say is reported by the wait and read by the
+    /// tick after it.
+    #[test]
+    fn a_client_the_wait_found_is_read_by_the_next_tick() {
+        let (mut server, mut compositor, addr) = server();
+        let mut conn = dial(&mut server, &mut compositor, addr);
+        let seq = conn
+            .send(RequestBody::CreateWindow(WindowSpec::new(
+                "Found", 100, 100,
+            )))
+            .expect("send");
+        server.wait_for_work(
+            &mut Headless,
+            Some(Instant::now() + Duration::from_secs(5)),
+            FRAME,
+        );
+        assert!(
+            server.clients[0].readable,
+            "the request did not wake the wait"
+        );
+        server.tick(&mut compositor).expect("tick");
+        for _ in 0..1000 {
+            conn.pump().expect("pump");
+            if let Some(reply) = conn.take_reply(seq) {
+                assert!(matches!(reply, ResponseBody::WindowCreated { .. }));
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the tick after the wait did not serve the request");
     }
 
     // ------------------------------------------------------------------
@@ -2090,32 +2397,6 @@ mod tests {
         assert!(
             !server.pointer_changed(&compositor),
             "the frame owed was paid"
-        );
-    }
-
-    /// The same through the real loop: a tick in which only the mouse moved
-    /// still puts a frame on the display, and an idle tick does not.
-    #[test]
-    fn the_loop_shows_a_frame_when_only_the_pointer_moved() {
-        let (mut server, mut compositor, _addr) = server();
-        let mut display = Recording::closing_after(4);
-        display.feed(Vec::new());
-        display.feed(vec![InputEvent::MouseMove { x: 30, y: 40 }]);
-        display.feed(Vec::new());
-        display.feed(Vec::new());
-        server
-            .run_with(&mut compositor, &mut display)
-            .expect("the loop");
-        assert_eq!(
-            display.shown(),
-            2,
-            "the first frame, then one for the pointer, and none for idle ticks"
-        );
-        let pointer = display.last_pointer().expect("a pointer");
-        assert_eq!(
-            pointer.x + i32::try_from(pointer.image.hot_x).unwrap(),
-            30,
-            "the frame shown was not the one with the pointer moved"
         );
     }
 

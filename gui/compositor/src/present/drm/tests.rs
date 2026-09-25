@@ -30,7 +30,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::sys::{
     CardPath, CardSource, EBUSY, ENODEV, ENOENT, Errno, KmsSys, MAX_CARDS, Mapped, OutArray,
@@ -2477,4 +2477,36 @@ fn a_pointer_on_the_seam_is_drawn_on_both_monitors() {
             }
         }
     }
+}
+
+// ------------------------------------------------ waking for the next probe --
+
+#[test]
+fn the_next_hotplug_probe_is_a_deadline() {
+    // Nothing tells the compositor a cable moved, so a desktop nobody is
+    // touching must still wake for the probe -- or a monitor plugged into it
+    // stays dark until somebody moves the mouse.
+    let before = Instant::now();
+    let mut scanout = DrmScanout::new(FakeCard::desktop()).unwrap();
+    let due = scanout.deadline().expect("a card is probed on a schedule");
+    assert!(
+        due >= before + super::PROBE_INTERVAL && due <= Instant::now() + super::PROBE_INTERVAL,
+        "the first probe is not one interval after start-up"
+    );
+
+    // A probe moves it on.
+    scanout.set_probe_interval(Duration::from_millis(1));
+    std::thread::sleep(Duration::from_millis(2));
+    let probed = Instant::now();
+    scanout.monitors();
+    let next = scanout.deadline().unwrap();
+    assert!(
+        next >= probed + Duration::from_millis(1),
+        "the deadline did not move past the probe"
+    );
+
+    // "Probe whenever asked" is not a reason to be asked: a zero interval as a
+    // deadline would always be past, and the loop waiting on it would spin.
+    scanout.set_probe_interval(Duration::ZERO);
+    assert_eq!(scanout.deadline(), None);
 }

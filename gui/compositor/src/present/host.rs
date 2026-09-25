@@ -61,6 +61,9 @@
 use std::cell::{Cell, RefCell};
 use std::io;
 use std::thread::ThreadId;
+use std::time::Duration;
+
+use guiremote::WaitSet;
 
 // The compositor's own `MouseButton`, not `guitk::event::MouseButton`: this
 // translates host messages into [`InputEvent`], which is what
@@ -935,6 +938,21 @@ impl super::Present for Window {
 
     fn is_open(&self) -> bool {
         !CLOSED.get()
+    }
+
+    /// Wake for window messages as well as for the loop's sockets.
+    ///
+    /// This window's input is its message queue, which is not a handle a
+    /// socket wait can hold. A loop blocked on its clients alone would not
+    /// wake for a keystroke, a click or the close button, and after five
+    /// seconds of that Windows would mark the window not responding.
+    fn wait(&mut self, set: &mut WaitSet, timeout: Option<Duration>) -> io::Result<()> {
+        debug_assert_eq!(
+            self.owner,
+            std::thread::current().id(),
+            "a window's messages wake only the thread that created it"
+        );
+        set.wait_or_message(timeout).map(drop)
     }
 }
 

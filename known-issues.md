@@ -38825,7 +38825,27 @@ deleting an eleven-day-old write-once log is safe, but do not delete a `.output`
 file for a task that may still be running — read the task list first. Files
 under `-mtime +7` are unambiguously dead.
 
-## TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING (lane C, 2026-08-17)
+## TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING (lane C, 2026-08-17) - **fixed 2026-09-25 (lane F)**
+
+> **Fixed 2026-09-25 (lane F).** The server loop now *waits*: between ticks it
+> blocks on its listener, every client, the display's input devices and a
+> deadline — the next owed frame, a hotplug probe, a key repeat, a slow key's
+> threshold, an idle watch — through `guiremote::WaitSet`
+> (`gui/remote/src/wait.rs`: `poll` on SlateOS and Linux; event-select, a
+> high-resolution timer and a message-queue wake on Windows). A request is read
+> the moment it arrives, frames stay paced to one per refresh, and on the
+> development host an idle desktop wakes twice in the 300 ms the old loop woke
+> eighteen times (`an_idle_desktop_does_not_wake_until_something_happens`).
+> `IdleBackoff`, mitigation 3 below, is gone: waiting subsumes it.
+> design-decisions.md §1302.
+>
+> **Not yet on SlateOS, for one reason that is not this entry's:** SlateOS's
+> `poll` never reports a connection waiting on a *listening* socket, so there
+> the loop still asks for connections once a frame and waits no longer than
+> one. Requests on existing connections are read at once everywhere. That gap
+> is tracked separately — `known-issues.md` → `[F]` 2026-09-25, and
+> `requests/f-a-poll-never-reports-a-connection-waiting-on-a-listening-socket.md`.
+> The description below is the state before the fix.
 
 **What.** `gui/compositor/src/server.rs`'s `run()` is a polling loop. Once per
 display frame interval it wakes, asks the listener whether anyone is trying to
@@ -165066,3 +165086,36 @@ works.
 window ends the grab, because the host sends `WM_MOUSELEAVE` and the release
 happens where the compositor cannot see it. On a real display the pointer
 cannot leave the output.
+
+### [F] On SlateOS the compositor still asks its listener for connections every frame, because `poll` never reports one waiting -- 2026-09-25
+
+**Status:** OPEN — worked around in lane F; the fix is lane A's (`requests/f-a-poll-never-reports-a-connection-waiting-on-a-listening-socket.md`).
+
+**In short:** the compositor now sleeps until there is something to do instead
+of waking sixty times a second to look (design-decisions §1302). On SlateOS it
+cannot yet sleep all the way, because the kernel never tells a waiting program
+that someone has connected to it. So there it still wakes once a frame to ask —
+exactly as often as before, no worse — and an idle SlateOS desktop keeps its old
+wakeup rate until lane A's fix lands.
+
+**Where it bites.** `gui/remote/src/wait.rs`, `LISTENER_READINESS`, which is
+`false` when `target_vendor = "slateos"`; `gui/compositor/src/server.rs`,
+`listener_worth_asking` and `accept_deadline`, which turn that into "ask every
+tick, wait at most one frame".
+
+**Why.** `kernel/src/net/socket.rs::poll_ready` answers for a listening socket
+by sending `OP_POLL` for the listener id to the network daemon;
+`services/netstack`'s `ring_tcp_poll` looks the id up only among connections and
+returns `-1`, which the kernel reads as "nothing waiting". A server that trusted
+the wait would never accept anyone — every application launched after the
+compositor had started would hang waiting for its window.
+
+**The proper fix** is lane A's: the daemon answers `OP_POLL` for a listener
+("readable iff an established connection is in the backlog"). Lane F's side is
+then one line — `LISTENER_READINESS` becomes `true`, or goes — and the two
+helpers with it.
+
+**How to see it.** Not observable as a fault on SlateOS today, because the
+workaround is in place; `a_listener_the_platform_cannot_vouch_for_is_asked_every_frame`
+holds the workaround's two halves. The kernel side is visible directly: `poll`
+a listening socket with a connection pending and `revents` comes back 0.

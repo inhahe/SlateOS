@@ -66,6 +66,26 @@
 //! that its display grew a keyboard. This is what closed `known-issues.md` →
 //! `TD-COMPOSITOR-HAS-NO-LOCAL-INPUT`.
 //!
+//! ## Waiting for the user
+//!
+//! A display is also something the compositor's loop *waits on*: between
+//! frames it blocks until a client writes, the user does something, or a
+//! deadline comes due, rather than waking on a timer to ask
+//! (`known-issues.md` → `TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING`). Three
+//! methods make that possible without the loop knowing what kind of display it
+//! has, and all three default to "nothing", which is right for a display with
+//! no input:
+//!
+//! * [`Present::wait_on`] adds the handles input arrives on — evdev's file
+//!   descriptors — to the loop's [`WaitSet`].
+//! * [`Present::deadline`] says when the display needs a tick even if nothing
+//!   arrives: the next hotplug probe, the next key repeat.
+//! * [`Present::wait`] does the blocking, for the display whose input is not a
+//!   handle at all — the host window, whose input is a Windows message queue.
+//!
+//! **A display with input it cannot put in the set must give a deadline**, or
+//! that input is read only when something else happens to wake the loop.
+//!
 //! ## What is still missing
 //!
 //! Nothing in this module — but the SlateOS build only *works* if the process
@@ -75,9 +95,22 @@
 //! [`evdev::EvdevError::Denied`] says so in as many words, because a permission
 //! error that looks like a missing file is a day lost to the wrong hypothesis.
 
+use std::io;
+use std::time::{Duration, Instant};
+
+use guiremote::WaitSet;
 use inputsettings::InputSettings;
 
 use crate::{InputEvent, PointerSprite};
+
+/// The earlier of two optional instants, where `None` is "never".
+#[must_use]
+pub fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
 
 /// One frame for a [`Present`] to put on the display: the composited picture
 /// and, over it, the pointer.
@@ -249,6 +282,41 @@ pub trait Present {
     /// server, a recording and a host window have no pointer whose speed could
     /// change. Only the implementor that owns a device needs to care.
     fn reload_input(&mut self, _settings: &InputSettings) {}
+
+    /// Add the handles this display's input arrives on to `set`, so that the
+    /// loop's wait ends when the user does something.
+    ///
+    /// The default adds nothing: a display with no input, or one whose input
+    /// is not a handle and which therefore overrides [`Self::wait`] instead.
+    fn wait_on(&self, _set: &mut WaitSet) {}
+
+    /// When this display next needs the loop to run even if nothing arrives —
+    /// a hotplug probe, a key repeat — or `None` if nothing is scheduled.
+    ///
+    /// An instant already past means "now". The loop wakes at the earliest of
+    /// this, its own deadlines and the first handle to become ready, so a
+    /// display that forgets to report one does not break the loop, only
+    /// delays whatever it was waiting for until something else happens.
+    fn deadline(&self) -> Option<Instant> {
+        None
+    }
+
+    /// Block until something in `set` is ready, this display has input, or
+    /// `timeout` passes (`None`: no timeout).
+    ///
+    /// The default is [`WaitSet::wait`], which is right for every display
+    /// whose input is a handle [`Self::wait_on`] can add — or which has none.
+    /// Only a display whose input arrives some other way needs its own: the
+    /// host window, whose input is a Windows message queue, overrides this to
+    /// wake for messages too.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the wait reports. The loop treats a failed wait as a reason to
+    /// fall back to sleeping, not to stop the desktop.
+    fn wait(&mut self, set: &mut WaitSet, timeout: Option<Duration>) -> io::Result<()> {
+        set.wait(timeout).map(drop)
+    }
 }
 
 /// A display server with no display.
@@ -301,6 +369,18 @@ pub struct Recording {
     /// count of frames would never be reached on an idle desktop and the test
     /// would hang instead of failing.
     pub close_after: Option<u64>,
+    /// Close the display once this many frames have been shown.
+    ///
+    /// For a test about *when* the loop shows a frame. [`Self::close_after`]
+    /// cannot say that: it keeps the loop ticking back to back, so a frame the
+    /// loop holds back until the next refresh would never be reached. A
+    /// recording closed by this lets the loop wait as it would for a real
+    /// display, and ends it as soon as the frame in question arrives.
+    pub close_once_shown: Option<u64>,
+    /// Close the display at this instant whatever else has happened — the
+    /// watchdog that turns a frame never shown into a failed assertion rather
+    /// than a hung test.
+    pub close_at: Option<Instant>,
     /// What [`Present::monitors`] answers, if this recorder is standing in for a
     /// display that has monitors at all.
     ///
@@ -326,6 +406,8 @@ impl Recording {
             ticks: 0,
             open: true,
             close_after: None,
+            close_once_shown: None,
+            close_at: None,
             monitors: None,
         }
     }
@@ -428,11 +510,27 @@ impl Present for Recording {
     }
 
     fn is_open(&self) -> bool {
-        self.open && self.close_after.is_none_or(|limit| self.ticks < limit)
+        self.open
+            && self.close_after.is_none_or(|limit| self.ticks < limit)
+            && self.close_once_shown.is_none_or(|limit| self.shown < limit)
+            && self.close_at.is_none_or(|at| Instant::now() < at)
     }
 
     fn monitors(&mut self) -> Option<Vec<MonitorInfo>> {
         self.monitors.clone()
+    }
+
+    /// A recording is a script, not a device. While it has a batch of input
+    /// left, or is counting ticks down to closing, it is ready at once — each
+    /// batch is input the loop must go and fetch, and a countdown in ticks
+    /// only counts down if the loop ticks. Otherwise it wakes the loop only to
+    /// be closed at [`Self::close_at`], and leaves the loop to wait for its
+    /// own reasons, exactly as a real display with nobody touching it would.
+    fn deadline(&self) -> Option<Instant> {
+        if !self.script.is_empty() || self.close_after.is_some() {
+            return Some(Instant::now());
+        }
+        self.close_at
     }
 }
 
@@ -475,6 +573,22 @@ pub trait InputSource {
     /// settings for the same reason [`Self::set_bounds`]'s does — a source with
     /// no pointer and no repeat clock has nothing to change.
     fn reload_input(&mut self, _settings: &InputSettings) {}
+
+    /// Add the handles this source's events arrive on to `set`.
+    ///
+    /// The [`InputSource`] half of [`Present::wait_on`]. The default adds
+    /// nothing, which is right for a source that has no handles — and wrong
+    /// for one that has events and no deadline, which the loop would then
+    /// read only when something else woke it.
+    fn wait_on(&self, _set: &mut WaitSet) {}
+
+    /// When this source next has something to report even if no device says
+    /// anything — a held key's next repeat — or `None`.
+    ///
+    /// The [`InputSource`] half of [`Present::deadline`].
+    fn deadline(&self) -> Option<Instant> {
+        None
+    }
 }
 
 /// A screen and an input source, presented as one display.
@@ -550,6 +664,25 @@ impl<S: Present, I: InputSource> Present for Paired<S, I> {
     fn reload_input(&mut self, settings: &InputSettings) {
         self.input.reload_input(settings);
     }
+
+    /// Both halves: the screen may have input of its own, and the source is
+    /// where the keyboard is.
+    fn wait_on(&self, set: &mut WaitSet) {
+        self.screen.wait_on(set);
+        self.input.wait_on(set);
+    }
+
+    /// Whichever half needs the loop first: the screen's next hotplug probe or
+    /// the source's next key repeat.
+    fn deadline(&self) -> Option<Instant> {
+        earliest(self.screen.deadline(), self.input.deadline())
+    }
+
+    /// The screen's wait, since a screen is what might need a special one; the
+    /// source's handles are already in `set`.
+    fn wait(&mut self, set: &mut WaitSet, timeout: Option<Duration>) -> io::Result<()> {
+        self.screen.wait(set, timeout)
+    }
 }
 
 pub mod drm;
@@ -571,6 +704,8 @@ mod tests {
         clippy::panic,
         clippy::arithmetic_side_effects
     )]
+
+    use std::time::{Duration, Instant};
 
     use inputsettings::InputSettings;
 
@@ -741,11 +876,17 @@ mod tests {
         bounds: Vec<(u32, u32)>,
         /// Every settings it was told about, in order.
         reloads: Vec<InputSettings>,
+        /// What it reports as its next deadline.
+        due: Option<Instant>,
     }
 
     impl InputSource for ScriptedSource {
         fn poll(&mut self) -> Vec<InputEvent> {
             self.script.pop_front().unwrap_or_default()
+        }
+
+        fn deadline(&self) -> Option<Instant> {
+            self.due
         }
 
         fn set_bounds(&mut self, width: u32, height: u32) {
@@ -877,5 +1018,99 @@ mod tests {
         let mut rec = Recording::new();
         rec.reload_input(&InputSettings::default());
         assert!(headless.is_open() && rec.is_open(), "and nothing broke");
+    }
+
+    // -----------------------------------------------------------------------
+    // Waiting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_earliest_of_two_deadlines_is_the_sooner_and_none_is_never() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(1);
+        assert_eq!(super::earliest(Some(now), Some(later)), Some(now));
+        assert_eq!(super::earliest(Some(later), Some(now)), Some(now));
+        assert_eq!(super::earliest(None, Some(later)), Some(later));
+        assert_eq!(super::earliest(Some(later), None), Some(later));
+        assert_eq!(super::earliest(None, None), None);
+    }
+
+    #[test]
+    fn a_display_with_no_input_asks_for_nothing_and_waits_on_nothing() {
+        let headless = Headless;
+        assert_eq!(headless.deadline(), None);
+        let mut set = guiremote::WaitSet::new();
+        headless.wait_on(&mut set);
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn a_pair_wakes_for_whichever_half_needs_it_first() {
+        let soon = Instant::now() + Duration::from_millis(30);
+        let source = ScriptedSource {
+            due: Some(soon),
+            ..ScriptedSource::default()
+        };
+        let mut screen = Recording::new();
+        screen.close_at = Some(soon + Duration::from_secs(1));
+        let pair = Paired::new(screen, source, 2, 2);
+        assert_eq!(
+            pair.deadline(),
+            Some(soon),
+            "the source's key repeat comes first"
+        );
+
+        let mut screen = Recording::new();
+        screen.close_at = Some(soon);
+        let pair = Paired::new(screen, ScriptedSource::default(), 2, 2);
+        assert_eq!(
+            pair.deadline(),
+            Some(soon),
+            "and the screen's, when it is the only one"
+        );
+    }
+
+    #[test]
+    fn a_recording_with_input_left_is_ready_at_once_and_an_idle_one_is_not() {
+        let mut rec = Recording::new();
+        assert_eq!(
+            rec.deadline(),
+            None,
+            "nothing scripted: wait like a real display"
+        );
+
+        rec.feed(vec![InputEvent::MouseMove { x: 1, y: 1 }]);
+        let before = Instant::now();
+        assert!(
+            rec.deadline()
+                .is_some_and(|at| at >= before && at <= Instant::now())
+        );
+        rec.input();
+        assert_eq!(
+            rec.deadline(),
+            None,
+            "and once the script is read, idle again"
+        );
+
+        // A countdown in ticks only counts down if the loop ticks.
+        let counting = Recording::closing_after(3);
+        assert!(counting.deadline().is_some());
+    }
+
+    #[test]
+    fn a_recording_can_close_once_it_has_seen_enough_frames_or_at_a_time() {
+        let mut rec = Recording::new();
+        rec.close_once_shown = Some(1);
+        assert!(rec.is_open());
+        rec.show(&Frame::new(&[0; 4], 2, 2));
+        assert!(!rec.is_open(), "the frame it was waiting for arrived");
+
+        let mut rec = Recording::new();
+        let at = Instant::now() + Duration::from_millis(20);
+        rec.close_at = Some(at);
+        assert!(rec.is_open());
+        assert_eq!(rec.deadline(), Some(at), "it wakes the loop to be closed");
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(!rec.is_open(), "the watchdog fired");
     }
 }

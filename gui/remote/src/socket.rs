@@ -44,6 +44,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use crate::client::Transport;
+use crate::wait::{AsWaitHandle, WaitHandle};
 
 /// The environment variable naming the compositor's address.
 pub const DISPLAY_VAR: &str = "SLATE_DISPLAY";
@@ -432,6 +433,15 @@ impl Socket {
     }
 }
 
+impl AsWaitHandle for Socket {
+    /// The stream underneath, so a server can wait on many of these at once
+    /// ([`WaitSet`](crate::WaitSet)) rather than parking on one with
+    /// [`Transport::wait`].
+    fn wait_handle(&self) -> WaitHandle {
+        self.stream.wait_handle()
+    }
+}
+
 /// The compositor's end: a listening socket that hands back [`Socket`]s.
 ///
 /// Non-blocking, because a compositor has a frame to composite whether or not
@@ -486,6 +496,13 @@ impl Listener {
             Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(None),
             Err(e) => Err(e),
         }
+    }
+}
+
+impl AsWaitHandle for Listener {
+    /// Ready when a connection is waiting to be [`accept`](Listener::accept)ed.
+    fn wait_handle(&self) -> WaitHandle {
+        self.inner.wait_handle()
     }
 }
 

@@ -78,6 +78,16 @@ pub trait EventSys {
     ///
     /// The kernel's `errno`.
     fn ioctl_read(&mut self, request: u32, buf: &mut [u8]) -> Result<usize, Errno>;
+
+    /// What to wait on for this device's next record: its file descriptor.
+    ///
+    /// `None` — the default — for a device with nothing the platform can wait
+    /// on, which is every fake in a test. The compositor's loop blocks on
+    /// these between frames, so a real device that answered `None` would be
+    /// read only when something else woke the loop.
+    fn wait_handle(&self) -> Option<guiremote::WaitHandle> {
+        None
+    }
 }
 
 /// Something that can open `/dev/input/eventN` by index.
@@ -369,6 +379,10 @@ mod target {
             };
             let n = decode(ret)?;
             Ok(usize::try_from(n).unwrap_or(0).min(buf.len()))
+        }
+
+        fn wait_handle(&self) -> Option<guiremote::WaitHandle> {
+            Some(self.fd)
         }
     }
 

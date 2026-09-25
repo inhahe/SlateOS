@@ -3260,6 +3260,19 @@ impl FrameStats {
             None => true,
         }
     }
+
+    /// When [`Self::should_compose`] next says yes: one target interval after
+    /// the last frame began, or `None` if no frame has been composed and one
+    /// may be now.
+    ///
+    /// The instant a loop that has something to draw should wake at. The two
+    /// are the same comparison written in two directions, so a loop that waits
+    /// until this and then asks `should_compose` is told yes.
+    #[must_use]
+    pub fn next_compose_at(&self) -> Option<Instant> {
+        self.last_frame_start
+            .and_then(|start| start.checked_add(self.target_interval))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -8089,13 +8102,39 @@ impl Compositor {
     }
 
     /// Whether a keystroke is waiting out its slow-keys threshold.
-    ///
-    /// The server loop treats this as activity: to the idle backoff a waiting
-    /// key looks like perfect quiet, and backing off would deliver it late by
-    /// up to `IdleBackoff::IDLE_INTERVAL`, differently each time.
     #[must_use]
     pub fn has_deferred_key(&self) -> bool {
         self.deferred_key.is_some()
+    }
+
+    /// When something the compositor is waiting on by the clock next comes
+    /// due: a keystroke's slow-keys threshold, or a window's idle deadline.
+    /// `None` if nothing is.
+    ///
+    /// Nothing else would wake a loop for these. To a loop that waits for
+    /// input, a key waiting out its threshold is perfect quiet — no input, no
+    /// damage — and so is a session sliding towards its screen lock; without
+    /// this the key would land whenever the user next moved the mouse
+    /// (`design-decisions.md` §821) and the lock would never engage at all.
+    /// The server wakes at this instant and runs
+    /// [`poll_deferred_key`](Self::poll_deferred_key) and
+    /// [`queue_idle_notifications`](Self::queue_idle_notifications), which
+    /// compare against the clock the same way, so a wake here is never early.
+    #[must_use]
+    pub fn wake_at(&self) -> Option<Instant> {
+        let key = self.deferred_key.as_ref().and_then(|deferred| {
+            let due_ms = deferred
+                .pressed_at_ms
+                .saturating_add(u64::from(self.a11y_keys.filter.slow_keys_ms()));
+            self.started_at.checked_add(Duration::from_millis(due_ms))
+        });
+        let idle = self
+            .idle_watches
+            .values()
+            .filter(|watch| !watch.fired)
+            .filter_map(|watch| self.last_input.checked_add(watch.after))
+            .min();
+        present::earliest(key, idle)
     }
 
     /// Replace the accessibility settings.
@@ -8961,6 +9000,18 @@ impl Compositor {
     // -----------------------------------------------------------------------
     // Compositing pipeline
     // -----------------------------------------------------------------------
+
+    /// Whether [`Self::compose_frame`] has anything to draw: damage, a full
+    /// repaint pending, or a drop preview, which is repainted every frame it
+    /// is up.
+    ///
+    /// What a loop asks before deciding whether to wake for the next frame. A
+    /// desktop with nothing owed has no reason to wake at the frame rate at
+    /// all, and this is what lets it not.
+    #[must_use]
+    pub fn frame_owed(&self) -> bool {
+        self.full_recomposite || self.drag_preview.is_some() || self.damage.has_damage()
+    }
 
     /// Composite a frame. Returns true if a frame was actually composited
     /// (false if skipped due to no damage or frame budget).

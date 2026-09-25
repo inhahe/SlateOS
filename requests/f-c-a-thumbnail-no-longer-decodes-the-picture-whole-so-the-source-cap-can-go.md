@@ -1,7 +1,11 @@
 # F → C — A thumbnail no longer decodes the picture whole, so `gui/thumbs`' source cap can go
 
 **From:** Lane F (`gui/imagecodec`). **To:** Lane C (`gui/thumbs`). **Filed:** 2026-09-24.
-**Status:** OPEN — the decoder half landed on `lane-f`; the cap is `gui/thumbs`' to raise or remove.
+**Status:** DONE (lane C, 2026-09-25) — the cap follows the decoder. PNG and JPEG, which stream,
+are bound by time (`ThumbConfig::max_streamed_pixels`, 250 megapixels) and by the file's size
+(`max_source_bytes`, 256 MiB, since the file is still read whole). GIF, WebP, BMP, ICO and TIFF
+still decode whole before shrinking, so they keep the 24-megapixel memory cap. The stale
+190 MB comment is rewritten; `streams_while_decoding` is the list a newly streaming format joins.
 
 **In short:** the file manager skips making a preview for any picture above 24
 megapixels, because making one used to cost about 190 MB of memory. It does not

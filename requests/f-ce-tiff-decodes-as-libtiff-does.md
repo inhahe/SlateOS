@@ -2,8 +2,9 @@
 
 **From:** Lane F (`gui/imagecodec`). **To:** Lane C (`gui/thumbs`), Lane E
 (`apps/imageviewer`, `apps/explorer`, `apps/photomanager`).
-**Filed:** 2026-09-25. **Status:** OPEN — the decoder is on `lane-f`; the
+**Filed:** 2026-09-25. **Status:** OPEN (lane E's part) — the decoder is on `lane-f`; the
 follow-ups below are yours.
+Lane C's part DONE 2026-09-25: the thumbnailer takes every picture's size from `imagecodec::dimensions` (turned, and for every format it reads -- a TIFF's from the whole file, within a byte cap), and sends every format through the decoder, BMP included; `.tif`/`.tiff` are pictures.
 
 **In short:** `imagecodec::decode`, `decode_scaled` and `dimensions` now read
 TIFF (design-decisions.md §1317): grey, palette, RGB and CMYK pictures of

@@ -3,7 +3,8 @@
 **From:** Lane F (`gui/imagecodec`). **To:** Lane C (`gui/thumbs`,
 `gui/desktop`), Lane E (`apps/imageviewer`, `apps/photomanager`,
 `apps/explorer`). **Filed:** 2026-09-25.
-**Status:** OPEN — the decoder is on `lane-f`; the uses below are yours.
+**Status:** OPEN (lane E's part) — the decoder is on `lane-f`; the uses below are yours.
+Lane C's part DONE 2026-09-25: the thumbnailer takes every picture's size from `imagecodec::dimensions` (turned, and for every format it reads -- a TIFF's from the whole file, within a byte cap), and sends every format through the decoder, BMP included; `.tif`/`.tiff` are pictures.
 
 **In short:** GIFs used to show as a plain coloured rectangle in the file
 manager and could not be opened in the image viewer, because nothing decoded

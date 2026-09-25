@@ -68,28 +68,55 @@ const TEXT_PREVIEW_MAX_BYTES: usize = 4096;
 /// unbounded file to produce.
 const MAX_SVG_BYTES: usize = 1024 * 1024;
 
-/// Deliberately well below `imagecodec::Limits::DEFAULT_MAX_PIXELS` (7680×4320,
-/// the compositor's own buffer ceiling), because the two are bounding different
-/// things. That ceiling asks "could this be a wallpaper?" — one picture, chosen
-/// by the user, decoded when they choose it. This one asks "should a directory
-/// listing decode this?", and a directory listing decodes whatever is in the
-/// directory, without being asked, while the user waits for the folder to open.
+/// Most pixels a picture may have for the thumbnailer to decode it, when its
+/// decoder holds the whole picture before shrinking it -- GIF, WebP, BMP, ICO
+/// and TIFF -- before it declines and draws the aspect-ratio swatch instead.
 ///
-/// 24 megapixels is a 6000×4000 full-frame photograph, which is what the
-/// overwhelming majority of picture files on a desktop actually are. The cost
-/// of the ones above it is a swatch — exactly what *every* PNG got before this
-/// crate could decode at all — so nothing regresses at the boundary.
+/// A bound on **memory**: for these formats a 128-pixel preview still costs a
+/// full-size decode, four bytes a pixel and the decoder's own working buffers
+/// on top, and a directory listing decodes whatever is in the directory, while
+/// the user waits for it to open. At this cap the transient peak is under
+/// 200 MB, held for one picture at a time.
 ///
-/// **Why a cap is needed at all**, and what would remove it: `imagecodec` has
-/// no scaled or partial decode, so producing a 128×128 thumbnail costs a
-/// full-size decode. At this cap the transient peak is roughly 190 MB (the
-/// inflate output and the pixel buffer are both live inside `decode`), held for
-/// the milliseconds between decoding one picture and downscaling it, and one at
-/// a time because generation is sequential. A decoder that box-filtered *during*
-/// scanline reconstruction would never materialise the full picture and this
-/// constant could go away. See known-issues.md
-/// `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE`.
+/// 24 megapixels is a 6000x4000 full-frame photograph. Deliberately well
+/// below `imagecodec::Limits::DEFAULT_MAX_PIXELS` (7680x4320, the compositor's
+/// buffer ceiling): that one asks "could this be a wallpaper?", this one
+/// "should a listing decode this without being asked?".
+///
+/// PNG and JPEG do not have this cost any more: their decoders shrink while
+/// they read, so a preview costs the file's own bytes plus about half a
+/// megabyte, however large the picture (lane F,
+/// `requests/f-c-a-thumbnail-no-longer-decodes-the-picture-whole-so-the-source-cap-can-go.md`).
+/// They are bounded by [`DEFAULT_MAX_STREAMED_PIXELS`] instead. A format whose
+/// decoder learns to stream moves from this list to that one in
+/// [`streams_while_decoding`].
 const DEFAULT_MAX_SOURCE_PIXELS: u64 = 24_000_000;
+
+/// Most pixels a PNG or JPEG may have for the thumbnailer to decode it.
+///
+/// A bound on **time**, not memory: these decoders shrink the picture as they
+/// read it, so memory no longer grows with its size, but every pixel is still
+/// visited. 250 megapixels is a 20000x12500 panorama or a large scan -- a few
+/// seconds of background work at worst, one picture at a time -- and it is also
+/// the ceiling on how long one hostile file (a small PNG declaring an enormous
+/// empty canvas) can hold up the previews queued behind it.
+const DEFAULT_MAX_STREAMED_PIXELS: u64 = 250_000_000;
+
+/// Largest file the thumbnailer reads to make a preview.
+///
+/// The file is read whole -- the decoders take a slice -- so this, not the
+/// pixel count, is what bounds a streamed format's memory. 256 MiB is past
+/// every photograph and screenshot and most scans; what is larger gets the
+/// swatch, which is the right trade for a preview in a directory listing.
+const DEFAULT_MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// How much of a file is read to find a picture's size.
+///
+/// Enough for every format that keeps its size up front. A TIFF, whose size is
+/// in a directory usually written after the pixels, or a camera's JPEG with
+/// tens of kilobytes of EXIF before its frame header, ends mid-structure in
+/// this many bytes; [`probe_image`] reads the rest for those.
+const HEADER_BYTES: usize = 1024;
 
 /// Number of child items to show in a folder thumbnail grid (2x2).
 const FOLDER_PREVIEW_ITEMS: usize = 4;
@@ -422,138 +449,78 @@ struct ImageDimensions {
     height: u32,
 }
 
-/// Parse BMP header to extract dimensions.
-///
-/// BMP files start with `BM`, and the BITMAPINFOHEADER at offset 14 contains
-/// width (LE i32 at +4) and height (LE i32 at +8, may be negative for
-/// top-down bitmaps).
-fn parse_bmp_dimensions(data: &[u8]) -> Option<ImageDimensions> {
-    if !byteread::starts_with(data, b"BM") {
-        return None;
-    }
-    let width = byteread::i32_le_at(data, 18)?;
-    // A negative height means a top-down bitmap; `i32::MIN` has no positive
-    // counterpart, so take the magnitude as a `u32` rather than negating.
-    let height = byteread::i32_le_at(data, 22)?.unsigned_abs();
-    if width <= 0 || height == 0 {
-        return None;
-    }
-    Some(ImageDimensions {
-        width: width.unsigned_abs(),
-        height,
-    })
+/// A picture's size, and the file's bytes if finding it meant reading them.
+struct Probe {
+    dims: ImageDimensions,
+    data: Option<Vec<u8>>,
 }
 
-/// Parse PNG header to extract dimensions.
+/// A picture's size as it is shown -- turned by its EXIF orientation -- read
+/// by `imagecodec`, which is what will decode it, so the icon view, the swatch
+/// and the viewer cannot disagree about a picture's shape
+/// (design-decisions.md §555). This replaced four parsers of this crate's own,
+/// which knew four formats, read a sideways photograph's stored size, and sent
+/// every WebP, ICO and TIFF to the plain placeholder before a decoder saw it.
 ///
-/// Delegated to the decoder rather than read here. This used to be two
-/// `u32_be_at` calls at offsets 16 and 20 — the right offsets for a *valid*
-/// PNG, and unchecked for everything else, so a file that began with the eight
-/// magic bytes and then went wrong reported whatever integers happened to sit
-/// there. `imagecodec::png::dimensions` reads the IHDR as a chunk: it checks
-/// the length field, the chunk type, the CRC's presence, and the bit
-/// depth/colour-type combination, so a size it returns is one the picture
-/// actually has.
+/// From the file's first bytes, where most formats keep their size. A TIFF
+/// keeps it in a directory usually written after the pixels, and a camera's
+/// JPEG can carry tens of kilobytes of EXIF before its frame header; for those
+/// -- the decoder says the first bytes end mid-structure -- the whole file is
+/// read, within [`ThumbConfig::max_source_bytes`], and passed on so the decode
+/// does not read it again.
 ///
-/// It also means the icon view cannot disagree with the image viewer about how
-/// big a picture is, which is the same argument that put the decoder in one
-/// crate rather than one per caller (design-decisions.md §555).
-fn parse_png_dimensions(data: &[u8]) -> Option<ImageDimensions> {
-    let (width, height) = imagecodec::png::dimensions(data).ok()?;
-    if width == 0 || height == 0 {
-        return None;
+/// `None` for bytes that are no picture this system reads, and for a file too
+/// damaged to have a size: the placeholder, not the swatch, since a swatch
+/// claims a shape.
+fn probe_image(path: &Path, header: &[u8], config: &ThumbConfig) -> Option<Probe> {
+    match imagecodec::dimensions(header) {
+        Ok((width, height)) => Some(Probe {
+            dims: ImageDimensions { width, height },
+            data: None,
+        }),
+        Err(imagecodec::ImageError::Truncated) => {
+            let data = read_bounded(path, config.max_source_bytes)?;
+            let (width, height) = imagecodec::dimensions(&data).ok()?;
+            Some(Probe {
+                dims: ImageDimensions { width, height },
+                data: Some(data),
+            })
+        }
+        Err(_) => None,
     }
-    Some(ImageDimensions { width, height })
 }
 
-/// Parse GIF header to extract dimensions.
-///
-/// GIF files start with `GIF87a` or `GIF89a`, and the logical screen
-/// descriptor at offset 6 has width (LE u16) and height (LE u16).
-fn parse_gif_dimensions(data: &[u8]) -> Option<ImageDimensions> {
-    if data.len() < 10 {
-        return None;
-    }
-    let sig = data.get(0..6)?;
-    if sig != b"GIF87a" && sig != b"GIF89a" {
-        return None;
-    }
-    let width = byteread::u16_le_at(data, 6)? as u32;
-    let height = byteread::u16_le_at(data, 8)? as u32;
-    if width == 0 || height == 0 {
-        return None;
-    }
-    Some(ImageDimensions { width, height })
+/// Whether `imagecodec` shrinks this format while it decodes -- so memory does
+/// not grow with the picture, and the looser, time-based cap applies. PNG and
+/// JPEG, as of lane F's streaming decoders; a format whose decoder learns to
+/// stream belongs here too.
+fn streams_while_decoding(header: &[u8]) -> bool {
+    imagecodec::png::is_png(header) || imagecodec::jpeg::is_jpeg(header)
 }
 
-/// Parse JPEG header to extract dimensions.
-///
-/// JPEG files start with `\xFF\xD8`.  We scan for a SOF0 (0xFFC0) or
-/// SOF2 (0xFFC2) marker whose payload contains height (BE u16 at +3) and
-/// width (BE u16 at +5) relative to the marker payload start.
-fn parse_jpeg_dimensions(data: &[u8]) -> Option<ImageDimensions> {
-    if data.len() < 4 {
-        return None;
+/// The most pixels the thumbnailer decodes for the picture whose file begins
+/// with `header`.
+fn pixel_cap(header: &[u8], config: &ThumbConfig) -> u64 {
+    if streams_while_decoding(header) {
+        config.max_streamed_pixels
+    } else {
+        config.max_source_pixels
     }
-    if data.get(0..2)? != [0xFF, 0xD8] {
-        return None;
-    }
-
-    let mut pos: usize = 2;
-    while pos.saturating_add(1) < data.len() {
-        if *data.get(pos)? != 0xFF {
-            pos = pos.saturating_add(1);
-            continue;
-        }
-        let marker = *data.get(pos.checked_add(1)?)?;
-        pos = pos.checked_add(2)?;
-
-        // Skip padding 0xFF bytes.
-        if marker == 0xFF || marker == 0x00 {
-            continue;
-        }
-        // Restart markers and standalone markers have no payload.
-        if (0xD0..=0xD9).contains(&marker) {
-            continue;
-        }
-
-        if pos.saturating_add(2) > data.len() {
-            return None;
-        }
-        let seg_len = byteread::u16_be_at(data, pos)? as usize;
-        if seg_len < 2 {
-            return None;
-        }
-
-        // SOF0 (baseline), SOF1 (extended sequential), SOF2 (progressive)
-        if marker == 0xC0 || marker == 0xC1 || marker == 0xC2 {
-            if pos.saturating_add(7) > data.len() {
-                return None;
-            }
-            let height = byteread::u16_be_at(data, pos.checked_add(3)?)? as u32;
-            let width = byteread::u16_be_at(data, pos.checked_add(5)?)? as u32;
-            if width == 0 || height == 0 {
-                return None;
-            }
-            return Some(ImageDimensions { width, height });
-        }
-
-        // `seg_len >= 2` is enforced above, so this always advances — which
-        // is what stops a crafted JPEG spinning here forever.
-        pos = pos.checked_add(seg_len)?;
-    }
-    None
 }
 
-/// Try to parse image dimensions from raw file header bytes.
+/// A file's bytes, if it has no more than `max` of them.
 ///
-/// Tries each format in order (BMP, PNG, GIF, JPEG) and returns the first
-/// successful parse.
-fn parse_image_dimensions(data: &[u8]) -> Option<ImageDimensions> {
-    parse_bmp_dimensions(data)
-        .or_else(|| parse_png_dimensions(data))
-        .or_else(|| parse_gif_dimensions(data))
-        .or_else(|| parse_jpeg_dimensions(data))
+/// Read through a `take` of one more byte than allowed rather than trusting a
+/// size taken first: a file can grow between the two, and "no more than" has
+/// to be true of what was actually read.
+fn read_bounded(path: &Path, max: u64) -> Option<Vec<u8>> {
+    let mut data = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take(max.saturating_add(1))
+        .read_to_end(&mut data)
+        .ok()?;
+    (u64::try_from(data.len()).unwrap_or(u64::MAX) <= max).then_some(data)
 }
 
 // ============================================================================
@@ -667,7 +634,16 @@ pub struct ThumbConfig {
     /// the machine: a workstation opening a photographer's directory can afford
     /// what a low-memory device cannot, and the failure mode of guessing high
     /// is an out-of-memory kill of the file manager.
+    ///
+    /// For the formats whose decoder holds the whole picture; see
+    /// [`max_streamed_pixels`](Self::max_streamed_pixels) for the rest.
     pub max_source_pixels: u64,
+    /// Most pixels a picture may have when its decoder shrinks it while
+    /// reading (PNG, JPEG): a bound on time, not memory. See
+    /// [`DEFAULT_MAX_STREAMED_PIXELS`].
+    pub max_streamed_pixels: u64,
+    /// Largest file read to make a preview. See [`DEFAULT_MAX_SOURCE_BYTES`].
+    pub max_source_bytes: u64,
 }
 
 impl Default for ThumbConfig {
@@ -677,6 +653,8 @@ impl Default for ThumbConfig {
             bg_color: Color::rgb(245, 245, 245),
             text_color: Color::rgb(100, 100, 100),
             max_source_pixels: DEFAULT_MAX_SOURCE_PIXELS,
+            max_streamed_pixels: DEFAULT_MAX_STREAMED_PIXELS,
+            max_source_bytes: DEFAULT_MAX_SOURCE_BYTES,
         }
     }
 }
@@ -699,7 +677,11 @@ impl ThumbCategory {
     /// Determine the thumbnail category from a file extension.
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_lowercase().as_str() {
-            "bmp" | "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" => Self::Image,
+            // Every raster format `imagecodec` reads, and SVG. TIFF joined on
+            // 2026-09-25 with its decoder; a `.tif` used to be an "other" file.
+            "bmp" | "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" | "tif" | "tiff" => {
+                Self::Image
+            }
             "txt" | "log" | "md" | "rst" | "rs" | "py" | "c" | "h" | "cpp" | "js" | "ts"
             | "html" | "css" | "java" | "go" | "toml" | "yaml" | "json" | "xml" | "sh" | "cfg"
             | "ini" | "conf" => Self::Text,
@@ -783,49 +765,37 @@ pub fn generate_thumbnail(path: &Path, config: &ThumbConfig) -> Thumbnail {
 /// and a directory of photographs was a grid of identical green rectangles
 /// differing only in shape.
 fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Thumbnail {
-    let header = match read_file_header(path, 1024) {
+    let header = match read_file_header(path, HEADER_BYTES) {
         Some(h) => h,
         None => return generate_default_thumbnail(path, ThumbCategory::Image, config, mtime),
     };
 
     // SVG first, because it is the one image format whose size is not in a
-    // binary header: `parse_image_dimensions` below reads BMP, PNG, GIF and
-    // JPEG, and an SVG failed all four and fell through to a placeholder. Its
-    // dimensions are in its `viewBox`, which means parsing the document --
-    // which is also what draws it, so there is no cheaper question to ask.
+    // binary header: `probe_image` below asks the raster decoder, which does
+    // not read SVG. Its dimensions are in its `viewBox`, which means parsing
+    // the document -- which is also what draws it, so there is no cheaper
+    // question to ask.
     if looks_like_svg(&header)
         && let Some(thumb) = try_svg_thumbnail(path, config, mtime)
     {
         return thumb;
     }
 
-    let dims = match parse_image_dimensions(&header) {
-        Some(d) => d,
-        None => return generate_default_thumbnail(path, ThumbCategory::Image, config, mtime),
+    let Some(Probe { dims, data }) = probe_image(path, &header, config) else {
+        return generate_default_thumbnail(path, ThumbCategory::Image, config, mtime);
     };
 
-    // Dispatched on the signature rather than tried in turn, because either
-    // branch reads the whole file: offering the file to a decoder that will
-    // reject it on its first eight bytes still costs the read that got those
-    // eight bytes there.
-    if header.starts_with(b"BM") {
-        // BMP is the one format `imagecodec` does not read, and the one this
-        // module already decoded: uncompressed 24/32-bit, straight out of the
-        // file with no decompressor in the way.
-        if let Some(thumb) = try_bmp_thumbnail(path, dims, config, mtime) {
-            return thumb;
-        }
-    } else if let Some(thumb) = try_decoded_thumbnail(path, dims, config, mtime) {
+    if let Some(thumb) = try_decoded_thumbnail(path, &header, dims, data, config, mtime) {
         return thumb;
     }
 
     // Nothing decoded it: an aspect-ratio-correct colour swatch, which is at
-    // least honest about the shape of the picture. Today this is GIF, JPEG,
-    // WebP and ICO — and any PNG above `max_source_pixels`, or one that is
-    // corrupt. SVG used to be on that list and no longer is; it was also never
-    // *reaching* the swatch, because its size is not in a binary header and
-    // `parse_image_dimensions` returned `None` for it, so it fell through to
-    // the plain category placeholder one branch earlier.
+    // least honest about the shape of the picture -- the shape it is shown in,
+    // since `probe_image` reads a photograph's size turned. Every format this
+    // system reads now reaches the decoder (BMP went through a reader of this
+    // crate's own until 2026-09-25, and WebP, ICO and TIFF never got past the
+    // size check), so what lands here is a picture above its cap, a file above
+    // `max_source_bytes`, or one that is damaged past its header.
     let (tw, th) = fit_dimensions(dims.width, dims.height, config.size);
     let size = config.size;
     let mut canvas = Canvas::transparent(size, size);
@@ -841,8 +811,8 @@ fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
     into_thumbnail(canvas, path, mtime)
 }
 
-/// Decode the picture properly and downscale it, for the formats `imagecodec`
-/// reads (today: PNG).
+/// Decode the picture properly and downscale it: every format `imagecodec`
+/// reads.
 ///
 /// `None` — never an error — for a picture too large, a file that is not a
 /// format the decoder claims, or one that is corrupt. All three are the same
@@ -858,7 +828,9 @@ fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
 /// point of having it.
 fn try_decoded_thumbnail(
     path: &Path,
+    header: &[u8],
     dims: ImageDimensions,
+    data: Option<Vec<u8>>,
     config: &ThumbConfig,
     mtime: u64,
 ) -> Option<Thumbnail> {
@@ -866,21 +838,26 @@ fn try_decoded_thumbnail(
     // all. `imagecodec` would refuse the same picture from its own header a
     // moment later, but that moment costs a full read of a file that may be
     // hundreds of megabytes.
+    let cap = pixel_cap(header, config);
     let source_pixels = u64::from(dims.width).checked_mul(u64::from(dims.height))?;
-    if source_pixels > config.max_source_pixels {
+    if source_pixels > cap {
         return None;
     }
 
-    let data = fs::read(path).ok()?;
+    // Already read if finding the size meant reading it all; otherwise read
+    // now, within the byte cap.
+    let data = match data {
+        Some(data) => data,
+        None => read_bounded(path, config.max_source_bytes)?,
+    };
     let limits = imagecodec::Limits {
-        max_pixels: config.max_source_pixels,
+        max_pixels: cap,
         // The decompressed *byte* ceiling, kept in the same proportion the
         // crate's own default uses (16 bytes per pixel), which is what a
         // 16-bit-per-sample RGBA image costs before it is reduced to the
         // 4-bytes-per-pixel output. Deriving it from `max_pixels` rather than
         // repeating a number keeps the two from drifting apart.
-        max_decompressed_bytes: usize::try_from(config.max_source_pixels.saturating_mul(16))
-            .unwrap_or(usize::MAX),
+        max_decompressed_bytes: usize::try_from(cap.saturating_mul(16)).unwrap_or(usize::MAX),
     };
     // Scaled on the way out, not decoded whole and shrunk afterwards. The
     // full-size `Vec<u32>` between the two was the larger half of this
@@ -926,78 +903,6 @@ const fn argb_to_color(px: u32) -> Color {
         (px & 0xFF) as u8,
         ((px >> 24) & 0xFF) as u8,
     )
-}
-
-/// Attempt to create a real thumbnail from an uncompressed 32-bit BMP.
-fn try_bmp_thumbnail(
-    path: &Path,
-    dims: ImageDimensions,
-    config: &ThumbConfig,
-    mtime: u64,
-) -> Option<Thumbnail> {
-    let data = fs::read(path).ok()?;
-    if data.len() < 54 {
-        return None;
-    }
-
-    let offset = byteread::u32_le_at(&data, 10)? as usize;
-    let bits_per_pixel = byteread::u16_le_at(&data, 28)?;
-    let compression = byteread::u32_le_at(&data, 30)?;
-
-    // Only handle uncompressed 24-bit or 32-bit BMPs.
-    if compression != 0 || (bits_per_pixel != 24 && bits_per_pixel != 32) {
-        return None;
-    }
-
-    // Every size below is derived from the file's own header, so all of this
-    // arithmetic is on attacker-chosen numbers: computed with `checked_*`, a
-    // header that overflows a `usize` declines the thumbnail. Computed with
-    // `*`, it wraps to a small number that then passes the length check below
-    // while describing a buffer that is not there.
-    let bpp = bits_per_pixel as usize / 8;
-    let row_size = (dims.width as usize)
-        .checked_mul(bpp)?
-        .div_ceil(4)
-        .checked_mul(4)?; // rows padded to 4 bytes
-    let expected_data = row_size
-        .checked_mul(dims.height as usize)?
-        .checked_add(offset)?;
-    if data.len() < expected_data {
-        return None;
-    }
-
-    // BMP stores rows bottom-up by default (positive height).  Convert to
-    // top-down ARGB.
-    let bottom_up = byteread::i32_le_at(&data, 22)? > 0;
-
-    let mut canvas = Canvas::transparent(dims.width, dims.height);
-    for y in 0..dims.height {
-        let src_y = if bottom_up {
-            dims.height.saturating_sub(1).saturating_sub(y)
-        } else {
-            y
-        };
-        let row_start = (src_y as usize)
-            .checked_mul(row_size)?
-            .checked_add(offset)?;
-        for x in 0..dims.width {
-            let src_idx = (x as usize).checked_mul(bpp)?.checked_add(row_start)?;
-            // BMP pixel order is BGR(A).
-            let px = data.get(src_idx..src_idx.checked_add(bpp)?)?;
-            let (&b_val, &g_val, &r_val) = match px {
-                [b, g, r, ..] => (b, g, r),
-                _ => return None,
-            };
-            let a_val = if bpp == 4 { *px.get(3)? } else { u8::MAX };
-            canvas.set(x, y, Color::rgba(r_val, g_val, b_val, a_val));
-        }
-    }
-
-    Some(into_thumbnail(
-        box_filter_downscale(&canvas, config.size),
-        path,
-        mtime,
-    ))
 }
 
 /// Generate a text-preview thumbnail for source/text files.
@@ -2397,83 +2302,247 @@ mod tests {
         assert_eq!(dst.get(5, 5), src.get(5, 5));
     }
 
-    // -- Image header parsing -----------------------------------------------
+    // -- Every format the decoder reads ---------------------------------------
+    //
+    // The size and the pixels both come from `imagecodec` now, so its own tests
+    // own the headers (a BMP's negative height, a JPEG's segment walk, a PNG's
+    // IHDR). What is tested here is the thumbnailer: that every format reaches
+    // the decoder, that the size it uses is the one shown, and which cap
+    // applies. The fixtures are copies from `gui/imagecodec/tests/data`, whose
+    // `.txt` beside each says what the decoder makes of it.
 
+    /// Each fixture, and the size the decoder shows it at -- which, since
+    /// every one is under the default thumbnail size, is also the size of a
+    /// thumbnail that was really decoded. A swatch or a placeholder is always
+    /// the full square.
+    const EVERY_FORMAT: [(&str, &[u8], (u32, u32)); 6] = [
+        (
+            "gif_87a.gif",
+            include_bytes!("../tests/data/gif_87a.gif"),
+            (5, 3),
+        ),
+        (
+            "webp_lossless_column.webp",
+            include_bytes!("../tests/data/webp_lossless_column.webp"),
+            (1, 23),
+        ),
+        (
+            "ico_bmp_rle8.ico",
+            include_bytes!("../tests/data/ico_bmp_rle8.ico"),
+            (16, 16),
+        ),
+        (
+            "tiff_rgba16_associated.tif",
+            include_bytes!("../tests/data/tiff_rgba16_associated.tif"),
+            (13, 11),
+        ),
+        // Stored 24x16 with an EXIF orientation of 6: shown 16x24.
+        (
+            "orient_jpeg_6.jpg",
+            include_bytes!("../tests/data/orient_jpeg_6.jpg"),
+            (16, 24),
+        ),
+        (
+            "bmp_32_v3_fourth_byte.bmp",
+            include_bytes!("../tests/data/bmp_32_v3_fourth_byte.bmp"),
+            (13, 9),
+        ),
+    ];
+
+    /// Every format the decoder reads gets its picture. Until 2026-09-25 the
+    /// size check knew four formats, so a WebP, an icon or a TIFF got the plain
+    /// placeholder before a decoder saw it, and BMPs went through a reader of
+    /// this crate's own that knew two kinds of BMP.
     #[test]
-    fn parse_bmp_valid() {
-        let mut header = vec![0u8; 54];
-        header[0] = b'B';
-        header[1] = b'M';
-        // Width = 320 (LE u32 at offset 18)
-        header[18..22].copy_from_slice(&320u32.to_le_bytes());
-        // Height = 240 (LE u32 at offset 22)
-        header[22..26].copy_from_slice(&240u32.to_le_bytes());
-
-        let dims = parse_bmp_dimensions(&header).unwrap();
-        assert_eq!(dims.width, 320);
-        assert_eq!(dims.height, 240);
+    fn every_format_the_decoder_reads_gets_its_picture() {
+        let scratch = ScratchDir::new("thumbs_test_every_format");
+        let config = ThumbConfig::default();
+        for (name, bytes, shown) in EVERY_FORMAT {
+            let path = scratch.path(name);
+            fs::write(&path, bytes).unwrap();
+            let thumb = generate_thumbnail(&path, &config);
+            assert!(thumb.is_valid(), "{name}");
+            assert_eq!(
+                (thumb.width, thumb.height),
+                shown,
+                "{name} was not decoded -- a {}x{} swatch or placeholder came back",
+                thumb.width,
+                thumb.height
+            );
+        }
     }
 
+    /// A TIFF's size is in a directory written after its pixels, past the
+    /// bytes read to find a size; the probe reads the rest and hands it on.
     #[test]
-    fn parse_bmp_negative_height() {
-        let mut header = vec![0u8; 54];
-        header[0] = b'B';
-        header[1] = b'M';
-        header[18..22].copy_from_slice(&100u32.to_le_bytes());
-        // Negative height (top-down BMP) stored as i32.
-        header[22..26].copy_from_slice(&(-200i32 as u32).to_le_bytes());
-
-        let dims = parse_bmp_dimensions(&header).unwrap();
-        assert_eq!(dims.width, 100);
-        assert_eq!(dims.height, 200);
+    fn a_tiff_whose_size_is_after_its_pixels_is_still_measured() {
+        let tiff = include_bytes!("../tests/data/tiff_rgba16_associated.tif");
+        assert_eq!(
+            imagecodec::dimensions(&tiff[..HEADER_BYTES]),
+            Err(imagecodec::ImageError::Truncated),
+            "the fixture no longer keeps its size past the header"
+        );
+        let scratch = ScratchDir::new("thumbs_test_tiff_size");
+        let path = scratch.path("late.tif");
+        fs::write(&path, tiff).unwrap();
+        let probe = probe_image(&path, &tiff[..HEADER_BYTES], &ThumbConfig::default())
+            .expect("measured from the whole file");
+        assert_eq!((probe.dims.width, probe.dims.height), (13, 11));
+        assert_eq!(
+            probe.data.as_deref(),
+            Some(&tiff[..]),
+            "handed on, not read twice"
+        );
     }
 
+    /// A sideways photograph's swatch is drawn the way up it is shown, as its
+    /// decoded thumbnail is: the swatch's shape comes from the decoder's size,
+    /// which is turned, not from the stored one.
     #[test]
-    fn the_one_height_that_has_no_positive_counterpart_is_still_just_declined() {
-        // A top-down BMP stores its height negated, so reading it means taking
-        // a magnitude -- and `i32::MIN.abs()` panics, because +2147483648 is
-        // not an i32. `unsigned_abs` returns it as the u32 it fits in. The
-        // dimension is then rejected for being far too large by the caller,
-        // which is what should have happened all along; the point is that it
-        // is rejected rather than aborting the file manager.
-        let mut header = vec![0u8; 54];
-        header[0] = b'B';
-        header[1] = b'M';
-        header[18..22].copy_from_slice(&100u32.to_le_bytes());
-        header[22..26].copy_from_slice(&i32::MIN.to_le_bytes());
-
-        let dims = parse_bmp_dimensions(&header).expect("a magnitude, not a panic");
-        assert_eq!(dims.width, 100);
-        assert_eq!(dims.height, 2_147_483_648);
+    fn a_sideways_photographs_swatch_is_turned_too() {
+        let scratch = ScratchDir::new("thumbs_test_turned_swatch");
+        let path = scratch.path("portrait.jpg");
+        fs::write(&path, include_bytes!("../tests/data/orient_jpeg_6.jpg")).unwrap();
+        // A cap below the picture, so it is not decoded and gets the swatch.
+        let config = ThumbConfig {
+            max_streamed_pixels: 1,
+            ..ThumbConfig::default()
+        };
+        let thumb = generate_thumbnail(&path, &config);
+        let size = config.size;
+        assert_eq!((thumb.width, thumb.height), (size, size));
+        // The swatch is the picture's shape, centred and never enlarged: find
+        // it, and measure it.
+        let swatch = ThumbCategory::Image.accent_color();
+        // One canvas for the whole scan: `thumb_pixel` builds one per call.
+        let canvas = Canvas::from_argb(thumb.width, thumb.height, &thumb.pixels).unwrap();
+        let covered: Vec<(u32, u32)> = (0..size)
+            .flat_map(|y| (0..size).map(move |x| (x, y)))
+            .filter(|&(x, y)| canvas.get(x, y) == Some(swatch))
+            .collect();
+        let span = |pick: fn(&(u32, u32)) -> u32| {
+            let min = covered.iter().map(pick).min().unwrap();
+            let max = covered.iter().map(pick).max().unwrap();
+            max - min + 1
+        };
+        assert_eq!(
+            (span(|p| p.0), span(|p| p.1)),
+            (16, 24),
+            "the swatch is the stored 24x16, not the shown 16x24"
+        );
     }
 
+    /// Which cap applies depends on whether the format's decoder holds the
+    /// whole picture: a GIF is bound by `max_source_pixels` (memory), a PNG by
+    /// `max_streamed_pixels` (time), and each is untouched by the other's.
     #[test]
-    fn parse_png_valid() {
-        // A genuine PNG rather than a 24-byte stub with the size poked into
-        // it. The size now comes back through `imagecodec::png::dimensions`,
-        // which reads the IHDR *as a chunk* -- its length, its type, its CRC,
-        // and the bit depth and colour type after the size -- so a stub whose
-        // remaining fields are zero is not a picture and reports nothing. That
-        // is the decoder being right, not the test being unlucky: a file the
-        // decoder would refuse should not be listed with a size.
-        let dims = parse_png_dimensions(&imagecodec::testing::png_gradient(640, 480)).unwrap();
-        assert_eq!(dims.width, 640);
-        assert_eq!(dims.height, 480);
+    fn the_cap_depends_on_whether_the_decoder_streams() {
+        let scratch = ScratchDir::new("thumbs_test_which_cap");
+        let gif = scratch.path("small.gif");
+        fs::write(&gif, include_bytes!("../tests/data/gif_87a.gif")).unwrap(); // 15 pixels
+        let png = scratch.path("wide.png");
+        write_two_tone_png(&png, 200, 100); // 20 000 pixels
+        let decoded = |path: &Path, config: &ThumbConfig| {
+            let thumb = generate_thumbnail(path, config);
+            (thumb.width, thumb.height) != (config.size, config.size)
+        };
+
+        let tight_memory = ThumbConfig {
+            max_source_pixels: 10,
+            ..ThumbConfig::default()
+        };
+        assert!(
+            !decoded(&gif, &tight_memory),
+            "the GIF is over the memory cap"
+        );
+        assert!(decoded(&png, &tight_memory), "the PNG is not bound by it");
+
+        let tight_time = ThumbConfig {
+            max_streamed_pixels: 10,
+            ..ThumbConfig::default()
+        };
+        assert!(
+            decoded(&gif, &tight_time),
+            "the GIF is not bound by the time cap"
+        );
+        assert!(!decoded(&png, &tight_time), "the PNG is over it");
     }
 
-    /// A file that begins with the PNG signature but is not a PNG has no
-    /// dimensions to report. Before the decoder went in, the eight-byte
-    /// signature plus two big-endian numbers at a fixed offset were the whole
-    /// check, so any 24 bytes starting `\x89PNG` claimed to be a picture of
-    /// whatever size those bytes happened to spell.
+    /// A file larger than `max_source_bytes` is not read to make a preview: a
+    /// picture whose size is in its header gets the swatch, and one whose size
+    /// is not (a TIFF) gets the placeholder, since finding its shape would
+    /// mean the read the cap refuses.
     #[test]
-    fn a_png_signature_over_rubbish_has_no_dimensions() {
+    fn a_file_over_the_byte_cap_is_not_read() {
+        let scratch = ScratchDir::new("thumbs_test_byte_cap");
+        let png = scratch.path("wide.png");
+        write_two_tone_png(&png, 200, 100);
+        let tiff = scratch.path("late.tif");
+        fs::write(
+            &tiff,
+            include_bytes!("../tests/data/tiff_rgba16_associated.tif"),
+        )
+        .unwrap();
+        let config = ThumbConfig {
+            max_source_bytes: 64,
+            ..ThumbConfig::default()
+        };
+        let swatch = ThumbCategory::Image.accent_color();
+        let size = config.size;
+
+        let thumb = generate_thumbnail(&png, &config);
+        assert_eq!((thumb.width, thumb.height), (size, size));
+        assert_eq!(
+            thumb_pixel(&thumb, size / 2, size / 2),
+            swatch,
+            "the PNG's swatch"
+        );
+
+        // The TIFF's size is past its first bytes, and the rest is over the
+        // cap: it has no size to draw a swatch of, and is not read to find one.
+        let header = read_file_header(&tiff, HEADER_BYTES).unwrap();
+        assert!(probe_image(&tiff, &header, &config).is_none());
+        let thumb = generate_thumbnail(&tiff, &config);
+        assert_eq!((thumb.width, thumb.height), (size, size));
+
+        assert!(read_bounded(&tiff, 64).is_none());
+        assert_eq!(read_bounded(&tiff, 1318).map(|d| d.len()), Some(1318));
+    }
+
+    /// A 32-bit BMP with the plain 40-byte header keeps no alpha in its fourth
+    /// byte -- many such files have junk or zeros there -- and Chrome shows it
+    /// opaque. The reader this crate had took the byte as alpha, and drew holes.
+    #[test]
+    fn a_bmp_whose_fourth_byte_is_not_alpha_is_drawn_opaque() {
+        let scratch = ScratchDir::new("thumbs_test_bmp_opaque");
+        let path = scratch.path("v3.bmp");
+        fs::write(
+            &path,
+            include_bytes!("../tests/data/bmp_32_v3_fourth_byte.bmp"),
+        )
+        .unwrap();
+        let thumb = generate_thumbnail(&path, &ThumbConfig::default());
+        assert_eq!((thumb.width, thumb.height), (13, 9));
+        for y in 0..thumb.height {
+            for x in 0..thumb.width {
+                assert_eq!(thumb_pixel(&thumb, x, y).a, 255, "({x}, {y}) is not opaque");
+            }
+        }
+    }
+
+    /// Bytes that begin with a PNG's signature but are not a PNG have no size:
+    /// the decoder reads the IHDR as a chunk, so a stub whose remaining fields
+    /// are rubbish is not a picture, and is not listed with a shape.
+    #[test]
+    fn a_png_signature_over_rubbish_has_no_size() {
         let mut header = vec![0u8; 24];
         header[0..8].copy_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
         header[16..20].copy_from_slice(&640u32.to_be_bytes());
         header[20..24].copy_from_slice(&480u32.to_be_bytes());
-
-        assert!(parse_png_dimensions(&header).is_none());
+        let scratch = ScratchDir::new("thumbs_test_png_rubbish");
+        let path = scratch.path("stub.png");
+        fs::write(&path, &header).unwrap();
+        assert!(probe_image(&path, &header, &ThumbConfig::default()).is_none());
     }
 
     // -- Decoding a real picture --------------------------------------------
@@ -2583,8 +2652,10 @@ mod tests {
         let path = scratch.path("huge.png");
         write_two_tone_png(&path, 200, 100);
 
+        // A PNG, whose decoder shrinks while it reads, so the cap that applies
+        // is the streamed one -- see `the_cap_depends_on_whether_the_decoder_streams`.
         let config = ThumbConfig {
-            max_source_pixels: 10_000, // 200x100 is twice this.
+            max_streamed_pixels: 10_000, // 200x100 is twice this.
             ..ThumbConfig::default()
         };
         let thumb = generate_thumbnail(&path, &config);
@@ -2621,7 +2692,7 @@ mod tests {
     }
 
     /// A file whose bytes are not a picture at all, under a name that says it
-    /// is. `parse_image_dimensions` finds no header it recognises, so this
+    /// is. `probe_image` finds no header the decoder recognises, so this
     /// never reaches the decoder — it is the third outcome, the category
     /// placeholder, and the test exists to pin the boundary between it and the
     /// swatch.
@@ -2635,39 +2706,6 @@ mod tests {
         let thumb = generate_thumbnail(&path, &config);
         assert_eq!((thumb.width, thumb.height), (config.size, config.size));
         assert!(thumb.is_valid());
-    }
-
-    #[test]
-    fn parse_gif_valid() {
-        let mut header = vec![0u8; 10];
-        header[0..6].copy_from_slice(b"GIF89a");
-        header[6..8].copy_from_slice(&256u16.to_le_bytes());
-        header[8..10].copy_from_slice(&192u16.to_le_bytes());
-
-        let dims = parse_gif_dimensions(&header).unwrap();
-        assert_eq!(dims.width, 256);
-        assert_eq!(dims.height, 192);
-    }
-
-    #[test]
-    fn parse_jpeg_valid() {
-        // Minimal JPEG with SOF0 marker.
-        let mut data = vec![0xFF, 0xD8]; // SOI
-        // APP0 marker (skip it)
-        data.extend_from_slice(&[0xFF, 0xE0]);
-        data.extend_from_slice(&16u16.to_be_bytes()); // segment length
-        data.extend_from_slice(&[0u8; 14]); // payload
-        // SOF0 marker
-        data.extend_from_slice(&[0xFF, 0xC0]);
-        data.extend_from_slice(&17u16.to_be_bytes()); // segment length
-        data.push(8); // precision
-        data.extend_from_slice(&480u16.to_be_bytes()); // height
-        data.extend_from_slice(&640u16.to_be_bytes()); // width
-        data.extend_from_slice(&[0u8; 10]); // rest of SOF
-
-        let dims = parse_jpeg_dimensions(&data).unwrap();
-        assert_eq!(dims.width, 640);
-        assert_eq!(dims.height, 480);
     }
 
     // ---- SVG ----------------------------------------------------------
@@ -2758,20 +2796,6 @@ mod tests {
             thumb.width > 0 && thumb.height > 0,
             "a broken drawing produced no thumbnail at all"
         );
-    }
-
-    #[test]
-    fn parse_image_dimensions_tries_all_formats() {
-        // BMP header.
-        let mut bmp = vec![0u8; 54];
-        bmp[0] = b'B';
-        bmp[1] = b'M';
-        bmp[18..22].copy_from_slice(&100u32.to_le_bytes());
-        bmp[22..26].copy_from_slice(&50u32.to_le_bytes());
-        assert!(parse_image_dimensions(&bmp).is_some());
-
-        // Garbage data.
-        assert!(parse_image_dimensions(&[0, 1, 2, 3]).is_none());
     }
 
     // -- Render command generation ------------------------------------------
@@ -3235,39 +3259,5 @@ mod tests {
         assert_eq!(fit_dimensions(0, 10, 100), (0, 0));
         assert_eq!(fit_dimensions(10, 0, 100), (0, 0));
         assert_eq!(fit_dimensions(10, 10, 0), (0, 0));
-    }
-
-    /// No prefix of a JPEG panics or hangs the dimension parser.
-    ///
-    /// The segment walker advances by a length read out of the file. It is
-    /// correct — `seg_len < 2` is refused, so the cursor always moves — but
-    /// that is the property worth pinning rather than assuming, since the same
-    /// shape in `apps/musicplayer`'s WAV parser could be made to loop forever.
-    /// A missed bound shows up only at the length that reaches it, so this
-    /// sweeps every prefix rather than sampling.
-    #[test]
-    fn no_prefix_of_a_jpeg_panics_or_hangs_the_parser() {
-        let mut jpeg: Vec<u8> = vec![0xFF, 0xD8];
-        // A comment segment, then SOF0 with 64x48.
-        jpeg.extend_from_slice(&[0xFF, 0xFE, 0x00, 0x04, 0xAA, 0xBB]);
-        jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08]);
-        jpeg.extend_from_slice(&48u16.to_be_bytes());
-        jpeg.extend_from_slice(&64u16.to_be_bytes());
-        jpeg.extend_from_slice(&[0u8; 8]);
-
-        // `ImageDimensions` is not `PartialEq`, so the fields are compared —
-        // and asserting the fixture parses is what keeps the sweep below
-        // meaningful rather than a loop over something that is not a JPEG.
-        let got = parse_jpeg_dimensions(&jpeg).expect("the fixture is a JPEG");
-        assert_eq!((got.width, got.height), (64, 48));
-
-        for len in 0..=jpeg.len() {
-            let _ = parse_jpeg_dimensions(jpeg.get(..len).unwrap_or(&[]));
-        }
-
-        // A segment claiming a length of zero is refused rather than walked
-        // forever: `seg_len < 2` is the check that makes the cursor advance.
-        let stuck = vec![0xFF, 0xD8, 0xFF, 0xFE, 0x00, 0x00, 0x00, 0x00];
-        assert!(parse_jpeg_dimensions(&stuck).is_none());
     }
 }

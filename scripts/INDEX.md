@@ -326,6 +326,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/stdin-hang-sweep.sh` | Does any test binary hang when its stdin is an OPEN PIPE that never delivers? |
 | `scripts/straddle-check.py` | Report which loops in a kernel binary straddle a 4 KiB guest page. |
 | `scripts/strings-diff.sh` | Differential test: our `strings` against GNU binutils `strings`. |
+| `scripts/suite_pool.py` | Run a tooling suite's independent cases a few at a time, with one-at-a-time output. |
 | `scripts/symbolize.py` | Turn the raw addresses in a kernel panic into `symbol+offset`. |
 | `scripts/tail-diff.sh` | Differential test: our tail against GNU tail. |
 | `scripts/tar-diff.sh` | Differential test: our tar against GNU tar. |
@@ -395,4 +396,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_385 scripts._
+_386 scripts._

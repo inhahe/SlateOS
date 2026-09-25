@@ -69,6 +69,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gitenv  # noqa: E402
+import suite_pool  # noqa: E402
 
 _REMOVED = gitenv.scrub_environ()
 
@@ -110,12 +111,26 @@ failures: list[str] = []
 
 # Appended to every label while a mirror mode is running. Every case is run
 # once per mode, so without it the two runs report identical names and a
-# failure list cannot say which path broke.
-label_suffix = ""
+# failure list cannot say which path broke. Kept in `suite_pool.context`, per
+# case, because the cases run a few at a time: a module global set by one mode
+# would be read by a case of the other.
+def label_suffix() -> str:
+    return getattr(suite_pool.context, "label_suffix", "")
+
+
+def labelled(suffix: str, body):
+    """`body`, run with `suffix` on every label it checks."""
+    def run(tmp: str) -> None:
+        suite_pool.context.label_suffix = suffix
+        try:
+            body(tmp)
+        finally:
+            suite_pool.context.label_suffix = ""
+    return run
 
 
 def check(label: str, got: object, want: object) -> None:
-    label = label + label_suffix
+    label = label + label_suffix()
     if got == want:
         print(f"PASS  {label}")
     else:
@@ -436,23 +451,27 @@ def main() -> int:
         print("SKIP  rustfmt is not on PATH — gate 7 skips too, nothing to test")
         return 0
 
-    global label_suffix
-    with tempfile.TemporaryDirectory() as tmp:
-        for mirror in MIRROR_MODES:
-            print(f"\n--- mirror filled {mirror} ---")
-            label_suffix = f" [{mirror}]"
-            for case in (case_committed_clean, case_committed_dirty,
-                         case_false_pass, case_false_fail,
-                         case_untouched_submodule, case_added_then_deleted,
-                         case_bypass):
-                case(os.path.join(tmp, mirror), mirror)
-        print("\n--- gittree.py works, and is used ---")
-        label_suffix = " [batched]"
-        case_batched_really_batches(os.path.join(tmp, "works"))
-        print("\n--- gittree.py fails ---")
-        label_suffix = " [broken]"
-        case_gittree_failure_falls_back(os.path.join(tmp, "broken"))
-        label_suffix = ""
+    # A few at a time, each case in a directory of its own and its output in
+    # list order (`scripts/suite_pool.py`): every case builds its own fixture
+    # and runs the whole hook against it, and one at a time this suite was
+    # 1894 s of a boot test's gate phase.
+    cases = []
+    for mirror in MIRROR_MODES:
+        heading = f"\n--- mirror filled {mirror} ---"
+        for n, case in enumerate((case_committed_clean, case_committed_dirty,
+                                  case_false_pass, case_false_fail,
+                                  case_untouched_submodule, case_added_then_deleted,
+                                  case_bypass)):
+            cases.append((heading if n == 0 else None,
+                          labelled(f" [{mirror}]",
+                                   lambda tmp, case=case, mirror=mirror: case(tmp, mirror))))
+    cases.append(("\n--- gittree.py works, and is used ---",
+                  labelled(" [batched]",
+                           lambda tmp: case_batched_really_batches(os.path.join(tmp, "works")))))
+    cases.append(("\n--- gittree.py fails ---",
+                  labelled(" [broken]",
+                           lambda tmp: case_gittree_failure_falls_back(os.path.join(tmp, "broken")))))
+    suite_pool.run(cases)
 
     if failures:
         print(f"\n{len(failures)} pre-push fmt-gate test(s) failed:",

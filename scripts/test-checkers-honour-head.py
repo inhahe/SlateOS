@@ -59,6 +59,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gitenv  # noqa: E402
+import suite_pool  # noqa: E402
 
 _REMOVED = gitenv.scrub_environ()
 
@@ -4474,9 +4475,10 @@ def main() -> int:
                   f"{len(hooked)} end-to-end; it has at least {floor} and "
                   f"{e2e_floor}. The list is broken, not the code.")
             return 1
-    with tempfile.TemporaryDirectory() as tmp:
-        for case in CASES:
-            case(tmp)
+    # A few at a time, each in a directory of its own, the output in list
+    # order: the cases share nothing, and one at a time this suite was the
+    # largest single item in a boot test's gate phase (`scripts/suite_pool.py`).
+    suite_pool.run([(None, case) for case in CASES])
     print()
     if failures:
         print(f"{len(failures)} FAILED: {', '.join(failures)}", file=sys.stderr)

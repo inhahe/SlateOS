@@ -2616,7 +2616,9 @@ impl FileSearchApp {
         let (x, y, w, h) = (area.x, area.y, area.w, area.h);
         f.hit(Target::Results, area);
         let table = Table::new(RESULT_COLUMNS, x);
-        f.draw_with(|cmds| table.header(cmds, y + 4.0, self.palette.overlay0, ROW_FONT_SMALL));
+        // `subtext0`, not `overlay0`: the heads are live -- a press sorts by
+        // one -- and overlay0 is the disabled grey, 2.3:1 on the base.
+        f.draw_with(|cmds| table.header(cmds, y + 4.0, self.palette.subtext0, ROW_FONT_SMALL));
         for (col, sort) in HEADER_SORTS {
             let rect = Rect::new(table.left(col), y, table.width(col), RESULTS_HEADER_H);
             if sort == self.sort_column {
@@ -2628,7 +2630,7 @@ impl FileSearchApp {
                     y: y + 4.0,
                     text: if self.sort_ascending { "▲" } else { "▼" }.to_string(),
                     font_size: 9.0,
-                    color: self.palette.overlay0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,

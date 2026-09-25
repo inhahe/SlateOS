@@ -612,7 +612,17 @@ def extract_shell_function(name, source=None):
     raise RuntimeError(f"`{name}` in boot-test.sh has no closing `}}` in column 0")
 
 
-def _run_clippy_gate(probe_body, commit_wait, timeout=60):
+#: How long a harness run may take before it is called a hang. These are hang
+#: guards, not performance assertions -- nothing in this file tests speed -- so
+#: they are sized for a loaded host rather than an idle one. On 2026-09-25 a
+#: suite loop that needs well under a minute idle took more than 180 s while
+#: six lanes were building: the CPU had room (a spinner beside it got over half
+#: a core), but process creation crawled, which no CPU probe can see. A real
+#: hang still trips the guard; it only takes longer to.
+HARNESS_HANG_GUARD_S = 900
+
+
+def _run_clippy_gate(probe_body, commit_wait, timeout=HARNESS_HANG_GUARD_S):
     """Drive the real `check_kernel_clippy` against a `cargo` that always crashes.
 
     Returns the `CompletedProcess`, or `None` if it had to be killed -- which is
@@ -874,9 +884,10 @@ def _run_prune_hook(free_gb, below_gb, pruner_rc=0):
                 "echo RETURNED rc=$?\n"
             )
 
-        proc = run_harness(tmp, 60, "the prune hook")
+        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the prune hook")
         if proc is None:
-            return None, "the prune hook did not finish within 60s on a host with room -- a hang", None
+            return None, (f"the prune hook did not finish within "
+                          f"{HARNESS_HANG_GUARD_S}s on a host with room -- a hang"), None
         argv_path = os.path.join(tmp, "argv.txt")
         argv = None
         if os.path.exists(argv_path):
@@ -1004,9 +1015,10 @@ def _run_python_suites(suites):
                 f"echo \"GATE_RETURNED rc=$?\"\n"
             )
 
-        proc = run_harness(tmp, 180, "the suite loop")
+        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the suite loop")
         if proc is None:
-            return None, "the suite loop did not finish within 180s on a host with room -- a hang"
+            return None, (f"the suite loop did not finish within "
+                          f"{HARNESS_HANG_GUARD_S}s on a host with room -- a hang")
         return proc.returncode, proc.stdout
     finally:
         drop_fixture(tmp)

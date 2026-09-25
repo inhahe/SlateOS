@@ -2005,14 +2005,6 @@ name = "notimpl"
 version = "0.1.0"
 
 [[package]]
-name = "nproc"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "usageerror",
-]
-
-[[package]]
 name = "nsenter"
 version = "0.1.0"
 

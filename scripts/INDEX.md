@@ -11,6 +11,7 @@ promises about its own output, which a one-line summary cannot carry.
 |---|---|
 | `scripts/abi-reach.py` | Which kernel capabilities can the Linux-ABI table reach that no native number can? |
 | `scripts/all-diff.sh` | Run every `*-diff.sh` harness and print one summary line each. |
+| `scripts/arch-diff.sh` | arch-diff.sh — compare our `arch` against GNU's, inside WSL. |
 | `scripts/argv-utf8.py` | Find utilities that read argv or the environment as `String`, and so panic. |
 | `scripts/audit-cli-fabrication.py` | One-off measurement: how many `userspace/*` CLI crates print a *report* |
 | `scripts/audit-rustfmt-drift.py` | Report every tracked .rs file that rustfmt would reformat. |
@@ -227,6 +228,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/nice-diff.sh` | Differential test: our `nice` against GNU coreutils'. |
 | `scripts/nl-diff.sh` | Differential test: our nl against GNU nl. |
 | `scripts/nohup-diff.sh` | Differential test: our `nohup` against GNU coreutils'. |
+| `scripts/nproc-diff.sh` | nproc-diff.sh — compare our `nproc` against GNU's, inside WSL. |
 | `scripts/od-diff.sh` | Differential test: our od against GNU od. |
 | `scripts/open-requests.py` | List the `requests/` entries addressed to a lane that are still open. |
 | `scripts/option-gap-ref.sh` | The reference half of `scripts/option-gap.sh`, run where the reference lives |
@@ -238,6 +240,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/paste-diff.sh` | Differential test: our paste against GNU paste. |
 | `scripts/paste-probe.py` | Ad-hoc measurement of GNU `paste`. Not part of the build; kept only so the |
 | `scripts/patch-diff.sh` | Differential test: our `patch` against GNU patch. |
+| `scripts/pathchk-diff.sh` | pathchk-diff.sh — compare our `pathchk` against GNU's, inside WSL. |
 | `scripts/pkgconf-spike/run.sh` | Cross-compile upstream pkgconf and link it against SlateOS's own libc.a. |
 | `scripts/positional-model-limits.py` | Where the positional contamination model can and cannot see, derived from its code. |
 | `scripts/pre-boot.py` | Run everything `boot-test.sh` checks before it builds, without building anything. |
@@ -386,6 +389,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/unknown-option-sweep.py` | Find programs that take an unknown option as a FILE and then create it. |
 | `scripts/unlink-diff.sh` | unlink-diff.sh — compare our `unlink` and `link` against GNU's, inside WSL. |
 | `scripts/uptime-diff.sh` | Differential test: our `uptime` against procps-ng `uptime`. |
+| `scripts/users-diff.sh` | users-diff.sh — compare our `users` against GNU's, inside WSL. |
 | `scripts/verify_mutations.py` | Check a `mutate.py` table against the source it claims to break. |
 | `scripts/wc-diff.sh` | Differential test: our wc against GNU wc. |
 | `scripts/wdog-nmi-soak.sh` | wdog-nmi-soak.sh — DIAGNOSTIC (throwaway): boot repeatedly under the |
@@ -399,4 +403,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_389 scripts._
+_393 scripts._

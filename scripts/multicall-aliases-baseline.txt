@@ -93,9 +93,6 @@ mesg:write
 mkinitramfs:lsinitramfs
 mkinitramfs:update-initramfs
 newgrp:sg
-nproc:arch
-nproc:pathchk
-nproc:users
 ntpd:ntpdate
 ntpd:sntp
 numactl:memhog

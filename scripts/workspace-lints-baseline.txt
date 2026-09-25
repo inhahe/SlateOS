@@ -136,7 +136,6 @@ userspace/newgrp  # bare deny(clippy::all)
 userspace/nftables  # bare deny(clippy::all)
 userspace/nologin  # bare deny(clippy::all)
 userspace/notimpl  # bare deny(clippy::all)
-userspace/nproc
 userspace/nsenter  # bare deny(clippy::all)
 userspace/nslookup
 userspace/numactl  # bare deny(clippy::all)

@@ -500,6 +500,7 @@ pub mod umask;
 // on any system with an account named `1000`.
 pub use userspec;
 pub mod utimecmp;
+pub mod utsname;
 pub mod vercmp;
 pub mod xnum;
 pub mod yesno;

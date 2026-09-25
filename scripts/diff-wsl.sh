@@ -129,6 +129,7 @@
 # | `DIFF_GNU_SOURCE`| (none) | a coreutils version (`9.4`) to fetch, build and compare against, *instead of* the installed binary. See "Why a built reference" below |
 # | `DIFF_GNU_DIR`   | (none) | an already-built `coreutils-N/src` to use instead of building one. The escape hatch for `DIFF_GNU_SOURCE`; ignored without it |
 # | `DIFF_GNU_CACHE` | `$HOME/.cache/slateos-diff-gnu` | where the tarball is downloaded and unpacked |
+# | `DIFF_GNU_EXTRA` | (none) | programs upstream builds only on request (`arch`, `hostname`, `coreutils`: its `no_install__progs`), made in the built tree with `make src/NAME`. Without it `arch` has no reference at all |
 # | `DIFF_GNU_VERIFY_WITH` | the first `DIFF_BINS` entry | which binary in the built tree is asked for its `--version`. For the one utility that cannot answer; see "Why a built reference" below |
 # | `DIFF_NEED`      | (none) | other commands that must exist inside WSL, or the run is skipped rather than run without them |
 # | `DIFF_NO_REF`    | (unset) | do not look for a reference; the harness finds its own |
@@ -784,6 +785,22 @@ if [ -n "$DIFF_GNU_SOURCE" ] && [ -z "$gnu_dir" ]; then
     printf '%s\n' "$diff_gnu_want" > "$diff_gnu_src/.slateos-built"
   fi
   gnu_dir=$diff_gnu_src/src
+fi
+# Upstream's `no_install__progs` -- `arch`, `hostname` and `coreutils` -- are
+# automake EXTRA_PROGRAMS: `make` compiles them only when asked for by name, so
+# a default build has no `src/arch` at all. A harness comparing one names it in
+# `DIFF_GNU_EXTRA`, and it is built here, in the finished tree. Naming a target
+# is safe at this point: the BUILT_SOURCES trap described above bites only a
+# tree that has not been built. Only a missing binary is built, so the cost is
+# paid once per cache, and again only after the tree itself is rebuilt.
+if [ -n "$DIFF_GNU_SOURCE" ] && [ -z "${DIFF_GNU_DIR:-}" ]; then
+  for diff_extra in ${DIFF_GNU_EXTRA:-}; do
+    [ -x "$gnu_dir/$diff_extra" ] && continue
+    ( cd "$diff_gnu_src" && make -s "src/$diff_extra" ) >&2 || {
+      echo "$DIFF_PROG-diff: could not build src/$diff_extra in coreutils $DIFF_GNU_SOURCE" >&2
+      exit 1
+    }
+  done
 fi
 # What the reference can actually do, read from the tree rather than inferred
 # from what it was asked to do. `gl_FUNC_XATTR` can decide `use_xattr=no` and

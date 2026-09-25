@@ -118,7 +118,6 @@ userspace/nc/src/main.rs:argv-as-string
 userspace/netstat/src/main.rs:argv-as-string
 userspace/nftables/src/main.rs:argv-as-string
 userspace/nmap/src/main.rs:argv-as-string
-userspace/nproc/src/main.rs:argv-as-string
 userspace/nsenter/src/main.rs:argv-as-string
 userspace/nslookup/src/main.rs:argv-as-string
 userspace/ntpd/src/main.rs:argv-as-string

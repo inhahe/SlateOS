@@ -6,8 +6,9 @@
 //!
 //! `printenv` and `sync` were personalities here too, which nothing could reach: no
 //! link was ever staged for either. Each is `userspace/coreutils`'s own bin
-//! since 2026-09-24/25 -- ports of GNU's, differentially tested -- and a name
-//! belongs to the one program that does the job (design-decisions.md §1019).
+//! since 2026-09-24/25 -- ports of GNU's, differentially tested -- and
+//! `coreutils` is the one home for such a name, the duplicate going
+//! (design-decisions.md §1005).
 
 use quoting::quoteaf_os;
 use std::env;

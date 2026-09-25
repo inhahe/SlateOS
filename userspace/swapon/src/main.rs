@@ -530,8 +530,8 @@ fn main() {
         // `scripts/multicall-aliases.py` rejected it at pre-push and was
         // right: a dispatch arm for a name no crate, coreutils bin, or
         // rootfs alias produces is a branch nothing can reach, and
-        // design-decisions §1019 says to delete the shadowing branch because
-        // the name belongs to whichever program performs the operation.
+        // design-decisions §1005 says the better implementation of a name
+        // wins and the duplicate is deleted -- here the shadowing branch.
         // `free` is coreutils' (`userspace/free` retired 2026-09-12 at 0 of
         // 48 against procps-ng).
         //

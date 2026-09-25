@@ -2272,13 +2272,32 @@ copy lacked (`free` gained `-l/--lohi`, `--tebi` and the GNU long forms;
 every entry point was shadowed, unreachable, or an outright refusal. The
 unreachable ledger stands at 169.
 
+**UPDATE 2026-09-25: the unreachable ledger stands at 161.** Eight names were
+closed the §1005 way -- the name becomes a `coreutils` bin, ported from GNU
+9.4 and checked against a build of it by a `scripts/<name>-diff.sh` harness,
+and the dead branch is deleted -- rather than by adding a link to the
+personality: `printenv` and `sync` (from `getopt`), `truncate` (from `pv`),
+and `arch`, `pathchk` and `users` (from `nproc`). None of the deleted
+branches was worth keeping: `nproc`'s `users` read the terminal field as the
+user name, from wtmp instead of utmp; its `pathchk -p` checked against 4096
+and 255 instead of POSIX's 256 and 14; its `arch` guessed from
+`/proc/cpuinfo`. With its last three personalities gone, **`userspace/nproc`
+itself was retired**: `nproc` is a `coreutils` bin too now, a port of GNU's
+(gnulib's `num_processors` -- affinity mask, `OMP_NUM_THREADS`,
+`OMP_THREAD_LIMIT`), where the crate had counted `/sys` ranges and told a
+process pinned to two CPUs that it had twelve. Still here and next in line,
+all GNU programs that live as personalities of something else:
+`getopt:cksum`, `pv:shred`, `shuf:factor`/`numfmt`, `base64:base32`,
+`finger:pinky`. None of the new bins is on the image yet: that is lane D's
+manifest, `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.
+
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:
 
 | Shadowing crate | Name | Who really provides it |
 |---|---|---|
 | `userspace/nologin` | `true`, `false` | coreutils |
-| `userspace/nproc` | `tty`, `logname` | coreutils |
+| `userspace/nproc` (retired 2026-09-25) | `tty`, `logname` | coreutils |
 | `userspace/fuser` | `lsof` | `userspace/lsof` |
 | `userspace/hostnamectl` | `hostname` | `userspace/hostname` |
 | `userspace/resolvectl` | `nslookup` | `userspace/nslookup` |
@@ -2303,9 +2322,10 @@ filed because it looks like an answer. It was latent only because
 dispatch and this claim lived only in prose.
 
 The first fix was an arm refusing that one name. `multicall-aliases.py`
-rejected it at pre-push and was right — per §1019 the shadowing branch is
-deleted, because the name belongs to whichever program performs the
-operation. But deleting it and restoring the catch-all would have put the
+rejected it at pre-push and was right — per §1005 the shadowing branch is
+deleted, because the better implementation of a name wins and the duplicate
+goes. (This sentence cited §1019 until 2026-09-25; §1019 is about exec-or-
+refuse and never said this.) But deleting it and restoring the catch-all would have put the
 silent wrong answer back *invisibly*: the checker reads dispatch arms, so a
 catch-all lets a binary answer to every name on earth while declaring none.
 `main` now dispatches `swapon` and `swapoff` explicitly and refuses anything
@@ -2357,7 +2377,7 @@ two run in nearly every shell script on the system, and `nologin`'s job is to
 *refuse* and exit non-zero.
 
 **The fix per name is a decision, not a patch.** Either the personality is
-deleted (the name belongs to whoever performs the operation — §1019), or the
+deleted (the better implementation of a name wins — §1005), or the
 name gets a real producer, preferably its own crate so it gets its own
 capability identity. Both ledgers may only shrink, so the count is the
 progress bar — with the caveat this entry exists to record: the count is only

@@ -8,8 +8,8 @@
 //!
 //! `truncate` was a third personality, which no link ever reached. It is
 //! `userspace/coreutils`'s own bin since 2026-09-25, a port of GNU's checked
-//! against it, and a name belongs to the one program that does the job
-//! (design-decisions.md §1019).
+//! against it, and `coreutils` is the one home for such a name, the duplicate
+//! going (design-decisions.md §1005).
 //!
 //! # Examples
 //!

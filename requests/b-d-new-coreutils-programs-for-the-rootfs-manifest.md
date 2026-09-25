@@ -6,12 +6,13 @@
 
 ## In short
 
-The `coreutils` crate now builds programs it did not build when the manifest
-was written: `sha1sum`, `printenv`, `link`, `unlink`, `sync`, `truncate` and
-`groups`. Each is a port of GNU coreutils 9.4 and has been checked against a
-build of 9.4 (a script runs both on the same inputs and compares their output,
-errors and exit status). A binary the manifest does not name does not go on the
-image, so today all seven are built and then left out. Please add them.
+The `coreutils` crate now builds eleven programs it did not build when the
+manifest was written: `sha1sum`, `printenv`, `link`, `unlink`, `sync`,
+`truncate`, `groups`, `arch`, `pathchk`, `users` and `nproc`. Each is a port of
+GNU coreutils 9.4 and has been checked against a build of 9.4 (a script runs
+both on the same inputs and compares their output, errors and exit status). A
+binary the manifest does not name does not go on the image, so today all
+eleven are built and then left out. Please add them.
 
 ## Why they belong by the manifest's own rule
 
@@ -22,13 +23,13 @@ bin list. The only coreutils names it leaves out on purpose are:
 - `sort`, for the same reason;
 - `sh`, because `/bin/sh` is dash.
 
-These seven are none of those. They are missing only because they did not
+These eleven are none of those. They are missing only because they did not
 exist when the list was generated. Nothing else stages these names:
 `create-ext4-rootfs.sh`'s `PROMOTED` map has none of them. So listing them
 takes no name away from anything.
 
 **Size.** At the manifest's own average of about 813 KiB per static binary,
-seven come to roughly 6 MiB. The header records 59 MiB used of a 96 MiB
+eleven come to roughly 9 MiB. The header records 59 MiB used of a 96 MiB
 budget.
 
 ## The programs
@@ -42,6 +43,10 @@ budget.
 | `sync` | flush filesystems, or `-d`/`-f` for named files | `scripts/sync-diff.sh` |
 | `truncate` | set a file's size (`-s`, `-r`, `-c`, `-o`) | `scripts/truncate-diff.sh` |
 | `groups` | print a user's or the current process's groups | `scripts/id-diff.sh` |
+| `arch` | the machine name, the same answer as `uname -m` | `scripts/arch-diff.sh` |
+| `pathchk` | whether file names are valid, or portable to any POSIX system (POSIX) | `scripts/pathchk-diff.sh` |
+| `users` | the users logged in now, one word per session | `scripts/users-diff.sh` |
+| `nproc` | how many CPUs this process may use; what `make -j"$(nproc)"` asks | `scripts/nproc-diff.sh` |
 
 **One alias as well: `[ = test`.** Our `test` already behaves as `[` when it
 is started under that name: it then insists on the closing `]`. But nothing
@@ -51,11 +56,13 @@ example `find . -exec [ -s {} ] \; -print` or `env [ -d /tmp ]`. The
 manifest's alias syntax (`name = producer`) covers it, and `test` is
 already listed.
 
-Three of these names used to be answered, partly, by other crates that read
-`argv[0]` to decide what to be: `getopt` had `printenv` and `sync`, and `pv`
-had `truncate`. Those branches were removed, because under design-decisions
-§1019 a command name belongs to the one program that does the job. None of
-those crates is on the image, so no name moves from one program to another.
+Six of these names used to be answered, partly, by other crates that read
+`argv[0]` to decide what to be: `getopt` had `printenv` and `sync`, `pv` had
+`truncate`, and `nproc` had `arch`, `pathchk` and `users`. Those branches were
+removed, because under design-decisions §1005 `coreutils` is the one home for
+these tools and a duplicate is deleted. The `userspace/nproc` crate went
+entirely, its own `nproc` being replaced by the port above. None of those
+crates was on the image, so no name moves from one program to another there.
 
 ## This list may grow before you read it
 

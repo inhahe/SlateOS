@@ -4074,11 +4074,12 @@ _Port ext4 first. Don't write a custom filesystem._
 - [x] Port coreutils (85 binaries: echo, cat, ls, head, wc, mkdir, rm, cp, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut, tr, chmod, chown, id, whoami, hostname, readlink, realpath, stat, printf, test, kill, dd, df, du, xargs, find, ps, nohup, nice, mkfifo, expr, nl, paste, comm, expand, fold, md5sum, sha256sum, tty, diff, cmp, od, strings, uptime, free, unexpand, cal, time, sed, awk, ed, more, sh, tar, bc, patch, split, join, csplit, logger, logname, who, tsort, renice)
   - [-] `[B]` **The programs GNU coreutils 9.4 has and we did not** (2026-09-25). Each is ported from the 9.4 source and
     checked against a build of it by a `scripts/<name>-diff.sh` harness. **Done:** `sha1sum`, `printenv`, `link`, `unlink`,
-    `sync`, `truncate`, `groups` (the last shares `coreutils::grouplist` with `id`, as upstream shares `group-list.c`). The
-    multi-personality crates that answered some of these names in part lost those branches (§1019: `getopt` printenv/sync,
-    `pv` truncate). **Still missing:** `arch`, `b2sum`, `base32`, `basenc`, `chgrp`, `cksum`, `dir`, `dircolors`, `factor`,
-    `hostid`, `mknod`, `numfmt`, `pathchk`, `pinky`, `pr`, `ptx`, `sha224sum`, `sha384sum`, `sha512sum`, `shred`, `sum`,
-    `users`, `vdir`. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
+    `sync`, `truncate`, `groups` (the last shares `coreutils::grouplist` with `id`, as upstream shares `group-list.c`),
+    `arch` (shares `coreutils::utsname::MACHINE` with `uname -m`), `pathchk`, `users`; and `nproc`, re-ported because the
+    standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
+    names in part lost those branches (§1005: `getopt` printenv/sync, `pv` truncate, `nproc` arch/pathchk/users).
+    **Still missing:** `b2sum`, `base32`, `basenc`, `chgrp`, `cksum`, `dir`, `dircolors`, `factor`, `hostid`, `mknod`,
+    `numfmt`, `pinky`, `pr`, `ptx`, `sha224sum`, `sha384sum`, `sha512sum`, `shred`, `sum`, `vdir`. Not ported, for want of what they act on: `chcon`/`runcon` (SELinux contexts) and `stdbuf` (works by
     `LD_PRELOAD` into a dynamically linked program). `[` is `test` under another name and needs only the image alias. None
     ships until lane D lists it: `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.
 - [x] Port rsync (replaces robocopy need) — Rust implementation: recursive, archive mode, checksums, delete, exclude/include, dry-run, progress, stats

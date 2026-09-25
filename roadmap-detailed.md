@@ -1677,8 +1677,8 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 ### 3.4 Window Manager / Desktop Shell
 
 #### Taskbar
-- [ ] Pinned apps on left, running apps on right, divider between sections
-- [ ] Drag to reorder in both sections
+- [x] Pinned apps on left, running apps on right, divider between sections — 2026-09-25: a wider gap and a divider line between the two, only while both have buttons (`DesktopShell::taskbar_divider_rect`).
+- [x] Drag to reorder in both sections — 2026-09-25: pins by dragging along the pinned row; running programs' buttons along theirs, in an order the shell keeps (`button_order`) rather than the stacking order, so a raised window's button stays put.
 - [ ] Optional app name alongside icon
 - [ ] Aero-style blurry transparency (taskbar and/or window titlebars)
 

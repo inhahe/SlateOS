@@ -1678,6 +1678,19 @@ live.
   the drop itself still lands, since the release goes to the shell surface
   the press focused.
 
+- `[C]` **Running programs' taskbar buttons stay where they are, and can be
+  dragged** -- done 2026-09-25 (`design.txt` line 713: "can drag and reorder
+  icons in pinned section and currently running apps section"). The bar was
+  drawn in stacking order, so every click on a window's button moved it to
+  the end; the shell now keeps an order of its own -- a window joins the end
+  when it opens and keeps its place when raised, and one on another desktop
+  keeps its place while this desktop's are rearranged -- and a window's button
+  can be dragged along its row. A button acts on the release, as the pins do,
+  so that a press can become a drag. The pins and the windows are set apart
+  by a small space and a divider (`design.txt` line 708). The drop rule the two
+  rows now share also fixed a pin dragged rightwards swapping with its
+  neighbour a few pixels into the drag.
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's

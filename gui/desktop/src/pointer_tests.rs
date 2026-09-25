@@ -694,11 +694,10 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
     let b = open(&mut shell, "B");
     assert_eq!(shell.focused_window, Some(b));
 
-    // A is at index 0: `taskbar_windows` is in the compositor's order, and B
-    // arrived above it.
+    // A is at index 0: the buttons stand in the order the windows opened.
     let first = shell.taskbar_button_rect(0);
     assert_eq!(
-        click_at(&mut shell, first),
+        choose_at(&mut shell, first),
         ShellAction::Control(ShellRequest::window(a, ShellControlAction::Activate)),
         "the button of an unfocused window must summon it"
     );
@@ -719,7 +718,7 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
         .unwrap();
     let button = shell.taskbar_button_rect(index);
     assert_eq!(
-        click_at(&mut shell, button),
+        choose_at(&mut shell, button),
         ShellAction::Control(ShellRequest::window(b, ShellControlAction::Minimize)),
         "the button of the focused window must put it away"
     );
@@ -872,7 +871,7 @@ fn a_minimized_window_can_be_got_back_from_its_taskbar_button() {
     );
     let button = shell.taskbar_button_rect(0);
     assert_eq!(
-        click_at(&mut shell, button),
+        choose_at(&mut shell, button),
         ShellAction::Control(ShellRequest::window(id, ShellControlAction::Activate)),
         "the click must ask for the window back, not minimize it again"
     );
@@ -1009,7 +1008,7 @@ fn the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop()
     shell.apply_window_list(&here(&[focused]));
 
     let button = shell.taskbar_button_rect(0);
-    let action = click_at(&mut shell, button);
+    let action = choose_at(&mut shell, button);
     assert_eq!(
         action,
         ShellAction::Control(ShellRequest::window(
@@ -1478,8 +1477,16 @@ fn a_double_click_is_the_same_event_to_this_shell_as_a_single_one() {
     let b = open(&mut shell, "B");
     assert_eq!(shell.focused_window, Some(b));
     let (x, y) = centre(shell.taskbar_button_rect(0));
+    // Taken hold of, like a press -- and the release asks, as it does after a
+    // single click. A `DoubleClick` arm that did nothing would leave the
+    // release nothing to finish.
+    assert_eq!(shell.handle_mouse(&doubled(x, y)), ShellAction::Consumed);
     assert_eq!(
-        shell.handle_mouse(&doubled(x, y)),
+        shell.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        }),
         ShellAction::Control(ShellRequest::window(a, ShellControlAction::Activate)),
         "double-click on a taskbar button asked for nothing"
     );
@@ -2558,4 +2565,407 @@ fn the_chooser_tiles_the_work_area_and_not_the_screen() {
     for zone in &shell.snap.layout().zones {
         assert!(zone.y + zone.height <= taller.y);
     }
+}
+
+// ---- the order of the running programs' buttons ----------------------------------
+
+/// The window `id` is raised and focused: moved to the top of the next list,
+/// the others unfocused -- what a click on it, or Alt+Tab to it, produces.
+fn raise(shell: &mut DesktopShell, id: WindowId) {
+    let mut list = as_list(shell);
+    let at = list
+        .iter()
+        .position(|info| info.id == id.0)
+        .expect("raising a window the shell does not hold");
+    let mut raised = list.remove(at);
+    for other in &mut list {
+        other.focused = false;
+    }
+    raised.focused = true;
+    list.push(raised);
+    shell.apply_window_list(&here(&list));
+}
+
+/// The windows the taskbar's buttons stand for, left to right.
+fn buttons(shell: &DesktopShell) -> Vec<WindowId> {
+    shell
+        .taskbar_slots()
+        .into_iter()
+        .filter_map(|slot| match slot {
+            crate::TaskbarSlot::Window(id) => Some(id),
+            crate::TaskbarSlot::Pinned(_) => None,
+        })
+        .collect()
+}
+
+/// The middle of the button standing for `id`.
+fn button_of(shell: &DesktopShell, id: WindowId) -> (f32, f32) {
+    let slot = shell
+        .taskbar_slots()
+        .iter()
+        .position(|slot| *slot == crate::TaskbarSlot::Window(id))
+        .expect("the window has no button");
+    centre(shell.taskbar_button_rect(slot))
+}
+
+fn release(shell: &mut DesktopShell, at: (f32, f32)) -> ShellAction {
+    shell.handle_mouse(&MouseEvent {
+        x: at.0,
+        y: at.1,
+        kind: MouseEventKind::Release(MouseButton::Left),
+    })
+}
+
+fn move_to(shell: &mut DesktopShell, at: (f32, f32)) {
+    shell.handle_mouse(&MouseEvent {
+        x: at.0,
+        y: at.1,
+        kind: MouseEventKind::Move,
+    });
+}
+
+/// **A button stays where it is when its window is raised.** The bar used to
+/// be drawn in stacking order, so every click moved the clicked button to the
+/// end -- no button was ever where the user had last seen it.
+#[test]
+fn a_raised_window_keeps_its_button_where_it_was() {
+    let mut shell = shell();
+    let a = open(&mut shell, "A");
+    let b = open(&mut shell, "B");
+    let c = open(&mut shell, "C");
+    assert_eq!(buttons(&shell), [a, b, c]);
+
+    raise(&mut shell, a);
+    assert_eq!(buttons(&shell), [a, b, c], "raising A moved its button");
+    // The stacking order did change, and Alt+Tab still follows it.
+    let stacked: Vec<WindowId> = shell.taskbar_windows().iter().map(|w| w.id).collect();
+    assert_eq!(stacked, [b, c, a]);
+}
+
+/// A window that goes takes its button; one that arrives joins the end.
+#[test]
+fn a_closed_window_leaves_the_row_and_a_new_one_joins_its_end() {
+    let mut shell = shell();
+    let a = open(&mut shell, "A");
+    let b = open(&mut shell, "B");
+    let c = open(&mut shell, "C");
+    raise(&mut shell, a);
+
+    let without_b: Vec<WindowInfo> = as_list(&shell)
+        .into_iter()
+        .filter(|info| info.id != b.0)
+        .collect();
+    shell.apply_window_list(&here(&without_b));
+    assert_eq!(buttons(&shell), [a, c]);
+
+    let d = open(&mut shell, "D");
+    assert_eq!(buttons(&shell), [a, c, d]);
+}
+
+/// A click acts on the release now -- so that a press can become a drag --
+/// and is the same toggle it was: summon the window behind, put away the one
+/// in front.
+#[test]
+fn a_window_button_acts_on_the_release() {
+    let mut shell = shell();
+    let a = open(&mut shell, "A");
+    let b = open(&mut shell, "B");
+
+    let at = button_of(&shell, a);
+    assert_eq!(
+        shell.handle_mouse(&click(at.0, at.1)),
+        ShellAction::Consumed
+    );
+    assert_eq!(
+        release(&mut shell, at),
+        ShellAction::Control(ShellRequest::window(a, ShellControlAction::Activate))
+    );
+
+    let at = button_of(&shell, b);
+    shell.handle_mouse(&click(at.0, at.1));
+    assert_eq!(
+        release(&mut shell, at),
+        ShellAction::Control(ShellRequest::window(b, ShellControlAction::Minimize))
+    );
+}
+
+/// Pressing the bar can move the focus before the release arrives. The toggle
+/// is decided by what was in front at the press, so a click on the front
+/// window's button still puts it away.
+#[test]
+fn what_was_in_front_at_the_press_decides_the_toggle() {
+    let mut shell = shell();
+    open(&mut shell, "A");
+    let b = open(&mut shell, "B");
+    let at = button_of(&shell, b);
+    shell.handle_mouse(&click(at.0, at.1));
+
+    // The panel took the focus: no application window holds it now.
+    let mut list = as_list(&shell);
+    for info in &mut list {
+        info.focused = false;
+    }
+    shell.apply_window_list(&here(&list));
+    assert_eq!(shell.focused_window, None);
+
+    assert_eq!(
+        release(&mut shell, at),
+        ShellAction::Control(ShellRequest::window(b, ShellControlAction::Minimize))
+    );
+}
+
+/// A window that closes while its button is held asks for nothing.
+#[test]
+fn a_window_closed_while_its_button_is_held_asks_for_nothing() {
+    let mut shell = shell();
+    let a = open(&mut shell, "A");
+    let at = button_of(&shell, a);
+    shell.handle_mouse(&click(at.0, at.1));
+    shell.apply_window_list(&here(&[]));
+    assert_eq!(release(&mut shell, at), ShellAction::Consumed);
+}
+
+/// **Dragging a window's button moves it along the row**, and the release
+/// that ends the drag summons nothing.
+#[test]
+fn dragging_a_window_button_moves_it_along_the_row() {
+    let mut shell = shell();
+    let a = open(&mut shell, "A");
+    let b = open(&mut shell, "B");
+    let c = open(&mut shell, "C");
+
+    let from = button_of(&shell, a);
+    let last = shell.taskbar_button_rect(2);
+    let to = (last.x + last.w * 0.75, from.1);
+    shell.handle_mouse(&click(from.0, from.1));
+    // Past its own middle, short of its neighbour's: nothing moves yet.
+    move_to(&mut shell, (from.0 + 20.0, from.1));
+    assert_eq!(
+        buttons(&shell),
+        [a, b, c],
+        "a nudge swapped it with its neighbour"
+    );
+    move_to(&mut shell, to);
+    assert_eq!(
+        buttons(&shell),
+        [b, c, a],
+        "the row did not follow the drag"
+    );
+    assert_eq!(release(&mut shell, to), ShellAction::Consumed);
+    assert_eq!(buttons(&shell), [b, c, a]);
+
+    // And the new order holds when the stacking changes.
+    raise(&mut shell, b);
+    assert_eq!(buttons(&shell), [b, c, a]);
+}
+
+/// Carried up off the bar, a window's button stays where it last was: the
+/// row rearranges only under a pointer that is on it.
+#[test]
+fn a_window_button_carried_off_the_bar_stays_put() {
+    let mut shell = shell();
+    let a = open(&mut shell, "A");
+    let b = open(&mut shell, "B");
+    let c = open(&mut shell, "C");
+
+    let from = button_of(&shell, a);
+    let last = shell.taskbar_button_rect(2);
+    let above_the_last = (last.x + last.w * 0.75, 500.0);
+    shell.handle_mouse(&click(from.0, from.1));
+    move_to(&mut shell, (from.0, 500.0));
+    move_to(&mut shell, above_the_last);
+    assert_eq!(
+        buttons(&shell),
+        [a, b, c],
+        "the row followed a pointer off the bar"
+    );
+    assert_eq!(release(&mut shell, above_the_last), ShellAction::Consumed);
+    assert_eq!(buttons(&shell), [a, b, c]);
+}
+
+/// A window's button stays among the window buttons: dragged over the pins
+/// it goes to the front of its own row, and the pins do not move.
+#[test]
+fn a_window_button_cannot_be_dragged_among_the_pins() {
+    appearance::config::testing::with_scratch_config("window-button-not-among-pins", |_root| {
+        let mut shell = shell();
+        let entry = shell.start_menu_entries()[0];
+        let (exec, name) = (entry.executable_path.clone(), entry.name.clone());
+        shell.pin_app(&exec, &name);
+        let a = open(&mut shell, "A");
+        let b = open(&mut shell, "B");
+
+        let from = button_of(&shell, b);
+        let pin = shell.taskbar_button_rect(0);
+        let to = (pin.x + 2.0, from.1);
+        shell.handle_mouse(&click(from.0, from.1));
+        move_to(&mut shell, to);
+        release(&mut shell, to);
+
+        assert_eq!(buttons(&shell), [b, a]);
+        assert_eq!(shell.pinned_apps().len(), 1);
+        assert_eq!(shell.taskbar_slots()[0], crate::TaskbarSlot::Pinned(0));
+    });
+}
+
+/// A window on another desktop keeps its place in the order while the user
+/// rearranges this desktop's buttons around it.
+#[test]
+fn a_window_on_another_desktop_keeps_its_place() {
+    let mut shell = shell();
+    shell.num_desktops = 2;
+    let mut away = app(2, "X");
+    away.workspace = 1;
+    shell.apply_window_list(&here(&[app(1, "A"), away, app(3, "B")]));
+    let (a, x, b) = (WindowId(1), WindowId(2), WindowId(3));
+    assert_eq!(buttons(&shell), [a, b]);
+
+    // B dragged in front of A on this desktop.
+    let from = button_of(&shell, b);
+    let first = shell.taskbar_button_rect(0);
+    let to = (first.x + 2.0, from.1);
+    shell.handle_mouse(&click(from.0, from.1));
+    move_to(&mut shell, to);
+    release(&mut shell, to);
+    assert_eq!(buttons(&shell), [b, a]);
+
+    // X comes to this desktop, and stands where it stood: between them.
+    let mut here_now = app(2, "X");
+    here_now.workspace = 0;
+    shell.apply_window_list(&here(&[app(1, "A"), here_now, app(3, "B")]));
+    assert_eq!(buttons(&shell), [b, x, a]);
+}
+
+/// A pin nudged past its own middle stays where it is: a button moves only
+/// when the pointer crosses a *neighbour's* middle. The rule used to count the
+/// dragged button's own middle, so a drag to the right swapped it with its
+/// neighbour a few pixels in -- and a drag to the left did not, which is how
+/// it went unnoticed.
+#[test]
+fn a_pin_nudged_past_its_own_middle_stays_put() {
+    appearance::config::testing::with_scratch_config("pin-nudge", |_root| {
+        let mut shell = shell();
+        let apps: Vec<String> = shell
+            .start_menu_entries()
+            .iter()
+            .take(3)
+            .map(|entry| entry.executable_path.clone())
+            .collect();
+        for exec in &apps {
+            shell.pin_app(exec, exec);
+        }
+        let order = |shell: &DesktopShell| -> Vec<String> {
+            shell
+                .pinned_apps()
+                .iter()
+                .map(|app| app.exec_path.clone())
+                .collect()
+        };
+
+        let first = shell.taskbar_button_rect(0);
+        let y = first.y + first.h / 2.0;
+        let (pressed, nudged) = (first.x + first.w * 0.25, first.x + first.w * 0.75);
+        shell.handle_mouse(&click(pressed, y));
+        move_to(&mut shell, (nudged, y));
+        assert_eq!(order(&shell), apps, "a nudge swapped it with its neighbour");
+        release(&mut shell, (nudged, y));
+        assert_eq!(order(&shell), apps);
+
+        // Past the neighbour's middle, it does move.
+        let second = shell.taskbar_button_rect(1);
+        let past = second.x + second.w * 0.75;
+        shell.handle_mouse(&click(pressed, y));
+        move_to(&mut shell, (past, y));
+        release(&mut shell, (past, y));
+        assert_eq!(
+            order(&shell),
+            [apps[1].clone(), apps[0].clone(), apps[2].clone()]
+        );
+    });
+}
+
+// ---- the space and the divider between the two sections --------------------------
+
+/// A shell with one pinned program and `windows` windows open.
+fn pinned_and_open(windows: usize) -> DesktopShell {
+    let mut shell = shell();
+    let entry = shell.start_menu_entries()[0];
+    let (exec, name) = (entry.executable_path.clone(), entry.name.clone());
+    shell.pin_app(&exec, &name);
+    for n in 0..windows {
+        open(&mut shell, &format!("window {n}"));
+    }
+    shell
+}
+
+/// `design.txt`: pinned programs on the left, running ones to their right,
+/// "with a small space and a divider between the two sections". The gap
+/// between the sections is wider than the gap between two buttons, and the
+/// divider stands in its middle, drawn.
+#[test]
+fn a_space_and_a_divider_set_the_pins_apart_from_the_windows() {
+    appearance::config::testing::with_scratch_config("taskbar-divider", |_root| {
+        let shell = pinned_and_open(2);
+        let (pin, first, second) = (
+            shell.taskbar_button_rect(0),
+            shell.taskbar_button_rect(1),
+            shell.taskbar_button_rect(2),
+        );
+        let between_sections = first.x - (pin.x + pin.w);
+        let between_buttons = second.x - (first.x + first.w);
+        assert!(
+            between_sections > between_buttons,
+            "the sections are {between_sections}px apart, the buttons {between_buttons}px"
+        );
+
+        let divider = shell.taskbar_divider_rect().expect("no divider");
+        assert!(divider.x >= pin.x + pin.w && divider.x + divider.w <= first.x);
+        let (dx, dy) = centre(divider);
+        assert_eq!(
+            shell.hit_test(dx, dy),
+            Hit::TaskbarPanel,
+            "the divider is not a button"
+        );
+        let drawn = shell.render_taskbar().commands.iter().any(|cmd| {
+            matches!(cmd, RenderCommand::FillRect { x, y, width, height, .. }
+                if (*x, *y, *width, *height) == (divider.x, divider.y, divider.w, divider.h))
+        });
+        assert!(drawn, "the divider is not drawn");
+    });
+}
+
+/// A divider with nothing on one side divides nothing: no pins, or no
+/// windows, and the buttons are evenly spaced with no line.
+#[test]
+fn one_section_alone_has_no_divider() {
+    appearance::config::testing::with_scratch_config("taskbar-no-divider", |_root| {
+        let only_pinned = pinned_and_open(0);
+        assert_eq!(only_pinned.taskbar_divider_rect(), None);
+
+        let mut only_windows = shell();
+        open(&mut only_windows, "A");
+        open(&mut only_windows, "B");
+        assert_eq!(only_windows.taskbar_divider_rect(), None);
+        let (a, b) = (
+            only_windows.taskbar_button_rect(0),
+            only_windows.taskbar_button_rect(1),
+        );
+        assert!((b.x - (a.x + a.w) - only_windows.scale(crate::TASKBAR_BUTTON_GAP)).abs() < 0.01);
+    });
+}
+
+/// The extra space comes out of the buttons' share, not the tray's: a full
+/// bar still stops short of the tray.
+#[test]
+fn a_full_bar_with_a_divider_still_stops_short_of_the_tray() {
+    appearance::config::testing::with_scratch_config("taskbar-divider-full", |_root| {
+        let shell = pinned_and_open(30);
+        let last = shell.taskbar_button_rect(shell.taskbar_slots().len() - 1);
+        assert!(
+            last.x + last.w <= shell.tray_x(),
+            "the last button ends at {}, past the tray at {}",
+            last.x + last.w,
+            shell.tray_x()
+        );
+    });
 }

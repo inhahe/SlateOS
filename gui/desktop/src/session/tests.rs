@@ -702,6 +702,7 @@ fn a_taskbar_button_asks_the_compositor_rather_than_changing_anything() {
 
     let button = centre(session.shell().taskbar_button_rect(1));
     press_at(&desktop, session.panel(), button.0, button.1);
+    release_at(&desktop, session.panel(), button.0, button.1);
     session.pump().expect("pump");
 
     assert!(
@@ -729,6 +730,7 @@ fn a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised() {
 
     let button = centre(session.shell().taskbar_button_rect(1));
     press_at(&desktop, session.panel(), button.0, button.1);
+    release_at(&desktop, session.panel(), button.0, button.1);
     session.pump().expect("pump");
 
     assert!(
@@ -961,10 +963,22 @@ fn a_window_list_arriving_with_a_click_is_folded_in_after_it() {
         // shell that folds it in too early.
         d.send_window_list(&[app(7, "something else")]);
         let (ox, oy) = session.panel().origin();
-        d.send_input(&[InputEvent::new(
-            session.panel().window(),
-            guitk::event::Event::Mouse(click(button.0 - ox, button.1 - oy)),
-        )]);
+        // A whole click, press and release: a window's button acts on the
+        // release, and both arrive before the list is folded in.
+        d.send_input(&[
+            InputEvent::new(
+                session.panel().window(),
+                guitk::event::Event::Mouse(click(button.0 - ox, button.1 - oy)),
+            ),
+            InputEvent::new(
+                session.panel().window(),
+                guitk::event::Event::Mouse(guitk::event::MouseEvent {
+                    x: button.0 - ox,
+                    y: button.1 - oy,
+                    kind: MouseEventKind::Release(MouseButton::Left),
+                }),
+            ),
+        ]);
     }
     session.pump().expect("pump");
 

@@ -274,6 +274,14 @@ const START_BUTTON_WIDTH: f32 = 48.0;
 const TASKBAR_BUTTON_START_GAP: f32 = 8.0;
 /// Gap between adjacent window buttons.
 const TASKBAR_BUTTON_GAP: f32 = 4.0;
+/// Gap between the last pinned button and the first window's, with the
+/// divider drawn in its middle: `design.txt` asks for "a small space and a
+/// divider between the two sections". Only while both sections have buttons.
+const TASKBAR_SECTION_GAP: f32 = 13.0;
+/// How strongly the divider between the sections is drawn: the bar's own
+/// text colour at this alpha, so it follows the theme and stays quieter than
+/// anything that can be clicked.
+const TASKBAR_DIVIDER_ALPHA: u8 = 80;
 /// Vertical inset of a window button inside the panel.
 const TASKBAR_BUTTON_INSET: f32 = 4.0;
 /// Widest a window button gets, however few windows are open.
@@ -508,6 +516,18 @@ enum CarryTarget {
     /// Pinned to the start menu: among its pinned rows where it was let go
     /// on them, after them when it was let go on the start button.
     StartMenu,
+}
+
+/// A window's taskbar button pressed and perhaps being dragged.
+struct WindowPress {
+    /// The press and its drag threshold, keyed by the window.
+    source: tray_dnd::DragSource<WindowId>,
+    /// Whether the window was the focused one when the button was pressed --
+    /// which decides what a click does: a toggle minimises the window in
+    /// front and summons any other. Taken at the press, because pressing the
+    /// bar can itself move the focus before the release arrives, and a click
+    /// on the front window's button must not turn into "summon" on the way.
+    was_focused: bool,
 }
 
 /// A start-menu row pressed and perhaps being dragged.
@@ -1206,6 +1226,20 @@ pub struct DesktopShell {
     /// Where the pointer is in a drag that carries a program, for the label
     /// that follows it.
     carry_at: (f32, f32),
+    /// The order the running programs' buttons stand in on the taskbar: the
+    /// order their windows arrived, as the user has since rearranged them by
+    /// dragging. Every window the shell holds is in it, shown or not, so a
+    /// window moved to another desktop and back returns to its place.
+    ///
+    /// The shell's own, because nothing else knows it. The compositor lists
+    /// windows in *stacking* order, which changes every time one is raised;
+    /// a bar drawn in that order moved a button to the end each time it was
+    /// clicked, so no button was ever where the user had last seen it.
+    button_order: Vec<WindowId>,
+    /// A window's taskbar button pressed and not yet let go: a click, or the
+    /// start of dragging it along the row. See
+    /// [`finish_window_press`](Self::finish_window_press).
+    window_press: Option<WindowPress>,
     /// A press that landed on a tray icon and has not been released.
     ///
     /// Held from press to release because until the release the shell does
@@ -1793,6 +1827,8 @@ impl DesktopShell {
             start_pins: Vec::new(),
             start_pins_dirty: false,
             carry_at: (0.0, 0.0),
+            button_order: Vec::new(),
+            window_press: None,
             tray_tooltip: None,
             alt_tab_active: false,
             alt_tab_index: 0,
@@ -2345,26 +2381,75 @@ impl DesktopShell {
     /// in either the renderer or the hit test.
     fn taskbar_button_width(&self) -> f32 {
         let bar = self.taskbar_rect();
-        let available = (bar.w
-            - self.scale(START_BUTTON_WIDTH)
-            - self.tray_width()
-            - self.scale(TRAY_RESERVE_GAP))
-        .max(0.0);
-        let count = self.taskbar_slots().len().max(1) as f32;
-        self.scale(TASKBAR_BUTTON_MAX_WIDTH).min(available / count)
+        let count = self.taskbar_slots().len().max(1);
+        // Everything between the start button and the tray that is not a
+        // button: the gap after the start button, the gap after every button
+        // but the last, the wider one between the sections, and the reserve
+        // before the tray. The gaps used to be left out, so the buttons were
+        // each given their share of the space and then spaced apart as well
+        // -- fine while they were at their widest, and past the tray's edge
+        // once enough windows were open: 108 px into it with thirty-one.
+        let gaps = self.scale(TASKBAR_BUTTON_START_GAP)
+            + count.saturating_sub(1) as f32 * self.scale(TASKBAR_BUTTON_GAP)
+            + self.section_gap_extra()
+            + self.scale(TRAY_RESERVE_GAP);
+        let available =
+            (bar.w - self.scale(START_BUTTON_WIDTH) - self.tray_width() - gaps).max(0.0);
+        self.scale(TASKBAR_BUTTON_MAX_WIDTH)
+            .min(available / count as f32)
     }
 
-    /// The taskbar button for the `index`-th visible window.
+    /// How much wider than an ordinary gap the one between the pinned and
+    /// the running sections is -- nothing unless both sections have buttons,
+    /// since a divider with nothing on one side divides nothing.
+    fn section_gap_extra(&self) -> f32 {
+        let pins = self.taskbar.pinned_apps().len();
+        let running = self.taskbar_slots().len().saturating_sub(pins);
+        if pins > 0 && running > 0 {
+            self.scale(TASKBAR_SECTION_GAP - TASKBAR_BUTTON_GAP)
+        } else {
+            0.0
+        }
+    }
+
+    /// The taskbar button in slot `index` -- pinned applications first, then
+    /// the windows, the two set apart by [`taskbar_divider_rect`](Self::taskbar_divider_rect).
     #[must_use]
     pub fn taskbar_button_rect(&self, index: usize) -> Rect {
         let bar = self.taskbar_rect();
         let w = self.taskbar_button_width();
         let inset = self.scale(TASKBAR_BUTTON_INSET).min(bar.h / 2.0);
+        let past_the_pins = if index >= self.taskbar.pinned_apps().len() {
+            self.section_gap_extra()
+        } else {
+            0.0
+        };
         let x = bar.x
             + self.scale(START_BUTTON_WIDTH)
             + self.scale(TASKBAR_BUTTON_START_GAP)
-            + index as f32 * (w + self.scale(TASKBAR_BUTTON_GAP));
+            + index as f32 * (w + self.scale(TASKBAR_BUTTON_GAP))
+            + past_the_pins;
         Rect::new(x, bar.y + inset, w, bar.h - inset * 2.0)
+    }
+
+    /// The line between the pinned buttons and the windows', in the middle of
+    /// the gap between them -- `None` unless both sections have buttons.
+    #[must_use]
+    pub fn taskbar_divider_rect(&self) -> Option<Rect> {
+        let pins = self.taskbar.pinned_apps().len();
+        if pins == 0 || self.section_gap_extra() <= 0.0 {
+            return None;
+        }
+        let last_pin = self.taskbar_button_rect(pins.saturating_sub(1));
+        let first_window = self.taskbar_button_rect(pins);
+        let thickness = self.scale(1.0).max(1.0);
+        let middle = (last_pin.x + last_pin.w + first_window.x) / 2.0;
+        Some(Rect::new(
+            middle - thickness / 2.0,
+            last_pin.y + last_pin.h * 0.2,
+            thickness,
+            last_pin.h * 0.6,
+        ))
     }
 
     /// Every button the taskbar shows, pinned applications first.
@@ -2383,11 +2468,30 @@ impl DesktopShell {
             .map(TaskbarSlot::Pinned)
             .collect();
         slots.extend(
-            self.taskbar_windows()
+            self.taskbar_button_windows()
                 .iter()
                 .map(|window| TaskbarSlot::Window(window.id)),
         );
         slots
+    }
+
+    /// The windows that have taskbar buttons, in the order the buttons stand:
+    /// [`taskbar_windows`](Self::taskbar_windows)' set, in the taskbar's own
+    /// order (see `button_order`) rather than the stacking order. Stable: the
+    /// buttons stay put when a window is raised, and move only when the user
+    /// drags one.
+    #[must_use]
+    pub fn taskbar_button_windows(&self) -> Vec<&ManagedWindow> {
+        let mut windows = self.taskbar_windows();
+        // A window the order has not seen yet -- which `apply_window_list`
+        // makes impossible -- would go last rather than first.
+        windows.sort_by_key(|w| {
+            self.button_order
+                .iter()
+                .position(|id| *id == w.id)
+                .unwrap_or(usize::MAX)
+        });
+        windows
     }
 
     /// The applications pinned to the taskbar, in the order they are shown.
@@ -3172,6 +3276,16 @@ impl DesktopShell {
                 _ => {}
             }
         }
+        if self.window_press.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    self.drag_window_button_to(event.x, event.y);
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Release(_) => return self.finish_window_press(),
+                _ => {}
+            }
+        }
         if self.pin_drag.is_some() {
             match event.kind {
                 MouseEventKind::Move => {
@@ -3814,28 +3928,27 @@ impl DesktopShell {
                 ShellAction::Consumed
             }
             Hit::StartMenuPanel | Hit::PowerMenuPanel | Hit::TaskbarPanel => ShellAction::Consumed,
-            Hit::TaskbarButton(id) => ShellAction::Control(ShellRequest::window(
-                id,
-                // The button of the window you are already looking at
-                // minimises it — the taskbar button is a toggle, not a second
-                // way to focus what is already focused.
-                if self.focused_window == Some(id) {
-                    ShellControlAction::Minimize
-                } else {
-                    // `Activate`, not `Restore`: a window minimised while
-                    // maximised has to come back maximised, and restoring
-                    // would silently drop a state the user never asked to
-                    // leave. See the compositor's `activate_window`.
-                    ShellControlAction::Activate
-                },
-            )),
+            // The press only takes hold, as a pinned button's does: the
+            // release decides whether it was a click, which summons or
+            // minimises the window, or a drag along the row, which moves the
+            // button. See `finish_window_press`.
+            Hit::TaskbarButton(id) => {
+                let mut source = tray_dnd::DragSource::default();
+                source.on_press(id, x, y);
+                self.window_press = Some(WindowPress {
+                    source,
+                    was_focused: self.focused_window == Some(id),
+                });
+                ShellAction::Consumed
+            }
             // The desktop is the icon layer's. A press here selects an icon,
             // clears the selection, or starts a rubber-band, and the layer
             // answers whether it took it.
             //
             // It used to focus the window it thought was there, which was both
-            // a guess — the shell holds no window rectangles — and a change to
-            // a list the next event from the compositor would overwrite.
+            // a guess -- the shell knew no window rectangles then -- and a
+            // change to a list the next event from the compositor would
+            // overwrite.
             Hit::Desktop => {
                 let before = self.icons.selected_ids();
                 self.icons
@@ -4215,6 +4328,17 @@ impl DesktopShell {
         }
 
         self.windows = kept;
+        // The taskbar's own order follows the list without taking its order:
+        // a window that went leaves it, a window that arrived joins the end
+        // -- several arriving together, in the order they were stacked,
+        // which is the order they were opened in.
+        self.button_order.retain(|id| self.windows.contains_key(id));
+        for info in &list.windows {
+            let id = WindowId(info.id);
+            if self.windows.contains_key(&id) && !self.button_order.contains(&id) {
+                self.button_order.push(id);
+            }
+        }
         // Taken from the list rather than preserved: the compositor is the
         // authority on focus too, and "no window is focused" is a state it can
         // genuinely be in — every window minimised, or the desktop empty.
@@ -5607,6 +5731,15 @@ impl DesktopShell {
             );
         }
 
+        // The divider between the pinned buttons and the windows'.
+        if let Some(divider) = self.taskbar_divider_rect() {
+            fill(
+                &mut tree,
+                divider,
+                with_alpha(self.theme.taskbar_fg, TASKBAR_DIVIDER_ALPHA),
+            );
+        }
+
         // System tray (right side). Both items are placed from the display's
         // right edge inwards, so a wider clock — the date and weekday switches
         // roughly triple it — pushes the tray left instead of running off the
@@ -6586,7 +6719,8 @@ impl DesktopShell {
             // a program back on the bar the user had just taken off.
             return false;
         };
-        let to = self.pinned_drop_boundary(x);
+        let count = self.taskbar.pinned_apps().len();
+        let to = self.row_drop_index(0, count, from, x);
         if to == from {
             return false;
         }
@@ -6595,22 +6729,106 @@ impl DesktopShell {
         true
     }
 
-    /// Where in the pinned run a drop at `x` belongs.
+    /// Move a window's button along the row of window buttons, to the place
+    /// under the pointer. Answers whether anything moved.
     ///
-    /// Measured against each button's *midpoint*, so a button dropped on the
-    /// left half of its neighbour goes before it and on the right half after
-    /// it. Clamped to the run: a drag past the last pinned button lands at the
-    /// end rather than among the window buttons, which are not the pinned
-    /// list's to rearrange.
-    fn pinned_drop_boundary(&self, x: f32) -> usize {
-        let count = self.taskbar.pinned_apps().len();
-        for index in 0..count {
-            let button = self.taskbar_button_rect(index);
-            if x < button.x + button.w / 2.0 {
-                return index;
+    /// Only along its own row: the pinned buttons are launchers, in an order
+    /// of their own, and a window's button among them would be neither.
+    /// Carried off the bar, it stays where it last was.
+    fn drag_window_button_to(&mut self, x: f32, y: f32) -> bool {
+        let Some(press) = self.window_press.as_mut() else {
+            return false;
+        };
+        press.source.on_move(x, y);
+        if !press.source.is_dragging() {
+            return false;
+        }
+        let Some(id) = press.source.pressed_key() else {
+            return false;
+        };
+        if !self.taskbar_rect().contains(x, y) {
+            return false;
+        }
+        let shown: Vec<WindowId> = self.taskbar_button_windows().iter().map(|w| w.id).collect();
+        // Gone from the bar while it was held -- closed, or moved to another
+        // desktop. Nothing left to move.
+        let Some(from) = shown.iter().position(|w| *w == id) else {
+            return false;
+        };
+        let pins = self.taskbar.pinned_apps().len();
+        let to = self.row_drop_index(pins, shown.len(), from, x);
+        if to == from {
+            return false;
+        }
+        let mut row = shown.clone();
+        let moved = row.remove(from);
+        row.insert(to, moved);
+        // Written back into the places the shown windows hold in the whole
+        // order, so a window on another desktop keeps its own place.
+        let mut next = row.into_iter();
+        for slot in &mut self.button_order {
+            if shown.contains(slot)
+                && let Some(id) = next.next()
+            {
+                *slot = id;
             }
         }
-        count.saturating_sub(1)
+        true
+    }
+
+    /// Where, in a row of `count` taskbar buttons starting at slot
+    /// `first_slot`, the button at `from` belongs when dragged to `x`: after
+    /// every *other* button in the row whose middle `x` has passed. So it
+    /// moves one place each time the pointer crosses a neighbour's middle,
+    /// in either direction, and can never leave its row -- the pins' row and
+    /// the windows' row are each asked about separately.
+    ///
+    /// Counting only the others is the point. The rule this replaced
+    /// ("before the first button whose middle is right of `x`") counted the
+    /// dragged button's own middle too, so a pin dragged *rightwards* swapped
+    /// with its neighbour as soon as the pointer crossed its own centre -- a
+    /// few pixels into the drag -- while a leftward drag behaved.
+    fn row_drop_index(&self, first_slot: usize, count: usize, from: usize, x: f32) -> usize {
+        (0..count)
+            .filter(|&index| index != from)
+            .filter(|&index| {
+                let button = self.taskbar_button_rect(first_slot.saturating_add(index));
+                button.x + button.w / 2.0 < x
+            })
+            .count()
+    }
+
+    /// Let go of a pressed window button: a drag along the row already moved
+    /// it on the way here; a click summons the window -- or minimises it, if
+    /// it was the one in front when the button was pressed, since the
+    /// button is a toggle and not a second way to focus what is focused.
+    fn finish_window_press(&mut self) -> ShellAction {
+        let Some(mut press) = self.window_press.take() else {
+            return ShellAction::Consumed;
+        };
+        let id = press.source.pressed_key();
+        // Read before `on_release`, which resets the source.
+        let was_drag = press.source.on_release();
+        let Some(id) = id.filter(|_| !was_drag) else {
+            return ShellAction::Consumed;
+        };
+        // Closed between the press and the release: nothing to summon, and
+        // asking would only be refused.
+        if !self.windows.contains_key(&id) {
+            return ShellAction::Consumed;
+        }
+        ShellAction::Control(ShellRequest::window(
+            id,
+            if press.was_focused {
+                ShellControlAction::Minimize
+            } else {
+                // `Activate`, not `Restore`: a window minimised while
+                // maximised has to come back maximised, and restoring would
+                // silently drop a state the user never asked to leave. See
+                // the compositor's `activate_window`.
+                ShellControlAction::Activate
+            },
+        ))
     }
 
     /// Which pinned slot holds `exec`, if any.
@@ -6780,7 +6998,7 @@ impl DesktopShell {
 
     /// The gap in the pinned run a new button dropped at `x` goes into,
     /// `0..=len`: before the first button whose middle is right of `x`, or
-    /// after the last. Unlike [`pinned_drop_boundary`](Self::pinned_drop_boundary)
+    /// after the last. Unlike [`row_drop_index`](Self::row_drop_index)
     /// it can name the end, because a new button can go after the last one.
     fn pinned_insert_boundary(&self, x: f32) -> usize {
         let count = self.taskbar.pinned_apps().len();
@@ -11848,15 +12066,28 @@ mod overview_wiring_tests {
         ));
         let button = s.taskbar_button_rect(0);
         let (x, y) = (button.x + button.w / 2.0, button.y + button.h / 2.0);
+        let release = |s: &mut DesktopShell| {
+            s.handle_mouse(&MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Release(MouseButton::Left),
+            })
+        };
         // The control this is contrasted against: with the overview closed, the
-        // same press is the taskbar's and asks for something.
+        // same click is the taskbar's and asks for something -- on the
+        // release, since a press on a window's button only takes hold.
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
         assert!(
-            matches!(press(&mut s, x, y), ShellAction::Control(_)),
-            "the test's premise is wrong: that press is not a taskbar button"
+            matches!(release(&mut s), ShellAction::Control(_)),
+            "the test's premise is wrong: that click is not a taskbar button"
         );
 
         s.overview.show(overview::OverviewMode::AllWindows);
         assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+        assert!(
+            !matches!(release(&mut s), ShellAction::Control(_)),
+            "the click reached the taskbar through the overview"
+        );
     }
 
     #[test]

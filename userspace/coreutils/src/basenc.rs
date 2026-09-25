@@ -833,8 +833,10 @@ enum Request {
     Run(Settings),
 }
 
-/// `base64` and `base32`'s table.
-const FIXED_LONG_OPTIONS: &[(&str, Takes)] = &[
+/// `base64` and `base32`'s table. Named `LONG_OPTIONS`, and `basenc`'s
+/// `BASENC_LONG_OPTIONS`, so `scripts/getopt-ambiguity-check.py` can follow
+/// each bin here to its own table and hold it against GNU's.
+const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("decode", Takes::Nothing),
     ("wrap", Takes::Required),
     ("ignore-garbage", Takes::Nothing),
@@ -881,7 +883,7 @@ fn parse_args(program: Program, prog: Prog, args: &[OsString]) -> Result<Request
     let table = if program == Program::Basenc {
         BASENC_LONG_OPTIONS
     } else {
-        FIXED_LONG_OPTIONS
+        LONG_OPTIONS
     };
     let mut decode = false;
     let mut ignore_garbage = false;

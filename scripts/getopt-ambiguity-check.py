@@ -259,6 +259,30 @@ PAIR_RE = re.compile(r'\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*\)')
 DELEGATE_RE = re.compile(r"coreutils::([a-z_][a-z0-9_]*)::main\s*\(")
 
 
+# ...but ONE table per shared module is not always upstream's arrangement
+# either. `digest.c`'s `long_options` changes with the build: `b2sum` adds
+# `--length`, and `cksum` adds that and five more (`--algorithm`, `--base64`,
+# `--debug`, `--raw`, `--untagged`) under `#if HASH_ALGO_CKSUM`. So a module
+# may carry a table per build that differs, named for the bin --
+# `B2SUM_LONG_OPTIONS`, `CKSUM_LONG_OPTIONS` -- and a delegated bin is
+# compared against its own table when there is one, `LONG_OPTIONS` when
+# there is not. Before this, `b2sum` and `cksum` were compared against the
+# single-algorithm table and reported seven "missing" names that the
+# programs do accept (lane B, 2026-09-25): a false alarm, but one that
+# reads exactly like a real one, and the only fix it suggests is to break
+# the tables.
+def per_bin_table(stem: str) -> str:
+    """The name a shared module gives the table of the bin called ``stem``."""
+    return stem.upper().replace("-", "_") + "_LONG_OPTIONS"
+
+
+def table_head_re(name: str) -> re.Pattern[str]:
+    """``TABLE_HEAD_RE`` for a table called ``name``."""
+    return re.compile(
+        r"const\s+" + re.escape(name) + r"\s*:\s*&\[\([^\]]*?\)\]\s*=\s*"
+    )
+
+
 @dataclass
 class Table:
     util: str
@@ -376,14 +400,19 @@ def stem_of(rel: str) -> str:
     return parent[-2] if len(parent) >= 2 else name
 
 
-def parse_table(tree: gittree.Tree, rel: str) -> Table | None:
+def parse_table(tree: gittree.Tree, rel: str, prefer: str | None = None) -> Table | None:
+    """The table in ``rel``: the one named ``prefer`` if the file has it,
+    else ``LONG_OPTIONS``. ``prefer`` is only passed when following a
+    delegation; see ``per_bin_table``."""
     text = tree.read_text(rel)
     if text is None:
         # A path the tree does not have. `Tree` answers `None` rather than
         # raising precisely so this is an answer -- a bin that exists on disk
         # but not in the revision being judged is simply not in that push.
         return None
-    m = TABLE_HEAD_RE.search(text)
+    m = table_head_re(prefer).search(text) if prefer else None
+    if m is None:
+        m = TABLE_HEAD_RE.search(text)
     body = slice_body(text, m.end()) if m else None
     if body is None:
         d = DELEGATE_RE.search(text)
@@ -394,7 +423,7 @@ def parse_table(tree: gittree.Tree, rel: str) -> Table | None:
                 # table, and each is compared against its own GNU binary. That
                 # is not redundant — it is the only thing that would catch a
                 # table right for one algorithm and wrong for the other.
-                t = parse_table(tree, shared)
+                t = parse_table(tree, shared, prefer=per_bin_table(stem_of(rel)))
                 if t:
                     t.util = stem_of(rel)
                 return t
@@ -914,6 +943,41 @@ def selftest() -> int:
     rule("aliases")
     ta = Table(util="u", names=["alpha"], aliases={"alias": "alpha"})
     expect("alias-is-ours", compare_name_sets(ta, {"alpha", "alias"}, {}), [])
+
+    # 6. A delegated bin reads its own table from the shared module when the
+    #    module has one, and the shared table when it does not -- so `b2sum`
+    #    and `md5sum`, both `coreutils::digest::main`, are compared against
+    #    different tables, as upstream's builds of `digest.c` differ.
+    rule("per-bin-table")
+
+    class FakeTree:
+        def __init__(self, files: dict[str, str]) -> None:
+            self.files = files
+
+        def read_text(self, rel: str) -> str | None:
+            return self.files.get(rel)
+
+        def is_file(self, rel: str) -> bool:
+            return rel in self.files
+
+    tree = FakeTree({
+        f"{BIN_REL}/md5sum.rs": "fn main() { coreutils::digest::main(Build::Md5sum) }\n",
+        f"{BIN_REL}/b2sum.rs": "fn main() { coreutils::digest::main(Build::B2sum) }\n",
+        f"{SRC_REL}/digest.rs": (
+            "const LONG_OPTIONS: &[(&str, Takes)] = &[\n"
+            "    (\"check\", Takes::Nothing),\n"
+            "];\n"
+            "const B2SUM_LONG_OPTIONS: &[(&str, Takes)] = &[\n"
+            "    (\"length\", Takes::Required),\n"
+            "    (\"check\", Takes::Nothing),\n"
+            "];\n"
+        ),
+    })
+    md5 = parse_table(tree, f"{BIN_REL}/md5sum.rs")  # type: ignore[arg-type]
+    b2 = parse_table(tree, f"{BIN_REL}/b2sum.rs")  # type: ignore[arg-type]
+    expect("md5sum-shared", md5 and (md5.util, md5.names), ("md5sum", ["check"]))
+    expect("b2sum-own", b2 and (b2.util, b2.names), ("b2sum", ["length", "check"]))
+    expect("name", per_bin_table("sha1sum"), "SHA1SUM_LONG_OPTIONS")
 
     for f in failures:
         print(f"selftest FAIL {f}")

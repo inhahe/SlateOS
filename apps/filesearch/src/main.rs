@@ -1169,6 +1169,16 @@ pub fn unix_now() -> u64 {
 
 // ─── Search History ──────────────────────────────────────────────────
 
+/// How a remembered search is listed: what was searched for, how, and how
+/// many it found the last time it ran.
+///
+/// The count was kept with every search and read by nothing -- the
+/// pre-push write-only-fields gate named it -- while it is the one thing
+/// that tells two remembered searches for the same word apart.
+fn history_label(s: &SavedSearch) -> String {
+    format!("{} ({}) -- {} found", s.query, s.mode, s.result_count)
+}
+
 /// A saved/recent search
 #[derive(Debug, Clone)]
 pub struct SavedSearch {
@@ -2555,7 +2565,7 @@ impl FileSearchApp {
             for s in saved {
                 rows.push(FilterRow {
                     rect: Rect::new(x, fy, w, 22.0),
-                    label: format!("{} ({})", s.query, s.mode),
+                    label: history_label(s),
                     kind: FilterRowKind::Saved { id: s.id },
                 });
                 fy += 24.0;
@@ -2575,7 +2585,7 @@ impl FileSearchApp {
                 choice(
                     &mut rows,
                     &mut fy,
-                    format!("{} ({})", s.query, s.mode),
+                    history_label(s),
                     Target::Recent(s.id),
                     false,
                     24.0,
@@ -4923,6 +4933,37 @@ mod tests {
         app.criteria.mode = SearchMode::Glob;
         app.execute_search();
         assert_eq!(app.results.len(), 2); // main.rs, lib.rs
+    }
+
+    /// A remembered search says how many it found. The count was kept with
+    /// every search and read by nothing.
+    #[test]
+    fn a_remembered_search_says_how_many_it_found() {
+        let mut app = FileSearchApp::new();
+        app.launch = |_, _| Ok(());
+        populate_sample_index(&mut app.index);
+        for c in "report".chars() {
+            app.handle_event(&typed(c));
+        }
+        app.handle_event(&Event::Key(guitk::probe::press(Key::Enter)));
+        app.handle_event(&Event::Key(guitk::probe::press(Key::Enter)));
+        let found = app.results.len();
+        assert!(found > 0, "the sample index has no report");
+        let label = format!("report ({}) -- {found} found", app.criteria.mode);
+        let texts: Vec<String> = app
+            .frame(1280.0, 800.0)
+            .into_tree()
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.contains(&label),
+            "no {label:?} among {texts:?}"
+        );
     }
 
     /// **A search is remembered when something is opened from it -- not on

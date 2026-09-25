@@ -364,7 +364,6 @@ pub struct Settings {
     pub wind_unit: WindSpeedUnit,
     pub pressure_unit: PressureUnit,
     pub time_format: TimeFormat,
-    pub update_interval_min: u32,
 }
 
 impl Default for Settings {
@@ -374,7 +373,6 @@ impl Default for Settings {
             wind_unit: WindSpeedUnit::Kmh,
             pressure_unit: PressureUnit::Hpa,
             time_format: TimeFormat::H24,
-            update_interval_min: 30,
         }
     }
 }
@@ -1138,11 +1136,6 @@ impl WeatherApp {
             TimeFormat::H12 => TimeFormat::H24,
             TimeFormat::H24 => TimeFormat::H12,
         };
-    }
-
-    /// Set update interval (clamped to 5..=120 minutes).
-    pub fn set_update_interval(&mut self, minutes: u32) {
-        self.settings.update_interval_min = minutes.clamp(5, 120);
     }
 
     /// Scroll the hourly strip left/right.
@@ -3073,14 +3066,12 @@ impl App for WeatherApp {
 
     /// No clock, and that is a statement about the app rather than the trait.
     ///
-    /// `Settings::update_interval_min` says the forecast refreshes every thirty
-    /// minutes, is displayed in the settings view and can be changed — and
-    /// nothing is behind it. There is no weather source; every reading comes
-    /// from `sample_*` data compiled into the binary. Returning an interval here
-    /// would wake the machine on a schedule to redraw numbers that cannot
-    /// change, which is the cost `known-issues.md` lesson 47 is about, incurred
-    /// for no benefit. When a source exists this returns
-    /// `Duration::from_secs(u64::from(self.settings.update_interval_min) * 60)`.
+    /// There is no weather source, so there is nothing to refresh: a clock
+    /// here would wake the machine on a schedule to redraw numbers that cannot
+    /// change, which is the cost `known-issues.md` lesson 47 is about. The
+    /// refresh interval the settings once offered -- a field written, clamped
+    /// and tested, and read by nothing -- is gone with its row; when a source
+    /// exists, the interval comes back with it, and this returns it.
     /// See known-issues.md -> TD-C-WEATHER-HAS-A-REFRESH-INTERVAL-AND-NOTHING-TO-REFRESH.
     fn tick_interval(&self) -> Option<Duration> {
         None
@@ -3956,7 +3947,6 @@ mod tests {
         assert_eq!(s.wind_unit, WindSpeedUnit::Kmh);
         assert_eq!(s.pressure_unit, PressureUnit::Hpa);
         assert_eq!(s.time_format, TimeFormat::H24);
-        assert_eq!(s.update_interval_min, 30);
     }
 
     #[test]
@@ -4126,27 +4116,6 @@ mod tests {
         assert_eq!(app.settings.time_format, TimeFormat::H12);
         app.toggle_time_format();
         assert_eq!(app.settings.time_format, TimeFormat::H24);
-    }
-
-    #[test]
-    fn test_app_set_update_interval() {
-        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
-        app.set_update_interval(60);
-        assert_eq!(app.settings.update_interval_min, 60);
-    }
-
-    #[test]
-    fn test_app_set_update_interval_clamped_low() {
-        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
-        app.set_update_interval(1);
-        assert_eq!(app.settings.update_interval_min, 5);
-    }
-
-    #[test]
-    fn test_app_set_update_interval_clamped_high() {
-        let mut app = WeatherApp::with_sample_weather(800.0, 600.0);
-        app.set_update_interval(999);
-        assert_eq!(app.settings.update_interval_min, 120);
     }
 
     #[test]

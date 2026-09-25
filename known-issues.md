@@ -61717,6 +61717,9 @@ should be until it drives something; `Settings::update_interval_min` and
 `set_update_interval` stay for the source to use. What remains open is the
 source itself. (The sample weather the entry describes had already been
 removed on 2026-09-15; the app opens on a notice that it cannot fetch.)
+*Later the same day:* the field and its setter are gone too -- the pre-push
+write-only-fields gate refused them, written, clamped and tested and read by
+nothing but the tests. The interval comes back with the source.
 
 ### TD-C-FINANCE-IS-A-VIEWER-OVER-SAMPLE-DATA — 2026-09-04 — OPEN
 

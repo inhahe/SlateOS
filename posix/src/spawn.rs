@@ -389,35 +389,18 @@ pub(crate) const MAX_FD_MAP: usize = crate::fdtable::MAX_FDS;
 // posix_spawn_file_actions
 // ---------------------------------------------------------------------------
 
-/// Maximum number of file actions per spawn.
+/// How many action slots the first `add*` allocates; the array doubles each
+/// time it fills. glibc's `__posix_spawn_file_actions_realloc` starts at 8 and
+/// doubles too, and like glibc there is no limit but memory.
 ///
-/// Covers typical shell pipeline needs (a few close + dup2 pairs).
-const MAX_FILE_ACTIONS: usize = 16;
-
-/// Maximum path length stored inline in an open action.
-const ACTION_PATH_MAX: usize = 256;
-
-/// A single file action to execute in the child (POSIX order).
-#[derive(Clone, Copy)]
-// ALLOW: The large Open variant is intentional — all storage is inline
-// (no heap) so that FileAction is Copy and fits in fixed-size arrays
-// without dynamic allocation.  The size difference is acceptable here.
-#[allow(clippy::large_enum_variant)]
-#[allow(dead_code)] // Used when posix_spawn actually applies actions in child.
-enum FileAction {
-    /// Close a file descriptor.
-    Close { fd: Fd },
-    /// Duplicate `fd` to `newfd` (like dup2).
-    Dup2 { fd: Fd, newfd: Fd },
-    /// Open `path` with `oflag`/`mode` and assign to `fd`.
-    Open {
-        fd: Fd,
-        path: [u8; ACTION_PATH_MAX],
-        path_len: usize,
-        oflag: i32,
-        mode: ModeT,
-    },
-}
+/// There was one, 16 actions with paths of at most 255 bytes, stored inline,
+/// until 2026-09-25. Both caps were chosen when this libc's `malloc` was one
+/// mmap per allocation, so every allocation, however small, cost a 16 KiB
+/// region. Since the heap became dlmalloc (design-decisions.md §1101) a small
+/// allocation costs a small allocation, and the caps were refusing real
+/// programs for no remaining reason: a `posix_spawn` with a path longer than
+/// 255 bytes failed with `ENAMETOOLONG` that glibc never gives.
+const INITIAL_FILE_ACTIONS: usize = 8;
 
 /// File actions object for `posix_spawn` — **exactly the 80 bytes every C
 /// header declares**, with the actions themselves on the heap.
@@ -505,11 +488,16 @@ impl PosixSpawnFileActionsT {
     /// Actions recorded so far.
     ///
     /// `used` is `i32` to match the C layout, so it is narrowed here once
-    /// rather than at each of the six call sites.  It is only ever advanced
-    /// from 0 by `push`, which caps it at `MAX_FILE_ACTIONS`, so the value
-    /// is non-negative by construction.
+    /// rather than at each call site.  It is only ever advanced from 0 by
+    /// `push`, which keeps it at most `allocated`, so the value is
+    /// non-negative by construction.
     fn count(&self) -> usize {
         usize::try_from(self.used).unwrap_or(0)
+    }
+
+    /// Slots allocated behind `actions`; see [`Self::count`] on the narrowing.
+    fn capacity(&self) -> usize {
+        usize::try_from(self.allocated).unwrap_or(0)
     }
 
     /// The recorded actions, in the order they were added.
@@ -520,76 +508,56 @@ impl PosixSpawnFileActionsT {
         if self.actions.is_null() {
             return &[];
         }
-        // SAFETY: `actions` is non-null, so it came from `push`'s allocation
-        // of `MAX_FILE_ACTIONS` initialised slots, and `used <=
-        // MAX_FILE_ACTIONS` is `push`'s invariant.
+        // SAFETY: `actions` is non-null, so it came from `grow`, which
+        // allocated `allocated` slots; `push` initialised the first `used` of
+        // them and keeps `used <= allocated`.
         unsafe { core::slice::from_raw_parts(self.actions, self.count()) }
     }
 
-    /// Append one action, allocating the slot array on first use.
+    /// Append one action, growing the slot array when it is full.
     ///
-    /// Returns 0, or `ENOMEM` if the object is full or the allocation fails —
-    /// the two cases POSIX gives `posix_spawn_file_actions_add*` for running
-    /// out of room, which is why they are not distinguished here.
-    ///
-    /// # Why the cap stays, when glibc has none
-    ///
-    /// Lane A's report suggested dropping `MAX_FILE_ACTIONS` along with the
-    /// inline storage, since a growable array makes the `ENOMEM` a real one.
-    /// It is not local to this type: `MAX_FILE_ACTIONS` also sizes
-    /// [`OpenedHandles::fds`], and `MAX_FD_MAP >= 3 + MAX_FILE_ACTIONS` is
-    /// asserted against the **fd map handed to the kernel's spawn syscall**,
-    /// which is fixed-width. An uncapped action list would silently overrun
-    /// that map — or, via `OpenedHandles::push`'s bounds check, close a
-    /// descriptor the child was about to be handed. Lifting the cap therefore
-    /// means widening a kernel interface that lives in lane A's tree, so it is
-    /// not this fix.
-    ///
-    /// The cap is also what makes one allocation right: with it, the array is
-    /// 4608 bytes and cannot grow, so there is no `realloc` path to get wrong.
-    ///
-    /// The slot comes in by reference rather than by value: it is 288 bytes,
-    /// most of it the inline path, and passing it in registers-plus-stack-copy
-    /// at each of the five call sites is a copy the callee only makes again.
-    fn push(&mut self, slot: &FileActionSlot) -> i32 {
-        if self.count() >= MAX_FILE_ACTIONS {
+    /// Takes ownership of `slot`, its path included: the object owns it from
+    /// here until [`Self::release`], and if the append fails the path is freed
+    /// now. Returns 0, or `ENOMEM` if the array could not grow -- the error
+    /// POSIX gives the `posix_spawn_file_actions_add*` functions for running
+    /// out of memory.
+    fn push(&mut self, slot: FileActionSlot) -> i32 {
+        if (self.actions.is_null() || self.count() >= self.capacity()) && self.grow().is_none() {
+            slot.free_path();
             return errno::ENOMEM;
         }
-        if self.actions.is_null() {
-            // The whole array at once rather than glibc's doubling: our
-            // `malloc` is one mmap per allocation (see malloc.rs), so any
-            // request under a 16 KiB region costs a whole region — the 4608
-            // bytes here and glibc's initial 8 slots are charged identically.
-            //
-            // This is also why the path stays inline at 256 bytes rather than
-            // being `strdup`ed as lane A suggested: under a page-granular
-            // allocator a `strdup` per action costs a 16 KiB region *each*, so
-            // 16 opens would take 256 KiB where one flat array takes 16.
-            let bytes = MAX_FILE_ACTIONS.saturating_mul(size_of::<FileActionSlot>());
-            let raw = crate::malloc::malloc(bytes);
-            if raw.is_null() {
-                return errno::ENOMEM;
-            }
-            let slots = raw.cast::<FileActionSlot>();
-            let mut i = 0usize;
-            while i < MAX_FILE_ACTIONS {
-                // SAFETY: `slots` points to `MAX_FILE_ACTIONS` slots' worth of
-                // fresh, writable, uninitialised bytes; `i` is in range.  The
-                // slots must be *written*, never read, until initialised —
-                // hence `write`, not a `&mut` reference to a live value.
-                unsafe { slots.add(i).write(FileActionSlot::empty()) };
-                i = i.wrapping_add(1);
-            }
-            self.actions = slots;
-            self.allocated = i32::try_from(MAX_FILE_ACTIONS).unwrap_or(i32::MAX);
-            self.used = 0;
-        }
         let idx = self.count();
-        // SAFETY: `actions` is non-null and holds `MAX_FILE_ACTIONS`
-        // initialised slots; `idx < MAX_FILE_ACTIONS` from the cap above.
-        unsafe { *self.actions.add(idx) = *slot };
+        // SAFETY: `actions` holds `allocated` slots (`grow`), and
+        // `idx = used < allocated`, checked just above. The slot at `idx` is
+        // uninitialised memory, so it is written, not assigned.
+        unsafe { self.actions.add(idx).write(slot) };
         self.used = self.used.saturating_add(1);
         0
+    }
+
+    /// Double the slot array (or allocate its first `INITIAL_FILE_ACTIONS`).
+    ///
+    /// `realloc` moves the recorded slots with the block. That is sound: a
+    /// slot is plain data and a pointer to a path allocated separately, and
+    /// nothing points *into* the array.
+    fn grow(&mut self) -> Option<()> {
+        let new_cap = match self.capacity() {
+            0 => INITIAL_FILE_ACTIONS,
+            cap => cap.checked_mul(2)?,
+        };
+        // `allocated` is a C `int`; an array that cannot be counted in one is
+        // refused here as the allocation failure it would be anyway.
+        let new_allocated = i32::try_from(new_cap).ok()?;
+        let bytes = new_cap.checked_mul(size_of::<FileActionSlot>())?;
+        // SAFETY: `actions` is null or this object's own block from an earlier
+        // `grow`; `realloc(NULL, n)` is `malloc(n)`.
+        let raw = unsafe { crate::malloc::realloc(self.actions.cast::<u8>(), bytes) };
+        if raw.is_null() {
+            return None;
+        }
+        self.actions = raw.cast::<FileActionSlot>();
+        self.allocated = new_allocated;
+        Some(())
     }
 
     /// Release the slot array and return to the just-initialised state.
@@ -597,8 +565,11 @@ impl PosixSpawnFileActionsT {
     /// Idempotent, so a caller that destroys twice — or destroys an object it
     /// only ever `init`ed — does not double-free.
     fn release(&mut self) {
+        for slot in self.slots() {
+            slot.free_path();
+        }
         if !self.actions.is_null() {
-            // SAFETY: `actions` came from `crate::malloc::malloc` in `push`
+            // SAFETY: `actions` came from `crate::malloc::realloc` in `grow`
             // and is freed exactly once, because it is nulled immediately.
             unsafe { crate::malloc::free(self.actions.cast::<u8>()) };
         }
@@ -608,17 +579,20 @@ impl PosixSpawnFileActionsT {
     }
 }
 
-/// Internal slot — wraps `Option<FileAction>` in a fixed-size repr.
-#[derive(Clone, Copy)]
+/// One recorded file action.
+///
+/// `path` is the action's own copy of the caller's path -- a `malloc` block,
+/// NUL-terminated, owned by the object holding the slot and freed by its
+/// `release` -- or null for the actions that name no path.
 #[repr(C)]
 struct FileActionSlot {
-    /// 0 = empty, 1 = Close, 2 = Dup2, 3 = Open.
+    /// 1 = Close, 2 = Dup2, 3 = Open, 4 = Chdir, 5 = Closefrom.
     tag: u8,
     fd: Fd,
     newfd: Fd,
     oflag: i32,
     mode: ModeT,
-    path: [u8; ACTION_PATH_MAX],
+    path: *mut u8,
     path_len: usize,
 }
 
@@ -630,29 +604,69 @@ impl FileActionSlot {
             newfd: 0,
             oflag: 0,
             mode: 0,
-            path: [0; ACTION_PATH_MAX],
+            path: core::ptr::null_mut(),
             path_len: 0,
         }
     }
 
-    #[allow(dead_code)] // Used when posix_spawn actually applies actions in child.
-    fn to_action(self) -> Option<FileAction> {
-        match self.tag {
-            1 => Some(FileAction::Close { fd: self.fd }),
-            2 => Some(FileAction::Dup2 {
-                fd: self.fd,
-                newfd: self.newfd,
-            }),
-            3 => Some(FileAction::Open {
-                fd: self.fd,
-                path: self.path,
-                path_len: self.path_len,
-                oflag: self.oflag,
-                mode: self.mode,
-            }),
-            _ => None,
+    /// The path, without its terminator; empty for an action with none.
+    fn path_bytes(&self) -> &[u8] {
+        if self.path.is_null() {
+            return &[];
+        }
+        // SAFETY: a non-null `path` is `dup_path`'s block of `path_len + 1`
+        // bytes, which lives until `release` frees it.
+        unsafe { core::slice::from_raw_parts(self.path, self.path_len) }
+    }
+
+    /// The path with its terminator, as `open` takes it; `None` for an
+    /// action with none.
+    fn path_cstr(&self) -> Option<&[u8]> {
+        if self.path.is_null() {
+            return None;
+        }
+        let len = self.path_len.checked_add(1)?;
+        // SAFETY: as in `path_bytes`; the block includes the terminator.
+        Some(unsafe { core::slice::from_raw_parts(self.path, len) })
+    }
+
+    /// Free the path, if there is one. Only `release` and a failed `push`
+    /// call this, and neither uses the slot again.
+    fn free_path(&self) {
+        if !self.path.is_null() {
+            // SAFETY: a non-null `path` is `dup_path`'s `malloc` block, and
+            // each slot's is freed once: by `release`, or by the `push` that
+            // failed to take the slot.
+            unsafe { crate::malloc::free(self.path) };
         }
     }
+}
+
+/// Copy the C string `path` into a `malloc` block of its own, terminator and
+/// all, returning the block and the length without the terminator. `None` if
+/// the allocation fails.
+///
+/// glibc's `add*` functions `strdup` their path the same way, and accept any
+/// length: a path too long to use fails the spawn, with `ENAMETOOLONG`, when
+/// the action is carried out.
+///
+/// # Safety
+///
+/// `path` must be a valid, NUL-terminated C string.
+unsafe fn dup_path(path: *const u8) -> Option<(*mut u8, usize)> {
+    // SAFETY: `path` is a C string (this function's contract).
+    let len = unsafe { crate::file::c_strlen_pub(path) };
+    let block = crate::malloc::malloc(len.checked_add(1)?);
+    if block.is_null() {
+        return None;
+    }
+    // SAFETY: `block` holds `len + 1` fresh bytes and cannot overlap `path`,
+    // which is readable for `len` bytes (`c_strlen_pub`).
+    unsafe {
+        core::ptr::copy_nonoverlapping(path, block, len);
+        block.add(len).write(0);
+    }
+    Some((block, len))
 }
 
 /// Is `fd` acceptable to a `posix_spawn_file_actions_add*` call?
@@ -698,9 +712,10 @@ pub extern "C" fn posix_spawn_file_actions_init(acts: *mut PosixSpawnFileActions
 
 /// Destroy a file actions object.
 ///
-/// Frees the slot array allocated by the first `add*`.  A caller that
-/// `init`ed and never added anything frees nothing, and a caller that
-/// destroys twice is safe: `release` nulls the pointer as it frees it.
+/// Frees every action's copy of its path, then the slot array.  A caller
+/// that `init`ed and never added anything frees nothing, and a caller that
+/// destroys twice is safe: `release` nulls the pointer and zeroes the count
+/// as it frees them.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawn_file_actions_destroy(acts: *mut PosixSpawnFileActionsT) -> i32 {
     if !acts.is_null() {
@@ -731,7 +746,7 @@ pub extern "C" fn posix_spawn_file_actions_addclose(
     }
     // SAFETY: acts is non-null (checked above).
     let a = unsafe { &mut *acts };
-    a.push(&FileActionSlot {
+    a.push(FileActionSlot {
         tag: 1,
         fd,
         ..FileActionSlot::empty()
@@ -759,7 +774,7 @@ pub extern "C" fn posix_spawn_file_actions_adddup2(
     }
     // SAFETY: acts is non-null (checked above).
     let a = unsafe { &mut *acts };
-    a.push(&FileActionSlot {
+    a.push(FileActionSlot {
         tag: 2,
         fd,
         newfd,
@@ -789,23 +804,19 @@ pub extern "C" fn posix_spawn_file_actions_addopen(
     if acts.is_null() || path.is_null() {
         return errno::EFAULT;
     }
-    // SAFETY: acts and path are non-null (checked above).
+    // SAFETY: acts is non-null (checked above).
     let a = unsafe { &mut *acts };
-    let path_len = unsafe { crate::file::c_strlen_pub(path) };
-    if path_len >= ACTION_PATH_MAX {
-        return errno::ENAMETOOLONG;
-    }
-    let mut stored_path = [0u8; ACTION_PATH_MAX];
-    // SAFETY: path is readable for path_len bytes per c_strlen_pub contract.
-    unsafe {
-        core::ptr::copy_nonoverlapping(path, stored_path.as_mut_ptr(), path_len);
-    }
-    a.push(&FileActionSlot {
+    // SAFETY: path is non-null (checked above) and a C string by the caller's
+    // contract.
+    let Some((stored, path_len)) = (unsafe { dup_path(path) }) else {
+        return errno::ENOMEM;
+    };
+    a.push(FileActionSlot {
         tag: 3,
         fd,
         oflag,
         mode,
-        path: stored_path,
+        path: stored,
         path_len,
         ..FileActionSlot::empty()
     })
@@ -838,21 +849,18 @@ pub extern "C" fn posix_spawn_file_actions_addchdir_np(
     if acts.is_null() || path.is_null() {
         return errno::EFAULT;
     }
+    // SAFETY: acts is non-null (checked above).
     let a = unsafe { &mut *acts };
-    let path_len = unsafe { crate::file::c_strlen_pub(path) };
-    if path_len >= ACTION_PATH_MAX {
-        return errno::ENAMETOOLONG;
-    }
-    let mut stored_path = [0u8; ACTION_PATH_MAX];
-    // SAFETY: path is readable for path_len bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(path, stored_path.as_mut_ptr(), path_len);
-    }
-    // Tag 4 = Chdir action (not yet processed by spawn — forward-compatible).
-    a.push(&FileActionSlot {
+    // SAFETY: path is non-null (checked above) and a C string by the caller's
+    // contract.
+    let Some((stored, path_len)) = (unsafe { dup_path(path) }) else {
+        return errno::ENOMEM;
+    };
+    // Tag 4: carried out by `ChildCwd::change_to` when the spawn runs.
+    a.push(FileActionSlot {
         tag: 4,
         fd: -1,
-        path: stored_path,
+        path: stored,
         path_len,
         ..FileActionSlot::empty()
     })
@@ -883,7 +891,7 @@ pub extern "C" fn posix_spawn_file_actions_addclosefrom_np(
     }
     let a = unsafe { &mut *acts };
     // Tag 5 = Closefrom action.
-    a.push(&FileActionSlot {
+    a.push(FileActionSlot {
         tag: 5,
         fd: lowfd,
         ..FileActionSlot::empty()
@@ -1411,7 +1419,7 @@ pub fn handle_type_to_kind_for(handle_type: u8, handle: u64) -> crate::fdtable::
 /// `Drop` rather than by a call each return has to remember.
 struct OpenedHandles {
     /// Parent descriptors opened by `apply_file_actions`.
-    fds: [Fd; MAX_FILE_ACTIONS],
+    fds: [Fd; MAX_FD_MAP],
     /// Number of valid entries.
     count: usize,
 }
@@ -1419,20 +1427,27 @@ struct OpenedHandles {
 impl OpenedHandles {
     const fn new() -> Self {
         Self {
-            fds: [-1; MAX_FILE_ACTIONS],
+            fds: [-1; MAX_FD_MAP],
             count: 0,
         }
     }
 
-    /// Record a descriptor to close.  There is one slot per file action and
-    /// at most one open per action, so this cannot run out; if it ever did,
-    /// the descriptor is closed at once rather than leaked.
-    fn push(&mut self, fd: Fd) {
-        if self.count < MAX_FILE_ACTIONS {
-            self.fds[self.count] = fd;
+    /// Record a descriptor to close after the spawn.
+    ///
+    /// One per `open` action, up to the size of the child's table -- more
+    /// opens than a child has descriptors is past anything a spawn can mean.
+    /// Past that the descriptor is closed now and the action fails with
+    /// `ENOMEM`: its handle was about to be handed to the child, so it must
+    /// not be closed while the spawn still goes ahead.
+    fn push(&mut self, fd: Fd) -> Result<(), i32> {
+        if let Some(slot) = self.fds.get_mut(self.count) {
+            *slot = fd;
             self.count = self.count.wrapping_add(1);
+            Ok(())
         } else {
+            // Nothing to report from the close: the action is failing anyway.
             let _ = crate::file::close(fd);
+            Err(errno::ENOMEM)
         }
     }
 }
@@ -1577,21 +1592,19 @@ impl ChildCwd {
         Ok(())
     }
 
-    /// `path` as an `open` in the child would find it, NUL-terminated in
-    /// `out`: resolved against the child's directory once a `chdir` has moved
-    /// it, and passed through as it stands before that -- when the child's
-    /// directory and ours are the same one.
+    /// `path_z` -- a path with its terminator -- as an `open` in the child
+    /// would find it, NUL-terminated: resolved against the child's directory
+    /// into `out` once a `chdir` has moved it, and passed through as it stands
+    /// before that, when the child's directory and ours are the same one.
     fn open_path<'a>(
         &self,
-        path: &'a [u8; ACTION_PATH_MAX],
-        path_len: usize,
+        path_z: &'a [u8],
         out: &'a mut [u8; crate::unistd::PATH_MAX],
     ) -> Result<&'a [u8], i32> {
-        let given = path.get(..path_len).ok_or(errno::ENAMETOOLONG)?;
+        // Every slot's path carries its terminator (`dup_path`).
+        let given = path_z.strip_suffix(&[0]).ok_or(errno::EINVAL)?;
         if !self.moved || given.first() == Some(&b'/') {
-            // `path` is NUL-padded past `path_len` (the add functions refuse a
-            // length of ACTION_PATH_MAX or more), so it is already a C string.
-            return path.get(..=path_len).ok_or(errno::ENAMETOOLONG);
+            return Ok(path_z);
         }
         let mut resolved = [0u8; crate::unistd::PATH_MAX];
         let n = crate::unistd::resolve_path_against(self.as_bytes(), given, &mut resolved)
@@ -1660,12 +1673,13 @@ fn apply_file_actions(
                     return Err(errno::ENOENT);
                 }
                 let mut in_child = [0u8; crate::unistd::PATH_MAX];
-                let open_path = cwd.open_path(&slot.path, slot.path_len, &mut in_child)?;
+                let given = slot.path_cstr().ok_or(errno::ENOENT)?;
+                let open_path = cwd.open_path(given, &mut in_child)?;
                 let fd = crate::file::open(open_path.as_ptr(), slot.oflag, slot.mode);
                 if fd < 0 {
                     return Err(errno::get_errno());
                 }
-                opened.push(fd);
+                opened.push(fd)?;
                 let entry = fdtable::get_fd(fd).ok_or(errno::EBADF)?;
                 // `O_CLOEXEC` on an action's open means the child's exec
                 // closes it at once, so the child never has it.
@@ -1677,7 +1691,7 @@ fn apply_file_actions(
             }
             4 => {
                 // chdir: see `ChildCwd::change_to`.
-                cwd.change_to(slot.path.get(..slot.path_len).unwrap_or(&[]))?;
+                cwd.change_to(slot.path_bytes())?;
             }
             5 => {
                 // closefrom(lowfd): every descriptor from lowfd up.
@@ -3531,89 +3545,6 @@ mod tests {
         assert_eq!(slot.path_len, 0);
     }
 
-    #[test]
-    fn test_file_action_slot_to_action_empty() {
-        let slot = FileActionSlot::empty();
-        assert!(slot.to_action().is_none());
-    }
-
-    #[test]
-    fn test_file_action_slot_to_action_close() {
-        let slot = FileActionSlot {
-            tag: 1,
-            fd: 5,
-            ..FileActionSlot::empty()
-        };
-        let action = slot.to_action();
-        assert!(action.is_some());
-        match action.unwrap() {
-            FileAction::Close { fd } => assert_eq!(fd, 5),
-            _ => panic!("expected Close"),
-        }
-    }
-
-    #[test]
-    fn test_file_action_slot_to_action_dup2() {
-        let slot = FileActionSlot {
-            tag: 2,
-            fd: 3,
-            newfd: 7,
-            ..FileActionSlot::empty()
-        };
-        let action = slot.to_action();
-        match action.unwrap() {
-            FileAction::Dup2 { fd, newfd } => {
-                assert_eq!(fd, 3);
-                assert_eq!(newfd, 7);
-            }
-            _ => panic!("expected Dup2"),
-        }
-    }
-
-    #[test]
-    fn test_file_action_slot_to_action_open() {
-        let mut path = [0u8; ACTION_PATH_MAX];
-        path[0] = b'/';
-        path[1] = b'f';
-        path[2] = b'o';
-        path[3] = b'o';
-        let slot = FileActionSlot {
-            tag: 3,
-            fd: 1,
-            oflag: 0x42,
-            mode: 0o644,
-            path,
-            path_len: 4,
-            ..FileActionSlot::empty()
-        };
-        let action = slot.to_action();
-        match action.unwrap() {
-            FileAction::Open {
-                fd,
-                path: p,
-                path_len,
-                oflag,
-                mode,
-            } => {
-                assert_eq!(fd, 1);
-                assert_eq!(path_len, 4);
-                assert_eq!(&p[..4], b"/foo");
-                assert_eq!(oflag, 0x42);
-                assert_eq!(mode, 0o644);
-            }
-            _ => panic!("expected Open"),
-        }
-    }
-
-    #[test]
-    fn test_file_action_slot_to_action_invalid_tag() {
-        let slot = FileActionSlot {
-            tag: 99,
-            ..FileActionSlot::empty()
-        };
-        assert!(slot.to_action().is_none());
-    }
-
     // -- posix_spawn_file_actions_init/destroy --
 
     #[test]
@@ -3697,19 +3628,65 @@ mod tests {
         assert_eq!(ret, errno::EBADF);
     }
 
+    /// There is no action cap, as there is none in glibc: the array grows.
+    /// It stopped at 16 until 2026-09-25, with `ENOMEM` on the 17th.
     #[test]
-    fn test_file_actions_addclose_full() {
+    fn test_file_actions_grow_past_the_old_cap() {
         let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
-        // Fill to capacity.
-        for i in 0..MAX_FILE_ACTIONS {
-            let ret = posix_spawn_file_actions_addclose(&raw mut acts, i as Fd);
-            assert_eq!(ret, 0);
+        for i in 0..200 {
+            assert_eq!(
+                posix_spawn_file_actions_addclose(&raw mut acts, i % 64),
+                0,
+                "action {i}"
+            );
         }
-        assert_eq!(acts.count(), MAX_FILE_ACTIONS);
-        // One more should fail.
-        let ret = posix_spawn_file_actions_addclose(&raw mut acts, 99);
-        assert_eq!(ret, errno::ENOMEM);
+        assert_eq!(acts.count(), 200);
+        assert!(acts.capacity() >= 200);
+        // Replayed in the order they were added, across every growth.
+        for (i, slot) in acts.slots().iter().enumerate() {
+            assert_eq!((slot.tag, slot.fd), (1, (i % 64) as Fd), "slot {i}");
+        }
+        posix_spawn_file_actions_destroy(&raw mut acts);
+        assert_eq!(acts.count(), 0);
+    }
+
+    /// Each action's path is its own copy, freed by `destroy`, and an `open`
+    /// or `chdir` path is no longer capped at 255 bytes.
+    #[test]
+    fn test_file_action_paths_are_owned_copies_of_any_length() {
+        let before = crate::malloc::live_allocations::count();
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+
+        let mut long = std::vec![b'/'];
+        long.extend(std::iter::repeat_n(b'd', 1000));
+        long.push(0);
+        let mut short = b"/tmp/x\0".to_vec();
+        assert_eq!(
+            posix_spawn_file_actions_addopen(&raw mut acts, 3, long.as_ptr(), 0, 0),
+            0
+        );
+        assert_eq!(
+            posix_spawn_file_actions_addchdir_np(&raw mut acts, short.as_ptr()),
+            0
+        );
+        // The caller's buffers can change or go; the object keeps its copies.
+        long.fill(b'z');
+        short.fill(b'z');
+        let slots = acts.slots();
+        assert_eq!(slots[0].path_len, 1001);
+        assert_eq!(slots[0].path_bytes().first(), Some(&b'/'));
+        assert!(slots[0].path_bytes()[1..].iter().all(|&b| b == b'd'));
+        assert_eq!(slots[0].path_cstr().and_then(|z| z.last()), Some(&0));
+        assert_eq!(slots[1].path_bytes(), b"/tmp/x");
+
+        posix_spawn_file_actions_destroy(&raw mut acts);
+        assert_eq!(
+            crate::malloc::live_allocations::count(),
+            before,
+            "destroy frees the slot array and every path"
+        );
     }
 
     // -- posix_spawn_file_actions_adddup2 --
@@ -4454,8 +4431,6 @@ mod tests {
         // One slot per fd-table entry, so no open descriptor is ever out of
         // the child's reach. It was 32, which dropped fds 32..256 silently.
         assert_eq!(MAX_FD_MAP, crate::fdtable::MAX_FDS);
-        // Must be large enough for 3 standard fds + MAX_FILE_ACTIONS.
-        assert!(MAX_FD_MAP >= 3 + MAX_FILE_ACTIONS);
     }
 
     // -----------------------------------------------------------------------
@@ -4507,20 +4482,20 @@ mod tests {
         assert_eq!(acts.slots()[0].tag, 4, "chdir action tag should be 4");
     }
 
+    /// A `chdir` after sixteen other actions is recorded like any other: the
+    /// array grows (it was full, and refused with `ENOMEM`, until 2026-09-25).
     #[test]
-    fn test_addchdir_np_full() {
+    fn test_addchdir_np_after_sixteen_actions() {
         let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
-        // Fill all slots.
-        for _ in 0..MAX_FILE_ACTIONS {
-            posix_spawn_file_actions_addclose(&raw mut acts, 0);
+        for _ in 0..16 {
+            assert_eq!(posix_spawn_file_actions_addclose(&raw mut acts, 0), 0);
         }
         let ret = posix_spawn_file_actions_addchdir_np(&raw mut acts, b"/tmp\0".as_ptr());
-        assert_eq!(
-            ret,
-            crate::errno::ENOMEM,
-            "full actions should return ENOMEM"
-        );
+        assert_eq!(ret, 0);
+        assert_eq!(acts.slots()[16].tag, 4);
+        assert_eq!(acts.slots()[16].path_bytes(), b"/tmp");
+        posix_spawn_file_actions_destroy(&raw mut acts);
     }
 
     // -----------------------------------------------------------------------
@@ -4594,18 +4569,18 @@ mod tests {
     }
 
     #[test]
-    fn test_addclosefrom_np_full() {
+    fn test_addclosefrom_np_after_sixteen_actions() {
         let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
-        for _ in 0..MAX_FILE_ACTIONS {
-            posix_spawn_file_actions_addclose(&raw mut acts, 0);
+        for _ in 0..16 {
+            assert_eq!(posix_spawn_file_actions_addclose(&raw mut acts, 0), 0);
         }
-        let ret = posix_spawn_file_actions_addclosefrom_np(&raw mut acts, 3);
         assert_eq!(
-            ret,
-            crate::errno::ENOMEM,
-            "full actions should return ENOMEM"
+            posix_spawn_file_actions_addclosefrom_np(&raw mut acts, 3),
+            0
         );
+        assert_eq!((acts.slots()[16].tag, acts.slots()[16].fd), (5, 3));
+        posix_spawn_file_actions_destroy(&raw mut acts);
     }
 
     // -----------------------------------------------------------------------
@@ -5395,32 +5370,23 @@ mod tests {
     fn an_open_after_a_chdir_is_resolved_in_the_childs_directory() {
         fresh_spawn_cwd(b"/home");
         crate::unistd::host_dirs::add(b"/srv");
-        let mut slot_path = [0u8; ACTION_PATH_MAX];
-        slot_path[..7].copy_from_slice(b"log.txt");
+        let rel = b"log.txt\0";
         let mut out = [0u8; crate::unistd::PATH_MAX];
 
         let mut cwd = ChildCwd::of_parent();
         assert_eq!(
-            cwd.open_path(&slot_path, 7, &mut out),
-            Ok(&b"log.txt\0"[..]),
+            cwd.open_path(rel, &mut out),
+            Ok(&rel[..]),
             "no chdir yet: the child is where we are"
         );
 
         cwd.change_to(b"/srv").expect("/srv exists");
         let mut out = [0u8; crate::unistd::PATH_MAX];
-        assert_eq!(
-            cwd.open_path(&slot_path, 7, &mut out),
-            Ok(&b"/srv/log.txt\0"[..])
-        );
+        assert_eq!(cwd.open_path(rel, &mut out), Ok(&b"/srv/log.txt\0"[..]));
 
-        let mut abs = [0u8; ACTION_PATH_MAX];
-        abs[..8].copy_from_slice(b"/etc/foo");
+        let abs = b"/etc/foo\0";
         let mut out = [0u8; crate::unistd::PATH_MAX];
-        assert_eq!(
-            cwd.open_path(&abs, 8, &mut out),
-            Ok(&b"/etc/foo\0"[..]),
-            "absolute"
-        );
+        assert_eq!(cwd.open_path(abs, &mut out), Ok(&abs[..]), "absolute");
     }
 
     fn v1_probe() -> SpawnExArgs {

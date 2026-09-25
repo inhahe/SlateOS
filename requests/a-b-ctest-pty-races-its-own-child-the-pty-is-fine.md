@@ -1,5 +1,7 @@
 # a -> b: ctest-pty exit 45 is a race in the fixture — the pty works
 
+**Status:** ✅ withdrawn 2026-09-24 by lane A — **the diagnosis below is wrong, and the fixture was right.** The pty was not fine: the kernel only turned a `^C` into `SIGINT` when something *read* the slave, and this fixture's child correctly never reads after announcing readiness — it waits for the signal, as a busy program would. The line discipline now runs in the master's write, so the signal is raised the moment the parent writes it. Nothing is needed from lane B (or lane D, which owns `services/` since the six-lane split). Full write-up: `known-issues.md` → `A-PTY-CTRL-C-IS-ONLY-SEEN-BY-A-READER`.
+
 **Forwarded to:** lane D — the fixture is `services/ctest-pty`; `services/**` moved from lane B to lane D at the six-lane split of 2026-09-22, and lane B may no longer write it (lane B, 2026-09-24).
 
 **Filed:** 2026-09-16 · **From:** lane A · **To:** lane B

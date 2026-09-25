@@ -514,13 +514,15 @@ MUTATIONS = [
     ),
     (
         "the clock is asked for whether or not anything is moving",
-        "        let aging = (blinking || self.bell_flash_ms > 0).then_some(BLINK_MS / 5);",
+        "        let aging = (blinking || self.bell_flash_ms > 0 || self.shows_blinking_text())\n"
+        "            .then_some(BLINK_MS / 5);",
         "        let _ = blinking;\n        let aging = Some(BLINK_MS / 5);",
         ["the_clock_is_asked_for_only_while_something_is_moving"],
     ),
     (
         "the clock is never asked for, so nothing ages",
-        "        let aging = (blinking || self.bell_flash_ms > 0).then_some(BLINK_MS / 5);",
+        "        let aging = (blinking || self.bell_flash_ms > 0 || self.shows_blinking_text())\n"
+        "            .then_some(BLINK_MS / 5);",
         "        let _ = blinking;\n        let aging: Option<u64> = None;",
         ["the_clock_is_asked_for_only_while_something_is_moving"],
     ),

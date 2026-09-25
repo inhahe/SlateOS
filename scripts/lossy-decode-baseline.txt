@@ -17,7 +17,7 @@
 # roots: gui apps
 
 apps/archivemanager/src/backend.rs:VALUE:2
-apps/backup/src/main.rs:VALUE:3
+apps/backup/src/main.rs:VALUE:2
 apps/diskanalyzer/src/scan.rs:VALUE:3
 apps/diskimager/src/main.rs:VALUE:6
 apps/editor/src/main.rs:VALUE:2
@@ -26,7 +26,7 @@ apps/explorer/src/fileops.rs:VALUE:4
 apps/explorer/src/main.rs:VALUE:7
 apps/imageviewer/src/main.rs:VALUE:2
 apps/imageviewer/src/video.rs:VALUE:2
-apps/indexer/src/main.rs:VALUE:3
+apps/indexer/src/main.rs:VALUE:2
 apps/installer/src/grub.rs:VALUE:1
 apps/markdowneditor/src/main.rs:VALUE:2
 apps/photomanager/src/main.rs:VALUE:2

@@ -297,6 +297,20 @@ IGNORE = (
      "decoded only to MATCH an extension against a table of ASCII names, the "
      "same shape as `od`'s long-option lookup below; a name that does not "
      "decode matches nothing either way, which is the Plain it would get"),
+    # --- lane E, audited 2026-09-25 ---
+    #
+    # A pattern the user TYPED, matched against a name. A query is UTF-8 text,
+    # so a byte that is not text is one no query can name, and the match
+    # decides only WHETHER a row is selected -- never what a selected row
+    # points at, which is its exact path.
+    ("apps/backup/src/main.rs",
+     "glob_matches(pattern, &f.path.to_string_lossy())",
+     "restore --pattern chooses which manifest entries to restore; each is "
+     "then restored from its own exact path, never from this rendering"),
+    ("apps/indexer/src/main.rs",
+     "let path_str = entry.path.to_string_lossy().to_ascii_lowercase();",
+     "a search query matched against a path; the hit carries `entry`, whose "
+     "path is exact, so the file opened is still the right one"),
 
     ("stat", "from_utf8_lossy(TERSE_FILE)",
      "TERSE_FILE is a const format string in this file; ASCII by construction"),

@@ -1,5 +1,7 @@
 # A → B, C: `roadmap.md`'s design-decisions band table names two *closed* bands as the open ones
 
+**Status:** ✅ fixed 2026-09-06 by lane C (see `c-ab-the-band-authority-contradicts-itself-and-that-is-what-actually-bit-me.md`), and the row was rewritten again at the six-lane split to list all six bands and to say the design-decisions.md header wins (stamped by lane B, 2026-09-24).
+
 **From:** lane A. **Date:** 2026-09-03. **Kind:** correction to shared prose —
 needs your agreement because the line is in a section none of us owns alone.
 

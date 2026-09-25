@@ -52,7 +52,8 @@
 //! - `tcsendbreak` — send break condition (stub)
 //! - `tcdrain` — wait for output to complete (stub, writes are synchronous)
 //! - `tcflow` — suspend/restart I/O (stub, no flow control)
-//! - `tcflush` — discard pending I/O (stub, no buffered data)
+//! - `tcflush` — discard a terminal's queued input and/or output
+//!   (`SYS_TTY_FLUSH`; also `ioctl(TCFLSH)` and `tcsetattr(TCSAFLUSH)`)
 //!
 //! ## isatty / ttyname
 //!
@@ -82,6 +83,10 @@ pub const TCSETS: u64 = 0x5402;
 pub const TCSETSW: u64 = 0x5403;
 /// Set termios after draining output and flushing input.
 pub const TCSETSF: u64 = 0x5404;
+/// Discard queued terminal input and/or output; the argument is the queue
+/// selector (`TCIFLUSH`/`TCOFLUSH`/`TCIOFLUSH`) passed by value, not a
+/// pointer. What `tcflush` is, in glibc and here.
+pub const TCFLSH: u64 = 0x540B;
 /// Make this the controlling terminal (for session leaders).
 pub const TIOCSCTTY: u64 = 0x540E;
 /// Get foreground process group of terminal.
@@ -680,7 +685,8 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
         FIONBIO => handle_fionbio(fd, arg),
         FIONREAD => handle_fionread(entry.kind, entry.handle, arg),
         TCGETS => handle_tcgets(entry.kind, entry.handle, arg),
-        TCSETS | TCSETSW | TCSETSF => handle_tcsets(entry.kind, entry.handle, arg),
+        TCSETS | TCSETSW | TCSETSF => handle_tcsets(entry.kind, entry.handle, request, arg),
+        TCFLSH => handle_tcflsh(entry.kind, entry.handle, arg),
         TIOCGPGRP => handle_tiocgpgrp(fd, entry.kind, entry.handle, arg),
         TIOCSPGRP => handle_tiocspgrp(fd, entry.kind, entry.handle, arg),
         TIOCSCTTY => handle_tiocsctty(entry.kind, entry.handle),
@@ -993,17 +999,21 @@ fn handle_tcgets(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
 /// installs it via `SYS_TTY_SET_TERMIOS`, so raw mode, `ECHO` and the
 /// control characters take real effect on the next console read.
 ///
-/// All three requests behave identically: `TCSETSW` waits for queued output
-/// to drain and `TCSETSF` additionally flushes pending input, and we have
-/// neither an output queue nor a kernel-side input queue to act on.  The
-/// Linux shim collapses the same three for the same reason.
+/// `TCSETSW` is `TCSETS`: it waits for queued output to drain, and there is
+/// no output queue. `TCSETSF` is not quite: since 2026-09-24 the kernel's line
+/// discipline runs as input arrives, so a terminal has a real input queue,
+/// and `TCSETSF` -- `tcsetattr(TCSAFLUSH)`, what a password prompt uses to
+/// throw away type-ahead -- empties it with `SYS_TTY_FLUSH` once the new
+/// settings are in. Linux flushes first; the kernel's own `TCSETSF` flushes
+/// after a *successful* set, so a refused request discards nothing, and this
+/// does the same. The end state is identical either way.
 ///
 /// This was previously accepted and thrown away, on the rationale that "our
 /// console has no configurable line discipline".  That stopped being true
 /// when `kernel/src/tty.rs` gained one; the comment outlived the fact, and
 /// every native-ABI program that asked for raw mode silently got cooked
 /// mode instead.
-fn handle_tcsets(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+fn handle_tcsets(kind: HandleKind, handle: u64, request: u64, arg: *mut u8) -> i32 {
     let Some(term) = terminal_arg(kind, handle) else {
         errno::set_errno(errno::ENOTTY);
         return -1;
@@ -1014,11 +1024,102 @@ fn handle_tcsets(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
     }
     // SAFETY: Caller must provide a buffer large enough for Termios.
     let t = unsafe { core::ptr::read_unaligned(arg.cast::<Termios>()) };
-    if set_kernel_termios(term, &t) {
-        0
-    } else {
+    if !set_kernel_termios(term, &t) {
         // errno already set by the translation of the kernel's error.
-        -1
+        return -1;
+    }
+    if request == TCSETSF {
+        // Not expected to fail once the set has succeeded on the same
+        // terminal -- the selector is fixed and valid -- but if it does, the
+        // caller asked for its type-ahead to be discarded and must not be told
+        // it was.
+        if let Err(e) = flush_terminal(term, TCIFLUSH) {
+            errno::set_errno(e);
+            return -1;
+        }
+    }
+    0
+}
+
+/// TCFLSH -- `tcflush`: discard queued input, output or both.
+///
+/// The selector arrives by value in the pointer slot, as it does from C's
+/// variadic `ioctl(fd, TCFLSH, TCIFLUSH)`. Only the low 32 bits are the `int`:
+/// a variadic `int` travels in a 64-bit register whose upper half the caller
+/// need not clear.
+///
+/// Error order is Linux's: a descriptor that is not a terminal is `ENOTTY`
+/// before an unknown selector is `EINVAL`.
+fn handle_tcflsh(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+    let Some(term) = terminal_arg(kind, handle) else {
+        errno::set_errno(errno::ENOTTY);
+        return -1;
+    };
+    let queue = arg as usize as u32 as i32;
+    if !(TCIFLUSH..=TCIOFLUSH).contains(&queue) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    match flush_terminal(term, queue) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+/// Discard a terminal's queued input, output or both (`SYS_TTY_FLUSH`).
+///
+/// `term` follows [`terminal_arg`]'s convention, which is the syscall's own:
+/// `0` for the caller's controlling terminal, an owned pty handle otherwise.
+/// `queue` is `TCIFLUSH`, `TCOFLUSH` or `TCIOFLUSH`, already validated.
+///
+/// A kernel older than the call answers "no such syscall", and that is
+/// success: on such a kernel the line discipline ran inside `read`, so
+/// typed-ahead input was raw bytes nobody had looked at yet and there was no
+/// queue to empty. Discarding nothing is the truthful result there, and it is
+/// what `tcflush` always returned before the call existed.
+fn flush_terminal(term: u64, queue: i32) -> Result<(), i32> {
+    #[cfg(target_os = "none")]
+    {
+        let ret = crate::syscall::syscall2(crate::syscall::SYS_TTY_FLUSH, term, queue as u64);
+        if ret >= 0 {
+            return Ok(());
+        }
+        match errno::errno_for(ret) {
+            errno::ENOSYS => Ok(()),
+            e => Err(e),
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_flush::record(term, queue);
+        Ok(())
+    }
+}
+
+/// Host-build record of the flushes asked for, so the tests can check that
+/// `tcflush`, `ioctl(TCFLSH)` and `tcsetattr(TCSAFLUSH)` issue the right one --
+/// the host has no kernel to flush anything. Per-thread, like `host_termios`.
+#[cfg(not(target_os = "none"))]
+mod host_flush {
+    extern crate std;
+    use core::cell::RefCell;
+    use std::vec::Vec;
+
+    std::thread_local! {
+        static FLUSHES: RefCell<Vec<(u64, i32)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(term: u64, queue: i32) {
+        FLUSHES.with(|f| f.borrow_mut().push((term, queue)));
+    }
+
+    /// The flushes recorded on this thread since the last call, oldest first.
+    #[cfg(test)]
+    pub(super) fn take() -> Vec<(u64, i32)> {
+        FLUSHES.with(|f| core::mem::take(&mut *f.borrow_mut()))
     }
 }
 
@@ -1835,22 +1936,23 @@ pub const TCOFLUSH: i32 = 1;
 /// TCIOFLUSH — flush both input and output.
 pub const TCIOFLUSH: i32 = 2;
 
-/// Discard pending terminal I/O data.
+/// Discard a terminal's queued input (`TCIFLUSH`), output (`TCOFLUSH`) or
+/// both (`TCIOFLUSH`).
 ///
-/// Our console doesn't buffer data beyond the framebuffer, so there
-/// is nothing to flush.  Validates `fd` is a terminal and
-/// `queue_selector` is a known constant.
+/// `ioctl(fd, TCFLSH, queue_selector)`, as in glibc, so the descriptor checks
+/// are `ioctl`'s: `EBADF` for a bad or `O_PATH` descriptor, `ENOTTY` for one
+/// that is not a terminal (the console or either end of a pty), then `EINVAL`
+/// for an unknown selector.
+///
+/// Until 2026-09-25 this checked its arguments and discarded nothing, and
+/// refused a pty outright: there was no queue to empty. There is now (the
+/// kernel's line discipline runs as input arrives), and `SYS_TTY_FLUSH`
+/// empties it -- see [`flush_terminal`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tcflush(fd: i32, queue_selector: i32) -> i32 {
-    if let Err(e) = validate_terminal_fd(fd) {
-        errno::set_errno(e);
-        return -1;
-    }
-    if !(TCIFLUSH..=TCIOFLUSH).contains(&queue_selector) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    0
+    // The selector travels in the pointer slot, as it does through C's
+    // variadic `ioctl`; `handle_tcflsh` reads back its low 32 bits.
+    ioctl(fd, TCFLSH, queue_selector as u32 as usize as *mut u8)
 }
 
 /// Validate that `fd` is an open terminal.
@@ -3091,6 +3193,112 @@ mod tests {
         assert_eq!(tcflush(fd, TCIFLUSH), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
         let _ = fdtable::close_fd(fd);
+    }
+
+    // -- tcflush / TCFLSH / TCSAFLUSH reach SYS_TTY_FLUSH --
+    //
+    // Until 2026-09-25 all three checked their arguments and discarded
+    // nothing. The host has no kernel, so `host_flush` records what would have
+    // been asked of it.
+
+    #[test]
+    fn test_tcflush_asks_the_kernel_to_flush_the_named_queue() {
+        ensure_std_fds();
+        let _ = host_flush::take();
+        assert_eq!(tcflush(0, TCIFLUSH), 0);
+        assert_eq!(tcflush(0, TCOFLUSH), 0);
+        assert_eq!(tcflush(0, TCIOFLUSH), 0);
+        assert_eq!(
+            host_flush::take(),
+            [(CTTY, TCIFLUSH), (CTTY, TCOFLUSH), (CTTY, TCIOFLUSH)],
+            "the console is the controlling terminal, 0"
+        );
+    }
+
+    #[test]
+    fn test_tcflush_refusals_flush_nothing() {
+        ensure_std_fds();
+        let _ = host_flush::take();
+        assert_eq!(tcflush(0, 3), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(tcflush(-1, TCIFLUSH), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+        let fd = fdtable::alloc_fd(HandleKind::File, 312).unwrap();
+        // Not a terminal is ENOTTY even with a bad selector: Linux's order.
+        assert_eq!(tcflush(fd, 99), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+        assert_eq!(host_flush::take(), [], "a refused call flushes nothing");
+    }
+
+    /// A pty is a terminal. `tcflush` used to accept only the console, so a
+    /// program on a pty -- every program in a terminal emulator -- got ENOTTY.
+    #[test]
+    fn test_tcflush_on_a_pty_names_the_pty() {
+        let _ = host_flush::take();
+        let slave = fdtable::alloc_fd(HandleKind::PtySlave, 4242).unwrap();
+        let master = fdtable::alloc_fd(HandleKind::PtyMaster, 4343).unwrap();
+        assert_eq!(tcflush(slave, TCIFLUSH), 0);
+        assert_eq!(tcflush(master, TCOFLUSH), 0);
+        let _ = fdtable::close_fd(slave);
+        let _ = fdtable::close_fd(master);
+        assert_eq!(host_flush::take(), [(4242, TCIFLUSH), (4343, TCOFLUSH)]);
+    }
+
+    /// `ioctl(fd, TCFLSH, q)` from C: the selector is a variadic `int`, so the
+    /// upper half of its register is whatever the caller left there.
+    #[test]
+    fn test_ioctl_tcflsh_reads_only_the_int() {
+        ensure_std_fds();
+        let _ = host_flush::take();
+        let dirty = 0xdead_beef_0000_0001_u64 as usize as *mut u8;
+        assert_eq!(ioctl(0, TCFLSH, dirty), 0);
+        assert_eq!(host_flush::take(), [(CTTY, TCOFLUSH)]);
+        let bad = 0x0000_0001_0000_0007_u64 as usize as *mut u8;
+        assert_eq!(ioctl(0, TCFLSH, bad), -1, "7 is no selector");
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// `tcsetattr(TCSAFLUSH)` -- what a password prompt uses to throw away
+    /// type-ahead -- sets the terminal *and then* flushes its input; the other
+    /// two actions flush nothing.
+    #[test]
+    fn test_tcsaflush_sets_then_flushes_input() {
+        ensure_std_fds();
+        let mut t = default_termios();
+        assert_eq!(tcgetattr(0, &raw mut t), 0);
+        let _ = host_flush::take();
+        assert_eq!(tcsetattr(0, TCSANOW, &raw const t), 0);
+        assert_eq!(tcsetattr(0, TCSADRAIN, &raw const t), 0);
+        assert_eq!(host_flush::take(), [], "TCSANOW/TCSADRAIN flush nothing");
+        t.c_lflag &= !ECHO;
+        assert_eq!(tcsetattr(0, TCSAFLUSH, &raw const t), 0);
+        assert_eq!(host_flush::take(), [(CTTY, TCIFLUSH)]);
+        let mut back = default_termios();
+        assert_eq!(tcgetattr(0, &raw mut back), 0);
+        assert_eq!(back.c_lflag & ECHO, 0, "and the settings went in");
+    }
+
+    /// A refused set flushes nothing: the kernel's own `TCSETSF` flushes only
+    /// after a successful set, and so does this.
+    #[test]
+    fn test_tcsaflush_refused_set_flushes_nothing() {
+        ensure_std_fds();
+        let _ = host_flush::take();
+        assert_eq!(tcsetattr(0, TCSAFLUSH, core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        let fd = fdtable::alloc_fd(HandleKind::Pipe, 313).unwrap();
+        let t = default_termios();
+        assert_eq!(tcsetattr(fd, TCSAFLUSH, &raw const t), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+        assert_eq!(host_flush::take(), []);
+    }
+
+    #[test]
+    fn test_tcflsh_is_linuxs_number() {
+        assert_eq!(TCFLSH, 0x540B);
+        assert_eq!(TCFLSH, u64::from(crate::linux_tty_user_types::TCFLSH));
     }
 
     // -- Additional cfmakeraw / termios tests --

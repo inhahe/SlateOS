@@ -276,6 +276,19 @@ pub const SYS_TTY_SET_TERMIOS: u64 = 542;
 /// which returns one raw keyboard byte and so delivered `^C` as byte 0x03.
 /// Returns the byte count (0 at EOF) or a negative error.
 pub const SYS_TTY_READ: u64 = 543;
+/// Discard a terminal's queued input, output or both (`tcflush`,
+/// `tcsetattr(TCSAFLUSH)`). `arg0` is the terminal -- `0` for the caller's
+/// controlling terminal, an owned pty handle otherwise, as for
+/// [`SYS_PTY_GET_WINSIZE`] -- and `arg1` the queue with Linux's values
+/// (`TCIFLUSH` 0, `TCOFLUSH` 1, `TCIOFLUSH` 2). Returns 0 or a negative error;
+/// a background caller is stopped with `SIGTTOU` first, as for
+/// [`SYS_TTY_SET_TERMIOS`].
+///
+/// New on 2026-09-24 (lane A; `requests/a-d-native-tcflush-and-tcsaflush-have-a-syscall-now.md`),
+/// when the line discipline moved from `read` to input arrival and a terminal
+/// acquired an input queue to flush. A kernel without it answers "no such
+/// syscall", which `ioctl.rs`'s `flush_terminal` treats as nothing to flush.
+pub const SYS_TTY_FLUSH: u64 = 1076;
 
 // ---------------------------------------------------------------------------
 // Pseudo-terminals (544–556)

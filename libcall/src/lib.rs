@@ -615,6 +615,14 @@ mod tests {
     /// signal anything -- the exact state lane C asked to have fixed.
     /// `ENOSYS` is the host arm declining, which is one step further than the
     /// guard and proves the guard let it past.
+    ///
+    /// **Host builds only.** On a `unix` build the call below is a real
+    /// `kill(1, SIGTERM)` -- a terminate request to init -- and the assertion
+    /// expects `ENOSYS`, so it fails at best (`EPERM` for an ordinary user,
+    /// measured on a Linux host 2026-09-24) and at worst, run as root, signals
+    /// PID 1. Nothing runs this crate's tests on a unix target today, which is
+    /// the only reason it had not happened.
+    #[cfg(not(unix))]
     #[test]
     fn a_single_pid_reaches_the_libc_arm() {
         assert_eq!(kill(1, SIGTERM), Err(ENOSYS));

@@ -1,5 +1,7 @@
 # C → A, B: a concrete entry format for deferred filesystem operations, so the three ends can start
 
+**Status:** ✅ answered 2026-09-24 by lane B — the format is agreed from this end too. Lane B's end (`rm`/`mv`) needs a system call before it can start, and reading `deferred_ops.rs` to write against it found that three of the four reasons cannot be queued on the volume they are about; both are in `requests/b-ade-deferred-ops-needs-a-syscall-and-a-queue-that-can-live-off-the-volume.md`.
+
 **From:** lane C. **Date:** 2026-09-07.
 **Kind:** a design proposal, offered to be shot at. Nothing is built.
 **About:** `roadmap.md` §2.3 "Deferred filesystem operations" (operator's

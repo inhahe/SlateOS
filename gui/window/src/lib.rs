@@ -840,6 +840,93 @@ pub struct EventLoop<T: Transport> {
     woken: Option<Arc<AtomicBool>>,
     /// The waker handed out, so that every one handed out is the same.
     waker: Option<Waker>,
+    /// Presses so far, for recognising a double click. See [`Clicks`].
+    clicks: Clicks,
+}
+
+/// Two presses of one button in one window, close together in time and on
+/// screen: a double click, delivered as [`MouseEventKind::DoubleClick`] straight
+/// after the second press.
+///
+/// The compositor sends only presses -- double-click timing "belongs with the
+/// widget that has to honour it" (its `wire_mouse_kind`) -- and every widget
+/// that honours one, the file dialog's list, the grid, the text view, is on
+/// this side of the wire. So the loop recognises them, once, for every
+/// application, rather than each one inventing its own timing or, as until
+/// now, none of them receiving a double click at all.
+///
+/// The rules are the ones the compositor's own title-bar double click settled
+/// (design-decisions §502): a pair is keyed on the window and the button, any
+/// press in between breaks it, and a completed double click does not arm
+/// another, so three quick clicks are a double click and a click. On top of
+/// those, the second press must land within [`DOUBLE_CLICK_SLOP`] of the first:
+/// two quick clicks on neighbouring rows are two clicks.
+#[derive(Clone, Copy, Debug)]
+struct Clicks {
+    /// How far apart the presses may be: the user's setting, `input.yaml`.
+    interval: Duration,
+    /// The last press, if it could begin a double click.
+    last: Option<Click>,
+}
+
+/// A press, as [`Clicks`] remembers it.
+#[derive(Clone, Copy, Debug)]
+struct Click {
+    window: u64,
+    button: MouseButton,
+    x: f32,
+    y: f32,
+    /// The compositor's clock when it handled the press, if it said.
+    stamp: Option<u32>,
+    /// When this loop read it, for a press nothing stamped.
+    read: Instant,
+}
+
+/// How far, in pixels either way, the pointer may move between the presses of
+/// a double click: the four Windows allows by default.
+pub const DOUBLE_CLICK_SLOP: f32 = 4.0;
+
+impl Clicks {
+    const fn new() -> Self {
+        Self {
+            interval: Duration::from_millis(inputsettings::DEFAULT_DOUBLE_CLICK_MS as u64),
+            last: None,
+        }
+    }
+
+    /// Take one press, and say whether it completes a double click.
+    fn press(&mut self, click: Click) -> bool {
+        // Taken first, so any press breaks a pending pair and only a press
+        // that could begin one leaves a record behind (§502, point 2).
+        let previous = self.last.take();
+        let pairs = previous.is_some_and(|first| {
+            first.window == click.window
+                && first.button == click.button
+                && (first.x - click.x).abs() <= DOUBLE_CLICK_SLOP
+                && (first.y - click.y).abs() <= DOUBLE_CLICK_SLOP
+                && self.soon_enough(&first, &click)
+        });
+        // A completed double click arms nothing (§502, point 3).
+        if !pairs {
+            self.last = Some(click);
+        }
+        pairs
+    }
+
+    /// Whether `second` came within the interval of `first`: by the
+    /// compositor's clock when both carry it, which no delay in this process
+    /// can move -- a program busy for a second reads two clicks made a second
+    /// apart one straight after the other -- and by when this loop read them
+    /// otherwise.
+    fn soon_enough(&self, first: &Click, second: &Click) -> bool {
+        match (first.stamp, second.stamp) {
+            (Some(a), Some(b)) => {
+                // Wrapping: the clock is milliseconds modulo 2^32.
+                Duration::from_millis(u64::from(b.wrapping_sub(a))) <= self.interval
+            }
+            _ => second.read.saturating_duration_since(first.read) <= self.interval,
+        }
+    }
 }
 
 /// What an [`EventLoop::waker`] does: note that a wake happened, then end the
@@ -890,7 +977,28 @@ impl<T: Transport> EventLoop<T> {
             ticked: Vec::new(),
             woken: None,
             waker: None,
+            clicks: Clicks::new(),
         }
+    }
+
+    /// How far apart two presses may be and still be a double click.
+    ///
+    /// [`app`] keeps this at the user's setting in `input.yaml`, as the
+    /// compositor does for its title bars; a program driving the loop itself
+    /// may set it. Clamped to the range the setting allows.
+    pub fn set_double_click_interval(&mut self, interval: Duration) {
+        let bounds = (
+            Duration::from_millis(u64::from(inputsettings::MIN_DOUBLE_CLICK_MS)),
+            Duration::from_millis(u64::from(inputsettings::MAX_DOUBLE_CLICK_MS)),
+        );
+        self.clicks.interval = interval.clamp(bounds.0, bounds.1);
+    }
+
+    /// The double-click interval in force: see
+    /// [`Self::set_double_click_interval`].
+    #[must_use]
+    pub const fn double_click_interval(&self) -> Duration {
+        self.clicks.interval
     }
 
     /// The connection underneath, for requests this crate does not wrap.
@@ -1722,6 +1830,37 @@ impl<T: Transport> EventLoop<T> {
             // Folded in before the application sees it, so a handler that asks
             // the window how big it is during a `Resize` gets the new answer.
             window.apply(&ev.event);
+            // A press that completes a double click is followed at once by the
+            // double click itself, as its own event: consumers are written for
+            // both orders (the file dialog's list opens on either), and every
+            // one of them still sees the press.
+            if let Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }) = ev.event
+            {
+                let click = Click {
+                    window: ev.window,
+                    button,
+                    x,
+                    y,
+                    stamp: ev.time,
+                    read: Instant::now(),
+                };
+                if self.clicks.press(click) {
+                    let mut double = InputEvent::new(
+                        ev.window,
+                        Event::Mouse(MouseEvent {
+                            x,
+                            y,
+                            kind: MouseEventKind::DoubleClick(button),
+                        }),
+                    );
+                    double.time = ev.time;
+                    self.pending.push_front(double);
+                }
+            }
             return Ok(Some((ev.window, ev.event)));
         }
         Ok(None)
@@ -2730,6 +2869,229 @@ mod tests {
             count, 2,
             "both events, and the loop ended with the connection"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Double clicks
+    // ---------------------------------------------------------------
+
+    fn mouse(kind: MouseEventKind, x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
+    fn press(button: MouseButton, x: f32, y: f32) -> Event {
+        mouse(MouseEventKind::Press(button), x, y)
+    }
+
+    /// Every event the loop hands over for `script`, one batch.
+    fn delivered(script: Vec<(u64, Event, Option<u32>)>) -> Vec<Event> {
+        let (mut events, server) = wired();
+        let a = open(&mut events, "A");
+        let b = open(&mut events, "B");
+        let batch = script
+            .into_iter()
+            .map(|(window, event, time)| {
+                let window = if window == 0 { a } else { b };
+                let ev = InputEvent::new(window, event);
+                match time {
+                    Some(t) => ev.at(t),
+                    None => ev,
+                }
+            })
+            .collect();
+        server.borrow_mut().script.push_back(batch);
+        let mut seen = Vec::new();
+        events
+            .run(|_loop, _w, event| {
+                seen.push(event);
+                EventResponse::Continue
+            })
+            .unwrap();
+        seen
+    }
+
+    fn doubles(seen: &[Event]) -> usize {
+        seen.iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Event::Mouse(MouseEvent {
+                        kind: MouseEventKind::DoubleClick(_),
+                        ..
+                    })
+                )
+            })
+            .count()
+    }
+
+    const LEFT: MouseButton = MouseButton::Left;
+
+    #[test]
+    fn two_quick_presses_in_one_place_are_followed_by_a_double_click() {
+        let release = mouse(MouseEventKind::Release(LEFT), 10.0, 10.0);
+        let seen = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (0, release.clone(), Some(1060)),
+            (0, press(LEFT, 11.0, 9.0), Some(1200)),
+            (0, release.clone(), Some(1260)),
+        ]);
+        assert_eq!(
+            seen,
+            vec![
+                press(LEFT, 10.0, 10.0),
+                release.clone(),
+                press(LEFT, 11.0, 9.0),
+                mouse(MouseEventKind::DoubleClick(LEFT), 11.0, 9.0),
+                release,
+            ],
+            "the double click comes straight after the press that completes it, \
+             and the press itself is still delivered"
+        );
+    }
+
+    #[test]
+    fn presses_further_apart_than_the_interval_are_two_clicks() {
+        // The default interval is 400 ms: 400 apart pairs, 401 does not.
+        let at_the_edge = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (0, press(LEFT, 10.0, 10.0), Some(1400)),
+        ]);
+        assert_eq!(doubles(&at_the_edge), 1);
+        let past_it = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (0, press(LEFT, 10.0, 10.0), Some(1401)),
+        ]);
+        assert_eq!(doubles(&past_it), 0);
+    }
+
+    #[test]
+    fn clicks_made_apart_are_not_paired_by_a_client_that_read_them_together() {
+        // What the compositor's stamps are for. These two clicks were made
+        // 0.6 s apart; a program busy in between reads them in one batch,
+        // microseconds apart, and timing them by that would call it a double.
+        let seen = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(5000)),
+            (0, press(LEFT, 10.0, 10.0), Some(5600)),
+        ]);
+        assert_eq!(doubles(&seen), 0);
+    }
+
+    #[test]
+    fn the_stamps_are_compared_across_the_clocks_wrap() {
+        let seen = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(u32::MAX - 50)),
+            (0, press(LEFT, 10.0, 10.0), Some(100)),
+        ]);
+        assert_eq!(doubles(&seen), 1, "151 ms apart across the wrap");
+    }
+
+    #[test]
+    fn presses_in_two_windows_or_of_two_buttons_are_not_a_double_click() {
+        let windows = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (1, press(LEFT, 10.0, 10.0), Some(1100)),
+        ]);
+        assert_eq!(doubles(&windows), 0, "one click in each of two windows");
+        let buttons = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (0, press(MouseButton::Right, 10.0, 10.0), Some(1100)),
+        ]);
+        assert_eq!(doubles(&buttons), 0, "a left click and a right click");
+    }
+
+    #[test]
+    fn a_press_that_moved_further_than_the_slop_is_a_new_click() {
+        let within = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (
+                0,
+                press(LEFT, 10.0 + DOUBLE_CLICK_SLOP, 10.0 - DOUBLE_CLICK_SLOP),
+                Some(1100),
+            ),
+        ]);
+        assert_eq!(doubles(&within), 1);
+        let beyond = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (
+                0,
+                press(LEFT, 10.0, 10.0 + DOUBLE_CLICK_SLOP + 1.0),
+                Some(1100),
+            ),
+        ]);
+        assert_eq!(doubles(&beyond), 0, "two quick clicks on neighbouring rows");
+    }
+
+    #[test]
+    fn any_press_in_between_breaks_the_pair() {
+        // design-decisions §502, point 2: the user went somewhere else.
+        let seen = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (1, press(LEFT, 50.0, 50.0), Some(1050)),
+            (0, press(LEFT, 10.0, 10.0), Some(1100)),
+        ]);
+        assert_eq!(doubles(&seen), 0);
+    }
+
+    #[test]
+    fn three_quick_clicks_are_a_double_click_and_a_click() {
+        // §502, point 3: a completed double click arms nothing, so the third
+        // press does not pair with the second; the fourth pairs with the third.
+        let three = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (0, press(LEFT, 10.0, 10.0), Some(1100)),
+            (0, press(LEFT, 10.0, 10.0), Some(1200)),
+        ]);
+        assert_eq!(doubles(&three), 1);
+        let four = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), Some(1000)),
+            (0, press(LEFT, 10.0, 10.0), Some(1100)),
+            (0, press(LEFT, 10.0, 10.0), Some(1200)),
+            (0, press(LEFT, 10.0, 10.0), Some(1300)),
+        ]);
+        assert_eq!(doubles(&four), 2);
+    }
+
+    #[test]
+    fn unstamped_presses_are_timed_by_when_the_loop_read_them() {
+        // An injected event has no stamp; two read at once are a double click.
+        let quick = delivered(vec![
+            (0, press(LEFT, 10.0, 10.0), None),
+            (0, press(LEFT, 10.0, 10.0), None),
+        ]);
+        assert_eq!(doubles(&quick), 1);
+
+        // And two read further apart than the interval are not. The handler
+        // sleeps between them at the shortest interval allowed: a sleep can
+        // only overrun, which widens the gap the assertion already expects.
+        let (mut events, server) = wired();
+        let a = open(&mut events, "A");
+        events.set_double_click_interval(Duration::from_millis(1));
+        assert_eq!(
+            events.double_click_interval(),
+            Duration::from_millis(u64::from(inputsettings::MIN_DOUBLE_CLICK_MS)),
+            "clamped to the setting's range"
+        );
+        server
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(a, press(LEFT, 10.0, 10.0))]);
+        server
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(a, press(LEFT, 10.0, 10.0))]);
+        let mut seen = Vec::new();
+        let pause = Duration::from_millis(u64::from(inputsettings::MIN_DOUBLE_CLICK_MS) + 60);
+        events
+            .run(|_loop, _w, event| {
+                if seen.is_empty() {
+                    std::thread::sleep(pause);
+                }
+                seen.push(event);
+                EventResponse::Continue
+            })
+            .unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(doubles(&seen), 0);
     }
 
     #[test]

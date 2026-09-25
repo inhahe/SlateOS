@@ -12,9 +12,8 @@
 #   * **the list** -- sorted by byte value (`Bob` before `alice`), one word per
 #     session so a user logged in twice appears twice, trailing spaces trimmed
 #     and nothing else, a 32-byte name with no NUL, names that are not UTF-8.
-#   * **the file** -- empty, torn (a partial record at the end is dropped),
-#     missing, unreadable, a directory: glibc's `getutxent` reports none of
-#     these, so each is "nobody", status 0, on both sides.
+#   * **the file** -- empty, and torn (a partial record at the end is
+#     dropped). Missing, unreadable, a directory: see below.
 #   * **the live files** -- no operand (`/var/run/utmp`, dead sessions
 #     dropped), `/var/run/utmp` named (dead sessions kept), `/var/log/wtmp`.
 #   * **the command line** -- one FILE at most, `--`, unknown options.
@@ -26,6 +25,12 @@
 # ## Cases that differ on purpose
 #
 # `--help` omits the GNU ancillary block and `--version` names SlateOS.
+#
+# A FILE that is missing, unreadable or a directory: glibc's `getutxent`
+# cannot report the failure, so GNU on Linux prints nothing and exits 0 --
+# "nobody is logged in". gnulib's own reader, used where GNU reads the file
+# itself as ours does, reports `users: FILE: <reason>` and exits 1; ours does
+# too (see `users.rs`).
 set -u
 
 DIFF_PROG='users'
@@ -151,12 +156,12 @@ run_case torn
 run_case deadpids
 run_case big
 
-# --- files glibc reads as "nobody" --------------------------------------------------
+# --- files that are not a list of sessions -------------------------------------------
 run_case empty
-run_case missing
-run_case unreadable
-run_case dir
-run_case ''
+xfail_case 'glibc hides the failure; gnulib and ours report it' missing
+xfail_case 'glibc hides the failure; gnulib and ours report it' unreadable
+xfail_case 'glibc hides the failure; gnulib and ours report it' dir
+xfail_case 'glibc hides the failure; gnulib and ours report it' ''
 
 # --- the live files ------------------------------------------------------------------
 run_case
@@ -168,7 +173,7 @@ run_case --
 run_case one mixed
 run_case one mixed big
 run_case -- one
-run_case -- -x
+xfail_case 'glibc hides the failure; gnulib and ours report it' -- -x
 run_case -x
 run_case --nope
 run_case one --nope

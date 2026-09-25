@@ -427,6 +427,7 @@ dependencies = [
  "ere",
  "localtime",
  "modechange",
+ "optionalfile",
  "procinfo",
  "pwdb",
  "quoting",

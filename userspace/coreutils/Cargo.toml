@@ -85,6 +85,12 @@ localtime = { path = "../localtime" }
 # `quoting` hold.
 utmpfile = { path = "../../utmpfile" }
 
+# A file whose absence is normal but whose unreadability is not. `users` reads
+# `/var/run/utmp`, which a system with nobody logged in may simply not have;
+# one that is there and cannot be read is a different answer, and
+# `unwrap_or_default` gave it as "nobody". Std only, so §768 does not apply.
+optionalfile = { path = "../../optionalfile" }
+
 # `sed`'s `w`/`W`/`R` tests write to a real file, because those commands take a
 # file name as an argument and there is no way to exercise them otherwise. They
 # named that file `temp_dir()/sed-w-test` and friends — one fixed path per test,

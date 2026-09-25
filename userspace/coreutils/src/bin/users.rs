@@ -22,14 +22,20 @@
 //! login leaves its record behind. A FILE named on the command line is taken
 //! as it is, dead sessions included -- `users /var/log/wtmp` is history.
 //!
-//! # A file that cannot be read has no sessions
+//! # A file that cannot be read is not a file with nobody in it
 //!
-//! GNU reads through glibc's `utmpxname`/`getutxent`, which report nothing:
-//! a file that does not exist, cannot be opened, or is a directory yields no
-//! records, and `users` prints nothing and exits 0. That is reproduced rather
-//! than improved on -- `who` on the same file must agree, and GNU's does
-//! exactly this -- and a torn record at the end of the file is dropped, as
-//! glibc drops it.
+//! GNU on Linux reads through glibc's `utmpxname`/`getutxent`, which cannot
+//! report a failure: a FILE that does not exist, cannot be opened, or is a
+//! directory yields no records, and `users` prints nothing and exits 0 --
+//! "nobody is logged in", which is not what happened. gnulib's own reader,
+//! the one GNU uses where it reads the file itself as this does, reports it:
+//! a named FILE it cannot open or read is `users: FILE: <reason>`, status 1,
+//! and only a *missing* default utmp counts as no sessions. That is what this
+//! does, with the default file read by `optionalfile`, so that one which is
+//! there but unreadable is an error too rather than an empty machine. Against
+//! GNU on glibc those cases differ, on purpose.
+//!
+//! A torn record at the end of the file is dropped, as both readers drop it.
 //!
 //! # Replaces `nproc`'s `users` personality
 //!
@@ -155,9 +161,13 @@ fn user_line(records: &[Record], still_running: impl Fn(i32) -> bool) -> Vec<u8>
 #[cfg(unix)]
 mod imp {
     use super::{Request, USERS, UTMP_FILE, help_text, parse_args, user_line};
+    use coreutils::diag;
+    use coreutils::errmsg::strerror;
+    use coreutils::quote::quotef_os;
     use coreutils::stdfd::{self, Stream};
     use std::ffi::OsString;
     use std::io::{self, Write};
+    use std::path::Path;
     use std::process::ExitCode;
 
     /// gnulib's `READ_UTMP_CHECK_PIDS` test, inverted: a session is dropped
@@ -204,10 +214,22 @@ mod imp {
                     None => (OsString::from(UTMP_FILE), true),
                     Some(f) => (f, false),
                 };
-                // Discarded on purpose: glibc's `getutxent`, which GNU reads
-                // through, turns every open or read failure into "no
-                // records", and so does this. See the module documentation.
-                let data = std::fs::read(&path).unwrap_or_default();
+                let read = if check_pids {
+                    // The live utmp: a system that has none has nobody logged
+                    // in, but one that is there and cannot be read does not.
+                    optionalfile::read_bytes_or_empty(Path::new(&path))
+                } else {
+                    // A file named on the command line must be readable, as
+                    // gnulib's own reader requires.
+                    std::fs::read(&path)
+                };
+                let data = match read {
+                    Ok(data) => data,
+                    Err(e) => {
+                        diag!("users: {}: {}", quotef_os(&path), strerror(&e));
+                        return ExitCode::FAILURE;
+                    }
+                };
                 let records = utmpfile::parse(&data);
                 let line = user_line(&records, |pid| !check_pids || still_running(pid));
                 let _ = out.write_all(&line);

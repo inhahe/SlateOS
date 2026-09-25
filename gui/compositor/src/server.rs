@@ -2734,6 +2734,14 @@ mod tests {
             compositor.frame_owed(),
             "recovery did not ask for a whole frame"
         );
+        // The compositor composes at most once a frame interval, by its own
+        // clock. Waiting until that clock allows it is a wait *for* a deadline,
+        // which load can only make longer; composing straight away instead
+        // passed wherever the first frame happened to take longer than a
+        // refresh to draw, and failed on a faster build.
+        if let Some(ready) = compositor.frame_stats().next_compose_at() {
+            std::thread::sleep(ready.saturating_duration_since(Instant::now()));
+        }
         assert!(server.compose(&mut compositor));
         server.show(&compositor, &mut display);
         assert_ne!(display.last_serial(), before);

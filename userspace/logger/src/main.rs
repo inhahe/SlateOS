@@ -649,7 +649,17 @@ fn parse_args(args: &[OsString]) -> Options {
                             process::exit(0);
                         }
                         _ => {
-                            eprintln!("logger: invalid option -- '{}'", chars[j]);
+                            // `quoteaf`, not hand-written quotes: the letter
+                            // is argv's, so it can be a newline, and `'{}'`
+                            // would put that newline into stderr raw. For any
+                            // ordinary letter the two print the same `'Q'`
+                            // util-linux prints.
+                            let mut utf8 = [0u8; 4];
+                            let flag = chars[j].encode_utf8(&mut utf8);
+                            eprintln!(
+                                "logger: invalid option -- {}",
+                                quoting::quoteaf(flag.as_bytes())
+                            );
                             usage_hint();
                             process::exit(1);
                         }

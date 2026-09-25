@@ -141,14 +141,18 @@ class ConcurrentProbe:
     def __init__(self, n, max_seconds=120):
         self.dir = tempfile.mkdtemp(prefix="hostload-probe-")
         self.stop_path = os.path.join(self.dir, "stop")
+        self.n = n
         code = chr(10).join([
             "import os, sys, time",
             "stop = " + repr(self.stop_path),
+            "ready = " + repr(os.path.join(self.dir, "ready-")),
             "end = time.monotonic() + " + repr(float(max_seconds)),
             "samples = []",
             "while True:",
             "    t = time.monotonic()",
             "    samples.append((t, time.process_time()))",
+            "    if len(samples) == 1:",
+            "        open(ready + str(os.getpid()), 'w').close()",
             "    if t > end or os.path.exists(stop):",
             "        break",
             "    until = t + " + repr(CONCURRENT_SAMPLE_S),
@@ -164,6 +168,29 @@ class ConcurrentProbe:
             ]
         except OSError:
             self.procs = []
+
+    def wait_started(self, timeout=60):
+        """Wait until every spinner has taken its first sample; whether all did.
+
+        Call it before taking the start of an interval to be measured. A
+        spinner's samples cover only the time since it started, and process
+        start is exactly what a starved host delays: a spinner that begins
+        after the interval does would leave its start unbracketed, the
+        interval would read as unmeasured, and a starved run would be called
+        a hang -- the misattribution the probe exists to prevent. Seen on
+        2026-09-25: a spinner took its first sample after the stop-file.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                started = sum(1 for name in os.listdir(self.dir)
+                              if name.startswith("ready-"))
+            except OSError:
+                started = 0
+            if started >= self.n:
+                return True
+            time.sleep(0.02)
+        return False
 
     def finish(self):
         """Stop the spinners; return each one's `(monotonic, cpu)` samples."""
@@ -265,6 +292,7 @@ def run_measured(argv, timeout, what, spinners=1, **kwargs):
     # leave the interval unbracketed, and an unmeasured interval excuses
     # nothing -- every starved timeout would read as a hang.
     probe = ConcurrentProbe(spinners, max_seconds=timeout + 60)
+    probe.wait_started()
     t0 = time.monotonic()
     try:
         return subprocess.run(argv, timeout=timeout, **kwargs)

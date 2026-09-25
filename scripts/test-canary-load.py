@@ -241,6 +241,8 @@ def timing_case(name, probe=True):
     """
     before = len(FAILURES)
     beside = ConcurrentProbe(2) if probe else None
+    if beside is not None:
+        beside.wait_started()
     t0 = time.monotonic()
     starved = None
     timed_out = None
@@ -1121,6 +1123,7 @@ with timing_case("spinner occupancy (live)", probe=False) as tmpdir:
     # ticks under it to mean something.
     # Plain spinners alongside the run, for attribution: see ConcurrentProbe.
     probe = ConcurrentProbe(2)
+    probe.wait_started()
     try:
         record, rc, out = run_controller(
             serial, ["--at", "bench_05", "--until", "bench_35"],

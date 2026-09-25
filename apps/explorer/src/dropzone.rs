@@ -27,41 +27,16 @@
 use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+// The toolkit's rectangle rather than one of this crate's own. See
+// `known-issues.md` `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`: eight
+// crates declared the same four floats under two spellings, and every
+// place an application met a toolkit widget paid to convert between them.
+pub use guitk::frame::Rect;
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::theme::with_alpha;
 
 use std::path::{Path, PathBuf};
-
-// ============================================================================
-// Rect helper
-// ============================================================================
-
-/// Axis-aligned rectangle used for zone bounding boxes.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    /// Create a new rectangle.
-    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-
-    /// Returns `true` if the point `(px, py)` lies inside this rectangle.
-    pub fn contains(&self, px: f32, py: f32) -> bool {
-        px >= self.x && px < self.x + self.width && py >= self.y && py < self.y + self.height
-    }
-}
 
 // ============================================================================
 // Drop zone enum
@@ -272,6 +247,22 @@ impl DropZoneManager {
             kind: ZoneKind::FileRow,
             index: Some(index),
         });
+    }
+
+    /// The rectangle of one file row, as the last frame drew it.
+    ///
+    /// For the insertion indicator: a drag has to be drawn where the row
+    /// *is*, and the row's position is a fact about the frame rather than
+    /// something to recompute -- the same reason hit-testing goes through
+    /// these zones. Recomputing it would be a second copy of the layout
+    /// arithmetic, and the first time the two disagreed the line would point
+    /// between two rows the user is not looking at.
+    #[must_use]
+    pub fn file_row_rect(&self, index: usize) -> Option<Rect> {
+        self.zones
+            .iter()
+            .find(|z| z.kind == ZoneKind::FileRow && z.index == Some(index))
+            .map(|z| z.rect)
     }
 
     /// Register a sidebar item.
@@ -703,8 +694,8 @@ pub fn render_drop_feedback(
                 cmds.push(RenderCommand::FillRect {
                     x: area.x,
                     y: area.y,
-                    width: area.width,
-                    height: area.height,
+                    width: area.w,
+                    height: area.h,
                     color: highlight,
                     corner_radii: CornerRadii::ZERO,
                 });
@@ -715,16 +706,16 @@ pub fn render_drop_feedback(
             cmds.push(RenderCommand::FillRect {
                 x: rect.x,
                 y: rect.y,
-                width: rect.width,
-                height: rect.height,
+                width: rect.w,
+                height: rect.h,
                 color: highlight,
                 corner_radii: CornerRadii::ZERO,
             });
             // Underline at the bottom of the row.
             cmds.push(RenderCommand::FillRect {
                 x: rect.x,
-                y: rect.y + rect.height - 2.0,
-                width: rect.width,
+                y: rect.y + rect.h - 2.0,
+                width: rect.w,
                 height: 2.0,
                 color: underline,
                 corner_radii: CornerRadii::ZERO,
@@ -735,16 +726,16 @@ pub fn render_drop_feedback(
             cmds.push(RenderCommand::FillRect {
                 x: rect.x,
                 y: rect.y,
-                width: rect.width,
-                height: rect.height,
+                width: rect.w,
+                height: rect.h,
                 color: highlight,
                 corner_radii: CornerRadii::ZERO,
             });
             // Underline.
             cmds.push(RenderCommand::FillRect {
                 x: rect.x,
-                y: rect.y + rect.height - 2.0,
-                width: rect.width,
+                y: rect.y + rect.h - 2.0,
+                width: rect.w,
                 height: 2.0,
                 color: underline,
                 corner_radii: CornerRadii::ZERO,
@@ -806,7 +797,6 @@ mod tests {
     )]
 
     use super::*;
-    use scratchdir::ScratchDir;
     use std::fs;
 
     // ------------------------------------------------------------------
@@ -913,7 +903,7 @@ mod tests {
         // This test used to pass against a *made-up* path because the check it
         // rested on compared first components and never touched the disk --
         // which is exactly the bug. See `crate::drives`.
-        let scratch = ScratchDir::new("dropzone_same_drive");
+        let scratch = crate::guarded_scratch("dropzone_same_drive");
         let root = scratch.dir().to_path_buf();
         fs::write(root.join("file.txt"), "x").unwrap();
 
@@ -990,7 +980,7 @@ mod tests {
 
     #[test]
     fn operation_folder_target() {
-        let scratch = ScratchDir::new("dropzone_folder_target");
+        let scratch = crate::guarded_scratch("dropzone_folder_target");
         let root = scratch.dir().to_path_buf();
         fs::write(root.join("file.txt"), "x").unwrap();
         fs::create_dir(root.join("Documents")).unwrap();
@@ -1056,7 +1046,7 @@ mod tests {
         // process, and the clock they read only advances on a timer interrupt,
         // so a nanosecond tag is shared by every test that starts in the same
         // tick and they would scribble on each other's trees.
-        let scratch = scratchdir::ScratchDir::new("dropzone_nested");
+        let scratch = crate::guarded_scratch("dropzone_nested");
         let dir = scratch.dir();
         let project = dir.join("project");
         std::fs::create_dir_all(project.join("sub")).expect("tree");
@@ -1135,7 +1125,7 @@ mod tests {
 
     #[test]
     fn handle_drop_valid() {
-        let scratch = ScratchDir::new("dropzone_handle_drop");
+        let scratch = crate::guarded_scratch("dropzone_handle_drop");
         let root = scratch.dir().to_path_buf();
         fs::write(root.join("file.txt"), "x").unwrap();
 

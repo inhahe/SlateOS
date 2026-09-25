@@ -81,6 +81,41 @@ const MIN_ROW_HEIGHT: f32 = 16.0;
 const ROW_HEADER_WIDTH: f32 = 50.0;
 const COL_HEADER_HEIGHT: f32 = 24.0;
 const TOOLBAR_HEIGHT: f32 = 36.0;
+
+/// Every key this program answers, and what it does.
+///
+/// **Raised by `F1`, not by `?`.** Every other help overlay in this tree opens
+/// on `?`, and this one cannot: the key handler ends in a catch-all that
+/// starts editing the cell on any printable character, so `?` is a character
+/// a spreadsheet has to be able to put in a cell. A help key that ate it
+/// would be a worse defect than the one this list fixes.
+///
+/// **Each row is a key this program actually answers**, which is not a
+/// property the list has on its own: `every_advertised_key_does_something`
+/// walks it, reads each label with `guitk::shortcut` and presses every key it
+/// names. `apps/rssreader` shipped an overlay of twenty-one shortcuts of which
+/// about four worked.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows", "Move the selection"),
+    ("Tab / Shift+Tab", "One cell right / left"),
+    ("Enter / Shift+Enter", "One cell down / up"),
+    ("Home / End", "First / last column of this row"),
+    ("PageUp / PageDown", "One screen up / down"),
+    ("F2", "Edit this cell"),
+    ("Delete", "Clear the selected cells"),
+    ("Escape", "Stop editing, keeping what was there"),
+    ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy / cut / paste"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+B / Ctrl+I", "Bold / italic"),
+    ("Ctrl+F / Ctrl+H", "Find / find and replace"),
+    ("Alt+C", "Find and replace: match case, or ignore it"),
+    ("Ctrl+O / Ctrl+S", "Open / save"),
+    ("Ctrl+T", "Show or hide the toolbar"),
+    ("Ctrl+G", "Show or hide the gridlines"),
+    ("Ctrl+Shift+F", "Show or hide the formula bar"),
+    ("Ctrl+Shift+S", "Show or hide the status bar"),
+    ("F1", "This list"),
+];
 const FORMULA_BAR_HEIGHT: f32 = 28.0;
 const SHEET_TAB_HEIGHT: f32 = 28.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
@@ -2006,6 +2041,8 @@ pub enum FindControl {
     Replace,
     /// Replace every match.
     ReplaceAll,
+    /// Match case, or ignore it.
+    MatchCase,
 }
 
 /// Where the find-and-replace panel and each of its controls are drawn.
@@ -2800,6 +2837,8 @@ pub struct SpreadsheetApp {
     pub show_formula_bar: bool,
     /// Whether to show the toolbar.
     pub show_toolbar: bool,
+    /// Whether the shortcut list is up.
+    pub show_help: bool,
     /// Whether to show the status bar.
     pub show_status_bar: bool,
     /// The user's colours, replaced whenever the theme changes.
@@ -2828,6 +2867,7 @@ impl SpreadsheetApp {
             show_gridlines: true,
             show_formula_bar: true,
             show_toolbar: true,
+            show_help: false,
             show_status_bar: true,
         }
     }
@@ -3830,6 +3870,13 @@ impl SpreadsheetApp {
                     self.redo();
                     return EventResult::Consumed;
                 }
+                // Before the unguarded `Key::S` below, which would
+                // otherwise take this and open the save dialog. A guard
+                // narrows only the arm it is on.
+                Key::S if event.modifiers.shift => {
+                    self.show_status_bar = !self.show_status_bar;
+                    return EventResult::Consumed;
+                }
                 Key::S => {
                     self.open_file_dialog(true);
                     return EventResult::Consumed;
@@ -3842,8 +3889,32 @@ impl SpreadsheetApp {
                     self.toggle_bold();
                     return EventResult::Consumed;
                 }
+                // `show_toolbar` gates the toolbar's draw and had no writer,
+                // so it could never be got out of the way of the grid.
+                //
+                // Ctrl, not a plain letter: the catch-all below starts editing
+                // the cell on any printable character, so a bare `T` would
+                // stop being typeable into a spreadsheet.
+                Key::T => {
+                    self.show_toolbar = !self.show_toolbar;
+                    return EventResult::Consumed;
+                }
                 Key::I => {
                     self.toggle_italic();
+                    return EventResult::Consumed;
+                }
+                // The three view toggles the window drew from and could never
+                // change: `show_gridlines`, `show_formula_bar` and
+                // `show_status_bar` were `true` at construction with no writer
+                // anywhere, so the grid always had lines and both bars were
+                // permanent. Found by `scripts/frozen-flag-survey.py`.
+                Key::G => {
+                    self.show_gridlines = !self.show_gridlines;
+                    return EventResult::Consumed;
+                }
+                // Likewise before the unguarded `Key::F`, which is find.
+                Key::F if event.modifiers.shift => {
+                    self.show_formula_bar = !self.show_formula_bar;
                     return EventResult::Consumed;
                 }
                 Key::F => {
@@ -3920,6 +3991,18 @@ impl SpreadsheetApp {
                 self.begin_editing();
                 EventResult::Consumed
             }
+            // The shortcut list. `F1` rather than `?`, which this program has
+            // to be able to type into a cell.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            // Before the unguarded `Key::Escape` below, which would otherwise
+            // take this and cancel an edit while the list stayed up.
+            Key::Escape if self.show_help => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
             Key::Delete => {
                 self.delete_selection();
                 EventResult::Consumed
@@ -3972,6 +4055,15 @@ impl SpreadsheetApp {
                 }
                 _ => return EventResult::Ignored,
             }
+        }
+
+        // Alt, ahead of the text branch, which would otherwise type a `c`
+        // into whichever box has the caret. Not Ctrl+I: that is italic here,
+        // and a key that means two things in one window is worse than an
+        // unfamiliar one.
+        if event.modifiers.alt && event.key == Key::C {
+            self.apply_find_control(FindControl::MatchCase);
+            return EventResult::Consumed;
         }
 
         match event.key {
@@ -4676,6 +4768,19 @@ impl SpreadsheetApp {
             self.picker
                 .render(&self.palette, self.window_width, self.window_height),
         );
+
+        // And the shortcut list over even that, because it is the one thing a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.window_width, self.window_height),
+                TOOLBAR_HEIGHT,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         cmds
     }
@@ -5884,6 +5989,18 @@ impl SpreadsheetApp {
             FindControl::Field(FindField::Replace),
         ));
 
+        // The case switch, between the two boxes and the buttons.
+        //
+        // `FindReplace::case_sensitive` is handed to `textfind::Case` on every
+        // search *and* consulted by both replace paths, and it was `false`
+        // with no writer: so a replace of `id` also rewrote `ID` and `Id`,
+        // always, and a spreadsheet full of column headings could not be
+        // edited without hitting them.
+        controls.push((
+            Rect::new(dlg_x + 70.0, dlg_y + 92.0, 130.0, 18.0),
+            FindControl::MatchCase,
+        ));
+
         let btn_y = dlg_y + dlg_h - 34.0;
         let mut bx = dlg_x + 12.0;
         for (label, control) in [
@@ -5927,6 +6044,13 @@ impl SpreadsheetApp {
             FindControl::FindNext => self.find_next(),
             FindControl::Replace => self.replace_current_match(),
             FindControl::ReplaceAll => self.replace_all_matches(),
+            FindControl::MatchCase => {
+                self.find_replace.case_sensitive = !self.find_replace.case_sensitive;
+                // The results on screen answer the old question; leaving them
+                // there invites reading them as the new one's.
+                self.find_replace.results.clear();
+                self.find_replace.current_result = 0;
+            }
         }
     }
 
@@ -6102,6 +6226,30 @@ impl SpreadsheetApp {
                         color: self.palette.text,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(rect.w - 8.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
+                FindControl::MatchCase => {
+                    // Drawn as a box with a tick, and the key beside it, on
+                    // the pattern the rest of this tree uses for an option a
+                    // click and a keystroke both reach.
+                    let ticked = if self.find_replace.case_sensitive {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    };
+                    cmds.push(RenderCommand::Text {
+                        x: rect.x,
+                        y: rect.y,
+                        text: format!("{ticked} Match case  (Alt+C)"),
+                        font_size: SMALL_FONT,
+                        color: if self.find_replace.case_sensitive {
+                            self.palette.text
+                        } else {
+                            self.palette.subtext0
+                        },
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(rect.w),
                         overflow: TextOverflow::Ellipsis,
                     });
                 }
@@ -6358,6 +6506,7 @@ mod tests {
     // Only the tests build events by hand; production code reads the fields of
     // the ones it is handed.
     use guitk::event::Modifiers;
+    use guitk::shortcut::keystrokes;
 
     use super::*;
     /// The picker is not merely open: it is DRAWN.
@@ -6851,6 +7000,150 @@ mod tests {
     // type into the second field, nothing could press any of the buttons, and
     // `replace_current`/`replace_all` had no caller at all.
     // ------------------------------------------------------------------
+
+    /// **The three view toggles change the view, and nothing else.**
+    ///
+    /// `Ctrl+Shift+S` and `Ctrl+Shift+F` sit directly above `Ctrl+S` (save)
+    /// and `Ctrl+F` (find), and a guard narrows only the arm it is on -- so if
+    /// the shifted arms were below their unshifted twins, the chord would open
+    /// a dialog instead. **That mistake is invisible to
+    /// `every_advertised_key_does_something`**, which asks only whether the
+    /// key was consumed, and opening a save dialog consumes it just as
+    /// thoroughly as toggling a bar. The outcome carries no information about
+    /// the mechanism; only the effect does.
+    #[test]
+    fn the_view_toggles_toggle_the_view_and_open_nothing() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        let before = (
+            app.show_gridlines,
+            app.show_formula_bar,
+            app.show_status_bar,
+        );
+
+        app.handle_event(&ctrl(Key::G));
+        assert_ne!(
+            app.show_gridlines, before.0,
+            "Ctrl+G did not move the gridlines"
+        );
+
+        app.handle_event(&ctrl_shift(Key::F));
+        assert_ne!(
+            app.show_formula_bar, before.1,
+            "Ctrl+Shift+F did not move the formula bar"
+        );
+
+        app.handle_event(&ctrl_shift(Key::S));
+        assert_ne!(
+            app.show_status_bar, before.2,
+            "Ctrl+Shift+S did not move the status bar"
+        );
+
+        assert!(
+            !app.picker.is_open(),
+            "a view toggle fell through to the save dialog"
+        );
+    }
+
+    /// Find and replace can be told that case matters.
+    ///
+    /// `FindReplace::case_sensitive` is handed to `textfind::Case` on every
+    /// search and consulted by both replace paths, and it was `false` with no
+    /// writer in the crate. So a replace of `id` also rewrote `ID` and `Id`,
+    /// always -- and a sheet whose headings differ only in case could not be
+    /// edited without hitting them.
+    #[test]
+    fn alt_c_makes_find_and_replace_match_case() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.set_cell_input(CellAddr::new(0, 0), "id");
+        app.set_cell_input(CellAddr::new(0, 1), "ID");
+        app.set_cell_input(CellAddr::new(0, 2), "Id");
+
+        app.open_find_replace(FindField::Search);
+        app.find_replace.search_text = String::from("id");
+        app.find_next();
+        let folded = app.find_replace.results.len();
+        assert_eq!(
+            folded, 3,
+            "control: ignoring case, all three spellings should match"
+        );
+
+        assert_eq!(
+            app.handle_event(&alt(Key::C)),
+            EventResult::Consumed,
+            "Alt+C was ignored in the find panel"
+        );
+        assert!(
+            app.find_replace.case_sensitive,
+            "Alt+C did not turn matching on"
+        );
+        app.find_next();
+        assert_eq!(
+            app.find_replace.results.len(),
+            1,
+            "with case on, only the exact spelling should match"
+        );
+
+        app.handle_event(&alt(Key::C));
+        assert!(
+            !app.find_replace.case_sensitive,
+            "Alt+C is a switch, not a one-way door"
+        );
+    }
+
+    /// The panel draws the switch, and the click reaches it.
+    #[test]
+    fn the_find_panel_draws_the_case_switch_and_a_click_works_it() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.open_find_replace(FindField::Search);
+
+        let drawn = |a: &SpreadsheetApp| -> Vec<String> {
+            a.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(
+            drawn(&app).iter().any(|t| t == "[ ] Match case  (Alt+C)"),
+            "the panel does not draw the case switch"
+        );
+
+        // The control is in the same list the hit test walks, so a click on
+        // where it is drawn has to reach it.
+        let panel = app.find_panel();
+        let (rect, _) = panel
+            .controls
+            .iter()
+            .find(|(_, control)| *control == FindControl::MatchCase)
+            .expect("the panel lays out no case switch");
+        let (cx, cy) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+        app.handle_mouse_event(&MouseEvent {
+            x: cx,
+            y: cy,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert!(
+            app.find_replace.case_sensitive,
+            "a click on the case switch did not work it"
+        );
+        assert!(
+            drawn(&app).iter().any(|t| t == "[x] Match case  (Alt+C)"),
+            "the switch moved and the panel still draws it unticked"
+        );
+    }
+
+    fn alt(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.alt = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
 
     fn ctrl(k: Key) -> Event {
         Event::Key(KeyEvent {
@@ -8971,6 +9264,113 @@ mod tests {
         buffer
     }
 
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// A list on screen and the handler behind it are two copies of one fact,
+    /// and they drift: `apps/rssreader` shipped an overlay of twenty-one
+    /// shortcuts of which about four worked. The label is read by
+    /// `guitk::shortcut` rather than matched against a table written beside it
+    /// here -- that table would be a third copy, drifting from both.
+    ///
+    /// One sheet is enough here, where other apps need several: every arm in
+    /// this handler returns `Consumed` whatever the state, down to `Left` in
+    /// column A. That is worth stating rather than leaving implied, because it
+    /// is also what makes the check weaker here than elsewhere -- it proves the
+    /// key reaches an arm, not that the arm did anything.
+    ///
+    /// The strokes carry no text, which matters more in this program than in
+    /// any other: the handler ends in a catch-all that starts editing the cell
+    /// on any printable character. A stroke carrying `"q"` would be `Consumed`
+    /// by that catch-all, and every letter in the alphabet would pass this
+    /// test whether or not the program bound it.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                assert!(
+                    stroke.text.is_empty(),
+                    "a stroke carrying text would be eaten by the edit catch-all"
+                );
+                // Several states, not one. A key that belongs to a panel
+                // declines while that panel is shut, which is correct and is
+                // not the same thing as being unbound -- `Alt+C` is the find
+                // panel's, and a single-state guard called it unanswered.
+                let answered = key_states().iter_mut().any(|app| {
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// States a shortcut might need in order to be able to act.
+    fn key_states() -> Vec<SpreadsheetApp> {
+        let fresh = SpreadsheetApp::new(1280.0, 800.0);
+        // With the find panel up, so its own keys have something to work on.
+        let mut finding = SpreadsheetApp::new(1280.0, 800.0);
+        finding.open_find_replace(FindField::Search);
+        vec![fresh, finding]
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/netscan`'s `wol_note` was written by the
+    /// model and drawn by nothing for three commits with every model-level
+    /// test passing.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        assert!(
+            !drawn_text(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&Event::Key(key(Key::F1, None)));
+        let shown = drawn_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&Event::Key(key(Key::Escape, None)));
+        assert!(
+            !drawn_text(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// `?` stays a character, because a spreadsheet has to be able to hold one.
+    #[test]
+    fn a_question_mark_is_typed_into_the_cell_not_swallowed_as_help() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.handle_event(&Event::Key(key(Key::Slash, Some('?'))));
+        assert!(
+            !drawn_text(&app).contains("F1 closes this"),
+            "`?` opened the help overlay in a program that has to type it"
+        );
+        assert!(
+            matches!(app.mode, InteractionMode::Editing { .. }),
+            "`?` did not start editing the cell"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn drawn_text(app: &SpreadsheetApp) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
     fn key(key: Key, text: Option<char>) -> KeyEvent {
         KeyEvent {
             key,
@@ -9343,6 +9743,37 @@ mod tests {
         *app.selection_mut() = Selection::single(CellAddr::new(20, 0));
         app.ensure_cell_visible(CellAddr::new(20, 0));
         assert!(app.scroll().x > 0.0);
+    }
+
+    /// Ctrl+T hides the toolbar, and a plain `T` still types into the cell.
+    ///
+    /// `show_toolbar` gates the toolbar's draw and had no writer. The key has
+    /// to carry Ctrl: the catch-all in this handler starts editing the cell on
+    /// any printable character, so a bare `T` would stop being typeable into a
+    /// spreadsheet -- a worse defect than the one being fixed.
+    #[test]
+    fn ctrl_t_hides_the_toolbar_and_plain_t_still_types() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        assert!(app.show_toolbar, "control: the toolbar starts shown");
+
+        let ev = |k: Key, ctrl: bool, text: &str| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl,
+                ..Modifiers::NONE
+            },
+            text: text.to_string(),
+        };
+
+        app.handle_key_event(&ev(Key::T, true, ""));
+        assert!(!app.show_toolbar, "Ctrl+T did not hide the toolbar");
+
+        app.handle_key_event(&ev(Key::T, false, "t"));
+        assert!(
+            matches!(app.mode, InteractionMode::Editing { .. }),
+            "a plain T no longer starts typing into the cell"
+        );
     }
 
     #[test]

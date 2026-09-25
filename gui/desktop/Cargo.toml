@@ -31,6 +31,19 @@ name = "desktop-demo"
 path = "src/bin/demo.rs"
 
 [dependencies]
+
+# The FLAT glob matcher, for wallpaper exclusion patterns. Flat and not
+# the path-aware one in apps/backup because a rotation reads one folder,
+# so a pattern that could cross directories would have nothing to cross.
+# See known-issues.md TD-C-THE-TWO-GLOB-MATCHERS-ARE-NOT-DUPLICATES.
+globmatch = { path = "../globmatch" }
+
+# design-decisions 426's path escape, for the wallpaper's own config format.
+pathcodec = { path = "../pathcodec" }
+# The session group, for the screen-lock delay. One integer with two
+# readers -- `apps/settings` writes it -- which is the `fileassoc` shape
+# rather than a typed crate like `appearance`. See src/idle_lock.rs.
+settingsfile = { path = "../settingsfile" }
 guitk = { path = "../toolkit" }
 # `/proc` is read through the one parser, not a second copy. The same
 # crate serves apps/sysinfo, apps/procexplorer and apps/sysmonitor; two

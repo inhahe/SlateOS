@@ -6,12 +6,26 @@
 //! - SHA-1 info hash computation
 //! - Peer wire protocol messages (BEP 3)
 //! - Piece management with bitfield tracking
-//! - Tracker announce/scrape (HTTP)
+//! - Tracker announce URLs built, and announce responses parsed
 //! - Magnet link parsing (BEP 9)
 //! - Download/upload speed tracking
-//! - Bandwidth throttling
-//! - Peer discovery and management
 //! - Multi-tab UI with transfer list, details, peers, files, trackers
+//!
+//! What it cannot do is **transfer anything**. The crate depends on `guitk`,
+//! `oswindow`, `appearance` and `safeio`, and on no network at all: there is
+//! no `std::net` here and no socket of any kind. The announce URL
+//! `TrackerRequest::build_url` composes is never fetched, so no peer list
+//! comes back, and a torrent with no peers makes no progress. That is
+//! deliberate — see the note in the tick loop, which records why the
+//! invented peers it used to have were worse than none.
+//!
+//! Three entries were removed from the list above rather than left to
+//! mislead someone planning work from it. *Tracker announce/scrape (HTTP)*
+//! became the line above it, since what exists is the URL and the response
+//! parser, not the fetch between them. *Bandwidth throttling* is gone:
+//! `BandwidthLimiter` is implemented and tested, but the two fields that hold
+//! one are read by nothing, so no byte is ever delayed. *Peer discovery* is
+//! gone for want of the transport.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
@@ -2188,6 +2202,26 @@ const CANNOT_TRANSFER_LINES: [&str; 3] = [
     "A torrent showing no progress is not an empty swarm -- nothing was ever asked for.",
 ];
 
+/// What the settings panel has to say about itself.
+///
+/// `CANNOT_TRANSFER_LINES` covers the transfers view. This covers the
+/// settings panel, which was the half those three lines never reached: a
+/// person reading "this client cannot download or upload anything" has been
+/// told the *transfers* do not happen, and may still reasonably believe that
+/// "Encryption: Prefer" and "DHT: Enabled" describe how this client behaves
+/// on a network.
+///
+/// They describe nothing. There is no network stack here, so none of these
+/// values has ever been consulted by anything but the line that draws it --
+/// the panel reads the value in order to print the value, which is the most
+/// persuasive form of a false claim a program can make, because the evidence
+/// is the program's own output at the moment the reader is checking.
+///
+/// The repair is this line and not a key. A control that moves and changes
+/// nothing is a claim; a fixed value beside an honest note is a gap.
+const SETTINGS_NOT_APPLIED: &str =
+    "Not applied: nothing reads these except this panel -- there is no network stack.";
+
 /// Columns of the Peers detail table.
 const PEER_COLUMNS: &[Column] = &[
     Column {
@@ -2310,6 +2344,8 @@ pub struct TorrentApp {
     pub peer_id: [u8; 20],
     pub search_query: String,
     pub sort_column: SortColumn,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub sort_ascending: bool,
     pub filter: TorrentFilter,
     pub global_download_speed: SpeedTracker,
@@ -2326,6 +2362,53 @@ pub struct TorrentApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+}
+
+/// Stepping and naming for [`SortColumn`].
+impl SortColumn {
+    /// Every column, in the order `C` steps through them.
+    ///
+    /// Written in the same order as the comparator so the two cannot drift:
+    /// a variant added to the enum and forgotten here would be unreachable
+    /// again, which is the defect this list exists to end.
+    pub const ALL: [Self; 11] = [
+        Self::Name,
+        Self::Size,
+        Self::Progress,
+        Self::Status,
+        Self::DownSpeed,
+        Self::UpSpeed,
+        Self::Ratio,
+        Self::Eta,
+        Self::Seeds,
+        Self::Peers,
+        Self::Added,
+    ];
+
+    /// What the status bar calls this column.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Size => "size",
+            Self::Progress => "progress",
+            Self::Status => "status",
+            Self::DownSpeed => "download speed",
+            Self::UpSpeed => "upload speed",
+            Self::Ratio => "ratio",
+            Self::Eta => "time left",
+            Self::Seeds => "seeds",
+            Self::Peers => "peers",
+            Self::Added => "date added",
+        }
+    }
+
+    /// The next column round the ring.
+    #[must_use]
+    pub fn next(self) -> Self {
+        let at = Self::ALL.iter().position(|c| *c == self).unwrap_or(0);
+        let wrapped = at.saturating_add(1) % Self::ALL.len();
+        Self::ALL.get(wrapped).copied().unwrap_or(Self::Added)
+    }
 }
 
 /// Column for sorting
@@ -2384,6 +2467,32 @@ impl TorrentFilter {
     }
 }
 
+/// The keys this window answers, as a reader sees them.
+///
+/// Before this the window named two of them -- `(C, R)` in the status bar
+/// beside the sort -- and the seven filter digits, the streaming toggle and
+/// all three Ctrl chords were written down nowhere. The survey read `1`, `2`
+/// and `3` as named because those characters appear in drawn text like
+/// "1 downloading"; a lone digit is cheap to match by accident, which is why
+/// the count it reported was seven and the true number was ten.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("Up / Down", "Move the selection"),
+    ("Space", "Pause or resume the selected transfer"),
+    ("S", "Download this one in order, for streaming"),
+    ("Delete", "Remove it from the list; the files stay"),
+    (
+        "1-7",
+        "Filter: all, downloading, seeding, done, paused, active, error",
+    ),
+    ("C", "Change the sort column"),
+    ("R", "Reverse the sort"),
+    ("Tab", "Next tab"),
+    ("Ctrl+O", "Open a .torrent file"),
+    ("Ctrl+P", "Pause every transfer"),
+    ("Ctrl+R", "Resume every transfer"),
+];
+
 impl Default for TorrentApp {
     fn default() -> Self {
         Self::new()
@@ -2415,6 +2524,7 @@ impl TorrentApp {
             peer_id,
             search_query: String::new(),
             sort_column: SortColumn::Added,
+            show_help: false,
             sort_ascending: false,
             filter: TorrentFilter::All,
             global_download_speed: SpeedTracker::new(60, 1000),
@@ -2690,7 +2800,44 @@ impl TorrentApp {
     }
 
     /// Handle a key press.
+    /// Choose a filter, reporting whether the list actually changed.
+    ///
+    /// `Ignored` when the filter is already the one asked for: pressing `1`
+    /// twice does nothing the second time, and saying so is how every other
+    /// key in this app behaves.
+    fn set_filter(&mut self, filter: TorrentFilter) -> EventResult {
+        // `Ignored` when the filter does not change, and that is not a key
+        // being given away. I removed this early return on 2026-09-21 arguing
+        // that `Ignored` means "propagate to parent" and so handed 3 to
+        // whatever sits above this window. There is nothing above it:
+        // `handle_event` maps `Ignored` to `Response::Idle`, so in a
+        // top-level app the word means "nothing changed, do not redraw".
+        // Putting it back, because a redundant repaint of every row on a key
+        // that did nothing is a real if small cost, and the reason I took it
+        // out was simply wrong.
+        if self.filter == filter {
+            return EventResult::Ignored;
+        }
+        self.filter = filter;
+        EventResult::Consumed
+    }
+
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Above the Ctrl branch, which returns for every Ctrl chord: placed
+        // after it, Ctrl+P would pause every transfer from behind the card.
+        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal. Delete removes the selected transfer, and doing that
+            // from behind a list the reader is consulting is the reason this
+            // does not let keys through.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         if key.modifiers.ctrl {
             return match key.key {
                 // Everything at once, which is what the toolbar buttons are
@@ -2764,6 +2911,27 @@ impl TorrentApp {
                 {
                     t.toggle_sequential();
                 }
+                EventResult::Consumed
+            }
+            // The filter sidebar, the sort column and its direction: three
+            // controls this window draws and nothing could operate. The
+            // sidebar highlighted whichever filter was selected and none could
+            // be chosen; the comparator had eleven arms and ten were
+            // unreachable. Found by `scripts/frozen-flag-survey.py` after it
+            // learned to look at enums as well as booleans.
+            Key::Num1 => self.set_filter(TorrentFilter::All),
+            Key::Num2 => self.set_filter(TorrentFilter::Downloading),
+            Key::Num3 => self.set_filter(TorrentFilter::Seeding),
+            Key::Num4 => self.set_filter(TorrentFilter::Completed),
+            Key::Num5 => self.set_filter(TorrentFilter::Paused),
+            Key::Num6 => self.set_filter(TorrentFilter::Active),
+            Key::Num7 => self.set_filter(TorrentFilter::Error),
+            Key::C => {
+                self.sort_column = self.sort_column.next();
+                EventResult::Consumed
+            }
+            Key::R => {
+                self.sort_ascending = !self.sort_ascending;
                 EventResult::Consumed
             }
             Key::Tab => {
@@ -3211,12 +3379,18 @@ impl TorrentApp {
             x: 12.0,
             y: sy + 8.0,
             text: format!(
-                "↓ {}  ↑ {}  |  {} downloading, {} seeding, {} total  |  {}",
+                "↓ {}  ↑ {}  |  {} downloading, {} seeding, {} total  |  sorted by {} {} (C, R)  |  {}",
                 format_speed(dl_speed),
                 format_speed(ul_speed),
                 downloading,
                 seeding,
                 total,
+                self.sort_column.label(),
+                if self.sort_ascending {
+                    "ascending"
+                } else {
+                    "descending"
+                },
                 self.status_message
             ),
             font_size: 11.0,
@@ -3225,6 +3399,17 @@ impl TorrentApp {
             max_width: Some(width - 24.0),
             overflow: TextOverflow::Ellipsis,
         });
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
 
         // Last, so it is above everything. Without this the picker
         // takes every keystroke with nothing on screen to say why --
@@ -3808,6 +3993,18 @@ impl TorrentApp {
     fn render_settings(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
         let mut sy = y + 12.0;
         let label_x = x + 16.0;
+
+        cmds.push(RenderCommand::Text {
+            x: label_x,
+            y: sy,
+            text: SETTINGS_NOT_APPLIED.to_owned(),
+            font_size: 11.0,
+            color: self.palette.ink(self.palette.yellow),
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(w - 32.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+        sy += 24.0;
         let value_x = x + 220.0;
         let max_val_w = w - 240.0;
 
@@ -4150,6 +4347,44 @@ mod tests {
     ///
     /// Found by `scripts/find-unpinned-picker-routing.py`, which cuts the
     /// routing and reports whose tests notice. Sixteen of twenty did not.
+    /// The settings panel says its settings are not applied.
+    ///
+    /// `CANNOT_TRANSFER_LINES` tells a reader the transfers do not happen.
+    /// This panel separately reports "Encryption: Prefer" and "DHT: Enabled",
+    /// which a reader can believe describes how the client behaves on a
+    /// network -- and there is no network stack, so those values have never
+    /// been read by anything but the line that prints them.
+    #[test]
+    fn the_settings_panel_says_nothing_reads_these() {
+        let mut app = TorrentApp::new();
+        app.active_tab = Tab::Settings;
+        let texts: Vec<String> = app
+            .render_commands(1280.0, 800.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            texts.iter().any(|t| t.contains("Encryption:")),
+            "control: the panel must be drawing a setting for this to be \
+about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        // Against the words a reader sees, not against the constant: a test
+        // comparing with `SETTINGS_NOT_APPLIED` passes with the constant
+        // rewritten to "Settings", which would be the same defect wearing
+        // this test as cover.
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Not applied") && t.contains("nothing reads these")),
+            "the panel drew settings and did not say they are not applied"
+        );
+    }
+
     #[test]
     fn an_open_picker_takes_the_keyboard_from_the_list() {
         let mut app = TorrentApp::new();
@@ -4353,6 +4588,190 @@ mod tests {
     // outside the tests -- the transfer controls and the piece picker, which
     // is the whole of a BitTorrent client's download loop.
     // ------------------------------------------------------------------
+
+    /// **The sort column and its direction can be changed.**
+    ///
+    /// `sort_column` had no writer anywhere: declared, constructed as `Added`,
+    /// read once in a comparator with eleven arms, ten of them unreachable.
+    /// `sort_ascending` was fixed at descending beside it.
+    ///
+    /// Asserts the *order of the list*, not the value of the field: a key that
+    /// sets an enum the comparator ignores would pass the weaker test, which
+    /// is the defect `apps/regextester`'s `multiline` had.
+    #[test]
+    fn the_sort_column_and_direction_can_be_changed() {
+        let mut app = TorrentApp::new();
+        for (name, size) in [("beta", 3000u64), ("alpha", 1000), ("gamma", 2000)] {
+            let meta = create_sample_torrent(name, size, 256, "http://t.co/a");
+            app.add_torrent(meta, None);
+        }
+
+        let names = |app: &TorrentApp| -> Vec<String> {
+            app.filtered_torrents()
+                .iter()
+                .map(|t| t.name.clone())
+                .collect()
+        };
+        let start = names(&app);
+
+        // Step to the name column and the list has to re-order.
+        let mut guard = 0;
+        while app.sort_column != SortColumn::Name && guard < SortColumn::ALL.len() {
+            assert_eq!(app.handle_event(&press(Key::C)), EventResult::Consumed);
+            guard += 1;
+        }
+        assert_eq!(
+            app.sort_column,
+            SortColumn::Name,
+            "C did not reach the name column"
+        );
+        let by_name = names(&app);
+        assert_ne!(by_name, start, "sorting by name changed nothing");
+
+        assert_eq!(app.handle_event(&press(Key::R)), EventResult::Consumed);
+        let reversed = names(&app);
+        assert_ne!(reversed, by_name, "R did not reverse the order");
+        assert_eq!(
+            reversed.iter().rev().cloned().collect::<Vec<_>>(),
+            by_name,
+            "R gave an order that is not the reverse of the one before it"
+        );
+    }
+
+    /// **Every filter in the sidebar can be selected.**
+    ///
+    /// The sidebar drew seven entries and highlighted whichever was current;
+    /// `filter` had no writer, so the highlight never moved and six of the
+    /// seven rows were decoration.
+    #[test]
+    fn every_filter_in_the_sidebar_can_be_selected() {
+        let mut app = TorrentApp::new();
+        let wanted = [
+            (Key::Num1, TorrentFilter::All),
+            (Key::Num2, TorrentFilter::Downloading),
+            (Key::Num3, TorrentFilter::Seeding),
+            (Key::Num4, TorrentFilter::Completed),
+            (Key::Num5, TorrentFilter::Paused),
+            (Key::Num6, TorrentFilter::Active),
+            (Key::Num7, TorrentFilter::Error),
+        ];
+        for (key, filter) in wanted {
+            app.handle_event(&press(key));
+            assert_eq!(app.filter, filter, "{key:?} did not select {filter:?}");
+        }
+    }
+
+    /// **The status bar says what the list is sorted by, and how to change it.**
+    ///
+    /// Without this the two keys are as unreachable as the fields were: the
+    /// sidebar shows its own selection, but nothing else on screen mentions
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Two filter states, and the reason is the one that took longest to
+    /// see. `Consumed` here asks whether the key *did* something, not whether
+    /// the window owns it: `Ignored` in a top-level app means "nothing
+    /// changed, do not redraw" -- `handle_event` maps it to `Response::Idle`
+    /// and there is no parent to propagate to. So `1` on a list already
+    /// showing All is answered and reports `Ignored`, correctly. Running the
+    /// guard from two different filters gives every digit a state in which it
+    /// changes something.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered =
+                    [TorrentFilter::All, TorrentFilter::Error]
+                        .into_iter()
+                        .any(|start| {
+                            let mut app = TorrentApp::new();
+                            app.filter = start;
+                            app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                        });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the last third: `C` behind the card must not move the
+    /// sort column, but asserting only that would pass just as well on a
+    /// window that had lost `C` altogether, so the same key is then pressed
+    /// with the card down and required to work.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &mut TorrentApp| -> String {
+            app.render(1200.0, 800.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+
+        let mut app = TorrentApp::new();
+        assert!(
+            !drawn(&mut app).contains("F1 or ? closes this"),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = drawn(&mut app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let column = app.sort_column;
+        app.handle_event(&press(Key::C));
+        assert_eq!(
+            app.sort_column, column,
+            "C changed the sort column through the shortcut card"
+        );
+
+        app.handle_event(&press(Key::Escape));
+        app.handle_event(&press(Key::C));
+        assert_ne!(
+            app.sort_column, column,
+            "control: C does nothing even with the card down"
+        );
+    }
+
+    /// the sort at all.
+    #[test]
+    fn the_status_bar_names_the_sort_and_its_keys() {
+        let mut app = TorrentApp::new();
+        let drawn = |app: &mut TorrentApp| -> String {
+            app.render(1200.0, 800.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+
+        let before = drawn(&mut app);
+        assert!(
+            before.contains("sorted by date added descending (C, R)"),
+            "the status bar does not say what the list is sorted by: {before}"
+        );
+
+        app.handle_event(&press(Key::R));
+        assert!(
+            drawn(&mut app).contains("sorted by date added ascending (C, R)"),
+            "the status bar did not follow the direction"
+        );
+    }
 
     fn key_ev(key: Key, ctrl: bool) -> Event {
         let mut modifiers = guitk::event::Modifiers::NONE;

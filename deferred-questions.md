@@ -25,9 +25,16 @@ Same per-lane rules as the other shared documents: append your own entries,
 don't rewrite another lane's, and merge `origin/main` before trusting what you
 read here.
 
+**Entries are numbered `DQ<n>`.** They were `D-Q<n>` until 2026-09-22, when
+the project went to six lanes and `D-` became lane D's open-question prefix
+(`open-questions.md` ids are `<lane>-Q<n>`). The two entries that existed then
+carry their old names in their headings, so a search for an old citation still
+lands here, and lane D's own numbering starts at D-Q3 so that D-Q1 and D-Q2 are
+never reissued. See `design-decisions.md` §1100.
+
 ---
 
-## D-Q1 — Once a fastpy utility is proven as good as the Rust one, which does a stock install run by default?
+## DQ1 (was D-Q1) — Once a fastpy utility is proven as good as the Rust one, which does a stock install run by default?
 
 *(Was `open-questions.md` Q39, raised 2026-08-14 out of §108. Moved here
 2026-08-15 at the operator's direction — the entry itself said "ask again
@@ -81,7 +88,7 @@ makes it a user choice.
 
 ---
 
-## D-Q2 — Install `clang` + `lld` and turn on LLVM CFI for C code?
+## DQ2 (was D-Q2) — Install `clang` + `lld` and turn on LLVM CFI for C code?
 
 *(Was `open-questions.md` A-Q1's **option B**, raised 2026-08-14 by Lane A.
 Answered by the operator 2026-08-15 with **"not yet"** — a deferral, not a
@@ -135,7 +142,7 @@ it, with the prover*) was recorded by Lane A as `design-decisions.md` §201.
 **The answer does not change** — there is still no substantial C port, so the
 payoff is still near zero and "not yet" still stands. What changes is the
 **cost** side, which the entry above overstates in two specific ways. Recording
-this now, because whoever promotes D-Q2 will otherwise re-derive it.
+this now, because whoever promotes DQ2 will otherwise re-derive it.
 
 **1. "We do not have them installed" is no longer true — and never needed to be.**
 `zig cc` **is** clang, and `zig`'s linker **is** `ld.lld`. Zig has been a
@@ -328,3 +335,77 @@ corrected on its say-so (§229 — no correction is applied to any recorded valu
 The cost is a missed detection in a band no run has yet landed in, and the
 failure is now documented in `known-issues.md` with a script that reproduces it,
 so it cannot be rediscovered as a surprise.
+
+## [C] Where should the weather app get weather, once it can fetch at all? — deferred 2026-09-18
+
+**In short:** Our weather app has no weather and no way to get any, and it
+says so plainly in its own window rather than showing invented numbers. So
+there is nothing wrong with it today and nothing for you to decide. When we
+can actually make a network request, someone has to choose where the forecast
+comes from — and that is a real choice, because a weather provider learns
+where our users are.
+
+**Why this is not in `open-questions.md`.** I raised it there first and
+withdrew it the same day. The app already behaves correctly while empty
+(`CANNOT_FETCH_LINES`, and it stops before drawing the dashboard), so there is
+no harm accruing, and the decision cannot be acted on: `net/httpclient` builds
+and parses HTTP and has no transport — its own module doc says "What this
+crate does *not* do: send anything". Asking now would be asking you to choose
+a supplier for a delivery we cannot receive.
+
+**The choice, when it arrives:**
+
+| Option | *What changes* |
+|---|---|
+| A public no-key API (Open-Meteo and similar) | *Forecasts work with no signup; the provider sees our users' coordinates.* |
+| A keyed commercial API | *Same, plus a key to ship, store and rotate.* |
+| User-supplied endpoint, nothing by default | *It stays empty until someone configures it; no third party by default.* |
+| Never fetch; delete the app | *One fewer app, no privacy surface.* |
+
+**Trigger to promote this into `open-questions.md`:** the first working
+outbound connection in the net stack — a real `connect`/`send` path that
+`net/httpclient` can sit on. Until then this is blocked on the project, not on
+the operator.
+
+**Related:** `known-issues.md` →
+`TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY` (withdrawn; explains why the app is
+already correct).
+## [A] If file seals start being enforced, who is allowed to set one? — deferred 2026-09-18
+
+**Trigger:** the first caller of `sealing::add_seals` outside `kshell`, or any
+change that makes `fs/vfs.rs` / `fs/handle.rs` consult a seal. Either event
+turns this from hypothetical into a policy that ships.
+
+**In short:** the kernel can record that a file is permanently unchangeable,
+and nothing checks that record, so the mark does nothing today. If someone
+makes it real, an unanswered question becomes load-bearing: *who may apply an
+irreversible restriction to a file?* Right now the answer would be "anyone
+who can call the function", because there is no permission check at all.
+
+**Why it is deferred rather than queued.** Nothing uses sealing: every
+`sealing::` reference outside `kernel/src/fs/sealing.rs` is `procfs.rs`
+(`stats`, `list_sealed`) or `kshell.rs` (`add_seals`, `get_seals`), and the
+write and truncate paths contain no reference to seals. So the policy has no
+consequences until enforcement lands, and `open-questions.md` is 32 entries
+deep with none of lane A's seven answered. Asking now would pad the queue
+this file exists to protect.
+
+**What was already done, so this is not a loose end.** `sealing.rs`'s module
+doc now leads with **NOT ENFORCED YET** and says a sealed file is writable;
+`known-issues.md` carries the enumeration; and `stats()`'s `denied` counter is
+documented as only ever able to read 0, so `/proc` cannot be misread as
+"nobody tried" when the truth is "nothing is checked".
+
+**The shape of the decision, recorded now while the evidence is fresh.**
+`grep SEAL kernel/src/cap/rights.rs` returns nothing, and `add_seals`
+contains no capability check, so all three options below are open:
+
+| option | consequence |
+|---|---|
+| a new right, e.g. `SET_SEAL` | costs a bit in `Rights` (`DISTINCT` is currently 16 and pinned, so the pin moves), and every legitimate sealer needs granting it |
+| no right — anyone may seal | simplest, and a denial-of-service: any process that can open a file for write could make it permanently unwritable |
+| seal only what you own | no new right, but "own" needs defining against the existing file-tag model, and it does not cover a shared file, which is the case the feature's own doc names |
+
+The middle option is the one to be careful about: irreversibility plus no
+authority check is a combination that cannot be walked back per-file, only by
+removing the feature.

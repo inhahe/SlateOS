@@ -1042,6 +1042,26 @@ fn sample_disks() -> Vec<Disk> {
 // Application state
 // ============================================================================
 
+/// The keys this window answers, as a reader sees them.
+///
+/// `Ctrl+Z` takes back the last pending operation, on a window whose other
+/// keys queue partition changes. It was named nowhere, which makes the queue
+/// a one-way list until you find it.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Move through the partitions"),
+    (
+        "Left / Right",
+        "Smaller or larger, in the create-partition dialog",
+    ),
+    ("Tab", "Next panel"),
+    ("Delete", "Queue a delete for the selection"),
+    ("Ctrl+N", "Create a partition in free space"),
+    ("Ctrl+Z", "Take back the last queued change"),
+    ("Ctrl+Enter", "Apply everything queued"),
+    ("Esc", "Close the dialog"),
+];
+
 /// Main application state for the partition manager.
 pub struct PartitionManagerApp {
     /// Window dimensions.
@@ -1056,6 +1076,8 @@ pub struct PartitionManagerApp {
     /// Queue of pending operations.
     pub operation_queue: Vec<PendingOperation>,
     /// Currently active dialog.
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub dialog: ActiveDialog,
     /// Scroll offset for the partition list.
     pub partition_scroll: f32,
@@ -1100,6 +1122,7 @@ impl PartitionManagerApp {
             selected_disk: 0,
             selected_item: SelectedItem::None,
             operation_queue: Vec::new(),
+            show_help: false,
             dialog: ActiveDialog::None,
             partition_scroll: 0.0,
             queue_scroll: 0.0,
@@ -3213,6 +3236,17 @@ pub fn render(app: &mut PartitionManagerApp) -> RenderTree {
         ActiveDialog::None => {}
     }
 
+    if app.show_help {
+        guitk::shortcut::render_card(
+            &mut tree,
+            &app.palette,
+            (app.width, app.height),
+            0.0,
+            SHORTCUTS,
+            "F1 closes this",
+        );
+    }
+
     tree
 }
 
@@ -3845,6 +3879,18 @@ fn handle_format_accepted(app: &mut PartitionManagerApp) {
 fn handle_key(app: &mut PartitionManagerApp, key_ev: &KeyEvent) -> EventResult {
     if !key_ev.pressed {
         return EventResult::Ignored;
+    }
+
+    if key_ev.key == Key::F1 {
+        app.show_help = !app.show_help;
+        return EventResult::Consumed;
+    }
+    if app.show_help {
+        // Modal. Delete queues a partition removal.
+        if matches!(key_ev.key, Key::Escape | Key::Enter) {
+            app.show_help = false;
+        }
+        return EventResult::Consumed;
     }
 
     // Escape closes dialogs
@@ -6394,6 +6440,98 @@ mod tests {
     }
 
     // -- Event handling tests --
+    fn card_key(k: Key, ctrl: bool) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers {
+                ctrl,
+                ..guitk::event::Modifiers::NONE
+            },
+            text: String::new(),
+        }
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Two states, because `Esc` closes a dialog and `Ctrl+Enter` applies a
+    /// queue; both report nothing to do when there is neither.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [0_u8, 1, 2].into_iter().any(|state| {
+                    let mut app = app_with_disks();
+                    if state == 2 {
+                        // The create-partition dialog, which is the only
+                        // place Left and Right are answered -- they resize
+                        // the new partition. My row said "Previous or next
+                        // disk", which this window does not do: the seventh
+                        // row in this queue written from the key instead of
+                        // from the arm.
+                        app.dialog = ActiveDialog::CreatePartition(CreatePartitionDialog::new(
+                            2048, 4096, 512,
+                        ));
+                    }
+                    if state == 1 {
+                        // A dialog open, which is what Esc has to close.
+                        app.dialog = ActiveDialog::destructive(
+                            ConfirmIntent::DeletePartition,
+                            "Delete Partition",
+                            "queued",
+                            "Delete",
+                        );
+                    }
+                    handle_key(&mut app, &stroke) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing is queued behind it.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &mut PartitionManagerApp| -> Vec<String> {
+            render(app)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut app = app_with_disks();
+        assert!(
+            !drawn(&mut app).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        handle_key(&mut app, &card_key(Key::F1, false));
+        let shown = drawn(&mut app);
+        let missing = guitk::shortcut::missing_rows(&shown, SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let selected = app.selected_item.clone();
+        handle_key(&mut app, &card_key(Key::Down, false));
+        assert_eq!(
+            app.selected_item, selected,
+            "Down moved the selection through the shortcut card"
+        );
+
+        handle_key(&mut app, &card_key(Key::F1, false));
+        handle_key(&mut app, &card_key(Key::Down, false));
+        assert_ne!(
+            app.selected_item, selected,
+            "control: Down does nothing even with the card down"
+        );
+    }
 
     #[test]
     fn test_handle_resize() {

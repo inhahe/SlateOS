@@ -1,0 +1,21 @@
+[package]
+name = "associations"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS file associations — which program opens which kind of file"
+
+[dependencies]
+
+# For `FileCategory` and `extensions_in`. The toolkit already carries the one
+# table of extension -> kind, so a category here is a view on that table rather
+# than a second list of the same facts.
+guitk = { path = "../toolkit" }
+# Format-preserving YAML: the associations file is one a user may have
+# commented, and it has to come back with the comments intact.
+yamldoc = { path = "../../yamldoc" }
+
+# Where settings files live and how they are replaced atomically.
+settingsfile = { path = "../settingsfile" }
+
+[lints]
+workspace = true

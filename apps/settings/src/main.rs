@@ -6,8 +6,8 @@
 //!
 //! Uses the guitk library for rendering. Dark theme (Catppuccin Mocha) by default.
 
-mod defaultapps;
 mod dyndns;
+mod lockscreen;
 mod remote;
 mod snapshots;
 
@@ -18,6 +18,7 @@ use appearance::{
 };
 #[allow(unused_imports)]
 use guitk::color::Color;
+use guitk::colorpicker::{ColorPickerDialog, ColorPickerEvent};
 use guitk::dialog::{DialogAction, FileDialog};
 #[allow(unused_imports)]
 use guitk::event::{
@@ -31,6 +32,8 @@ use guitk::scroll_window;
 #[allow(unused_imports)]
 use guitk::style::{CornerRadii, Edges};
 use guitk::text;
+use guitk::textedit;
+use guitk::textinput::TextInput;
 use guitk::wheel;
 use inputsettings::{InputFile, MAX_DOUBLE_CLICK_MS, MIN_DOUBLE_CLICK_MS};
 use oswindow::app::{Reloads, Response};
@@ -463,12 +466,40 @@ impl NarratorVerbosity {
 // ============================================================================
 
 /// Complete application state for the settings UI.
+/// The keys this window answers, as a reader sees them.
+///
+/// Five chords, named in no string this program draws: the search box is
+/// reached with Ctrl+F and a focused text field takes the four editing
+/// chords. Everything else on this window is a pointer target or a
+/// conventional key cap.
+///
+/// **No `?` row.** A focused field takes every character, so `?` would cost
+/// a question mark in a search or an exclusion pattern to buy a list `F1`
+/// already opens. Third app where `?` was not free, after ebook and
+/// markdowneditor, and the reason is the same each time: this window can be
+/// typed into.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Ctrl+F", "Jump to the search box"),
+    ("Ctrl+A", "Select all, in a text box"),
+    ("Ctrl+C", "Copy"),
+    ("Ctrl+X", "Cut"),
+    ("Ctrl+V", "Paste"),
+];
+
 pub struct SettingsState {
     // Navigation
     pub current_category: SettingsCategory,
     pub current_page: SettingsPage,
-    pub search_query: String,
+    /// What has been typed into the sidebar's search box.
+    ///
+    /// A [`TextInput`] since 2026-09-17. It was a `String` with `push` and
+    /// `pop`, so a mistyped query could only be fixed from the end -- and the
+    /// box drew no caret, because there was no caret to draw.
+    pub search_query: TextInput,
     pub search_focused: bool,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub sidebar_hovered: Option<usize>,
 
     // Window dimensions
@@ -480,6 +511,38 @@ pub struct SettingsState {
     /// questions -- a switch, a value from a list -- and a wallpaper is the one
     /// answer that comes from the filesystem.
     pub dialog: Option<FileDialog>,
+    /// The colour picker, while it is up.
+    ///
+    /// A second modal rather than a variant of the first: the two share no
+    /// state, answer different events and are never open together. What they
+    /// do share is the rule at the top of `dispatch_event` — a modal answers
+    /// first, because on this window every stray keystroke is a setting.
+    pub color_dialog: Option<ColorPickerDialog>,
+    /// Where the colour picker's answer goes.
+    color_is_for: ColorPurpose,
+    /// The glob being typed into the exclusion field, before it is added.
+    ///
+    /// Held separately from the saved list so that typing is not a change to
+    /// the settings: a draft that wrote itself into `wallpaper.exclude` on
+    /// every keystroke would leave `holiday`, `holiday-`, `holiday-2` and the
+    /// rest behind in the file, each of them a pattern the user never meant.
+    /// A [`TextInput`] and not a `String`. The first version of this row was
+    /// a `String` with `push` and `pop` against it, so a typo in the middle of
+    /// `holiday-2019-*.jpg` could only be fixed by deleting back to it: no
+    /// arrow keys, no selection, no paste. The toolkit already had a field
+    /// that does all of that, and does it correctly for right-to-left text,
+    /// which a hand-rolled one was never going to.
+    pub exclusion_draft: TextInput,
+    /// Which place on the page typing goes to, if any.
+    focused_field: Option<FieldId>,
+    /// What the open picker is being used for.
+    ///
+    /// `DialogAction::Selected` arrives with a path and nothing else, so the
+    /// answer has to say which question it answers. The same shape as
+    /// `apps/explorer`'s `Modal`, which carries what to do when it replies --
+    /// and for the same reason: a second picker sharing one handler would
+    /// apply a chosen folder as a wallpaper.
+    picker_is_for: PickerPurpose,
 
     // Display settings
     pub resolution_index: usize,
@@ -599,7 +662,35 @@ pub struct SettingsState {
     /// [`SettingsState::refresh_default_apps`] when the page is entered, which
     /// is the same moment `apps/explorer` re-reads it: neither program caches
     /// an association across the action that uses it.
-    default_apps: Vec<defaultapps::Association>,
+    default_apps: Vec<associations::Association>,
+    /// What each offered category resolves to, alongside the raw list.
+    ///
+    /// Computed when the associations are, from the same document, so the two
+    /// halves of the page cannot disagree about what is on disk.
+    default_app_categories: Vec<(&'static str, associations::CategoryDefault)>,
+    /// Every font family installed here, for the Fonts page's picker.
+    ///
+    /// Held rather than asked for while drawing: `available_families` walks
+    /// the font database, and `build_page` runs on every repaint and again for
+    /// every hit test. Loaded once, because a font is installed by putting a
+    /// file somewhere, which is not something this application can be
+    /// notified about -- unlike the settings file, which has a watcher.
+    font_families: Vec<String>,
+    /// The fixed-pitch families, for the terminal font picker. A subset of
+    /// `font_families`, kept separately because the filter is the whole point:
+    /// offering the unfiltered list under "Terminal Font" is what breaks a
+    /// terminal's grid.
+    mono_families: Vec<String>,
+    /// Minutes before the session locks itself; nought is never.
+    ///
+    /// Held rather than re-read while drawing, like the two lists above:
+    /// `build_page` runs on every repaint and again for every hit test.
+    lock_after_minutes: u32,
+    /// `session.yaml` was rewritten and the shell has not been told.
+    ///
+    /// Without the telling, a delay the user just chose takes effect at the
+    /// next sign-in -- the shell claims its idle watch once, at startup.
+    session_dirty: bool,
 }
 
 /// Where an open dropdown's popup is, and which of its items are on screen.
@@ -688,6 +779,9 @@ pub enum DropdownId {
     /// How far the `n`-th program's notifications get while focusing.
     NotifImportance(usize),
     /// When quiet hours begin.
+    /// How long each picture in a rotation stays up.
+    RotationInterval,
+    LoginBackground,
     QuietStart,
     /// When they end. Earlier than the start means they run through midnight,
     /// which is what nearly everyone wants and what the default is.
@@ -701,6 +795,20 @@ pub enum DropdownId {
     HighContrast,
     /// How the desktop picture is placed on the screen.
     WallpaperFit,
+    /// The family all interface text is drawn in.
+    UiFont,
+    /// How long the session waits before locking itself.
+    LockAfter,
+    /// The family fixed-pitch text is drawn in.
+    ///
+    /// Offered only because `guitk::text::available_mono_families` can now
+    /// answer it. `set_mono_family` installs whatever it is handed and says
+    /// so -- a caller pointing it at a proportional face "gets a terminal with
+    /// a broken grid, and that is the caller's decision to have made" -- so
+    /// this picker is built on the filtered list rather than on
+    /// `available_families`, which is how it declines to make that decision on
+    /// the user's behalf.
+    MonoFont,
 }
 
 impl DropdownId {
@@ -712,14 +820,27 @@ impl DropdownId {
     /// rather than trust that whoever adds one also wires it.
     ///
     /// **Named `FIXED` and not `ALL`, because it is deliberately a subset.**
-    /// `NotifImportance` is absent: it is one dropdown *per program*, in a list
-    /// that may be empty, so there is no fixed value to walk. That reason was
+    /// `NotifImportance` is absent, and it is the only one: it is one dropdown
+    /// *per program*, in a list that may be empty, so there is no fixed value
+    /// to walk.
+    ///
+    /// **Five more used to be absent for no reason anybody had written down**
+    /// -- `RotationInterval`, `LoginBackground`, `UiFont`, `LockAfter` and
+    /// `MonoFont`. Each is drawn by a `dropdown_row`, opens, and has a value
+    /// handler, so each was working; none of them was covered by the sweep
+    /// below, which is the guarantee this list exists to give. They were found
+    /// by `scripts/check-variant-lists.py` once it began asking which variants
+    /// a list omits rather than how many it holds -- the old count-based check
+    /// could not see them, because ten of sixteen looks exactly like a subset
+    /// that means it. The rule the sweep already states applies to them as it
+    /// does to the wallpaper rows: a dropdown left out for being awkward to
+    /// reach is precisely the one worth checking. That reason was
     /// already written here while the constant was still called `ALL` -- which
     /// is the shape `scripts/check-variant-lists.py` exists to refuse, and did:
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 10] = [
+    pub const FIXED: [Self; 15] = [
         Self::QuietStart,
         Self::QuietEnd,
         Self::WallpaperFit,
@@ -730,6 +851,11 @@ impl DropdownId {
         Self::CursorSize,
         Self::NarratorVerbosity,
         Self::HighContrast,
+        Self::RotationInterval,
+        Self::LoginBackground,
+        Self::UiFont,
+        Self::LockAfter,
+        Self::MonoFont,
     ];
 }
 
@@ -769,12 +895,31 @@ impl SettingsState {
         self.appearance = AppearanceFile::load();
     }
 
+    /// Read the stored screen-lock delay.
+    ///
+    /// I/O, and so out of [`new`](Self::new) with the rest of it.
+    pub fn load_lock_delay(&mut self) {
+        self.lock_after_minutes = lockscreen::stored_minutes();
+    }
+
+    /// Enumerate the font families installed on this machine.
+    ///
+    /// I/O, and so out of [`new`](Self::new) with the rest of it.
+    pub fn load_font_families(&mut self) {
+        self.font_families = guitk::text::available_families();
+        self.mono_families = guitk::text::available_mono_families();
+    }
+
     /// Re-read the file associations the File Associations program writes.
     ///
     /// I/O, and so out of [`new`](Self::new) for the reason given above.
     pub fn refresh_default_apps(&mut self) {
-        let doc = settingsfile::load(defaultapps::ASSOC_CONFIG_NAME);
-        self.default_apps = defaultapps::associations_from(&doc);
+        let doc = settingsfile::load(associations::CONFIG_NAME);
+        self.default_apps = associations::associations_from(&doc);
+        self.default_app_categories = associations::CATEGORIES
+            .iter()
+            .map(|c| (c.name, associations::category_default(&doc, c)))
+            .collect();
     }
 
     /// Move to `page`, doing whatever entering a page requires.
@@ -808,12 +953,51 @@ impl SettingsState {
     /// The filter is the formats `gui/imagecodec` can actually decode. A
     /// picker that offered every file would let a user choose a `.txt` and
     /// meet a failure the desktop reports somewhere they are not looking.
-    fn open_wallpaper_dialog(&mut self) {
+    /// Choose a folder to rotate wallpapers from.
+    ///
+    /// `select_folder` rather than `open`, because the thing being chosen is a
+    /// directory -- the same call `apps/filesearch` and `apps/renamer` make for
+    /// the same reason. It existed already; a folder picker did not need
+    /// inventing.
+    fn open_rotation_folder_dialog(&mut self) {
         let start = self
             .appearance
             .settings
-            .wallpaper
-            .as_deref()
+            .wallpaper_folder
+            .clone()
+            .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = FileDialog::select_folder().with_initial_path(start);
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.picker_is_for = PickerPurpose::RotationFolder;
+        self.dialog = Some(dialog);
+    }
+
+    fn open_wallpaper_dialog(&mut self) {
+        let start = self.appearance.settings.wallpaper.clone();
+        self.open_picture_dialog(PickerPurpose::Wallpaper, start.as_deref());
+    }
+
+    /// Choose the picture the login screen shows.
+    fn open_login_image_dialog(&mut self) {
+        let start = match &self.appearance.settings.login_background {
+            appearance::LoginBackground::CustomImage(path) => Some(path.clone()),
+            // No picture of its own yet, so start where the desktop's is: the
+            // two are usually in the same folder, and it is a better guess
+            // than the home directory.
+            _ => self.appearance.settings.wallpaper.clone(),
+        };
+        self.open_picture_dialog(PickerPurpose::LoginImage, start.as_deref());
+    }
+
+    /// The picture picker, wherever its answer is going to land.
+    ///
+    /// One opener rather than one per errand: the filter list below is the
+    /// part worth not copying. Passing the extensions bare instead of as globs
+    /// made every directory list as empty, and a second copy of that list is a
+    /// second chance to get it wrong.
+    fn open_picture_dialog(&mut self, purpose: PickerPurpose, near: Option<&std::path::Path>) {
+        let start = near
             .and_then(|p| {
                 std::path::Path::new(p)
                     .parent()
@@ -831,10 +1015,79 @@ impl SettingsState {
             // find its own fixture.
             .with_filter("Pictures", &["*.png", "*.jpg", "*.jpeg", "*.bmp"]);
         dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.picker_is_for = purpose;
         self.dialog = Some(dialog);
     }
 
     /// Give the picker an event; `None` when there is no picker up.
+    /// Add what has been typed to the exclusion list, if it is worth adding.
+    ///
+    /// Trimmed, because a pattern with a space at one end matches nothing and
+    /// looks in the list exactly like one that would. Refused when empty for
+    /// the same reason the reader drops empty lines, and when already present:
+    /// a list holding one pattern twice excludes nothing extra and gives the
+    /// user two rows to remove before the picture comes back.
+    fn add_exclusion(&mut self) {
+        let pattern = self.exclusion_draft.text().trim().to_string();
+        if pattern.is_empty() {
+            return;
+        }
+        if !self
+            .appearance
+            .settings
+            .wallpaper_exclusions
+            .contains(&pattern)
+        {
+            self.appearance.settings.wallpaper_exclusions.push(pattern);
+        }
+        // Cleared either way. The draft is gone from the field, which is what
+        // says the press was received; leaving a duplicate sitting there would
+        // read as a press that did not land.
+        self.exclusion_draft.clear();
+    }
+
+    /// Give the colour picker an event, and act on what comes back.
+    ///
+    /// A confirmed colour is two settings, not one: the colour itself, and
+    /// `accent_color = Custom` to say that it is the one to use. Writing only
+    /// the colour would store a value nothing reads, since
+    /// `effective_accent` consults `custom_accent` only for `Custom` -- the
+    /// picker would appear to work and the desktop would not change.
+    fn color_dialog_event(&mut self, event: &Event) {
+        let (width, height) = (self.window_width, self.window_height);
+        let outcome = {
+            let Some(dialog) = self.color_dialog.as_mut() else {
+                return;
+            };
+            match event {
+                Event::Key(key) if key.pressed => dialog.handle_key(key),
+                Event::Mouse(mouse) => dialog.handle_mouse(mouse, width, height),
+                _ => None,
+            }
+        };
+        match outcome {
+            Some(ColorPickerEvent::Confirmed(color)) => {
+                match self.color_is_for {
+                    ColorPurpose::Accent => {
+                        self.appearance.settings.custom_accent = color;
+                        self.appearance.settings.accent_color = AccentColor::Custom;
+                    }
+                    ColorPurpose::LoginBackground => {
+                        self.appearance.settings.login_background =
+                            appearance::LoginBackground::SolidColor(color);
+                    }
+                }
+                self.color_dialog = None;
+            }
+            Some(ColorPickerEvent::Cancelled) => self.color_dialog = None,
+            // `Changed` is the live preview inside the picker, which the
+            // picker draws for itself. Adopting it here would repaint the
+            // whole desktop on every pixel of a drag, and would leave the
+            // last-dragged colour in force if the user then cancelled.
+            _ => {}
+        }
+    }
+
     fn dialog_event(&mut self, event: &Event) -> Option<bool> {
         let (width, height) = (self.window_width, self.window_height);
         let action = {
@@ -845,10 +1098,35 @@ impl SettingsState {
                 _ => DialogAction::None,
             }
         };
+        Some(self.apply_dialog_answer(action))
+    }
+
+    /// Apply the picker's answer.
+    ///
+    /// Separate from [`Self::dialog_event`] so a test can hand it an answer
+    /// without a compositor. Inline, the only way to ask "where does a chosen
+    /// folder land" was to synthesise the mouse events that would choose one
+    /// -- which is how the menu test earlier today ended up asking a function
+    /// that could not have failed.
+    fn apply_dialog_answer(&mut self, action: DialogAction) -> bool {
         match action {
             DialogAction::Selected(path) => {
                 self.dialog = None;
-                self.appearance.settings.wallpaper = Some(path.to_string_lossy().into_owned());
+                match self.picker_is_for {
+                    PickerPurpose::Wallpaper => self.appearance.settings.wallpaper = Some(path),
+                    PickerPurpose::RotationFolder => {
+                        self.appearance.settings.wallpaper_folder = Some(path);
+                    }
+                    // The mode becomes "a picture" only now, when there is a
+                    // picture. Setting it when the dropdown was clicked would
+                    // leave `login.background: image` with no `login.image` if
+                    // the user cancelled, which reads back as the theme -- a
+                    // setting that silently undoes itself.
+                    PickerPurpose::LoginImage => {
+                        self.appearance.settings.login_background =
+                            appearance::LoginBackground::CustomImage(path);
+                    }
+                }
             }
             DialogAction::Cancelled => self.dialog = None,
             DialogAction::NavigatedTo(path) => {
@@ -858,7 +1136,7 @@ impl SettingsState {
             }
             DialogAction::None => {}
         }
-        Some(true)
+        true
     }
 
     fn save_appearance(&mut self) {
@@ -1041,13 +1319,19 @@ impl SettingsState {
         Self {
             current_category: SettingsCategory::System,
             current_page: SettingsPage::Display,
-            search_query: String::new(),
+            search_query: TextInput::new(),
             search_focused: false,
+            show_help: false,
             sidebar_hovered: None,
 
             window_width: 1200.0,
             window_height: 800.0,
             dialog: None,
+            color_dialog: None,
+            color_is_for: ColorPurpose::Accent,
+            exclusion_draft: TextInput::new(),
+            focused_field: None,
+            picker_is_for: PickerPurpose::Wallpaper,
 
             // Display defaults
             resolution_index: 2,   // 1920x1080
@@ -1104,6 +1388,13 @@ impl SettingsState {
             // filled by `refresh_default_apps`, from `main` and on entry to
             // the page.
             default_apps: Vec::new(),
+            default_app_categories: Vec::new(),
+            // Empty for the same reason as `default_apps`: enumerating
+            // installed fonts is I/O, and this constructor does none.
+            font_families: Vec::new(),
+            mono_families: Vec::new(),
+            lock_after_minutes: 0,
+            session_dirty: false,
         }
     }
 }
@@ -1762,6 +2053,20 @@ const SECTION_HEADER_HEIGHT: f32 = 36.0;
 /// Height of a button drawn by [`render_button`].
 const BUTTON_HEIGHT: f32 = 32.0;
 
+/// How wide a text field is. Wider than a button, because what goes in one is
+/// a phrase rather than a word: a glob like `holiday-2019-*.jpg` is the point
+/// of the exclusion list, and a field that clips it while typing hides the
+/// mistake the user is about to make.
+const FIELD_WIDTH: f32 = 260.0;
+
+/// The size text in a field is drawn at.
+///
+/// Named because two places need the *same* answer: the row that draws the
+/// text, and the arrow keys, which move the caret by screen position and so
+/// must measure at the size it was drawn at. A constant rather than two
+/// literals is what keeps them from drifting apart.
+const FIELD_FONT_SIZE: f32 = 13.0;
+
 /// How far below a row's top edge a button inside that row is drawn.
 const BUTTON_ROW_INSET_Y: f32 = 6.0;
 
@@ -1776,6 +2081,8 @@ enum ToggleId {
     /// Whether it shows a banner rather than only appearing in the list.
     NotifBanner(usize),
     /// Whether the nightly quiet hours are in force at all.
+    /// Whether a rotation is shuffled or goes in folder order.
+    RotationShuffle,
     QuietHours,
     MonoAudio,
     VisualAlerts,
@@ -1965,6 +2272,20 @@ enum SelectId {
     Account,
     PointerSize,
     AccountPicture,
+    /// One saved exclusion pattern, by position. Selecting it removes it.
+    ExclusionPattern,
+}
+
+/// A place on a page where typing goes.
+///
+/// The sidebar's search box predates this and keeps its own `search_focused`
+/// flag; it is not a page row and cannot be one, since it is drawn outside the
+/// scrolling content. Everything on a *page* that accepts typing goes through
+/// here, so that "what has the keyboard" is one question with one answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldId {
+    /// The glob being typed, before it is added to the exclusion list.
+    ExclusionDraft,
 }
 
 /// A continuously-valued setting the pointer can drag along a track.
@@ -2069,11 +2390,94 @@ enum ButtonId {
     ChooseWallpaper,
     /// Go back to the plain background that follows the theme.
     ClearWallpaper,
+    /// Open the picker and choose a folder to rotate wallpapers from.
+    ChooseRotationFolder,
+    ChooseLoginImage,
+    AddExclusion,
+    /// Stop rotating and go back to a single picture.
+    ClearRotation,
+}
+
+/// How long a rotation leaves each picture up, in seconds.
+///
+/// A fixed list rather than a free number, the same judgement the lock delay
+/// and the thumbnail sizes make: this is a policy the user picks, not a
+/// measurement they take, and a text field would invite "5 min" and "0.5" and
+/// other things the reader would then have to refuse.
+/// The greeter backgrounds this page can set up from start to finish.
+///
+/// Four, not five. The fifth is a gradient, which needs *two* colours, and
+/// `ColorPickerDialog` has no title — so asking for them in sequence would put
+/// up two identical dialogs with nothing to say which was the top and which
+/// the bottom. A gradient stays hand-written until the picker can name what it
+/// is asking for; it is listed when in force and never silently overwritten.
+///
+/// A solid colour joined the list on 2026-09-17, when the accent picker gave
+/// this app somewhere to pick one. design-decisions 856: a settings page is
+/// built when something obeys it, not when something stores it, and the same
+/// rule refuses a control that cannot finish the job.
+const LOGIN_BACKGROUNDS: [&str; 4] = [
+    "Theme colour",
+    "A colour",
+    "Same as my desktop",
+    "A picture",
+];
+
+/// What to call a greeter background in the interface.
+fn login_background_label(bg: &appearance::LoginBackground) -> &'static str {
+    match bg {
+        appearance::LoginBackground::Theme => "Theme colour",
+        appearance::LoginBackground::SameAsDesktop => "Same as my desktop",
+        appearance::LoginBackground::CustomImage(_) => "A picture",
+        appearance::LoginBackground::SolidColor(_) => "A colour",
+        appearance::LoginBackground::Gradient { .. } => "A gradient (set by hand)",
+    }
+}
+
+const ROTATION_INTERVALS: [u64; 6] = [60, 300, 600, 1_800, 3_600, 86_400];
+
+/// How an interval is written on the row.
+fn rotation_interval_label(secs: u64) -> &'static str {
+    match secs {
+        0..=60 => "Every minute",
+        61..=300 => "Every 5 minutes",
+        301..=600 => "Every 10 minutes",
+        601..=1_800 => "Every 30 minutes",
+        1_801..=3_600 => "Every hour",
+        _ => "Every day",
+    }
+}
+
+/// What the *colour* picker is being used for, so its answer lands in the
+/// right place.
+///
+/// Separate from [`PickerPurpose`], which is the file picker's: the two
+/// modals answer different questions and share no state. One enum covering
+/// both would have variants that are errors for half its readers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ColorPurpose {
+    /// The desktop's accent colour.
+    #[default]
+    Accent,
+    /// The plain colour behind the login screen.
+    LoginBackground,
+}
+
+/// What the file picker is being used for, so its answer lands in the right
+/// place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum PickerPurpose {
+    #[default]
+    Wallpaper,
+    RotationFolder,
+    LoginImage,
 }
 
 /// What a click on a page landed on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowHit {
+    /// A click on a place where typing goes.
+    Focus(FieldId),
     Dropdown(DropdownId),
     Toggle(ToggleId),
     Pill(PillId, usize),
@@ -2321,6 +2725,97 @@ trait PageSink {
         self.advance(ITEM_HEIGHT);
     }
 
+    /// A row whose control is a place to type.
+    ///
+    /// Drawn like the other controls — label on the left, control in the
+    /// same column — so it reads as one of them rather than as a form dropped
+    /// into the page. The caret is drawn only when focused, because a caret in
+    /// an unfocused field promises that typing will land there.
+    fn text_field_row(
+        &mut self,
+        label: &str,
+        id: FieldId,
+        field: &TextInput,
+        placeholder: &str,
+        focused: bool,
+    ) {
+        let pal = &self.palette();
+        self.draw(|tree, x, y| {
+            render_setting_row(tree, pal, x, y, label, 0.0);
+        });
+        let (x, y) = (self.x(), self.y());
+        self.hit_rect(
+            x + CONTROL_COLUMN_DX,
+            y + BUTTON_ROW_INSET_Y,
+            FIELD_WIDTH,
+            BUTTON_HEIGHT,
+            RowHit::Focus(id),
+        );
+        // Owned, because the closure outlives this call and `SingleLine`
+        // borrows what it draws.
+        let text = field.text().to_string();
+        let cursor = field.cursor();
+        let anchor = field.selection_anchor();
+        let hint = placeholder.to_string();
+        self.draw(move |tree, x, y| {
+            let fx = x + CONTROL_COLUMN_DX;
+            let fy = y + BUTTON_ROW_INSET_Y;
+            fill_rounded(tree, fx, fy, FIELD_WIDTH, BUTTON_HEIGHT, pal.surface0, 6.0);
+            if focused {
+                // An underline rather than a different fill, so the text reads
+                // identically whether or not the field has the keyboard: a
+                // field that changes colour when focused makes the *text* look
+                // like it changed.
+                fill_rounded(
+                    tree,
+                    fx,
+                    fy + BUTTON_HEIGHT - 2.0,
+                    FIELD_WIDTH,
+                    2.0,
+                    pal.accent,
+                    1.0,
+                );
+            }
+            if text.is_empty() && !focused {
+                text_clipped(
+                    tree,
+                    fx + 8.0,
+                    fy + 7.0,
+                    &hint,
+                    pal.subtext0,
+                    13.0,
+                    FIELD_WIDTH - 16.0,
+                );
+                return;
+            }
+            // The toolkit's own field: caret, selection, and the horizontal
+            // scroll that keeps the caret visible in a string wider than the
+            // box. This row drew its own caret from `text::width` until
+            // 2026-09-17, which put it at the end of the string rather than at
+            // the caret and could not show a selection at all.
+            textedit::draw(
+                tree,
+                &textedit::SingleLine {
+                    text: &text,
+                    cursor,
+                    selection_anchor: anchor,
+                    focused,
+                    x: fx + 8.0,
+                    y: fy + 7.0,
+                    width: FIELD_WIDTH - 16.0,
+                    line_height: 18.0,
+                    font_size: FIELD_FONT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: pal.text,
+                    selection_bg: pal.accent,
+                    selection_fg: pal.crust,
+                    caret_width: 1.5,
+                },
+            );
+        });
+        self.advance(ITEM_HEIGHT);
+    }
+
     /// One row of a selectable list: a click anywhere in it selects `index`,
     /// and `draw` paints the row's contents at the cursor.
     fn list_row(
@@ -2486,12 +2981,28 @@ impl SettingsState {
             self.render_open_dropdown(&mut tree);
         }
 
-        // And the file picker over even that: it is the only modal thing in
-        // this window, and a dropdown drawn over it would be a list the user
-        // could not dismiss.
+        // And a modal over even that: a dropdown drawn over one would be a
+        // list the user could not dismiss. Two of them now, the file picker
+        // and the colour picker; they are never open at once, because each is
+        // opened from a page that the other one covers.
         if let Some(dialog) = &self.dialog {
             tree.commands
                 .extend(dialog.render(pal, self.window_width, self.window_height));
+        }
+        if let Some(picker) = self.color_dialog.as_ref() {
+            tree.commands
+                .extend(picker.render(pal, self.window_width, self.window_height));
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                pal,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
         }
 
         tree
@@ -2594,7 +3105,7 @@ impl SettingsState {
             pal.surface0,
             8.0,
         );
-        if self.search_query.is_empty() {
+        if self.search_query.text().is_empty() && !self.search_focused {
             tree.text(
                 24.0,
                 search_y + 12.0,
@@ -2603,14 +3114,27 @@ impl SettingsState {
                 13.0,
             );
         } else {
-            text_clipped(
+            // Through the toolkit's own single-line drawer, which is what puts
+            // a caret and a selection on screen. `text_clipped` drew neither,
+            // and could not: it is handed a string and nothing else.
+            textedit::draw(
                 tree,
-                24.0,
-                search_y + 12.0,
-                &self.search_query,
-                pal.text,
-                13.0,
-                SIDEBAR_WIDTH - 52.0,
+                &textedit::SingleLine {
+                    text: self.search_query.text(),
+                    cursor: self.search_query.cursor(),
+                    selection_anchor: self.search_query.selection_anchor(),
+                    focused: self.search_focused,
+                    x: 24.0,
+                    y: search_y + 12.0,
+                    width: SIDEBAR_WIDTH - 52.0,
+                    line_height: 18.0,
+                    font_size: FIELD_FONT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: pal.text,
+                    selection_bg: pal.accent,
+                    selection_fg: pal.crust,
+                    caret_width: 1.5,
+                },
             );
         }
 
@@ -2741,6 +3265,8 @@ impl SettingsState {
             SettingsPage::Proxy => self.build_proxy_page(sink),
             SettingsPage::DynamicDns => Self::build_dyndns_page(sink, &self.palette()),
             SettingsPage::DefaultApps => self.build_default_apps_page(sink),
+            SettingsPage::Fonts => self.build_fonts_page(sink),
+            SettingsPage::LockScreen => self.build_lockscreen_page(sink),
             SettingsPage::UserAccounts | SettingsPage::LoginOptions => {
                 self.build_accounts_page(sink);
             }
@@ -2788,6 +3314,48 @@ impl SettingsState {
             // table as data rather than as behaviour.
             //
             // See `TD-C-THREE-STARTUP-MANAGERS-AND-NOTHING-THAT-STARTS-ANYTHING`.
+            //
+            // `InstalledApps`, same date, shorter answer: there is no package
+            // database to read. No `installed_packages`, no `package_db`, no
+            // `/var/lib/pkg` anywhere under `apps/installer`, `userspace/` or
+            // `services/`. This one cannot even *list* truthfully, let alone
+            // uninstall, so it is not waiting on a consumer but on a source.
+            //
+            // `WiFi`, `Ethernet` and `VPN`, same date, one answer for all
+            // three: `apps/netmanager` is the network manager, it is 5,700
+            // lines, and it has already been through this. `apply_ip_config`
+            // returns "nothing here can reach the interface"; `connect_wifi`
+            // returns "nothing here can reach a radio", with a comment
+            // recording that it used to report a join against a network
+            // `sample_wifi_networks` had invented; `toggle_vpn` deliberately
+            // leaves the switch where it is. `net80211`'s only `scan` parses a
+            // frame it is handed -- there is no device scan to call. A page
+            // here would be a *second* network configurator over the same
+            // absent write path, and the first one at least refuses out loud.
+            //
+            // `Power`: blocked on lane A, not on judgement.
+            // `gui/desktop/src/power_settings.rs` has `set_brightness_ac` and
+            // `set_brightness_battery` and there is no syscall under them --
+            // filed as `requests/c-a-brightness-has-setters-and-no-door.md`,
+            // still unconsumed. This is the one placeholder whose page gets
+            // written the day another lane answers, rather than the day this
+            // lane builds something.
+            //
+            // That accounts for all six that still fall through here: one
+            // waiting on a consumer (StartupApps), one on a source
+            // (InstalledApps), three on a write path the dedicated app has
+            // already declared missing (WiFi, Ethernet, VPN), and one on lane A
+            // (Power).
+            //
+            // Two left on 2026-09-16 by the same route, which is the only route
+            // out of this arm: Fonts when `set_font_family` got a caller, and
+            // LockScreen when the compositor learned to report an idle session
+            // and the shell learned to lock on it. Neither was unblocked by
+            // deciding to build the page.
+            //
+            // The set is asserted by `the_placeholder_pages_are_exactly_these`
+            // rather than counted in prose here, the count having drifted three
+            // times in one day -- eleven, then eight, then seven.
             _ => self.build_placeholder_page(sink),
         }
     }
@@ -3045,7 +3613,10 @@ impl SettingsState {
 
         match self.appearance.settings.wallpaper.as_deref() {
             Some(path) => {
-                s.note(path, 28.0);
+                // `display()` because this is the line of text under the
+                // heading, and a label is text by definition. The path itself
+                // is held exactly; nothing is rebuilt from this string.
+                s.note(&path.display().to_string(), 28.0);
             }
             None => {
                 s.note(
@@ -3062,6 +3633,78 @@ impl SettingsState {
             pal.accent,
             Some(RowHit::Press(ButtonId::ChooseWallpaper)),
         );
+
+        s.section("Rotation");
+        match self.appearance.settings.wallpaper_folder.as_deref() {
+            Some(folder) => s.note(&folder.display().to_string(), 28.0),
+            None => s.note(
+                "No folder. The desktop shows the single picture above.",
+                28.0,
+            ),
+        }
+        s.button_row(
+            "Rotate through a folder",
+            "Choose...",
+            pal.accent,
+            Some(RowHit::Press(ButtonId::ChooseRotationFolder)),
+        );
+        // The interval and the order are about a folder, so they appear with
+        // one and not before: three controls of which two govern nothing read
+        // as broken rather than as inapplicable, which is the judgement the
+        // fit dropdown below already makes.
+        if self.appearance.settings.wallpaper_folder.is_some() {
+            s.dropdown_row(
+                "Change picture",
+                DropdownId::RotationInterval,
+                rotation_interval_label(self.appearance.settings.wallpaper_interval_secs),
+            );
+            s.toggle_row(
+                "Shuffle the order",
+                ToggleId::RotationShuffle,
+                self.appearance.settings.wallpaper_shuffle,
+            );
+            // The patterns already saved, each with a way to take it back.
+            // `design.txt` line 1246 asks that the user "exclude certain
+            // desktops if they want"; matched against the file name, since a
+            // rotation reads one folder.
+            for (idx, pattern) in self
+                .appearance
+                .settings
+                .wallpaper_exclusions
+                .iter()
+                .enumerate()
+            {
+                s.button_row(
+                    pattern,
+                    "Remove",
+                    pal.surface1,
+                    Some(RowHit::Select(SelectId::ExclusionPattern, idx)),
+                );
+            }
+            s.text_field_row(
+                "Skip pictures named",
+                FieldId::ExclusionDraft,
+                &self.exclusion_draft,
+                "*.gif",
+                self.focused_field == Some(FieldId::ExclusionDraft),
+            );
+            // Offered only with something to add: a button that does nothing
+            // for an empty field is one a user reads as broken.
+            if !self.exclusion_draft.text().trim().is_empty() {
+                s.button_row(
+                    "",
+                    "Add",
+                    pal.accent,
+                    Some(RowHit::Press(ButtonId::AddExclusion)),
+                );
+            }
+            s.button_row(
+                "Stop rotating",
+                "Clear",
+                pal.subtext0,
+                Some(RowHit::Press(ButtonId::ClearRotation)),
+            );
+        }
         // Offered only with a picture to place, for the reason Remove is:
         // a control whose every option does the same nothing is one a user
         // reads as broken rather than as inapplicable.
@@ -3082,6 +3725,36 @@ impl SettingsState {
                 pal.surface1,
                 Some(RowHit::Press(ButtonId::ClearWallpaper)),
             );
+        }
+
+        // On this page rather than a page of its own, because the setting most
+        // people want is "the same as that one" and a choice is easiest to make
+        // next to the thing it is being compared with. `design.txt` line 1247
+        // asks for exactly that: an easy way to make the two the same.
+        s.section("Login screen");
+        s.dropdown_row(
+            "Background",
+            DropdownId::LoginBackground,
+            login_background_label(&self.appearance.settings.login_background),
+        );
+        match &self.appearance.settings.login_background {
+            appearance::LoginBackground::SameAsDesktop => s.note(
+                "The login screen shows whatever the desktop is showing, \
+                 including as a rotation changes it.",
+                28.0,
+            ),
+            appearance::LoginBackground::CustomImage(path) => {
+                s.note(&path.display().to_string(), 28.0);
+                s.button_row(
+                    "Login picture",
+                    "Choose...",
+                    pal.accent,
+                    Some(RowHit::Press(ButtonId::ChooseLoginImage)),
+                );
+            }
+            // The theme needs no explaining, and the two hand-written styles
+            // are named by the dropdown itself.
+            _ => {}
         }
     }
 
@@ -3283,8 +3956,42 @@ impl SettingsState {
             });
         }
 
+        // And one more, for a colour that is not in the row. It sits in the
+        // grid rather than beside it because it is the same kind of choice:
+        // `AccentColor::Custom` is a fourteenth accent, not a mode.
+        //
+        // The swatch shows the colour actually stored, so a user who picked
+        // one recognises it here; `AppearanceSettings::custom_accent` has a
+        // sensible default, so it is never blank.
+        let custom_idx = presets.len();
+        let (dx, dy) = swatch_offset(custom_idx);
+        let (x, y) = (s.x(), s.y());
+        s.hit_rect(
+            x + dx,
+            y + dy,
+            SWATCH_SIZE,
+            SWATCH_SIZE,
+            RowHit::Select(SelectId::AccentColor, custom_idx),
+        );
+        let custom_color = self.appearance.settings.custom_accent;
+        let custom_selected = chosen == AccentColor::Custom;
+        s.draw(move |tree, x, y| {
+            render_swatch(tree, pal, x + dx, y + dy, custom_color, custom_selected);
+            // A mark to say this one asks a question rather than answering
+            // one. `readable_on` rather than `pal.on_accent()`: that role is
+            // chosen for the *theme's* accent, and this swatch is whatever
+            // colour the user picked -- which may be white.
+            tree.text(
+                x + dx + SWATCH_SIZE / 2.0 - 4.0,
+                y + dy + SWATCH_SIZE / 2.0 - 7.0,
+                "+",
+                guitk::palette::readable_on(custom_color),
+                15.0,
+            );
+        });
+
         #[allow(clippy::cast_precision_loss)]
-        let grid_rows = presets.len().div_ceil(SWATCH_COLS) as f32;
+        let grid_rows = presets.len().saturating_add(1).div_ceil(SWATCH_COLS) as f32;
         s.advance(grid_rows * (SWATCH_SIZE + SWATCH_SPACING));
         s.gap();
 
@@ -3928,6 +4635,138 @@ impl SettingsState {
     /// Read-only. Adding and removing entries needs a syscall the kernel does
     /// not expose to userspace yet; `known-issues.md` carries that as
     /// `TD-C-DYNDNS-PAGE-IS-READ-ONLY`.
+    /// When the screen locks itself.
+    ///
+    /// A page rather than a placeholder since 2026-09-16, because the setting
+    /// finally has a consumer: the desktop shell claims an idle watch for this
+    /// delay, the compositor reports when the session has been that quiet, and
+    /// the shell runs the lock screen. Before that chain existed, a control
+    /// here would have been the echoed-setting defect -- which is what the
+    /// note on `build_page`'s `_ =>` arm said while this page was blank.
+    fn build_lockscreen_page<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        s.section("Screen Lock");
+        s.dropdown_row(
+            "Lock the screen",
+            DropdownId::LockAfter,
+            &lockscreen::label(self.lock_after_minutes),
+        );
+
+        if self.lock_after_minutes == 0 {
+            s.note(
+                "The screen will not lock on its own. It can still be locked at any time from the start menu or with the lock shortcut.",
+                40.0,
+            );
+        } else {
+            s.value_row(
+                "Locks after",
+                &format!("{} of no keyboard or mouse activity", {
+                    let m = self.lock_after_minutes;
+                    if m == 1 {
+                        "1 minute".to_string()
+                    } else {
+                        format!("{m} minutes")
+                    }
+                }),
+                pal.text,
+            );
+        }
+
+        s.gap();
+        // Said here because the alternative is a user setting a delay, walking
+        // away, and finding the screen open. `design-decisions.md` 818 is the
+        // rule; this is the one place a person can be told about it.
+        s.note(
+            "An account with no password is never locked, so this has no effect on one. Give the account a password on the Accounts page first.",
+            44.0,
+        );
+    }
+
+    /// The font the interface is drawn in.
+    ///
+    /// Two rows that look redundant and are not: what the user has *chosen*
+    /// and what is actually *in use*. `guitk::text::set_font_family` keeps the
+    /// working font when the chosen family is not installed -- the right
+    /// behaviour, because losing every glyph on screen to a bad setting is
+    /// worse than ignoring the setting -- which means the two can disagree.
+    /// That disagreement is the one thing a user needs to see to understand
+    /// why picking a font changed nothing, and it is invisible from the
+    /// setting alone.
+    fn build_fonts_page<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        let chosen = self.appearance.settings.fonts.ui_font.clone();
+        let installed = self.font_families.contains(&chosen);
+
+        s.section("Interface Font");
+        if self.font_families.is_empty() {
+            s.note(
+                "No font families could be found on this system, so there is nothing to choose between. Text is drawn in the built-in face.",
+                40.0,
+            );
+        } else {
+            s.dropdown_row("Font", DropdownId::UiFont, &chosen);
+        }
+
+        // Asked of the toolkit rather than inferred from the setting above.
+        // The setting is a request; this is the answer.
+        match guitk::text::font_family() {
+            Some(family) if family == chosen => s.value_row("In use", &family, pal.text),
+            Some(family) => s.value_row("In use", &family, pal.peach),
+            // `None` is the toolkit's built-in bitmap face, which is what it
+            // falls back to when no installed font could be loaded at all.
+            None => s.value_row("In use", "Built-in face", pal.peach),
+        }
+
+        if !installed && !chosen.is_empty() {
+            s.note(
+                &format!(
+                    "\"{chosen}\" is not installed on this machine, so text is drawn in the font named above instead."
+                ),
+                40.0,
+            );
+        }
+
+        s.gap();
+        s.section("Terminal Font");
+        let mono_chosen = self.appearance.settings.fonts.mono_font.clone();
+        if self.mono_families.is_empty() {
+            s.note(
+                "No fixed-pitch font families were found on this system, so there is nothing a terminal can safely be set to. Fixed-pitch text is drawn in the built-in face.",
+                40.0,
+            );
+        } else {
+            s.dropdown_row("Font", DropdownId::MonoFont, &mono_chosen);
+        }
+
+        match guitk::text::mono_family() {
+            Some(family) if family == mono_chosen => s.value_row("In use", &family, pal.text),
+            Some(family) => s.value_row("In use", &family, pal.peach),
+            None => s.value_row("In use", "Built-in face", pal.peach),
+        }
+
+        // A configured family missing from the *filtered* list is two
+        // different complaints, and they are worth telling apart: not
+        // installed at all, or installed and proportional. The second is what
+        // a hand-edited `appearance.yaml` produces, and it is the one that
+        // breaks the grid.
+        if !mono_chosen.is_empty() && !self.mono_families.contains(&mono_chosen) {
+            let why = if self.font_families.contains(&mono_chosen) {
+                format!(
+                    "\"{mono_chosen}\" is installed but is not fixed-pitch, so it is not offered here: a proportional font in a terminal breaks the character grid."
+                )
+            } else {
+                format!("\"{mono_chosen}\" is not installed on this machine.")
+            };
+            s.note(&why, 40.0);
+        }
+
+        s.gap();
+        s.note(
+            "Only fixed-pitch families are listed for the terminal. The setting will accept any family that is written into the configuration file by hand, which is why the row above reports what is actually in use.",
+            44.0,
+        );
+    }
+
     /// Which program opens which kind of file.
     ///
     /// Every row here is a real setting with a real effect: `apps/explorer`
@@ -3940,6 +4779,27 @@ impl SettingsState {
     /// program's editor.
     fn build_default_apps_page<S: PageSink>(&self, s: &mut S) {
         let pal = self.palette();
+
+        s.section("By kind");
+        for (name, state) in &self.default_app_categories {
+            match state {
+                associations::CategoryDefault::Agreed(program) => {
+                    s.value_row(name, program, pal.text);
+                }
+                // "Mixed" covers both disagreement and a group only partly
+                // set, and is drawn as a warning for the second case: some
+                // file of this kind on the machine opens with nothing, and
+                // naming the majority program would hide exactly that.
+                associations::CategoryDefault::Mixed => {
+                    s.value_row(name, "Mixed", pal.peach);
+                }
+                associations::CategoryDefault::Unset => {
+                    s.value_row(name, "Not set", pal.subtext0);
+                }
+            }
+        }
+        s.gap();
+
         s.section("File Associations");
         if self.default_apps.is_empty() {
             s.note(
@@ -4230,6 +5090,37 @@ impl SettingsState {
                     at,
                 )
             }
+            DropdownId::LoginBackground => {
+                let mut items: Vec<String> =
+                    LOGIN_BACKGROUNDS.iter().map(|b| (*b).to_string()).collect();
+                let current = match &self.appearance.settings.login_background {
+                    appearance::LoginBackground::Theme => 0,
+                    appearance::LoginBackground::SolidColor(_) => 1,
+                    appearance::LoginBackground::SameAsDesktop => 2,
+                    appearance::LoginBackground::CustomImage(_) => 3,
+                    // A gradient can be written into `appearance.yaml` by
+                    // hand but not built here. Shown as a fifth entry so the
+                    // list says what is actually in force: a dropdown that
+                    // displayed "Theme colour" over a hand-written gradient
+                    // would be reporting a setting the machine is not using.
+                    other @ appearance::LoginBackground::Gradient { .. } => {
+                        items.push(login_background_label(other).to_string());
+                        4
+                    }
+                };
+                (items, current)
+            }
+            DropdownId::RotationInterval => {
+                let items: Vec<String> = ROTATION_INTERVALS
+                    .iter()
+                    .map(|s| rotation_interval_label(*s).to_string())
+                    .collect();
+                let current = ROTATION_INTERVALS
+                    .iter()
+                    .position(|s| *s == self.appearance.settings.wallpaper_interval_secs)
+                    .unwrap_or(2);
+                (items, current)
+            }
             DropdownId::WallpaperFit => {
                 let items: Vec<String> = appearance::ImageFit::ALL
                     .iter()
@@ -4240,6 +5131,37 @@ impl SettingsState {
                     .position(|f| *f == self.appearance.settings.wallpaper_fit)
                     .unwrap_or(0);
                 (items, current)
+            }
+            DropdownId::LockAfter => {
+                let items: Vec<String> = lockscreen::CHOICES
+                    .iter()
+                    .map(|m| lockscreen::label(*m))
+                    .collect();
+                let current = lockscreen::CHOICES
+                    .iter()
+                    .position(|m| *m == self.lock_after_minutes)
+                    .unwrap_or(0);
+                (items, current)
+            }
+            DropdownId::UiFont => {
+                // A configured family that is not installed has no row to
+                // highlight, and falls back to the first. That is a highlight
+                // only: the row's own text says which family is configured and
+                // whether it is actually in use, because the list cannot.
+                let current = self
+                    .font_families
+                    .iter()
+                    .position(|f| *f == self.appearance.settings.fonts.ui_font)
+                    .unwrap_or(0);
+                (self.font_families.clone(), current)
+            }
+            DropdownId::MonoFont => {
+                let current = self
+                    .mono_families
+                    .iter()
+                    .position(|f| *f == self.appearance.settings.fonts.mono_font)
+                    .unwrap_or(0);
+                (self.mono_families.clone(), current)
             }
             DropdownId::ColorFilter => {
                 let items: Vec<String> = ColorFilter::ALL
@@ -4521,6 +5443,14 @@ impl SettingsState {
             self.dialog_event(event);
             return EventResult::Consumed;
         }
+        // The colour picker is modal for the same reason and on the same
+        // terms. Inside the same snapshot bracket, so the colour it returns is
+        // saved by the whole-struct comparison rather than by a write of its
+        // own -- a second way to persist is a second way to forget.
+        if !matches!(event, Event::Resize { .. }) && self.color_dialog.is_some() {
+            self.color_dialog_event(event);
+            return EventResult::Consumed;
+        }
         match event {
             Event::Key(key_evt) => self.handle_key(key_evt),
             Event::Mouse(mouse_evt) => self.handle_mouse(mouse_evt),
@@ -4536,6 +5466,104 @@ impl SettingsState {
     fn handle_key(&mut self, evt: &KeyEvent) -> EventResult {
         if !evt.pressed {
             return EventResult::Ignored;
+        }
+
+        // Above the focused-field branch below, which takes the keyboard and
+        // returns. Placed after it, the card could be raised from a page and
+        // then not dismissed from a text box -- and on this window an
+        // unclaimed keystroke is a setting.
+        if evt.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            if matches!(evt.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
+        // A focused field takes the keyboard before the page does, for the
+        // reason the modals do: on this window an unclaimed keystroke is a
+        // setting. Ordered before the sidebar's search box because that one
+        // is reached with Ctrl+F, which still works — `types_text` is false
+        // for a chord.
+        if self.focused_field == Some(FieldId::ExclusionDraft) {
+            let shift = evt.modifiers.shift;
+            match evt.key {
+                Key::Backspace => {
+                    self.exclusion_draft.backspace();
+                    return EventResult::Consumed;
+                }
+                Key::Delete => {
+                    self.exclusion_draft.delete();
+                    return EventResult::Consumed;
+                }
+                // The caret moves, and moves *visually*: `move_cursor_left`
+                // takes the font it is drawn at because on a line that mixes
+                // directions "one place left" is not "one character back".
+                // None of this existed while the draft was a `String`.
+                Key::Left => {
+                    self.exclusion_draft.move_cursor_left(
+                        shift,
+                        FIELD_FONT_SIZE,
+                        FontWeightHint::Regular,
+                    );
+                    return EventResult::Consumed;
+                }
+                Key::Right => {
+                    self.exclusion_draft.move_cursor_right(
+                        shift,
+                        FIELD_FONT_SIZE,
+                        FontWeightHint::Regular,
+                    );
+                    return EventResult::Consumed;
+                }
+                Key::Home => {
+                    self.exclusion_draft.move_home(shift);
+                    return EventResult::Consumed;
+                }
+                Key::End => {
+                    self.exclusion_draft.move_end(shift);
+                    return EventResult::Consumed;
+                }
+                Key::A if evt.modifiers.ctrl => {
+                    self.exclusion_draft.select_all();
+                    return EventResult::Consumed;
+                }
+                Key::C if evt.modifiers.ctrl => {
+                    self.exclusion_draft.copy();
+                    return EventResult::Consumed;
+                }
+                Key::X if evt.modifiers.ctrl => {
+                    self.exclusion_draft.cut();
+                    return EventResult::Consumed;
+                }
+                Key::V if evt.modifiers.ctrl => {
+                    self.exclusion_draft.paste();
+                    return EventResult::Consumed;
+                }
+                Key::Escape => {
+                    // Escape abandons the draft rather than merely unfocusing:
+                    // a half-typed glob left in the field would be added by the
+                    // next press of a button the user thought was unrelated.
+                    self.exclusion_draft.clear();
+                    self.focused_field = None;
+                    return EventResult::Consumed;
+                }
+                Key::Enter => {
+                    self.add_exclusion();
+                    return EventResult::Consumed;
+                }
+                _ => {
+                    if evt.types_text() {
+                        for ch in evt.typed() {
+                            self.exclusion_draft.insert_char(ch);
+                        }
+                        return EventResult::Consumed;
+                    }
+                }
+            }
         }
 
         // Close dropdown on Escape
@@ -4557,7 +5585,53 @@ impl SettingsState {
         if self.search_focused {
             match evt.key {
                 Key::Backspace => {
-                    self.search_query.pop();
+                    self.search_query.backspace();
+                    return EventResult::Consumed;
+                }
+                Key::Delete => {
+                    self.search_query.delete();
+                    return EventResult::Consumed;
+                }
+                // The caret moves, and moves visually. None of this was
+                // reachable while the query was a `String`.
+                Key::Left => {
+                    self.search_query.move_cursor_left(
+                        evt.modifiers.shift,
+                        FIELD_FONT_SIZE,
+                        FontWeightHint::Regular,
+                    );
+                    return EventResult::Consumed;
+                }
+                Key::Right => {
+                    self.search_query.move_cursor_right(
+                        evt.modifiers.shift,
+                        FIELD_FONT_SIZE,
+                        FontWeightHint::Regular,
+                    );
+                    return EventResult::Consumed;
+                }
+                Key::Home => {
+                    self.search_query.move_home(evt.modifiers.shift);
+                    return EventResult::Consumed;
+                }
+                Key::End => {
+                    self.search_query.move_end(evt.modifiers.shift);
+                    return EventResult::Consumed;
+                }
+                Key::A if evt.modifiers.ctrl => {
+                    self.search_query.select_all();
+                    return EventResult::Consumed;
+                }
+                Key::C if evt.modifiers.ctrl => {
+                    self.search_query.copy();
+                    return EventResult::Consumed;
+                }
+                Key::X if evt.modifiers.ctrl => {
+                    self.search_query.cut();
+                    return EventResult::Consumed;
+                }
+                Key::V if evt.modifiers.ctrl => {
+                    self.search_query.paste();
                     return EventResult::Consumed;
                 }
                 Key::Escape => {
@@ -4567,7 +5641,9 @@ impl SettingsState {
                 }
                 _ => {
                     if evt.types_text() {
-                        self.search_query.extend(evt.typed());
+                        for ch in evt.typed() {
+                            self.search_query.insert_char(ch);
+                        }
                         return EventResult::Consumed;
                     }
                 }
@@ -4722,7 +5798,15 @@ impl SettingsState {
     /// not say what the press meant. Even they do not do their own arithmetic —
     /// the track is asked of the page, in [`drag_slider_to`](Self::drag_slider_to).
     fn apply_row_hit(&mut self, hit: RowHit, mx: f32) {
+        // Clicking a field aims the keyboard at it; clicking any other control
+        // takes it away again. Without this the field keeps the keyboard for
+        // ever, and a user who focused it, clicked a switch and carried on
+        // typing would be filling in a glob they could no longer see.
+        if !matches!(hit, RowHit::Focus(_)) {
+            self.focused_field = None;
+        }
         match hit {
+            RowHit::Focus(id) => self.focused_field = Some(id),
             RowHit::Dropdown(id) => self.show_dropdown(id),
             RowHit::Slider(id) => {
                 // A press both jumps the handle to the pointer and takes hold
@@ -4771,6 +5855,15 @@ impl SettingsState {
             RowHit::Select(SelectId::AccentColor, idx) => {
                 if let Some(accent) = AccentColor::presets().get(idx) {
                     self.appearance.settings.accent_color = *accent;
+                } else {
+                    // The swatch past the end of the presets: pick your own.
+                    // Opened on the colour in force, so the picker starts
+                    // where the user is rather than at an arbitrary hue, and
+                    // cancelling visibly changes nothing.
+                    self.color_is_for = ColorPurpose::Accent;
+                    self.color_dialog = Some(ColorPickerDialog::new(
+                        self.appearance.settings.effective_accent(),
+                    ));
                 }
             }
             RowHit::Select(SelectId::Account, idx) => {
@@ -4787,6 +5880,17 @@ impl SettingsState {
             RowHit::Press(ButtonId::ChooseWallpaper) => self.open_wallpaper_dialog(),
             RowHit::Press(ButtonId::ClearWallpaper) => {
                 self.appearance.settings.wallpaper = None;
+            }
+            RowHit::Press(ButtonId::ChooseRotationFolder) => self.open_rotation_folder_dialog(),
+            RowHit::Press(ButtonId::ChooseLoginImage) => self.open_login_image_dialog(),
+            RowHit::Press(ButtonId::AddExclusion) => self.add_exclusion(),
+            RowHit::Select(SelectId::ExclusionPattern, idx) => {
+                if idx < self.appearance.settings.wallpaper_exclusions.len() {
+                    self.appearance.settings.wallpaper_exclusions.remove(idx);
+                }
+            }
+            RowHit::Press(ButtonId::ClearRotation) => {
+                self.appearance.settings.wallpaper_folder = None;
             }
         }
     }
@@ -4918,6 +6022,7 @@ impl SettingsState {
     /// principle, and a stale index must not panic.
     fn toggle_mut(&mut self, id: ToggleId) -> Option<&mut bool> {
         Some(match id {
+            ToggleId::RotationShuffle => &mut self.appearance.settings.wallpaper_shuffle,
             ToggleId::NightLight => &mut self.appearance.settings.night_light,
             ToggleId::AutoLogin => &mut self.auto_login_enabled,
             ToggleId::NotifSound(index) => &mut self.notif.settings.apps.get_mut(index)?.sound,
@@ -5049,9 +6154,65 @@ impl SettingsState {
                     rule.importance = *chosen;
                 }
             }
+            DropdownId::RotationInterval => {
+                if let Some(secs) = ROTATION_INTERVALS.get(index) {
+                    self.appearance.settings.wallpaper_interval_secs = *secs;
+                }
+            }
+            DropdownId::LoginBackground => match index {
+                0 => self.appearance.settings.login_background = appearance::LoginBackground::Theme,
+                // Straight to the picker, as "A picture" is, and for the same
+                // reason: the style becomes a colour when there is a colour,
+                // so cancelling leaves the greeter as it was.
+                1 => {
+                    self.color_is_for = ColorPurpose::LoginBackground;
+                    self.color_dialog = Some(ColorPickerDialog::new(
+                        match self.appearance.settings.login_background {
+                            appearance::LoginBackground::SolidColor(c) => c,
+                            // Open on the theme's deepest surface, which is
+                            // what the greeter is showing now, so the picker
+                            // starts where the user is looking.
+                            _ => self.palette().crust,
+                        },
+                    ));
+                }
+                2 => {
+                    self.appearance.settings.login_background =
+                        appearance::LoginBackground::SameAsDesktop;
+                }
+                // Straight to the picker: see `PickerPurpose::LoginImage`.
+                3 => self.open_login_image_dialog(),
+                // The hand-written entry. Choosing it means "leave it alone",
+                // which is what doing nothing achieves.
+                _ => {}
+            },
             DropdownId::WallpaperFit => {
                 if let Some(fit) = appearance::ImageFit::ALL.get(index) {
                     self.appearance.settings.wallpaper_fit = *fit;
+                }
+            }
+            DropdownId::LockAfter => {
+                if let Some(minutes) = lockscreen::CHOICES.get(index).copied() {
+                    self.lock_after_minutes = minutes;
+                    if let Err(err) = lockscreen::store_minutes(minutes) {
+                        eprintln!("settings: could not save session.yaml: {err}");
+                    }
+                    // Flagged even when the write failed, for the reason
+                    // `save_appearance` gives: the shell answers by re-reading
+                    // the file, and after a failed write the honest answer is
+                    // still "look again" -- it will find what is actually
+                    // stored, which is the state the user now has.
+                    self.session_dirty = true;
+                }
+            }
+            DropdownId::UiFont => {
+                if let Some(family) = self.font_families.get(index) {
+                    self.appearance.settings.fonts.ui_font = family.clone();
+                }
+            }
+            DropdownId::MonoFont => {
+                if let Some(family) = self.mono_families.get(index) {
+                    self.appearance.settings.fonts.mono_font = family.clone();
                 }
             }
             DropdownId::ColorFilter => {
@@ -5089,10 +6250,10 @@ impl SettingsState {
 
     /// Check if a category/page matches the current search query.
     pub fn matches_search(&self, text: &str) -> bool {
-        if self.search_query.is_empty() {
+        if self.search_query.text().is_empty() {
             return true;
         }
-        let query_lower = self.search_query.to_lowercase();
+        let query_lower = self.search_query.text().to_lowercase();
         let text_lower = text.to_lowercase();
         if text_lower.contains(&query_lower) {
             return true;
@@ -5122,7 +6283,7 @@ impl SettingsState {
     /// resolved against a different list is how a click lands on the wrong
     /// category.
     pub fn filtered_categories(&self) -> Vec<SettingsCategory> {
-        if self.search_query.is_empty() {
+        if self.search_query.text().is_empty() {
             return SettingsCategory::ALL.to_vec();
         }
         SettingsCategory::ALL
@@ -5215,6 +6376,7 @@ impl oswindow::app::App for SettingsState {
             appearance: self.take_appearance_change(),
             input: self.take_input_change(),
             notifications: self.take_notifications_change(),
+            session: core::mem::take(&mut self.session_dirty),
         }
     }
 
@@ -5254,6 +6416,13 @@ fn main() -> ExitCode {
     // the first page shown. Entering the page re-reads them; this is only the
     // case that entry never happens because the page is already open.
     state.refresh_default_apps();
+
+    // The installed font families, for the Fonts page's picker. Once: a font
+    // appears by a file being put somewhere, which nothing here is told about.
+    state.load_font_families();
+
+    // The screen-lock delay, for the Lock Screen page.
+    state.load_lock_delay();
 
     // `launch` rather than `launch_with`: Settings takes no file and no page
     // name, so it wants exactly the shared command line and nothing more —
@@ -5391,9 +6560,12 @@ mod tests {
 
     /// The Notifications page is a page, not a roadworks sign.
     ///
-    /// Eight of the twenty-nine pages fall through `build_page`'s `_ =>` arm
+    /// Some of the twenty-nine pages fall through `build_page`'s `_ =>` arm
     /// to `build_placeholder_page`, which draws "This page is under
-    /// construction". Asserted by the text on screen rather than by the
+    /// construction" -- which ones is asserted by
+    /// [`the_placeholder_pages_are_exactly_these`] rather than counted in
+    /// prose here, because the number written in this sentence was wrong twice
+    /// in one day. Asserted by the text on screen rather than by the
     /// dispatch arm, because an arm that rendered nothing would satisfy the
     /// arm and not the user.
     #[test]
@@ -5419,9 +6591,9 @@ mod tests {
     #[test]
     fn the_default_apps_page_shows_a_real_association() {
         settingsfile::testing::with_scratch_config("settings-default-apps", |_root| {
-            let mut doc = settingsfile::load(defaultapps::ASSOC_CONFIG_NAME);
+            let mut doc = settingsfile::load(associations::CONFIG_NAME);
             doc.set_str(&["associations", "txt"], "/usr/bin/chosen-editor");
-            settingsfile::store(defaultapps::ASSOC_CONFIG_NAME, &doc)
+            settingsfile::store(associations::CONFIG_NAME, &doc)
                 .expect("the scratch configuration should be writable");
 
             let mut app = SettingsState::new();
@@ -5441,6 +6613,150 @@ mod tests {
                 "the program the file manager would run was not drawn"
             );
         });
+    }
+
+    /// The Fonts page names the font actually being drawn with.
+    ///
+    /// The "in use" row is the whole point of the page rather than a
+    /// decoration beside the picker. A configured family that this machine
+    /// does not have is silently ignored by the toolkit -- correctly, since
+    /// losing every glyph to a bad setting is worse -- so the setting alone
+    /// cannot tell the user why choosing a font changed nothing. Asserting
+    /// only that a picker exists would pass on a page that promised a font
+    /// The page summarises each kind, and tells the three states apart.
+    ///
+    /// The Mixed case is the one worth a test: a group with one of its
+    /// extensions set must not read as settled, because the page would then be
+    /// claiming every video on the machine opens with something when most of
+    /// them open with nothing.
+    #[test]
+    fn the_default_apps_page_summarises_each_kind() {
+        settingsfile::testing::with_scratch_config("settings-default-kinds", |_root| {
+            let mut doc = yamldoc::Document::new();
+            let music = &associations::CATEGORIES[0];
+            for extension in music.extensions() {
+                doc.set_str(
+                    &[associations::ASSOCIATIONS, extension],
+                    "/usr/bin/musicplayer",
+                );
+            }
+            let video = &associations::CATEGORIES[1];
+            let one = video
+                .extensions()
+                .next()
+                .expect("the video group is not empty");
+            doc.set_str(&[associations::ASSOCIATIONS, one], "/usr/bin/videoplayer");
+            settingsfile::store(associations::CONFIG_NAME, &doc)
+                .expect("the scratch config is writable");
+
+            let mut app = SettingsState::new();
+            app.refresh_default_apps();
+            app.go_to_page(SettingsPage::DefaultApps);
+            let text = format!("{:?}", app.render_tree());
+
+            assert!(
+                text.contains("/usr/bin/musicplayer"),
+                "Music does not name the program every audio type points at"
+            );
+            assert!(
+                text.contains("Mixed"),
+                "a video group with one of its types set is not reported as mixed"
+            );
+            assert!(
+                text.contains("Not set"),
+                "Images is set nowhere, and the page does not say so"
+            );
+        });
+    }
+
+    /// nothing could load.
+    #[test]
+    fn the_fonts_page_reports_the_font_actually_in_use() {
+        let mut app = SettingsState::new();
+        app.load_font_families();
+        app.go_to_page(SettingsPage::Fonts);
+        let text = format!("{:?}", app.render_tree());
+        assert!(
+            !text.contains("under construction"),
+            "the Fonts page still draws the placeholder"
+        );
+        // Asked of the toolkit, exactly as the page asks it. Hard-coding a
+        // family here would make the test a statement about the developer's
+        // machine rather than about the page.
+        let in_use = guitk::text::font_family().unwrap_or_else(|| String::from("Built-in face"));
+        assert!(
+            text.contains(&in_use),
+            "the page does not name the font the toolkit is drawing with ({in_use})"
+        );
+
+        assert!(
+            text.contains("Terminal Font"),
+            "the terminal font section is missing"
+        );
+        // The filter is the whole reason this section waited on
+        // `post.isFixedPitch`: everything offered for the terminal must be a
+        // family this machine actually has, and a subset of what the interface
+        // picker offers. A `monospaced_families` that returned names from some
+        // other source would satisfy "the section renders" and fail here.
+        assert!(
+            app.mono_families
+                .iter()
+                .all(|f| app.font_families.contains(f)),
+            "a family offered for the terminal is not among the installed families"
+        );
+    }
+
+    /// Exactly these pages still draw "This page is under construction".
+    ///
+    /// The count was written in prose three times in one day and was wrong
+    /// twice -- eleven, then eight, then seven -- because it is a fact about
+    /// the `_ =>` arm of `build_page`, and prose does not get recompiled when
+    /// that arm loses a variant.
+    ///
+    /// The *set* rather than the count, because the set makes the failure
+    /// useful in both directions: finishing a page tells you which one left,
+    /// and a page that regresses to the placeholder -- which is what a
+    /// mis-ordered match arm looks like -- tells you which one arrived.
+    /// Asserted from the screen rather than from the match, for the reason the
+    /// Notifications test gives: an arm that rendered nothing would satisfy
+    /// the arm and not the user.
+    ///
+    /// Each page's reason for being here is recorded on the `_ =>` arm itself.
+    #[test]
+    fn the_placeholder_pages_are_exactly_these() {
+        const EXPECTED: &[SettingsPage] = &[
+            SettingsPage::Ethernet,
+            SettingsPage::InstalledApps,
+            SettingsPage::Power,
+            SettingsPage::StartupApps,
+            SettingsPage::VPN,
+            SettingsPage::WiFi,
+        ];
+
+        let mut found: Vec<SettingsPage> = Vec::new();
+        for category in SettingsCategory::ALL {
+            for page in category.pages() {
+                // A page can be listed under two categories, and rendering it
+                // twice would put it in the list twice.
+                if found.contains(page) {
+                    continue;
+                }
+                let mut app = SettingsState::new();
+                app.go_to_page(*page);
+                if format!("{:?}", app.render_tree()).contains("under construction") {
+                    found.push(*page);
+                }
+            }
+        }
+
+        let mut found_labels: Vec<&str> = found.iter().map(|p| p.label()).collect();
+        found_labels.sort_unstable();
+        let mut want_labels: Vec<&str> = EXPECTED.iter().map(|p| p.label()).collect();
+        want_labels.sort_unstable();
+        assert_eq!(
+            found_labels, want_labels,
+            "the set of pages drawing the placeholder changed"
+        );
     }
 
     /// With rules present, each program is listed with what it may do.
@@ -5714,7 +7030,7 @@ mod tests {
         let state = SettingsState::new();
         assert_eq!(state.current_category, SettingsCategory::System);
         assert_eq!(state.current_page, SettingsPage::Display);
-        assert!(state.search_query.is_empty());
+        assert!(state.search_query.text().is_empty());
         assert!(!state.appearance.settings.night_light);
         assert_eq!(state.appearance.settings.theme_mode, ThemeMode::Dark);
     }
@@ -5726,6 +7042,95 @@ mod tests {
         assert!(!tree.is_empty());
         // Should have at minimum: background rect + sidebar + header + content
         assert!(tree.len() > 20);
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Two states, because four of the six are editing chords that only a
+    /// focused text box claims. With nothing focused, Ctrl+C reaches a page
+    /// that has no use for it.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|typing| {
+                    let mut state = SettingsState::new();
+                    if typing {
+                        state.search_focused = true;
+                    }
+                    state.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the last third: Ctrl+F behind the card must not focus
+    /// the search box, and must focus it with the card down. Asserting only
+    /// the first half would pass on a window where Ctrl+F had stopped
+    /// working.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |state: &SettingsState| -> String {
+            state
+                .render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+
+        let mut state = SettingsState::new();
+        assert!(
+            !drawn(&state).contains("F1 closes this"),
+            "the card is up before anybody asked for it"
+        );
+
+        state.handle_event(&Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }));
+        let shown = drawn(&state);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let ctrl_f = Event::Key(KeyEvent {
+            key: Key::F,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        });
+        state.handle_event(&ctrl_f);
+        assert!(
+            !state.search_focused,
+            "Ctrl+F focused the search box through the shortcut card"
+        );
+
+        state.handle_event(&Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }));
+        state.handle_event(&ctrl_f);
+        assert!(
+            state.search_focused,
+            "control: Ctrl+F does nothing even with the card down"
+        );
     }
 
     #[test]
@@ -5831,7 +7236,7 @@ mod tests {
     #[test]
     fn test_search_filter_categories() {
         let mut state = SettingsState::new();
-        state.search_query = "wifi".to_string();
+        state.search_query.set_text("wifi");
         let filtered = state.filtered_categories();
         assert!(filtered.contains(&SettingsCategory::Network));
         assert!(!filtered.contains(&SettingsCategory::System));
@@ -5949,7 +7354,7 @@ mod tests {
             "the unfiltered sidebar does not draw Network: {all:?}"
         );
 
-        state.search_query = "network".to_string();
+        state.search_query.set_text("network");
         let filtered = sidebar_labels(&state);
 
         assert!(
@@ -5973,7 +7378,7 @@ mod tests {
         let mut state = SettingsState::new();
         // A query that certainly excludes the first category, so an index into
         // `ALL` and an index into the filtered list cannot agree by accident.
-        state.search_query = "network".to_string();
+        state.search_query.set_text("network");
         let visible = state.filtered_categories();
         assert!(!visible.is_empty(), "the query matched nothing at all");
         assert_ne!(
@@ -6189,6 +7594,661 @@ mod tests {
     }
 
     /// **The Wallpaper page is a page now, not a placeholder.**
+    /// The rotation rows appear only once there is a folder for them.
+    ///
+    /// Three controls of which two govern nothing read as broken rather than
+    /// as inapplicable -- the judgement the fit dropdown already makes, and
+    /// the one design-decisions 856 is about.
+    /// The dropdown offers the styles it can set up from start to finish.
+    ///
+    /// Four of the five. The missing one is the gradient, which needs two
+    /// colours and a picker that can say which is which. design-decisions 856.
+    #[test]
+    fn the_login_background_dropdown_offers_only_what_it_can_finish() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.show_dropdown(DropdownId::LoginBackground);
+
+        let layout = state.dropdown_layout().expect("the dropdown did not open");
+        assert_eq!(
+            layout.items.len(),
+            4,
+            "offered a style it cannot finish setting up: {:?}",
+            layout.items
+        );
+        assert_eq!(layout.selected, 0, "a fresh install is on the theme");
+    }
+
+    /// A style written into the file by hand is reported, not overwritten.
+    ///
+    /// A dropdown that showed "Theme colour" over a hand-written gradient
+    /// would be describing a machine other than the one in front of the user,
+    /// and the first click anywhere in it would silently discard their
+    /// colours.
+    #[test]
+    fn a_hand_written_greeter_style_is_shown_rather_than_misreported() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.appearance.settings.login_background = appearance::LoginBackground::Gradient {
+            top: guitk::color::Color::from_hex(0x112233),
+            bottom: guitk::color::Color::from_hex(0x445566),
+        };
+        state.show_dropdown(DropdownId::LoginBackground);
+
+        let layout = state.dropdown_layout().expect("the dropdown did not open");
+        assert_eq!(layout.items.len(), 5, "the gradient was not listed");
+        assert_eq!(
+            layout.selected, 4,
+            "the list pointed at a style the machine is not using"
+        );
+        assert!(
+            layout.items[4].contains("gradient"),
+            "the entry does not say what it is: {:?}",
+            layout.items[4]
+        );
+    }
+
+    /// "Same as my desktop" is one click, and stores no filename.
+    #[test]
+    fn following_the_desktop_is_one_click() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.show_dropdown(DropdownId::LoginBackground);
+        state.apply_dropdown_selection(2);
+
+        assert_eq!(
+            state.appearance.settings.login_background,
+            appearance::LoginBackground::SameAsDesktop
+        );
+    }
+
+    /// Choosing "A picture" asks which picture.
+    ///
+    /// The setting must not become `CustomImage` before there is a path to put
+    /// in it: an `image` mode with no `login.image` reads back as the theme, so
+    /// a cancelled picker would leave a setting that silently undid itself.
+    #[test]
+    fn choosing_a_picture_asks_which_picture() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.show_dropdown(DropdownId::LoginBackground);
+        state.apply_dropdown_selection(3);
+
+        assert!(state.dialog.is_some(), "no picker appeared");
+        assert_eq!(
+            state.appearance.settings.login_background,
+            appearance::LoginBackground::Theme,
+            "the mode changed before a picture had been named"
+        );
+    }
+
+    /// The picture the picker returns is the picture the greeter is set to.
+    #[test]
+    fn the_chosen_login_picture_lands_in_the_setting() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.show_dropdown(DropdownId::LoginBackground);
+        state.apply_dropdown_selection(3);
+
+        let chosen = std::path::PathBuf::from("/home/u/Pictures/greeter.png");
+        state.apply_dialog_answer(DialogAction::Selected(chosen.clone()));
+
+        assert_eq!(
+            state.appearance.settings.login_background,
+            appearance::LoginBackground::CustomImage(chosen),
+            "the picture the user picked is not the one that was saved"
+        );
+        assert!(state.dialog.is_none(), "the picker stayed up");
+    }
+
+    /// Choosing "A colour" asks which colour, and settles when told.
+    ///
+    /// Through the picker rather than by assigning the field, because the
+    /// claim is that a *user* can reach it: this style was drawn by the
+    /// greeter and readable from `appearance.yaml` from the start, and until
+    /// the accent picker existed there was no way in this app to choose one.
+    #[test]
+    fn a_colour_for_the_greeter_is_chosen_with_the_picker() {
+        with_scratch_config("settings-greeter-colour", |_root| {
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Wallpaper;
+            state.show_dropdown(DropdownId::LoginBackground);
+            state.apply_dropdown_selection(1);
+
+            assert!(state.color_dialog.is_some(), "no colour picker appeared");
+            assert_eq!(
+                state.appearance.settings.login_background,
+                appearance::LoginBackground::Theme,
+                "the style changed before a colour had been chosen"
+            );
+
+            let chosen = Color::from_hex(0x2E1F4A);
+            state
+                .color_dialog
+                .as_mut()
+                .expect("picker")
+                .picker_mut()
+                .set_color(chosen);
+            state.handle_event(&key_press(Key::Enter));
+
+            assert_eq!(
+                state.appearance.settings.login_background,
+                appearance::LoginBackground::SolidColor(chosen),
+                "the greeter did not take the colour that was picked"
+            );
+        });
+    }
+
+    /// The accent and the greeter do not take each other's colours.
+    ///
+    /// One picker serves both, so the only thing keeping them apart is
+    /// `color_is_for`. Without it the last thing to open the picker would win,
+    /// and choosing a greeter colour would silently repaint every button on
+    /// the desktop.
+    #[test]
+    fn the_two_colour_choices_do_not_cross() {
+        with_scratch_config("settings-colour-purpose", |_root| {
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Wallpaper;
+            let accent_before = state.appearance.settings.accent_color;
+
+            state.show_dropdown(DropdownId::LoginBackground);
+            state.apply_dropdown_selection(1);
+            let chosen = Color::from_hex(0x0B6E4F);
+            state
+                .color_dialog
+                .as_mut()
+                .expect("picker")
+                .picker_mut()
+                .set_color(chosen);
+            state.handle_event(&key_press(Key::Enter));
+
+            assert_eq!(
+                state.appearance.settings.login_background,
+                appearance::LoginBackground::SolidColor(chosen)
+            );
+            assert_eq!(
+                state.appearance.settings.accent_color, accent_before,
+                "picking a colour for the greeter changed the desktop's accent"
+            );
+        });
+    }
+
+    /// A page showing the rotation controls, with a folder already chosen.
+    fn rotation_page() -> SettingsState {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.appearance.settings.wallpaper_folder =
+            Some(std::path::PathBuf::from("/home/u/Pictures"));
+        state
+    }
+
+    /// Type `text` into whatever field has the keyboard.
+    fn type_text(state: &mut SettingsState, text: &str) {
+        for ch in text.chars() {
+            state.handle_event(&Event::Key(KeyEvent {
+                // The virtual key code is not what a text field reads --
+                // `typed()` yields the characters in `text`, so that a layout
+                // this build has never heard of still types. `Unknown` is
+                // therefore the honest code for "some key produced this
+                // character", and using `Key::A` for every letter would be
+                // asserting something about the keyboard that is not true.
+                key: Key::Unknown(0),
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: ch.to_string(),
+            }));
+        }
+    }
+
+    /// **A pattern typed into the field reaches the setting the shell reads.**
+    ///
+    /// `wallpaper.exclude` has been read by the shell and applied by
+    /// `Session::is_excluded` since 2026-09-17; until this control existed the
+    /// only way to put a pattern there was to edit the file by hand.
+    #[test]
+    fn a_typed_pattern_joins_the_exclusion_list() {
+        with_scratch_config("settings-exclusion-add", |_root| {
+            let mut state = rotation_page();
+            let (x, y) = center_of(&state, RowHit::Focus(FieldId::ExclusionDraft))
+                .expect("no field to type a pattern into");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+
+            type_text(&mut state, "*.gif");
+            state.handle_event(&Event::Key(KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }));
+
+            assert_eq!(
+                state.appearance.settings.wallpaper_exclusions,
+                vec!["*.gif".to_string()],
+                "the pattern never reached the setting the shell reads"
+            );
+            assert!(
+                state.exclusion_draft.text().is_empty(),
+                "the field still holds the pattern it just added"
+            );
+        });
+    }
+
+    /// The same pattern twice is one pattern.
+    ///
+    /// A list holding it twice excludes nothing extra and gives the user two
+    /// rows to remove before the picture comes back.
+    #[test]
+    fn adding_a_pattern_twice_adds_it_once() {
+        with_scratch_config("settings-exclusion-dup", |_root| {
+            let mut state = rotation_page();
+            state.exclusion_draft.set_text("*.gif");
+            state.add_exclusion();
+            state.exclusion_draft.set_text("  *.gif  ");
+            state.add_exclusion();
+
+            assert_eq!(
+                state.appearance.settings.wallpaper_exclusions,
+                vec!["*.gif".to_string()],
+                "a trimmed duplicate was stored as a second pattern"
+            );
+        });
+    }
+
+    /// An empty field adds nothing, and offers no button that would.
+    #[test]
+    fn an_empty_pattern_is_not_a_pattern() {
+        with_scratch_config("settings-exclusion-empty", |_root| {
+            let mut state = rotation_page();
+            assert!(
+                center_of(&state, RowHit::Press(ButtonId::AddExclusion)).is_none(),
+                "an Add button was drawn with nothing to add"
+            );
+
+            state.exclusion_draft.set_text("   ");
+            state.add_exclusion();
+            assert!(
+                state.appearance.settings.wallpaper_exclusions.is_empty(),
+                "whitespace was stored as a pattern"
+            );
+        });
+    }
+
+    /// A saved pattern can be taken back.
+    #[test]
+    fn a_saved_pattern_can_be_removed() {
+        with_scratch_config("settings-exclusion-remove", |_root| {
+            let mut state = rotation_page();
+            state.appearance.settings.wallpaper_exclusions =
+                vec!["*.gif".to_string(), "draft-*".to_string()];
+
+            let (x, y) = center_of(&state, RowHit::Select(SelectId::ExclusionPattern, 0))
+                .expect("no way to remove the first pattern");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+
+            assert_eq!(
+                state.appearance.settings.wallpaper_exclusions,
+                vec!["draft-*".to_string()],
+                "removing the first pattern removed the wrong one, or none"
+            );
+        });
+    }
+
+    /// **Clicking another control takes the keyboard back from the field.**
+    ///
+    /// Without this the field keeps it for ever: a user who typed a glob,
+    /// clicked the shuffle switch and carried on typing would be filling in a
+    /// pattern they could no longer see. Worth its own test because the first
+    /// version of this editor had the comment describing the behaviour and not
+    /// the line implementing it.
+    #[test]
+    fn clicking_another_control_takes_the_keyboard_back() {
+        with_scratch_config("settings-exclusion-focus", |_root| {
+            let mut state = rotation_page();
+            let (x, y) = center_of(&state, RowHit::Focus(FieldId::ExclusionDraft)).expect("field");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            type_text(&mut state, "ab");
+            assert_eq!(
+                state.exclusion_draft.text(),
+                "ab",
+                "the field did not take typing"
+            );
+
+            let (tx, ty) = center_of(&state, RowHit::Toggle(ToggleId::RotationShuffle))
+                .expect("no shuffle switch to click");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: tx,
+                y: ty,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+
+            type_text(&mut state, "cd");
+            assert_eq!(
+                state.exclusion_draft.text(),
+                "ab",
+                "typing went on landing in a field the user had clicked away from"
+            );
+        });
+    }
+
+    /// The search box takes a caret too, and shows one.
+    ///
+    /// It was a `String` with `push` and `pop`: a mistyped query could only be
+    /// fixed from the end, and the box drew no caret because there was none to
+    /// draw. Asserted through the key handler and then on the drawn commands,
+    /// since "the model moved the caret" and "the user can see where it is"
+    /// are separate claims and only the second is the feature.
+    #[test]
+    fn the_search_box_has_a_caret_and_draws_it() {
+        with_scratch_config("settings-search-caret", |_root| {
+            let mut state = SettingsState::new();
+            state.search_focused = true;
+            type_text(&mut state, "wfi");
+
+            // Back two and insert the missing letter.
+            state.handle_event(&key_press(Key::Left));
+            state.handle_event(&key_press(Key::Left));
+            type_text(&mut state, "i");
+            assert_eq!(
+                state.search_query.text(),
+                "wifi",
+                "the caret did not move back into the query"
+            );
+
+            let tree = state.render_tree();
+            // A `Line`, which is what `textedit::push_caret` emits -- not a
+            // thin `FillRect`, which is what this test looked for first and
+            // is how the caret is drawn in the page rows.
+            let painted = tree.commands.iter().any(|c| {
+                matches!(c, guitk::render::RenderCommand::Line { width, .. }
+                    if (width - 1.5).abs() < f32::EPSILON)
+            });
+            assert!(painted, "no caret was drawn in a focused search box");
+        });
+    }
+
+    /// **A typo in the middle of a pattern can be fixed in the middle.**
+    ///
+    /// The point of the field being a `TextInput` rather than a `String`. The
+    /// first version of this row supported typing and backspace and nothing
+    /// else, so `holiday-2109-*.jpg` could only be corrected by deleting back
+    /// to the mistake and retyping the rest. Asserted through the key handler,
+    /// because the claim is about what the *keyboard* can do.
+    #[test]
+    fn the_caret_can_be_moved_back_into_a_pattern() {
+        with_scratch_config("settings-exclusion-caret", |_root| {
+            let mut state = rotation_page();
+            let (x, y) = center_of(&state, RowHit::Focus(FieldId::ExclusionDraft)).expect("field");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+
+            type_text(&mut state, "*.gf");
+            // Back one, and put the missing letter where it belongs.
+            state.handle_event(&key_press(Key::Left));
+            type_text(&mut state, "i");
+
+            assert_eq!(
+                state.exclusion_draft.text(),
+                "*.gif",
+                "the caret did not move back into the pattern"
+            );
+
+            // And Home reaches the front, which backspace never could.
+            state.handle_event(&key_press(Key::Home));
+            type_text(&mut state, "x");
+            assert_eq!(state.exclusion_draft.text(), "x*.gif");
+        });
+    }
+
+    /// The exclusion controls wait for a folder, like the rest of the section.
+    #[test]
+    fn the_exclusion_field_waits_for_a_folder() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.appearance.settings.wallpaper_folder = None;
+        assert!(
+            center_of(&state, RowHit::Focus(FieldId::ExclusionDraft)).is_none(),
+            "a field for excluding pictures from a rotation that is not running"
+        );
+    }
+
+    /// The Choose button appears with a picture to choose, and not otherwise.
+    #[test]
+    fn the_login_picture_row_waits_for_a_picture_style() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+
+        state.appearance.settings.login_background = appearance::LoginBackground::SameAsDesktop;
+        assert!(
+            center_of(&state, RowHit::Press(ButtonId::ChooseLoginImage)).is_none(),
+            "a picture chooser was drawn for a style that uses no picture"
+        );
+
+        state.appearance.settings.login_background =
+            appearance::LoginBackground::CustomImage(std::path::PathBuf::from("/p.png"));
+        assert!(
+            center_of(&state, RowHit::Press(ButtonId::ChooseLoginImage)).is_some(),
+            "no way to change the greeter's picture"
+        );
+    }
+
+    /// Return a key event for `key`, pressed.
+    fn key_press(key: Key) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    /// Open the colour picker the way a user does, and answer where it is.
+    ///
+    /// **Call this inside `with_scratch_config`.** It goes through
+    /// `handle_event`, and this application persists by comparing the whole
+    /// settings struct around that call -- so opening the picker writes
+    /// `appearance.yaml` wherever the run's configuration directory happens
+    /// to point. On a developer's machine that is their own; under a parallel
+    /// workspace run it is a neighbouring test's scratch directory, which is
+    /// where `BUG-C-THE-KEYBOARD-LAYOUT-TEST-FAILS-ABOUT-ONE-WORKSPACE-RUN-IN-TWO`
+    /// came from. The pre-push gate caught this helper doing exactly that.
+    fn open_accent_picker() -> SettingsState {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Colors;
+        let custom = AccentColor::presets().len();
+        let (x, y) = center_of(&state, RowHit::Select(SelectId::AccentColor, custom))
+            .expect("no swatch for a colour of your own");
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        state
+    }
+
+    /// There is a swatch for a colour that is not one of the presets.
+    ///
+    /// The palette has honoured `AccentColor::Custom` since it was written --
+    /// `effective_accent` returns `custom_accent` for it, and `accent_on` has
+    /// a branch saying the user's choice is not to be second-guessed -- but
+    /// `AccentColor::presets()` lists the named accents and not that one, so
+    /// there was no way to reach it. This is the control catching up with the
+    /// consumer, which is the direction that leaves nothing lying.
+    ///
+    /// No scratch config: this one only lays the page out and never persists.
+    #[test]
+    fn the_accent_grid_offers_a_colour_of_your_own() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Colors;
+        assert!(
+            center_of(
+                &state,
+                RowHit::Select(SelectId::AccentColor, AccentColor::presets().len())
+            )
+            .is_some(),
+            "the accent grid ends at the presets"
+        );
+    }
+
+    /// Pressing it asks which colour, and changes nothing until told.
+    #[test]
+    fn choosing_your_own_colour_asks_which_colour() {
+        with_scratch_config("settings-accent-open", |_root| {
+            let state = open_accent_picker();
+            assert!(state.color_dialog.is_some(), "no colour picker appeared");
+            assert_eq!(
+                state.appearance.settings.accent_color,
+                AccentColor::Blue,
+                "the accent changed before a colour had been chosen"
+            );
+        });
+    }
+
+    /// **A confirmed colour is the accent, and the desktop is told to use it.**
+    ///
+    /// Two settings, not one. `effective_accent` consults `custom_accent` only
+    /// when `accent_color` is `Custom`, so writing the colour alone would
+    /// store a value nothing reads: the picker would appear to have worked and
+    /// the desktop would not change. That is the same shape as the wallpaper
+    /// fit defect -- stored, and nothing obeying it.
+    #[test]
+    fn a_confirmed_colour_becomes_the_accent() {
+        with_scratch_config("settings-accent-confirm", |_root| {
+            let mut state = open_accent_picker();
+            let chosen = Color::from_hex(0x1D7A3F);
+            state
+                .color_dialog
+                .as_mut()
+                .expect("picker")
+                .picker_mut()
+                .set_color(chosen);
+
+            state.handle_event(&key_press(Key::Enter));
+
+            assert!(state.color_dialog.is_none(), "the picker stayed up");
+            assert_eq!(state.appearance.settings.custom_accent, chosen);
+            assert_eq!(
+                state.appearance.settings.accent_color,
+                AccentColor::Custom,
+                "the colour was saved but nothing was told to use it"
+            );
+            // The claim that matters to a user: the desktop's accent is theirs.
+            assert_eq!(
+                state.appearance.settings.effective_accent(),
+                chosen,
+                "the accent the desktop will draw is not the colour picked"
+            );
+        });
+    }
+
+    /// Cancelling leaves the accent exactly as it was.
+    #[test]
+    fn cancelling_the_colour_picker_changes_nothing() {
+        with_scratch_config("settings-accent-cancel", |_root| {
+            let mut state = open_accent_picker();
+            let before = state.appearance.settings.effective_accent();
+            state
+                .color_dialog
+                .as_mut()
+                .expect("picker")
+                .picker_mut()
+                .set_color(Color::from_hex(0xFF00FF));
+
+            state.handle_event(&key_press(Key::Escape));
+
+            assert!(state.color_dialog.is_none(), "the picker stayed up");
+            assert_eq!(
+                state.appearance.settings.effective_accent(),
+                before,
+                "a cancelled colour was adopted anyway"
+            );
+            assert_ne!(state.appearance.settings.accent_color, AccentColor::Custom);
+        });
+    }
+
+    /// While the picker is up, a keystroke does not reach the page behind it.
+    ///
+    /// On this window every key is a setting, so a modal that leaks is a modal
+    /// that changes something the user could not see they were changing. The
+    /// file picker is guarded this way already; this is the same guard.
+    #[test]
+    fn the_colour_picker_answers_before_the_page() {
+        with_scratch_config("settings-accent-modal", |_root| {
+            let mut state = open_accent_picker();
+            let page = state.current_page;
+
+            // Down would move the sidebar selection on an unguarded page.
+            state.handle_event(&key_press(Key::Down));
+
+            assert_eq!(state.current_page, page, "a keystroke reached the page");
+            assert!(state.color_dialog.is_some(), "the picker went away");
+        });
+    }
+
+    #[test]
+    fn rotation_detail_rows_wait_for_a_folder() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+
+        state.appearance.settings.wallpaper_folder = None;
+        assert!(
+            center_of(&state, RowHit::Toggle(ToggleId::RotationShuffle)).is_none(),
+            "a shuffle switch was drawn with no folder to shuffle"
+        );
+        assert!(
+            center_of(&state, RowHit::Press(ButtonId::ChooseRotationFolder)).is_some(),
+            "the page must always offer a way to START rotating"
+        );
+
+        state.appearance.settings.wallpaper_folder = Some(std::path::PathBuf::from("/pics"));
+        assert!(
+            center_of(&state, RowHit::Toggle(ToggleId::RotationShuffle)).is_some(),
+            "a folder is set and the rows did not appear"
+        );
+        assert!(
+            center_of(&state, RowHit::Dropdown(DropdownId::RotationInterval)).is_some(),
+            "no way to change how often it rotates"
+        );
+    }
+
+    /// Choosing a folder does not set it as the single picture.
+    ///
+    /// One picker serves both, and its answer is a bare path: without
+    /// `picker_is_for` the chosen folder would be applied as a wallpaper, and
+    /// the desktop would try to draw a directory.
+    #[test]
+    fn a_chosen_folder_lands_in_the_folder_setting() {
+        let mut state = SettingsState::new();
+        state.open_rotation_folder_dialog();
+        assert!(
+            state.apply_dialog_answer(DialogAction::Selected(std::path::PathBuf::from("/pics")))
+        );
+
+        assert_eq!(
+            state.appearance.settings.wallpaper_folder,
+            Some(std::path::PathBuf::from("/pics"))
+        );
+        assert_eq!(
+            state.appearance.settings.wallpaper, None,
+            "the folder was applied as the single picture"
+        );
+    }
+
     #[test]
     fn the_wallpaper_page_offers_a_way_to_choose_one() {
         let mut state = SettingsState::new();
@@ -6211,7 +8271,7 @@ mod tests {
         with_scratch_config("settings-wallpaper-remove", |root| {
             let mut state = SettingsState::new();
             state.current_page = SettingsPage::Wallpaper;
-            state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+            state.appearance.settings.wallpaper = Some(std::path::PathBuf::from("/pictures/a.png"));
 
             let (cx, cy) = center_of(&state, RowHit::Press(ButtonId::ClearWallpaper))
                 .expect("the page draws no Remove button");
@@ -6246,7 +8306,7 @@ mod tests {
         with_scratch_config("settings-wallpaper-fit", |root| {
             let mut state = SettingsState::new();
             state.current_page = SettingsPage::Wallpaper;
-            state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+            state.appearance.settings.wallpaper = Some(std::path::PathBuf::from("/pictures/a.png"));
             assert_eq!(
                 state.appearance.settings.wallpaper_fit,
                 appearance::ImageFit::Fill,
@@ -6303,7 +8363,7 @@ mod tests {
             "a fit chooser with nothing to place"
         );
 
-        state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+        state.appearance.settings.wallpaper = Some(std::path::PathBuf::from("/pictures/a.png"));
         assert!(
             center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_some(),
             "no way to say how the picture is placed"
@@ -6323,7 +8383,7 @@ mod tests {
             "Remove is offered with no picture to remove"
         );
 
-        state.appearance.settings.wallpaper = Some("/pictures/a.png".to_string());
+        state.appearance.settings.wallpaper = Some(std::path::PathBuf::from("/pictures/a.png"));
         assert!(
             center_of(&state, RowHit::Press(ButtonId::ClearWallpaper)).is_some(),
             "Remove is missing when there is a picture"
@@ -6500,7 +8560,23 @@ mod tests {
         // tempting fix and the wrong one: the sweep exists to catch a dropdown
         // nothing can open, and a dropdown excluded for being hard to reach is
         // exactly the one it should be checking.
-        state.appearance.settings.wallpaper = Some("/pictures/example.png".to_string());
+        state.appearance.settings.wallpaper =
+            Some(std::path::PathBuf::from("/pictures/example.png"));
+        // Likewise the Rotation section: its interval dropdown and shuffle
+        // switch appear only once a *folder* is chosen, because a rotation
+        // detail with nothing to rotate through is the same broken-looking
+        // control as the fit chooser above. `rotation_detail_rows_wait_for_a_folder`
+        // is where that is asserted from the other side.
+        state.appearance.settings.wallpaper_folder = Some(std::path::PathBuf::from("/pictures"));
+        // And the two font pickers, which are drawn only when the system has
+        // families to offer -- a chooser with nothing in it reads as broken,
+        // so the page says so in a note instead. A test enumerates no fonts,
+        // so without this the rows never exist and the sweep cannot see them.
+        // Fixtures rather than `load_font_families`, which would make the
+        // sweep's coverage depend on what happens to be installed on the
+        // machine running it.
+        state.font_families = vec!["Example Sans".to_owned(), "Example Serif".to_owned()];
+        state.mono_families = vec!["Example Mono".to_owned()];
         // Turning one switch on can reveal another, so repeat until the set
         // stops growing. Bounded because nothing here turns a switch back off.
         for _ in 0..8 {
@@ -8723,6 +10799,29 @@ mod tests {
 /// protocol, so they are about the strap: when a frame is drawn, which events
 /// are ours, when the loop stops, and — the reason this task existed — that a
 /// Personalization change is announced to the compositor.
+///
+/// # Why every test here opens with a `config_turn`
+///
+/// Each of these runs an event loop, and the loop polls the appearance file
+/// once per turn — so every test in this module is a *reader* of the
+/// configuration directory. This binary also contains a *writer*:
+/// `the_default_apps_page_shows_a_real_association` points
+/// `XDG_CONFIG_HOME` at a scratch copy through
+/// `settingsfile::testing::with_scratch_config`. `cargo test` runs a
+/// binary's tests as threads of one process, so the two share that variable.
+///
+/// `ENV_LOCK` inside `settingsfile` serialises writers against each other and
+/// not against readers — `known-issues.md`
+/// `TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS`.
+/// An unguarded reader can therefore watch the directory change under it,
+/// decide the user's appearance settings were edited, and repaint: one frame
+/// more than the test counted, at a rate low enough (not once in ten runs of
+/// this binary alone) to look like noise rather than a race.
+///
+/// `gui/window`'s own `TestDesktop` holds this guard already, but only under
+/// *that* crate's `#[cfg(test)]` — the type is a dev-dependency there and
+/// cannot appear in the shipped library. A dependent's test binary gets no
+/// protection from it, which is why each test below takes the turn itself.
 #[cfg(test)]
 mod loop_tests {
     // A test that indexes out of range should fail loudly and point at the line
@@ -8824,6 +10923,7 @@ mod loop_tests {
 
     #[test]
     fn settings_draws_once_at_startup_and_then_only_when_something_changed() {
+        let _config_turn = settingsfile::testing::config_turn();
         let (mut events, desktop) = testing::desktop();
         let (mut state, at) = control_on(
             SettingsPage::UserAccounts,
@@ -8867,6 +10967,7 @@ mod loop_tests {
 
     #[test]
     fn events_for_another_window_are_ignored_rather_than_applied() {
+        let _config_turn = settingsfile::testing::config_turn();
         let (mut events, desktop) = testing::desktop();
         let mine = WindowBuilder::new("Settings", 1200, 800)
             .build(&mut events)
@@ -8901,6 +11002,7 @@ mod loop_tests {
 
     #[test]
     fn closing_the_window_stops_the_loop_rather_than_merely_being_ignored() {
+        let _config_turn = settingsfile::testing::config_turn();
         let (mut events, desktop) = testing::desktop();
         let window = WindowBuilder::new("Settings", 1200, 800)
             .build(&mut events)
@@ -8934,6 +11036,7 @@ mod loop_tests {
 
     #[test]
     fn a_resize_is_applied_before_the_frame_that_answers_it() {
+        let _config_turn = settingsfile::testing::config_turn();
         let (mut events, desktop) = testing::desktop();
         let window = WindowBuilder::new("Settings", 1200, 800)
             .resizable(true)
@@ -8970,6 +11073,7 @@ mod loop_tests {
     #[test]
     fn changing_an_appearance_setting_asks_the_compositor_to_reload() {
         with_scratch_config("settings_loop_reload", |_root| {
+            let _config_turn = settingsfile::testing::config_turn();
             let (mut events, desktop) = testing::desktop();
             let window = WindowBuilder::new("Settings", 1200, 800)
                 .build(&mut events)
@@ -9008,6 +11112,7 @@ mod loop_tests {
     #[test]
     fn an_event_that_changes_no_appearance_setting_asks_for_no_reload() {
         with_scratch_config("settings_loop_no_reload", |_root| {
+            let _config_turn = settingsfile::testing::config_turn();
             let (mut events, desktop) = testing::desktop();
             let window = WindowBuilder::new("Settings", 1200, 800)
                 .build(&mut events)
@@ -9045,6 +11150,7 @@ mod loop_tests {
     #[test]
     fn one_change_produces_one_notification_and_not_one_per_later_event() {
         with_scratch_config("settings_loop_once", |_root| {
+            let _config_turn = settingsfile::testing::config_turn();
             let (mut events, desktop) = testing::desktop();
             let window = WindowBuilder::new("Settings", 1200, 800)
                 .build(&mut events)
@@ -9138,6 +11244,7 @@ mod loop_tests {
     #[test]
     fn a_double_click_change_asks_the_compositor_to_re_read_the_input_file() {
         with_scratch_config("settings_loop_input_reload", |_root| {
+            let _config_turn = settingsfile::testing::config_turn();
             let (mut events, desktop) = testing::desktop();
             let window = WindowBuilder::new("Settings", 1200, 800)
                 .build(&mut events)
@@ -9179,6 +11286,7 @@ mod loop_tests {
     #[test]
     fn an_appearance_change_asks_for_no_input_reload() {
         with_scratch_config("settings_loop_no_input_reload", |_root| {
+            let _config_turn = settingsfile::testing::config_turn();
             let (mut events, desktop) = testing::desktop();
             let window = WindowBuilder::new("Settings", 1200, 800)
                 .build(&mut events)

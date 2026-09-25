@@ -73,7 +73,10 @@ import gittree  # noqa: E402  (needs the path above)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Lane B's trees. `--roots` overrides, so another lane can run this over its
+# (Since the six-lane split of 2026-09-22 these trees are lanes B and D --
+# userspace/ and init/ are B's; posix/, services/ and toolchain/ are D's.
+# The population is unchanged; a failure here now names one of two owners.)
+# Lane B's trees under three lanes. `--roots` overrides, so another lane can run this over its
 # own without widening a default that would fail on crates its runner cannot
 # fix.
 ROOTS = ("userspace", "services", "init", "posix")

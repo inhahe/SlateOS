@@ -1072,12 +1072,56 @@ impl NetstackConn {
         if !ring.sq_push(sqe) {
             return Err(KernelError::ResourceExhausted);
         }
-        self.submit_round()?;
-        // The daemon served us, so it now holds a session for our ring — mark it
-        // so teardown emits an `OP_STOP`. (A created-but-never-submitted client
-        // leaves this false and never contacts the daemon.)
-        self.session_open = true;
-        let cqe = ring.cq_pop().ok_or(KernelError::InternalError)?;
+        // Bounded poll, matching the eight loops elsewhere in this file and
+        // for the reason they all state: a round drives the daemon's pump
+        // once, so one round is not guaranteed to produce the completion.
+        // This function polled exactly once, and was the only place in the
+        // module that did -- which cost one boot in twenty as
+        // `[netsock] FAIL: head-of-line setup step listen failed:
+        // InternalError`, the control path failing where every data path
+        // already retried.
+        //
+        // Re-rounding is safe and is NOT a re-submission: `sq_push` above
+        // ran once, and `submit_round` carries no SQE -- its contract is
+        // "the daemon drains whatever SQEs are queued against its
+        // persistent session". A later round on an already-drained queue
+        // finds nothing to do and the completion is already in the CQ.
+        let mut got = None;
+        let mut rounds = 0u32;
+        for _ in 0..8u32 {
+            rounds = rounds.saturating_add(1);
+            self.submit_round()?;
+            // The daemon served us, so it now holds a session for our ring —
+            // mark it so teardown emits an `OP_STOP`. (A created-but-never-
+            // submitted client leaves this false and never contacts the
+            // daemon.)
+            self.session_open = true;
+            if let Some(c) = ring.cq_pop() {
+                got = Some(c);
+                break;
+            }
+        }
+        // `TimedOut` rather than `InternalError`: four conditions used to
+        // arrive at the caller as one word -- an absent ring, a missing
+        // completion, a `user_data` mismatch and an unexpected second
+        // completion. "The daemon never answered" and "the daemon answered
+        // wrongly" want different words, and a rung that prints the error
+        // is the only thing that will ever read them.
+        // Say so when one round was not enough. The retry above is claimed
+        // structurally -- the control path now polls the way its eight
+        // neighbours do -- and a green boot cannot tell "the race is fixed"
+        // from "the race did not fire". This line answers it directly: if it
+        // never appears the loop is insurance and the 1-in-20 `listen`
+        // failure had another cause; if it appears, the race was real and is
+        // now absorbed, and the number says how close the single poll was.
+        if rounds > 1 {
+            crate::serial_println!(
+                "[netstack-client]   submit_and_reap needed {} rounds for one \
+                 completion -- a single poll would have failed here",
+                rounds
+            );
+        }
+        let cqe = got.ok_or(KernelError::TimedOut)?;
         if cqe.user_data != want_ud {
             return Err(KernelError::InternalError);
         }

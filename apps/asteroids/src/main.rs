@@ -1382,7 +1382,7 @@ impl AsteroidsApp {
             label_left(
                 f,
                 &Label {
-                    text: "Arrows: Move  Space: Shoot  P: Pause  N: New",
+                    text: CONTROLS_LINE,
                     size: l.small,
                     weight: FontWeightHint::Light,
                     color: OVERLAY0,
@@ -1755,6 +1755,19 @@ fn push_text(f: &mut Frame<Target>, l: &Label, x: f32, y: f32, limit: f32) {
 }
 
 /// Against the left edge of `r`, centred down it.
+/// The line under the readings that says which keys fly the ship.
+///
+/// **`W/A/D` and not `WASD`.** `Key::A`, `Key::D` and `Key::W` are aliases
+/// for Left, Right and Up, and until now the line named only the arrows, so
+/// three keys this game answers were written down nowhere. The obvious repair
+/// is the word every arcade game uses -- and it would claim a fourth key:
+/// `Key::S` appears nowhere in this crate, because an asteroids ship has no
+/// reverse thrust. `guitk::shortcut::keystrokes` expands `WASD` to four
+/// keystrokes and `scripts/key-survey.py` expands it to four names, so the
+/// word is not loose shorthand here; it is a testable claim, and one of the
+/// four would have been false.
+const CONTROLS_LINE: &str = "Arrows or W/A/D: Move  Space: Shoot  P: Pause  N: New";
+
 fn label_left(f: &mut Frame<Target>, l: &Label, r: Rect) {
     if r.is_empty() {
         return;
@@ -2009,6 +2022,115 @@ mod tests {
     /// Helper: advance the game by a given number of milliseconds.
     fn tick(app: &mut AsteroidsApp, ms: u64) {
         app.handle_tick(ms);
+    }
+
+    /// **Every key the controls line names does something, and S is absent.**
+    ///
+    /// The line named only the arrows while `A`, `D` and `W` were bound as
+    /// aliases, so `key-survey.py` reported three keys this game answers and
+    /// never mentions. The repair is one word away from being a lie: `WASD`
+    /// is what every arcade game writes, `keystrokes` expands it to four
+    /// keystrokes, and `Key::S` appears nowhere in this crate because the
+    /// ship has no reverse thrust.
+    ///
+    /// So this walks the keys the line actually names and requires each to
+    /// move the ship. It deliberately does *not* assert that S does nothing:
+    /// that would pin an absence and stand in the way of someone adding
+    /// reverse thrust, which is a feature and not a regression. What it pins
+    /// is the direction that matters -- nothing is advertised that does not
+    /// answer.
+    #[test]
+    fn every_key_the_controls_line_names_flies_the_ship() {
+        // A key on the controls line, the word that names it, and how to
+        // see the press arrive. `fn` pointers rather than inferred closures,
+        // because each closure is its own type and an array of them has no
+        // common element type; named, because clippy calls the tuple complex
+        // and it is right that the shape wants a name.
+        type ControlCase = (Key, &'static str, fn(&AsteroidsApp) -> bool);
+        let cases: [ControlCase; 6] = [
+            (Key::A, "A", |a| a.input.left),
+            (Key::D, "D", |a| a.input.right),
+            (Key::W, "W", |a| a.input.thrust),
+            (Key::Left, "Arrows", |a| a.input.left),
+            (Key::Right, "Arrows", |a| a.input.right),
+            (Key::Up, "Arrows", |a| a.input.thrust),
+        ];
+        for (key, named, reach) in cases {
+            assert!(
+                CONTROLS_LINE.contains(named),
+                "the controls line never mentions {named}"
+            );
+            let mut app = AsteroidsApp::new();
+            assert!(!reach(&app), "the ship was already moving");
+            key_down(&mut app, key);
+            assert!(
+                reach(&app),
+                "{named} is on the controls line and {key:?} does nothing"
+            );
+            key_up(&mut app, key);
+            assert!(!reach(&app), "{key:?} never came back up");
+        }
+    }
+
+    /// **The controls line fits the band it is drawn in.**
+    ///
+    /// `label_left` hands the label a `max_width`, so a line too long for the
+    /// header is ellipsized rather than wrapped -- and the tail is `N: New`,
+    /// the one row that tells a player how to start again.
+    ///
+    /// **`or W/A/D` did not come close to overflowing, and saying so is the
+    /// point.** At the default window the band is about 800 pixels and the
+    /// line about 300, so my first draft of this comment -- that lengthening
+    /// it was "exactly the edit that cuts the tail off" -- was wrong, and the
+    /// control I ran to check said so by passing. The same mistake as the
+    /// launcher hint two hours ago: a plausible reason written down before it
+    /// was tested.
+    ///
+    /// What makes the test worth having is the last size. `draw_header` drops
+    /// the line on *height*, not width, so a tall narrow window keeps it in a
+    /// band with a quarter of the room -- 396 pixels at 420x600, against 434
+    /// for a line with one more short row on it. That is where growth runs
+    /// off the end first, and without that size this test would accept almost
+    /// any tail.
+    #[test]
+    fn the_controls_line_fits_the_header() {
+        let app = AsteroidsApp::new();
+        for (w, h) in [
+            (WINDOW_WIDTH, WINDOW_HEIGHT),
+            (1920.0, 1080.0),
+            (1000.0, 1000.0),
+            // The narrowest window that still draws the line. `draw_header`
+            // drops it on *height*, not width, so a tall narrow window keeps
+            // it in a band with far less room than the default -- and that is
+            // where an added row runs off the end first. Without this size the
+            // test has 500 pixels of slack at the default and would accept
+            // almost any tail.
+            (420.0, 600.0),
+        ] {
+            let l = Layout::new(w, h);
+            let inner_w = (l.header.w - l.pad * 2.0).max(0.0);
+            let drawn = text::measure(CONTROLS_LINE, l.small, FontWeightHint::Light);
+            assert!(
+                drawn <= inner_w,
+                "at {w}x{h} the header is {inner_w} wide and the line is {drawn}"
+            );
+        }
+        // And it really is on screen at the default size, not merely narrow
+        // enough to have been: a header that gave the line up would satisfy
+        // the measurement above and show the player nothing.
+        let texts: Vec<String> = app
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == CONTROLS_LINE),
+            "the controls line never reached the window: {texts:?}"
+        );
     }
 
     /// A key going down, and staying down.

@@ -5669,6 +5669,43 @@ mod tests {
 
     // --- Connection tests ---
 
+    /// No input to `connect` reports a connection, for any profile.
+    ///
+    /// The window says "Connected to {name}" on success, and that sentence is
+    /// honest today only because success never happens -- `connect` has three
+    /// exits and all three are `Err`. That is correctness by unreachability,
+    /// which lasts exactly until somebody adds an `Ok` path for a reason short
+    /// of a real tunnel; the claim then fires and the window announces a
+    /// connection that does not exist.
+    ///
+    /// So the property is pinned rather than left to the shape of the code. If
+    /// this test starts failing, the right response is not to relax it: it is
+    /// to check that whatever now succeeds has actually carried traffic before
+    /// the message is allowed to say so.
+    #[test]
+    fn no_profile_can_report_a_connection() {
+        let mut mgr = VpnManager::with_sample_profiles();
+        let count = mgr.profiles.len();
+        assert!(count > 1, "a one-profile fixture would not test much");
+
+        for index in 0..count {
+            let name = mgr.profiles[index].name.clone();
+            assert!(
+                mgr.connect(index).is_err(),
+                "{name} reported a connection, and nothing here carries one"
+            );
+        }
+
+        // The two paths that refuse for a different reason than "no client":
+        // a disabled profile, and an index past the end.
+        mgr.profiles[0].enabled = false;
+        assert!(mgr.connect(0).is_err(), "a disabled profile connected");
+        assert!(
+            mgr.connect(count.saturating_add(5)).is_err(),
+            "an index past the end connected"
+        );
+    }
+
     #[test]
     fn test_manager_connect() {
         let mut mgr = VpnManager::with_sample_profiles();

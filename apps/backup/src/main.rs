@@ -15,11 +15,17 @@
 
 use std::collections::BTreeMap;
 use std::env;
-use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
+
+// See `gui/pathcodec`: design-decisions 426's escape, shared rather than
+// copied. This file and `apps/explorer/src/fileops.rs` held identical
+// implementations of these four functions until 2026-09-16 -- each under its
+// own doc comment explaining its own format, which is how two copies of one
+// decision stayed comfortable.
+use pathcodec::{decode_path, encode_path, os_string_from_bytes};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1017,94 +1023,6 @@ impl FileEntry {
             is_symlink,
             link_target,
         })
-    }
-}
-
-/// Escape a path into printable ASCII, losslessly.
-///
-/// The manifest is JSON, whose strings are Unicode, but a path is a byte
-/// string. `to_string_lossy` would substitute U+FFFD for every undecodable
-/// byte — and since the manifest is the only record of what a backup contains,
-/// that byte is then gone: restore recreates the file under a different name
-/// and verify reports the original as missing. `OsStr::as_encoded_bytes` gives
-/// the exact bytes; anything outside printable ASCII, plus `%` itself, is
-/// percent-encoded.
-fn encode_path(path: &Path) -> String {
-    encode_bytes(path.as_os_str().as_encoded_bytes())
-}
-
-/// The lossless core of [`encode_path`], on bytes rather than a path.
-///
-/// Kept separate because this — not the `OsStr` conversion around it — is where
-/// the round-trip property lives, and it can be tested on any host.
-fn encode_bytes(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len());
-    for &b in bytes {
-        if b == b'%' || !(0x20..0x7f).contains(&b) {
-            out.push_str(&format!("%{b:02X}"));
-        } else {
-            out.push(b as char); // guarded: printable ASCII only
-        }
-    }
-    out
-}
-
-/// Reverse of [`encode_path`].
-fn decode_path(encoded: &str) -> PathBuf {
-    PathBuf::from(os_string_from_bytes(decode_bytes(encoded)))
-}
-
-/// Reverse of [`encode_bytes`].
-///
-/// A `%` not followed by two hex digits is passed through literally rather than
-/// dropped: this reads files that may have been hand-edited, and losing a byte
-/// silently is worse than keeping one that was never an escape.
-fn decode_bytes(encoded: &str) -> Vec<u8> {
-    let bytes = encoded.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while let Some(&b) = bytes.get(i) {
-        if b == b'%'
-            && let Some(hex) = encoded.get(i.saturating_add(1)..i.saturating_add(3))
-            && let Ok(v) = u8::from_str_radix(hex, 16)
-        {
-            out.push(v);
-            i = i.saturating_add(3);
-            continue;
-        }
-        out.push(b);
-        i = i.saturating_add(1);
-    }
-    out
-}
-
-/// Build an `OsString` from the raw bytes of a path.
-///
-/// This is where the byte world meets the platform's path type, so it is split
-/// per platform rather than papered over with
-/// `OsStr::from_encoded_bytes_unchecked`: that function's contract is that the
-/// bytes are valid for the platform's `OsStr` encoding, which is true for
-/// arbitrary bytes on Unix but *not* on Windows, where `OsStr` is WTF-8. Since
-/// our target is `target-family = ["unix"]`, the safe, total conversion below
-/// is the one that actually runs; Windows appears only as a test host.
-#[cfg(unix)]
-fn os_string_from_bytes(bytes: Vec<u8>) -> OsString {
-    use std::os::unix::ffi::OsStringExt;
-    OsString::from_vec(bytes)
-}
-
-/// Test-host fallback. Windows `OsString` cannot hold a byte string that is not
-/// WTF-8, so bytes that are not valid UTF-8 cannot survive here. They are not
-/// silently mangled: [`decode_bytes`] is still exact, and the tests assert the
-/// round-trip at that level, which is the level the manifest is written at.
-#[cfg(not(unix))]
-fn os_string_from_bytes(bytes: Vec<u8>) -> OsString {
-    match String::from_utf8(bytes) {
-        Ok(s) => OsString::from(s),
-        // Reachable only on a non-Unix host reading a manifest written on the
-        // target. Nothing better is representable; `decode_bytes` is the API to
-        // use if the exact bytes are needed.
-        Err(e) => OsString::from(String::from_utf8_lossy(e.as_bytes()).into_owned()),
     }
 }
 
@@ -2681,9 +2599,27 @@ fn cmd_schedule(dest: &Path, source: &str, interval: &str) -> io::Result<()> {
         }
     }
 
+    // Refused rather than converted. `to_string_lossy` here would replace any
+    // byte that is not UTF-8 with U+FFFD and store *that* as the destination,
+    // so the schedule would name a directory the user never gave and the
+    // failure would surface much later as a backup written somewhere else.
+    // Our paths allow every byte but `/` and NUL; the schedule file is JSON,
+    // which is text, and inventing an escape for this one field would be a
+    // format only this program could read.
+    let Some(dest_text) = dest.to_str() else {
+        eprintln!(
+            "error: the destination path is not valid UTF-8, and the schedule file is JSON.
+             Give a destination whose path is UTF-8, or back up now with `backup create`."
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination path is not valid UTF-8",
+        ));
+    };
+
     let entry = ScheduleEntry {
         source: source.to_string(),
-        dest: dest.to_string_lossy().to_string(),
+        dest: dest_text.to_string(),
         interval: interval.to_string(),
     };
 
@@ -2703,6 +2639,21 @@ fn cmd_schedule(dest: &Path, source: &str, interval: &str) -> io::Result<()> {
         source,
         dest.display(),
         interval
+    );
+    // Said plainly, because the command otherwise reads as a promise. Nothing
+    // in this system reads schedules.json: there is no timer, no service and
+    // no check at start-up, so a user who sets this and walks away has no
+    // backups and no way to find that out until they need one. Announcing the
+    // gap is what `apps/netmanager` does rather than appearing to work, and
+    // what `posix`'s `require_shell` does rather than faking a check.
+    // See known-issues.md
+    // BUG-C-BACKUP-SCHEDULE-WRITES-A-FILE-NOTHING-EVER-READS.
+    println!(
+        "
+Note: this records the schedule; it does not yet cause a backup.
+         Nothing on this system starts a backup at a scheduled time, so no
+         backup will happen until a scheduler exists. Use `backup create` to
+         back up now."
     );
     Ok(())
 }
@@ -4108,43 +4059,6 @@ mod tests {
         );
     }
 
-    /// The write side. Fixing the manifest *parser* was not enough: the entry
-    /// handed to the writer had already been through `to_string_lossy` in
-    /// `relative_path`, so a byte the filesystem allowed was destroyed before
-    /// the manifest ever saw it, and restore recreated the file under a
-    /// different name.
-    ///
-    /// Asserted on bytes because that is what the manifest stores; on the
-    /// Windows test host an `OsString` cannot hold a non-WTF-8 byte string at
-    /// all, so routing through `PathBuf` would test the host, not the format.
-    #[test]
-    fn a_path_byte_the_filesystem_allows_survives_the_manifest() {
-        let raw = b"photos/caf\xE9.jpg";
-        let encoded = encode_bytes(raw);
-        assert_eq!(encoded, "photos/caf%E9.jpg");
-        assert_eq!(
-            decode_bytes(&encoded),
-            raw,
-            "a lone 0xE9 must come back as 0xE9, not as U+FFFD"
-        );
-    }
-
-    #[test]
-    fn every_byte_value_round_trips_through_the_path_encoding() {
-        let all: Vec<u8> = (0u8..=255).collect();
-        assert_eq!(decode_bytes(&encode_bytes(&all)), all);
-    }
-
-    #[test]
-    fn a_percent_in_a_filename_is_not_mistaken_for_an_escape() {
-        // "100% done.txt" is a legal filename. Round-tripping it must not eat
-        // the "20", and a `%` that is not a valid escape is kept verbatim.
-        let raw = b"100% done.txt";
-        assert_eq!(encode_bytes(raw), "100%25 done.txt");
-        assert_eq!(decode_bytes(&encode_bytes(raw)), raw);
-        assert_eq!(decode_bytes("a%zz"), b"a%zz");
-    }
-
     /// `relative_path` produces every `FileEntry.path`, so its output is what
     /// the manifest records. It must strip the base and normalise separators
     /// without going anywhere near a string conversion.
@@ -5041,5 +4955,43 @@ mod tests {
         };
         assert_eq!(opts.source, PathBuf::from("--dest"));
         assert_eq!(opts.dest, PathBuf::from("/backups"));
+    }
+
+    /// A destination the schedule file cannot hold is refused, not mangled.
+    ///
+    /// Windows-only because that is where a non-UTF-8 path is constructible in
+    /// a test: an unpaired surrogate is a legal path component there and has
+    /// no UTF-8 encoding. The defect it guards is not platform-specific --
+    /// `to_string_lossy` would substitute U+FFFD and store a directory the
+    /// user never named, and the backup would land somewhere else with no
+    /// error at the time it was set up.
+    #[cfg(windows)]
+    #[test]
+    fn a_destination_that_is_not_utf8_is_refused_rather_than_mangled() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        // Built inside a scratch directory rather than as a bare relative
+        // path. The refusal happens before anything is created, so nothing
+        // should be written either way -- but when this test was first run
+        // against a deliberately broken version, `create_dir_all` reached the
+        // path and left a directory named with an unpaired surrogate sitting
+        // in the source tree, which `cargo fmt` then tripped over. A test
+        // whose failure mode litters the repository is one nobody will want to
+        // run twice.
+        let scratch = temp_dir("schedule_nonutf8");
+        let dest = scratch.dir().join(OsString::from_wide(&[0xD800_u16]));
+        assert!(
+            dest.to_str().is_none(),
+            "the fixture is not the case under test"
+        );
+
+        let err = cmd_schedule(&dest, "/some/source", "daily")
+            .expect_err("a destination that cannot be written down must be refused");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::InvalidInput,
+            "refused for the wrong reason: {err}"
+        );
     }
 }

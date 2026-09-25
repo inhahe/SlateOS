@@ -41,6 +41,7 @@ name = "appearance"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "pathcodec",
  "settingsfile",
  "yamldoc",
 ]
@@ -68,6 +69,15 @@ name = "arp"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "associations"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]
@@ -128,6 +138,7 @@ dependencies = [
 name = "backup-app"
 version = "0.1.0"
 dependencies = [
+ "pathcodec",
  "safeio",
  "scratchdir",
  "sha2",
@@ -559,6 +570,7 @@ dependencies = [
  "appearance",
  "authlib",
  "daywindow",
+ "globmatch",
  "guiremote",
  "guitk",
  "imagecodec",
@@ -567,6 +579,7 @@ dependencies = [
  "loginusers",
  "notifsettings",
  "oswindow",
+ "pathcodec",
  "posix",
  "procinfo",
  "scratchdir",
@@ -785,13 +798,16 @@ name = "explorer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "associations",
  "byteread",
  "guitk",
  "imagecodec",
  "oswindow",
+ "pathcodec",
  "scratchdir",
  "settingsfile",
  "textfind",
+ "thumbs",
  "yamldoc",
 ]
 
@@ -808,6 +824,7 @@ name = "fileassoc"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "associations",
  "guitk",
  "oswindow",
  "safeio",
@@ -1076,6 +1093,7 @@ dependencies = [
 name = "hangman"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -1186,6 +1204,7 @@ dependencies = [
  "guitk",
  "imagecodec",
  "oswindow",
+ "safeio",
  "scratchdir",
 ]
 
@@ -2110,13 +2129,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pathcodec"
+version = "0.1.0"
+
+[[package]]
 name = "pdfviewer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "deflate",
  "guitk",
  "oswindow",
  "printjob",
+ "safeio",
 ]
 
 [[package]]
@@ -2142,7 +2167,13 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "guitk",
+ "imagecodec",
  "oswindow",
+ "pathcodec",
+ "safeio",
+ "scratchdir",
+ "settingsfile",
+ "thumbs",
 ]
 
 [[package]]
@@ -2554,6 +2585,7 @@ name = "settings"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "associations",
  "compositor",
  "guitk",
  "inputsettings",
@@ -3009,6 +3041,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "thumbs"
+version = "0.1.0"
+dependencies = [
+ "byteread",
+ "guitk",
+ "imagecodec",
+ "scratchdir",
+]
+
+[[package]]
 name = "tictactoe"
 version = "0.1.0"
 dependencies = [
@@ -3318,6 +3360,7 @@ dependencies = [
 name = "wordle"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

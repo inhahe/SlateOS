@@ -729,6 +729,21 @@ enum Panel {
     Favorites,
 }
 
+/// The keys this window answers, as a reader sees them.
+///
+/// `Ctrl+C` is what this program is *for* -- it puts the selected character
+/// on the clipboard -- and it was named nowhere.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Arrows", "Move through the characters"),
+    ("PageUp / PageDown", "Move a screenful"),
+    ("Enter", "Copy the character"),
+    ("Ctrl+C", "Copy the character"),
+    ("Ctrl+F", "Jump to the search box"),
+    ("Tab", "Next panel"),
+    ("Esc", "Leave the search box"),
+];
+
 struct CharMapApp {
     // Block browser
     blocks: Vec<UnicodeBlock>,
@@ -753,6 +768,8 @@ struct CharMapApp {
     // Search
     search_query: String,
     search_results: Vec<u32>,
+    /// Whether the shortcut card is up.
+    show_help: bool,
     search_active: bool,
     search_selected: usize,
 
@@ -803,6 +820,7 @@ impl CharMapApp {
             category_filter: CategoryFilter::All,
             search_query: String::new(),
             search_results: Vec::new(),
+            show_help: false,
             search_active: false,
             search_selected: 0,
             recent: Vec::new(),
@@ -1101,6 +1119,16 @@ impl CharMapApp {
         if !event.pressed {
             return false;
         }
+        if event.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return true;
+        }
+        if self.show_help {
+            if matches!(event.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return true;
+        }
         let ctrl = event.modifiers.ctrl;
         match event.key {
             Key::F if ctrl => self.set_search_active(true),
@@ -1356,6 +1384,18 @@ impl CharMapApp {
             self.render_detail(&mut frame, detail);
         }
         self.render_status(&mut frame, layout.status);
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
+
         frame
     }
 
@@ -2370,6 +2410,69 @@ mod tests {
 
     use super::*;
     use guitk::probe;
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Two states, because `Esc` leaves the search box and correctly reports
+    /// nothing to do when the box is not open.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|searching| {
+                    let mut app = CharMapApp::new();
+                    if searching {
+                        app.set_search_active(true);
+                    }
+                    app.handle_key(&stroke)
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing copies behind it.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &CharMapApp| -> Vec<String> {
+            app.frame(<CharMapApp as Probe>::SIZE.0, <CharMapApp as Probe>::SIZE.1)
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut app = CharMapApp::new();
+        assert!(
+            !drawn(&app).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_key(&probe::press(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&drawn(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let panel = app.active_panel;
+        app.handle_key(&probe::press(Key::Tab));
+        assert_eq!(
+            app.active_panel, panel,
+            "Tab moved the panel through the shortcut card"
+        );
+
+        app.handle_key(&probe::press(Key::F1));
+        app.handle_key(&probe::press(Key::Tab));
+        assert_ne!(
+            app.active_panel, panel,
+            "control: Tab does nothing even with the card down"
+        );
+    }
 
     // ── Unicode Block tests ────────────────────────────────────────────
 

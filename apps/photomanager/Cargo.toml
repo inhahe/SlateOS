@@ -9,5 +9,39 @@ appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 
+# Decoding a photograph, which is the one thing a photo manager has to do with
+# one. Until this arrived the library could import a file, read its EXIF and
+# list it, and then drew a card with its name on it.
+imagecodec = { path = "../../gui/imagecodec" }
+
+# The grid's thumbnails: generation, an LRU that owns the image ids, and the
+# eviction list the compositor must be told about. Extracted from the file
+# manager, which had all of it already -- above all the rule that drops are
+# announced before uploads, because the link checks its budget against
+# `held - freed + incoming`.
+thumbs = { path = "../../gui/thumbs" }
+
+# Read through a cap rather than `std::fs::read`: `imagecodec::Limits` is
+# checked against a file's header, and a file already held whole in memory has
+# nothing left to be protected from.
+safeio = { path = "../safeio" }
+
+# Where the library file lives. The answer to "which directory?" belongs in
+# one place, and this is where every other application asks.
+settingsfile = { path = "../../gui/settingsfile" }
+
+# Writing a path into a text file without destroying it. A name on this OS may
+# hold any byte but `/` and NUL, so `Display` is not an option -- it
+# substitutes U+FFFD and the bytes are gone.
+pathcodec = { path = "../../gui/pathcodec" }
+
+[dev-dependencies]
+# The same crate with its counters on, so a test can prove the save really
+# went through `safeio::write_atomically` rather than quietly regressing to
+# `fs::write` -- the two leave identical bytes, so nothing else can tell them
+# apart.
+safeio = { path = "../safeio", features = ["audit"] }
+scratchdir = { path = "../../userspace/scratchdir" }
+
 [lints]
 workspace = true

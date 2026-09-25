@@ -1412,6 +1412,45 @@ enum View {
 }
 
 /// The top-level Kanban application state.
+/// The keys this program answers, raised by `F1`.
+///
+/// `?` is not a second way in: naming a card, a column or a search takes typed
+/// text, so a `?` has somewhere to go -- the `apps/spreadsheet` case in
+/// design-decisions 863.
+///
+/// Seven rows name the thing they need. `P`, `M`, `B`, `Ctrl+D` and `Ctrl+A`
+/// all act on the selected card and are refused without one; `N`, `Shift+C`
+/// and `T` belong to the board view; `Ctrl+S` needs the filter bar open.
+/// Those refusals are correct, and a list that did not say so would be
+/// advertising keys that look broken.
+///
+/// **`Ctrl+S` is not save.** This app bound it to the search bar long before
+/// it had a file door, and the handler's own comment says the app's vocabulary
+/// outranks consistency with its neighbours. `Ctrl+E` writes the board out.
+/// The first draft of this list said "Open / save" for `Ctrl+O / Ctrl+S`,
+/// which was written from habit rather than from the handler; the guard
+/// caught it.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Left / Right", "Another column"),
+    ("Up / Down", "Another card, or scroll a card"),
+    ("PageUp / PageDown", "A screenful at a time"),
+    ("Enter", "Open the card, or confirm"),
+    ("Esc", "Back, or cancel what you are typing"),
+    ("N", "A new card, on the board"),
+    ("Shift+C", "A new column, on the board"),
+    ("T", "Sort this column, on the board"),
+    ("P", "Cycle this card's priority"),
+    ("M / B", "Move this card on / back a column"),
+    ("Ctrl+D", "Delete this card"),
+    ("Ctrl+A", "Archive it"),
+    ("Alt+1-4", "Board, and the three other views"),
+    ("Ctrl+F", "Show or hide the filter bar"),
+    ("Ctrl+S", "Type a search term, with that bar open"),
+    ("Ctrl+O", "Open a board"),
+    ("Ctrl+E", "Export this one"),
+    ("F1", "This list"),
+];
+
 struct KanbanApp {
     /// The open or save picker. Holds the dialog, the saving flag and the
     /// routing thirteen applications used to write out by hand.
@@ -1458,6 +1497,8 @@ struct KanbanApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 /// What the user is currently typing into.
@@ -1488,6 +1529,7 @@ impl KanbanApp {
     fn new() -> Self {
         let default_board = Board::default_board();
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             picker: FilePicker::new(),
             last_file_action: None,
@@ -3377,6 +3419,19 @@ fn render_app(app: &KanbanApp, width: f32, height: f32) -> RenderTree {
     // Input overlay
     render_input_overlay(&mut tree, app, width, height);
 
+    // Over the input overlay too: the list is the one thing on screen a
+    // reader asked for explicitly.
+    if app.show_help {
+        guitk::shortcut::render_card(
+            &mut tree,
+            &app.palette,
+            (width, height),
+            0.0,
+            SHORTCUTS,
+            "F1 closes this",
+        );
+    }
+
     tree
 }
 
@@ -3388,6 +3443,21 @@ fn render_app(app: &KanbanApp, width: f32, height: f32) -> RenderTree {
 fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
     if !key.pressed {
         return false;
+    }
+
+    // Above the input router: naming a card takes typed text and `F1` is not
+    // text, so a reader half-way through a title still gets the keys.
+    if key.key == Key::F1 {
+        app.show_help = !app.show_help;
+        return true;
+    }
+    if app.show_help {
+        // Modal. Letting keys through would mean deleting a card the reader
+        // cannot see.
+        if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+            app.show_help = false;
+        }
+        return true;
     }
 
     // If in input mode, route to input handler
@@ -3919,6 +3989,104 @@ mod tests {
             modifiers: guitk::event::Modifiers::NONE,
             text: String::new(),
         }
+    }
+
+    /// Every string the window draws, joined.
+    fn drawn(app: &KanbanApp) -> String {
+        render_app(app, 1200.0, 800.0)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// A board with a card selected, which is what most of these keys need.
+    fn with_card() -> KanbanApp {
+        let mut app = KanbanApp::new();
+        app.view = View::Board;
+        // Column 1, not 0: `B` moves a card back a column and is correctly
+        // refused at the left edge, `M` moves it on and is refused at the
+        // right. A card in the middle is the only place both have work.
+        let id = app.add_card("A card", 1).expect("a card");
+        app.selected_card = Some(id);
+        app.selected_column = 1;
+        // Open, so `Ctrl+S` has a search field to type into. Closed it answers
+        // `false`, which is correct and is not a missing binding.
+        app.show_filter_bar = true;
+        app
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// Two states. `P`, `M`, `B`, `Ctrl+D` and `Ctrl+A` all act on the
+    /// selected card and are correctly refused without one; the card-detail
+    /// view is what gives `Up`/`Down` a card to scroll rather than a list to
+    /// step. Every refusal involved is right, which is why the list names the
+    /// thing each key needs.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [View::Board, View::CardDetail].into_iter().any(|view| {
+                    let mut app = with_card();
+                    app.view = view;
+                    handle_key_event(&mut app, &stroke)
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the half that matters: `Ctrl+D` behind the card would
+    /// delete a card the reader cannot see, and asserting only that it does
+    /// not would pass on an app that had lost `Ctrl+D` altogether.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = with_card();
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        handle_key_event(&mut app, &key_press(Key::F1));
+        let shown = drawn(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let cards = app.active_board().cards.len();
+        let mut ctrl_d = key_press(Key::D);
+        ctrl_d.modifiers.ctrl = true;
+        handle_key_event(&mut app, &ctrl_d);
+        assert_eq!(
+            app.active_board().cards.len(),
+            cards,
+            "Ctrl+D deleted a card through the shortcut card"
+        );
+
+        handle_key_event(&mut app, &key_press(Key::Escape));
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+
+        handle_key_event(&mut app, &ctrl_d);
+        assert_ne!(
+            app.active_board().cards.len(),
+            cards,
+            "control: Ctrl+D does nothing even with the card down"
+        );
     }
 
     /// An open picker takes the keyboard, and the window behind it does not.

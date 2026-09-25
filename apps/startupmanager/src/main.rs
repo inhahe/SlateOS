@@ -1164,11 +1164,14 @@ impl ToolbarAction {
     /// Button text.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Add => "Add",
+            Self::Add => "Add (Ctrl+N)",
             Self::Remove => "Remove",
             Self::Enable => "Enable",
             Self::Disable => "Disable",
-            Self::Refresh => "Refresh",
+            // The key is on the button because a toolbar button is
+            // where a reader looks for what it does. `BUTTON_WIDTH` is
+            // fixed, so this text is not measured for the hit box.
+            Self::Refresh => "Refresh (F5)",
         }
     }
 
@@ -1474,6 +1477,20 @@ impl Layout {
     }
 }
 
+/// The keys this window answers, as a reader sees them.
+///
+/// `Ctrl+Q` closes the program and `Delete` removes a startup entry; neither
+/// was named.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Move through the entries"),
+    ("Enter", "Edit the selected entry"),
+    ("Delete", "Remove the selected entry"),
+    ("F5", "Look again"),
+    ("Ctrl+Q", "Quit"),
+    ("Esc", "Close the dialog"),
+];
+
 /// Full application state for the startup manager UI.
 pub struct StartupUI {
     pub manager: StartupManager,
@@ -1481,6 +1498,8 @@ pub struct StartupUI {
     pub sort_order: SortOrder,
     pub search_query: String,
     pub selected_id: Option<u64>,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub dialog: DialogState,
     /// First visible row of the table, as an index into the filtered list.
     pub scroll_offset: usize,
@@ -1513,6 +1532,7 @@ impl StartupUI {
             sort_order: SortOrder::Ascending,
             search_query: String::new(),
             selected_id: Option::None,
+            show_help: false,
             dialog: DialogState::Closed,
             scroll_offset: 0,
             window_width: WINDOW_WIDTH,
@@ -1944,6 +1964,17 @@ impl StartupUI {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal: Delete removes a startup entry.
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         if matches!(self.dialog, DialogState::AddEdit(_)) {
             return self.handle_add_edit_key(key);
         }
@@ -2168,6 +2199,17 @@ impl StartupUI {
             }
         }
 
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
+
         frame
     }
 
@@ -2337,7 +2379,7 @@ impl StartupUI {
 
         let empty = self.search_query.is_empty();
         let display = if empty {
-            "Search by name, publisher, or path..."
+            "Search by name, publisher, or path...  (Ctrl+F)"
         } else {
             &self.search_query
         };
@@ -3125,6 +3167,27 @@ mod tests {
     ///
     /// The empty list needs the same guard, which is the third banner line:
     /// "An empty list is not an all-clear -- nothing was examined."
+    /// **Every toolbar label fits its button, so no key is elided away.**
+    ///
+    /// The buttons are a fixed `BUTTON_WIDTH` and their text is drawn with
+    /// `max_width` and `TextOverflow::Ellipsis`. Naming the keys on them --
+    /// "Refresh (F5)", "Add (Ctrl+N)" -- is only worth anything if the name
+    /// survives to the screen; elided to "Refresh ..." it would hide exactly
+    /// the thing it was added to show, and look broken doing it.
+    #[test]
+    fn every_toolbar_label_fits_its_button() {
+        let room = BUTTON_WIDTH - 8.0;
+        for action in ToolbarAction::all() {
+            let w = text::measure(action.label(), FONT_SIZE, FontWeightHint::Bold);
+            assert!(
+                w <= room,
+                "{:?} draws {:?} at {w:.1}pt wide, and the button gives {room:.1}",
+                action,
+                action.label()
+            );
+        }
+    }
+
     #[test]
     fn a_fresh_manager_lists_nothing_and_says_why() {
         let ui = StartupUI::new();
@@ -3161,6 +3224,38 @@ mod tests {
     // the window hands it.
     use guitk::event::Modifiers;
     use guitk::probe;
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// `Ctrl+Q` is checked through `on_event`, because quitting is decided a
+    /// level up and returns `Response::Exit` rather than an `EventResult`.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let quits = {
+                    let mut ui = StartupUI::new();
+                    matches!(ui.on_event(&Event::Key(stroke.clone())), Response::Exit)
+                };
+                let answered = quits
+                    || [false, true].into_iter().any(|modal| {
+                        let mut ui = StartupUI::new();
+                        if modal {
+                            // A confirm dialog open, which is what Esc has to
+                            // close. The id need not exist: the dialog's key
+                            // handling does not look it up.
+                            ui.dialog = DialogState::ConfirmDelete(1);
+                        }
+                        ui.handle_key(&stroke) == EventResult::Consumed
+                    });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
 
     // -- StartupType tests --------------------------------------------------
 

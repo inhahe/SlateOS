@@ -1065,6 +1065,96 @@ enum GeneratorMode {
     Passphrase,
 }
 
+/// One character-set checkbox of the generator panel.
+///
+/// The panel drew four of these as `[x]` and `[ ]`, a mode row of three
+/// buttons with the active one highlighted, and a length slider with a knob
+/// positioned from the current value -- and not one of them could be
+/// operated. `CharsetOptions` was `true` four times over at construction with
+/// no writer in the crate, `mode` was `Random` for ever, and `set_length`
+/// carried an `allow(dead_code)` saying in as many words that the panel had
+/// no length control.
+///
+/// The checkbox is this list now, so a box cannot be drawn without a key
+/// that ticks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CharsetBox {
+    Uppercase,
+    Lowercase,
+    Digits,
+    Symbols,
+}
+
+impl CharsetBox {
+    /// Every box, in the order the panel draws them.
+    const ALL: [CharsetBox; 4] = [
+        Self::Uppercase,
+        Self::Lowercase,
+        Self::Digits,
+        Self::Symbols,
+    ];
+
+    /// The keystroke, as the panel prints it.
+    fn keys(self) -> &'static str {
+        match self {
+            Self::Uppercase => "Ctrl+1",
+            Self::Lowercase => "Ctrl+2",
+            Self::Digits => "Ctrl+3",
+            Self::Symbols => "Ctrl+4",
+        }
+    }
+
+    /// The name beside the box.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Uppercase => "Uppercase A-Z",
+            Self::Lowercase => "Lowercase a-z",
+            Self::Digits => "Digits 0-9",
+            Self::Symbols => "Symbols !@#$",
+        }
+    }
+
+    /// Which key ticks it, decided by parsing the label the panel prints.
+    fn from_key(key: Key, ctrl: bool) -> Option<Self> {
+        if !ctrl {
+            return None;
+        }
+        Self::ALL.into_iter().find(|b| {
+            guitk::shortcut::keystrokes(b.keys())
+                .is_ok_and(|presses| presses.iter().any(|p| p.key == key))
+        })
+    }
+
+    fn is_on(self, opts: &CharsetOptions) -> bool {
+        match self {
+            Self::Uppercase => opts.uppercase,
+            Self::Lowercase => opts.lowercase,
+            Self::Digits => opts.digits,
+            Self::Symbols => opts.symbols,
+        }
+    }
+
+    fn set(self, opts: &mut CharsetOptions, on: bool) {
+        match self {
+            Self::Uppercase => opts.uppercase = on,
+            Self::Lowercase => opts.lowercase = on,
+            Self::Digits => opts.digits = on,
+            Self::Symbols => opts.symbols = on,
+        }
+    }
+}
+
+impl GeneratorMode {
+    /// The next mode, wrapping, in the order the panel draws the buttons.
+    fn next(self) -> Self {
+        match self {
+            Self::Random => Self::Pronounceable,
+            Self::Pronounceable => Self::Passphrase,
+            Self::Passphrase => Self::Random,
+        }
+    }
+}
+
 /// Passphrase-mode settings.
 #[derive(Clone, Debug)]
 struct PassphraseOptions {
@@ -1198,7 +1288,6 @@ impl PasswordGenerator {
     ///
     /// The generator panel shows the length and offers no way to change it, so
     /// nothing calls this. See `todo.txt`.
-    #[allow(dead_code, reason = "the generator panel has no length control yet")]
     fn set_length(&mut self, len: usize) {
         self.length = len.clamp(8, 128);
     }
@@ -5037,7 +5126,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         frame,
         x_start + pad,
         y,
-        "Mode",
+        "Mode (Ctrl+M)",
         state.palette.text,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Bold,
@@ -5074,7 +5163,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         frame,
         x_start + pad,
         y,
-        "Length",
+        "Length (Left/Right)",
         state.palette.text,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Regular,
@@ -5134,20 +5223,15 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         );
         y += 24.0;
 
-        let options = [
-            ("Uppercase A-Z", state.password_generator.charset.uppercase),
-            ("Lowercase a-z", state.password_generator.charset.lowercase),
-            ("Digits 0-9", state.password_generator.charset.digits),
-            ("Symbols !@#$", state.password_generator.charset.symbols),
-        ];
-
-        for (label, enabled) in &options {
-            let check_color = if *enabled {
+        for box_ in CharsetBox::ALL {
+            let enabled = box_.is_on(&state.password_generator.charset);
+            let label = format!("{} ({})", box_.label(), box_.keys());
+            let check_color = if enabled {
                 state.palette.green
             } else {
                 state.palette.surface2
             };
-            let check_char = if *enabled { "[x]" } else { "[ ]" };
+            let check_char = if enabled { "[x]" } else { "[ ]" };
             draw_text(
                 frame,
                 x_start + pad,
@@ -5162,7 +5246,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
                 frame,
                 x_start + pad + 32.0,
                 y,
-                label,
+                &label,
                 state.palette.text,
                 DEFAULT_FONT_SIZE,
                 FontWeightHint::Regular,
@@ -6151,6 +6235,16 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
         return handle_new_entry_key(state, key);
     }
 
+    // The generator panel's own controls, live only while it is up. Every
+    // one of these was drawn -- three mode buttons with the active one
+    // highlighted, a slider with a knob, four ticked boxes -- and none could
+    // be operated. Ahead of the match because the catch-all below would
+    // otherwise type them into the search box behind the panel.
+    if state.detail_view == DetailView::PasswordGenerator && generator_key(state, key) {
+        state.vault.touch(state.now);
+        return EventResult::Consumed;
+    }
+
     // Main app key handling
     let result = match key.key {
         Key::L if key.modifiers.ctrl => {
@@ -6217,6 +6311,61 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
     }
     result
 }
+
+/// Handle a keystroke aimed at the password generator panel.
+///
+/// Returns whether it was one. Every branch regenerates, because the panel is
+/// showing a password produced under the *previous* settings and leaving it
+/// there invites reading it as the new ones' output -- the same reason the
+/// kind keys in `apps/passwordgen` produce immediately.
+fn generator_key(state: &mut AppState, key: &KeyEvent) -> bool {
+    let ctrl = key.modifiers.ctrl;
+    if ctrl && key.key == Key::M {
+        state.password_generator.mode = state.password_generator.mode.next();
+        regenerate_password(state);
+        return true;
+    }
+
+    // Length, on the arrows, because the control drawn for it is a slider.
+    if !ctrl && matches!(key.key, Key::Left | Key::Right) {
+        let len = state.password_generator.length;
+        let next = if key.key == Key::Left {
+            len.saturating_sub(1)
+        } else {
+            len.saturating_add(1)
+        };
+        state.password_generator.set_length(next);
+        regenerate_password(state);
+        return true;
+    }
+
+    let Some(box_) = CharsetBox::from_key(key.key, ctrl) else {
+        return false;
+    };
+    // The boxes belong to Random mode; the panel does not draw them in the
+    // other two, and a key that silently changed an invisible setting would
+    // be worse than one that does nothing.
+    if state.password_generator.mode != GeneratorMode::Random {
+        return false;
+    }
+
+    let opts = &mut state.password_generator.charset;
+    let on = box_.is_on(opts);
+    if on && CharsetBox::ALL.iter().filter(|b| b.is_on(opts)).count() <= 1 {
+        // `build_charset` answers an empty pool with an empty password, so a
+        // generator with every box clear would produce nothing and say
+        // nothing about why.
+        state.generator_error = Some(NEEDS_ONE_CHARACTER_SET.to_owned());
+        state.generated_password.clear();
+        return true;
+    }
+    box_.set(opts, !on);
+    regenerate_password(state);
+    true
+}
+
+/// Why the last box cannot be cleared.
+const NEEDS_ONE_CHARACTER_SET: &str = "A password needs at least one kind of character";
 
 fn navigate_entry_list(state: &mut AppState, direction: i32) {
     if state.filtered_ids.is_empty() {
@@ -9065,6 +9214,164 @@ mod tests {
                 text: ch.to_string(),
             };
             handle_key(state, &ev);
+        }
+    }
+
+    /// Every control the generator panel draws can be operated.
+    ///
+    /// The panel drew three mode buttons with the active one highlighted, a
+    /// length slider with its knob placed from the current value, and four
+    /// ticked checkboxes. `CharsetOptions` was four `true`s with no writer in
+    /// the crate, `mode` never left `Random`, and `set_length` carried an
+    /// `allow(dead_code)` saying the panel had no length control.
+    #[test]
+    fn every_generator_control_answers_a_key() {
+        let mut state = unlocked_app();
+        state.detail_view = DetailView::PasswordGenerator;
+
+        // The mode row.
+        let mode = state.password_generator.mode;
+        assert_eq!(
+            handle_key(&mut state, &ctrl_of(Key::M)),
+            EventResult::Consumed,
+            "Ctrl+M was ignored on the generator panel"
+        );
+        assert_ne!(
+            state.password_generator.mode, mode,
+            "Ctrl+M did not move the mode"
+        );
+
+        // The length slider.
+        state.password_generator.mode = GeneratorMode::Random;
+        let len = state.password_generator.length;
+        handle_key(&mut state, &key_of(Key::Right));
+        assert_eq!(
+            state.password_generator.length,
+            len.saturating_add(1),
+            "Right did not lengthen the password"
+        );
+        handle_key(&mut state, &key_of(Key::Left));
+        assert_eq!(
+            state.password_generator.length, len,
+            "Left did not shorten it back"
+        );
+
+        // The four boxes.
+        for box_ in CharsetBox::ALL {
+            let before = box_.is_on(&state.password_generator.charset);
+            let keys = box_.keys();
+            let presses = guitk::shortcut::keystrokes(keys)
+                .unwrap_or_else(|e| panic!("{} prints unparseable keys: {e:?}", box_.label()));
+            let first = presses.first().expect("no keystroke");
+            let ev = KeyEvent {
+                key: first.key,
+                pressed: true,
+                modifiers: first.modifiers,
+                text: String::new(),
+            };
+            assert_eq!(
+                handle_key(&mut state, &ev),
+                EventResult::Consumed,
+                "{} ignored {keys}",
+                box_.label()
+            );
+            assert_ne!(
+                box_.is_on(&state.password_generator.charset),
+                before,
+                "{} did not change when {keys} was pressed",
+                box_.label()
+            );
+            // Put it back, so each box is tested against a full set rather
+            // than against whatever the previous one left behind.
+            handle_key(&mut state, &ev);
+        }
+    }
+
+    /// The last character set cannot be cleared, and the panel says why.
+    ///
+    /// `build_charset` answers an empty pool with an empty password, so a
+    /// generator with every box clear would produce nothing and explain
+    /// nothing.
+    #[test]
+    fn the_last_character_set_cannot_be_cleared() {
+        let mut state = unlocked_app();
+        state.detail_view = DetailView::PasswordGenerator;
+        state.password_generator.mode = GeneratorMode::Random;
+
+        for box_ in [
+            CharsetBox::Lowercase,
+            CharsetBox::Digits,
+            CharsetBox::Symbols,
+        ] {
+            box_.set(&mut state.password_generator.charset, false);
+        }
+        assert!(
+            CharsetBox::Uppercase.is_on(&state.password_generator.charset),
+            "control: uppercase should be the only one left"
+        );
+
+        handle_key(&mut state, &ctrl_of(Key::Num1));
+        assert!(
+            CharsetBox::Uppercase.is_on(&state.password_generator.charset),
+            "the last character set was cleared"
+        );
+        assert_eq!(
+            state.generator_error.as_deref(),
+            Some(NEEDS_ONE_CHARACTER_SET),
+            "clearing the last set said nothing about why it refused"
+        );
+    }
+
+    /// The panel prints the key beside every box it draws.
+    #[test]
+    fn the_generator_panel_names_its_keys() {
+        let mut state = unlocked_app();
+        state.detail_view = DetailView::PasswordGenerator;
+        state.password_generator.mode = GeneratorMode::Random;
+        let texts: Vec<String> = state
+            .draw((1200.0, 800.0))
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        for box_ in CharsetBox::ALL {
+            let want = format!("{} ({})", box_.label(), box_.keys());
+            assert!(texts.contains(&want), "the panel never draws {want:?}");
+        }
+        assert!(
+            texts.iter().any(|t| t == "Mode (Ctrl+M)"),
+            "the mode row does not say which key changes it"
+        );
+        assert!(
+            texts.iter().any(|t| t == "Length (Left/Right)"),
+            "the slider does not say which keys move it"
+        );
+    }
+
+    /// The generator's keys belong to the generator: they must not reach the
+    /// search box that is behind it, nor act when it is not up.
+    #[test]
+    fn the_generator_keys_do_nothing_when_the_panel_is_not_up() {
+        let mut state = unlocked_app();
+        state.detail_view = DetailView::EntryDetail;
+        let before = state.password_generator.length;
+        handle_key(&mut state, &key_of(Key::Right));
+        assert_eq!(
+            state.password_generator.length, before,
+            "Right changed the generator from a view that does not show it"
+        );
+    }
+
+    fn ctrl_of(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
         }
     }
 

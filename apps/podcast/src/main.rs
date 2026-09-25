@@ -22,9 +22,14 @@ use appearance::Palette;
 use appearance::Surface;
 use std::collections::HashMap;
 
+// The toolkit's rectangle rather than a private copy: this crate had
+// the same four floats under `width`/`height`, with the same half-open
+// `contains`. See `known-issues.md`
+// `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`.
 use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
@@ -33,7 +38,7 @@ use guitk::text;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -619,6 +624,36 @@ impl Podcast {
 // Playback History Entry
 // ============================================================================
 
+/// The wall clock as "YYYY-MM-DD HH:MM", or `None` if it cannot be read.
+///
+/// Every `HistoryEntry` carried the string literal `"2026-05-18 10:00"` until
+/// 2026-09-18, and the history panel drew it, so a listening history filled up
+/// with rows that all happened at the same minute of the same day -- a day in
+/// the past, for anyone running this after that date.
+///
+/// `None` rather than a fallback date: a history row saying "time unknown" is
+/// awkward and true, and one saying 1 January 1970 is neither. This is the
+/// same choice `apps/reminders` makes at `system_now`, and for the same
+/// reason.
+fn system_timestamp() -> Option<String> {
+    let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    let secs = i64::try_from(since_epoch.as_secs()).ok()?;
+    // The civil date comes from `guitk::date`, the toolkit's one calendar,
+    // rather than a day-number formula written again here.
+    let (year, month, day) = guitk::date::Date::from_unix_utc(secs).ymd();
+    // `rem_euclid`, not `%`: a pre-1970 instant with `%` gives a negative
+    // remainder, which is not a time of day at all.
+    let secs_into_day = secs.rem_euclid(86_400);
+    let hour = secs_into_day / 3600;
+    let minute = (secs_into_day / 60) % 60;
+    Some(format!(
+        "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}"
+    ))
+}
+
+/// What to show when the clock could not be read.
+const TIME_UNKNOWN: &str = "time unknown";
+
 /// A record of a listening session.
 #[derive(Clone, Debug)]
 pub struct HistoryEntry {
@@ -860,28 +895,6 @@ pub enum MainView {
     Search,
 }
 
-/// A rectangle on screen.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    const ZERO: Self = Self {
-        x: 0.0,
-        y: 0.0,
-        width: 0.0,
-        height: 0.0,
-    };
-
-    fn contains(self, x: f32, y: f32) -> bool {
-        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
-    }
-}
-
 /// A control in the now-playing bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayerControl {
@@ -941,6 +954,32 @@ pub enum SidebarSelection {
 // ============================================================================
 
 /// The main podcast manager application.
+/// The keys this window answers, as a reader sees them.
+///
+/// It named none of them. The only key word in any string this program drew
+/// was the "Space" in an episode title.
+///
+/// `S` and `Ctrl+S` are separate rows because they are separate things --
+/// playback speed and a file dialog -- and a single row covering both would
+/// be the kind of summary that reads fine and answers nothing.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("Space", "Play or pause"),
+    ("Enter", "Open the episode, or play it from the detail view"),
+    ("Up / Down", "Move through the episodes"),
+    ("Left / Right", "Seek, while something is playing"),
+    ("PageUp / PageDown", "Move a screenful"),
+    ("Tab", "Next panel"),
+    ("Esc", "Leave the episode detail view"),
+    ("S", "Playback speed"),
+    ("A", "Auto-play the next episode, on or off"),
+    ("Q", "Add the selected episode to the queue"),
+    ("D", "Download the selected episode"),
+    ("M", "Mark the selected episode played or unplayed"),
+    ("Ctrl+O", "Open a feed file"),
+    ("Ctrl+S", "Save the feed list"),
+];
+
 pub struct PodcastApp {
     /// The open or save picker. Holds the dialog, the saving flag and the
     /// routing that ten applications used to write out by hand.
@@ -958,6 +997,8 @@ pub struct PodcastApp {
     pub stats: ListeningStats,
 
     // Playback state
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub player_state: PlayerState,
     pub current_episode_id: Option<u64>,
     pub current_podcast_id: Option<u64>,
@@ -1010,6 +1051,7 @@ impl PodcastApp {
             download_queue: Vec::new(),
             history: Vec::new(),
             stats: ListeningStats::new(),
+            show_help: false,
             player_state: PlayerState::Stopped,
             current_episode_id: None,
             current_podcast_id: None,
@@ -1510,7 +1552,7 @@ impl PodcastApp {
                 podcast_id,
                 episode_title: ep_title,
                 podcast_title: podcast_title.clone(),
-                listened_at: "2026-05-18 10:00".to_string(),
+                listened_at: system_timestamp().unwrap_or_else(|| TIME_UNKNOWN.to_owned()),
                 duration_listened_secs: pos,
                 completed: true,
             });
@@ -1563,7 +1605,7 @@ impl PodcastApp {
                 podcast_id,
                 episode_title: ep_title,
                 podcast_title: pod_title,
-                listened_at: "2026-05-18 10:00".to_string(),
+                listened_at: system_timestamp().unwrap_or_else(|| TIME_UNKNOWN.to_owned()),
                 duration_listened_secs: pos,
                 completed: false,
             });
@@ -2212,6 +2254,21 @@ impl PodcastApp {
     }
 
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        // Above the Ctrl branch, which returns for every chord, and above the
+        // typed path, which claims every unmodified letter.
+        if event.key == Key::F1 || (event.key == Key::Slash && event.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return true;
+        }
+        if self.show_help {
+            // Modal. D starts a download and Space starts playing; neither
+            // should happen from behind a list somebody is reading.
+            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return true;
+        }
+
         // Before anything else: Space plays, and a guard arm placed after a
         // bare `Key::S` would never be reached.
         if event.modifiers.ctrl {
@@ -2285,6 +2342,13 @@ impl PodcastApp {
         match ch.to_ascii_lowercase() {
             's' => {
                 self.cycle_speed();
+                true
+            }
+            // `auto_play_next` was `true` at construction with no writer
+            // anywhere: the window drew "Auto-play: On", in green, and could
+            // only ever say On. Found by `scripts/frozen-flag-survey.py`.
+            'a' => {
+                self.auto_play_next = !self.auto_play_next;
                 true
             }
             'q' => self.queue_selected_episode(),
@@ -2494,6 +2558,17 @@ impl PodcastApp {
         // Now playing bar.
         if self.player_state != PlayerState::Stopped {
             self.render_now_playing(&mut cmds);
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.width, self.height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
         }
 
         // Last, so it is above everything.
@@ -3453,8 +3528,11 @@ impl PodcastApp {
         cmds.push(RenderCommand::Text {
             x: content_x + 16.0,
             y: HEADER_HEIGHT + 12.0,
+            // The key is named beside the value it controls, which is the
+            // cheapest discoverable place for it: the line is already on
+            // screen and already changes when the setting does.
             text: format!(
-                "Auto-play: {}",
+                "Auto-play: {} (a)",
                 if self.auto_play_next { "On" } else { "Off" }
             ),
             color: if self.auto_play_next {
@@ -4121,8 +4199,8 @@ impl PodcastApp {
                 Rect {
                     x: 0.0,
                     y: bar_y,
-                    width: self.width,
-                    height: SEEK_STRIP_HEIGHT,
+                    w: self.width,
+                    h: SEEK_STRIP_HEIGHT,
                 },
             ),
             (
@@ -4130,8 +4208,8 @@ impl PodcastApp {
                 Rect {
                     x: controls_x,
                     y: controls_y,
-                    width: 36.0,
-                    height: 36.0,
+                    w: 36.0,
+                    h: 36.0,
                 },
             ),
             (
@@ -4139,8 +4217,8 @@ impl PodcastApp {
                 Rect {
                     x: controls_x + 48.0,
                     y: controls_y - 2.0,
-                    width: 40.0,
-                    height: 40.0,
+                    w: 40.0,
+                    h: 40.0,
                 },
             ),
             (
@@ -4148,8 +4226,8 @@ impl PodcastApp {
                 Rect {
                     x: controls_x + 100.0,
                     y: controls_y,
-                    width: 36.0,
-                    height: 36.0,
+                    w: 36.0,
+                    h: 36.0,
                 },
             ),
             (
@@ -4157,8 +4235,8 @@ impl PodcastApp {
                 Rect {
                     x: self.width - 120.0,
                     y: bar_y + 14.0,
-                    width: 44.0,
-                    height: 22.0,
+                    w: 44.0,
+                    h: 22.0,
                 },
             ),
         ]
@@ -4288,20 +4366,13 @@ impl PodcastApp {
             controls
                 .iter()
                 .find(|(c, _)| *c == wanted)
-                .map_or(Rect::ZERO, |(_, r)| *r)
+                .map_or(Rect::EMPTY, |(_, r)| *r)
         };
 
         // Skip back button.
         let back = rect_of(PlayerControl::SkipBack);
-        self.palette.push_surface(
-            cmds,
-            back.x,
-            back.y,
-            back.width,
-            back.height,
-            18.0,
-            Surface::Card,
-        );
+        self.palette
+            .push_surface(cmds, back.x, back.y, back.w, back.h, 18.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: back.x + 6.0,
             y: back.y + 9.0,
@@ -4318,8 +4389,8 @@ impl PodcastApp {
         cmds.push(RenderCommand::FillRect {
             x: pp.x,
             y: pp.y,
-            width: pp.width,
-            height: pp.height,
+            width: pp.w,
+            height: pp.h,
             color: self.palette.blue,
             corner_radii: CornerRadii::all(20.0),
         });
@@ -4341,15 +4412,8 @@ impl PodcastApp {
 
         // Skip forward button.
         let fwd = rect_of(PlayerControl::SkipForward);
-        self.palette.push_surface(
-            cmds,
-            fwd.x,
-            fwd.y,
-            fwd.width,
-            fwd.height,
-            18.0,
-            Surface::Card,
-        );
+        self.palette
+            .push_surface(cmds, fwd.x, fwd.y, fwd.w, fwd.h, 18.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: fwd.x + 4.0,
             y: fwd.y + 9.0,
@@ -4380,15 +4444,8 @@ impl PodcastApp {
 
         // Speed indicator, which is also the button that cycles it.
         let speed = rect_of(PlayerControl::Speed);
-        self.palette.push_surface(
-            cmds,
-            speed.x,
-            speed.y,
-            speed.width,
-            speed.height,
-            4.0,
-            Surface::Card,
-        );
+        self.palette
+            .push_surface(cmds, speed.x, speed.y, speed.w, speed.h, 4.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: speed.x + 6.0,
             y: speed.y + 4.0,
@@ -6046,6 +6103,43 @@ mod tests {
     // History tests
     // -----------------------------------------------------------------------
 
+    /// A history entry carries the real time, not a constant.
+    ///
+    /// `listened_at` was the string literal "2026-05-18 10:00" at both of its
+    /// assignment sites, and the history panel drew it -- so a listening
+    /// history filled up with rows that all happened at the same minute of the
+    /// same day, a day in the past for anyone running this after that date.
+    #[test]
+    fn a_history_entry_is_stamped_with_the_real_time() {
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
+        let pid = app.subscribe("P", "", "", "rss://x", "", vec![]);
+        let eid = app
+            .add_episode(pid, "Ep", "", "2026-01-01", 600, "", 100)
+            .unwrap();
+        app.play_episode(pid, eid);
+        app.seek_forward(100);
+        app.stop_playback();
+
+        let entry = app.history.last().expect("an entry was recorded");
+        assert_ne!(
+            entry.listened_at, "2026-05-18 10:00",
+            "the entry still carries the invented timestamp"
+        );
+        // Either the clock was read, in which case it agrees with a reading
+        // taken now, or it could not be, in which case the row says so rather
+        // than naming a day.
+        match system_timestamp() {
+            Some(now) => assert_eq!(
+                entry.listened_at, now,
+                "the entry disagrees with the clock it was supposed to read"
+            ),
+            None => assert_eq!(
+                entry.listened_at, TIME_UNKNOWN,
+                "the clock could not be read and the row named a time anyway"
+            ),
+        }
+    }
+
     #[test]
     fn test_playback_records_history() {
         let mut app = PodcastApp::with_sample_data(800.0, 600.0);
@@ -6827,6 +6921,112 @@ mod tests {
         })
     }
 
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// The letter rows are pressed with the character in `text`, because the
+    /// letter shortcuts read `typed()` and not the key code -- a synthetic
+    /// event with an empty string reaches none of them. The chords and the
+    /// named keys are pressed as keys, which is how they arrive.
+    ///
+    /// Three states, and all carry a *selected* episode. A fresh window has
+    /// none -- `selected_episode_id` starts `None` -- so Space, Q, D and M
+    /// all report nothing to do, correctly: there is no episode to play,
+    /// queue, download or mark. A guard run on an empty selection calls four
+    /// working keys broken. The second state plays, because Left and Right
+    /// seek and do nothing while stopped; the third opens the detail view,
+    /// because that is the only place Escape has anything to leave.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = (1..=5).any(|rows| {
+                    [0_u8, 1, 2].into_iter().any(|state| {
+                        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
+                        // Which episode is selected matters, not just that one
+                        // is. `Up` on the first row stops rather than wrapping,
+                        // and `D` refuses an episode already downloaded or
+                        // queued -- both correct, and both make a key look dead
+                        // if the guard only ever looks at one row.
+                        for _ in 0..rows {
+                            app.handle_event(&key(Key::Down));
+                        }
+                        if state == 1 {
+                            app.play_selected_episode();
+                        }
+                        if state == 2 {
+                            // The detail view, which is the only place `Esc` has
+                            // anything to leave. Everywhere else it correctly
+                            // reports nothing to do, the way `apps/screenrecorder`
+                            // does -- and the row here said "Back" until this test
+                            // asked what that meant.
+                            app.handle_event(&key(Key::Enter));
+                        }
+                        let mut event = Event::Key(stroke.clone());
+                        // A single letter arrives with the character it typed.
+                        if label.len() == 1 && label.chars().all(char::is_alphanumeric) {
+                            event = typed(
+                                stroke.key,
+                                label.chars().next().unwrap_or('?').to_ascii_lowercase(),
+                            );
+                        }
+                        app.handle_event(&event)
+                    })
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing plays behind it.**
+    ///
+    /// The control is the last third: Space behind the card must not start
+    /// playback, and must start it with the card down.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &PodcastApp| -> Vec<String> {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut app = PodcastApp::with_sample_data(800.0, 600.0);
+        assert!(
+            !drawn(&app)
+                .iter()
+                .any(|t| t.contains("F1 or ? closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_event(&key(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&drawn(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&key(Key::Down));
+        app.handle_event(&key(Key::F1));
+        let state = app.player_state;
+        app.handle_event(&key(Key::Space));
+        assert_eq!(
+            app.player_state, state,
+            "Space started playback through the shortcut card"
+        );
+
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&key(Key::Space));
+        assert_ne!(
+            app.player_state, state,
+            "control: Space does nothing even with the card down"
+        );
+    }
+
     /// A letter key, carrying the text it typed.
     ///
     /// The letter shortcuts read `typed()` rather than the key code, so a
@@ -6838,6 +7038,53 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: ch.to_string(),
         })
+    }
+
+    /// **Auto-play can be turned off, and the window says how.**
+    ///
+    /// `auto_play_next` was `true` at construction and written nowhere, so the
+    /// header drew "Auto-play: On" in green and could only ever say On -- a
+    /// setting displayed and not offered. Found by
+    /// `scripts/frozen-flag-survey.py`.
+    ///
+    /// Asserts the drawn line as well as the field, because naming the key
+    /// beside the value is the whole reason this needs no overlay: if the
+    /// label stops carrying it, the key is undiscoverable again and nothing
+    /// else in the app would notice.
+    #[test]
+    fn auto_play_can_be_turned_off_and_the_line_names_the_key() {
+        let mut app = PodcastApp::with_sample_data(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(app.auto_play_next, "the fixture should start with it on");
+
+        // The indicator lives in the queue view, behind an empty-queue early
+        // return -- so the label is only on screen where a queue is. That is
+        // worth knowing and is why this test puts the app there rather than
+        // asserting against a window that never draws the line.
+        app.handle_event(&typed(Key::Q, 'q'));
+        app.main_view = MainView::Queue;
+        assert!(!app.play_queue.is_empty(), "nothing was queued to look at");
+
+        let drawn = |app: &PodcastApp| -> String {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        assert!(
+            drawn(&app).contains("Auto-play: On (a)"),
+            "the indicator does not name the key that changes it"
+        );
+
+        app.handle_event(&typed(Key::A, 'a'));
+        assert!(!app.auto_play_next, "`a` did not turn auto-play off");
+        assert!(
+            drawn(&app).contains("Auto-play: Off (a)"),
+            "the indicator did not follow the setting"
+        );
     }
 
     fn click_at(x: f32, y: f32) -> Event {
@@ -7099,7 +7346,7 @@ mod tests {
             .iter()
             .find(|(c, _)| *c == PlayerControl::PlayPause)
             .expect("a play button");
-        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
         assert_eq!(app.player_control_at(x, y), Some(PlayerControl::PlayPause));
         assert!(app.handle_event(&click_at(x, y)));
         assert_eq!(app.player_state, PlayerState::Paused);
@@ -7117,7 +7364,7 @@ mod tests {
                 .iter()
                 .find(|(c, _)| *c == wanted)
                 .expect("a control");
-            (r.x + r.width / 2.0, r.y + r.height / 2.0)
+            (r.x + r.w / 2.0, r.y + r.h / 2.0)
         };
         let (x, y) = at(PlayerControl::SkipForward);
         app.handle_event(&click_at(x, y));
@@ -7167,10 +7414,7 @@ mod tests {
             .iter()
             .find(|(c, _)| *c == PlayerControl::Speed)
             .expect("a speed badge");
-        app.handle_event(&click_at(
-            rect.x + rect.width / 2.0,
-            rect.y + rect.height / 2.0,
-        ));
+        app.handle_event(&click_at(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0));
         assert_ne!(app.playback_speed, before);
     }
 
@@ -7197,7 +7441,7 @@ mod tests {
             .iter()
             .find(|(c, _)| *c == PlayerControl::PlayPause)
             .expect("a play button");
-        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
         let before = app.selected_episode_id;
         app.handle_event(&click_at(x, y));
         assert_eq!(app.player_state, PlayerState::Paused);

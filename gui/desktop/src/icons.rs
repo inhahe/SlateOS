@@ -27,6 +27,7 @@ use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use std::path::PathBuf;
 use yamldoc::Document;
 
 // ============================================================================
@@ -145,7 +146,13 @@ impl IconType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IconAction {
     /// Open a path (file or directory).
-    OpenPath(String),
+    ///
+    /// A `PathBuf`, not a `String`. This held text until 2026-09-16 and was
+    /// built with `to_string_lossy`, so a home directory containing bytes that
+    /// are not UTF-8 produced an icon that launched a path which does not
+    /// exist -- and the bytes were available: the caller reads `HOME` with
+    /// `var_os` and already had a `PathBuf` in hand before flattening it.
+    OpenPath(PathBuf),
     /// Launch a system tool/dialog.
     LaunchSystem(String),
     /// Custom action string.
@@ -497,12 +504,12 @@ impl DesktopIconLayer {
             defaults.push((
                 "Documents".to_string(),
                 IconType::Folder,
-                IconAction::OpenPath(docs.to_string_lossy().into_owned()),
+                IconAction::OpenPath(docs),
             ));
             defaults.push((
                 "Home".to_string(),
                 IconType::Folder,
-                IconAction::OpenPath(home.to_string_lossy().into_owned()),
+                IconAction::OpenPath(home),
             ));
         }
 
@@ -1141,10 +1148,16 @@ impl DesktopIconLayer {
     // Where the icons were left
     //
     // `design-decisions.md` 933 (open-questions A-Q8): desktop icon layout is
-    // not a kernel concern. `fs::deskicons` and `/proc/deskicons` go, and this
-    // layer becomes the authority, persisting positions in userspace. Lane C
-    // wires first and lane A deletes after, so no reboot loses positions in
-    // between -- which is why this half exists before that half.
+    // not a kernel concern. This layer is the authority and persists positions
+    // in userspace; `fs::deskicons` and `/proc/deskicons` are gone.
+    //
+    // The order was deliberate -- lane C wired first and lane A deleted after,
+    // so no reboot lost positions in between, which is why this half was
+    // written before that half. Both halves landed; confirmed 2026-09-16 in
+    // `requests/a-c-deskicons-is-a-persistence-layer-the-shell-is-the-layout-authority.md`.
+    // Stated in the past tense on purpose: it described a deletion that had
+    // already happened as though it were still owed, which is how a comment
+    // becomes a claim nobody re-checks.
     // ======================================================================
 
     /// The key an icon's position is filed under.
@@ -1155,11 +1168,18 @@ impl DesktopIconLayer {
     /// on it is looked up when it is drawn -- and for the same reason: storing
     /// the label too would be a second copy of it, stale the first time the
     /// thing is renamed.
-    fn storage_key(action: &IconAction) -> String {
+    /// The key this icon's position is saved under, if it can have one.
+    ///
+    /// `None` for a path with no text form. The layout is a settings document
+    /// and its keys are text, so such an icon cannot be written down -- and
+    /// flattening it would save the position against a *different* path, which
+    /// is the failure `columnprefs::set_for_folder` refuses for folders. The
+    /// icon still works; only its position is not remembered.
+    fn storage_key(action: &IconAction) -> Option<String> {
         match action {
-            IconAction::OpenPath(path) => format!("path:{path}"),
-            IconAction::LaunchSystem(name) => format!("system:{name}"),
-            IconAction::Custom(name) => format!("custom:{name}"),
+            IconAction::OpenPath(path) => path.to_str().map(|p| format!("path:{p}")),
+            IconAction::LaunchSystem(name) => Some(format!("system:{name}")),
+            IconAction::Custom(name) => Some(format!("custom:{name}")),
         }
     }
 
@@ -1172,7 +1192,7 @@ impl DesktopIconLayer {
         let live: Vec<String> = self
             .icons
             .iter()
-            .map(|icon| Self::storage_key(&icon.action))
+            .filter_map(|icon| Self::storage_key(&icon.action))
             .collect();
         for key in doc.keys(&[POSITIONS_KEY]) {
             if !live.contains(&key) {
@@ -1180,7 +1200,9 @@ impl DesktopIconLayer {
             }
         }
         for icon in &self.icons {
-            let key = Self::storage_key(&icon.action);
+            let Some(key) = Self::storage_key(&icon.action) else {
+                continue;
+            };
             doc.set_i64(&[POSITIONS_KEY, &key, "x"], i64::from(icon.x));
             doc.set_i64(&[POSITIONS_KEY, &key, "y"], i64::from(icon.y));
         }
@@ -1201,7 +1223,9 @@ impl DesktopIconLayer {
     pub fn read_positions(&mut self, doc: &Document) {
         let (max_x, max_y) = self.last_cell_origin();
         for icon in &mut self.icons {
-            let key = Self::storage_key(&icon.action);
+            let Some(key) = Self::storage_key(&icon.action) else {
+                continue;
+            };
             let (Some(x), Some(y)) = (
                 doc.get_i64(&[POSITIONS_KEY, &key, "x"]),
                 doc.get_i64(&[POSITIONS_KEY, &key, "y"]),
@@ -1362,9 +1386,28 @@ mod tests {
 
     /// A layer with the default icons on a 1920x1080 screen.
     fn populated() -> DesktopIconLayer {
+        // `populate_defaults` reads `HOME`, and `settingsfile::testing`
+        // removes it for the duration of a scratch-config turn -- which four
+        // tests in `idle_lock.rs` take. The environment is process-global and
+        // these tests are threads, so without holding the same lock this
+        // reads `HOME` while another thread is deleting it and sees two icons
+        // instead of four. `ENV_LOCK` only serialises the tests that take it,
+        // and a reader is the side that forgets: see known-issues
+        // `TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS`.
+        let _turn = settingsfile::testing::config_turn();
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
         layer.populate_defaults();
         layer
+    }
+
+    /// The storage key of an action a test built, which must have one.
+    ///
+    /// Every fixture here uses a representable path, so `None` means the
+    /// test's own premise has broken rather than that the code under test is
+    /// wrong -- worth failing loudly at the fixture instead of comparing two
+    /// `None`s and passing.
+    fn expect_key(action: &IconAction) -> String {
+        DesktopIconLayer::storage_key(action).expect("a test fixture with no storage key")
     }
 
     /// The position of the icon whose action is `key`.
@@ -1372,7 +1415,7 @@ mod tests {
         layer
             .icons
             .iter()
-            .find(|i| DesktopIconLayer::storage_key(&i.action) == key)
+            .find(|i| DesktopIconLayer::storage_key(&i.action).as_deref() == Some(key))
             .map(|i| (i.x, i.y))
     }
 
@@ -1383,10 +1426,56 @@ mod tests {
     /// answer where things were. Goes through a `Document` rather than a file,
     /// which is the same split `InputFile` and the taskbar's pinned apps use --
     /// the format is exercised without a filesystem.
+    /// An icon on a path with no text form works and is simply not saved.
+    ///
+    /// The layout is a settings document, so its keys are text and such a path
+    /// cannot be one. The choice recorded here is to skip it rather than to
+    /// flatten it: a flattened key would save this icon's position against a
+    /// *different* path, and the user would find a stranger's icon where they
+    /// left theirs. `columnprefs::set_for_folder` refuses folders for the same
+    /// reason. Windows-only because that is where such a path can be built.
+    #[cfg(windows)]
+    #[test]
+    fn an_icon_whose_path_has_no_text_form_is_skipped_not_flattened() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let mut layer = populated();
+        let odd = PathBuf::from(OsString::from_wide(&[0x0043_u16, 0x003A, 0x005C, 0xD800]));
+        assert!(
+            odd.to_str().is_none(),
+            "the fixture is not the case under test"
+        );
+
+        let id = layer.add_icon("Odd", IconType::Folder, IconAction::OpenPath(odd), 5, 6);
+        assert!(
+            DesktopIconLayer::storage_key(&layer.icons.last().expect("added").action).is_none(),
+            "a path with no text form produced a key anyway"
+        );
+
+        // Writing the layout must not fail, must not invent a key for it, and
+        // must still record every other icon.
+        let mut doc = Document::new();
+        layer.write_positions(&mut doc);
+        let keys = doc.keys(&[POSITIONS_KEY]);
+        assert!(!keys.is_empty(), "the other icons were lost with it");
+        for key in &keys {
+            assert!(
+                !key.contains(char::REPLACEMENT_CHARACTER),
+                "a flattened key was written: {key:?}"
+            );
+        }
+        // And the icon is still there to click.
+        assert!(
+            layer.icons.iter().any(|i| i.id == id),
+            "the icon was dropped rather than merely left unsaved"
+        );
+    }
+
     #[test]
     fn an_icon_stays_where_it_was_dragged() {
         let mut layer = populated();
-        let key = DesktopIconLayer::storage_key(&layer.icons[0].action);
+        let key = expect_key(&layer.icons[0].action);
         layer.icons[0].x = 400;
         layer.icons[0].y = 300;
 
@@ -1415,7 +1504,7 @@ mod tests {
 
         let mut restarted = populated();
         restarted.icons[0].label = "Something Else Entirely".to_string();
-        let key = DesktopIconLayer::storage_key(&restarted.icons[0].action);
+        let key = expect_key(&restarted.icons[0].action);
         restarted.read_positions(&doc);
 
         assert_eq!(position_of(&restarted, &key), Some((640, 480)));
@@ -1429,11 +1518,20 @@ mod tests {
     /// able to click it.
     #[test]
     fn a_position_off_this_screen_is_clamped_onto_it() {
+        // `populate_defaults` reads `HOME`, and `settingsfile::testing`
+        // removes it for the duration of a scratch-config turn -- which four
+        // tests in `idle_lock.rs` take. The environment is process-global and
+        // these tests are threads, so without holding the same lock this
+        // reads `HOME` while another thread is deleting it and sees two icons
+        // instead of four. `ENV_LOCK` only serialises the tests that take it,
+        // and a reader is the side that forgets: see known-issues
+        // `TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS`.
+        let _turn = settingsfile::testing::config_turn();
         let mut wide = DesktopIconLayer::new(3840, 2160, 40);
         wide.populate_defaults();
         wide.icons[0].x = 3600;
         wide.icons[0].y = 2000;
-        let key = DesktopIconLayer::storage_key(&wide.icons[0].action);
+        let key = expect_key(&wide.icons[0].action);
         let mut doc = Document::new();
         wide.write_positions(&mut doc);
 
@@ -1453,7 +1551,7 @@ mod tests {
     #[test]
     fn a_coordinate_too_large_for_the_screen_type_is_ignored() {
         let mut layer = populated();
-        let key = DesktopIconLayer::storage_key(&layer.icons[0].action);
+        let key = expect_key(&layer.icons[0].action);
         let before = position_of(&layer, &key).expect("an icon");
 
         let mut doc = Document::new();
@@ -1472,7 +1570,7 @@ mod tests {
     #[test]
     fn a_removed_icon_is_taken_out_of_the_file() {
         let mut layer = populated();
-        let key = DesktopIconLayer::storage_key(&layer.icons[0].action);
+        let key = expect_key(&layer.icons[0].action);
         let mut doc = Document::new();
         layer.write_positions(&mut doc);
         assert!(doc.get_i64(&[POSITIONS_KEY, &key, "x"]).is_some());
@@ -1492,7 +1590,7 @@ mod tests {
     #[test]
     fn an_icon_the_file_does_not_mention_is_left_alone() {
         let mut layer = populated();
-        let key = DesktopIconLayer::storage_key(&layer.icons[0].action);
+        let key = expect_key(&layer.icons[0].action);
         let before = position_of(&layer, &key).expect("an icon");
 
         layer.read_positions(&Document::new());
@@ -1571,11 +1669,17 @@ mod tests {
     #[test]
     fn select_single_deselects_others() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
-        let id1 = layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
+        let id1 = layer.add_icon(
+            "A",
+            IconType::File,
+            IconAction::OpenPath(PathBuf::from("/a")),
+            0,
+            0,
+        );
         let id2 = layer.add_icon(
             "B",
             IconType::File,
-            IconAction::OpenPath("/b".into()),
+            IconAction::OpenPath(PathBuf::from("/b")),
             80,
             0,
         );
@@ -1593,7 +1697,13 @@ mod tests {
     #[test]
     fn toggle_selection() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
-        let id1 = layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
+        let id1 = layer.add_icon(
+            "A",
+            IconType::File,
+            IconAction::OpenPath(PathBuf::from("/a")),
+            0,
+            0,
+        );
 
         assert!(!layer.get_icon(id1).unwrap().selected);
 
@@ -1607,18 +1717,24 @@ mod tests {
     #[test]
     fn select_all_and_deselect_all() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
-        layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
+        layer.add_icon(
+            "A",
+            IconType::File,
+            IconAction::OpenPath(PathBuf::from("/a")),
+            0,
+            0,
+        );
         layer.add_icon(
             "B",
             IconType::File,
-            IconAction::OpenPath("/b".into()),
+            IconAction::OpenPath(PathBuf::from("/b")),
             80,
             0,
         );
         layer.add_icon(
             "C",
             IconType::File,
-            IconAction::OpenPath("/c".into()),
+            IconAction::OpenPath(PathBuf::from("/c")),
             160,
             0,
         );
@@ -1634,18 +1750,24 @@ mod tests {
     fn rubber_band_selection() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
         // Place icons in a known grid.
-        layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
+        layer.add_icon(
+            "A",
+            IconType::File,
+            IconAction::OpenPath(PathBuf::from("/a")),
+            0,
+            0,
+        );
         layer.add_icon(
             "B",
             IconType::File,
-            IconAction::OpenPath("/b".into()),
+            IconAction::OpenPath(PathBuf::from("/b")),
             80,
             0,
         );
         layer.add_icon(
             "C",
             IconType::File,
-            IconAction::OpenPath("/c".into()),
+            IconAction::OpenPath(PathBuf::from("/c")),
             0,
             90,
         );
@@ -1670,21 +1792,21 @@ mod tests {
         layer.add_icon(
             "Zebra",
             IconType::File,
-            IconAction::OpenPath("/z".into()),
+            IconAction::OpenPath(PathBuf::from("/z")),
             500,
             500,
         );
         layer.add_icon(
             "Apple",
             IconType::File,
-            IconAction::OpenPath("/a".into()),
+            IconAction::OpenPath(PathBuf::from("/a")),
             300,
             300,
         );
         layer.add_icon(
             "Mango",
             IconType::File,
-            IconAction::OpenPath("/m".into()),
+            IconAction::OpenPath(PathBuf::from("/m")),
             100,
             100,
         );
@@ -1704,7 +1826,7 @@ mod tests {
             layer.add_icon(
                 &format!("Icon{i}"),
                 IconType::File,
-                IconAction::OpenPath(format!("/{i}")),
+                IconAction::OpenPath(PathBuf::from(format!("/{i}"))),
                 999,
                 999,
             );
@@ -1738,7 +1860,7 @@ mod tests {
             layer.add_icon(
                 &format!("Icon{i}"),
                 IconType::File,
-                IconAction::OpenPath(format!("/{i}")),
+                IconAction::OpenPath(PathBuf::from(format!("/{i}"))),
                 999,
                 999,
             );
@@ -1760,6 +1882,15 @@ mod tests {
 
     #[test]
     fn the_default_icons_are_stacked_at_the_layers_own_pitch() {
+        // `populate_defaults` reads `HOME`, and `settingsfile::testing`
+        // removes it for the duration of a scratch-config turn -- which four
+        // tests in `idle_lock.rs` take. The environment is process-global and
+        // these tests are threads, so without holding the same lock this
+        // reads `HOME` while another thread is deleting it and sees two icons
+        // instead of four. `ENV_LOCK` only serialises the tests that take it,
+        // and a reader is the side that forgets: see known-issues
+        // `TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS`.
+        let _turn = settingsfile::testing::config_turn();
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
         layer.grid = GridConfig::new(120, 140);
         layer.populate_defaults();
@@ -1789,7 +1920,7 @@ mod tests {
             layer.add_icon(
                 &format!("Icon{i}"),
                 IconType::File,
-                IconAction::OpenPath(format!("/{i}")),
+                IconAction::OpenPath(PathBuf::from(format!("/{i}"))),
                 0,
                 0,
             );
@@ -1808,7 +1939,7 @@ mod tests {
         layer.add_icon(
             "First",
             IconType::File,
-            IconAction::OpenPath("/first".into()),
+            IconAction::OpenPath(PathBuf::from("/first")),
             EDGE_PADDING as i32,
             EDGE_PADDING as i32,
         );
@@ -1835,7 +1966,7 @@ mod tests {
         let id = layer.add_icon(
             "Test",
             IconType::File,
-            IconAction::OpenPath("/t".into()),
+            IconAction::OpenPath(PathBuf::from("/t")),
             0,
             0,
         );
@@ -1853,14 +1984,14 @@ mod tests {
         let _id1 = layer.add_icon(
             "Under",
             IconType::File,
-            IconAction::OpenPath("/u".into()),
+            IconAction::OpenPath(PathBuf::from("/u")),
             0,
             0,
         );
         let id2 = layer.add_icon(
             "Over",
             IconType::File,
-            IconAction::OpenPath("/o".into()),
+            IconAction::OpenPath(PathBuf::from("/o")),
             0,
             0,
         );
@@ -2000,7 +2131,7 @@ mod tests {
         layer.add_icon(
             "Test",
             IconType::File,
-            IconAction::OpenPath("/t".into()),
+            IconAction::OpenPath(PathBuf::from("/t")),
             0,
             0,
         );
@@ -2016,11 +2147,17 @@ mod tests {
     #[test]
     fn delete_key_returns_selected_ids() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
-        let id1 = layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
+        let id1 = layer.add_icon(
+            "A",
+            IconType::File,
+            IconAction::OpenPath(PathBuf::from("/a")),
+            0,
+            0,
+        );
         let id2 = layer.add_icon(
             "B",
             IconType::File,
-            IconAction::OpenPath("/b".into()),
+            IconAction::OpenPath(PathBuf::from("/b")),
             80,
             0,
         );
@@ -2033,7 +2170,13 @@ mod tests {
     #[test]
     fn f2_begins_rename_for_single_selection() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
-        let id = layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
+        let id = layer.add_icon(
+            "A",
+            IconType::File,
+            IconAction::OpenPath(PathBuf::from("/a")),
+            0,
+            0,
+        );
 
         layer.select_single(id);
         let event = layer.handle_key(DesktopKey::F2, false);
@@ -2043,11 +2186,17 @@ mod tests {
     #[test]
     fn f2_does_nothing_for_multi_selection() {
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
-        layer.add_icon("A", IconType::File, IconAction::OpenPath("/a".into()), 0, 0);
+        layer.add_icon(
+            "A",
+            IconType::File,
+            IconAction::OpenPath(PathBuf::from("/a")),
+            0,
+            0,
+        );
         layer.add_icon(
             "B",
             IconType::File,
-            IconAction::OpenPath("/b".into()),
+            IconAction::OpenPath(PathBuf::from("/b")),
             80,
             0,
         );
@@ -2063,6 +2212,15 @@ mod tests {
 
     #[test]
     fn populate_defaults_creates_four_icons() {
+        // `populate_defaults` reads `HOME`, and `settingsfile::testing`
+        // removes it for the duration of a scratch-config turn -- which four
+        // tests in `idle_lock.rs` take. The environment is process-global and
+        // these tests are threads, so without holding the same lock this
+        // reads `HOME` while another thread is deleting it and sees two icons
+        // instead of four. `ENV_LOCK` only serialises the tests that take it,
+        // and a reader is the side that forgets: see known-issues
+        // `TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS`.
+        let _turn = settingsfile::testing::config_turn();
         let mut layer = DesktopIconLayer::new(1920, 1080, 40);
         layer.populate_defaults();
         assert_eq!(layer.icons.len(), 4);
@@ -2099,7 +2257,7 @@ mod tests {
         let id = layer.add_icon(
             "Sel",
             IconType::File,
-            IconAction::OpenPath("/s".into()),
+            IconAction::OpenPath(PathBuf::from("/s")),
             0,
             0,
         );
@@ -2145,14 +2303,14 @@ mod tests {
         let id = layer.add_icon(
             "Selected",
             IconType::File,
-            IconAction::OpenPath("/s".into()),
+            IconAction::OpenPath(PathBuf::from("/s")),
             0,
             0,
         );
         layer.add_icon(
             "Unselected",
             IconType::Folder,
-            IconAction::OpenPath("/u".into()),
+            IconAction::OpenPath(PathBuf::from("/u")),
             80,
             0,
         );
@@ -2227,7 +2385,7 @@ mod tests {
                     let id = layer.add_icon(
                         &format!("Icon {i}"),
                         ty,
-                        IconAction::OpenPath(format!("/i{i}")),
+                        IconAction::OpenPath(PathBuf::from(format!("/i{i}"))),
                         (i as i32) * 80,
                         0,
                     );

@@ -983,6 +983,67 @@ def test_the_corpus_is_not_all_one_verdict(mod):
           open_share < 0.5, True)
 
 
+
+def test_request_names_single_and_multi_recipient(mod):
+    """`<from>-<to>-<slug>.md`, where `<to>` may name several lanes.
+
+    The multi-recipient form (`a-bc-...`) was written twenty times under three
+    lanes and the old single-letter pattern skipped every one -- the report
+    never listed them for either recipient, which is this tool's expensive
+    failure direction. The negative cases are names that merely *look* like the
+    form; they must stay unparsed, as they always were.
+    """
+    cases = [
+        ("a-b-native-rlimit-syscalls-landed.md", ("a", "b")),
+        ("b-a-cap-enumerating-query-syscall.md", ("b", "a")),
+        ("a-bc-lane-a-closed-600-699-at-679-and-opened-900-999.md", ("a", "bc")),
+        ("c-ab-deflate-has-no-incremental-inflate.md", ("c", "ab")),
+        ("d-a-a-new-lane-needs-a-syscall.md", ("d", "a")),
+        ("a-bcdef-everyone-stop.md", ("a", "bcdef")),
+        ("f-e-the-window-api-changed.md", ("f", "e")),
+        # not request names
+        ("a-bash-spike.md", None),                  # 's', 'h' are not lanes
+        ("a-bb-duplicate-recipient.md", None),      # a lane named twice
+        ("g-a-no-such-sender.md", None),
+        ("a-g-no-such-recipient.md", None),
+        ("shell_needs_kernel_embedding.md", None),
+        ("a-b.md", None),                           # no slug
+    ]
+    for name, want in cases:
+        check(f"parse_name({name!r})", mod.parse_name(name), want)
+
+
+def test_lane_letters_match_which_lane(mod):
+    """The letters this report accepts are exactly the lanes which-lane.py knows.
+
+    A lane missing here is a lane whose requests are never parsed and whose
+    `--lane` is refused, and nothing else would notice.
+    """
+    import importlib.util
+    import pathlib
+    path = pathlib.Path(__file__).resolve().parent / "which-lane.py"
+    spec = importlib.util.spec_from_file_location("which_lane_for_test", path)
+    wl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(wl)
+    check("LANE_LETTERS == which-lane LANES",
+          mod.LANE_LETTERS, "".join(wl.LANES).lower())
+
+
+def test_multi_recipient_request_reaches_every_recipient(mod):
+    """A request to `bc` is open work for lane b AND lane c, and not for a."""
+    import contextlib
+    import io
+    import pathlib
+    entry = ("a", "bc", pathlib.Path("a-bc-x.md"), True, "no status marker", "x")
+    for lane, want in (("b", True), ("c", True), ("a", False), ("d", False)):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            mod.report([entry], lane=lane, outgoing=False, show_all=False)
+        verb = "sees" if want else "does not see"
+        check(f"lane {lane} {verb} a request addressed to bc",
+              "a-bc-x.md" in buf.getvalue(), want)
+
+
 def main():
     mod = load_module()
     tests = [(name, fn) for name, fn in list(globals().items())

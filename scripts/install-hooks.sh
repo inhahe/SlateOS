@@ -1,10 +1,11 @@
 #!/bin/sh
 # Install this repo's git hooks into the shared .git dir, as trampolines.
 #
-# All four worktrees (os, os-lane-a, os-lane-b, os-lane-c) share ONE repository,
-# so `git rev-parse --git-common-dir` resolves to the same place from any of
-# them and a single run here arms the hooks for all three lane agents. Running
-# it again from another worktree is harmless.
+# Every worktree (os, and os-lane-a .. os-lane-f) shares ONE repository, so
+# `git rev-parse --git-common-dir` resolves to the same place from any of them
+# and a single run here arms the hooks for every lane agent -- including a lane
+# worktree created after the run, which is how lanes D-F got theirs on
+# 2026-09-22. Running it again from another worktree is harmless.
 #
 # Hooks are not carried by clone or fetch — .git/hooks is not part of the tree —
 # so this has to be run once per clone. The sources are tracked under

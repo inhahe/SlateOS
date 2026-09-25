@@ -1,0 +1,41 @@
+[package]
+name = "thumbs"
+version = "0.1.0"
+edition = "2024"
+description = "Thumbnails: generating them, caching them, and owning the image ids they are drawn under."
+
+[lib]
+path = "src/lib.rs"
+
+# Extracted from `apps/explorer`, where it was `mod thumbs` and had been since
+# it was first needed. Nothing in it was ever explorer-specific -- it holds no
+# reference to a single one of that binary's types -- and the second caller
+# arrived when `apps/photomanager` gained a grid of photographs to draw.
+#
+# The part worth sharing is not the downscaling, which anyone would rewrite
+# correctly. It is the *id lifecycle*: the cache owns the image ids, eviction
+# reports which ones the compositor must be told to drop, and drops are
+# announced before uploads because the link checks its budget against
+# `held - freed + incoming`. A second implementation would have got that last
+# detail wrong and been refused at exactly the moment its cache was working.
+[dependencies]
+# Thumbnails are drawn, not just decoded: a folder gets a mini-grid, a text
+# file a minimap, and a file with no preview a category icon, all of them
+# assembled from `RenderCommand`s on a `Canvas`.
+guitk = { path = "../toolkit" }
+
+# Header parsing that must not trust the file -- dimensions come out of bytes
+# an attacker may have chosen.
+byteread = { path = "../../byteread" }
+
+# The decoder proper. A thumbnail of a photograph is the photograph, scaled,
+# and `decode_scaled` does the work in the DCT domain rather than decoding
+# 21 megapixels to throw almost all of them away.
+imagecodec = { path = "../imagecodec" }
+
+[dev-dependencies]
+# Test fixtures only: a private temp directory per test, removed on drop.
+scratchdir = { path = "../../userspace/scratchdir" }
+
+[lints]
+workspace = true

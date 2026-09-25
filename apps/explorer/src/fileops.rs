@@ -2,7 +2,8 @@
 //!
 //! Provides copy, move, delete, recycle, and undo operations with:
 //! - Progress tracking (bytes, files, ETA)
-//! - Crash-safe journaling for resume on interruption
+//! - Journalling that lets an interrupted operation continue without redoing
+//!   work (see the caveat below: this is not crash recovery)
 //! - Conflict resolution policies
 //! - Per-file error handling (skip, retry, stop)
 //! - Undo via an operation journal
@@ -12,9 +13,29 @@
 //! scanned to produce an [`OperationPlan`], which records total bytes and file
 //! count. The plan is then executed step-by-step, updating an
 //! [`OperationProgress`] after each file and writing completed actions to an
-//! [`OperationJournal`] so that a crashed/interrupted operation can be resumed
-//! by re-reading the journal and skipping already-finished items.
+//! [`OperationJournal`] so that an interrupted operation can continue by
+//! re-reading the journal and skipping already-finished items.
+//!
+//! # This is not crash recovery, and said plainly because it reads like it
+//!
+//! The journal records a plan **id** and which action indices finished. It
+//! does not record the plan: not the sources, not the destinations, not the
+//! operation. So it can tell a *running* executor which of its own steps are
+//! already done, and after a crash it can tell a new process that "actions
+//! 0..7 of plan 4391 completed" -- about a plan that no longer exists
+//! anywhere. Surviving a restart needs the plan persisted too, which is a
+//! change to this file's format rather than a reader to add. Recorded in
+//! `roadmap-detailed.md` §4.1 under durable bulk operations.
 
+// What this suppression is hiding, measured 2026-09-16 by removing it:
+// ten findings, including that three `ConflictPolicy` variants (`Overwrite`,
+// `OverwriteIfNewer`, `Ask`), two error policies (`StopOnFirst`, `RetryN`) and
+// `ExecutorConfig` are never constructed anywhere -- while the list at the top
+// of this file advertises "conflict resolution policies" and "per-file error
+// handling (skip, retry, stop)". The allow stays for now because removing it
+// means deciding, variant by variant, between wiring and deleting; it is no
+// longer *silent*, which was the part that let the gap live here unremarked.
+// See known-issues TD-C-THE-FILE-OPERATIONS-MODULE-ADVERTISES-POLICIES-NOTHING-SELECTS.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -22,6 +43,12 @@ use std::fmt;
 use std::fs;
 use std::io::{self, BufRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
+
+// The percent-encoding design-decisions §426 chose for records that must
+// stay human-readable. Shared rather than copied: §426 picked ONE escape
+// precisely so two formats could not drift, and this file and
+// `apps/backup` held byte-identical copies of it until 2026-09-16.
+use pathcodec::{decode_path, encode_path};
 use std::time::{Duration, Instant, SystemTime};
 
 // ============================================================================
@@ -1547,27 +1574,33 @@ impl OperationExecutor {
     }
 
     /// The temporary name a copy to `dest` writes through.
-    fn temp_name(dest: &Path) -> String {
-        format!(
-            ".{}.fileop-tmp",
-            dest.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "file".to_string())
-        )
+    /// The scratch name a copy writes to before renaming it into place.
+    ///
+    /// Built from the destination's name as **bytes**. It went through
+    /// `to_string_lossy` until 2026-09-16, which meant two files whose names
+    /// differ only in bytes that are not valid UTF-8 produced the *same*
+    /// scratch name -- both collapsing to U+FFFD -- so two copies into one
+    /// directory could write over each other's temporary file and one would
+    /// land holding the other's contents. That is the failure
+    /// `TD-C-A-SCRATCH-BACKUP-KEYED-BY-BASENAME-OVERWROTE-THE-FILE-IT-WAS-PROTECTING`
+    /// records, reached by a different road.
+    ///
+    /// An `OsString` keeps every byte, so distinct names stay distinct.
+    fn temp_name(dest: &Path) -> std::ffi::OsString {
+        let mut name = std::ffi::OsString::from(".");
+        name.push(dest.file_name().unwrap_or_else(|| "file".as_ref()));
+        name.push(".fileop-tmp");
+        name
     }
 
     fn atomic_copy_file(&self, src: &Path, dest: &Path) -> io::Result<()> {
         let parent = dest.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(parent)?;
 
-        // Temporary name: <dest>.fileop-tmp
-        let tmp_name = format!(
-            ".{}.fileop-tmp",
-            dest.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "file".to_string())
-        );
-        let tmp_path = parent.join(tmp_name);
+        // The same scratch name the other copy path uses. This was a second
+        // copy of the format string, which is how one of them could have been
+        // fixed without the other.
+        let tmp_path = parent.join(Self::temp_name(dest));
 
         // A copy that fails part-way still leaves a partial temporary behind,
         // so it is cleaned up on the error path too.
@@ -1671,92 +1704,6 @@ fn set_file_mtime(path: &Path, _mtime: SystemTime) -> io::Result<()> {
 /// Entries written before this existed begin with the raw path, so the marker
 /// is what tells the two formats apart.
 const META_VERSION: &str = "slate-recycle-v2";
-
-/// Escape a path into a single line of printable ASCII, losslessly.
-///
-/// Paths on this OS may contain any byte except `/` and NUL, so they are not
-/// necessarily UTF-8 and cannot be written with `Display` — that substitutes
-/// U+FFFD and the original bytes are gone. `OsStr::as_encoded_bytes` gives the
-/// exact bytes back; everything outside printable ASCII, plus `%` itself, is
-/// percent-encoded so the metadata file stays line-oriented text.
-fn encode_path(path: &Path) -> String {
-    encode_bytes(path.as_os_str().as_encoded_bytes())
-}
-
-/// The lossless core of [`encode_path`], on bytes rather than a path.
-///
-/// Kept separate because this — not the `OsStr` conversion around it — is where
-/// the round-trip property lives, and it can be tested on any host.
-fn encode_bytes(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len());
-    for &b in bytes {
-        if b == b'%' || !(0x20..0x7f).contains(&b) {
-            out.push_str(&format!("%{b:02X}"));
-        } else {
-            out.push(b as char); // guarded: printable ASCII only
-        }
-    }
-    out
-}
-
-/// Reverse of [`encode_path`].
-fn decode_path(encoded: &str) -> PathBuf {
-    PathBuf::from(os_string_from_bytes(decode_bytes(encoded)))
-}
-
-/// Reverse of [`encode_bytes`].
-///
-/// A `%` not followed by two hex digits is passed through literally rather than
-/// dropped: the metadata file may have been hand-edited, and losing a byte
-/// silently is worse than keeping one that was never an escape.
-fn decode_bytes(encoded: &str) -> Vec<u8> {
-    let bytes = encoded.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while let Some(&b) = bytes.get(i) {
-        if b == b'%'
-            && let Some(hex) = encoded.get(i.saturating_add(1)..i.saturating_add(3))
-            && let Ok(v) = u8::from_str_radix(hex, 16)
-        {
-            out.push(v);
-            i = i.saturating_add(3);
-            continue;
-        }
-        out.push(b);
-        i = i.saturating_add(1);
-    }
-    out
-}
-
-/// Build an `OsString` from the raw bytes of a path.
-///
-/// This is where the byte world meets the platform's path type, so it is split
-/// per platform rather than papered over with
-/// `OsStr::from_encoded_bytes_unchecked`: that function's contract is that the
-/// bytes are valid for the platform's `OsStr` encoding, which is true for
-/// arbitrary bytes on Unix but *not* on Windows, where `OsStr` is WTF-8. Since
-/// our target is `target-family = ["unix"]`, the safe, total conversion below
-/// is the one that actually runs; Windows appears only as a test host.
-#[cfg(unix)]
-fn os_string_from_bytes(bytes: Vec<u8>) -> std::ffi::OsString {
-    use std::os::unix::ffi::OsStringExt;
-    std::ffi::OsString::from_vec(bytes)
-}
-
-/// Test-host fallback. Windows `OsString` cannot hold a byte string that is not
-/// WTF-8, so bytes that are not valid UTF-8 cannot survive here. They are not
-/// silently mangled: [`decode_bytes`] is still exact, and the tests assert the
-/// round-trip at that level, which is the level `meta.txt` is written at.
-#[cfg(not(unix))]
-fn os_string_from_bytes(bytes: Vec<u8>) -> std::ffi::OsString {
-    match String::from_utf8(bytes) {
-        Ok(s) => std::ffi::OsString::from(s),
-        // Reachable only on a non-Unix host reading a bin written on the
-        // target. Nothing better is representable; `decode_bytes` is the API to
-        // use if the exact bytes are needed.
-        Err(e) => std::ffi::OsString::from(String::from_utf8_lossy(e.as_bytes()).into_owned()),
-    }
-}
 
 /// Move `src` to `dest`, falling back to copy-then-remove across devices.
 ///
@@ -1913,10 +1860,24 @@ impl RecycleBin {
 
     /// Create a `RecycleBin` at the default location (`~/.recycle/`)
     /// with 30-day auto-purge.
+    ///
+    /// `var_os`, not `var`. This read `HOME` as UTF-8 and fell back to `/tmp`
+    /// when it was not, which put the recycle bin of anyone with a home
+    /// directory holding undecodable bytes in a directory that is cleared on
+    /// restart -- so "move to recycle bin" became "delete on next boot",
+    /// silently, for exactly the users this module is otherwise careful about.
+    /// [`Self::send_to_bin`] below goes to real trouble to record an original
+    /// path losslessly so a non-UTF-8 name can be restored; that care was
+    /// undone one function earlier by the location itself.
+    ///
+    /// The `/tmp` fallback now applies only when `HOME` is genuinely unset,
+    /// which is its own hazard and is left alone here: it is the pre-existing
+    /// behaviour for a case this change does not touch, and conflating the two
+    /// would hide which one was the bug.
     pub fn default_location() -> Self {
-        let home = std::env::var("HOME")
+        let home = std::env::var_os("HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"));
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
         Self::new(home.join(".recycle"), DEFAULT_RECYCLE_MAX_AGE)
     }
 
@@ -2508,7 +2469,7 @@ mod tests {
     /// and not to `_`, which would drop it (and delete the directory) before
     /// the test's first line.
     fn temp_dir(label: &str) -> ScratchDir {
-        ScratchDir::new(&format!("fileops_test_{label}"))
+        crate::guarded_scratch(&format!("fileops_test_{label}"))
     }
 
     /// Write a file with the given content.
@@ -3319,44 +3280,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_path_that_is_not_utf8_survives_the_metadata() {
-        // Paths on this OS allow every byte but `/` and NUL, so the metadata
-        // must carry bytes, not characters. Writing the path with `Display`
-        // replaced undecodable bytes with U+FFFD and the original name was
-        // then unrecoverable.
-        //
-        // Asserted at the byte level, which is the level `meta.txt` is written
-        // at: `OsString` on the Windows test host cannot hold a non-WTF-8 byte
-        // string at all, so going through `PathBuf` here would be testing the
-        // host's limitation rather than our encoding.
-        let encoded = "/home/u/caf%E9.txt";
-        let decoded = decode_bytes(encoded);
-        assert_eq!(
-            decoded, b"/home/u/caf\xE9.txt",
-            "a lone 0xE9 must come back as 0xE9, not as U+FFFD"
-        );
-        assert_eq!(
-            encode_bytes(&decoded),
-            encoded,
-            "and must re-encode to the same text"
-        );
-    }
-
-    /// Every byte value must survive, not just the one a bug happened to hit.
-    #[test]
-    fn every_byte_value_round_trips_through_the_encoding() {
-        let all: Vec<u8> = (0u8..=255).collect();
-        assert_eq!(decode_bytes(&encode_bytes(&all)), all);
-    }
-
-    #[test]
-    fn a_percent_that_is_not_an_escape_is_kept_verbatim() {
-        // A hand-edited file may contain a bare `%`. Dropping it would silently
-        // rename the entry; the decoder passes it through instead.
-        assert_eq!(decode_bytes("100%"), b"100%");
-        assert_eq!(decode_bytes("a%zz"), b"a%zz");
-    }
+    // The pure encode/decode cases that used to sit here now live in
+    // `apps/pathcodec`, which owns the encoding and tests every byte value.
+    // What remains in this file exercises the encoding through `meta.txt`,
+    // which is this crate's own use of it.
 
     #[test]
     fn a_recycled_non_ascii_name_restores_to_its_original_path() {
@@ -4379,5 +4306,34 @@ mod tests {
         let meta = fs::symlink_metadata(&made).expect("the link exists");
         assert!(meta.file_type().is_symlink());
         assert_eq!(fs::read_to_string(&made).expect("resolves"), "hello");
+    }
+
+    /// Two names that differ only in undecodable bytes get different scratch
+    /// names.
+    ///
+    /// The collision this guards is silent and destructive: with a lossy
+    /// scratch name both files copy through `.<U+FFFD>.fileop-tmp`, so two
+    /// copies into one directory can overwrite each other's temporary and one
+    /// arrives holding the other's contents. Windows-only because that is
+    /// where such a name can be built in a test; the defect is not.
+    #[cfg(windows)]
+    #[test]
+    fn scratch_names_keep_bytes_that_are_not_utf8_apart() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let a = PathBuf::from(OsString::from_wide(&[0x0041_u16, 0xD800]));
+        let b = PathBuf::from(OsString::from_wide(&[0x0041_u16, 0xD801]));
+        assert_ne!(a, b, "the fixture is not two different names");
+        assert!(
+            a.to_str().is_none() && b.to_str().is_none(),
+            "fixture is UTF-8"
+        );
+
+        assert_ne!(
+            OperationExecutor::temp_name(&a),
+            OperationExecutor::temp_name(&b),
+            "two distinct names share one scratch name, so a copy can land holding the wrong file"
+        );
     }
 }

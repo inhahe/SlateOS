@@ -110,7 +110,7 @@ MUTATOR_RE = re.compile(
 # The direction matters: the bug made the tool report FEWER problems than exist.
 # The first measurement of 2026-08-26, 520, was taken with it and is an
 # undercount too.
-CEILING = 504
+CEILING = 503
 
 
 def main() -> int:

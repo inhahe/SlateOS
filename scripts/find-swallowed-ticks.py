@@ -64,6 +64,31 @@ and `gui/` the same day (8 dispatchers, 2 reported, both correct:
 root is `apps` alone, which is the narrowing that hid `explorer` in the first
 place** -- pass `--roots=apps,gui` unless you have a reason not to.
 
+THE FOURTEEN IT STILL REPORTS, so nobody investigates them twice. All fourteen
+are correct code, read against the source on 2026-09-17, and twelve of them for
+one reason:
+
+  * Twelve route the event through the shared `FilePicker` and return early on
+    `Picked::Handled | Picked::Cancelled`: automator, benchmark, calendar,
+    clipmanager, flashcards, markdowneditor, musicplayer, photomanager,
+    podcast, reminders, sysinfo, torrent. That return cannot swallow a tick,
+    because `FilePicker::handle` never takes one. `gui/toolkit/src/dialog.rs`
+    says so in as many words -- "Time and geometry -- `Tick` and `Resize` --
+    are NOT taken" -- and pins it with
+    `a_tick_and_a_resize_still_reach_the_application`, whose failure message
+    is "the application's clock stopped because a dialog was open". The guard
+    this scanner sees is real; the danger it looks for is closed one layer
+    down, which is why reading the twelve individually finds nothing twelve
+    times.
+  * `apps/diskimager` returns early only for `Key` and `Mouse`, the model the
+    banner already names.
+  * `apps/explorer` returns early only for `CloseRequested`.
+
+`calendar`, `photomanager` and `reminders` still carry comments describing the
+version that *was* wrong. Calendar's is worth keeping: a save dialog left up
+across midnight, after which "today" stayed on yesterday, in blue, in five
+places. They are why this scanner exists, and they are fixed.
+
 Report-only. Read the guard before changing anything.
 
 Usage:  python scripts/find-swallowed-ticks.py [--roots=apps,gui]
@@ -76,6 +101,59 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import selftestflag  # noqa: E402
 from rustlex import live_code, strip_noise  # noqa: E402
+
+# The count this file's "IT STILL REPORTS" note claims, so the scan can say
+# when the two have drifted apart.
+#
+# Twice on 2026-09-17 a note like that sat beside a larger scan and nobody
+# noticed: `find-claimed-acts` listed four while reporting six, and
+# `find-stale-admissions` listed three while reporting eight -- and three of
+# that eight were real, windows denying capabilities they had gained. The note
+# exists so nobody investigates a known-good finding twice, and it can only do
+# that if it covers everything reported. The gap is the finding, so the tool
+# says so rather than leaving it to be spotted.
+_COUNT_WORDS = {
+    "ZERO": 0, "ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5,
+    "SIX": 6, "SEVEN": 7, "EIGHT": 8, "NINE": 9, "TEN": 10, "ELEVEN": 11,
+    "TWELVE": 12,
+}
+
+
+def documented_count():
+    """How many findings this file's own note says it covers, or None."""
+    match = re.search(r"THE ([A-Z]+) IT STILL REPORTS", __doc__ or "")
+    if match is None:
+        return None
+    return _COUNT_WORDS.get(match.group(1))
+
+
+def report_drift(found, out=sys.stdout):
+    """Say so when the scan reports more than this file's note covers.
+
+    One direction only. Finding *fewer* than the note lists is usually not
+    staleness: a documented entry can sit outside the roots this run scanned,
+    and warning on that would cry wolf on every default run. A checker nobody
+    believes is worse than no checker. The dangerous direction is the other
+    one, where something is reported that nobody has ever read.
+    """
+    documented = documented_count()
+    if documented is None or found <= documented:
+        return False
+    missing = found - documented
+    print("", file=out)
+    print(
+        "  NOTE OUT OF DATE: this file documents {} known-good finding(s) and"
+        " the scan reports {}.".format(documented, found),
+        file=out,
+    )
+    print(
+        "  The {} not covered have never been read. Read them, and either fix"
+        " what they".format(missing),
+        file=out,
+    )
+    print("  found or add them to the note with the reason.", file=out)
+    return True
+
 
 MATCH_EVENT = re.compile(r"\bmatch\s+\*?event\b")
 FN = re.compile(r"\bfn\s+([a-z_0-9]+)\s*[(<]")
@@ -170,6 +248,7 @@ def main(argv):
         f"{checked} dispatcher(s) with a Tick arm; "
         f"{len(findings)} can return before reaching it\n"
     )
+    report_drift(len(findings))
     print("  MOST OF THESE ARE FINE. A correct guard trips this too --")
     print("  apps/diskimager returns early only for Key and Mouse, and is the")
     print("  model worth copying. Read the guard before changing anything.\n")

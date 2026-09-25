@@ -15,9 +15,26 @@
 //! - WHOIS lookup for public IPs
 //! - Simulated traceroute
 //!
-//! Uses the guitk library for UI rendering. Network I/O is
-//! performed through Slate OS syscalls; simulated with representative
-//! data for initial development.
+//! **This program has no network access and says so.** Its dependencies are
+//! `appearance`, `guitk` and `oswindow` -- there is no `std::net`, no socket
+//! syscall, nothing that can contact an address. Every operation on the list
+//! above refuses and explains: `start_scan`, `run_traceroute`, `run_whois` and
+//! `send_wol` each set a note saying what could not be done and why.
+//!
+//! The line here used to read "Network I/O is performed through Slate OS
+//! syscalls; simulated with representative data for initial development",
+//! which was false in both halves -- there is no syscall, and the simulation
+//! was removed on 2026-09-15 for inventing hosts and open ports.
+//!
+//! **What survived that removal until 2026-09-18 was the report around the
+//! hosts.** A scan produced a `ScanResult` with the hosts list empty and
+//! everything else filled in, so the panel read "Scanned 254 IPs | 0 hosts up
+//! | 0 open ports | 12.3s", the window *title* read "0 hosts up on
+//! 192.168.1.0/24", and a history entry was filed stamped "2026-05-18
+//! 12:07:13" -- a constant derived from the scan id, not a clock. Nothing was
+//! contacted, so the address count is a count of what it would have tried, the
+//! duration is an estimate, and **"0 hosts up" is a finding about the user's
+//! network.** `start_scan` now refuses like the other three.
 
 use appearance::Edge;
 use appearance::Palette;
@@ -54,6 +71,27 @@ use std::collections::VecDeque;
 
 const WINDOW_WIDTH: f32 = 1100.0;
 const WINDOW_HEIGHT: f32 = 780.0;
+/// What the discovery settings amount to.
+///
+/// `start_scan` already refuses and explains, and that refusal takes the
+/// results summary's place -- but only once Scan has been pressed. Before
+/// that the window shows a target box, a discovery method, a timeout and a
+/// concurrency, which is the full apparatus of a scanner, and says nothing.
+/// Somebody reading the settings to decide what to scan has not pressed
+/// anything yet.
+///
+/// This is the fourth app in this sweep with a refusal attached to the action
+/// and nothing on the window it is read from -- after `apps/torrent`,
+/// `apps/systemrestore` and `apps/screenshot`. The shape is worth stating
+/// once more: **a refusal at the moment of acting does not cover the window
+/// somebody reads beforehand.**
+///
+/// `discovery_method` is read by exactly one thing, the line this appears
+/// on -- the panel reads the value in order to print the value -- so the
+/// method is not a setting with an effect to reach, and a key for it would
+/// be a control that changes a word.
+const CONFIG_NOT_APPLIED: &str = "not applied: no network access";
+
 const TITLE_BAR_HEIGHT: f32 = 38.0;
 const CONFIG_PANEL_HEIGHT: f32 = 140.0;
 const SIDEBAR_WIDTH: f32 = 300.0;
@@ -67,7 +105,6 @@ const TAB_HEIGHT: f32 = 30.0;
 const CORNER_RADIUS: f32 = 6.0;
 const SMALL_RADIUS: f32 = 4.0;
 
-const MAX_HISTORY_ENTRIES: usize = 50;
 /// Vertical space a truncated list keeps for its "N more" line.
 ///
 /// Reserved whether or not the line is drawn, so that how many rows fit does
@@ -1979,6 +2016,8 @@ pub struct NetScanApp {
     /// asked yet", and the two must not look the same: a panel that stays
     /// blank after a button press is read as the button not working, which
     /// sends the user to look for a bug in the wrong place.
+    /// Why no scan was run.
+    pub scan_note: Option<String>,
     pub traceroute_note: Option<String>,
     pub traceroute_result: Option<Vec<TracerouteHop>>,
     pub whois_target: String,
@@ -2039,6 +2078,7 @@ impl Default for NetScanApp {
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
             results_scroll: 0,
+            scan_note: None,
             traceroute_target: String::from("8.8.8.8"),
             traceroute_note: None,
             traceroute_result: None,
@@ -2070,96 +2110,32 @@ impl NetScanApp {
             return;
         }
 
-        let target = match ScanTarget::parse(&self.config.target_input) {
-            Some(t) => t,
-            None => return, // Invalid target input
-        };
+        self.results = None;
 
-        let ips = target.all_ips();
-        if ips.is_empty() {
+        // The target is still parsed first, so a typo is reported as a typo
+        // rather than being swallowed by the refusal -- the same order
+        // `run_traceroute` uses, and for the same reason.
+        let Some(target) = ScanTarget::parse(&self.config.target_input) else {
+            self.scan_note = Some(format!(
+                "Not a scannable target: {}",
+                self.config.target_input
+            ));
+            return;
+        };
+        if target.all_ips().is_empty() {
+            self.scan_note = Some(format!(
+                "That range contains no addresses: {}",
+                self.config.target_input
+            ));
             return;
         }
 
-        let ports = match self.config.profile {
-            ScanProfile::Custom => {
-                parse_port_spec(&self.config.port_input).unwrap_or_else(quick_scan_ports)
-            }
-            other => other.ports(),
-        };
-
-        // Limit the number of ports to keep simulation fast
-        let scan_ports: Vec<u16> = if ports.len() > 1024 {
-            ports.into_iter().take(1024).collect()
-        } else {
-            ports
-        };
-
-        // Saturating: this is a seed, so any answer is as good as any other,
-        // and the arithmetic should not be the thing that decides.
-        // The generator that fed the fabricated scan. Nothing draws from it
-        // now; it is left named so the removal is one line when the real
-        // scanner lands and this whole block goes.
-        let _rng_seed = (ips.len() as u64)
-            .saturating_mul(31)
-            .saturating_add((scan_ports.len() as u64).saturating_mul(17));
-        let hosts: Vec<HostResult> = Vec::new();
-
-        // No hosts. This crate has no network access at all -- no `std::net`,
-        // no socket syscall -- so nothing here has contacted anything.
-        //
-        // What was here until 2026-09-15 was worse than a constant list, and
-        // worse in a way that mattered: `simulate_host_scan` gave each address
-        // a 60% chance of being "up" and each port a tuned probability of
-        // being open -- 50% for SSH, HTTP and HTTPS, 25% for RDP and SMB, 15%
-        // for database ports -- with a fabricated service banner 40% of the
-        // time. Two runs disagreed, which is exactly what a real scan does, so
-        // repeating it could not expose it.
-        //
-        // The reported facts were security conclusions about machines on the
-        // user's network. A false *open* costs an afternoon; a false
-        // **closed** is someone deciding their network is secure, and this
-        // reported far more closed ports than open ones.
-
-        let id = self.scan_id_counter;
-        self.scan_id_counter = self.scan_id_counter.saturating_add(1);
-        let total_ips = ips.len() as u32;
-        let total_ports = scan_ports.len() as u32;
-        let est_time = estimate_scan_time(
-            total_ips,
-            total_ports,
-            self.config.timeout_ms,
-            self.config.concurrency,
-        );
-
-        let result = ScanResult {
-            id,
-            timestamp: format!(
-                "2026-05-18 12:{:02}:{:02}",
-                id.saturating_mul(7) % 60,
-                id.saturating_mul(13) % 60
-            ),
-            target_description: self.config.target_input.clone(),
-            profile: self.config.profile,
-            hosts,
-            total_ips_scanned: total_ips,
-            total_ports_scanned: total_ports,
-            duration_secs: est_time,
-        };
-
-        // Push to history
-        if self.history.len() >= MAX_HISTORY_ENTRIES {
-            self.history.pop_back();
-        }
-        self.history.push_front(result.clone());
-        self.results = Some(result);
-        self.selected_host_idx = None;
-        // Back to the first row: the offset belongs to the list that was there
-        // before, and these results are a different list. Through
-        // `scroll_results_to_top`, which said exactly this and had no caller.
+        self.scan_note = Some(String::from(
+            "Cannot scan: this program has no network access, so no address was contacted. \
+             That is not a finding that nothing is there.",
+        ));
         self.scroll_results_to_top();
         self.detail_port_scroll = 0;
-        // The lists they belong to have been replaced, so a fraction earned
-        // scrolling the old scan must not deliver a row in the new one.
         self.results_wheel.reset();
         self.ports_wheel.reset();
         self.is_scanning = false;
@@ -2793,10 +2769,11 @@ impl NetScanApp {
             x: PADDING,
             y: method_y,
             text: format!(
-                "Discovery: {}  |  Timeout: {}ms  |  Concurrency: {}",
+                "Discovery: {}  |  Timeout: {}ms  |  Concurrency: {}  |  {}",
                 self.config.discovery_method.label(),
                 self.config.timeout_ms,
                 self.config.concurrency,
+                CONFIG_NOT_APPLIED,
             ),
             color: self.palette.subtext0,
             font_size: 11.0,
@@ -2991,9 +2968,24 @@ impl NetScanApp {
         let content_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING;
         let table_width = self.window_width - SIDEBAR_WIDTH;
 
-        // Results summary bar
+        // Results summary bar, or why there is none.
+        //
+        // The refusal takes the summary's place rather than sitting beside an
+        // empty table: pressing Scan and seeing nothing change is the failure
+        // this whole panel is now for.
         if let Some(ref result) = self.results {
             self.render_summary_bar(tree, content_y, result);
+        } else if let Some(note) = self.scan_note.as_deref() {
+            tree.push(RenderCommand::Text {
+                x: PADDING,
+                y: content_y + 6.0,
+                text: note.to_string(),
+                color: self.palette.ink(self.palette.yellow),
+                font_size: 12.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((self.window_width - SIDEBAR_WIDTH - PADDING * 2.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
         }
 
         let table_top = content_y + SUMMARY_BAR_HEIGHT;
@@ -4838,16 +4830,22 @@ mod tests {
         );
     }
 
+    /// The title does not report a finding, because there is none to report.
+    ///
+    /// It read "0 hosts up on 192.168.1.0/24 - Network Scanner" after a scan
+    /// that contacted nothing -- a claim about the user's network, in the
+    /// taskbar, where it outlives the window being looked at.
     #[test]
-    fn the_title_reports_what_the_scan_found() {
+    fn the_title_does_not_claim_a_finding() {
         let mut app = NetScanApp::new();
         assert_eq!(app.title(), "Network Scanner");
+
         app.start_scan();
-        let title = app.title();
-        assert!(title.contains("hosts up"), "got {title:?}");
-        assert!(
-            title.contains(&app.config.target_input),
-            "the title should name what was scanned, got {title:?}"
+
+        assert_eq!(
+            app.title(),
+            "Network Scanner",
+            "the title reports a scan that did not happen"
         );
     }
 
@@ -5548,40 +5546,105 @@ mod tests {
         assert!(app.history.is_empty());
     }
 
+    /// The settings line says the settings are not applied, before anything
+    /// is pressed.
+    ///
+    /// `start_scan` refuses and explains, and that refusal takes the results
+    /// summary's place -- but only once Scan has been pressed. Before that
+    /// the window shows a target box, a discovery method, a timeout and a
+    /// concurrency, which is the whole apparatus of a scanner, and said
+    /// nothing. Somebody reading the settings to decide what to scan has not
+    /// pressed anything yet.
+    #[test]
+    fn the_settings_line_says_they_are_not_applied() {
+        let app = NetScanApp::new();
+        assert!(app.scan_note.is_none(), "control: nothing pressed yet");
+
+        let texts: Vec<String> = app
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        let line = texts
+            .iter()
+            .find(|t| t.starts_with("Discovery: "))
+            .unwrap_or_else(|| panic!("control: the settings line is not drawn: {texts:?}"));
+        // Against the words rather than the constant: comparing with
+        // `CONFIG_NOT_APPLIED` passes with the constant rewritten to "ok".
+        assert!(
+            line.contains("not applied") && line.contains("no network access"),
+            "the settings line does not say they are not applied: {line:?}"
+        );
+    }
+
+    /// A scan produces no result, because no scan happened.
+    ///
+    /// This asserted `results.is_some()` and `!history.is_empty()` until
+    /// 2026-09-18. Both were true and both were the defect: a `ScanResult`
+    /// filed in a durable history *is* the claim that a scan ran.
     #[test]
     fn test_app_start_scan() {
         let mut app = NetScanApp::new();
         app.start_scan();
-        assert!(app.results.is_some());
-        assert!(!app.history.is_empty());
+        assert!(
+            app.results.is_none(),
+            "a scan that contacted nothing produced a result"
+        );
+        assert!(app.history.is_empty(), "and filed it in the history");
+        assert!(app.scan_note.is_some(), "and did not say why");
     }
 
-    /// A scan reports no hosts, because nothing here can reach the network.
+    /// A scan says it cannot be run, rather than reporting an empty one.
     ///
-    /// This asserted the opposite until 2026-09-15 and was correct about the
-    /// behaviour: `start_scan` invented hosts and open ports, with
-    /// probabilities tuned to look plausible -- 50% for SSH and HTTP, 25% for
-    /// RDP and SMB. Two runs disagreed, which is what a real scan does, so
-    /// repeating it could never have exposed it.
+    /// Two removals, a day apart in spirit. Until 2026-09-15 `start_scan`
+    /// invented hosts and open ports with probabilities tuned to look
+    /// plausible -- 50% for SSH and HTTP, 25% for RDP and SMB -- and two runs
+    /// disagreed, which is what a real scan does, so repeating it could never
+    /// have exposed it. That was removed and the hosts list became empty.
+    ///
+    /// **The report around the hosts stayed**, and that was still a claim:
+    /// "Scanned 254 IPs | 0 hosts up | 0 open ports | 12.3s" in the panel, the
+    /// same count in the window *title*, and a history entry stamped
+    /// "2026-05-18 12:07:13" -- a constant, not a clock. Nothing was scanned,
+    /// so the count of addresses is a count of addresses it would have tried,
+    /// the duration is an estimate, and "0 hosts up" is a finding about the
+    /// user's network. `run_traceroute` in this same file already refused
+    /// outright; the scan is the one that was missed.
     #[test]
-    fn a_scan_reports_no_hosts_because_it_cannot_reach_the_network() {
+    fn a_scan_says_it_cannot_run_rather_than_reporting_an_empty_one() {
         let mut app = NetScanApp::new();
         app.start_scan();
-        let result = app.results.as_ref().expect("a scan result");
+
+        assert!(app.results.is_none(), "an empty scan report was produced");
+        let note = app.scan_note.as_deref().expect("a reason");
         assert!(
-            result.hosts.is_empty(),
-            "the scan reported {} hosts and contacted nothing",
-            result.hosts.len()
+            note.contains("no network access"),
+            "the refusal does not say why: {note:?}"
+        );
+        assert!(
+            note.contains("not a finding"),
+            "the refusal does not deny the inference: {note:?}"
         );
     }
 
+    /// A typo is still reported as a typo, not swallowed by the refusal.
     #[test]
-    fn test_app_scan_history_limit() {
+    fn a_bad_target_is_reported_as_a_bad_target() {
         let mut app = NetScanApp::new();
-        for _ in 0..MAX_HISTORY_ENTRIES + 5 {
-            app.start_scan();
-        }
-        assert!(app.history.len() <= MAX_HISTORY_ENTRIES);
+        app.config.target_input = String::from("not an address");
+
+        app.start_scan();
+
+        let note = app.scan_note.as_deref().expect("a reason");
+        assert!(
+            note.contains("Not a scannable target"),
+            "a typo was reported as a missing network: {note:?}"
+        );
     }
 
     #[test]
@@ -5613,6 +5676,30 @@ mod tests {
         app.run_traceroute();
         let note = app.traceroute_note.expect("nothing said anything");
         assert!(note.contains("Not an IPv4 address"), "{note}");
+    }
+
+    /// The refusal reaches the window, not just the field.
+    ///
+    /// `wol_note` was written and rendered by nothing for three commits, and
+    /// only the write-only-field gate noticed. A note that never reaches the
+    /// screen leaves Scan looking like a button that does nothing, which is
+    /// the failure this panel is now for.
+    #[test]
+    fn the_scan_refusal_reaches_the_window() {
+        let mut app = NetScanApp::new();
+        app.start_scan();
+        let note = app
+            .scan_note
+            .clone()
+            .expect("Scan did nothing and said nothing");
+
+        assert!(
+            app.render_tree()
+                .commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == &note)),
+            "the refusal never reached the screen",
+        );
     }
 
     /// Wake-on-LAN builds the packet and cannot send it.
@@ -5731,7 +5818,11 @@ mod tests {
         });
         let result = app.handle_event(&event);
         assert_eq!(result, EventResult::Consumed);
-        assert!(app.results.is_some());
+        assert!(
+            app.scan_note.is_some(),
+            "F5 did not reach the scan, or reached it and said nothing"
+        );
+        assert!(app.results.is_none(), "F5 produced an empty scan report");
     }
 
     #[test]

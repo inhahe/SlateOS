@@ -182,6 +182,19 @@ enum Role {
     /// A glyph the marks after it attach to, and the end of the run of marks
     /// before it.
     Base,
+    /// A glyph that is not drawn, and that the cluster walk steps over.
+    ///
+    /// A default ignorable the face had a space glyph to blank it with. It is
+    /// still in the run -- something has to hold its cluster and its byte
+    /// offset -- but it is neither a base nor a mark, and treating it as
+    /// either is wrong in a different way. As a *mark* it would be placed and
+    /// zeroed, which is work on a glyph with nothing to draw. As a *base* it
+    /// ends the run of marks before it and starts a new cluster, which is the
+    /// failure [`Role::Mark`]'s own note describes for class-zero marks: the
+    /// measurement restarts halfway through a syllable. A ZWJ between a
+    /// Sinhala letter and its virama did exactly that, leaving the virama a
+    /// whole letter to the right of the consonant it kills.
+    Ignored,
     /// A combining mark this pass owns, carrying its combining class.
     ///
     /// Zero is a class like any other here. HarfBuzz neither moves nor zeroes
@@ -569,16 +582,6 @@ impl ScaledFont {
         self.face.corrections(self.px_per_em, &self.coords)
     }
 
-    /// The same, read from the legacy `kern` table alone.
-    ///
-    /// What the shaper charges a pair in a run whose script reaches no `GPOS`
-    /// `kern` feature. Not public: a caller with no run behind it has no script
-    /// to decide with, and [`kern_across`](Self::kern_across) is the answer for
-    /// that caller.
-    fn legacy_kern_across(&self, left: u16, right: u16, between: &[u16]) -> f32 {
-        f32::from(self.face.legacy_kern_across(left, right, between)) * self.scale
-    }
-
     /// Font units to pixels.
     ///
     /// The cast is exact for anything a layout table can produce: font units
@@ -941,6 +944,9 @@ impl ScaledFont {
                 // marks. A face with a `GDEF` to class the glyph and a `GPOS`
                 // to place it needs neither.
                 mark: (owned || (by_category && !tab)) && norm::is_mark(ch),
+                // Derived under the same condition and for the second of the
+                // two decisions above: which glyphs the fallback places.
+                any_mark: (owned || (by_category && !tab)) && norm::is_any_mark(ch),
                 // Answered here for the reason the two below are: it is a
                 // property of the character, and after substitution there may
                 // be no character left to ask. Unlike them it does not survive
@@ -1056,14 +1062,7 @@ impl ScaledFont {
             if !self.places_marks(segment.script) {
                 continue;
             }
-            for at in segment.start..segment.end {
-                let Some(glyph) = glyphs.get(at) else { break };
-                if glyph.mark
-                    && let Some(slot) = roles.get_mut(at)
-                {
-                    *slot = Role::Mark(glyph.klass);
-                }
-            }
+            mark_roles(&glyphs, &mut roles, segment.start, segment.end);
         }
 
         // Which glyphs are combining marks, and what each one's nominal width
@@ -1145,6 +1144,10 @@ impl ScaledFont {
         // width, and a face that kerns after a space would quietly narrow it.
         let mut kern_left: Option<usize> = None;
         let mut between: Vec<u16> = Vec::new();
+        // The half of a split legacy kern that belongs to the *right* glyph of
+        // the pair, carried to the iteration that pushes it. See the split
+        // below for why a legacy kern has two halves at all.
+        let mut carry: f32 = 0.0;
         for (i, glyph) in glyphs.iter().enumerate() {
             let tab = tabs.get(i).copied().unwrap_or(false);
             let gid = glyph.gid;
@@ -1185,11 +1188,40 @@ impl ScaledFont {
                 && !erased
                 && let Some(last) = kern_left.and_then(|at| out.get_mut(at))
             {
-                let kern = self.legacy_kern_across(last.key.gid(), gid, &between);
+                // Split between the pair, in font units, the way HarfBuzz's
+                // `hb_kern_machine_t` does: half onto the left glyph's
+                // advance, the remainder onto the right glyph's advance *and*
+                // its offset.
+                //
+                // The ink lands in the same place either way, which is why
+                // charging the whole kern to the left glyph was not visibly
+                // wrong and survived this long. What differs is every question
+                // asked *between* the two glyphs: where a caret goes, what a
+                // hit test answers, how a run is cut for wrapping. Measured on
+                // Arial Rounded Bold, whose `a`/`b` kern is -27 font units:
+                // HarfBuzz reports advances 1203 and 1267 against natural 1217
+                // and 1280, so it charges -14 and -13. We charged -27 and 0.
+                //
+                // In font units and not in pixels, because the halving is an
+                // integer shift and rounding it twice at a scaled size does
+                // not land on HarfBuzz's answer. `>> 1` and not `/ 2`: the
+                // shift floors toward negative infinity, so -27 halves to -14
+                // and the remainder is -13, which is HarfBuzz's arithmetic
+                // exactly.
+                //
+                // Across every font on the host this took the sweep's
+                // `misplaced` bucket from 168 to 1.
+                let whole = self.face.legacy_kern_across(last.key.gid(), gid, &between);
+                let half = whole >> 1;
+                let rest = whole.saturating_sub(half);
+                let kern = f32::from(half) * self.scale;
                 last.advance += kern;
                 last.kern_next = kern;
+                carry = f32::from(rest) * self.scale;
             }
-            let advance = self.px(adjust.x_advance);
+            let advance = self.px(adjust.x_advance) + carry;
+            let carried = carry;
+            carry = 0.0;
             // How far back a zeroed mark has to be moved so that taking its
             // advance away does not also move its image.
             //
@@ -1255,7 +1287,10 @@ impl ScaledFont {
                 // fallback fills those in below. `y` points up, which is both
                 // `GPOS`'s convention and `ShapedGlyph`'s, so it passes through
                 // unflipped; the flip happens once, at the blit.
-                offset: (self.px(adjust.x_offset) - back, self.px(adjust.y_offset)),
+                offset: (
+                    self.px(adjust.x_offset) - back + carried,
+                    self.px(adjust.y_offset),
+                ),
             });
             if erased {
                 // Not in `between` and not a new left half: see above.
@@ -1672,13 +1707,16 @@ impl ScaledFont {
             // A mark with no base before it — a run that opens with a
             // combining character — attaches to nothing, exactly as in
             // HarfBuzz, where the first cluster simply contains no base.
-            if matches!(roles.get(at), Some(Role::Mark(_))) {
+            if matches!(roles.get(at), Some(Role::Mark(_) | Role::Ignored)) {
                 at = at.saturating_add(1);
                 continue;
             }
             let base = at;
             let mut end = base.saturating_add(1);
-            while matches!(roles.get(end), Some(Role::Mark(_))) {
+            // An ignorable inside the run of marks does not end it. It draws
+            // nothing and takes no advance, so the marks after it still belong
+            // to the base before it.
+            while matches!(roles.get(end), Some(Role::Mark(_) | Role::Ignored)) {
                 end = end.saturating_add(1);
             }
             at = end.max(base.saturating_add(1));
@@ -2077,6 +2115,31 @@ fn collapse_variation_sequences(
     }
 }
 
+/// Give every combining mark in `start..end` the role that makes the measuring
+/// fallback place it against the base before it.
+///
+/// The predicate is [`SubGlyph::any_mark`] -- `Mn`, `Mc` and `Me` -- and not
+/// the narrower [`SubGlyph::mark`], which is `Mn` alone. The two are easy to
+/// confuse and the difference is not cosmetic: HarfBuzz clusters a run for
+/// `_hb_ot_shape_fallback_mark_position` with
+/// `HB_UNICODE_GENERAL_CATEGORY_IS_MARK`, which counts all three, and it is
+/// only the *zeroing* inside that pass that narrows to `Mn`. Asking the narrow
+/// question here leaves every spacing combining mark out of the cluster
+/// entirely, so nothing places it and nothing zeroes it -- which is how a
+/// Javanese pangkon ended up a full advance to the right of the letter it
+/// hangs on. Measured: `misplaced` 40 -> 15 on the supplementary corpus, with
+/// the default corpus unmoved.
+fn mark_roles(glyphs: &[SubGlyph], roles: &mut [Role], start: usize, end: usize) {
+    for at in start..end {
+        let Some(glyph) = glyphs.get(at) else { break };
+        if glyph.any_mark
+            && let Some(slot) = roles.get_mut(at)
+        {
+            *slot = Role::Mark(glyph.klass);
+        }
+    }
+}
+
 /// Erase the glyphs still standing for characters that are never drawn.
 ///
 /// HarfBuzz's `hb_ot_hide_default_ignorables`, plus the zeroing that
@@ -2138,17 +2201,45 @@ fn hide_ignorables(
         });
         return;
     }
-    for (glyph, sub) in out.iter_mut().zip(glyphs) {
+    for (i, (glyph, sub)) in out.iter_mut().zip(glyphs).enumerate() {
         if !sub.ignorable.erased() {
             continue;
+        }
+        // Only a *base* is demoted. A default ignorable that is itself a
+        // combining mark -- U+034F and the variation selectors are `Mn` --
+        // keeps `Role::Mark`, for the reason above: it is already transparent
+        // to the walk, and moving it would cut the cluster at a character
+        // that was never meant to be seen.
+        if let Some(slot) = roles.get_mut(i)
+            && *slot == Role::Base
+        {
+            *slot = Role::Ignored;
         }
         glyph.key = GlyphKey::outline(space);
         // Advance *and* the kern charged to it, because the kern was added
         // into the advance when it was charged and leaving it would make the
-        // recorded pieces stop summing to the width. The x offset goes for the
-        // same reason HarfBuzz zeroes it — a zero-advance glyph that is still
-        // displaced would drag its blank somewhere — and the y offset stays,
-        // also as in HarfBuzz, because nothing is drawn for it to move.
+        // recorded pieces stop summing to the width. The x offset goes
+        // because a zero-advance glyph that is still displaced would drag its
+        // blank somewhere, and the y offset stays because nothing is drawn
+        // for it to move.
+        //
+        // **HarfBuzz does not zero the x offset, and this comment used to say
+        // it did.** Measured 2026-09-21 on `a` CGJ `b` in `SegUIVar.ttf`,
+        // whose `GPOS` attaches U+034F to its base as a mark: HarfBuzz keeps
+        // the attachment and reports the hidden glyph at x_offset -1042,
+        // which is minus the base's advance, putting the blank back on the
+        // letter it attached to. We report 0, leaving it at the pen. Both are
+        // invisible -- a space glyph with no advance -- so nothing a reader
+        // sees differs, and it is the one remaining `misplaced` in the
+        // 556-face sweep.
+        //
+        // Ours is kept for the reason §434 gives: the x of an invisible
+        // zero-advance glyph is good for placing a caret on that character's
+        // cluster, and the pen is where the next glyph starts. Anyone
+        // changing it should know it is a *mark attachment* being discarded
+        // here, not a kern -- §434's account of this divergence describes
+        // kern charging, which stopped diverging when kerning moved onto the
+        // right-hand glyph.
         glyph.advance = 0.0;
         glyph.kern_next = 0.0;
         glyph.offset.0 = 0.0;
@@ -2523,6 +2614,80 @@ mod tests {
     /// The vertical offset is deliberately *not* zeroed, which is HarfBuzz's
     /// behaviour: with no advance and nothing drawn there is nothing for it to
     /// move, and matching the reference exactly is worth more than tidying it.
+    /// A *spacing* combining mark is still a mark the fallback places.
+    ///
+    /// The distinction the two predicates draw, at the one place that wants
+    /// the wide one. `mark` is `Mn`, and asking it here drops every `Mc` out
+    /// of the cluster: nothing places the mark and nothing zeroes it, so it
+    /// sits a whole advance to the right of its base. Both glyphs below are
+    /// marks; only one of them is `Mn`, and both must come back as marks.
+    ///
+    /// Swap `any_mark` for `mark` in [`mark_roles`] and the middle assertion
+    /// fails -- which is the point of testing the loop rather than the
+    /// predicates it is built from.
+    #[test]
+    fn the_fallback_places_spacing_marks_not_just_nonspacing_ones() {
+        let base = SubGlyph::new(10, 0);
+        // `Mc`, a Javanese pangkon or a Devanagari matra: it occupies width,
+        // which is why `mark` -- the zeroing question -- says no.
+        let mut spacing = SubGlyph::new(11, 0);
+        spacing.any_mark = true;
+        spacing.mark = false;
+        spacing.klass = 9;
+        // `Mn`, an ordinary accent: both questions say yes.
+        let mut nonspacing = SubGlyph::new(12, 0);
+        nonspacing.any_mark = true;
+        nonspacing.mark = true;
+        nonspacing.klass = 230;
+        let glyphs = alloc::vec![base, spacing, nonspacing];
+        let mut roles = alloc::vec![Role::Base; 3];
+        mark_roles(&glyphs, &mut roles, 0, glyphs.len());
+        assert_eq!(
+            roles,
+            alloc::vec![Role::Base, Role::Mark(9), Role::Mark(230)],
+            "a spacing combining mark belongs in the cluster too"
+        );
+    }
+
+    /// A blanked glyph stops being something marks can attach to.
+    ///
+    /// The ZWJ case. Blanking leaves the glyph in the run, and while it stayed
+    /// a `Role::Base` it ended the run of marks before it and began a new
+    /// cluster -- so a Sinhala virama measured against the invisible joiner
+    /// instead of the consonant, and came out a whole letter to its right.
+    ///
+    /// A blanked glyph that is already a *mark* keeps `Role::Mark`, which the
+    /// test above pins: it is transparent to the walk either way, and demoting
+    /// it would cut the cluster at U+034F or a variation selector.
+    #[test]
+    fn a_blanked_base_is_no_longer_a_base() {
+        let ignorable = |yes: Ignorable| {
+            let mut g = SubGlyph::new(0, 0);
+            g.ignorable = yes;
+            g
+        };
+        let subs = alloc::vec![
+            ignorable(Ignorable::No),
+            ignorable(Ignorable::Plain),
+            ignorable(Ignorable::No)
+        ];
+        let filled = |gid: u16| ShapedGlyph {
+            key: GlyphKey::outline(gid),
+            cluster: 0,
+            advance: 7.0,
+            kern_next: 2.0,
+            offset: (3.0, 5.0),
+        };
+        let mut out = alloc::vec![filled(10), filled(11), filled(12)];
+        let mut roles = alloc::vec![Role::Base, Role::Base, Role::Mark(9)];
+        hide_ignorables(&mut out, &mut roles, &subs, 3);
+        assert_eq!(
+            roles,
+            alloc::vec![Role::Base, Role::Ignored, Role::Mark(9)],
+            "the blanked joiner must not stand between a mark and its base"
+        );
+    }
+
     #[test]
     fn a_face_with_a_space_empties_the_glyph_rather_than_removing_it() {
         let ignorable = |yes: Ignorable| {

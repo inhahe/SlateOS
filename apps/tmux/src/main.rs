@@ -1509,6 +1509,12 @@ struct Window {
     active_pane: PaneId,
     /// Layout preset applied to this window.
     preset: LayoutPreset,
+    /// Whether the active pane is filling the window on its own.
+    ///
+    /// tmux's `prefix z`. Before this the key existed and set a status line
+    /// reading "Pane zoom toggled" -- the word "zoom" appeared exactly once
+    /// in this crate, in that string. It announced a thing it did not do.
+    zoomed: bool,
     /// Window creation number (for display index).
     index: usize,
 }
@@ -1521,6 +1527,7 @@ impl Window {
             layout: LayoutNode::Leaf(initial_pane),
             active_pane: initial_pane,
             preset: LayoutPreset::Tiled,
+            zoomed: false,
             index,
         }
     }
@@ -1541,12 +1548,17 @@ impl Window {
     /// worth of character cells whatever size window the compositor granted,
     /// and text wrapped at a width it was not being drawn at.
     fn bounds(&self, width: f32, height: f32) -> Vec<(PaneId, f32, f32, f32, f32)> {
-        self.layout.compute_bounds(
-            0.0,
-            TAB_BAR_HEIGHT,
-            width,
-            height - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT,
-        )
+        let y = TAB_BAR_HEIGHT;
+        let h = height - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT;
+        if self.zoomed {
+            // The whole area, one pane. Here rather than in the renderer
+            // because this is the only function that turns a layout into
+            // rectangles: `relayout` reads it to size the terminal grid, so
+            // a zoomed pane is given the cells it is drawn with rather than
+            // the cells it had when it was a quarter of the screen.
+            return vec![(self.active_pane, 0.0, y, width, h)];
+        }
+        self.layout.compute_bounds(0.0, y, width, h)
     }
 }
 
@@ -1657,6 +1669,45 @@ enum PrefixState {
 // ============================================================================
 
 /// Top-level terminal multiplexer state.
+/// The prefix commands this multiplexer answers, as a reader sees them.
+///
+/// Every one is pressed *after* the prefix -- Ctrl+B, then the key -- which
+/// is why the closing line says so and why none of these rows carries a
+/// modifier. The window showed "Ctrl+B ..." while the prefix was armed and
+/// named not one of the twenty-odd keys it was waiting for.
+///
+/// `F1` is the exception and is not a prefix command: a list you can only
+/// reach by already knowing a key is not much of a list.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("c", "New window"),
+    ("n / p", "Next or previous window"),
+    ("0-9", "Go to a window by number"),
+    ("w", "Choose a window from a list"),
+    ("s", "Choose a session from a list"),
+    ("&", "Close the window"),
+    ("- or \"", "Split the pane top and bottom"),
+    ("| or %", "Split the pane left and right"),
+    ("o", "Next pane"),
+    (";", "The pane you were in before"),
+    ("}", "Swap this pane with the next"),
+    ("z", "Zoom this pane to fill the window, and back"),
+    ("+", "Grow the pane"),
+    ("x", "Close the pane"),
+    ("Space", "Cycle the layout"),
+    ("[", "Copy mode, to look back at what scrolled past"),
+    ("q", "Leave copy mode"),
+    ("k / j", "Back or forward one line"),
+    ("b / f", "Back or forward one screen"),
+    ("g / G", "To the top, or back to the live screen"),
+    ("v", "Start a selection"),
+    ("y", "Copy the selection"),
+    ("]", "Paste"),
+    (",", "Rename the window"),
+    (":", "Type a command"),
+    ("d", "Detach"),
+];
+
 struct Multiplexer {
     /// All panes across all sessions (shared storage).
     panes: Vec<Pane>,
@@ -1664,6 +1715,8 @@ struct Multiplexer {
     sessions: Vec<Session>,
     /// Currently active session index.
     active_session: usize,
+    /// Whether the shortcut card is up.
+    show_help: bool,
     /// Prefix key state.
     prefix_state: PrefixState,
     /// Whether the command prompt is shown (`:` command mode).
@@ -1710,6 +1763,7 @@ impl Multiplexer {
             panes: vec![initial_pane],
             sessions: vec![session],
             active_session: 0,
+            show_help: false,
             prefix_state: PrefixState::Normal,
             command_mode: false,
             command_input: String::new(),
@@ -2223,6 +2277,23 @@ impl Multiplexer {
     /// 3. everything else, which belongs to the pane -- and which currently has
     ///    nowhere to go, because no pane has a process behind it.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Above the command prompt and the prefix, both of which swallow the
+        // key and return. A list you cannot dismiss from the state you
+        // reached it in is the failure this ordering avoids, and it is the
+        // seventh app where the placement mattered.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal. `d` detaches and `&` closes a window; neither should
+            // happen from behind a list somebody is reading.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         if self.command_mode {
             return self.handle_command_key(key);
         }
@@ -2514,9 +2585,24 @@ impl Multiplexer {
                     session.active_window = idx;
                 }
             }
-            // Zoom (toggle full-size for active pane)
+            // Zoom: the active pane fills the window until it is pressed
+            // again. `Window::bounds` is what honours it.
             'z' => {
-                self.set_status("Pane zoom toggled");
+                let zoomed = self
+                    .active_session_mut()
+                    .and_then(Session::active_window_mut)
+                    .map(|w| {
+                        w.zoomed = !w.zoomed;
+                        w.zoomed
+                    });
+                if let Some(zoomed) = zoomed {
+                    self.relayout();
+                    self.set_status(if zoomed {
+                        "pane zoomed -- press the prefix and z again to unzoom"
+                    } else {
+                        "pane unzoomed"
+                    });
+                }
             }
             _ => {
                 self.set_status(&format!("Unknown key: {key}"));
@@ -2669,6 +2755,16 @@ impl Multiplexer {
         }
         if self.prefix_state == PrefixState::Prefix {
             self.render_prefix_indicator(&mut cmds);
+        }
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this; the rest follow Ctrl+B",
+            );
         }
 
         cmds
@@ -3796,6 +3892,102 @@ mod tests {
     // Ctrl+B keyboard, the first feature the module doc lists -- had eighteen
     // tests and no caller, and so did `process_command`.
     // ------------------------------------------------------------------
+
+    /// **Every prefix command the card advertises is answered.**
+    ///
+    /// Pressed the way a keyboard sends them: Ctrl+B, then the character in
+    /// `text`. `process_prefix_key` takes a `char`, so a synthetic event with
+    /// an empty string reaches nothing -- which is also why `key-survey.py`
+    /// could not see these seventeen keys until it learned to follow a call
+    /// from a handler into a function taking a char.
+    ///
+    /// The control is the last assertion: an unbound letter must *not* be
+    /// answered, or this test would pass on a program that accepted
+    /// everything.
+    #[test]
+    fn every_advertised_prefix_command_does_something() {
+        for (label, what) in SHORTCUTS {
+            if *label == "F1" {
+                continue; // not a prefix command; covered below
+            }
+            for ch in prefix_chars(label) {
+                let mut mux = Multiplexer::new();
+                mux.handle_event(&key_ev(Key::B, "", true));
+                mux.handle_event(&key_ev(Key::A, &ch.to_string(), false));
+                assert_ne!(
+                    mux.status_message,
+                    format!("Unknown key: {ch}"),
+                    "the card advertises {label:?} for {what:?}, and the prefix does not know {ch:?}"
+                );
+            }
+        }
+
+        let mut mux = Multiplexer::new();
+        mux.handle_event(&key_ev(Key::B, "", true));
+        mux.handle_event(&key_ev(Key::A, "~", false));
+        assert_eq!(
+            mux.status_message, "Unknown key: ~",
+            "control: the prefix answers a key nothing binds, so the loop above proves nothing"
+        );
+    }
+
+    /// The characters a card row names, which are not always one.
+    fn prefix_chars(label: &str) -> Vec<char> {
+        match label {
+            "0-9" => ('0'..='9').collect(),
+            "Space" => vec![' '],
+            _ => label
+                .split(" or ")
+                .flat_map(|part| part.split(" / "))
+                .filter_map(|part| part.trim().chars().next())
+                .collect(),
+        }
+    }
+
+    /// **Zoom fills the window with one pane, rather than saying it did.**
+    ///
+    /// `prefix z` used to call `set_status("Pane zoom toggled")` and nothing
+    /// else: the word "zoom" appeared exactly once in this crate, in that
+    /// string. It announced a thing it did not do, which is the same defect
+    /// as `apps/fileassoc`'s export -- a message true about a variable and
+    /// false about the world.
+    #[test]
+    fn zooming_gives_the_active_pane_the_whole_window() {
+        let mut mux = Multiplexer::new();
+        mux.handle_event(&key_ev(Key::B, "", true));
+        mux.handle_event(&key_ev(Key::A, "%", false));
+        let split = mux
+            .active_session()
+            .and_then(Session::active_window)
+            .map(|w| w.bounds(1200.0, 800.0))
+            .unwrap_or_default();
+        assert!(split.len() > 1, "control: the split did not happen");
+
+        mux.handle_event(&key_ev(Key::B, "", true));
+        mux.handle_event(&key_ev(Key::A, "z", false));
+        let zoomed = mux
+            .active_session()
+            .and_then(Session::active_window)
+            .map(|w| w.bounds(1200.0, 800.0))
+            .unwrap_or_default();
+        assert_eq!(zoomed.len(), 1, "zoom left more than one pane on screen");
+        let only = zoomed.first().expect("one pane");
+        let widest = split.iter().map(|b| b.3).fold(0.0_f32, f32::max);
+        assert!(
+            only.3 > widest,
+            "the zoomed pane is no wider than it was: {} against {widest}",
+            only.3
+        );
+
+        mux.handle_event(&key_ev(Key::B, "", true));
+        mux.handle_event(&key_ev(Key::A, "z", false));
+        let back = mux
+            .active_session()
+            .and_then(Session::active_window)
+            .map(|w| w.bounds(1200.0, 800.0))
+            .unwrap_or_default();
+        assert_eq!(back.len(), split.len(), "unzoom did not restore the split");
+    }
 
     fn key_ev(key: Key, text: &str, ctrl: bool) -> Event {
         let mut modifiers = guitk::event::Modifiers::NONE;

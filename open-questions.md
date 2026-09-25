@@ -261,6 +261,168 @@ costs the other two lanes their merges.
 the head-of-line witness entry: `socket.rs:356`, `netstack_client.rs:158`, and
 `services/netstack/src/main.rs:2594`.*
 
+## C-Q26 — [C] Four programs have a preference with nowhere to keep it. Where do user settings live? — Status: OPEN (raised 2026-09-18)
+
+**In short:** several programs have a setting that ought to be yours to
+choose — whether the lock screen shows the date, whether the markdown editor
+saves as you type, what rules the password generator checks a password
+against. Right now each of those is decided in the program's source code and
+is the same for everybody. I can give some of them a key to press, but a key
+only lasts until the program closes: reopen it and it is back to the built-in
+answer. Making them stick means deciding where a program's settings are
+*kept*, and that is one decision for all ~280 programs rather than four
+separate ones, which is why I am asking rather than picking.
+
+**Why you are being asked.** Where settings live is visible to you: it
+decides whether your preferences survive a reinstall, whether you can copy
+them to another machine, whether you can edit them in a text editor, and
+whether one program's settings can be read by another. Those are all things
+you have opinions about and none of them are technical details. It is also
+close to impossible to change later — once programs write to a location, that
+location is the format.
+
+| Option | What changes |
+|---|---|
+| **A. One file per program, under a per-user settings directory** | `~/.config/lockscreen.yaml`, `~/.config/markdowneditor.yaml`, one per program, YAML as the design already requires elsewhere |
+| **B. One file for everything** | A single `~/.config/slateos.yaml` with a section per program |
+| **C. A settings service** | Programs ask a running service to read and write their settings; the service owns the files and can tell programs when something changed |
+
+*What changes, in one line each:*
+- **A** — you can open one program's settings in a text editor and see only that program's settings; deleting a program's file resets that program alone.
+- **B** — all your preferences are in one file you can copy to a new machine in a single step; a mistake while editing it can affect every program at once.
+- **C** — changing a setting takes effect immediately in every open window without reopening anything; it needs a service written first, so nothing lands for a while.
+
+**My recommendation: A.** It matches what the design already says about
+configuration (YAML, comments preserved), it is the one option where a
+program can be understood on its own, and it does not need anything built
+before the first program can use it. B's single file is genuinely nicer to
+back up, and that can be added later as an export. C is the best *eventual*
+answer — live updates across windows are worth having — but it is a service,
+and building one to unfreeze four booleans is the wrong order.
+
+**Where it bites, concretely:**
+
+| Program | The setting | What it does today |
+|---|---|---|
+| `apps/lockscreen` | `show_clock_seconds`, `show_date` | seconds hidden, date shown, for everyone |
+| `apps/markdowneditor` | `autosave_enabled` | off, for everyone |
+| `apps/passwordgen` | `PasswordPolicy` | checks its own built-in rules and shows a tick |
+| `apps/explorer` | `ConflictPolicy` | copying onto an existing name always renames, never asks |
+
+**If this is never answered:** nothing breaks and nothing gets worse. Each of
+those keeps its built-in answer, which is a defensible one in every case. The
+cost is that the whole class of "let the user decide" work stays shut: I can
+keep giving settings a key for the current session, but not one that is still
+set tomorrow. The survey that finds these is `scripts/frozen-flag-survey.py`,
+and it currently reports 99 such fields in 37 programs — most are per-session
+choices that a key does fix, and this question is about the remainder.
+
+## C-Q25 — [C] The password manager can write your passwords to a plain file, or write a "backup" that restores nothing. Which? — Status: OPEN (raised 2026-09-17)
+
+**In short:** the credential manager holds logins you have typed in, and
+today there is no way to get them out of it at all — no save button, no
+export, nothing. Two ways out are already written and sitting unused. One
+writes every password as readable text anyone who opens the file can read.
+The other writes a file it calls a *backup* that contains the names of your
+logins but none of the passwords, so restoring from it would give you back a
+list of empty entries. I need you to say which of these the program should
+offer before I connect either one to a button.
+
+**Why you are being asked.** Both choices are about your data leaving the
+program in a form you cannot take back. A plain-text file of passwords is the
+normal way every password manager lets you move to a different one, and it is
+also a file that is exactly as secret as wherever it lands. That is a policy
+call, not a technical one.
+
+| Option | What changes |
+|---|---|
+| **A. Plain-text export, with a warning** | "Export" writes a `.csv` containing every password as readable text; the program warns you first and the file is yours to protect or delete |
+| **B. Encrypted backup** | "Backup" writes a file only this program can read, using the password you unlock the vault with. It restores everything, and it is useless to anyone who takes it |
+| **C. Ship neither yet** | The two unused writers are deleted, and credentials stay inside the program until B is built properly |
+
+*What changes, in one line each:*
+- **A** — you can move your logins to another program today, and a file on your disk holds every password in the clear.
+- **B** — you can restore your vault onto a new machine, and nobody who copies the file learns anything; it needs the encryption work first, so it is not available today.
+- **C** — nothing leaves the program, and there is no way to move or restore your logins at all.
+
+**My recommendation: B, and A only if you want it.** Every password manager
+worth using offers the encrypted backup; the plain-text export is the
+migration escape hatch, and it is a real feature, but it should be a
+deliberate choice you make rather than the only thing on offer.
+
+**What I will not do either way:** connect the existing "backup" writer as it
+stands. It omits the passwords, so a file named like a backup would restore a
+vault of empty logins — and someone who had it would believe their
+credentials were safe. That is the failure this lane keeps finding: a name
+that claims more than the thing behind it does.
+
+**If this is never answered:** nothing gets worse. There is no way to export
+today and there will continue to be none, so no credential can leak through a
+door that does not exist. What stays broken is that a vault cannot be moved
+or restored, which makes the program a place to lose data rather than keep
+it. The two unused writers are `export_csv` and `serialize_backup` in
+`apps/credmanager/src/main.rs`, both carrying a `dead_code` allow that says
+outright they have no caller.
+
+## C-Q24 — [C] The design says to ship almost no keyboard shortcuts. We ship 31. Which ones stay? — Status: OPEN (raised 2026-09-17)
+
+**In short:** you wrote that SlateOS should come with very few keyboard
+shortcuts turned on, "or possibly no" — because "having hotkeys everywhere
+is a fucking pain in the ass". The desktop currently turns on **31** of them.
+Somebody should decide which ones survive. Nothing is broken either way; this
+is about what a new machine feels like on the first day.
+
+**Date raised:** 2026-09-17. **Lane:** C.
+
+**Where it comes from.** `design.txt` line 1320. The same file, a few lines
+later, carries a note headed PUSHBACK arguing that six are expected by
+everybody and should be on: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print
+Screen. So the file says both "almost none" and "these six". It does not say
+where the line is after that, and nothing in `design-decisions.md` records a
+decision — the 31 accumulated without one.
+
+**What is actually bound today.** They fall into four groups, and the groups
+matter more than the list:
+
+| Group | Examples | Count |
+|---|---|---|
+| Keys with one obvious meaning | Volume up/down/mute, brightness up/down, Print Screen | 6 |
+| The six the PUSHBACK note names | Alt+F4, Alt+Tab (and Alt+Shift+Tab) | 3 bound here; Ctrl+C/V/X and Ctrl+Z are **not** and should not be — they belong to whichever application has focus, and a global grab on them would break every one |
+| Window management chords | Snap left/right, minimise, maximise, show desktop, zone overlay | 8 |
+| Shell surfaces and desktops | Super (start menu), Super+R (run), Super+Tab (overview), next/previous desktop, notifications, task manager, settings, lock, shortcut card | 14 |
+
+**The reading that makes the spec consistent.** The complaint is about
+*chords* — Ctrl/Alt/Super combinations a user has to learn and can collide
+with an application. A dedicated Volume Up key is not "a hotkey everywhere";
+it is a key with one meaning, and leaving it unbound makes the hardware look
+broken. If that reading is right, the first group stays regardless and the
+argument is only about the last two.
+
+**The options.**
+
+| | *What changes* |
+|---|---|
+| **A. Ship the first two groups only** (9) | A new desktop has media keys, Alt+F4 and Alt+Tab. Super does nothing, there is no run box shortcut, no snapping, no desktop switching — each still available, each waiting to be bound. Closest to what the line says. |
+| **B. Ship A plus the shell's own surfaces** (about 14) | Adds Super, Super+R, Super+Tab, the shortcut card. The keys that open the things a user cannot otherwise find. Everything about window layout stays unbound. |
+| **C. Keep all 31, and record that the line has been overruled** | Nothing changes today; the spec stops being contradicted quietly. |
+| **D. Ship A, and put the rest behind one switch** ("enable the extra shortcuts") in the Hotkeys settings | Both audiences served, at the cost of a setting that exists to undo a decision. |
+
+**My recommendation: B.** A desktop whose Super key does nothing reads as
+broken rather than as restrained, and the start menu and run box have no other
+discoverable entry point. Window-management chords are exactly what the line
+is complaining about and are the ones people rebind anyway.
+
+**If it is never answered:** nothing breaks. The 31 stay, the spec goes on
+saying something the code does not do, and every future reader of that line
+has to work out for themselves whether it is stale or unimplemented. That is
+the real cost — not the shortcuts, the ambiguity.
+
+**Where it bites.** `gui/desktop/src/hotkeys.rs`, `register_defaults`.
+Trimming the list is a few minutes' work whichever way it goes; deciding is
+the part that needs you. Note that deleting a default now *sticks* —
+design-decisions 860 — so a user who dislikes any of the 31 can already
+remove it permanently.
+
 # Resolved` index at
 the bottom under your own lane's subheading. An answered question left in the
 body is pure clutter, and because it is older it sorts *first* — directly in
@@ -1083,11 +1245,64 @@ ask than guess.
 | system information | queries hardware details | 73 KB |
 | settings | a remote-settings page | 46 KB |
 
+**How each one escapes the compiler, measured 2026-09-16.** The tests are one
+reason; there is a second, and it differs per feature:
+
+| feature | why `dead_code` is silent |
+|---|---|
+| image viewer — video | `#![allow(dead_code)]` at the top of `video.rs` |
+| process explorer — features | `#![allow(dead_code)]` at the top of `features.rs` |
+| settings — remote page | `#![allow(dead_code)]` at the top of `remote.rs` |
+| installer — GRUB | `pub mod grub` in a crate with a `[lib]` section: `dead_code` stops at the crate boundary and cannot see that no one outside calls it |
+| system information — hardware queries | `pub mod hwquery`, same boundary |
+
+So three were silenced deliberately and two are structurally invisible. That
+matters for the decision: the first three would each start warning the moment
+the suppression came off, and the last two would not warn however the code was
+arranged, because the compiler has no way to know a library's public API has no
+users. Whatever is decided here, **the three suppressions are worth removing in
+the same change** -- otherwise the next feature to lose its last caller lands
+in exactly the same silence.
+
 **Why nobody noticed.** Each has its own tests and they all pass, because a
 test calls the code directly — it does not have to find a way in through the
 interface. This is the pattern `known-issues.md` records as lesson 47, and the
 sharp version of it: the process explorer's *own source* quotes that lesson
 while this module sat beside it.
+
+**A worked example of option B's cost, measured 2026-09-16, added so both
+options have evidence.** Three shell panels of this same shape were triaged
+that day: settings screens nobody could open, saving nothing, reached by
+nothing. Two were deleted (4,979 lines, 83 tests) and one was kept, and the
+question that decided each was the same one: **does a working implementation of
+this idea already exist somewhere else?**
+
+- Default applications: yes — `apps/fileassoc` writes the associations and
+  `apps/explorer` obeys them. Deleted, after moving the one idea the panel had
+  that the app lacked.
+- Backup settings: yes — `apps/backup` already does retention, exclusions,
+  incremental backups and pruning, *and runs them*. Deleted outright.
+- Power settings: no. Power plans, battery health and charge history exist
+  nowhere else, and the hardware they need is another team's. Kept.
+
+**Applied to two of the five, 2026-09-16.** The discriminator splits them, so
+this may be five small questions rather than one large one:
+
+| feature | does a working implementation exist elsewhere? | suggests |
+|---|---|---|
+| image viewer — plays video (77 KB) | **Yes.** `apps/videoplayer` is a separate, launchable application: 7,201 lines, 154 tests, no stubs. | delete |
+| process explorer — affinity, deadlocks, memory map (83 KB) | **No.** `features.rs` is 2,624 unreachable lines, and *affinity* and *deadlock detection* appear nowhere else in the tree. `sysmonitor` has some priority handling and none of the rest. | wire up |
+
+The other three (installer/GRUB, hardware queries, remote settings) are **not
+checked** — a first pass was inconclusive and is not reported rather than
+guessed at. Answering for the two above does not depend on them.
+
+Two things in that are worth carrying to the five above. Deleting is far
+cheaper than wiring *when the answer is yes* — most of a day's reading, no new
+interface, no new tests. And the dead copy twice looked *richer* than the live
+one, because a model that never runs is not constrained by having to work, so
+it accumulates vocabulary that reads as sophistication. Sizing these five by
+how finished they look would overvalue them.
 
 **A worked example of option A's cost, measured 2026-09-14.** A sixth feature
 of this shape was wired that day, and it is offered here as evidence rather
@@ -1439,6 +1654,144 @@ everywhere else**, and an exception needs to be worth the inconsistency.
 **If it is never answered:** nothing degrades. The event is still in the day's
 detail card, whose colour bar sits on `mantle` and is unaffected, so the
 information is reachable — just not from the grid.
+
+## C-Q21 — [C] Setting a backup to run every day does nothing. What should run it? — Status: OPEN (raised 2026-09-16)
+
+**In short:** the backup program lets you say "back up every day". Nothing on
+the machine ever does it. The setting is written to a file that no program
+reads, so a person who sets it and walks away has no backups at all and is
+never told. Fixing it means deciding *what* wakes up and runs the backup, and
+that choice has a visible consequence for whether backups happen when nobody
+is signed in.
+
+**Why you are being asked rather than told.** The three candidates differ in
+something only you can settle — whether backing up someone's data is allowed to
+happen while they are not signed in — and one of them is not this team's code
+to write.
+
+| Option | What changes | Runs with nobody signed in? |
+|---|---|---|
+| **A. A background service** (a program the system starts at boot, before anyone signs in) | Backups happen on time whether or not anyone is using the machine | Yes |
+| **B. The desktop** (the program that draws your screen after you sign in) | Backups happen shortly after you sign in, and while you are signed in | No |
+| **C. Ask on sign-in** — the desktop notices one is due and offers to run it | You see "a backup is due — run it now?" and choose | No |
+
+*What changes, in one line each:*
+- **A** — the machine backs up at 3am with the screen off, as most people expect "daily backup" to mean.
+- **B** — the machine backs up the first time you sign in that day, and not at all on a day you do not sign in.
+- **C** — you are asked rather than surprised, at the cost of a prompt you can dismiss forever, which makes "daily" mean "when you agree".
+
+**My recommendation: A**, with **C**'s prompt as a fallback for a backup missed
+while the machine was off. "Daily" that silently means "on days you signed in"
+is the same class of quiet untruth this whole thing is about — it would be a
+smaller lie than today's, not a fix for it.
+
+**The catch that makes this a question and not a task.** A background service
+lives in `services/`, which is lane B's tree, not lane C's. So option A is a
+request to another team; B and C are work this lane can do alone. If you pick
+A, the schedule feature stays broken until lane B picks it up. That is a real
+cost and it is why B is tempting — it is worse and available.
+
+**If this is never answered:** the current behaviour stands, which is that the
+command claims a schedule and nothing runs. As of today it at least *says* so
+— it now prints that it records the schedule and does not cause a backup — so
+nobody is misled, but nobody gets a scheduled backup either. Nothing else is
+blocked by this, and it does not get worse with time. Tracked as
+`known-issues.md` BUG-C-BACKUP-SCHEDULE-WRITES-A-FILE-NOTHING-EVER-READS.
+
+## C-Q22 — [C] An account set to "log in automatically" still asks for a password. How does someone get past it to a different account? — Status: OPEN (raised 2026-09-16)
+
+**In short:** you can mark an account to sign in on its own, without typing a
+password. The machine records that and then ignores it — the password box
+appears anyway. Making it work is easy; what is not decided is how anyone
+reaches a *different* account afterwards, because once a machine signs itself
+in, the screen that lets you pick a user never appears. Pick wrong and a shared
+family computer becomes a one-person computer.
+
+**Why this needs you.** Every option below is a few lines of code. The
+difference between them is what a second person has to know, or discover, to
+use the machine at all.
+
+| Option | What changes |
+|---|---|
+| **A. Hold a key while it starts** (the way most systems do it) | The machine signs itself in; holding Shift during start-up shows the chooser instead. A second person cannot find this without being told. |
+| **B. A "Sign in as someone else" button on the way past** | The chooser appears for a few seconds with the account pre-selected and a visible button; if nobody touches it, it proceeds. Everyone can see the escape, at the cost of a pause on every start. |
+| **C. Only when there is one account** | Automatic sign-in works on a single-user machine and silently turns itself off the moment a second account exists. Nobody is ever locked out, and the setting stops working for a reason the user did not do deliberately. |
+
+*What changes, in one line each:*
+- **A** — fastest start, and a second user sees no way in.
+- **B** — every start pauses about three seconds and shows a button.
+- **C** — the feature quietly stops applying when a second account is added.
+
+**My recommendation: B.** A is the familiar answer and is also the reason
+people ask how to get into a computer they can see the desktop of; the escape
+being invisible is the whole problem, not a detail of it. B costs a short pause
+and makes the way out obvious to somebody who has never used the machine. C is
+safe but surprising — a setting that turns itself off is hard to tell from one
+that is broken, which is the shape of defect this project keeps finding.
+
+**A second, smaller answer this needs.** When the machine is being *recovered*
+— started for repair rather than for use — should automatic sign-in be skipped?
+Recommend **yes** for every option: recovery is when you most need to choose a
+different account, and the password is the only thing standing between a
+stolen laptop and its contents.
+
+**If this is never answered:** nothing breaks and nothing gets worse. An
+account marked for automatic sign-in keeps asking for a password, which is the
+safe direction to fail. As of today the module no longer *claims* the feature —
+its own documentation said it had autologin while doing nothing — so the only
+cost is a setting that does not do what its name says. `design-decisions.md`
+824 records why it was left undecided.
+
+## C-Q23 — [C] The feature list is wrong often enough that planning from it misleads. Re-check it, and how far? — Status: OPEN (raised 2026-09-16)
+
+**In short:** `roadmap-detailed.md` is the list of everything this system is
+meant to do, and work gets picked from it. Thirty of its items were checked
+against the code in one evening, and about half were wrong — most of them
+saying "not built" about things that are built and working. Nobody made a
+mistake; the list simply ages faster than anyone updates it. The question is
+whether to spend real time re-checking the rest, and how much.
+
+**The evidence, from the thirty checked** (`known-issues.md` →
+`TD-C-THE-FEATURE-INVENTORY-WAS-WRONG-IN-BOTH-DIRECTIONS`):
+
+| what the list said | what the code said | count |
+|---|---|---|
+| not built | built and working | 11 |
+| not built | built but no user can reach it | 2 |
+| not built | partly built, no record of which part | 5 |
+| not built | genuinely not built | 10 |
+| *nothing* | built and **contradicting the design** | 2 |
+
+The last row is the one that costs most: the file list was choosing columns by
+looking inside folders, which §4.1 forbids in bold, and nothing in the list
+could say so because nothing was missing.
+
+**Why it matters in practice.** Twice this evening I started work the list said
+was unstarted and found it finished — once after building a replacement for
+something that already existed. A list that says "not built" about built things
+sends people to rebuild; a list that cannot express "built but unreachable"
+sends them to write code that is already written.
+
+| Option | What changes |
+|---|---|
+| **A. Re-check the whole file** (~930 open items) | The list becomes trustworthy. Costs days of reading with no new features at the end of it. |
+| **B. Re-check one section at a time, as work is picked from it** | Nothing is re-checked speculatively; each section is corrected by whoever was about to work in it anyway. Slower to become trustworthy, and sections nobody visits stay wrong. |
+| **C. Re-check nothing; treat the list as a wish-list and verify per task** | No effort spent. Every future task pays the same few minutes I paid tonight, and the two design contradictions stay unfound until someone trips over them. |
+
+*What changes, in one line each:*
+- **A** — a week of no visible progress, then a file you can plan from.
+- **B** — planning stays unreliable, but never wastes effort on sections nobody uses.
+- **C** — nothing changes; the cost stays spread thin and permanent.
+
+**My recommendation: B**, with one addition — that a checked item records
+*that* it was checked, and on what date. Half tonight's cost was not knowing
+whether an empty box meant "absent" or "unexamined". That single convention
+makes B converge instead of repeating.
+
+**If this is never answered:** nothing breaks. The list stays a rough guide,
+work continues to be picked from it, and occasionally someone rebuilds
+something that exists — which happened twice tonight and cost an hour each
+time. It does not get worse on its own, but it does not improve either.
 ## B-Q9 — [B] We wrote our own copy of a shell because we could not build the original. We can now. Keep the copy, or switch to the original? — Status: OPEN
 
 **In short:** the *shell* is the program that runs the commands you type. SlateOS
@@ -2484,7 +2837,7 @@ and compounding — it is effort spent on programs no one can run, and the longe
 it runs the larger the pile of code whose first real execution is still ahead of
 it.
 
-**Related but different:** `deferred-questions.md` D-Q1 asks which *implementation*
+**Related but different:** `deferred-questions.md` DQ1 asks which *implementation*
 (fastpy or Rust) a stock install should prefer once one is proven better. That
 assumes both ship. This asks whether they ship at all. Recorded in
 `known-issues.md` under the image-staging entry, which names "which utilities
@@ -2492,6 +2845,189 @@ earn their bytes" as a real question and correctly declines to answer it — but
 named it there rather than here, so it has never been in front of you.
 
 
+## A-Q16 — [A] Two kinds of lock in the kernel; one skips the deadlock checker, for a reason that turns out not to be true. Which way should that be settled? — Status: OPEN
+
+**In short:** the kernel has a cheap lock and an expensive lock. The
+expensive one is watched by a deadlock detector; the cheap one is not, and
+the stated reason it does not need watching is that nothing is ever locked
+*inside* it. A new check measured that: it happens **1256 times per boot**,
+in at least 24 places. Nothing has actually deadlocked, and the code is
+probably fine -- but the reason we believed it was fine was wrong, and the
+choice is whether to pay to find out properly.
+
+**Glossary, because none of this is guessable.** A *lock* stops two pieces
+of code touching the same data at once. A *deadlock* is two pieces of code
+each holding what the other needs, so both stop forever -- the classic cause
+is taking two locks in opposite orders. *lockdep* is the built-in detector
+that watches lock orders and complains about a possible deadlock even when
+one has not happened yet. A *leaf* lock is one that never takes another lock
+while held; leaf locks cannot participate in an ordering deadlock, which is
+why skipping the detector for them is sound.
+
+**Where it bites.** `design-decisions.md` §70 split the kernel's locks in
+two: `PreemptSpinMutex` (cheap, no detector, 489 uses, for "hot leaf
+locks") and `crate::sync::Mutex` (detector + statistics). The §70 text says
+ordering checks "add no value" for the cheap type *because* nothing nests
+inside it. §949's new check measured 1256 nested acquisitions per boot
+across ≥24 site pairs, including cross-module ones
+(`ipc/completion` -> `proc/thread`, `fs/cgroupfs` -> `cgroup`).
+
+One real instance was already fixed today: `INOTIFY_TABLE` documented its
+own lock order in prose *and* used the untracked type, so the order it
+documented could not be enforced. It is now the tracked type and lockdep
+confirms the order holds.
+
+| option | *What changes:* |
+|---|---|
+| **(a) Convert the non-leaf ones** (recommended) | the detector watches the orderings behind 89 distinct site pairs (measured 2026-09-17; the "12-15" here previously was extrapolated from a saturated cap); a real inversion becomes a loud boot failure instead of a hang. Costs per-acquire tracking on those paths. |
+| (b) Restate §70 honestly, accept the risk | nothing changes at runtime; §70 stops claiming a reason that is false and says the type is chosen for cost with ordering unchecked. The 1256 stay unwatched. |
+| (c) Convert only the cross-module pairs | the five cross-module orderings get watched; the same-module init-guard idiom (the bulk) stays as it is. |
+
+**My recommendation: (a), scoped by measurement rather than all at once.**
+
+**Measured after this question was filed, so the cost is no longer a
+guess.** There was no `PreemptSpinMutex` arm in `bench_lock_primitives`
+until 2026-09-17; there is now, and five boots agree:
+
+| | bare `spin::Mutex` | `PreemptSpinMutex` | `crate::sync::Mutex` |
+|---|---|---|---|
+| typical | 26ns | **160ns** | **395ns** |
+
+So converting one of these locks costs roughly **235ns per acquire**, and
+that 235ns is identifiable work -- lockdep, contention statistics, and two
+`rdtsc` reads -- rather than a general penalty for touching the acquire
+path. Which means the decision is per-lock and answerable: a lock taken
+once per boot costs nothing worth discussing, and one on a syscall path
+might.
+
+Two caveats on those numbers. They are QEMU TCG figures, so the *ratios*
+transfer and the nanoseconds do not. And one of the five boots reads
+28/268/719 -- uniformly higher across all three arms, so it is a slow boot
+rather than a slow lock, and is excluded rather than averaged in.
+
+A related measurement, because it bears on whether instrumenting these
+locks is inherently costly: the §949 leaf check adds three atomic
+operations to that same acquire path, and its cost is **below the noise
+floor** -- 166ns without it against 159/162/159 with it, the instrumented
+runs being the faster ones. So the 235ns is not "what it costs to touch
+this path"; it is what lockdep and statistics specifically cost.
+
+So: convert, read the arm, and revert any conversion that costs more than
+it is worth. The arm now exists to read.
+
+**If never answered:** the current behaviour is safe as far as anyone can
+tell and has been for months, so nothing breaks tomorrow. What degrades is
+that every new nesting added inside one of these 489 locks is equally
+unwatched, and the check now reports 24 of them at its cap on every boot --
+so the noise grows and the signal for a genuinely new one gets harder to
+see.
+
+
+## A-Q17 — [A] Moving or scaling a video/cursor layer silently does nothing. Should the kernel refuse the request, or start honouring it? — Status: OPEN
+
+**In short:** the display hardware can draw a picture as a layer and place
+or stretch it anywhere on screen -- that is how a video overlay or a mouse
+cursor gets positioned without redrawing everything. A program asks for a
+rectangle, the kernel stores the numbers, replies success, and never uses
+them. So moving or resizing that layer does nothing at all, and the program
+is told it worked.
+
+**Glossary.** A *plane* is one such hardware layer. *Atomic modeset* is the
+interface a display program uses to change several display settings at once,
+so they either all take effect together or none do -- it is the modern way
+Linux programs talk to a graphics driver. *Scanout* is the hardware
+continuously reading a framebuffer to send pixels to the monitor.
+
+**The measurement.** `drm/plane.rs` declares `src_x/y/w/h` (the region of
+the picture to take) and `dst_x/y/w/h` (where to put it on screen). Every
+occurrence of `dst_w` in the whole kernel is the declaration or one of five
+writes; there are **zero reads**. One of those writes is
+`drm/atomic.rs:423`, the atomic commit handler storing what a client asked
+for. Nothing in the scanout path consults any of it.
+
+| option | *What changes:* |
+|---|---|
+| **(a) Refuse a commit that sets a non-default rectangle** (recommended) | a program that tries to move a layer gets a clear error instead of false success. Programs that only ever use the full-screen default are unaffected. |
+| (b) Honour the rectangle in the scanout path | layers can actually be placed and scaled -- the feature works. This is real driver work, per backend, and needs hardware to verify. |
+| (c) Leave it, and document it | nothing changes; `/proc` and the API keep reporting success for a no-op. |
+
+**Why this needs you and not me.** (a) is a user-visible behaviour change to
+an API that Linux programs use by construction. Anything currently setting a
+rectangle gets success today and an error afterwards -- and "currently
+works" is doing a lot of work in that sentence, because what it means is
+"currently appears to work while doing nothing". That is a trade between two
+kinds of wrong, and which one is worse depends on what you want the OS to
+be honest about.
+
+**My recommendation is (a)**, on design-decisions 945: a simulated action
+should be disclosed where its result is read, and an API return value is
+where this one is read. There is no `/proc` header to put a note in, so the
+only honest disclosure available is the error. (b) is the right end state
+and is not blocked by (a) -- refusing now does not make honouring it later
+harder.
+
+**If never answered:** nothing breaks today, because nothing in the tree
+sets a plane rectangle. It gets worse with time in a specific way: the first
+real compositor to try it will spend a while looking for a bug in its own
+code, since every call it makes returns success.
+
+
+## A-Q18 — [A] Three lanes all append to the end of `known-issues.md` and it conflicted eleven times today. Should it get a per-lane seam like the other shared documents? — Status: OPEN
+
+**In short:** the three agents keep one shared file of known bugs. All three
+add new entries to the bottom, so any two that write between merges collide
+at the same spot. Today that happened eleven times. Every collision is
+trivial to fix -- keep both entries -- but each one stops a build pipeline
+that has to be started again from the beginning.
+
+**The other two shared documents already solve this, differently each.**
+
+| document | seam | conflicts today |
+|---|---|---|
+| `design-decisions.md` | per-lane numbering bands; 426 numbered sections, each lane inserting in its own range | 0 |
+| `open-questions.md` | per-lane question ids (`A-Q`/`B-Q`/`C-Q`); 31 open entries | 0 |
+| `known-issues.md` | none -- everyone appends at EOF | **11** |
+
+`roadmap.md` rule 3 says the per-lane conventions exist to make the merge
+clean, and for the two documents that have one it works: `design-decisions.md`
+auto-merged across a 72-commit divergence with zero conflicts. This file
+never got the same treatment.
+
+**Why it costs more than the fix suggests.** The resolution is mechanical --
+both sides are additive -- but it is not *always* mechanical, and that is the
+part worth knowing before choosing. Three times today the winning order
+mattered, because one side was an amendment (`### MOSTLY FIXED ... and the
+mechanism above was wrong`, `### TRIAGE ...`, my own `### Correction ...`)
+whose meaning depends on sitting directly under the entry it amends. A
+marker-deletion resolution silently re-parents such an amendment onto
+whatever the other lane appended. Twice it was lane C's amendment at risk and
+once it was mine.
+
+| option | *What changes:* |
+|---|---|
+| **(a) Per-lane append sections** (recommended) | each lane appends inside its own `## Lane A / B / C` section, so two lanes writing between merges no longer touch the same lines. New entries land in a different place than today. |
+| (b) Per-lane files, indexed | `known-issues-a.md` etc. with the existing index across them. No shared seam at all, but a reader needs three files, and cross-lane entries (of which there are many) need a home. |
+| (c) Leave it | nothing changes; the collisions stay mechanical and frequent, and the amendment-ordering hazard stays live. |
+
+**My recommendation is (a)**, because it matches what already works twice in
+this tree and needs no new tooling -- `check-known-issues-index` already
+walks the headings and would keep working. (b) is cleaner in principle and
+worse in practice: today's most useful entries are the cross-lane ones, where
+lane C's finding and mine turned out to be the same shape, and splitting the
+file makes that harder to notice.
+
+**Why it is yours and not mine.** It changes the layout of a document all
+three lanes write, so one lane reorganising it unilaterally is exactly the
+shared-word redefinition design-decisions 951 is about. It also wants a halt
+to do safely -- moving existing entries into sections while two other agents
+are appending would conflict with everything at once.
+
+**If never answered:** nothing breaks. The cost is steady rather than
+growing: roughly one chain restart per collision, plus the standing risk that
+an amendment gets re-parented by a resolution that looks correct because no
+conflict markers remain. I now assert adjacency (`parent < amendment <
+other`) rather than marker-absence, which covers my own resolutions and not
+anyone else's.
 
 
 
@@ -2769,6 +3305,27 @@ answered question left in the body is pure cost — and, being older, it sorts
   with AES-256-XTS, a mode not interchangeable with an authenticated-message
   cipher. The entry's unglossed jargon, which the operator called out, is
   glossed in §819.
+
+- C-Q27 — `CLAUDE.md`'s lane row gave lane C a `pkg/**` that has never existed
+  (the package manager is `userspace/pkg/`, lane B's). **Moot 2026-09-22**: the
+  operator had `CLAUDE.md`'s lane section rewritten for six lanes, and the new
+  table — generated from `scripts/which-lane.py`'s, which was already right —
+  names no `pkg/`. No decision was needed, so there is no design-decisions
+  entry beyond the mention in §1100.
+
+## Resolved — lane D
+
+*(None yet. Lane D was created on 2026-09-22; its first question will be
+**D-Q3**, because D-Q1 and D-Q2 are the old names of `deferred-questions.md`'s
+DQ1 and DQ2 and are never reissued.)*
+
+## Resolved — lane E
+
+*(None yet. Lane E was created on 2026-09-22.)*
+
+## Resolved — lane F
+
+*(None yet. Lane F was created on 2026-09-22.)*
 
 ## Resolved — pre-split (unprefixed `Q<n>`, single-agent era)
 

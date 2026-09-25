@@ -34,6 +34,7 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
+use guitk::filetypes::FileCategory;
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -766,26 +767,36 @@ fn color_for_node(node: &FileNode, pal: &Palette) -> Color {
     color_for_extension(&ext, pal)
 }
 
-/// Map a file extension to a Catppuccin Mocha color.
+/// Map a file extension to a colour, through the toolkit's one table.
+///
+/// The colours are this program's policy -- "video is blue" is a choice about
+/// a treemap, not a fact about files -- but *which files are video* is not,
+/// and it used to be a second list of 59 extensions maintained here. It had
+/// already drifted: the list knew `.tiff` and `.zst` and not `.mpg`, `.m4v` or
+/// `.psd`, so a disk full of MPEG video drew in the fallback grey.
+///
+/// See known-issues `TD-C-FOUR-PLACES-DECIDE-WHAT-KIND-OF-FILE-SOMETHING-IS`.
 fn color_for_extension(ext: &str, pal: &Palette) -> Color {
-    match ext {
-        // Video
-        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" => pal.blue,
-        // Images
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "svg" | "webp" | "tiff" => pal.green,
-        // Documents
-        "pdf" | "doc" | "docx" | "odt" | "txt" | "rtf" | "xls" | "xlsx" => pal.yellow,
-        // Code
-        "rs" | "py" | "js" | "ts" | "c" | "cpp" | "h" | "java" | "go" | "rb" | "toml" | "json"
-        | "yaml" | "xml" | "html" | "css" => pal.peach,
-        // Archives
-        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" => pal.red,
-        // Audio
-        "mp3" | "flac" | "wav" | "ogg" | "aac" | "wma" => pal.mauve,
-        // Executables / binaries
-        "exe" | "dll" | "so" | "dylib" | "bin" | "elf" => pal.teal,
-        // Fallback
-        _ => pal.surface0,
+    // Four the toolkit deliberately does not classify, kept here so the
+    // treemap does not lose colours it has today. `exe`, `dll` and `dylib` are
+    // foreign executables this system cannot run, and `bin` is any binary blob
+    // at all; `gui/toolkit`'s `foreign_executables_are_absent_on_purpose`
+    // records that leaving them out of the table is a decision rather than an
+    // omission. If that decision is ever made, this list goes with it.
+    if matches!(ext, "exe" | "dll" | "dylib" | "bin") {
+        return pal.teal;
+    }
+    match guitk::filetypes::category_from_extension(ext) {
+        FileCategory::Video => pal.blue,
+        FileCategory::Image => pal.green,
+        FileCategory::Document | FileCategory::Spreadsheet | FileCategory::Presentation => {
+            pal.yellow
+        }
+        FileCategory::Code | FileCategory::Config => pal.peach,
+        FileCategory::Archive | FileCategory::Package | FileCategory::DiskImage => pal.red,
+        FileCategory::Audio => pal.mauve,
+        FileCategory::Executable | FileCategory::Library | FileCategory::System => pal.teal,
+        FileCategory::Data | FileCategory::Unknown => pal.surface0,
     }
 }
 
@@ -1136,6 +1147,23 @@ pub type Frame = guitk::frame::Frame<Target>;
 // UI state
 // ============================================================================
 
+/// The keys this window answers, as a reader sees them.
+///
+/// None of them were named. `F5` starts a scan of the whole tree, which is
+/// the slowest thing this program does, and `Ctrl+L` is the only way to type
+/// a path -- the two worth knowing before pressing anything.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Move through the entries"),
+    ("PageUp / PageDown", "Move a screenful"),
+    ("Home", "Back to the top"),
+    ("Tab", "Next view: treemap, list, largest, extensions"),
+    ("Backspace", "Up one folder"),
+    ("Ctrl+L", "Type a path"),
+    ("F5", "Scan again"),
+    ("Esc", "Stop the scan"),
+];
+
 /// Complete UI state for the disk analyzer.
 pub struct DiskAnalyzerUI {
     /// Active view mode.
@@ -1193,6 +1221,8 @@ pub struct DiskAnalyzerUI {
     /// Text in the path input field.
     pub path_input: String,
     /// Whether the path field has the keyboard.
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub path_focused: bool,
     /// Index of the first list-view row to draw.
     ///
@@ -1267,6 +1297,7 @@ impl DiskAnalyzerUI {
             complete: true,
             scan_error: None,
             path_input,
+            show_help: false,
             path_focused: false,
             scroll_offset: 0,
             list_rows: Vec::new(),
@@ -1587,6 +1618,17 @@ impl DiskAnalyzerUI {
 
         self.render_status_bar(&mut frame, (w, h));
         self.render_tooltip(&mut frame, (w, h));
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (w, h),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         frame
     }
@@ -2421,6 +2463,20 @@ impl DiskAnalyzerUI {
             // so every keystroke would count twice.
             return Action::None;
         }
+        // Above the path box, which takes every character and returns.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return Action::Redraw;
+        }
+        if self.show_help {
+            // Modal. F5 rescans the tree and Esc cancels a running scan;
+            // neither should happen from behind a list.
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return Action::Redraw;
+        }
+
         if self.path_focused {
             return self.handle_path_key(key, size);
         }
@@ -3653,6 +3709,43 @@ mod tests {
 
     // -- Color helpers ---------------------------------------------------------
 
+    /// Formats the old hand-written list had drifted away from now colour.
+    ///
+    /// The whole reason for reading the toolkit's table instead of keeping a
+    /// second list here. Every one of these drew in the fallback grey before
+    /// 2026-09-16: a disk full of MPEG video looked like a disk full of
+    /// nothing in particular.
+    #[test]
+    fn formats_the_old_list_had_missed_now_colour() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        for ext in ["mpg", "mpeg", "m4v", "vob"] {
+            assert_eq!(
+                color_for_extension(ext, &pal),
+                pal.blue,
+                ".{ext} is video and did not draw as video"
+            );
+        }
+        assert_eq!(color_for_extension("psd", &pal), pal.green);
+        assert_eq!(color_for_extension("cab", &pal), pal.red);
+        assert_eq!(color_for_extension("so", &pal), pal.teal);
+    }
+
+    /// The four the toolkit will not classify keep their colour here.
+    ///
+    /// They are held out of the table on purpose, so deriving from it would
+    /// have quietly taken a colour away from every Windows binary on the disk.
+    #[test]
+    fn the_formats_the_toolkit_refuses_are_still_coloured() {
+        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
+        for ext in ["exe", "dll", "dylib", "bin"] {
+            assert_eq!(
+                color_for_extension(ext, &pal),
+                pal.teal,
+                ".{ext} lost its colour when the list moved to the toolkit"
+            );
+        }
+    }
+
     #[test]
     fn test_color_for_extension_videos() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
@@ -4059,6 +4152,93 @@ mod tests {
         let mut ui = DiskAnalyzerUI::new();
         ui.load_tree(sample_tree());
         ui
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Two states, because `Esc` cancels a running scan and correctly reports
+    /// nothing to do when none is running.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [0_u8, 1, 2].into_iter().any(|state| {
+                    let mut ui = loaded();
+                    if state == 1 {
+                        let root = ui.config.scan_path.clone();
+                        ui.start_scan(root);
+                    }
+                    if state == 2 {
+                        // Inside a folder, which is the only place Backspace
+                        // has a level to go up from -- at the root it
+                        // correctly reports nothing to do. Fifth key in this
+                        // queue that is answered only when it has somewhere
+                        // to go.
+                        let child = ui
+                            .current_node()
+                            .and_then(|node| {
+                                node.children
+                                    .iter()
+                                    .find(|c| c.is_dir())
+                                    .map(|c| c.name.clone())
+                            })
+                            .unwrap_or_default();
+                        ui.drill_down(&child, <DiskAnalyzerUI as Probe>::SIZE);
+                    }
+                    ui.handle_key(&stroke, <DiskAnalyzerUI as Probe>::SIZE) != Action::None
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing rescans behind it.**
+    ///
+    /// The control is the last third: Tab behind the card must not change the
+    /// view, and must change it with the card down. Not F5 -- a scan started
+    /// by a leak would run for as long as the tree is deep, and a control
+    /// should fail an assertion rather than start work.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let size = <DiskAnalyzerUI as Probe>::SIZE;
+        let drawn = |ui: &DiskAnalyzerUI| -> Vec<String> {
+            ui.frame(size.0, size.1)
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut ui = loaded();
+        assert!(
+            !drawn(&ui).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        ui.handle_key(&press(Key::F1), size);
+        let missing = guitk::shortcut::missing_rows(&drawn(&ui), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let view = ui.view_mode;
+        ui.handle_key(&press(Key::Tab), size);
+        assert_eq!(
+            ui.view_mode, view,
+            "Tab changed the view through the shortcut card"
+        );
+
+        ui.handle_key(&press(Key::F1), size);
+        ui.handle_key(&press(Key::Tab), size);
+        assert_ne!(
+            ui.view_mode, view,
+            "control: Tab does nothing even with the card down"
+        );
     }
 
     #[test]

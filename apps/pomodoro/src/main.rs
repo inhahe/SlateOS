@@ -482,9 +482,35 @@ impl Screen {
 
 // ── Application State ──────────────────────────────────────────────────────
 
+/// The keys this program answers, raised by `F1` or `?`.
+///
+/// `?` is free on every screen but one: naming a task takes typed text, and
+/// that screen takes every printable key including `?`. The card is answered
+/// above the task input for that reason, so `F1` still works while typing.
+///
+/// Four rows name the screen they belong to. The log's scrolling keys mean
+/// nothing on the timer, and the settings arrows mean nothing on the log.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("1-4", "Timer, stats, log, settings"),
+    ("Space", "Start or pause"),
+    ("R", "Reset the timer"),
+    ("S", "Skip this interval"),
+    ("T", "Name what you are working on"),
+    ("A", "Sound on or off"),
+    ("N", "Notifications on or off"),
+    ("Up / Down", "Scroll the log, or pick a setting"),
+    ("PageUp / PageDown", "A screenful of log"),
+    ("Home / End", "Top / bottom of the log"),
+    ("Left / Right", "Change the chosen setting"),
+    ("Esc", "Done naming the task"),
+    ("F1 / ?", "This list"),
+];
+
 pub struct PomodoroApp {
     /// The user's colours, handed over by the framework (§822).
     pub palette: Palette,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     // Timer core
     pub phase: Phase,
     pub state: TimerState,
@@ -545,6 +571,7 @@ impl PomodoroApp {
         let settings = Settings::default();
         let remaining = settings.duration_secs(Phase::Work);
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             phase: Phase::Work,
             state: TimerState::Idle,
@@ -962,6 +989,22 @@ impl PomodoroApp {
     // ── Keyboard ───────────────────────────────────────────────────────
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Above everything, including the task-naming screen below, which
+        // takes every printable key: `F1` is not printable, and a reader
+        // half-way through a task name still wants the keys.
+        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal. Letting keys through would mean skipping an interval the
+            // reader cannot see.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         if self.task_input_active {
             return self.handle_task_key(key);
         }
@@ -1264,6 +1307,16 @@ impl PomodoroApp {
             self.draw_notification(&mut frame, rect, text);
         }
 
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
         frame
     }
 
@@ -2002,6 +2055,99 @@ mod tests {
 
     fn press(app: &mut PomodoroApp, key: Key) -> EventResult {
         probe::key(app, &probe::press(key))
+    }
+
+    /// Every string the window draws, joined.
+    fn card_text(app: &PomodoroApp) -> String {
+        app.frame(DEFAULT_WIDTH, DEFAULT_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// Three screens, because most of these keys belong to one: the log's
+    /// scrolling keys mean nothing on the timer and the settings arrows mean
+    /// nothing on the log. Each refusal elsewhere is correct, which is why the
+    /// list names the screen.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                // The fourth state names the task, because `Esc` and
+                // `Enter` end that input and mean nothing outside it -- a
+                // correct refusal, and the only one of these keys that needs a
+                // state rather than a screen.
+                let answered = [
+                    (Screen::Timer, false),
+                    (Screen::Log, false),
+                    (Screen::Settings, false),
+                    (Screen::Timer, true),
+                ]
+                .into_iter()
+                .any(|(screen, naming)| {
+                    let mut app = sample();
+                    app.screen = screen;
+                    if naming {
+                        press(&mut app, Key::T);
+                    }
+                    probe::key(&mut app, &stroke) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and no screen answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the half that matters: `Space` behind the card must not
+    /// start the timer, and asserting only that it does not would pass on an
+    /// app that had lost `Space` altogether.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = sample();
+        assert!(
+            !card_text(&app).contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        press(&mut app, Key::F1);
+        let shown = card_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        // `state`, read from what Target::StartPause assigns, not a field
+        // named after the key.
+        let state = app.state;
+        press(&mut app, Key::Space);
+        assert_eq!(
+            app.state, state,
+            "Space started the timer through the shortcut card"
+        );
+
+        press(&mut app, Key::Escape);
+        assert!(
+            !card_text(&app).contains("F1 or ? closes this"),
+            "Escape did not close it"
+        );
+
+        press(&mut app, Key::Space);
+        assert_ne!(
+            app.state, state,
+            "control: Space does nothing even with the card down"
+        );
     }
 
     fn typing(app: &mut PomodoroApp, text: &str) {

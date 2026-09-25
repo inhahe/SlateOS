@@ -1,6 +1,11 @@
 //! File Vault — encrypted folder management.
 //!
-//! Provides per-folder encryption with password-based key derivation,
+//! **Records vault configuration; encrypts nothing yet.** This file
+//! contains no cryptographic call of any kind, and has no caller outside
+//! `/proc`, `kshell` and its own self-test. A folder marked as a vault is
+//! stored in plaintext.
+//!
+//! Intended: per-folder encryption with password-based key derivation,
 //! auto-lock on timeout, and secure file access through vault mounts.
 //!
 //! ## Architecture

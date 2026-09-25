@@ -3153,9 +3153,118 @@ impl Probe for TerminalState {
 // Main entry point
 // ============================================================================
 
+/// Start a shell and bridge its pipes to the slave end of `pty`.
+///
+/// The emulator already knows how to receive: [`TerminalState::drain_child`]
+/// reads the master, feeds the parser, and announces the exit once. What was
+/// missing was anything writing into the slave. This is that, and nothing
+/// more -- two threads that copy bytes, so the seam the tests exercise is
+/// untouched.
+///
+/// Threads rather than polling because `std` offers no portable non-blocking
+/// read of a child's stdout; a read has to block somewhere, and a thread is
+/// the only place it can block without stopping the frame.
+///
+/// Returns the error text on failure rather than logging it, because the
+/// caller puts it on screen: a terminal that silently fails to start a shell
+/// is the defect this whole change is about, and swapping "no shell" for a
+/// blank window would not be an improvement.
+fn start_shell(pty: &pty::PtyPair, program: &std::path::Path) -> Result<(), String> {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(program)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{}: {e}", program.display()))?;
+
+    let mut stdin = child.stdin.take().ok_or("the shell has no stdin")?;
+    let mut stdout = child.stdout.take().ok_or("the shell has no stdout")?;
+
+    // Child output -> the slave end, which the emulator drains each tick.
+    let to_screen = pty.slave.clone_handle();
+    std::thread::spawn(move || {
+        let mut buf = [0_u8; 4096];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if to_screen.write(buf.get(..n).unwrap_or(&[])).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        // The emulator says so once, and only if it is told.
+        to_screen.close();
+    });
+
+    // Keystrokes -> the child. The slave's read side is what the line
+    // discipline delivers a completed line to, so this is the same path a
+    // cooked-mode line already took; it now has somewhere to go.
+    let from_keyboard = pty.slave.clone_handle();
+    std::thread::spawn(move || {
+        let mut buf = [0_u8; 1024];
+        loop {
+            match from_keyboard.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if stdin.write_all(buf.get(..n).unwrap_or(&[])).is_err() {
+                        break;
+                    }
+                    if stdin.flush().is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
+/// The shell to run, from `$SHELL` or the conventional path.
+///
+/// Read rather than hard-coded because the answer differs between this
+/// program's two homes -- a development host and Slate OS -- and neither is
+/// wrong. A missing or unstartable shell is reported on screen rather than
+/// swallowed.
+fn shell_path() -> std::path::PathBuf {
+    std::env::var_os("SHELL").map_or_else(
+        || std::path::PathBuf::from("/bin/sh"),
+        std::path::PathBuf::from,
+    )
+}
+
 fn main() -> ExitCode {
     let mut terminal = TerminalState::new(TerminalConfig::default());
-    terminal.feed(b"\x1b[1;32mWelcome to Slate OS Terminal\x1b[0m\r\n$ ");
+
+    // Three outcomes, three different things to say. The greeting used to end
+    // in a `$ ` prompt unconditionally -- **a prompt is a claim that a shell
+    // is waiting for a command**, and until this change nothing in the crate
+    // started one. Now one is started, and the window only stays silent in
+    // the case where that worked and the shell will do its own greeting.
+    let program = shell_path();
+    match terminal.pty.as_ref() {
+        None => terminal.feed(
+            b"\x1b[33mNo terminal device.\x1b[0m This program could not open a \
+pty, so nothing can be connected to it.\r\n",
+        ),
+        Some(pair) => match start_shell(pair, &program) {
+            Ok(()) => {}
+            Err(why) => {
+                let msg = format!(
+                    "\x1b[33mNo shell.\x1b[0m {why}\r\nWhat you type is echoed \
+and then goes nowhere. Silence after Enter is not a command that produced no \
+output.\r\n"
+                );
+                terminal.feed(msg.as_bytes());
+            }
+        },
+    }
+
     app::launch("terminal", &mut terminal)
 }
 

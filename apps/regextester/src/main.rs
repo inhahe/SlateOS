@@ -139,6 +139,13 @@ enum AnchorKind {
 struct CompiledRegex {
     nodes: Vec<RegexNode>,
     group_count: usize,
+    /// Whether `^` and `$` also match at line boundaries.
+    ///
+    /// This was a field on the *app* that the engine never read: the window
+    /// drew an `m` button, coloured it by the flag, and the matcher's anchor
+    /// arm was `pos == 0` and `pos == len` regardless. A toggle for a flag
+    /// with no effect is worse than no toggle, because the button is a claim.
+    multiline: bool,
 }
 
 /// A match result with position and captured groups
@@ -181,6 +188,7 @@ struct RegexCompiler {
     nodes: Vec<RegexNode>,
     group_count: usize,
     case_insensitive: bool,
+    multiline: bool,
 }
 
 impl RegexCompiler {
@@ -191,7 +199,19 @@ impl RegexCompiler {
             nodes: Vec::new(),
             group_count: 0,
             case_insensitive,
+            multiline: false,
         }
+    }
+
+    /// Compile with `^` and `$` matching at every line boundary.
+    ///
+    /// A setter rather than a third argument to `new`, because `new` has 47
+    /// call sites and every one of them is a test that does not care about
+    /// this flag. Widening the signature would have edited 47 lines to say
+    /// `false`.
+    fn multiline(mut self, on: bool) -> Self {
+        self.multiline = on;
+        self
     }
 
     fn compile(mut self) -> Result<CompiledRegex, RegexError> {
@@ -200,6 +220,7 @@ impl RegexCompiler {
         Ok(CompiledRegex {
             nodes: self.nodes,
             group_count: self.group_count,
+            multiline: self.multiline,
         })
     }
 
@@ -855,7 +876,7 @@ fn execute_regex(compiled: &CompiledRegex, input: &str, start_pos: usize) -> Opt
 
         // Epsilon-closure at the current position (resolves splits, jumps,
         // group markers and anchors before we attempt to consume a character).
-        add_epsilon_threads(&mut threads, nodes, &chars, i, len);
+        add_epsilon_threads(&mut threads, nodes, &chars, i, len, compiled.multiline);
 
         let current_char = chars.get(i).copied();
         let mut new_threads: Vec<Thread> = Vec::new();
@@ -953,6 +974,7 @@ fn add_epsilon_threads(
     chars: &[char],
     pos: usize,
     len: usize,
+    multiline: bool,
 ) {
     let mut i = 0;
     let mut seen: Vec<bool> = vec![false; nodes.len()];
@@ -998,9 +1020,18 @@ fn add_epsilon_threads(
                 continue;
             }
             RegexNode::Anchor(kind) => {
+                // In multiline mode a line boundary is a start and an end, so
+                // `^` matches after every newline and `$` before every one.
+                // `chars.get` rather than indexing: `pos` runs to `len`
+                // inclusive, so `pos` is a valid index only when it is not the
+                // end, and the end is exactly where `$` matches anyway.
                 let matches = match kind {
-                    AnchorKind::Start => pos == 0,
-                    AnchorKind::End => pos == len,
+                    AnchorKind::Start => {
+                        pos == 0
+                            || (multiline
+                                && pos.checked_sub(1).and_then(|p| chars.get(p)) == Some(&'\n'))
+                    }
+                    AnchorKind::End => pos == len || (multiline && chars.get(pos) == Some(&'\n')),
                 };
                 if matches {
                     threads[i].pc = pc.saturating_add(1);
@@ -1460,6 +1491,59 @@ impl Default for RegexFlags {
     }
 }
 
+/// Every key this program answers, and what it does.
+///
+/// There is no `?` here and there cannot be: every printable character is
+/// typed into whichever field has focus, which is what makes this a tester
+/// rather than a viewer. So the list is raised by `F1`, as in
+/// `apps/spreadsheet` and `apps/hexeditor` for the same reason.
+///
+/// The three flag rows carry the tooltip strings the toolbar draws its buttons
+/// from. Those strings used to end at `let _ = tooltip; // used for hover
+/// tooltip` -- a comment describing what the value was *for*, above a line
+/// that threw it away, and there is no hover tooltip anywhere in the crate.
+/// They have a reader now.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`.
+/// The chips along the top of the Library tab, in the order they are drawn
+/// and the order `Ctrl+L` steps through them.
+///
+/// One list, not two. The renderer had this array inline and the key that
+/// steps it did not exist; adding the key with its own copy of the order is
+/// how the two drift apart, which is the defect this crate has now produced
+/// four times in four readings.
+const LIBRARY_FILTERS: [Option<PatternCategory>; 8] = [
+    None,
+    Some(PatternCategory::Validation),
+    Some(PatternCategory::Extraction),
+    Some(PatternCategory::Format),
+    Some(PatternCategory::Network),
+    Some(PatternCategory::DateTime),
+    Some(PatternCategory::Programming),
+    Some(PatternCategory::Custom),
+];
+
+const SHORTCUTS: &[(&str, &str)] = &[
+    (
+        "Ctrl+1 / Ctrl+2 / Ctrl+3",
+        "The tester / the library / the reference",
+    ),
+    (
+        "Tab",
+        "Move between the pattern, the text and the replacement",
+    ),
+    ("Up / Down", "Previous / next match"),
+    ("Backspace", "Delete a character from the focused field"),
+    ("Ctrl+I", "Case insensitive"),
+    ("Ctrl+G", "Global"),
+    ("Ctrl+R", "Show or hide the replacement box"),
+    ("Ctrl+L", "Next category, in the library"),
+    ("Ctrl+Shift+G", "Show or hide the capture groups"),
+    ("Ctrl+M", "Multiline"),
+    ("F1", "This list"),
+];
+
 struct App {
     /// The window size as the compositor granted it.
     ///
@@ -1477,6 +1561,8 @@ struct App {
     input_text: String,
     replace_text: String,
     flags: RegexFlags,
+    /// Whether the shortcut list is up.
+    show_help: bool,
     active_tab: ActiveTab,
     active_field: ActiveField,
 
@@ -1515,6 +1601,7 @@ impl App {
     fn new() -> Self {
         let library = built_in_patterns();
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
@@ -1552,7 +1639,8 @@ impl App {
         }
 
         // Compile
-        let compiler = RegexCompiler::new(&self.pattern, self.flags.case_insensitive);
+        let compiler = RegexCompiler::new(&self.pattern, self.flags.case_insensitive)
+            .multiline(self.flags.multiline);
         match compiler.compile() {
             Ok(regex) => {
                 self.compiled = Some(regex);
@@ -1804,13 +1892,19 @@ impl App {
 
         // Flags on the right
         let flags_x = self.window_width - 250.0;
+        // The names of these three live in `SHORTCUTS`, which is what the
+        // `F1` card draws and what the guard test presses. They used to be
+        // repeated here as a third element that ended at
+        // `let _ = tooltip; // used for hover tooltip` -- a comment saying what
+        // the value was *for*, above the line that threw it away, in a crate
+        // with no hover tooltip in it. One copy, with a reader.
         let flag_items = [
-            ("i", self.flags.case_insensitive, "Case insensitive"),
-            ("g", self.flags.global, "Global"),
-            ("m", self.flags.multiline, "Multiline"),
+            ("i", self.flags.case_insensitive),
+            ("g", self.flags.global),
+            ("m", self.flags.multiline),
         ];
 
-        for (fi, (label, active, tooltip)) in flag_items.iter().enumerate() {
+        for (fi, (label, active)) in flag_items.iter().enumerate() {
             let fx = flags_x + (fi as f32) * 40.0;
             cmds.push(RenderCommand::FillRect {
                 x: fx,
@@ -1838,7 +1932,6 @@ impl App {
                 max_width: Some(30.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            let _ = tooltip; // used for hover tooltip
         }
 
         // Match navigation on far right
@@ -2455,18 +2548,8 @@ impl App {
         let content_y = TOOLBAR_HEIGHT + PADDING;
 
         // Category filter bar
-        let categories = [
-            None,
-            Some(PatternCategory::Validation),
-            Some(PatternCategory::Extraction),
-            Some(PatternCategory::Format),
-            Some(PatternCategory::Network),
-            Some(PatternCategory::DateTime),
-            Some(PatternCategory::Programming),
-            Some(PatternCategory::Custom),
-        ];
         let mut cat_x = PADDING;
-        for cat in &categories {
+        for cat in &LIBRARY_FILTERS {
             let label = cat.map_or("All", PatternCategory::label);
             let w = text::width(label, SMALL_TEXT) + 16.0;
             let selected = self.library_category_filter == *cat;
@@ -2836,11 +2919,115 @@ impl App {
                 // Cycles focus rather than inserting a tab: a regex tester's
                 // three fields are the whole interface, and Tab is how every
                 // form on every desktop moves between them.
+                // Skips the replacement while its pane is hidden. Until
+                // `Ctrl+R` existed the pane was *never* drawn -- `show_replace`
+                // was `false` with no writer -- so this cycle put the caret in
+                // a field nobody could see, and the shortcut list said Tab
+                // moved between three fields when one of them was invisible.
                 self.active_field = match self.active_field {
                     ActiveField::Pattern => ActiveField::Input,
-                    ActiveField::Input => ActiveField::Replace,
-                    ActiveField::Replace => ActiveField::Pattern,
+                    ActiveField::Input if self.show_replace => ActiveField::Replace,
+                    ActiveField::Input | ActiveField::Replace => ActiveField::Pattern,
                 };
+                true
+            }
+            // The three flags the toolbar draws. Chords and not bare
+            // letters, because the catch-all below types every printable
+            // character into whichever field has focus -- an `i` belongs in
+            // somebody's pattern before it belongs to a setting. The letters
+            // match the labels on the buttons: i, g, m.
+            //
+            // Until this existed the buttons were drawn, coloured by their
+            // state, read by the matcher, and changeable only from a test.
+            // The list, before the chords and well before the catch-all
+            // that types. `F1` carries no modifier, so nothing below claims it.
+            GKey::F1 => {
+                self.show_help = !self.show_help;
+                true
+            }
+            GKey::Escape if self.show_help => {
+                self.show_help = false;
+                true
+            }
+            // The three tabs the window draws. `active_tab` was
+            // `ActiveTab::Tester` at construction, matched to choose the view,
+            // drawn to highlight the strip -- and written only by tests, so
+            // the Library and Reference tabs were rendered code no user could
+            // reach. A tab strip with one tab highlighted looks exactly like a
+            // tab strip, which is why nobody noticed.
+            //
+            // Chords, because every printable character is typed into
+            // whichever field has focus. Found by
+            // `scripts/frozen-flag-survey.py` once it learned about enums.
+            // The two panes this window can draw and could not be asked
+            // for. `show_replace` was `false` with no writer, so the
+            // replacement box was never drawn and `replace_in_active` never
+            // ran; `show_groups` was `true` with no writer, so the capture
+            // groups could not be put away. Found by
+            // `scripts/frozen-flag-survey.py` on its third pass over this
+            // crate, after the flag buttons and the tabs.
+            // The chips along the top of the Library tab.
+            // `library_category_filter` was `None` at construction, read to
+            // highlight the selected chip and again to filter the entries,
+            // and written nowhere -- so eight chips were drawn and none could
+            // be chosen. Found on the fourth pass over this crate, by reading
+            // the line under a row the survey had reported as a false
+            // positive.
+            GKey::L if key.modifiers.ctrl => {
+                let at = LIBRARY_FILTERS
+                    .iter()
+                    .position(|c| *c == self.library_category_filter)
+                    .unwrap_or(0);
+                // A comparison rather than a remainder: `%` can divide by
+                // zero and this crate denies arithmetic that can.
+                let next = at.saturating_add(1);
+                let wrapped = if next >= LIBRARY_FILTERS.len() {
+                    0
+                } else {
+                    next
+                };
+                self.library_category_filter = LIBRARY_FILTERS.get(wrapped).copied().flatten();
+                true
+            }
+            GKey::R if key.modifiers.ctrl => {
+                self.show_replace = !self.show_replace;
+                // Hiding the pane takes the caret with it, rather than
+                // leaving it typing into something off screen.
+                if !self.show_replace && self.active_field == ActiveField::Replace {
+                    self.active_field = ActiveField::Pattern;
+                }
+                self.update_regex();
+                true
+            }
+            GKey::G if key.modifiers.ctrl && key.modifiers.shift => {
+                self.show_groups = !self.show_groups;
+                true
+            }
+            GKey::Num1 if key.modifiers.ctrl => {
+                self.active_tab = ActiveTab::Tester;
+                true
+            }
+            GKey::Num2 if key.modifiers.ctrl => {
+                self.active_tab = ActiveTab::Library;
+                true
+            }
+            GKey::Num3 if key.modifiers.ctrl => {
+                self.active_tab = ActiveTab::Reference;
+                true
+            }
+            GKey::I if key.modifiers.ctrl => {
+                self.flags.case_insensitive = !self.flags.case_insensitive;
+                self.update_regex();
+                true
+            }
+            GKey::G if key.modifiers.ctrl => {
+                self.flags.global = !self.flags.global;
+                self.update_regex();
+                true
+            }
+            GKey::M if key.modifiers.ctrl => {
+                self.flags.multiline = !self.flags.multiline;
+                self.update_regex();
                 true
             }
             GKey::Down => {
@@ -2961,6 +3148,18 @@ impl oswindow::app::App for App {
         self.window_height = height;
         let mut tree = guitk::render::RenderTree::new();
         tree.commands = self.render_commands();
+
+        // Over everything, because it is the one thing a reader asked for.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
         tree
     }
 
@@ -3853,6 +4052,312 @@ mod tests {
         }))
     }
 
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table beside it here, which would be a third copy of the same fact.
+    ///
+    /// One app is enough here: every arm in this handler acts whatever the
+    /// state, and `handle_event` answers `true` when it did. That is worth
+    /// saying rather than leaving implied -- it is also what makes the check
+    /// weaker here than in apps that decline on purpose.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut app = App::new();
+                // Something to step through, so Up and Down have work.
+                app.pattern = String::from("a");
+                app.input_text = String::from("banana");
+                app.update_regex();
+                assert!(
+                    app.handle_event(&guitk::event::Event::Key(stroke.clone())),
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **All three tabs can be reached, and each draws something different.**
+    ///
+    /// `active_tab` was `ActiveTab::Tester` at construction, matched to choose
+    /// the view, drawn to highlight the strip -- and written only by tests. So
+    /// the Library and Reference tabs were rendered code no user could reach,
+    /// in a window that showed three tabs. A tab strip with one tab
+    /// highlighted looks exactly like a tab strip, which is why this survived
+    /// a careful reading of the same file two hours earlier.
+    ///
+    /// Asserts what each tab *draws*, not which variant the field holds: a
+    /// chord that sets the enum and a renderer that ignores it would pass the
+    /// weaker test, which is the defect `multiline` had in this very app.
+    #[test]
+    fn every_tab_can_be_reached_and_shows_its_own_content() {
+        let mut app = App::new();
+        let tester = drawn_help_text(&mut app);
+        assert!(
+            tester.contains("Tester"),
+            "the tab strip is not drawn at all"
+        );
+
+        assert!(ctrl(&mut app, guitk::event::Key::Num3), "Ctrl+3 unanswered");
+        let reference = drawn_help_text(&mut app);
+        assert!(
+            reference.contains("Syntax Reference"),
+            "Ctrl+3 did not bring up the reference tab"
+        );
+
+        assert!(ctrl(&mut app, guitk::event::Key::Num2), "Ctrl+2 unanswered");
+        let library = drawn_help_text(&mut app);
+        assert_ne!(
+            library, reference,
+            "the library and the reference draw the same thing"
+        );
+
+        assert!(ctrl(&mut app, guitk::event::Key::Num1), "Ctrl+1 unanswered");
+        assert_eq!(
+            drawn_help_text(&mut app),
+            tester,
+            "Ctrl+1 did not come back to the tester"
+        );
+    }
+
+    /// **The library's category chips can be chosen, and the list follows.**
+    ///
+    /// `library_category_filter` was `None` at construction, read to highlight
+    /// the selected chip and again to filter the entries, and written
+    /// nowhere -- eight chips drawn and none selectable. Fourth defect found
+    /// in this one crate.
+    ///
+    /// Asserts the *entries on screen*, not the field: a key that sets the
+    /// filter while the list ignores it would pass the weaker version, which
+    /// is this crate's own `multiline` defect from earlier today.
+    #[test]
+    fn the_library_categories_can_be_chosen_and_filter_the_list() {
+        let mut app = App::new();
+        assert!(ctrl(&mut app, guitk::event::Key::Num2), "Ctrl+2 unanswered");
+
+        let shown = |app: &mut App| -> usize {
+            drawn_help_text(app)
+                .split(" | ")
+                .filter(|t| !t.is_empty())
+                .count()
+        };
+        let all = shown(&mut app);
+        assert!(app.library_category_filter.is_none(), "starts unfiltered");
+
+        // Step to the first real category; fewer entries have to be drawn.
+        assert!(ctrl(&mut app, guitk::event::Key::L), "Ctrl+L unanswered");
+        assert_eq!(
+            app.library_category_filter,
+            Some(PatternCategory::Validation),
+            "Ctrl+L did not step to the first category"
+        );
+        assert!(
+            shown(&mut app) < all,
+            "filtering to one category drew as much as no filter did"
+        );
+
+        // ...and round the ring, back to no filter.
+        for _ in 0..(LIBRARY_FILTERS.len() - 1) {
+            ctrl(&mut app, guitk::event::Key::L);
+        }
+        assert!(
+            app.library_category_filter.is_none(),
+            "the cycle did not come back to All"
+        );
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/rssreader`'s overlay drew twenty of its
+    /// twenty-one rows for weeks.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = App::new();
+        assert!(
+            !drawn_help_text(&mut app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        assert!(press(&mut app, guitk::event::Key::F1, ""));
+        let shown = drawn_help_text(&mut app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(*keys), "{keys:?} never reached the window");
+            assert!(shown.contains(*what), "{what:?} never reached the window");
+        }
+
+        assert!(press(&mut app, guitk::event::Key::Escape, ""));
+        assert!(
+            !drawn_help_text(&mut app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn drawn_help_text(app: &mut App) -> String {
+        let (w, h) = (app.window_width, app.window_height);
+        oswindow::app::App::render(app, w, h)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// A key with Ctrl and Shift held.
+    fn ctrl_shift(app: &mut App, k: guitk::event::Key) -> bool {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = true;
+        modifiers.shift = true;
+        app.handle_event(&guitk::event::Event::Key(guitk::event::KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }))
+    }
+
+    /// **The replacement box can be shown, and Tab stops skipping it.**
+    ///
+    /// `show_replace` was `false` at construction with no writer, so the pane
+    /// was never drawn and `replace_in_active` never ran -- while `Tab` cycled
+    /// the caret *into* the field it holds, and the shortcut list said Tab
+    /// moved between three fields. One of the three was invisible.
+    #[test]
+    fn the_replacement_box_can_be_shown_and_tab_follows_it() {
+        let mut app = App::new();
+
+        // Hidden: Tab goes pattern -> input -> pattern, never resting in a
+        // field the window is not drawing.
+        assert!(!app.show_replace, "the pane starts hidden");
+        assert_eq!(app.active_field, ActiveField::Pattern);
+        press(&mut app, guitk::event::Key::Tab, "");
+        assert_eq!(app.active_field, ActiveField::Input);
+        press(&mut app, guitk::event::Key::Tab, "");
+        assert_eq!(
+            app.active_field,
+            ActiveField::Pattern,
+            "Tab rested in the replacement field while its pane was hidden"
+        );
+
+        // Shown: the third field joins the cycle.
+        assert!(ctrl(&mut app, guitk::event::Key::R), "Ctrl+R unanswered");
+        assert!(app.show_replace, "Ctrl+R did not show the pane");
+        press(&mut app, guitk::event::Key::Tab, "");
+        press(&mut app, guitk::event::Key::Tab, "");
+        assert_eq!(
+            app.active_field,
+            ActiveField::Replace,
+            "the replacement field is drawn and Tab still skips it"
+        );
+
+        // Hiding it again takes the caret out rather than leaving it typing
+        // into something off screen.
+        assert!(ctrl(&mut app, guitk::event::Key::R));
+        assert_eq!(app.active_field, ActiveField::Pattern);
+    }
+
+    /// **The capture groups can be put away, and the chord is not the flag.**
+    ///
+    /// `Ctrl+Shift+G` sits above `Ctrl+G`, which toggles the global flag. A
+    /// guard narrows only the arm it is on, so the wrong order would send this
+    /// chord to the flag -- and both answer `true`, so only the effect tells
+    /// them apart.
+    #[test]
+    fn the_capture_groups_can_be_hidden_without_touching_the_global_flag() {
+        let mut app = App::new();
+        let global = app.flags.global;
+        assert!(app.show_groups, "the groups start shown");
+
+        assert!(ctrl_shift(&mut app, guitk::event::Key::G), "unanswered");
+
+        assert!(!app.show_groups, "Ctrl+Shift+G did not hide the groups");
+        assert_eq!(
+            app.flags.global, global,
+            "Ctrl+Shift+G fell through to the global flag"
+        );
+    }
+
+    /// A key with Ctrl held.
+    fn ctrl(app: &mut App, k: guitk::event::Key) -> bool {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = true;
+        app.handle_event(&guitk::event::Event::Key(guitk::event::KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }))
+    }
+
+    /// **The three flags the toolbar draws can be changed.**
+    ///
+    /// They were drawn as buttons, coloured by their state, and read by the
+    /// matcher -- and the only assignment to any of them in the crate was
+    /// inside a test. The window offered three settings and answered none of
+    /// them. Found by `scripts/frozen-flag-survey.py`, which looks for exactly
+    /// this: a boolean the program reads and can never write.
+    #[test]
+    fn the_flag_buttons_can_be_toggled() {
+        let mut app = App::new();
+        for (key, read) in [
+            (guitk::event::Key::I, 0usize),
+            (guitk::event::Key::G, 1),
+            (guitk::event::Key::M, 2),
+        ] {
+            let before = [
+                app.flags.case_insensitive,
+                app.flags.global,
+                app.flags.multiline,
+            ][read];
+            assert!(ctrl(&mut app, key), "the chord was not answered");
+            let after = [
+                app.flags.case_insensitive,
+                app.flags.global,
+                app.flags.multiline,
+            ][read];
+            assert_ne!(before, after, "{key:?} did not change its flag");
+        }
+    }
+
+    /// **`m` changes what the pattern matches.**
+    ///
+    /// The flag existed, was drawn, and was read by nothing: the matcher's
+    /// anchor arm was `pos == 0` and `pos == len` whatever the flag said. A
+    /// toggle for a setting with no effect is worse than no toggle, because
+    /// the button is a claim -- so this asserts the *result*, not the field.
+    #[test]
+    fn multiline_makes_the_anchors_match_at_line_boundaries() {
+        // Built from a char code rather than written as an escape, so no
+        // heredoc or editor between here and the file can turn it into a real
+        // newline -- which has happened three times today.
+        let haystack = ["alpha", "beta", "gamma"].join(&String::from(char::from(10)));
+
+        let one_line = RegexCompiler::new("^beta$", false)
+            .compile()
+            .expect("a valid pattern");
+        assert!(
+            execute_regex(&one_line, &haystack, 0).is_none(),
+            "without the flag, ^ and $ are the ends of the whole text"
+        );
+
+        let many = RegexCompiler::new("^beta$", false)
+            .multiline(true)
+            .compile()
+            .expect("a valid pattern");
+        let found = execute_regex(&many, &haystack, 0).expect("the middle line");
+        assert_eq!(
+            haystack.get(found.start..found.end),
+            Some("beta"),
+            "the flag matched something other than the middle line"
+        );
+    }
+
     /// Typing goes to the focused field and recompiles as it goes.
     ///
     /// This app had no event handling until 2026-09-03: `main` built an `App`,
@@ -3871,17 +4376,36 @@ mod tests {
         assert!(app.compile_error.is_none());
     }
 
-    /// Tab cycles the three fields rather than inserting a tab character.
+    /// Tab cycles the fields on screen rather than inserting a tab
+    /// character.
+    ///
+    /// **This test used to assert the cycle reached `Replace` unconditionally,
+    /// and that was the defect written down as a requirement.** The
+    /// replacement pane is drawn only when `show_replace` is set, and
+    /// `show_replace` was `false` with no writer anywhere -- so the cycle this
+    /// test protected put the caret in a field the window never drew. The
+    /// pane can be opened now, and the cycle follows what is on screen.
     #[test]
-    fn tab_cycles_the_fields() {
+    fn tab_cycles_the_fields_that_are_on_screen() {
         let mut app = App::new();
         app.active_field = ActiveField::Pattern;
+        assert!(!app.show_replace, "the replacement pane starts hidden");
+
         press(&mut app, guitk::event::Key::Tab, "");
         assert_eq!(app.active_field, ActiveField::Input);
         press(&mut app, guitk::event::Key::Tab, "");
-        assert_eq!(app.active_field, ActiveField::Replace);
+        assert_eq!(
+            app.active_field,
+            ActiveField::Pattern,
+            "Tab rested in the replacement field while its pane was hidden"
+        );
+
+        // With the pane open the third field joins the cycle.
+        assert!(ctrl(&mut app, guitk::event::Key::R));
         press(&mut app, guitk::event::Key::Tab, "");
-        assert_eq!(app.active_field, ActiveField::Pattern);
+        press(&mut app, guitk::event::Key::Tab, "");
+        assert_eq!(app.active_field, ActiveField::Replace);
+
         assert!(
             app.pattern.is_empty(),
             "Tab typed a character into the field"

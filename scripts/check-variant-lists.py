@@ -32,21 +32,40 @@ whether or not it also reaches the array -- so it complements this check rather
 than replacing it. `ShellControlAction::all_really_is_every_action` is the
 worked example.
 
-Scope: only lists whose *name* claims totality (`ALL`, `ALL_*`, `EVERY_*`) are
-checked. That is not an invented convention -- it is the one the tree already
-follows. Every deliberate subset found when this was written says so in its
-name and in a doc comment giving the reason: `ShellControlAction::ZONELESS`
-(the zone actions are generated, and `SnapSlot::all` is their list),
-`Category::EXPENSE_CATS` (income and investment are not expenses),
-`PREVIEW_ACTIONS` (the three toolbar buttons, not the two other ways to make a
-`PreviewButton`), `SliderId::FIXED` (the per-app volumes are state, not a
-constant). Checking those against the variant count would report four
-non-problems, and a gate that cries wolf four times is a gate nobody reads. So
-the rule is: name it `ALL` and it is checked; name it anything else and the doc
-comment beside it is what says why it is short.
+Scope: **every** list whose element type resolves to an enum is checked, and a
+list that is deliberately short says so in `scripts/variant-lists-partial.txt`
+with a reason.
 
-Disagreement is reported *in either direction*, since a list longer than its
-enum means the pair has drifted just as surely.
+That is the second design. The first scoped the check by *name* -- `ALL`,
+`ALL_*`, `EVERY_*` -- on the reasoning that this was the convention the tree
+already followed, and that checking the rest would cry wolf over deliberate
+subsets like `ShellControlAction::ZONELESS` or `Category::EXPENSE_CATS`. The
+observation was true and the conclusion was wrong, for a reason worth keeping:
+**a population chosen by name inherits the vocabulary of whoever wrote the
+code, and it fails toward silence.** A list that ought to be total and happens
+to be called `FLEET`, `VIEW_MODES` or `DIFFICULTIES` gets no check at all, and
+nothing anywhere says so. Twenty-one such lists were found when the tool was
+first asked the question (`TD-C-TWENTY-ONE-LISTS-ARE-EXHAUSTIVE-BY-ACCIDENT`).
+
+Inverting the default swaps a silent failure for a loud one. Forgetting to
+opt in could not be noticed by anybody; forgetting to opt out is a failing gate
+that asks for the reason in writing. The "crying wolf" cost is real and is paid
+once per list, in a file where the reason stays readable next to the others.
+
+What is compared is **which variants are named, not how many**. Counting was
+the first design here too, and it has a hole: `[A, A, C]` over `enum { A, B, C }`
+has three entries and three variants, and is missing `B`. Comparing names also
+makes the check meaningful for an enum whose variants carry data, where the
+array is a different length from the variant count by construction --
+`apps/sudoku`'s `KEYPAD` lists `Target::Digit(1)` through `Digit(9)`, fourteen
+entries over ten variants, and no count could ever say anything useful about
+it.
+
+The name-based rule is still enforced in one direction: a list called `ALL` or
+`EVERY_*` may not appear in the exceptions file. A name claiming totality and a
+record saying totality is not required are a contradiction, and the tool
+refuses it rather than picking one. A subset named `ALL` is the same defect
+wearing the other hat.
 
 It is a heuristic, not a parser: it skips lists whose element type is not an
 enum it can find, and skips an enum name that resolves ambiguously across
@@ -196,8 +215,14 @@ def strip_attributes(text: str) -> str:
     return "".join(out)
 
 
-def enum_variants(text: str, start: int) -> int:
-    """Count top-level variants of the enum whose body opens at `start`."""
+def enum_variants(text: str, start: int) -> tuple[str, ...]:
+    """Top-level variant names of the enum whose body opens at `start`.
+
+    Names rather than a count, because a count cannot answer the question
+    the gate is really asking. A list of `[A, A, C]` over `enum { A, B, C }`
+    has three entries and three variants, and is missing `B`. Comparing
+    lengths passes it; comparing names does not.
+    """
     depth = 0
     i = start
     body_start = None
@@ -214,7 +239,7 @@ def enum_variants(text: str, start: int) -> int:
                 break
         i += 1
     else:
-        return -1
+        return ()
 
     # Order matters: comments and attributes go first, because both may contain
     # the brackets the nesting pass counts. Stripping `#[default]` *after* the
@@ -237,12 +262,17 @@ def enum_variants(text: str, start: int) -> int:
         elif depth == 0:
             out.append(ch)
     stripped = "".join(out)
-    names = [
-        v.strip()
-        for v in stripped.split(",")
-        if re.match(r"^\s*[A-Z]\w*\s*(=\s*[^,]+)?\s*$", v)
-    ]
-    return len(names)
+    # The identifier only. `Rank { Ace = 1, ... }` has a discriminant on every
+    # variant, and while counting never cared, naming does: keeping the `= 1`
+    # would make `Ace = 1` the variant's name and no array would ever mention
+    # it, which reported `apps/freecell` and `apps/solitaire` as missing all
+    # thirteen of the ranks they list in full.
+    names = []
+    for v in stripped.split(","):
+        hit = re.match(r"^\s*([A-Z]\w*)\s*(?:=\s*[^,]+)?\s*$", v)
+        if hit:
+            names.append(hit.group(1))
+    return tuple(names)
 
 
 def enclosing_impl(text: str, pos: int) -> str | None:
@@ -280,16 +310,85 @@ def uses_name(text: str, name: str) -> bool:
     return pat.search(text) is not None
 
 
+# The variant named in an expression like `Self::Any` or `Target::Digit(1)`.
+# Nested paths are matched too, so `Target::Level(Difficulty::Easy)` yields
+# both `Level` and `Easy`. The extra name is harmless: the check asks whether
+# every variant of one enum appears, so a name belonging to some other enum
+# simply never matches. The residual risk is a false *pass* where two enums
+# share a variant name and one is nested inside the other -- which is a
+# narrower failure than the one this replaces, and fails in the direction that
+# does not invent work.
+MENTION_RE = re.compile(r"(?:Self|[A-Z]\w*)\s*::\s*([A-Z]\w*)")
+
+# Lists that are not required to hold every variant, and why. Keyed by path and
+# `Enum::NAME` rather than by line, so moving a list does not rot the record.
+PARTIAL_FILE = pathlib.Path(__file__).resolve().parent / "variant-lists-partial.txt"
+
+
+def array_body(text: str, after_open: int) -> str | None:
+    """The literal between `= [` and its matching `]`.
+
+    `after_open` is the index just past the opening bracket, which is where
+    `LIST_RE` ends. Bracket depth rather than a regex, because the elements may
+    themselves be indexed or contain arrays.
+    """
+    depth = 1
+    i = after_open
+    while i < len(text):
+        ch = text[i]
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return text[after_open:i]
+        i += 1
+    return None
+
+
+def mentioned(body: str) -> set[str]:
+    """Every variant name appearing in an array literal.
+
+    Comments are stripped first, so a variant that was commented out counts as
+    absent -- which is the whole point, since commenting one out is one of the
+    ways a list silently stops being exhaustive.
+    """
+    return {m.group(1) for m in MENTION_RE.finditer(strip_comments(body))}
+
+
+def load_partial(path: pathlib.Path) -> dict[tuple[str, str], str]:
+    """The recorded not-required-to-be-total lists: `path<TAB>Enum::NAME<TAB>why`.
+
+    Keyed by the *element type* as well as the constant's name, because a
+    name alone is not unique within a file: `apps/settings` has both a
+    `DropdownId::FIXED` and a `SliderId::FIXED`, and a record meant for the
+    first quietly excused the second -- which was exhaustive and wanted
+    checking. A key that can match the wrong thing is a silent hole in the
+    gate, which is the one kind of bug this whole file exists to prevent.
+    """
+    out: dict[tuple[str, str], str] = {}
+    if not path.exists():
+        return out
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("\t") if p.strip()]
+        if len(parts) < 3:
+            continue
+        out[(parts[0], parts[1])] = parts[2]
+    return out
+
 def resolve_enum(
     elem: str,
     path: str,
     crate: str,
-    counts: dict[str, dict[str, int]],
+    counts: dict[str, dict[str, tuple[str, ...]]],
     nonenum: dict[str, set[str]],
     crates: dict[str, str],
     text: str,
-) -> tuple[int | None, str]:
-    """Variant count for `elem` as seen from `path`, or why it could not be had.
+) -> tuple[tuple[str, ...] | None, str]:
+    """Variant names of `elem` as seen from `path`, or why they could not be had.
 
     Nearest-first, because that is how Rust resolves a bare name: the same
     file, then the same crate, then another crate that this file imports from.
@@ -413,6 +512,33 @@ SELF_TESTS: list[tuple[str, str, int]] = [
 ]
 
 
+# Cases about the variant *names*, which the count-based table above cannot
+# see: a name that differs from the identifier is invisible to `len()`.
+NAME_TESTS: list[tuple[str, str, tuple[str, ...]]] = [
+    (
+        "a discriminant is not part of the name",
+        """
+        enum A {
+            Ace = 1,
+            Two = 2,
+        }
+        """,
+        ("Ace", "Two"),
+    ),
+    (
+        "struct and tuple variants give their bare names",
+        """
+        enum A {
+            One(u8),
+            Two { x: u8 },
+            Three,
+        }
+        """,
+        ("One", "Two", "Three"),
+    ),
+]
+
+
 def self_test() -> int:
     """Check the variant counter against sources counted by hand.
 
@@ -423,9 +549,15 @@ def self_test() -> int:
     teaches the regex about generics, they find out this was deliberate.
     """
     bad = 0
+    for label, src, want_names in NAME_TESTS:
+        m = ENUM_RE.search(src)
+        got_names = enum_variants(src, m.start()) if m else ()
+        ok = got_names == want_names
+        bad += not ok
+        print(f"{'ok  ' if ok else 'FAIL'}  {label}: {got_names} (want {want_names})")
     for label, src, want in SELF_TESTS:
         m = ENUM_RE.search(src)
-        got = enum_variants(src, m.start()) if m else -1
+        got = len(enum_variants(src, m.start())) if m else -1
         ok = got == want
         bad += not ok
         print(f"{'ok  ' if ok else 'FAIL'}  {label}: {got} (want {want})")
@@ -436,7 +568,7 @@ def self_test() -> int:
     print(f"{'ok  ' if ok else 'FAIL'}  a generic enum is skipped, not miscounted")
 
     bad += resolve_self_test()
-    print(f"\n{len(SELF_TESTS) + 1 + len(RESOLVE_TESTS)} cases, {bad} failed")
+    print(f"\n{len(NAME_TESTS) + len(SELF_TESTS) + 1 + len(RESOLVE_TESTS)} cases, {bad} failed")
     return 1 if bad else 0
 
 
@@ -520,13 +652,18 @@ def main(argv: list[str]) -> int:
     problems: list[str] = []
     checked: list[str] = []
     skipped: list[str] = []
-    subsets = 0
+    excused: list[str] = []
+    # Every (path, name) the scan actually found, so a record in
+    # variant-lists-partial.txt naming something that is gone can be told
+    # from one that is merely unresolved.
+    seen: set[tuple[str, str]] = set()
+    partial = load_partial(PARTIAL_FILE)
 
     # One pass to collect every enum in the tree, so a list can name an enum
     # that lives in another file, plus every non-enum type -- the second table
     # is what lets "this name is a struct" be said rather than merely "no enum
     # of this name is in scope".
-    counts: dict[str, dict[str, int]] = {}
+    counts: dict[str, dict[str, tuple[str, ...]]] = {}
     nonenum: dict[str, set[str]] = {}
     files: list[pathlib.Path] = []
     for r in ROOTS:
@@ -546,7 +683,7 @@ def main(argv: list[str]) -> int:
         crates[key] = crate_of(path, root)
         for m in ENUM_RE.finditer(text):
             n = enum_variants(text, m.start())
-            if n > 0:
+            if n:
                 counts.setdefault(m.group(1), {})[key] = n
         for m in NONENUM_RE.finditer(text):
             nonenum.setdefault(m.group(1), set()).add(key)
@@ -565,34 +702,75 @@ def main(argv: list[str]) -> int:
                     continue
             rel = path.relative_to(root).as_posix()
             line = text.count("\n", 0, m.start()) + 1
-            actual, why = resolve_enum(
+            variants, why = resolve_enum(
                 elem, key, crates[key], counts, nonenum, crates, text
             )
-            # Both counts in the summary have to keep meaning something, and
-            # they mean different things, so the two names take opposite
-            # branches here. A subset name counts only once its element type is
-            # known to be an enum -- otherwise the figure would swell to every
-            # `[u8; 32]` in the tree. A totality name counts as a *skip* when it
-            # does not resolve, because there the failure to resolve is the
-            # thing worth reporting: a list claiming to be exhaustive that
-            # nothing checked.
-            if not TOTAL_RE.match(name):
-                subsets += actual is not None
+            if variants is None:
+                # A list whose *name* claims totality and whose element type
+                # cannot be resolved is worth reporting -- something claims to
+                # be exhaustive and nothing checked it. A list with an ordinary
+                # name and an unresolvable element type is usually not a list
+                # of variants at all (`[u8; 32]`), so it is not news.
+                if TOTAL_RE.match(name):
+                    skipped.append(f"{rel}:{line}: {name}: not checked -- {why}")
                 continue
-            if actual is None:
-                skipped.append(f"{rel}:{line}: {name}: not checked -- {why}")
+
+            ident = f"{elem}::{name}"
+            seen.add((rel, ident))
+            body = array_body(text, m.end())
+            named = mentioned(body) if body is not None else set()
+            missing = [v for v in variants if v not in named]
+
+            reason = partial.get((rel, ident))
+            if reason is not None:
+                if TOTAL_RE.match(name):
+                    problems.append(
+                        f"{rel}:{line}: {name}: recorded as not required to be "
+                        f"exhaustive, but its own name claims it holds every "
+                        f"variant. One of the two is wrong."
+                    )
+                else:
+                    excused.append(f"{rel}:{line}: {name}: [{elem}; {declared}] -- {reason}")
+                continue
+
+            if missing:
+                # Named, not merely counted -- the point of the check is to say
+                # *which* variant fell out. Long tails are trimmed because a
+                # list short by eighty names is a list nobody meant to be
+                # total, and printing all eighty buries the ones that matter.
+                shown = ", ".join(missing[:6])
+                if len(missing) > 6:
+                    shown += f", and {len(missing) - 6} more"
+                problems.append(
+                    f"{rel}:{line}: {name}: [{elem}; {declared}] does not name "
+                    f"{shown} of `enum {elem}`'s {len(variants)}. Add "
+                    f"{'it' if len(missing) == 1 else 'them'}, or say why the list "
+                    f"is not required to be exhaustive in {PARTIAL_FILE.name}."
+                )
                 continue
             checked.append(f"{rel}:{line}: {name}: [{elem}; {declared}]")
-            if actual != declared:
-                problems.append(
-                    f"{rel}:{line}: {name}: [{elem}; {declared}] "
-                    f"but `enum {elem}` has {actual} variants"
-                )
+
+    # A record naming a list that is no longer there is not a harmless leftover.
+    # It reads as a decision somebody made about the code as it is now, and the
+    # list it excused may have been renamed into one that ought to be checked.
+    for (rel, ident), reason in sorted(partial.items()):
+        if (rel, ident) not in seen:
+            problems.append(
+                f"{PARTIAL_FILE.name}: {rel}: {ident}: no such variant list any "
+                f"more -- the record has rotted and says: {reason}"
+            )
 
     unresolved = len(skipped)
     if verbose:
         for c in checked:
             print(c)
+        print()
+        # The lists excused from the check, with the reason each was excused.
+        # Printed rather than merely counted because this is the population a
+        # reader most needs to audit: every one of them is a judgement somebody
+        # made, and a wrong one is invisible from the summary line alone.
+        for entry in excused:
+            print(f"(not required to be total) {entry}")
         print()
         for s in skipped:
             print(s)
@@ -600,9 +778,9 @@ def main(argv: list[str]) -> int:
     for p in problems:
         print(p)
     print(
-        f"{len(checked)} exhaustive lists checked, {len(problems)} out of step; "
-        f"{subsets} named as subsets and not checked, "
-        f"{unresolved} skipped as unresolved (--list says which)"
+        f"{len(checked)} lists hold every variant, {len(problems)} do not; "
+        f"{len(excused)} excused by {PARTIAL_FILE.name}, "
+        f"{unresolved} named as total but unresolved; --list names all three groups"
     )
     return 1 if problems else 0
 

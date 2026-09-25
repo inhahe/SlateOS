@@ -1690,23 +1690,24 @@ pub enum KeyAction {
     PrevArticle,
     NextFeed,
     PrevFeed,
+    CyclePane,
     ToggleRead,
     ToggleStar,
-    RefreshCurrent,
-    RefreshAll,
     Search,
     CycleSortOrder,
     CycleFilter,
     ToggleSidebar,
     MarkAllRead,
-    OpenInBrowser,
     AddFeed,
     RemoveFeed,
     RenameFeed,
     NewFolder,
+    MoveToFolder,
     ToggleFolderExpand,
+    ImportOpml,
+    ExportOpml,
+    ShowFeedHealth,
     ShowHelp,
-    Quit,
 }
 
 impl KeyAction {
@@ -1717,23 +1718,24 @@ impl KeyAction {
             Self::PrevArticle => "Previous article",
             Self::NextFeed => "Next feed",
             Self::PrevFeed => "Previous feed",
+            Self::CyclePane => "Move between panes",
             Self::ToggleRead => "Toggle read/unread",
             Self::ToggleStar => "Toggle star",
-            Self::RefreshCurrent => "Refresh current feed",
-            Self::RefreshAll => "Refresh all feeds",
             Self::Search => "Search articles",
             Self::CycleSortOrder => "Cycle sort order",
             Self::CycleFilter => "Cycle filter mode",
             Self::ToggleSidebar => "Toggle sidebar",
             Self::MarkAllRead => "Mark all as read",
-            Self::OpenInBrowser => "Open in browser",
             Self::AddFeed => "Add new feed",
             Self::RemoveFeed => "Remove feed",
             Self::RenameFeed => "Rename feed",
             Self::NewFolder => "New folder",
+            Self::MoveToFolder => "Move feed to folder",
             Self::ToggleFolderExpand => "Toggle folder expand",
+            Self::ImportOpml => "Import subscriptions (OPML)",
+            Self::ExportOpml => "Export subscriptions (OPML)",
+            Self::ShowFeedHealth => "How each feed's refreshes have gone",
             Self::ShowHelp => "Show keyboard shortcuts",
-            Self::Quit => "Quit",
         }
     }
 
@@ -1744,50 +1746,62 @@ impl KeyAction {
             Self::PrevArticle => "K / Up",
             Self::NextFeed => "Shift+J",
             Self::PrevFeed => "Shift+K",
-            Self::ToggleRead => "R",
+            Self::CyclePane => "Tab / Shift+Tab",
+            Self::ToggleRead => "R / Enter",
             Self::ToggleStar => "S",
-            Self::RefreshCurrent => "F5",
-            Self::RefreshAll => "Shift+F5",
             Self::Search => "Ctrl+F / /",
             Self::CycleSortOrder => "O",
             Self::CycleFilter => "F",
             Self::ToggleSidebar => "B",
             Self::MarkAllRead => "Shift+R",
-            Self::OpenInBrowser => "Enter / O",
             Self::AddFeed => "A",
             Self::RemoveFeed => "D",
             Self::RenameFeed => "Ctrl+R",
             Self::NewFolder => "Ctrl+N",
+            Self::MoveToFolder => "V",
             Self::ToggleFolderExpand => "Space",
-            Self::ShowHelp => "?",
-            Self::Quit => "Q",
+            Self::ImportOpml => "Ctrl+O",
+            Self::ExportOpml => "Ctrl+S",
+            Self::ShowFeedHealth => "H",
+            Self::ShowHelp => "F1 / ?",
         }
     }
 }
 
 /// All available keyboard shortcuts.
+/// Every row of the help overlay, in the order it is drawn.
+///
+/// **Each of these must be a key this program actually binds.** Four entries
+/// were removed on 2026-09-18 -- "F5 Refresh current feed", "Shift+F5 Refresh
+/// all feeds", "Enter / O Open in browser" and "Q Quit" -- because no such
+/// operation existed anywhere in the crate. The first two cannot exist while
+/// this reader has no transport (see the module doc), there is no browser to
+/// open anything in, and the framework offers no way for an app to close its
+/// own window. An overlay is the one place a user goes to be told what the
+/// keys are, so a row here that does nothing is worse than no overlay.
 pub const ALL_KEY_ACTIONS: &[KeyAction] = &[
     KeyAction::NextArticle,
     KeyAction::PrevArticle,
     KeyAction::NextFeed,
     KeyAction::PrevFeed,
+    KeyAction::CyclePane,
     KeyAction::ToggleRead,
     KeyAction::ToggleStar,
-    KeyAction::RefreshCurrent,
-    KeyAction::RefreshAll,
     KeyAction::Search,
     KeyAction::CycleSortOrder,
     KeyAction::CycleFilter,
     KeyAction::ToggleSidebar,
     KeyAction::MarkAllRead,
-    KeyAction::OpenInBrowser,
     KeyAction::AddFeed,
     KeyAction::RemoveFeed,
     KeyAction::RenameFeed,
     KeyAction::NewFolder,
+    KeyAction::MoveToFolder,
     KeyAction::ToggleFolderExpand,
+    KeyAction::ImportOpml,
+    KeyAction::ExportOpml,
+    KeyAction::ShowFeedHealth,
     KeyAction::ShowHelp,
-    KeyAction::Quit,
 ];
 
 // ============================================================================
@@ -1825,6 +1839,37 @@ impl ActivePane {
 // ============================================================================
 // Sidebar selection model
 // ============================================================================
+
+/// What the one-line prompt at the foot of the window is collecting.
+///
+/// One mode for both, rather than a flag each, because the two differ only
+/// in what is done with the finished string -- and because a second bare
+/// `bool` beside `search_active` is how a window ends up in two text modes
+/// at once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextEntry {
+    /// A new title for this feed.
+    RenameFeed(FeedId),
+    /// A name for a folder that does not exist yet.
+    NewFolder,
+    /// The address of a feed to subscribe to.
+    AddFeed,
+}
+
+/// A question at the foot of the window waiting on one keypress.
+///
+/// Separate from `TextEntry` because these collect a choice rather than a
+/// string, and because the destructive two must not be answerable by the
+/// same `Enter` that accepts a typed name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Prompt {
+    /// Delete this feed and the articles belonging to it?
+    RemoveFeed(FeedId),
+    /// Delete this folder, keeping the feeds that were in it?
+    RemoveFolder(FolderId),
+    /// Which folder should this feed be filed under?
+    MoveFeed(FeedId),
+}
 
 /// What is selected in the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2110,11 +2155,16 @@ pub struct RssReaderApp {
     pub filter_mode: FilterMode,
     pub search_query: String,
     pub search_active: bool,
+    /// A question waiting on a single keypress, if one is up.
+    pub prompt: Option<Prompt>,
+    /// The prompt at the foot of the window, if one is up.
+    pub text_entry: Option<TextEntry>,
+    /// What has been typed into that prompt.
+    pub text_buffer: String,
     pub search_results: Vec<SearchResult>,
 
     // Display state
     pub show_help: bool,
-    pub show_add_feed_dialog: bool,
     pub show_feed_health: bool,
     pub status_message: String,
     pub status_timestamp: u64,
@@ -2160,9 +2210,11 @@ impl RssReaderApp {
             filter_mode: FilterMode::All,
             search_query: String::new(),
             search_active: false,
+            prompt: None,
+            text_entry: None,
+            text_buffer: String::new(),
             search_results: Vec::new(),
             show_help: false,
-            show_add_feed_dialog: false,
             show_feed_health: false,
             status_message: String::new(),
             status_timestamp: 0,
@@ -2415,6 +2467,124 @@ impl RssReaderApp {
             self.selected_article_index = self.selected_article_index.saturating_sub(1);
             self.content_scroll_offset = 0.0;
         }
+    }
+
+    /// The sidebar's rows, top to bottom, exactly as the sidebar draws them.
+    ///
+    /// Selection steps through this list rather than through `feeds`, because
+    /// the sidebar interleaves four kinds of row -- the two standing entries,
+    /// each folder, the feeds inside an open folder, and the feeds in no
+    /// folder -- so a feed's position depends on which folder holds it and
+    /// whether that folder is open. Deriving the order in one place is what
+    /// keeps "down" meaning the row below rather than the next feed in
+    /// `feeds`, which is a different row entirely once folders exist.
+    pub fn sidebar_rows(&self) -> Vec<SidebarSelection> {
+        let mut rows = vec![SidebarSelection::AllFeeds, SidebarSelection::Starred];
+        for folder in &self.folders {
+            rows.push(SidebarSelection::Folder(folder.id));
+            if folder.is_expanded {
+                rows.extend(
+                    self.feeds
+                        .iter()
+                        .filter(|f| f.folder_id == Some(folder.id))
+                        .map(|f| SidebarSelection::Feed(f.id)),
+                );
+            }
+        }
+        rows.extend(
+            self.feeds
+                .iter()
+                .filter(|f| f.folder_id.is_none())
+                .map(|f| SidebarSelection::Feed(f.id)),
+        );
+        rows
+    }
+
+    /// Move the sidebar selection by `delta` rows, stopping at either end.
+    ///
+    /// Stops rather than wraps: the list is short and visible in full, so
+    /// wrapping past the end would move the highlight the length of the
+    /// sidebar in response to one keypress.
+    pub fn step_sidebar(&mut self, delta: isize) {
+        let rows = self.sidebar_rows();
+        let here = rows
+            .iter()
+            .position(|r| *r == self.sidebar_selection)
+            .unwrap_or(0);
+        let Some(next) = here.checked_add_signed(delta) else {
+            return;
+        };
+        let Some(selection) = rows.get(next).copied() else {
+            return;
+        };
+        self.sidebar_selection = selection;
+        // The article list is filtered by this selection, so an index into the
+        // previous list points at an unrelated article in the new one.
+        self.selected_article_index = 0;
+        self.content_scroll_offset = 0.0;
+    }
+
+    /// Move the sidebar selection to the next or previous feed, passing over
+    /// the folders and the two standing entries.
+    ///
+    /// Distinct from `step_sidebar`, which visits every row: the overlay
+    /// offers both because moving feed-to-feed in a sidebar of many folders
+    /// is otherwise a lot of keypresses through headings you do not want to
+    /// stop on.
+    pub fn step_feed(&mut self, forward: bool) {
+        let rows = self.sidebar_rows();
+        let feeds: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r, SidebarSelection::Feed(_)))
+            .map(|(i, _)| i)
+            .collect();
+        let target = match rows.iter().position(|r| *r == self.sidebar_selection) {
+            Some(here) if forward => feeds.iter().find(|i| **i > here).copied(),
+            Some(here) => feeds.iter().rev().find(|i| **i < here).copied(),
+            None => feeds.first().copied(),
+        };
+        // Past the last feed there is no next one; staying put is the same
+        // choice `step_sidebar` makes at either end of the list.
+        let Some(index) = target else {
+            return;
+        };
+        let Some(selection) = rows.get(index).copied() else {
+            return;
+        };
+        self.sidebar_selection = selection;
+        self.selected_article_index = 0;
+        self.content_scroll_offset = 0.0;
+    }
+
+    /// Open or close the folder the selection is in. Reports whether it did.
+    ///
+    /// `Folder::is_expanded` had no writer in production, so every folder was
+    /// permanently open and the "closed" indicator could not be drawn.
+    ///
+    /// A selected *feed* closes the folder holding it, which is what closing
+    /// means in a tree: you are in this folder and you want it shut. The
+    /// alternative -- doing nothing, because the highlight is on a feed -- is
+    /// a key that works or not depending on which row you are on, with no way
+    /// to tell which case you are in.
+    pub fn toggle_selected_folder(&mut self) -> bool {
+        let target = match self.sidebar_selection {
+            SidebarSelection::Folder(id) => Some(id),
+            SidebarSelection::Feed(id) => self
+                .feeds
+                .iter()
+                .find(|f| f.id == id)
+                .and_then(|f| f.folder_id),
+            SidebarSelection::AllFeeds | SidebarSelection::Starred => None,
+        };
+        let Some(id) = target else {
+            return false;
+        };
+        let Some(folder) = self.folders.iter_mut().find(|f| f.id == id) else {
+            return false;
+        };
+        folder.is_expanded = !folder.is_expanded;
+        true
     }
 
     /// Perform a search and store results.
@@ -2680,6 +2850,17 @@ impl RssReaderApp {
             return self.handle_search_key(key);
         }
 
+        // As does the rename/new-folder prompt, for the same reason.
+        if self.text_entry.is_some() {
+            return self.handle_text_entry_key(key);
+        }
+
+        // A question waiting on one key takes that key, including the digits
+        // that are filter shortcuts outside it.
+        if self.prompt.is_some() {
+            return self.handle_prompt_key(key);
+        }
+
         if key.modifiers.ctrl {
             return match key.key {
                 Key::F => {
@@ -2694,6 +2875,17 @@ impl RssReaderApp {
                 }
                 Key::O => {
                     self.open_file_dialog(false);
+                    EventResult::Consumed
+                }
+                // Both named in the help overlay and bound to nothing.
+                // `rename_feed` and `add_folder` existed; `rename_feed` had no
+                // caller at all, and `add_folder`'s only production caller was
+                // the OPML importer, so a folder could arrive by import and
+                // never be made.
+                Key::R => self.begin_rename_feed(),
+                Key::N => {
+                    self.text_buffer.clear();
+                    self.text_entry = Some(TextEntry::NewFolder);
                     EventResult::Consumed
                 }
                 Key::S => {
@@ -2713,14 +2905,103 @@ impl RssReaderApp {
                 };
                 EventResult::Consumed
             }
-            // Through the articles. `next_article` and `prev_article` were
-            // written, tested, and had no key.
+            // Feed to feed, as the overlay names them. These must precede the
+            // plain J/K arms below, which would otherwise take them.
+            Key::J if key.modifiers.shift => {
+                self.step_feed(true);
+                EventResult::Consumed
+            }
+            Key::K if key.modifiers.shift => {
+                self.step_feed(false);
+                EventResult::Consumed
+            }
+            // Through the articles -- or through the sidebar, when that is
+            // the active pane. `sidebar_selection` previously had no writer at
+            // all: the sidebar highlighted "All Feeds" forever, its Feed,
+            // Folder and Starred arms were unreachable, and tabbing to it
+            // changed only which pane was outlined.
             Key::Down | Key::J => {
-                self.next_article();
+                if self.active_pane == ActivePane::Sidebar {
+                    self.step_sidebar(1);
+                } else {
+                    self.next_article();
+                }
                 EventResult::Consumed
             }
             Key::Up | Key::K => {
-                self.prev_article();
+                if self.active_pane == ActivePane::Sidebar {
+                    self.step_sidebar(-1);
+                } else {
+                    self.prev_article();
+                }
+                EventResult::Consumed
+            }
+            // `R` and `Shift+R` are what the help overlay has named all
+            // along. `R` was bound to nothing while read/unread sat on `M`,
+            // and mark-all-read was on `Ctrl+A`, which the overlay never
+            // mentioned. Both old keys stay: they are what anyone who learned
+            // this app by trying keys already uses.
+            Key::R if key.modifiers.shift => {
+                self.mark_all_read();
+                EventResult::Consumed
+            }
+            Key::R => {
+                self.toggle_read();
+                EventResult::Consumed
+            }
+            // `D` is the overlay's "Remove feed", widened to the folder when
+            // that is what is selected: `remove_folder` had no caller either,
+            // and `remove_feed`'s only one was inside `remove_folder`.
+            Key::D => {
+                self.prompt = match self.sidebar_selection {
+                    SidebarSelection::Feed(id) => Some(Prompt::RemoveFeed(id)),
+                    SidebarSelection::Folder(id) => Some(Prompt::RemoveFolder(id)),
+                    SidebarSelection::AllFeeds | SidebarSelection::Starred => {
+                        self.status_message =
+                            "Select a feed or folder in the sidebar first".to_string();
+                        None
+                    }
+                };
+                EventResult::Consumed
+            }
+            // Filing a feed into a folder. `move_feed_to_folder` had no
+            // caller, and nothing else wrote `folder_id`, so an imported
+            // arrangement could never be changed.
+            Key::V => {
+                match self.sidebar_selection {
+                    SidebarSelection::Feed(id) => self.prompt = Some(Prompt::MoveFeed(id)),
+                    _ => {
+                        self.status_message = "Select a feed in the sidebar to move it".to_string();
+                    }
+                }
+                EventResult::Consumed
+            }
+            // The overlay's "Add new feed". `add_feed` had eight production
+            // callers and every one of them was the OPML importer, so a
+            // subscription could arrive in a file and never be typed.
+            Key::A => {
+                self.text_buffer.clear();
+                self.text_entry = Some(TextEntry::AddFeed);
+                EventResult::Consumed
+            }
+            // The overlay says Space opens and closes a folder. On a feed it
+            // closes the folder that feed is in; with nothing foldable
+            // selected it says so, rather than being a key that silently does
+            // nothing on some rows.
+            Key::Space => {
+                if !self.toggle_selected_folder() {
+                    self.status_message = "Select a folder, or a feed inside one".to_string();
+                }
+                EventResult::Consumed
+            }
+            // On a folder, `Enter` opens or closes it. This arm must precede
+            // the one below, which would otherwise swallow `Enter` into
+            // "mark read" while the sidebar is focused.
+            Key::Enter
+                if self.active_pane == ActivePane::Sidebar
+                    && matches!(self.sidebar_selection, SidebarSelection::Folder(_)) =>
+            {
+                self.toggle_selected_folder();
                 EventResult::Consumed
             }
             // Read and starred. Both had a test each and no caller, so an
@@ -2757,12 +3038,61 @@ impl RssReaderApp {
                 } else if self.show_help {
                     self.show_help = false;
                     EventResult::Consumed
+                } else if self.show_feed_health {
+                    self.show_feed_health = false;
+                    EventResult::Consumed
                 } else {
                     EventResult::Ignored
                 }
             }
+            // How each feed's refreshes have gone.
+            //
+            // `render_feed_health_overlay` was written, drawn conditionally,
+            // and `show_feed_health` was `false` with no writer -- so the
+            // overlay was unreachable. It was filed as *unfinished* on the
+            // reasoning that "nothing else in the app shows feed health",
+            // which was a claim about the name: `feed.health.is_healthy()`
+            // colours every row of the sidebar, and `record_success` runs on
+            // every refresh. The data is real and already on screen as a
+            // colour; this is the detail behind it.
+            Key::H => {
+                self.show_feed_health = !self.show_feed_health;
+                EventResult::Consumed
+            }
+            // `F1` raises the list in every app in this tree, including
+            // `apps/spreadsheet`, where `?` is a character the program has to
+            // be able to type into a cell -- so somebody who has learned one
+            // key is never stuck. `?` as well, here, where nothing is obliged
+            // to type one.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
             Key::Slash if key.modifiers.shift => {
                 self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            // The other half of the overlay's "Ctrl+F / /".
+            Key::Slash => {
+                self.search_active = true;
+                EventResult::Consumed
+            }
+            // Three pieces of state the app already obeys and nothing could
+            // change: `sidebar_visible` gates the sidebar's draw, `sort_order`
+            // drives the real `sort_by` over the article list, and the window
+            // prints "Sort: Date (newest first)" -- a label that until now
+            // could never say anything else.
+            Key::B => {
+                self.sidebar_visible = !self.sidebar_visible;
+                EventResult::Consumed
+            }
+            Key::O => {
+                self.sort_order = self.sort_order.next();
+                EventResult::Consumed
+            }
+            Key::F => {
+                self.filter_mode = self.filter_mode.next();
+                self.clamp_selection();
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -2801,6 +3131,192 @@ impl RssReaderApp {
                 EventResult::Consumed
             }
         }
+    }
+
+    /// The folders a feed can be filed into, in sidebar order.
+    ///
+    /// Capped at nine because the prompt answers to a single digit, and a
+    /// tenth folder that silently cannot be chosen is worse than one the
+    /// prompt admits it is not showing.
+    pub fn move_targets(&self) -> Vec<(FolderId, String)> {
+        self.folders
+            .iter()
+            .take(9)
+            .map(|f| (f.id, f.name.clone()))
+            .collect()
+    }
+
+    /// Keys while a one-keypress question is up.
+    fn handle_prompt_key(&mut self, key: &KeyEvent) -> EventResult {
+        let Some(prompt) = self.prompt.clone() else {
+            return EventResult::Ignored;
+        };
+        // Whatever happens, the question comes down: a prompt that survives a
+        // keypress it did not understand is one you cannot get out of.
+        self.prompt = None;
+        match prompt {
+            Prompt::RemoveFeed(id) => {
+                // Only `Y`. A destructive answer should not be reachable by
+                // the `Enter` someone is already pressing to read articles.
+                if key.key == Key::Y {
+                    self.remove_feed(id);
+                    self.forget_selection_of_removed();
+                    self.status_message = "Feed removed".to_string();
+                }
+                EventResult::Consumed
+            }
+            Prompt::RemoveFolder(id) => {
+                if key.key == Key::Y {
+                    // `false`: the feeds inside outlive the folder and become
+                    // ungrouped. Deleting a folder is a filing decision, and
+                    // taking the subscriptions with it is not what the word
+                    // means anywhere else.
+                    self.remove_folder(id, false);
+                    self.forget_selection_of_removed();
+                    self.status_message = "Folder removed; its feeds kept".to_string();
+                }
+                EventResult::Consumed
+            }
+            Prompt::MoveFeed(id) => {
+                let targets = self.move_targets();
+                let choice = match key.key {
+                    Key::Num0 => Some(None),
+                    Key::Num1 => targets.first().map(|(f, _)| Some(*f)),
+                    Key::Num2 => targets.get(1).map(|(f, _)| Some(*f)),
+                    Key::Num3 => targets.get(2).map(|(f, _)| Some(*f)),
+                    Key::Num4 => targets.get(3).map(|(f, _)| Some(*f)),
+                    Key::Num5 => targets.get(4).map(|(f, _)| Some(*f)),
+                    Key::Num6 => targets.get(5).map(|(f, _)| Some(*f)),
+                    Key::Num7 => targets.get(6).map(|(f, _)| Some(*f)),
+                    Key::Num8 => targets.get(7).map(|(f, _)| Some(*f)),
+                    Key::Num9 => targets.get(8).map(|(f, _)| Some(*f)),
+                    _ => None,
+                };
+                if let Some(folder) = choice {
+                    self.move_feed_to_folder(id, folder);
+                    self.status_message = match folder {
+                        Some(_) => "Feed moved".to_string(),
+                        None => "Feed moved out of its folder".to_string(),
+                    };
+                }
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Point the sidebar somewhere that still exists.
+    ///
+    /// The selection holds an id, not a row, so removing what it names leaves
+    /// it naming nothing: the highlight is drawn nowhere and the article list
+    /// filters to a feed that is gone, which looks exactly like an app that
+    /// has lost the user's articles.
+    fn forget_selection_of_removed(&mut self) {
+        let alive = match self.sidebar_selection {
+            SidebarSelection::Feed(id) => self.feeds.iter().any(|f| f.id == id),
+            SidebarSelection::Folder(id) => self.folders.iter().any(|f| f.id == id),
+            SidebarSelection::AllFeeds | SidebarSelection::Starred => true,
+        };
+        if !alive {
+            self.sidebar_selection = SidebarSelection::AllFeeds;
+            self.selected_article_index = 0;
+        }
+    }
+
+    /// Keys while the one-line prompt is up.
+    ///
+    /// The prompt takes every key, as the search box does: a folder named
+    /// "Books" must not hide the sidebar on its `b` and cycle the sort order
+    /// on its `o`.
+    fn handle_text_entry_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => {
+                self.text_entry = None;
+                self.text_buffer.clear();
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                self.commit_text_entry();
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                self.text_buffer.pop();
+                EventResult::Consumed
+            }
+            _ => {
+                let typed: String = key.typed().collect();
+                if typed.is_empty() {
+                    return EventResult::Ignored;
+                }
+                self.text_buffer.push_str(&typed);
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Do what the prompt was collecting a string for.
+    ///
+    /// An empty string cancels rather than committing: renaming a feed to ""
+    /// leaves a blank row in the sidebar that cannot be selected by name, and
+    /// there is no undo here to get the title back.
+    fn commit_text_entry(&mut self) {
+        let Some(entry) = self.text_entry.take() else {
+            return;
+        };
+        let text = self.text_buffer.trim().to_string();
+        self.text_buffer.clear();
+        if text.is_empty() {
+            return;
+        }
+        match entry {
+            TextEntry::RenameFeed(id) => {
+                self.rename_feed(id, &text);
+                self.status_message = format!("Renamed to {text}");
+            }
+            TextEntry::AddFeed => {
+                // The address stands in as the title until something can
+                // fetch the feed and learn its real one -- which nothing here
+                // can. A row reading "https://..." is ugly and true, and
+                // `Ctrl+R` renames it; a row reading "New Feed" would be
+                // neither.
+                let folder = match self.sidebar_selection {
+                    SidebarSelection::Folder(id) => Some(id),
+                    SidebarSelection::Feed(id) => self
+                        .feeds
+                        .iter()
+                        .find(|f| f.id == id)
+                        .and_then(|f| f.folder_id),
+                    SidebarSelection::AllFeeds | SidebarSelection::Starred => None,
+                };
+                let id = self.add_feed(&text, &text, folder);
+                self.sidebar_selection = SidebarSelection::Feed(id);
+                self.status_message = "Feed added. Ctrl+R renames it.".to_string();
+            }
+            TextEntry::NewFolder => {
+                let id = self.add_folder(&text);
+                // Select what was just made: a new folder that appears
+                // somewhere in the sidebar without the selection following it
+                // is a folder the user has to go and find.
+                self.sidebar_selection = SidebarSelection::Folder(id);
+                self.status_message = format!("Created folder {text}");
+            }
+        }
+    }
+
+    /// Begin renaming the selected feed, seeded with its current title.
+    ///
+    /// Seeded rather than blank because a rename is usually an edit -- and a
+    /// blank box makes the old title something you have to remember.
+    fn begin_rename_feed(&mut self) -> EventResult {
+        let SidebarSelection::Feed(id) = self.sidebar_selection else {
+            self.status_message = "Select a feed in the sidebar to rename it".to_string();
+            return EventResult::Consumed;
+        };
+        let Some(feed) = self.feeds.iter().find(|f| f.id == id) else {
+            return EventResult::Ignored;
+        };
+        self.text_buffer = feed.title.clone();
+        self.text_entry = Some(TextEntry::RenameFeed(id));
+        EventResult::Consumed
     }
 
     /// Keep the selection inside the list the current filter shows.
@@ -3331,10 +3847,6 @@ impl RssReaderApp {
         // Overlays
         if self.show_help {
             self.render_help_overlay(&mut cmds);
-        }
-
-        if self.show_add_feed_dialog {
-            self.render_add_feed_dialog(&mut cmds);
         }
 
         if self.show_feed_health {
@@ -4347,8 +4859,61 @@ impl RssReaderApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Status message
-        if !self.status_message.is_empty() {
+        // A question waiting on one keypress outranks everything on this line.
+        if let Some(prompt) = &self.prompt {
+            let text = match prompt {
+                Prompt::RemoveFeed(id) => {
+                    let name = self.feed_name(*id);
+                    format!("Remove {name} and its articles?  Y to confirm, any other key cancels")
+                }
+                Prompt::RemoveFolder(id) => {
+                    let name = self
+                        .folders
+                        .iter()
+                        .find(|f| f.id == *id)
+                        .map_or("this folder", |f| f.name.as_str());
+                    format!(
+                        "Remove {name}?  Its feeds are kept.  Y to confirm, any other key cancels"
+                    )
+                }
+                Prompt::MoveFeed(_) => {
+                    let mut parts = vec!["Move to:".to_string(), "0) no folder".to_string()];
+                    for (i, (_, name)) in self.move_targets().iter().enumerate() {
+                        parts.push(format!("{}) {name}", i.saturating_add(1)));
+                    }
+                    parts.join("   ")
+                }
+            };
+            cmds.push(RenderCommand::Text {
+                x: 12.0,
+                y: y + 7.0,
+                text,
+                font_size: 11.0,
+                color: self.palette.ink(self.palette.yellow),
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(self.width - 24.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        } else if let Some(entry) = &self.text_entry {
+            let label = match entry {
+                TextEntry::RenameFeed(_) => "Rename feed",
+                TextEntry::NewFolder => "New folder",
+                TextEntry::AddFeed => "Add feed (address)",
+            };
+            cmds.push(RenderCommand::Text {
+                x: self.width / 2.0,
+                y: y + 7.0,
+                text: format!(
+                    "{label}: {}_  (Enter to accept, Esc to cancel)",
+                    self.text_buffer
+                ),
+                font_size: 11.0,
+                color: self.palette.ink(self.palette.blue),
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(self.width / 2.0 - 120.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        } else if !self.status_message.is_empty() {
             cmds.push(RenderCommand::Text {
                 x: self.width / 2.0,
                 y: y + 7.0,
@@ -4392,8 +4957,21 @@ impl RssReaderApp {
     }
 
     /// Render the keyboard shortcuts help overlay.
+    ///
+    /// The card itself is `guitk::shortcut::render_card`, which sizes itself
+    /// from the number of rows. What stood here was a dialog of a fixed 520
+    /// pixels with a `break` when the rows ran past the bottom, so it drew as
+    /// many as fitted and stopped -- twenty of twenty-one. The row it dropped
+    /// was `ShowHelp`, so **the overlay did not list the key that closes it**,
+    /// and it had been that way since the overlay was written.
+    ///
+    /// Nothing could have noticed. The guard test reads the list against the
+    /// key handler and both were right; the overlay's own height was the third
+    /// thing, agreeing with neither. `every_row_of_the_overlay_reaches_the_window`
+    /// is the check that was missing, and it reads the screen.
     fn render_help_overlay(&self, cmds: &mut Vec<RenderCommand>) {
-        // Dimmed background
+        // Dimmed behind it, which is this app's own idea and worth keeping:
+        // the card is a modal thing and the dimming says so.
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
@@ -4403,276 +4981,20 @@ impl RssReaderApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        let dialog_width: f32 = 450.0;
-        let dialog_height: f32 = 520.0;
-        let dx = (self.width - dialog_width) / 2.0;
-        let dy = (self.height - dialog_height) / 2.0;
-
-        // Dialog background
-        self.palette.push_surface(
+        let rows: Vec<(&str, &str)> = ALL_KEY_ACTIONS
+            .iter()
+            .map(|a| (a.key_hint(), a.description()))
+            .collect();
+        guitk::shortcut::render_card(
             cmds,
-            dx,
-            dy,
-            dialog_width,
-            dialog_height,
-            12.0,
-            Surface::Panel,
+            &self.palette,
+            (self.width, self.height),
+            0.0,
+            &rows,
+            "F1 or ? closes this",
         );
-
-        // Dialog border
-        cmds.push(RenderCommand::StrokeRect {
-            x: dx,
-            y: dy,
-            width: dialog_width,
-            height: dialog_height,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(12.0),
-        });
-
-        // Title
-        cmds.push(RenderCommand::Text {
-            x: dx + 20.0,
-            y: dy + 16.0,
-            text: "Keyboard Shortcuts".to_string(),
-            font_size: 16.0,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Close hint
-        cmds.push(RenderCommand::Text {
-            x: dx + dialog_width - 80.0,
-            y: dy + 18.0,
-            text: "Press ? to close".to_string(),
-            font_size: 10.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Separator
-        cmds.push(RenderCommand::Line {
-            x1: dx + 20.0,
-            y1: dy + 44.0,
-            x2: dx + dialog_width - 20.0,
-            y2: dy + 44.0,
-            color: self.palette.surface1,
-            width: 1.0,
-        });
-
-        // Shortcut list
-        let mut row_y = dy + 56.0;
-        let row_height: f32 = 22.0;
-
-        for action in ALL_KEY_ACTIONS {
-            if row_y + row_height > dy + dialog_height - 10.0 {
-                break;
-            }
-
-            // Key hint
-            self.palette
-                .push_surface(cmds, dx + 20.0, row_y, 120.0, 18.0, 3.0, Surface::Panel);
-            cmds.push(RenderCommand::Text {
-                x: dx + 26.0,
-                y: row_y + 2.0,
-                text: action.key_hint().to_string(),
-                font_size: 11.0,
-                color: self.palette.ink(self.palette.peach),
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(110.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Description
-            cmds.push(RenderCommand::Text {
-                x: dx + 152.0,
-                y: row_y + 2.0,
-                text: action.description().to_string(),
-                font_size: 12.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(dialog_width - 180.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            row_y += row_height;
-        }
     }
 
-    /// Render the "Add Feed" dialog overlay.
-    fn render_add_feed_dialog(&self, cmds: &mut Vec<RenderCommand>) {
-        // Dimmed background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.width,
-            height: self.height,
-            color: Color::rgba(0, 0, 0, 180),
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        let dialog_width: f32 = 400.0;
-        let dialog_height: f32 = 260.0;
-        let dx = (self.width - dialog_width) / 2.0;
-        let dy = (self.height - dialog_height) / 2.0;
-
-        // Dialog background
-        self.palette.push_surface(
-            cmds,
-            dx,
-            dy,
-            dialog_width,
-            dialog_height,
-            12.0,
-            Surface::Panel,
-        );
-        cmds.push(RenderCommand::StrokeRect {
-            x: dx,
-            y: dy,
-            width: dialog_width,
-            height: dialog_height,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(12.0),
-        });
-
-        // Title
-        cmds.push(RenderCommand::Text {
-            x: dx + 20.0,
-            y: dy + 16.0,
-            text: "Add New Feed".to_string(),
-            font_size: 16.0,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // URL input label
-        cmds.push(RenderCommand::Text {
-            x: dx + 20.0,
-            y: dy + 56.0,
-            text: "Feed URL:".to_string(),
-            font_size: 12.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // URL input field
-        self.palette.push_surface(
-            cmds,
-            dx + 20.0,
-            dy + 76.0,
-            dialog_width - 40.0,
-            32.0,
-            4.0,
-            Surface::Panel,
-        );
-        cmds.push(RenderCommand::StrokeRect {
-            x: dx + 20.0,
-            y: dy + 76.0,
-            width: dialog_width - 40.0,
-            height: 32.0,
-            color: self.palette.blue,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: dx + 28.0,
-            y: dy + 84.0,
-            text: "https://example.com/feed.xml".to_string(),
-            font_size: 12.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(dialog_width - 56.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Folder selection label
-        cmds.push(RenderCommand::Text {
-            x: dx + 20.0,
-            y: dy + 124.0,
-            text: "Folder (optional):".to_string(),
-            font_size: 12.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Folder dropdown
-        self.palette.push_surface(
-            cmds,
-            dx + 20.0,
-            dy + 144.0,
-            dialog_width - 40.0,
-            32.0,
-            4.0,
-            Surface::Panel,
-        );
-        cmds.push(RenderCommand::Text {
-            x: dx + 28.0,
-            y: dy + 152.0,
-            text: "None (ungrouped)".to_string(),
-            font_size: 12.0,
-            color: self.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(dialog_width - 56.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Buttons
-        let button_y = dy + dialog_height - 52.0;
-
-        // Cancel button
-        self.palette.push_surface(
-            cmds,
-            dx + dialog_width - 200.0,
-            button_y,
-            80.0,
-            32.0,
-            6.0,
-            Surface::Panel,
-        );
-        cmds.push(RenderCommand::Text {
-            x: dx + dialog_width - 182.0,
-            y: button_y + 8.0,
-            text: "Cancel".to_string(),
-            font_size: 12.0,
-            color: self.palette.text,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Add button
-        cmds.push(RenderCommand::FillRect {
-            x: dx + dialog_width - 108.0,
-            y: button_y,
-            width: 88.0,
-            height: 32.0,
-            color: self.palette.blue,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: dx + dialog_width - 88.0,
-            y: button_y + 8.0,
-            text: "Add Feed".to_string(),
-            font_size: 12.0,
-            color: self.palette.crust,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    /// Render the feed health status overlay.
     fn render_feed_health_overlay(&self, cmds: &mut Vec<RenderCommand>) {
         // Dimmed background
         cmds.push(RenderCommand::FillRect {
@@ -4972,6 +5294,7 @@ mod tests {
     )]
 
     use super::*;
+    use guitk::shortcut::keystrokes;
 
     /// A downloaded feed file becomes articles you can actually read.
     ///
@@ -5233,6 +5556,55 @@ mod tests {
         })
     }
 
+    /// `H` opens the feed-health overlay, and it draws real health.
+    ///
+    /// `render_feed_health_overlay` was written, drawn conditionally, and
+    /// `show_feed_health` was `false` with no writer -- so it was
+    /// unreachable. It was filed as *unfinished*, on the reasoning that
+    /// "nothing else in the app shows feed health". That was a claim about
+    /// the name: `feed.health.is_healthy()` colours every row of the sidebar
+    /// and `record_success` runs on every refresh, both in live code. The
+    /// data is real and already on screen as a colour; the overlay is the
+    /// detail behind it, and this restores a finished feature rather than
+    /// shipping an unfinished one.
+    #[test]
+    fn h_opens_the_feed_health_overlay() {
+        let mut app = RssReaderApp::with_sample_data(1200.0, 800.0);
+        assert!(!app.show_feed_health, "control: it starts closed");
+
+        let before = drawn_strings(&app);
+        assert!(
+            !before.iter().any(|t| t == "Feed Health Status"),
+            "the overlay is up before anybody asked"
+        );
+
+        assert_eq!(
+            app.handle_event(&press(Key::H)),
+            EventResult::Consumed,
+            "H was ignored"
+        );
+        assert!(app.show_feed_health, "H did not open it");
+        assert!(
+            drawn_strings(&app)
+                .iter()
+                .any(|t| t == "Feed Health Status"),
+            "the overlay opened and drew nothing"
+        );
+
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.show_feed_health, "Escape did not close it");
+    }
+
+    fn drawn_strings(app: &RssReaderApp) -> Vec<String> {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn press(k: Key) -> Event {
         key_ev(k, false, false)
     }
@@ -5248,6 +5620,750 @@ mod tests {
 
     fn app() -> RssReaderApp {
         RssReaderApp::with_sample_data(1200.0, 800.0)
+    }
+
+    /// Text drawn anywhere in the window.
+    fn drawn_text(a: &RssReaderApp) -> Vec<String> {
+        a.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `A` subscribes to a feed by address.
+    ///
+    /// `add_feed` had eight production callers and every one was the OPML
+    /// importer, so a subscription could arrive in a file and never be typed.
+    #[test]
+    fn a_adds_a_feed_by_address() {
+        let mut a = app();
+        let before = a.feeds.len();
+
+        a.handle_event(&press(Key::A));
+        for c in "https://example.com/feed.xml".chars() {
+            a.handle_event(&types(c));
+        }
+        a.handle_event(&press(Key::Enter));
+
+        assert_eq!(a.feeds.len(), before + 1, "no feed was added");
+        let made = a
+            .feeds
+            .iter()
+            .find(|f| f.url == "https://example.com/feed.xml")
+            .expect("the feed");
+        assert_eq!(
+            a.sidebar_selection,
+            SidebarSelection::Feed(made.id),
+            "the new feed was not selected"
+        );
+    }
+
+    /// Every row of the help overlay is a key this program answers.
+    ///
+    /// The overlay used to list twenty-one shortcuts of which about four
+    /// worked; three named operations that existed nowhere in the crate. It is
+    /// the one place a user goes to be told what the keys are, so a row that
+    /// does nothing is worse than no overlay at all.
+    ///
+    /// This test is the reason that cannot come back: a new row must be given
+    /// a key here, and a key that stops being bound fails it.
+    /// **Every row of the overlay reaches the window.**
+    ///
+    /// `every_advertised_shortcut_does_something` reads the list against the
+    /// handler. This reads it against the *screen*, and they are different
+    /// questions: a row can be answered by the program and never drawn. This
+    /// app is where that difference bit -- the overlay's height was a fixed
+    /// 520 with a `break` when the rows ran past it, so the twenty-first of
+    /// twenty-one was silently dropped, and the one dropped was `ShowHelp`
+    /// itself. The overlay did not list the key that closes it.
+    #[test]
+    fn every_row_of_the_overlay_reaches_the_window() {
+        let mut a = app();
+        a.show_help = true;
+        let drawn: Vec<String> = a
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        let all = drawn.join(" | ");
+        for action in ALL_KEY_ACTIONS {
+            assert!(
+                all.contains(action.key_hint()),
+                "the overlay never drew {:?} for {action:?}",
+                action.key_hint()
+            );
+            assert!(
+                all.contains(action.description()),
+                "the overlay never drew {:?}",
+                action.description()
+            );
+        }
+    }
+
+    #[test]
+    fn every_advertised_shortcut_does_something() {
+        // The events come from each row's own printed hint, read by
+        // `guitk::shortcut`. What stood here was a `match` with one arm per
+        // row mapping the action to an event -- a third copy of the same fact,
+        // after the hint and the key handler, and one that could drift from
+        // *both* while still passing. It also checked only the first key of a
+        // row, so the `Down` in "J / Down" and the `Enter` in "R / Enter" were
+        // advertised and never tested. Every key of every row is pressed now.
+        for action in ALL_KEY_ACTIONS {
+            let hint = action.key_hint();
+            for stroke in keystrokes(hint).unwrap_or_else(|e| panic!("{e}")) {
+                // A fresh app per key: several of these open a prompt or a
+                // dialog that would swallow the next one.
+                let mut a = app();
+                // Both of these act on a sidebar row, and say so rather than
+                // acting when nothing is selected -- which is still answering.
+                a.sidebar_selection = SidebarSelection::Feed(a.feeds.first().expect("a feed").id);
+
+                assert_eq!(
+                    a.handle_event(&Event::Key(stroke.clone())),
+                    EventResult::Consumed,
+                    "the overlay advertises {hint:?} for {action:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// `D` then `Y` removes the selected feed and its articles.
+    ///
+    /// `remove_feed`'s only production caller was inside `remove_folder`, so
+    /// a feed could only be removed by removing the folder around it.
+    #[test]
+    fn d_then_y_removes_the_selected_feed() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        assert!(
+            a.articles.iter().any(|x| x.feed_id == id),
+            "control: the feed needs articles to lose"
+        );
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&press(Key::D));
+        assert!(a.prompt.is_some(), "D did not ask");
+        a.handle_event(&press(Key::Y));
+
+        assert!(
+            !a.feeds.iter().any(|f| f.id == id),
+            "the feed is still there"
+        );
+        assert!(
+            !a.articles.iter().any(|x| x.feed_id == id),
+            "its articles outlived it"
+        );
+    }
+
+    /// Any other key cancels, and nothing is removed.
+    #[test]
+    fn a_key_that_is_not_y_cancels_a_removal() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&press(Key::D));
+        a.handle_event(&press(Key::Enter));
+
+        assert!(a.prompt.is_none(), "the question is still up");
+        assert!(
+            a.feeds.iter().any(|f| f.id == id),
+            "Enter removed the feed; only Y should"
+        );
+    }
+
+    /// Removing a folder keeps the feeds that were in it.
+    #[test]
+    fn removing_a_folder_keeps_its_feeds() {
+        let mut a = app();
+        let id = a.folders.first().expect("a folder").id;
+        let inside: Vec<FeedId> = a
+            .feeds
+            .iter()
+            .filter(|f| f.folder_id == Some(id))
+            .map(|f| f.id)
+            .collect();
+        assert!(!inside.is_empty(), "control: the folder needs a feed in it");
+        a.sidebar_selection = SidebarSelection::Folder(id);
+
+        a.handle_event(&press(Key::D));
+        a.handle_event(&press(Key::Y));
+
+        assert!(!a.folders.iter().any(|f| f.id == id), "the folder survived");
+        for fid in inside {
+            let feed = a
+                .feeds
+                .iter()
+                .find(|f| f.id == fid)
+                .expect("the feed was deleted too");
+            assert_eq!(
+                feed.folder_id, None,
+                "the feed still points at a dead folder"
+            );
+        }
+    }
+
+    /// After a removal the selection names something that exists.
+    ///
+    /// The selection holds an id, not a row: left pointing at a removed feed
+    /// it filters the article list to nothing, which looks like an app that
+    /// has lost the user's articles.
+    #[test]
+    fn the_selection_survives_removing_what_it_named() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&press(Key::D));
+        a.handle_event(&press(Key::Y));
+
+        assert_eq!(
+            a.sidebar_selection,
+            SidebarSelection::AllFeeds,
+            "the sidebar still points at the removed feed"
+        );
+        assert!(
+            !a.filtered_article_indices().is_empty(),
+            "the article list is empty though other feeds have articles"
+        );
+    }
+
+    /// `V` then a digit files the feed into that folder.
+    ///
+    /// `move_feed_to_folder` had no caller and nothing else wrote
+    /// `folder_id`, so an imported arrangement could never be changed.
+    #[test]
+    fn v_then_a_digit_files_the_feed() {
+        let mut a = app();
+        let folder = a.folders.first().expect("a folder").id;
+        let id = a
+            .feeds
+            .iter()
+            .find(|f| f.folder_id != Some(folder))
+            .expect("a feed outside that folder")
+            .id;
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&press(Key::V));
+        assert!(a.prompt.is_some(), "V did not offer the folders");
+        a.handle_event(&press(Key::Num1));
+
+        assert_eq!(
+            a.feeds.iter().find(|f| f.id == id).unwrap().folder_id,
+            Some(folder),
+            "the feed was not filed"
+        );
+    }
+
+    /// `0` takes the feed out of every folder.
+    #[test]
+    fn v_then_zero_moves_the_feed_out_of_its_folder() {
+        let mut a = app();
+        let id = a
+            .feeds
+            .iter()
+            .find(|f| f.folder_id.is_some())
+            .expect("a feed in a folder")
+            .id;
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&press(Key::V));
+        a.handle_event(&press(Key::Num0));
+
+        assert_eq!(
+            a.feeds.iter().find(|f| f.id == id).unwrap().folder_id,
+            None,
+            "the feed is still in a folder"
+        );
+    }
+
+    /// A digit answering a prompt does not also change the filter behind it.
+    #[test]
+    fn a_digit_answering_a_prompt_does_not_change_the_filter() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        a.sidebar_selection = SidebarSelection::Feed(id);
+        let before = a.filter_mode;
+
+        a.handle_event(&press(Key::V));
+        a.handle_event(&press(Key::Num1));
+
+        assert_eq!(
+            a.filter_mode, before,
+            "answering the prompt changed the filter"
+        );
+    }
+
+    /// The question is on screen while it waits.
+    #[test]
+    fn the_removal_question_is_drawn() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&press(Key::D));
+
+        assert!(
+            drawn_text(&a).iter().any(|t| t.contains("Y to confirm")),
+            "the question is nowhere on screen"
+        );
+    }
+
+    /// Ctrl+R renames the selected feed. It was advertised and bound to
+    /// nothing, and `rename_feed` had no caller at all.
+    #[test]
+    fn ctrl_r_renames_the_selected_feed() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&key_ev(Key::R, true, false));
+        assert_eq!(
+            a.text_buffer,
+            a.feeds.iter().find(|f| f.id == id).unwrap().title,
+            "the box did not open seeded with the current title"
+        );
+
+        a.text_buffer.clear();
+        for c in "Morning news".chars() {
+            a.handle_event(&types(c));
+        }
+        a.handle_event(&press(Key::Enter));
+
+        assert_eq!(
+            a.feeds.iter().find(|f| f.id == id).unwrap().title,
+            "Morning news",
+            "the feed was not renamed"
+        );
+        assert!(a.text_entry.is_none(), "the prompt is still up");
+    }
+
+    /// Escape leaves the title alone.
+    #[test]
+    fn escape_cancels_a_rename() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        let before = a.feeds.first().unwrap().title.clone();
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&key_ev(Key::R, true, false));
+        for c in "Discarded".chars() {
+            a.handle_event(&types(c));
+        }
+        a.handle_event(&press(Key::Escape));
+
+        assert_eq!(
+            a.feeds.iter().find(|f| f.id == id).unwrap().title,
+            before,
+            "cancelling renamed it anyway"
+        );
+        assert!(a.text_entry.is_none(), "the prompt is still up");
+    }
+
+    /// An empty box does not blank the title, which nothing could undo.
+    #[test]
+    fn an_empty_rename_leaves_the_title_alone() {
+        let mut a = app();
+        let id = a.feeds.first().expect("a feed").id;
+        let before = a.feeds.first().unwrap().title.clone();
+        a.sidebar_selection = SidebarSelection::Feed(id);
+
+        a.handle_event(&key_ev(Key::R, true, false));
+        a.text_buffer.clear();
+        a.handle_event(&press(Key::Enter));
+
+        assert_eq!(
+            a.feeds.iter().find(|f| f.id == id).unwrap().title,
+            before,
+            "the feed was renamed to nothing"
+        );
+    }
+
+    /// While the prompt is up, its letters are text and not shortcuts.
+    ///
+    /// "Books" would otherwise hide the sidebar on its `b` and cycle the sort
+    /// order on its `o` while being typed.
+    #[test]
+    fn typing_into_the_prompt_does_not_fire_shortcuts() {
+        let mut a = app();
+        let sort_before = a.sort_order;
+        a.handle_event(&key_ev(Key::N, true, false));
+        assert!(a.text_entry.is_some(), "control: the prompt must be up");
+
+        for c in "Books".chars() {
+            a.handle_event(&types(c));
+        }
+
+        assert!(a.sidebar_visible, "typing hid the sidebar");
+        assert_eq!(a.sort_order, sort_before, "typing changed the sort order");
+        assert_eq!(a.text_buffer, "Books", "the letters did not reach the box");
+    }
+
+    /// Ctrl+N makes a folder and selects it.
+    ///
+    /// `add_folder`'s only production caller was the OPML importer, so a
+    /// folder could arrive by importing a file and never be made by hand.
+    #[test]
+    fn ctrl_n_creates_a_folder_and_selects_it() {
+        let mut a = app();
+        let before = a.folders.len();
+
+        a.handle_event(&key_ev(Key::N, true, false));
+        for c in "Reading".chars() {
+            a.handle_event(&types(c));
+        }
+        a.handle_event(&press(Key::Enter));
+
+        assert_eq!(a.folders.len(), before + 1, "no folder was created");
+        let made = a
+            .folders
+            .iter()
+            .find(|f| f.name == "Reading")
+            .expect("the folder");
+        assert_eq!(
+            a.sidebar_selection,
+            SidebarSelection::Folder(made.id),
+            "the new folder was not selected"
+        );
+    }
+
+    /// The prompt is on screen while it is up.
+    #[test]
+    fn the_prompt_is_drawn() {
+        let mut a = app();
+        a.handle_event(&key_ev(Key::N, true, false));
+        for c in "Reading".chars() {
+            a.handle_event(&types(c));
+        }
+
+        assert!(
+            drawn_text(&a)
+                .iter()
+                .any(|t| t.contains("New folder: Reading")),
+            "the prompt is nowhere on screen"
+        );
+    }
+
+    /// `R` marks read, which the overlay has always said and nothing did.
+    #[test]
+    fn r_toggles_read() {
+        let mut a = app();
+        let idx = *a.filtered_article_indices().first().expect("an article");
+        a.selected_article_index = 0;
+        let before = a.articles[idx].is_read;
+
+        a.handle_event(&press(Key::R));
+
+        assert_ne!(a.articles[idx].is_read, before, "R did nothing");
+    }
+
+    /// `Shift+R` marks everything read. It was on `Ctrl+A`, unadvertised.
+    #[test]
+    fn shift_r_marks_all_read() {
+        let mut a = app();
+        assert!(
+            a.articles.iter().any(|x| !x.is_read),
+            "control: something must be unread"
+        );
+
+        a.handle_event(&key_ev(Key::R, false, true));
+
+        assert!(
+            a.articles.iter().all(|x| x.is_read),
+            "Shift+R left something unread"
+        );
+    }
+
+    /// Space on a feed closes the folder that feed is in.
+    #[test]
+    fn space_on_a_feed_closes_its_folder() {
+        let mut a = app();
+        let feed = a
+            .feeds
+            .iter()
+            .find(|f| f.folder_id.is_some())
+            .expect("a feed in a folder");
+        let (fid, folder) = (feed.id, feed.folder_id.expect("its folder"));
+        a.sidebar_selection = SidebarSelection::Feed(fid);
+
+        a.handle_event(&press(Key::Space));
+
+        assert!(
+            !a.folders.iter().any(|f| f.id == folder && f.is_expanded),
+            "the folder holding the selected feed is still open"
+        );
+    }
+
+    /// `Space` opens and closes a folder, as the overlay says.
+    #[test]
+    fn space_toggles_a_folder() {
+        let mut a = app();
+        let id = a.folders.first().expect("a folder").id;
+        a.sidebar_selection = SidebarSelection::Folder(id);
+
+        a.handle_event(&press(Key::Space));
+
+        assert!(
+            !a.folders.iter().any(|f| f.id == id && f.is_expanded),
+            "Space did not close the folder"
+        );
+    }
+
+    /// `Shift+J` moves feed to feed, passing over folder headings.
+    #[test]
+    fn shift_j_moves_to_the_next_feed() {
+        let mut a = app();
+        a.sidebar_selection = SidebarSelection::AllFeeds;
+
+        a.handle_event(&key_ev(Key::J, false, true));
+
+        assert!(
+            matches!(a.sidebar_selection, SidebarSelection::Feed(_)),
+            "Shift+J landed on {:?}, not a feed",
+            a.sidebar_selection
+        );
+    }
+
+    /// `B` hides the sidebar, and the sidebar actually leaves the window.
+    ///
+    /// `sidebar_visible` gates the sidebar's draw and had no writer, so the
+    /// panel could never be hidden. Asserted through the render because the
+    /// field changing proves only that the field changed.
+    #[test]
+    fn b_hides_the_sidebar_from_the_window() {
+        let mut a = app();
+        assert!(
+            drawn_text(&a).iter().any(|t| t == "All Feeds"),
+            "control: the sidebar is on screen to begin with"
+        );
+
+        a.handle_event(&press(Key::B));
+
+        assert!(!a.sidebar_visible, "B did not clear the flag");
+        assert!(
+            !drawn_text(&a).iter().any(|t| t == "All Feeds"),
+            "the flag cleared and the sidebar was drawn anyway"
+        );
+    }
+
+    /// `O` cycles the sort order, and the window says so.
+    ///
+    /// The sort indicator read "Sort: Date (newest first)" and could not say
+    /// anything else, though `sort_order` drives a real sort of the list.
+    #[test]
+    fn o_cycles_the_sort_order() {
+        let mut a = app();
+        let before = a.sort_order;
+        let label_before = format!("Sort: {}", before.label());
+        assert!(
+            drawn_text(&a).contains(&label_before),
+            "control: the sort indicator is on screen"
+        );
+
+        a.handle_event(&press(Key::O));
+
+        assert_ne!(a.sort_order, before, "O did not change the sort order");
+        let label_after = format!("Sort: {}", a.sort_order.label());
+        assert!(
+            drawn_text(&a).contains(&label_after),
+            "the indicator still shows the old order"
+        );
+    }
+
+    /// `F` cycles the filter mode.
+    #[test]
+    fn f_cycles_the_filter_mode() {
+        let mut a = app();
+        let before = a.filter_mode;
+
+        a.handle_event(&press(Key::F));
+
+        assert_ne!(a.filter_mode, before, "F did not change the filter");
+    }
+
+    /// `/` opens the search box -- the half of "Ctrl+F / /" that was missing.
+    #[test]
+    fn slash_opens_search() {
+        let mut a = app();
+        assert!(!a.search_active, "control: search starts closed");
+
+        a.handle_event(&press(Key::Slash));
+
+        assert!(a.search_active, "/ did not open the search box");
+        assert!(!a.show_help, "/ opened the help overlay instead");
+    }
+
+    /// `?` still opens help, rather than being taken by the new `/`.
+    #[test]
+    fn shift_slash_still_opens_help() {
+        let mut a = app();
+
+        a.handle_event(&key_ev(Key::Slash, false, true));
+
+        assert!(a.show_help, "? no longer opens the help overlay");
+        assert!(!a.search_active, "? opened the search box instead");
+    }
+
+    /// Shift-Tab reaches the sidebar and Down moves its selection.
+    ///
+    /// `sidebar_selection` had no writer in production: it was `AllFeeds` from
+    /// construction to exit, so the Feed, Folder and Starred arms of the
+    /// article filter were unreachable and four highlight branches were dead.
+    #[test]
+    fn down_in_the_sidebar_moves_the_sidebar() {
+        let mut a = app();
+        assert_eq!(
+            a.sidebar_selection,
+            SidebarSelection::AllFeeds,
+            "control: the app starts on All Feeds"
+        );
+
+        a.handle_event(&key_ev(Key::Tab, false, true));
+        assert_eq!(
+            a.active_pane,
+            ActivePane::Sidebar,
+            "Shift-Tab missed the sidebar"
+        );
+        a.handle_event(&press(Key::Down));
+
+        assert_eq!(
+            a.sidebar_selection,
+            SidebarSelection::Starred,
+            "Down did not move the sidebar selection"
+        );
+    }
+
+    /// Down still moves through articles when the sidebar is not focused.
+    #[test]
+    fn down_outside_the_sidebar_still_moves_through_articles() {
+        let mut a = app();
+        a.active_pane = ActivePane::ArticleList;
+        assert!(
+            a.filtered_article_indices().len() > 1,
+            "control: need two articles"
+        );
+        a.selected_article_index = 0;
+
+        a.handle_event(&press(Key::Down));
+
+        assert_eq!(a.selected_article_index, 1, "Down stopped moving articles");
+        assert_eq!(
+            a.sidebar_selection,
+            SidebarSelection::AllFeeds,
+            "and it moved the sidebar instead"
+        );
+    }
+
+    /// Selecting a feed filters the article list to that feed.
+    ///
+    /// This is the whole point of the sidebar, and the arm of
+    /// `filtered_article_indices` that could not previously be reached.
+    #[test]
+    fn selecting_a_feed_filters_the_articles_to_it() {
+        let mut a = app();
+        let all = a.filtered_article_indices().len();
+        let feed_id = a
+            .sidebar_rows()
+            .into_iter()
+            .find_map(|r| match r {
+                SidebarSelection::Feed(id) => Some(id),
+                _ => None,
+            })
+            .expect("the fixture has a feed");
+
+        a.active_pane = ActivePane::Sidebar;
+        while a.sidebar_selection != SidebarSelection::Feed(feed_id) {
+            let before = a.sidebar_selection;
+            a.handle_event(&press(Key::Down));
+            assert_ne!(a.sidebar_selection, before, "the selection stopped moving");
+        }
+
+        let mine = a.filtered_article_indices();
+        assert!(!mine.is_empty(), "the feed's own articles vanished");
+        assert!(mine.len() < all, "selecting a feed did not narrow the list");
+        assert!(
+            mine.iter().all(|i| a.articles[*i].feed_id == feed_id),
+            "an article from another feed survived the filter"
+        );
+    }
+
+    /// Enter closes a folder, and its feeds leave the sidebar.
+    ///
+    /// `Folder::is_expanded` had no production writer, so every folder was
+    /// open forever and the "closed" indicator could never be drawn.
+    #[test]
+    fn enter_on_a_folder_closes_it() {
+        let mut a = app();
+        let folder_id = a.folders.first().expect("the fixture has a folder").id;
+        let inside: Vec<_> = a
+            .feeds
+            .iter()
+            .filter(|f| f.folder_id == Some(folder_id))
+            .map(|f| SidebarSelection::Feed(f.id))
+            .collect();
+        assert!(!inside.is_empty(), "control: the folder needs a feed in it");
+        assert!(
+            inside.iter().all(|r| a.sidebar_rows().contains(r)),
+            "control: an open folder shows its feeds"
+        );
+
+        a.active_pane = ActivePane::Sidebar;
+        a.sidebar_selection = SidebarSelection::Folder(folder_id);
+        a.handle_event(&press(Key::Enter));
+
+        assert!(
+            !a.folders.iter().any(|f| f.id == folder_id && f.is_expanded),
+            "the folder is still open"
+        );
+        assert!(
+            inside.iter().all(|r| !a.sidebar_rows().contains(r)),
+            "a closed folder still lists its feeds"
+        );
+    }
+
+    /// Enter in the article list still marks read, rather than being eaten.
+    #[test]
+    fn enter_outside_the_sidebar_still_marks_read() {
+        let mut a = app();
+        a.active_pane = ActivePane::ArticleList;
+        let idx = *a.filtered_article_indices().first().expect("an article");
+        a.selected_article_index = 0;
+        let before = a.articles[idx].is_read;
+
+        a.handle_event(&press(Key::Enter));
+
+        assert_ne!(
+            a.articles[idx].is_read, before,
+            "Enter no longer marks read"
+        );
+    }
+
+    /// The selection stops at the ends instead of wrapping or panicking.
+    #[test]
+    fn the_sidebar_selection_stops_at_both_ends() {
+        let mut a = app();
+        a.active_pane = ActivePane::Sidebar;
+
+        a.handle_event(&press(Key::Up));
+        assert_eq!(
+            a.sidebar_selection,
+            SidebarSelection::AllFeeds,
+            "Up from the first row wrapped or moved"
+        );
+
+        let last = *a.sidebar_rows().last().expect("rows exist");
+        for _ in 0..a.sidebar_rows().len() + 4 {
+            a.handle_event(&press(Key::Down));
+        }
+        assert_eq!(a.sidebar_selection, last, "Down ran off the end");
     }
 
     /// One feed is filled by parsing real RSS rather than by a constructor, so
@@ -5554,10 +6670,24 @@ mod tests {
         }
         // Not a timing assertion so much as a liveness one: the old code did
         // not finish the first of these at all, so any bound at all is the
-        // difference being tested. A second is orders of magnitude of slack
-        // over the closed form.
+        // difference being tested.
+        //
+        // The bound was one second, justified as "orders of magnitude of slack
+        // over the closed form". **That reasoning is wrong, and lane A
+        // measured why** (2026-09-18): a ratio bound assumes the noise is
+        // proportional, so a slower machine stretches the work and the ceiling
+        // together and the bound survives. A descheduled VM does not stretch,
+        // it *stops* -- for an absolute number of milliseconds -- and an
+        // absolute stall blows through any ceiling smaller than itself however
+        // large the ratio is. Their observed stall on this machine was 988ms
+        // against a one-second ceiling: twelve milliseconds of margin on a
+        // test whose ratio looked like a thousandfold.
+        //
+        // Thirty seconds is above any stall this host has been seen to take,
+        // still catches the non-termination this test exists for, and is a
+        // fraction of the harness timeout that would catch it anyway.
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
+            started.elapsed() < std::time::Duration::from_secs(30),
             "parsing four impossible dates should be instant, took {:?}",
             started.elapsed()
         );
@@ -6555,7 +7685,32 @@ mod tests {
 
     #[test]
     fn test_all_key_actions_count() {
-        assert_eq!(ALL_KEY_ACTIONS.len(), 21);
+        // Was `assert_eq!(ALL_KEY_ACTIONS.len(), 21)`. A count has to be
+        // edited by whoever changes the list, which makes it a step in a
+        // procedure rather than a check on one -- it fails for the person who
+        // added an action correctly and passes for anyone who replaces one
+        // action with another. These are properties of the list instead:
+        // every action offers a key, and no two offer the same one.
+        for action in ALL_KEY_ACTIONS {
+            assert!(
+                !action.key_hint().is_empty(),
+                "{action:?} is listed with no key"
+            );
+            assert!(
+                !action.description().is_empty(),
+                "{action:?} is listed with no description"
+            );
+        }
+        for (i, a) in ALL_KEY_ACTIONS.iter().enumerate() {
+            for b in ALL_KEY_ACTIONS.iter().skip(i + 1) {
+                assert_ne!(
+                    a.key_hint(),
+                    b.key_hint(),
+                    "{a:?} and {b:?} both claim {:?}",
+                    a.key_hint()
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -7113,14 +8268,6 @@ mod tests {
             a2.render_commands().len()
         };
         assert!(cmds.len() > normal);
-    }
-
-    #[test]
-    fn test_render_with_add_feed_dialog() {
-        let mut app = RssReaderApp::with_sample_data(1200.0, 800.0);
-        app.show_add_feed_dialog = true;
-        let cmds = app.render_commands();
-        assert!(!cmds.is_empty());
     }
 
     #[test]

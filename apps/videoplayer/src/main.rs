@@ -8,8 +8,13 @@
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+// The toolkit's rectangle rather than a private copy: this crate had
+// the same four floats under `width`/`height`, with the same half-open
+// `contains`. See `known-issues.md`
+// `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`.
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
@@ -91,21 +96,6 @@ const MIN_WINDOW_HEIGHT: f32 = 320.0;
 /// the queue did not reach the panel that configured it.
 const NO_SCREENSHOTS: &str = "Not applied: this player cannot take a \
 screenshot -- no frame is decoded and there is nowhere to write one.";
-
-/// A rectangle on screen.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    fn contains(self, x: f32, y: f32) -> bool {
-        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
-    }
-}
 
 // ============================================================================
 // Media container and codec types
@@ -1623,6 +1613,17 @@ pub enum DeinterlaceMode {
 }
 
 impl DeinterlaceMode {
+    /// The next mode, wrapping. `Auto` is last so the cycle returns to `Off`.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Blend,
+            Self::Blend => Self::Bob,
+            Self::Bob => Self::Yadif,
+            Self::Yadif => Self::Auto,
+            Self::Auto => Self::Off,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "Off",
@@ -1670,6 +1671,12 @@ pub enum Command {
     /// Shift the sound against the picture by this many milliseconds.
     AudioSync(i64),
     AddBookmark,
+    /// Step the repeat mode: off, one, all.
+    CycleRepeat,
+    /// Turn the equalizer's processing on or off.
+    ToggleEqualizerEnabled,
+    /// Change the Settings row the cursor is on.
+    ChangeSetting,
 }
 
 /// Which keystroke runs a command.
@@ -1785,10 +1792,15 @@ impl Shortcuts {
                 Press::Plain(Key::M),
                 Command::ToggleMute,
             ),
-            sc("Up", "Volume Up", Press::Plain(Key::Up), Command::VolumeUp),
+            sc(
+                "Up",
+                "Volume Up / Settings Row Up",
+                Press::Plain(Key::Up),
+                Command::VolumeUp,
+            ),
             sc(
                 "Down",
-                "Volume Down",
+                "Volume Down / Settings Row Down",
                 Press::Plain(Key::Down),
                 Command::VolumeDown,
             ),
@@ -1923,6 +1935,24 @@ impl Shortcuts {
                 "Add Bookmark",
                 Press::Ctrl(Key::B),
                 Command::AddBookmark,
+            ),
+            sc(
+                "R",
+                "Cycle Repeat Mode",
+                Press::Plain(Key::R),
+                Command::CycleRepeat,
+            ),
+            sc(
+                "Shift+E",
+                "Equalizer On / Off",
+                Press::Shift(Key::E),
+                Command::ToggleEqualizerEnabled,
+            ),
+            sc(
+                "Enter",
+                "Change the Selected Setting",
+                Press::Plain(Key::Enter),
+                Command::ChangeSetting,
             ),
             sc("0-9", "Seek to 0%-90%", Press::Digit, Command::SeekToDigit),
             // The keyboard's own media keys, which a player should honour and
@@ -2141,6 +2171,17 @@ pub enum OnFinishAction {
 }
 
 impl OnFinishAction {
+    /// The next action, wrapping.
+    pub fn next(self) -> Self {
+        match self {
+            Self::DoNothing => Self::PlayNext,
+            Self::PlayNext => Self::RepeatFile,
+            Self::RepeatFile => Self::ExitFullscreen,
+            Self::ExitFullscreen => Self::Quit,
+            Self::Quit => Self::DoNothing,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::DoNothing => "Do Nothing",
@@ -2168,6 +2209,80 @@ impl Default for PlayerPreferences {
             seek_large_step: 60_000,
             screenshot_config: ScreenshotConfig::default(),
             deinterlace: DeinterlaceMode::Auto,
+        }
+    }
+}
+
+/// One row of the Settings tab: what it is called, what it reads, what
+/// changing it does.
+///
+/// The panel used to build a `[(&str, &str); 6]` of labels and rendered
+/// values inside `render_settings`, and nothing anywhere could change one of
+/// them. Six preferences were drawn as "On"/"Off" for a user who had no way
+/// to make any of them read the other word -- `hardware_decode` was `true`
+/// for everybody, `on_finish` was `PlayNext` for everybody.
+///
+/// Making the row an enum with a `cycle` is what stops that recurring: the
+/// renderer walks this list, the cursor indexes this list, and Enter calls
+/// `cycle` on whatever it lands on. A row cannot be drawn without being
+/// changeable, because drawing it means being in this list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingRow {
+    ResumePlayback,
+    RememberVolume,
+    HardwareDecode,
+    SubtitleAutoLoad,
+    OnFinish,
+    Deinterlace,
+}
+
+impl SettingRow {
+    /// Every row, in the order the panel draws them.
+    pub const ALL: [SettingRow; 6] = [
+        Self::ResumePlayback,
+        Self::RememberVolume,
+        Self::HardwareDecode,
+        Self::SubtitleAutoLoad,
+        Self::OnFinish,
+        Self::Deinterlace,
+    ];
+
+    /// The name in the left column.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ResumePlayback => "Resume Playback",
+            Self::RememberVolume => "Remember Volume",
+            Self::HardwareDecode => "Hardware Decode",
+            Self::SubtitleAutoLoad => "Auto-load Subtitles",
+            Self::OnFinish => "On Finish",
+            Self::Deinterlace => "Deinterlace",
+        }
+    }
+
+    /// The value in the right column, as the panel prints it.
+    pub fn value(self, prefs: &PlayerPreferences) -> &'static str {
+        fn on_off(flag: bool) -> &'static str {
+            if flag { "On" } else { "Off" }
+        }
+        match self {
+            Self::ResumePlayback => on_off(prefs.resume_playback),
+            Self::RememberVolume => on_off(prefs.remember_volume),
+            Self::HardwareDecode => on_off(prefs.hardware_decode),
+            Self::SubtitleAutoLoad => on_off(prefs.subtitle_auto_load),
+            Self::OnFinish => prefs.on_finish.label(),
+            Self::Deinterlace => prefs.deinterlace.label(),
+        }
+    }
+
+    /// Move this row to its next value. Booleans flip; lists step and wrap.
+    pub fn cycle(self, prefs: &mut PlayerPreferences) {
+        match self {
+            Self::ResumePlayback => prefs.resume_playback = !prefs.resume_playback,
+            Self::RememberVolume => prefs.remember_volume = !prefs.remember_volume,
+            Self::HardwareDecode => prefs.hardware_decode = !prefs.hardware_decode,
+            Self::SubtitleAutoLoad => prefs.subtitle_auto_load = !prefs.subtitle_auto_load,
+            Self::OnFinish => prefs.on_finish = prefs.on_finish.next(),
+            Self::Deinterlace => prefs.deinterlace = prefs.deinterlace.next(),
         }
     }
 }
@@ -2259,6 +2374,8 @@ pub struct VideoPlayerApp {
 
     // Active tab in settings
     pub active_tab: PlayerTab,
+    /// Which row of the Settings tab the cursor is on.
+    pub settings_row: usize,
 
     // OSD messages
     pub osd_message: Option<String>,
@@ -2357,6 +2474,7 @@ impl VideoPlayerApp {
             recent: RecentHistory::default(),
             preferences: PlayerPreferences::default(),
             active_tab: PlayerTab::Player,
+            settings_row: 0,
             osd_message: None,
             osd_remaining_ms: 0,
         }
@@ -2741,8 +2859,23 @@ impl VideoPlayerApp {
             Command::Stop => self.stop(),
             Command::ToggleFullscreen => self.toggle_fullscreen(),
             Command::ToggleMute => self.toggle_mute(),
-            Command::VolumeUp => self.volume_up(),
-            Command::VolumeDown => self.volume_down(),
+            // On the Settings tab the list is what the arrows are for;
+            // there is no volume slider drawn there to move.
+            Command::VolumeUp => {
+                if self.active_tab == PlayerTab::Settings {
+                    self.settings_row = self.settings_row.saturating_sub(1);
+                } else {
+                    self.volume_up();
+                }
+            }
+            Command::VolumeDown => {
+                if self.active_tab == PlayerTab::Settings {
+                    let last = SettingRow::ALL.len().saturating_sub(1);
+                    self.settings_row = self.settings_row.saturating_add(1).min(last);
+                } else {
+                    self.volume_down();
+                }
+            }
             Command::SeekBy(ms) => {
                 if ms < 0 {
                     self.seek_backward(ms.unsigned_abs());
@@ -2802,6 +2935,32 @@ impl VideoPlayerApp {
             Command::AudioSync(ms) => {
                 self.audio_sync.adjust(ms);
                 self.show_osd(&format!("Audio {}", self.audio_sync.label()));
+            }
+            Command::CycleRepeat => {
+                self.repeat = self.repeat.cycle();
+                self.show_osd(&format!("Repeat: {}", self.repeat.label()));
+            }
+            Command::ToggleEqualizerEnabled => {
+                self.equalizer.enabled = !self.equalizer.enabled;
+                self.show_osd(if self.equalizer.enabled {
+                    "Equalizer on"
+                } else {
+                    "Equalizer off"
+                });
+            }
+            Command::ChangeSetting => {
+                // Deliberately does nothing outside the Settings tab rather
+                // than acting on a row the user cannot see.
+                if self.active_tab == PlayerTab::Settings {
+                    if let Some(row) = SettingRow::ALL.get(self.settings_row) {
+                        row.cycle(&mut self.preferences);
+                        self.show_osd(&format!(
+                            "{}: {}",
+                            row.label(),
+                            row.value(&self.preferences)
+                        ));
+                    }
+                }
             }
             Command::AddBookmark => {
                 let label = format!("Bookmark at {}", self.position.format());
@@ -2932,8 +3091,8 @@ impl VideoPlayerApp {
                     Rect {
                         x,
                         y: TAB_PADDING,
-                        width: (slot - TAB_PADDING).max(1.0),
-                        height: TAB_BAR_HEIGHT - TAB_PADDING * 2.0,
+                        w: (slot - TAB_PADDING).max(1.0),
+                        h: TAB_BAR_HEIGHT - TAB_PADDING * 2.0,
                     },
                 )
             })
@@ -2956,8 +3115,8 @@ impl VideoPlayerApp {
             // Centred on the line that is drawn, so the grab band reaches as
             // far above it as below.
             y: drawn_y - (SEEK_BAR_GRAB_HEIGHT - SEEK_BAR_HEIGHT) / 2.0,
-            width: (self.width - SEEK_BAR_INSET * 2.0).max(1.0),
-            height: SEEK_BAR_GRAB_HEIGHT,
+            w: (self.width - SEEK_BAR_INSET * 2.0).max(1.0),
+            h: SEEK_BAR_GRAB_HEIGHT,
         }
     }
 
@@ -2969,7 +3128,7 @@ impl VideoPlayerApp {
     /// Where along the file a point on the seek bar is.
     fn seek_fraction_at(&self, x: f32) -> f64 {
         let bar = self.seek_bar();
-        f64::from(((x - bar.x) / bar.width).clamp(0.0, 1.0))
+        f64::from(((x - bar.x) / bar.w).clamp(0.0, 1.0))
     }
 
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
@@ -3083,7 +3242,90 @@ impl VideoPlayerApp {
         // Tab bar at top
         self.render_tab_bar(&mut cmds);
 
+        // Over the tab bar as well: it is a list you asked for, and a panel
+        // under the bar would be half-hidden by it.
+        if self.chapter_list_visible {
+            self.render_chapter_list(&mut cmds);
+        }
+
         cmds
+    }
+
+    /// The chapter list, which `C` opens.
+    ///
+    /// Until 2026-09-22 `chapter_list_visible` was declared, initialised and
+    /// inverted by `C` and read by nothing, while `("C", "Toggle Chapter
+    /// List")` sat in the shortcut table this window both draws from and
+    /// dispatches on. The key was advertised and moved nothing.
+    ///
+    /// **It says so when there are none.** `chapters` is empty until a video
+    /// with chapter marks is loaded, and a panel that opens blank reads as a
+    /// broken control -- the lesson `apps/netscan`'s Send button and
+    /// `apps/soundrecorder`'s transport both taught: a press that changes
+    /// nothing visible sends someone hunting a fault in the wrong place.
+    fn render_chapter_list(&self, cmds: &mut Vec<RenderCommand>) {
+        let w = (self.width * 0.6).clamp(220.0, 460.0);
+        let h = (self.height * 0.6).clamp(120.0, 420.0);
+        let x = (self.width - w) / 2.0;
+        let y = (self.height - h) / 2.0;
+
+        self.palette
+            .push_surface(cmds, x, y, w, h, 6.0, Surface::Card);
+        cmds.push(RenderCommand::Text {
+            x: x + 12.0,
+            y: y + 10.0,
+            text: "Chapters  --  C closes this".into(),
+            font_size: 13.0,
+            color: self.palette.ink(self.palette.blue),
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(w - 24.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        if self.chapters.is_empty() {
+            cmds.push(RenderCommand::Text {
+                x: x + 12.0,
+                y: y + 34.0,
+                text: "This video has no chapter marks.".into(),
+                font_size: 11.0,
+                color: self.palette.subtext0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w - 24.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            return;
+        }
+
+        let here = self.current_chapter().map(|(idx, _)| idx);
+        for (i, chapter) in self.chapters.iter().enumerate() {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a video has tens of chapters, not millions"
+            )]
+            let row_y = y + 34.0 + i as f32 * 18.0;
+            if row_y + 18.0 > y + h {
+                break;
+            }
+            let current = here == Some(i);
+            cmds.push(RenderCommand::Text {
+                x: x + 12.0,
+                y: row_y,
+                text: format!("{}   {}", chapter.start.format(), chapter.title),
+                font_size: 11.0,
+                color: if current {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.text
+                },
+                font_weight: if current {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some(w - 24.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
     }
 
     fn render_tab_bar(&self, cmds: &mut Vec<RenderCommand>) {
@@ -3115,14 +3357,14 @@ impl VideoPlayerApp {
             cmds.push(RenderCommand::FillRect {
                 x: rect.x,
                 y: rect.y,
-                width: rect.width,
-                height: rect.height,
+                width: rect.w,
+                height: rect.h,
                 color: bg,
                 corner_radii: CornerRadii::all(4.0),
             });
 
             cmds.push(RenderCommand::Text {
-                x: rect.x + rect.width / 2.0 - 24.0,
+                x: rect.x + rect.w / 2.0 - 24.0,
                 y: 12.0,
                 text: tab.label().to_string(),
                 font_size: 12.0,
@@ -3132,7 +3374,7 @@ impl VideoPlayerApp {
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some((rect.width - 8.0).max(1.0)),
+                max_width: Some((rect.w - 8.0).max(1.0)),
                 overflow: TextOverflow::Ellipsis,
             });
 
@@ -3140,7 +3382,7 @@ impl VideoPlayerApp {
                 cmds.push(RenderCommand::FillRect {
                     x: rect.x + 2.0,
                     y: TAB_BAR_HEIGHT - 3.0,
-                    width: (rect.width - 4.0).max(1.0),
+                    width: (rect.w - 4.0).max(1.0),
                     height: 2.0,
                     color: self.palette.blue,
                     corner_radii: CornerRadii::all(1.0),
@@ -3303,7 +3545,7 @@ impl VideoPlayerApp {
         let bar = self.seek_bar();
         let seek_y = y + SEEK_BAR_OFFSET;
         let seek_x = bar.x;
-        let seek_w = bar.width;
+        let seek_w = bar.w;
         let seek_h = SEEK_BAR_HEIGHT;
 
         // Seek track background
@@ -4472,35 +4714,14 @@ impl VideoPlayerApp {
         });
 
         let prefs = &self.preferences;
-        let settings = [
-            (
-                "Resume Playback",
-                if prefs.resume_playback { "On" } else { "Off" },
-            ),
-            (
-                "Remember Volume",
-                if prefs.remember_volume { "On" } else { "Off" },
-            ),
-            (
-                "Hardware Decode",
-                if prefs.hardware_decode { "On" } else { "Off" },
-            ),
-            (
-                "Auto-load Subtitles",
-                if prefs.subtitle_auto_load {
-                    "On"
-                } else {
-                    "Off"
-                },
-            ),
-            ("On Finish", prefs.on_finish.label()),
-            ("Deinterlace", prefs.deinterlace.label()),
-        ];
+        let settings = SettingRow::ALL;
 
         let label_x = 20.0;
         let value_x = 220.0;
 
-        for (i, (name, value)) in settings.iter().enumerate() {
+        for (i, row) in settings.iter().enumerate() {
+            let (name, value) = (row.label(), row.value(prefs));
+            let selected = i == self.settings_row;
             let sy = top + 60.0 + i as f32 * 36.0;
 
             cmds.push(RenderCommand::FillRect {
@@ -4508,7 +4729,9 @@ impl VideoPlayerApp {
                 y: sy - 2.0,
                 width: self.width - 24.0,
                 height: 32.0,
-                color: if i % 2 == 0 {
+                color: if selected {
+                    self.palette.surface1
+                } else if i % 2 == 0 {
                     self.palette.surface0
                 } else {
                     self.palette.base
@@ -4527,9 +4750,9 @@ impl VideoPlayerApp {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            let value_color = if *value == "On" {
+            let value_color = if value == "On" {
                 self.palette.green
-            } else if *value == "Off" {
+            } else if value == "Off" {
                 self.palette.red
             } else {
                 self.palette.subtext1
@@ -5030,6 +5253,78 @@ mod tests {
     /// the window. Relying on a reader having passed it before reaching a
     /// settings panel is exactly what `apps/mediaconvert` got wrong: three
     /// lines about the queue did not reach the panel that configured it.
+    /// **C opens the chapter list, and it says so when there are none.**
+    ///
+    /// `chapter_list_visible` was declared, initialised and inverted by `C`
+    /// and read by nothing, while `("C", "Toggle Chapter List")` sat in the
+    /// shortcut table this window both draws from and dispatches on -- so the
+    /// key was advertised and moved nothing. Third of the five dead toggles
+    /// where the card is what turned a dormant field into a claim.
+    ///
+    /// The empty case is asserted, not assumed: `chapters` is empty until a
+    /// video with marks is loaded, and a panel that opens blank reads as a
+    /// broken control rather than an empty one.
+    #[test]
+    fn the_chapter_list_opens_and_says_when_there_is_nothing_in_it() {
+        let drawn = |app: &mut VideoPlayerApp| -> Vec<String> {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut app = VideoPlayerApp::new(1000.0, 700.0);
+        assert!(
+            !drawn(&mut app).iter().any(|t| t.starts_with("Chapters")),
+            "the list is up before anybody asked for it"
+        );
+
+        app.chapter_list_visible = true;
+        let shown = drawn(&mut app);
+        assert!(
+            shown.iter().any(|t| t.starts_with("Chapters")),
+            "C opened nothing: {shown:?}"
+        );
+        assert!(
+            shown
+                .iter()
+                .any(|t| t == "This video has no chapter marks."),
+            "an empty chapter list drew an empty box and said nothing"
+        );
+
+        // With chapters, each one is a row and the one being played is named.
+        app.chapters = vec![
+            Chapter {
+                title: String::from("Opening"),
+                start: Duration::from_secs(0),
+                end: Duration::from_secs(60),
+            },
+            Chapter {
+                title: String::from("The middle"),
+                start: Duration::from_secs(60),
+                end: Duration::from_secs(120),
+            },
+        ];
+        let shown = drawn(&mut app);
+        assert!(
+            shown.iter().any(|t| t.contains("Opening")),
+            "a chapter is missing from the list: {shown:?}"
+        );
+        assert!(
+            shown.iter().any(|t| t.contains("The middle")),
+            "a chapter is missing from the list: {shown:?}"
+        );
+        assert!(
+            !shown
+                .iter()
+                .any(|t| t == "This video has no chapter marks."),
+            "the list still claims there are none"
+        );
+    }
+
     #[test]
     fn the_screenshot_options_say_no_screenshot_can_be_taken() {
         let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
@@ -6296,6 +6591,190 @@ test to be about anything -- it drew {} text command(s)",
 
     use guitk::event::Modifiers;
 
+    /// Every row of the Settings tab can be changed from the keyboard, and
+    /// the panel draws the new value.
+    ///
+    /// This asserts the *drawn* value rather than the field, because the
+    /// defect being guarded is precisely a panel that shows a value nothing
+    /// can move: a test that only checked `app.preferences` would still pass
+    /// if the renderer went back to its own hardcoded copy of the list.
+    #[test]
+    fn every_settings_row_can_be_changed_and_the_panel_shows_it() {
+        for (i, row) in SettingRow::ALL.iter().enumerate() {
+            let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            app.active_tab = PlayerTab::Settings;
+            app.settings_row = i;
+            let before = row.value(&app.preferences).to_string();
+
+            let before_count = drawn_texts(&app).iter().filter(|t| **t == before).count();
+            assert!(
+                before_count > 0,
+                "control: the panel must draw {}'s value {before:?} before \
+this test can mean anything",
+                row.label()
+            );
+
+            assert!(
+                app.handle_event(&press(Key::Enter)),
+                "Enter on row {} of the settings list was not handled",
+                row.label()
+            );
+            let after = row.value(&app.preferences).to_string();
+            assert_ne!(
+                before,
+                after,
+                "Enter on {} left it reading {before:?}",
+                row.label()
+            );
+            // Counted rather than merely present: five of the six rows read
+            // "On" or "Off", so "the panel draws {after} somewhere" is
+            // satisfied by a *different* row and would pass against a
+            // renderer that ignored the change entirely. One fewer of the old
+            // word and one more of the new is a statement about this row.
+            let texts = drawn_texts(&app);
+            assert_eq!(
+                texts.iter().filter(|t| **t == before).count(),
+                before_count - 1,
+                "{} changed to {after:?} and the panel still drew {before:?} \
+as many times as before",
+                row.label()
+            );
+            assert!(
+                texts.contains(&after),
+                "{} now reads {after:?} and the panel does not draw it",
+                row.label()
+            );
+        }
+    }
+
+    /// Each row's `cycle` returns to where it started, so no value is a
+    /// one-way door the user cannot come back from.
+    #[test]
+    fn cycling_a_settings_row_comes_back_round() {
+        for row in SettingRow::ALL {
+            let mut prefs = PlayerPreferences::default();
+            let start = row.value(&prefs).to_string();
+            // Eight presses passes the longest list here (five) and lands
+            // back only if the cycle wraps.
+            let mut seen_other = false;
+            for _ in 0..40 {
+                row.cycle(&mut prefs);
+                if row.value(&prefs) != start {
+                    seen_other = true;
+                } else if seen_other {
+                    break;
+                }
+            }
+            assert!(seen_other, "{} never took another value", row.label());
+            assert_eq!(
+                row.value(&prefs),
+                start,
+                "{} does not cycle back to {start:?}",
+                row.label()
+            );
+        }
+    }
+
+    /// The arrows move the settings cursor only where the settings are.
+    #[test]
+    fn the_arrows_move_the_cursor_on_the_settings_tab_and_the_volume_elsewhere() {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.active_tab = PlayerTab::Settings;
+        app.handle_event(&press(Key::Down));
+        assert_eq!(app.settings_row, 1, "Down did not move the settings cursor");
+        app.handle_event(&press(Key::Up));
+        assert_eq!(app.settings_row, 0, "Up did not move it back");
+
+        // At the ends it stays put rather than wrapping into a row the eye
+        // has to hunt for at the other end of the list.
+        app.handle_event(&press(Key::Up));
+        assert_eq!(app.settings_row, 0, "Up at the top wrapped or ran off");
+        app.settings_row = SettingRow::ALL.len() - 1;
+        app.handle_event(&press(Key::Down));
+        assert_eq!(
+            app.settings_row,
+            SettingRow::ALL.len() - 1,
+            "Down at the bottom ran past the last row"
+        );
+
+        // And the volume still answers the same keys on the player itself.
+        let mut player = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        player.active_tab = PlayerTab::Player;
+        let before = player.volume.level();
+        player.handle_event(&press(Key::Up));
+        assert_ne!(
+            player.volume.level(),
+            before,
+            "Up on the player tab stopped changing the volume"
+        );
+        assert_eq!(player.settings_row, 0, "it moved the settings cursor too");
+    }
+
+    /// `Enter` outside the Settings tab must not change a setting the user
+    /// cannot see.
+    #[test]
+    fn enter_on_the_player_changes_no_setting() {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.active_tab = PlayerTab::Player;
+        let before = app.preferences.resume_playback;
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(
+            app.preferences.resume_playback, before,
+            "Enter changed a setting from a tab that does not show it"
+        );
+    }
+
+    /// The repeat mode and the equalizer switch were both read and never
+    /// written: the playlist consulted `repeat` to decide what came next, and
+    /// the equalizer drew its own on/off state, with nothing able to set
+    /// either.
+    #[test]
+    fn repeat_and_the_equalizer_switch_answer_their_keys() {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let before = app.repeat;
+        app.handle_event(&press(Key::R));
+        assert_ne!(app.repeat, before, "R did not move the repeat mode");
+
+        let eq = app.equalizer.enabled;
+        app.handle_event(&press_with(Key::E, shift()));
+        assert_ne!(
+            app.equalizer.enabled, eq,
+            "Shift+E did not switch the equalizer"
+        );
+        app.handle_event(&press_with(Key::E, shift()));
+        assert_eq!(
+            app.equalizer.enabled, eq,
+            "Shift+E is a switch, not a one-way door"
+        );
+    }
+
+    /// The shortcut panel and the dispatcher are one table; this checks the
+    /// keys it names are distinct, since two rows claiming one keystroke
+    /// means the second is printed and unreachable.
+    #[test]
+    fn no_two_shortcuts_claim_the_same_keystroke() {
+        let list = Shortcuts::list();
+        for (i, a) in list.iter().enumerate() {
+            for b in list.iter().skip(i + 1) {
+                assert_ne!(
+                    a.press, b.press,
+                    "{} and {} both claim the same keystroke",
+                    a.keys, b.keys
+                );
+            }
+        }
+    }
+
+    fn drawn_texts(app: &VideoPlayerApp) -> Vec<String> {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn press(k: Key) -> Event {
         Event::Key(KeyEvent {
             key: k,
@@ -6660,7 +7139,7 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         let rects = app.tab_rects();
         let (tab, rect) = rects[3];
-        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
         assert_eq!(app.tab_at(x, y), Some(tab));
         assert!(app.handle_event(&mouse(x, y, MouseEventKind::Press(MouseButton::Left))));
         assert_eq!(app.active_tab, tab);
@@ -6671,7 +7150,7 @@ test to be about anything -- it drew {} text command(s)",
         let app = loaded();
         for (tab, rect) in app.tab_rects() {
             assert_eq!(
-                app.tab_at(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+                app.tab_at(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0),
                 Some(tab),
                 "{tab:?} is drawn at {rect:?} and must be clickable there"
             );
@@ -6727,10 +7206,10 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         app.play();
         let bar = app.seek_bar();
-        let y = bar.y + bar.height / 2.0;
+        let y = bar.y + bar.h / 2.0;
 
         app.handle_event(&mouse(
-            bar.x + bar.width / 2.0,
+            bar.x + bar.w / 2.0,
             y,
             MouseEventKind::Press(MouseButton::Left),
         ));
@@ -6750,15 +7229,15 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         app.play();
         let bar = app.seek_bar();
-        let y = bar.y + bar.height / 2.0;
+        let y = bar.y + bar.h / 2.0;
 
         app.handle_event(&mouse(
-            bar.x + bar.width * 0.25,
+            bar.x + bar.w * 0.25,
             y,
             MouseEventKind::Press(MouseButton::Left),
         ));
         let early = app.seek_preview_position.expect("no preview").format();
-        app.handle_event(&mouse(bar.x + bar.width * 0.75, y, MouseEventKind::Move));
+        app.handle_event(&mouse(bar.x + bar.w * 0.75, y, MouseEventKind::Move));
         let late = app.seek_preview_position.expect("no preview").format();
         assert_ne!(early, late, "the preview did not follow the pointer");
 
@@ -6776,16 +7255,16 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         app.play();
         let bar = app.seek_bar();
-        let y = bar.y + bar.height / 2.0;
+        let y = bar.y + bar.h / 2.0;
 
         app.handle_event(&mouse(
-            bar.x + bar.width / 2.0,
+            bar.x + bar.w / 2.0,
             y,
             MouseEventKind::Press(MouseButton::Left),
         ));
         let preview = app.seek_preview_position.expect("no preview").format();
         app.handle_event(&mouse(
-            bar.x + bar.width / 2.0,
+            bar.x + bar.w / 2.0,
             y,
             MouseEventKind::Release(MouseButton::Left),
         ));
@@ -6802,8 +7281,8 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         app.play();
         let bar = app.seek_bar();
-        let y = bar.y + bar.height / 2.0;
-        let quarter = bar.x + bar.width / 4.0;
+        let y = bar.y + bar.h / 2.0;
+        let quarter = bar.x + bar.w / 4.0;
 
         app.handle_event(&mouse(quarter, y, MouseEventKind::Press(MouseButton::Left)));
         assert!(app.seeking);
@@ -6814,7 +7293,7 @@ test to be about anything -- it drew {} text command(s)",
             "dragging across a film must not seek to every pixel of the way"
         );
 
-        let three_quarters = bar.x + bar.width * 0.75;
+        let three_quarters = bar.x + bar.w * 0.75;
         app.handle_event(&mouse(three_quarters, y, MouseEventKind::Move));
         assert_eq!(app.position, Duration::ZERO);
 
@@ -6840,12 +7319,12 @@ test to be about anything -- it drew {} text command(s)",
         let app = loaded();
         let bar = app.seek_bar();
         assert!(
-            bar.height > SEEK_BAR_HEIGHT,
+            bar.h > SEEK_BAR_HEIGHT,
             "a six-pixel line is not a thing a pointer can land on"
         );
         let drawn_top = app.controls_top() + SEEK_BAR_OFFSET;
         assert!(
-            bar.y < drawn_top && bar.y + bar.height > drawn_top + SEEK_BAR_HEIGHT,
+            bar.y < drawn_top && bar.y + bar.h > drawn_top + SEEK_BAR_HEIGHT,
             "the grab band must reach above and below the line it is for"
         );
     }
@@ -6870,7 +7349,7 @@ test to be about anything -- it drew {} text command(s)",
         let narrow = app.seek_bar();
         app.set_window_size(1920.0, 1080.0);
         let wide = app.seek_bar();
-        assert!(wide.width > narrow.width, "the bar spans the window");
+        assert!(wide.w > narrow.w, "the bar spans the window");
         assert!(wide.y > narrow.y, "the controls sit on the bottom edge");
     }
 
@@ -6937,7 +7416,7 @@ test to be about anything -- it drew {} text command(s)",
         app.set_window_size(1.0, 1.0);
         assert!(app.width >= MIN_WINDOW_WIDTH);
         assert!(app.height >= MIN_WINDOW_HEIGHT);
-        assert!(app.seek_bar().width >= 1.0);
+        assert!(app.seek_bar().w >= 1.0);
     }
 
     #[test]
@@ -7020,10 +7499,10 @@ test to be about anything -- it drew {} text command(s)",
         app.set_window_size(2560.0, 1440.0);
         for (tab, rect) in app.tab_rects() {
             assert!(
-                rect.width <= TAB_MAX_WIDTH,
+                rect.w <= TAB_MAX_WIDTH,
                 "{tab:?} is {} wide on a 2560px window; a tab strip that \
                  grows without limit is a row of seven enormous buttons",
-                rect.width
+                rect.w
             );
         }
     }
@@ -7035,15 +7514,15 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         app.play();
         let bar = app.seek_bar();
-        let y = bar.y + bar.height / 2.0;
+        let y = bar.y + bar.h / 2.0;
         app.handle_event(&mouse(
             bar.x + 10.0,
             y,
             MouseEventKind::Press(MouseButton::Left),
         ));
-        app.handle_event(&mouse(bar.x + bar.width * 3.0, y, MouseEventKind::Move));
+        app.handle_event(&mouse(bar.x + bar.w * 3.0, y, MouseEventKind::Move));
         app.handle_event(&mouse(
-            bar.x + bar.width * 3.0,
+            bar.x + bar.w * 3.0,
             y,
             MouseEventKind::Release(MouseButton::Left),
         ));
@@ -7056,7 +7535,7 @@ test to be about anything -- it drew {} text command(s)",
             MouseEventKind::Press(MouseButton::Left),
         ));
         app.handle_event(&mouse(
-            bar.x - bar.width,
+            bar.x - bar.w,
             y,
             MouseEventKind::Release(MouseButton::Left),
         ));
@@ -7068,14 +7547,14 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         app.play();
         let bar = app.seek_bar();
-        let y = bar.y + bar.height / 2.0;
+        let y = bar.y + bar.h / 2.0;
         app.handle_event(&mouse(
-            bar.x + bar.width * 0.1,
+            bar.x + bar.w * 0.1,
             y,
             MouseEventKind::Press(MouseButton::Left),
         ));
         let first = app.seek_preview_position.expect("a preview");
-        app.handle_event(&mouse(bar.x + bar.width * 0.9, y, MouseEventKind::Move));
+        app.handle_event(&mouse(bar.x + bar.w * 0.9, y, MouseEventKind::Move));
         let second = app.seek_preview_position.expect("a preview");
         assert!(
             second > first,
@@ -7123,20 +7602,20 @@ test to be about anything -- it drew {} text command(s)",
         let mut app = loaded();
         app.play();
         let bar = app.seek_bar();
-        let y = bar.y + bar.height / 2.0;
+        let y = bar.y + bar.h / 2.0;
         let duration = app.current_file.as_ref().expect("a file").duration;
         app.handle_event(&mouse(
             bar.x + 10.0,
             y,
             MouseEventKind::Press(MouseButton::Left),
         ));
-        app.handle_event(&mouse(bar.x + bar.width * 5.0, y, MouseEventKind::Move));
+        app.handle_event(&mouse(bar.x + bar.w * 5.0, y, MouseEventKind::Move));
         assert_eq!(
             app.seek_preview_position,
             Some(duration),
             "the time shown under a pointer dragged off the right of the bar must be the end of the film, not a time past it"
         );
-        app.handle_event(&mouse(bar.x - bar.width, y, MouseEventKind::Move));
+        app.handle_event(&mouse(bar.x - bar.w, y, MouseEventKind::Move));
         assert_eq!(app.seek_preview_position, Some(Duration::ZERO));
     }
 

@@ -8,17 +8,29 @@
 ##     and the condition that should trigger doing it).
 ##
 ## ############################################################################
-## THREE-AGENT LANES (2026-08-13) — see roadmap.md "Three-Agent Parallel Execution"
+## SIX-AGENT LANES (three from 2026-08-13, six from 2026-09-22) — see roadmap.md
+## "Six-Agent Parallel Execution"
 ## ############################################################################
-## Three sessions work this repo at once. This file is APPEND-ONLY per lane:
-## add new entries under your own '## Lane A/B/C' heading at the END of the
-## file, and edit only entries under your own heading. To change another
-## lane's entry, file a request in requests/<from>-<to>-<slug>.md instead.
-## Which lane am I?  ->  python scripts/which-lane.py   (keys off the
-## per-account CLAUDE_CONFIG_DIR; see roadmap.md "Step 0").
-##   Lane A = kernel & core   (kernel/**, bench/**, boot test)
-##   Lane B = POSIX & userland(posix/**, userspace/**, services/**, init/**)
-##   Lane C = graphics, apps & net (gui/**, apps/**, net*/**, pkg/**)
+## Six sessions work this repo at once, two per Claude account. This file is
+## APPEND-ONLY per lane: add new entries under a '## Lane <X> — ...' heading of
+## your own at the END of the file, and edit only entries under your own
+## headings. To change another lane's entry, file a request in
+## requests/<from>-<to>-<slug>.md instead.
+## Which lane am I?  ->  python scripts/which-lane.py --agent-name "<your agent
+## name>"  (the name ListAgents shows; the Claude account no longer identifies
+## the lane, because two lanes share each one -- see roadmap.md "Step 0").
+##   Lane A = kernel, core & networking (kernel/**, bench/**, boot test, net*/**,
+##            aes/**, hmac/**, services/netstack/**)
+##   Lane B = userland          (userspace/**, init/**)
+##   Lane C = desktop & toolkit (gui/** except lane F's crates)
+##   Lane D = POSIX, libc & toolchain (posix/**, services/** but netstack,
+##            toolchain/stubs/**, the rootfs recipe)
+##   Lane E = applications      (apps/**)
+##   Lane F = graphics stack    (gui/compositor, window, remote, font,
+##            imagecodec, vulkan)
+## An entry under a '## Lane <X>' heading written before 2026-09-22 belongs to
+## whichever lane owns the code it names NOW (python scripts/which-lane.py
+## --owner <path>); the letter records who wrote it.
 ## Entries above these lane headings are pre-split single-agent history and
 ## belong to whichever lane owns the code they name.
 ##
@@ -4526,6 +4538,84 @@
 ##       Correct but less efficient; documented in posix/src/process.rs::vfork.
 
 ## Judgment Calls
+
+### 2026-09-16 — pushed with ALLOW_STALE_RELEASE=1, and did NOT update
+### bench/last-release-boot.json
+
+The release boot ran (BOOT_OK at 166s, first release profile in 101
+commits) and the boot test reported FAILED, because `ctest-pty` failed
+with exit 45. boot-test.sh treats any `self-test failed` marker as fatal
+even for a Diagnostic-severity rung, which is deliberate and correct --
+its own comment records that a naive `grep BOOT_OK` once hid a stale
+procfs readdir-count assertion.
+
+So three things are true at once and none of them is a clean outcome:
+
+  * the release profile WAS exercised, which is what the staleness gate
+    exists to ensure -- the bench scatter-scale check only runs there and
+    it produced a real finding;
+  * the boot test FAILED, so the baseline must not be stamped with it;
+    the existing baseline's own note records its predecessor as a
+    `=== Boot test PASSED ===` run, and writing a green marker over a red
+    run is the exact defect class I spent the previous day removing;
+  * the gate therefore keeps refusing every push, at 104 commits and
+    rising.
+
+**Decision: use the documented escape hatch, leave the baseline stale.**
+`ALLOW_STALE_RELEASE=1` exists for "you are about to run the release boot
+test", and I literally am: the commit being pushed adds instrumentation
+whose only purpose is to produce a discriminating line on the *next*
+release boot. Publishing it is the prerequisite for the measurement that
+would let the gate be cleared honestly.
+
+**Rejected: re-disable `ctest-pty` so the boot passes.** That is the
+"raise the CEILING" move `check-unreachable-mutators` warns about in as
+many words, and design-decisions 944 exists because this rung had already
+been switched off across four disable cycles while the reason rotted. A
+rung switched off to make a boot green is a rung that will not come back.
+
+**Rejected: stamp the baseline with a qualifying note.** The previous
+author did something adjacent -- recorded a `dirty=true` run with a long
+justification -- but that was a *passing* boot with uncommitted edits.
+A failing boot is a different claim and the field is read by
+`merge-readiness.py` as well as by humans.
+
+**What clears this properly:** the next release boot. If the new `[tty]`
+line appears naming the pty's id, the fault is in acquiring the terminal
+and the fix follows; if it does not appear, the hypothesis is wrong and
+the child is blocked elsewhere. Either way the boot after *that* is the
+one whose SHA belongs in the baseline.
+The post-merge sweep is now a SCRIPT, at build/sweep.sh (lane A, 2026-09-15).
+Three boots paid for the routine version.
+
+  Boot 1: skipped the sweep entirely -- stale INDEX.md, gate 53.
+  Boot 2: ran image-check and sysroot-check and forgot the sweep -- stale
+          INDEX.md again, gate 53.
+  Boot 3: typed SIX of the nine from memory and omitted three, one being
+          check-fields-written-never-read -- gate 52 failed on exactly that.
+
+  A routine typed from memory gets typed partially, and a partial sweep is
+  worse than none: it returns green over the checks that ran and says nothing
+  about the ones omitted. That is the corpus problem of 942 in its smallest
+  form, and I produced it three times in one day while writing the entry.
+
+  Scripting it also pins the thing most likely to go wrong by hand: THE
+  INVOCATIONS ARE NOT UNIFORM. Two checks REQUIRE --check (without it
+  gen-script-index rewrites INDEX.md and scan-orphan-modules reports and
+  exits 0 -- a check turned into a repair that reports success for having
+  acted) and seven REJECT it with rc=2 that reads like a finding. One flag
+  for all nine is wrong in both directions at once.
+
+  RUN IT WITHOUT A PIPE. `sh build/sweep.sh 2>&1 | tail -14` reports tail's
+  status, so the harness recorded exit 0 over a SWEEP FAILED -- which I did,
+  on the very run testing a script whose docstring is about that bug. Use
+  `sh build/sweep.sh > log 2>&1; echo rc=$?` and read the log.
+
+  Worth promoting to scripts/ if it survives: it is useful to all three lanes
+  and lane C has started sweeping after merges too. Left in build/ for now
+  because a new file in scripts/ has to satisfy check-gates-are-wired, and a
+  convenience runner is not a gate -- that needs checking before it lands
+  rather than discovering it in someone else's boot.
 
 MacAddress is declared twice (lane A, 2026-09-15). Small, real, not urgent.
 
@@ -54686,7 +54776,88 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## ############################################################################
 ## Lane A — kernel & core
 ## ############################################################################
-(no lane-A-specific entries yet; see the pre-split entries above)
+## IN PROGRESS (2026-09-18): ring-3 rung for /bin/cmake
+##   Answers requests/b-a-cmake-needs-a-ring-3-rung-like-the-other-three.md.
+##   Lane B's half is done: five -P fixtures in /usr/share/cmake-selftest,
+##   already in rootfs.ext4. Four facts below were MEASURED against a real
+##   cmake 3.28.3 in WSL, not assumed; each would otherwise cost a boot.
+##
+##   BLOCKED ON: build/spike/cmake-slateos.elf does not exist in this tree.
+##   build/ is gitignored, so create-ext4-rootfs.sh:1291 stages /bin/cmake
+##   only where the spike has been built. Lane B's 'cmake is staged' is true
+##   in their tree and false here. Unblock with:
+##     wsl -d Ubuntu -- bash scripts/cmake-spike/run.sh
+##   Prereqs confirmed present: WSL Ubuntu running, host cmake 3.28.3 at
+##   /usr/bin/cmake, tarball fetched+SHA256'd by slate_ensure_cmake_src.
+##   DO NOT run it while a QEMU boot is in flight -- a concurrent heavy
+##   build is the likeliest cause of the 988ms sleep that killed boot
+##   a17b8e0fa (design-decisions.md 952).
+##
+##   MEASURED FACT 1 -- the CMAKE_ROOT env var is NOT honoured. An isolated
+##   cmake with no module tree fails 'Could not find CMAKE_ROOT !!!', and
+##   setting CMAKE_ROOT=<real tree> does NOT fix it. So there is no env-var
+##   escape hatch; the tree must be findable by path.
+##
+##   MEASURED FACT 2 -- argv[0] governs prefix derivation, NOT
+##   /proc/self/exe. Discriminator: a binary at B/bin/cmake with no B/share,
+##   invoked via `exec -a A/bin/cmake B/bin/cmake --version`, found A's tree
+##   and printed its version. So argv[0] is sufficient.
+##
+##   => DESIGN: do NOT copy the 6 MB module tree into the VFS. Read the ELF
+##   from /mnt/bin/cmake and pass argv[0] = /mnt/bin/cmake, so cmake derives
+##   prefix /mnt and finds /mnt/share/cmake-4.4, which is already in the
+##   mounted image. (Compiled-in CMAKE_DATA_DIR is /share/cmake-4.4 and the
+##   staging script copies to $STAGE/share/, so the two agree.) This differs
+##   from every other Path-Z rung, which stage into / -- justify it in
+##   design-decisions.md when the rung lands.
+##
+##   MEASURED FACT 3 (from lane B, and it would have cost a cycle) --
+##   message() in -P script mode writes to STDERR; stdout is EMPTY for all
+##   five fixtures. So do NOT model the assertion on self_test_linux_slateos
+##   _make, which asserts stdout. Every fixture states its result by writing
+##   a file; assert the artifact's exact bytes. Fixture 03 additionally
+##   needs stderr captured, to contain 'slateos-deliberate-failure'.
+##
+##   MEASURED FACT 5 -- a SlateOS-linked binary CANNOT be smoke-tested on the
+##   host, so there is no way to validate the fixtures before a boot. Running
+##   cmake-slateos.elf under WSL gives rc=139 (SIGSEGV) with zero bytes of
+##   output. That looks alarming and means nothing: the CONTROL is that
+##   bash-slateos.elf, pkgconf-slateos.elf and make-slateos.elf -- all three
+##   green under SlateOS on every boot -- segfault identically, rc=139,
+##   0 bytes. It is ABI mismatch, since these link our libc and call our
+##   kernel. Do not spend time on this again; the ring-3 rung IS the only
+##   smoke test. (First attempt also misread `cmd | head -3` then `rc=$?` as
+##   cmake's status; that is head's status, and it said 0 over a segfault.)
+##
+##   MEASURED FACT 4 -- the binary is linked against our libc.a, so it is
+##   static: no ld.so/libc.so to stage. Template is
+##   self_test_pkgconf_on_slateos_libc (static, our libc), not the make rung
+##   (dynamic glibc). VERIFY statically by checking for PT_INTERP once the
+##   artifact exists -- the spike also links zig's libc++/libunwind.
+##
+##   MECHANISM to copy from pkgconf_invoke (spawn.rs:26435):
+##     let h = handle::open(out, WRITE|CREATE|TRUNCATE)?;
+##     let fd_map = [(0, CONSOLE, 0), (1, FILE, h_out), (2, FILE, h_err)];
+##   pkgconf puts CONSOLE on 2; cmake needs a FILE there for fixture 03.
+##   Rights must include METADATA, not just READ|WRITE: cmake walks
+##   directories and stats constantly, and without it the failure looks like
+##   a cmake bug rather than a missing right (same trap as pkgconf's lstat).
+##   Needs a writable cwd for the fixtures' relative writes; set cwd rather
+##   than relying on /.
+##
+##   EXPECTED ARTIFACTS (lane B measured these, do not re-derive):
+##     01-script -> exit 0, ./script-ran.txt = 'slateos-cmake-ok\n'
+##     02-vars   -> exit 0, ./vars.txt       = 'SLATEOS/7/len-ok\n'
+##     03-fatal  -> exit 1, stderr has 'slateos-deliberate-failure',
+##                  ./must-not-exist.txt ABSENT
+##     04-read   -> exit 0, ./read.txt       = 'SLATEOS-INPUT-PAYLOAD\n'
+##     05-glob   -> exit 0, ./glob.txt       = '3:a.txt,b.txt,c.txt,\n'
+##
+##   SIDE BENEFIT, worth stating: adding this rung also closes the Path-Z
+##   coverage blind spot. 'Path-Z prerequisites: complete -- 0 rungs
+##   skipped' counts skipped RUNGS, and cmake has zero rung references, so
+##   the one artifact actually missing is the only one the verdict cannot
+##   mention. See the known-issues entry of 2026-09-18.
 
 ## ############################################################################
 ## Lane B — POSIX & userland
@@ -58445,3 +58616,93 @@ minutes each to clear by reading, and it produced five real defects of which
 two (`sshd`, `grub2`) were serious. A scanner reporting 28 where 5 are real is
 emphatically worth running; the cost is that a future reader re-clears the 23
 unless the triage is written down, which is what this entry is for.
+
+## Judgment Call: pushed lane-a with ALLOW_STALE_RELEASE=1 rather than
+advancing the release-boot marker off a FAILED boot (lane A, 2026-09-17).
+
+  The pre-push release-staleness gate refused at 137 kernel-touching commits
+  against a threshold of 100. It offers two ways out: update
+  bench/last-release-boot.json with a fresh release boot's SHA, or override
+  with ALLOW_STALE_RELEASE=1. I took the override.
+
+  I had in fact just run a release boot, on 26a90aadf: it built release,
+  reached BOOT_OK in 133s, and ran the whole self-test battery. But it
+  returned 1, because three ring-3 fixtures failed -- `our own userland runs
+  at all`, `pty ^C signal delivery`, and `CPython REPL over a pty`. All three
+  are lane B's, all three are already filed in requests/, and none is
+  release-specific; they fail on debug too.
+
+  Why not update the marker anyway. That file's `note` is a curated
+  judgement, and the note already there sets the standard it is read at:
+  "Set from an actual release-profile boot test ... '=== Boot test PASSED
+  ==='". It also says READ THIS BEFORE TRUSTING THE SHA. Writing a baseline
+  from a run that failed would silently change what the field means for the
+  other two lanes, who read it as evidence a release boot passed. The
+  override touches no shared record and says plainly that I bypassed a gate.
+
+  The structural problem, which is the part worth acting on. The marker can
+  only be advanced by a *clean* release boot, and the tree cannot produce one
+  while another lane's fixtures are red. So the gate will be bypassed on
+  every push until lane B lands three fixes -- a gate that fails open while
+  continuing to look like a gate. That is the same shape I wrote into
+  HardIrqGuard's doc comment an hour earlier, and I would rather not have it
+  sitting in the push path.
+
+  Options, none of which I should pick unilaterally because they change a
+  shared gate's meaning: (a) let the marker record a boot that reached
+  BOOT_OK with only known-filed other-lane failures, with those failures
+  named in the note; (b) give the gate an explicit allow-list of known-red
+  fixtures so a boot can be 'clean modulo these'; (c) leave it, and accept
+  the override as the mechanism until lane B is green. Currently (c), by
+  default rather than by decision, which is why it is written down here.
+
+  Trigger to revisit: lane B fixing any of the three, at which point re-run a
+  release boot and set the marker properly.
+
+  RESOLVED 2026-09-17, and not by option (c). Lane C argued the case for (b)
+  and the decisive point was one I had missed: a flag set on every push is
+  not a bypass, it is the default path with a ritual attached -- and the real
+  loss is that ALLOW_STALE_RELEASE=1 in the history stops carrying any
+  information, so nobody can tell my routine bypasses from a genuine
+  wave-through.
+
+  Done narrower than they proposed. Their version baselined the three inside
+  boot-test.sh's verdict, which would have moved `clean` in
+  bench/boot-history.jsonl -- read by merge-readiness.py and by all three
+  lanes. Enumerating the readers showed the marker has exactly two
+  (check-release-staleness.py, scripts/hooks/pre-push) and that
+  last_green_boot() reads boot-history instead, so the marker could carry it
+  with no shared semantics touched. That is design-decisions 951.
+
+  The marker is now a8cebf3d1 with the three failures named in a
+  `baselined_failures` field and a retirement condition per name. The gate
+  reports ok at 1 commit past baseline, so the override is no longer in use.
+
+  And the permission was already in the file. Its own note says "the
+  automated ratchet stays strict, while this curated marker can carry a
+  reasoned judgement with its evidence" -- which I read twice today while
+  concluding I must not use it, having taken the precedent from its example
+  and not the permission from its text.
+
+## netscan's scan history has no cap, and the test for one could not fail (lane C, 2026-09-21)
+
+`MAX_HISTORY_ENTRIES = 50` existed, was referenced by exactly one thing --
+`test_app_scan_history_limit` -- and was enforced nowhere. That test called
+`start_scan()` fifty-five times and asserted `history.len() <= 50`.
+
+`start_scan` refuses: this program has no network access, and a `ScanResult`
+filed in a durable history *is* the claim that a scan ran, which is why the
+refusal records nothing. So the list was empty at every one of those fifty-five
+calls and the assertion was `0 <= 50`. It passed for a reason with nothing to
+do with its name, and would have gone on passing if the cap were deleted, set
+to zero, or set to a million.
+
+Both are removed: the constant was the only `never used` warning in the crate,
+and the test's real content -- that a refused scan files nothing -- is already
+asserted by `test_app_start_scan`, which says so in its own doc comment.
+
+**What has to happen when scanning exists.** The cap comes back at the point
+where a `ScanResult` is appended, and its test has to push entries *through
+that path* rather than through a call that refuses. The shape to avoid is the
+one just removed: a bound asserted over a collection that nothing fills is a
+test of the fixture, not of the bound.

@@ -268,6 +268,18 @@ pub fn available_families() -> Vec<String> {
     font_db().families()
 }
 
+/// Every fixed-pitch family installed on this system, sorted — what a
+/// *terminal* font picker lists.
+///
+/// Separate from [`available_families`] because [`set_mono_family`] does not
+/// check, and says so: a caller that points it at a proportional face "gets a
+/// terminal with a broken grid, and that is the caller's decision to have
+/// made". A picker built on this one is not making that decision.
+#[must_use]
+pub fn available_mono_families() -> Vec<String> {
+    font_db().monospaced_families()
+}
+
 /// Runs `f` with the font for `size` and `weight`.
 ///
 /// Poisoning is ignored deliberately. The guarded value is a cache of

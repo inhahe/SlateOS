@@ -466,6 +466,20 @@ impl DetailTab {
 // Application State
 // ============================================================================
 
+/// The keys this window answers, as a reader sees them.
+///
+/// `Esc` closes the program, which is worth a reader knowing before they
+/// press it to back out of something.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Move through the interfaces"),
+    ("Left / Right", "Previous or next tab"),
+    ("PageUp / PageDown", "Move a screenful"),
+    ("Home", "Back to the first"),
+    ("F5", "Look again"),
+    ("Esc", "Quit"),
+];
+
 /// Main application state.
 pub struct NetManagerApp {
     /// All known network interfaces.
@@ -513,6 +527,8 @@ pub struct NetManagerApp {
     /// `None` means keystrokes are navigation, not text. Kept as an explicit
     /// field rather than inferred from `editing_ip` because the DNS input is
     /// typeable on a tab where nothing is "being edited".
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub focus: Option<Field>,
     /// Carries the fraction of a row a wheel event is worth.
     ///
@@ -588,6 +604,7 @@ impl NetManagerApp {
             edit_ip_config,
             status_message,
             sidebar_scroll: 0,
+            show_help: false,
             focus: None,
             wheel: wheel::Accumulator::default(),
             window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
@@ -1010,6 +1027,17 @@ pub fn render_frame(app: &NetManagerApp, width: f32, height: f32) -> Frame {
     // Last, so nothing can be painted over it. The panels below it are empty
     // and this is the only thing that says why.
     render_cannot_see_banner(&mut frame, app);
+
+    if app.show_help {
+        guitk::shortcut::render_card(
+            &mut frame,
+            &app.palette,
+            (width, height),
+            0.0,
+            SHORTCUTS,
+            "F1 closes this",
+        );
+    }
 
     frame
 }
@@ -2979,6 +3007,19 @@ impl NetManagerApp {
             return Action::None;
         }
 
+        // Above the field branch, which takes every character and returns.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return Action::Redraw;
+        }
+        if self.show_help {
+            // Modal, and Escape especially: on this window it quits.
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return Action::Redraw;
+        }
+
         if let Some(field) = self.focus {
             return self.handle_key_in_field(key, field);
         }
@@ -4057,6 +4098,17 @@ mod tests {
         let before = app.vpn_states[1].clone();
         assert!(app.toggle_vpn(1).is_ok());
         assert_eq!(app.vpn_states[1], before, "the VPN switch moved");
+        // Asserted on this path too, not just the connect one. The message is
+        // set under `if let Some(vpn) = self.vpn_configs.get(index)`, so a
+        // `vpn_configs` shorter than `vpn_states` refuses in silence -- a
+        // switch that does not move and says nothing reads as a dead control
+        // rather than an honest refusal, and only the connect test would have
+        // noticed.
+        assert!(
+            app.status_message.contains("Cannot"),
+            "the switch did not move and nothing said why: {}",
+            app.status_message,
+        );
     }
 
     #[test]
@@ -4675,6 +4727,79 @@ mod tests {
     /// [`guitk::probe`] for what each one guarantees. Imported under their
     /// bare names because that is what the tests below already say.
     use guitk::probe::{click, press, rect_of, type_str, typing};
+
+    /// **Every key the card advertises is answered by this window.**
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [0_usize, 1].into_iter().any(|rows| {
+                    let mut app = NetManagerApp::new();
+                    // Interfaces, supplied rather than assumed. This window
+                    // opens with none -- it has no network access, which the
+                    // banner across it says -- and `move_selection` returns
+                    // `None` on an empty list, so Up and Down cannot act on
+                    // the machine that runs this test. The keys are real and
+                    // the state they need is not reachable here, the same
+                    // arrangement apps/soundrecorder has.
+                    app.interfaces = sample_interfaces();
+                    for _ in 0..rows {
+                        app.handle_key(&press(Key::Down));
+                    }
+                    app.handle_key(&stroke) != Action::None
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is F5 and the refresh, not Esc: this window's Escape
+    /// quits, so a leak would end the session rather than fail a test. Fifth
+    /// card whose control had to avoid its own most dangerous key.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let size = <NetManagerApp as Probe>::SIZE;
+        let drawn = |app: &NetManagerApp| -> Vec<String> {
+            render_frame(app, size.0, size.1)
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut app = NetManagerApp::new();
+        assert!(
+            !drawn(&app).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_key(&press(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&drawn(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let tab = app.active_tab;
+        app.handle_key(&press(Key::Right));
+        assert_eq!(
+            app.active_tab, tab,
+            "Right changed tab through the shortcut card"
+        );
+
+        app.handle_key(&press(Key::F1));
+        app.handle_key(&press(Key::Right));
+        assert_ne!(
+            app.active_tab, tab,
+            "control: Right does nothing even with the card down"
+        );
+    }
 
     /// True when `body` is painted with its origin inside `r`. A hit box says
     /// a click lands somewhere; this says the user can see what they are

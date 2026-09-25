@@ -261,6 +261,35 @@ impl Layout {
         }
     }
 
+    /// The same window with everything but the picture given up.
+    ///
+    /// `solve` already surrenders panes in order of what they are worth -- the
+    /// strip before the sidebar, the viewfinder never -- and this is the end
+    /// of that order, asked for rather than forced by a small window. The
+    /// toolbar and the status line stay: fullscreen here means "show me the
+    /// picture", not "hide the shutter button".
+    ///
+    /// Until 2026-09-22 `fullscreen_preview` was a field three lines long --
+    /// declared, initialised, and inverted by `F` -- that nothing read, so
+    /// the key changed a boolean and not one pixel. It is on the shortcut
+    /// card, which is what made it worth finding: a card row for a key with
+    /// no effect is a worse claim than an unnamed key.
+    #[must_use]
+    pub fn fullscreen(self) -> Self {
+        let viewfinder = Rect::new(
+            0.0,
+            self.viewfinder.y,
+            self.window.w,
+            self.strip.bottom().max(self.viewfinder.bottom()) - self.viewfinder.y,
+        );
+        Self {
+            viewfinder,
+            sidebar: Rect::new(self.window.w, self.viewfinder.y, 0.0, 0.0),
+            strip: Rect::new(0.0, viewfinder.bottom(), 0.0, 0.0),
+            ..self
+        }
+    }
+
     /// How many rows of `row` height fit in `r`, after `taken` has been used.
     pub fn rows_in(&self, r: Rect, taken: f32) -> usize {
         if self.row <= 0.0 {
@@ -844,7 +873,6 @@ pub struct CapturedPhoto {
     pub filter: ImageFilter,
     pub filename: String,
     /// Thumbnail pixel data (small preview).
-    pub thumbnail: Vec<u8>,
     pub favorite: bool,
 }
 
@@ -880,29 +908,6 @@ pub struct PhotoGallery {
     pub photos: Vec<CapturedPhoto>,
     pub selected_idx: Option<usize>,
     pub next_id: u32,
-    pub scroll_offset: usize,
-    pub view_mode: GalleryViewMode,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GalleryViewMode {
-    Grid,
-    List,
-    Filmstrip,
-}
-
-impl GalleryViewMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Grid => "Grid",
-            Self::List => "List",
-            Self::Filmstrip => "Filmstrip",
-        }
-    }
-
-    pub fn all() -> &'static [GalleryViewMode] {
-        &[Self::Grid, Self::List, Self::Filmstrip]
-    }
 }
 
 impl Default for PhotoGallery {
@@ -917,8 +922,6 @@ impl PhotoGallery {
             photos: Vec::new(),
             selected_idx: None,
             next_id: 1,
-            scroll_offset: 0,
-            view_mode: GalleryViewMode::Grid,
         }
     }
 
@@ -939,7 +942,6 @@ impl PhotoGallery {
             data_size,
             filter,
             filename,
-            thumbnail: vec![0u8; 64], // placeholder thumbnail
             favorite: false,
         });
         self.selected_idx = Some(self.photos.len().saturating_sub(1));
@@ -1325,6 +1327,8 @@ fn format_duration_ms(ms: u64) -> String {
 /// The main camera application.
 #[derive(Debug, Clone)]
 pub struct CameraApp {
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub width: f32,
     pub height: f32,
 
@@ -1371,6 +1375,7 @@ impl CameraApp {
     pub fn new(width: f32, height: f32) -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            show_help: false,
             width,
             height,
             cameras: default_cameras(),
@@ -1658,6 +1663,11 @@ impl CameraApp {
     /// actually in.
     pub fn frame(&self, w: f32, h: f32) -> Frame<Target> {
         let l = Layout::solve(w, h);
+        let l = if self.fullscreen_preview {
+            l.fullscreen()
+        } else {
+            l
+        };
         let mut f = Frame::new(w, h);
 
         fill(&mut f, l.window, self.palette.crust, CornerRadii::ZERO);
@@ -1680,6 +1690,18 @@ impl CameraApp {
         }
         if self.flash_remaining_ms > 0 {
             self.draw_flash(&mut f, &l);
+        }
+
+        if self.show_help {
+            let rows = Shortcuts::list();
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (w, h),
+                0.0,
+                &rows,
+                "F1 closes this",
+            );
         }
 
         f
@@ -3008,6 +3030,17 @@ impl CameraApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal. Space takes a photograph and Delete removes one.
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         let ctrl = key.modifiers.ctrl;
         if ctrl {
             let letter = key.text.chars().next().map(|c| c.to_ascii_lowercase());
@@ -3226,6 +3259,20 @@ impl CameraApp {
 pub struct Shortcuts;
 
 impl Shortcuts {
+    /// Every key this program answers, in the order the card draws them.
+    ///
+    /// **Until 2026-09-22 the only caller of this was its own test**, which
+    /// asserted the list had more than twenty rows and mentioned Space. So
+    /// camera carried a complete, maintained keyboard reference that no user
+    /// could ever see, and a test that passed on the size of a `Vec`.
+    ///
+    /// `key-survey.py` reported exactly one unnamed key here -- `B` -- and
+    /// that number was the blind spot rather than the finding: every other
+    /// key name appears in this list, and a scan over string literals cannot
+    /// tell a list that is drawn from one that is not. Its own docstring
+    /// says so. The list is drawn now, `B` is in it, and
+    /// `the_shortcut_list_reaches_the_window` is what makes the first of
+    /// those true rather than intended.
     pub fn list() -> Vec<(&'static str, &'static str)> {
         vec![
             ("Space", "Take Photo / Toggle Recording"),
@@ -3239,6 +3286,7 @@ impl Shortcuts {
             ("G", "Toggle Grid Overlay"),
             ("H", "Toggle Histogram"),
             ("S", "Toggle Sidebar"),
+            ("B", "Toggle Photo Strip"),
             ("F", "Toggle Fullscreen Preview"),
             ("+", "Zoom In"),
             ("-", "Zoom Out"),
@@ -4000,12 +4048,6 @@ mod tests {
         assert_eq!(g.total_size(), 3000);
     }
 
-    #[test]
-    fn test_gallery_view_modes() {
-        assert_eq!(GalleryViewMode::Grid.label(), "Grid");
-        assert_eq!(GalleryViewMode::all().len(), 3);
-    }
-
     // --- RecordingSession tests ---
 
     #[test]
@@ -4189,7 +4231,6 @@ mod tests {
             data_size: 4096,
             filter: ImageFilter::None,
             filename: "photo_0001.png".to_string(),
-            thumbnail: vec![0; 64],
             favorite: false,
         };
         assert_eq!(photo.display_name(), "photo_0001.png");
@@ -4204,7 +4245,6 @@ mod tests {
             data_size: 1024,
             filter: ImageFilter::None,
             filename: "test.png".to_string(),
-            thumbnail: vec![],
             favorite: false,
         };
         let label = photo.time_label();
@@ -4220,7 +4260,6 @@ mod tests {
             data_size: 1024,
             filter: ImageFilter::None,
             filename: "test.png".to_string(),
-            thumbnail: vec![],
             favorite: false,
         };
         assert!(!photo.favorite);
@@ -4369,12 +4408,197 @@ mod tests {
         assert_eq!(app.timer_mode, TimerMode::ThreeSeconds);
     }
 
+    /// **F gives the picture the whole window, and pressing it again gives it
+    /// back.**
+    ///
+    /// `fullscreen_preview` was three lines long -- declared, initialised,
+    /// and inverted by `F` -- and nothing read it, so the key changed a
+    /// boolean and not one pixel. It is a row on this window's shortcut card,
+    /// which is what made it worth finding: advertising a key with no effect
+    /// is a worse claim than leaving a working key unnamed.
+    ///
+    /// Checked at a window wide enough to *have* a sidebar and a strip: at a
+    /// small size `solve` has already given both up, so fullscreen and normal
+    /// agree there and a test at that size would pass on the old code.
     #[test]
-    fn test_shortcuts_list() {
-        let shortcuts = Shortcuts::list();
-        assert!(shortcuts.len() > 20);
-        assert!(shortcuts.iter().any(|(k, _)| *k == "Space"));
-        assert!(shortcuts.iter().any(|(_, a)| a.contains("Photo")));
+    fn fullscreen_gives_the_picture_the_whole_window() {
+        let (w, h) = (1200.0, 800.0);
+        let normal = Layout::solve(w, h);
+        assert!(
+            !normal.sidebar.is_empty() && !normal.strip.is_empty(),
+            "control: this size has no sidebar or strip to give up, so the comparison below would hold on any code at all"
+        );
+
+        let full = normal.fullscreen();
+        assert!(full.sidebar.is_empty(), "the sidebar survived fullscreen");
+        assert!(full.strip.is_empty(), "the strip survived fullscreen");
+        assert!(
+            full.viewfinder.w > normal.viewfinder.w,
+            "the picture is no wider: {} against {}",
+            full.viewfinder.w,
+            normal.viewfinder.w
+        );
+        assert!(
+            full.viewfinder.h >= normal.viewfinder.h,
+            "the picture got shorter"
+        );
+
+        // And the key really reaches it.
+        let mut app = CameraApp::new(w, h);
+        let before = app.frame(w, h).commands().len();
+        let mut typed_f = KeyEvent {
+            key: Key::F,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::from("f"),
+        };
+        app.handle_key(&typed_f);
+        assert!(app.fullscreen_preview, "F did not set the flag");
+        let after = app.frame(w, h).commands().len();
+        assert_ne!(
+            before, after,
+            "the window drew exactly the same thing with the preview full"
+        );
+
+        typed_f.text = String::from("f");
+        app.handle_key(&typed_f);
+        assert!(!app.fullscreen_preview, "F did not put it back");
+    }
+
+    /// The character a key produces, for the rows this window reads as text.
+    fn typed_char_for(k: Key) -> Option<char> {
+        let letters = [
+            (Key::R, 'r'),
+            (Key::P, 'p'),
+            (Key::T, 't'),
+            (Key::M, 'm'),
+            (Key::G, 'g'),
+            (Key::H, 'h'),
+            (Key::S, 's'),
+            (Key::B, 'b'),
+            (Key::F, 'f'),
+            (Key::V, 'v'),
+        ];
+        if let Some((_, ch)) = letters.into_iter().find(|(want, _)| *want == k) {
+            return Some(ch);
+        }
+        let digits = [
+            (Key::Num0, '0'),
+            (Key::Num1, '1'),
+            (Key::Num2, '2'),
+            (Key::Num3, '3'),
+            (Key::Num4, '4'),
+            (Key::Num5, '5'),
+            (Key::Num6, '6'),
+            (Key::Num7, '7'),
+            (Key::Num8, '8'),
+        ];
+        if let Some((_, ch)) = digits.into_iter().find(|(want, _)| *want == k) {
+            return Some(ch);
+        }
+        match k {
+            Key::Equals => Some('+'),
+            Key::Minus => Some('-'),
+            _ => None,
+        }
+    }
+
+    /// **The shortcut list reaches the window, and every key on it works.**
+    ///
+    /// This replaces a test that asserted `Shortcuts::list()` had more than
+    /// twenty rows and mentioned Space. That was true, and the list was drawn
+    /// by nothing at all -- its only caller was that assertion. A test can
+    /// confirm a reference is well stocked and say nothing about whether a
+    /// user can read it, which is the difference this pair now covers.
+    #[test]
+    fn every_advertised_key_does_something() {
+        let rows = Shortcuts::list();
+        assert!(rows.len() > 20, "the reference lost most of its rows");
+        for (label, what) in &rows {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [0_u8, 1, 2].into_iter().any(|state| {
+                    let mut app = CameraApp::new(800.0, 600.0);
+                    if state == 1 {
+                        app.toggle_recording();
+                    }
+                    if state == 2 {
+                        // A photograph in the gallery, which is the only
+                        // thing Delete has to delete.
+                        app.take_photo();
+                    }
+                    let mut event = stroke.clone();
+                    // The letter shortcuts read the typed character, so a
+                    // single-character row is pressed the way a keyboard
+                    // sends it.
+                    // The character comes from the *stroke*, not the label.
+                    // I wrote it from the label three times before this, and
+                    // a label is not a key: `Ctrl+H` has a modifier in front
+                    // of it, `+` is its own separator, and `1-8` is eight
+                    // strokes and matches none of them. This window reads its
+                    // letters from `text` on purpose, because a key code is a
+                    // position on a board and the letter under it depends on
+                    // the layout.
+                    if let Some(ch) = typed_char_for(stroke.key) {
+                        event.text = ch.to_string();
+                    }
+                    app.handle_key(&event) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card is drawn when it is asked for, and nothing acts behind it.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &CameraApp| -> Vec<String> {
+            app.frame(800.0, 600.0)
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let press = |k: Key| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        };
+
+        let mut app = CameraApp::new(800.0, 600.0);
+        assert!(
+            !drawn(&app).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_key(&press(Key::F1));
+        let shown = drawn(&app);
+        let rows = Shortcuts::list();
+        let missing = guitk::shortcut::missing_rows(&shown, &rows);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let grid = app.show_grid_overlay;
+        let mut typed = press(Key::G);
+        typed.text = String::from("g");
+        app.handle_key(&typed);
+        assert_eq!(
+            app.show_grid_overlay, grid,
+            "G toggled the grid through the shortcut card"
+        );
+
+        app.handle_key(&press(Key::F1));
+        app.handle_key(&typed);
+        assert_ne!(
+            app.show_grid_overlay, grid,
+            "control: G does nothing even with the card down"
+        );
     }
 
     #[test]

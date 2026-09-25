@@ -16,6 +16,16 @@
 //! - Multi-panel UI: source list, settings panel, queue
 //!
 //! Uses the guitk library for UI rendering.
+//!
+//! **This program cannot read or convert media files, and the window says so.**
+//! It has no filesystem access, so no source has been opened and no output can
+//! be written. The queue is the dangerous part, and it is labelled:
+//! *"Nothing will ever reach Completed here -- do not delete an original on the
+//! strength of this queue."* A conversion queue is acted on -- somebody clears
+//! the originals once it says done -- so a queue that cannot finish must never
+//! look as though it did.
+//!
+//! The list above is what the layouts draw when something supplies a model.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
@@ -1214,6 +1224,31 @@ const JOB_STEP: Duration = Duration::from_millis(120);
 const JOB_STEP_PERCENT: f32 = 4.0;
 
 /// The media converter application.
+/// The keys this window answers, as a reader sees them.
+///
+/// It named none of them. Every verb here -- queue everything, cancel what
+/// has not started, sweep up what finished, pick a profile, pick a quality --
+/// arrived with the keys that reach it, and no string in the crate spelled
+/// one.
+///
+/// CANNOT_CONVERT and SETTINGS_NOT_APPLIED still stand over the panel: no
+/// file is converted and nothing outside this window reads a setting. The
+/// keys are worth naming anyway, because they visibly move what the window
+/// shows, and a control that moves and is named nowhere is a separate defect
+/// from a control that moves nothing.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1 / ?", "This list"),
+    ("Tab", "Next panel: sources, settings, queue"),
+    ("Up / Down", "Move through the sources"),
+    ("Enter", "Queue the selected source"),
+    ("Ctrl+Enter", "Queue every source and start"),
+    ("Ctrl+C", "Cancel everything not yet started"),
+    ("Ctrl+L", "Clear the jobs that finished"),
+    ("Delete", "Drop a source, or cancel a queued job"),
+    ("Left / Right", "Change the profile, in the settings panel"),
+    ("1-4", "Quality: low, medium, high, lossless"),
+];
+
 pub struct MediaConvertApp {
     pub sources: Vec<SourceFile>,
     pub jobs: Vec<ConversionJob>,
@@ -1225,6 +1260,8 @@ pub struct MediaConvertApp {
     pub output_dir: String,
     pub quality_preset: QualityPreset,
     pub active_panel: ActivePanel,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub audio_settings: AudioSettings,
     pub video_settings: VideoSettings,
     pub image_settings: ImageSettings,
@@ -1263,6 +1300,7 @@ impl MediaConvertApp {
             output_dir: "/home/converted".to_owned(),
             quality_preset: QualityPreset::Medium,
             active_panel: ActivePanel::SourceList,
+            show_help: false,
             audio_settings: AudioSettings::default(),
             video_settings: VideoSettings::default(),
             image_settings: ImageSettings::default(),
@@ -1499,6 +1537,18 @@ impl MediaConvertApp {
 
     /// Handle a key press.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Above the Ctrl branch, which returns for every Ctrl chord. Placed
+        // after it, Ctrl+C would cancel the queue from behind the card.
+        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         if key.modifiers.ctrl {
             return match key.key {
                 // Queue everything and start. `queue_all` had six tests and no
@@ -1937,6 +1987,17 @@ impl MediaConvertApp {
         let queue_w = width - queue_x;
         if self.show_queue {
             self.render_queue_panel(&mut cmds, queue_x, content_y, queue_w, content_h);
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
         }
 
         cmds
@@ -2744,6 +2805,83 @@ mod tests {
             modifiers,
             text: String::new(),
         })
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Across all three panels, because half these keys are claimed by one
+    /// panel and ignored by the others: `Up` moves the source list and does
+    /// nothing in settings, `Left` picks a profile and does nothing in the
+    /// queue, `Delete` drops a source or cancels a job and is `Ignored` in
+    /// settings. A single-panel guard would have reported whichever half it
+    /// started in and been right about nothing.
+    #[test]
+    fn every_advertised_key_does_something() {
+        let panels = [
+            ActivePanel::SourceList,
+            ActivePanel::Settings,
+            ActivePanel::Queue,
+        ];
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = panels.into_iter().any(|panel| {
+                    let mut app = MediaConvertApp::new();
+                    app.active_panel = panel;
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and no panel answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the last third: Tab behind the card must not change
+    /// panel, and the same key with the card down must. Asserting only the
+    /// first half would pass on a window that had lost Tab entirely.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &MediaConvertApp| -> String {
+            app.render_commands(1200.0, 800.0)
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+
+        let mut app = MediaConvertApp::new();
+        assert!(
+            !drawn(&app).contains("F1 or ? closes this"),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = drawn(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let panel = app.active_panel;
+        app.handle_event(&press(Key::Tab));
+        assert_eq!(
+            app.active_panel, panel,
+            "Tab changed panel through the shortcut card"
+        );
+
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&press(Key::Tab));
+        assert_ne!(
+            app.active_panel, panel,
+            "control: Tab does nothing even with the card down"
+        );
     }
 
     fn press(k: Key) -> Event {

@@ -726,6 +726,8 @@ struct App {
     /// floor to Warn instead — the app had no input at all, so nothing had ever
     /// needed to make the distinction.
     search_focused: bool,
+    /// Whether the shortcut list is up.
+    show_help: bool,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -743,6 +745,33 @@ struct App {
 const NO_LOGS_LINES: [&str; 2] = [
     "No log is being read.",
     "This program cannot open a log file, so the view stays empty -- that is not a quiet system.",
+];
+
+/// Every key this program answers, and what it does.
+///
+/// Twenty-three bindings and nothing on screen naming one. `F1` rather than
+/// `?`, because this match reads `key.key` and ignores modifiers, so a shifted
+/// slash is a slash and would open the search box.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("1 / 2 / 3", "List / statistics / detail"),
+    ("T / D / I", "Show trace / debug / info and above"),
+    ("W / E / F", "Show warnings / errors / fatal and above"),
+    ("Up / Down", "Move through the entries"),
+    ("Home / End", "First / last entry"),
+    ("Space", "Bookmark this entry"),
+    ("B", "Show only the bookmarked entries"),
+    ("/", "Search"),
+    ("N / P", "Next / previous match"),
+    ("L", "Wrap long lines"),
+    ("A", "Follow the tail of the log"),
+    ("Ctrl+L", "Show or hide the line numbers"),
+    ("Ctrl+T", "Show or hide the timestamps"),
+    ("Ctrl+S", "Show or hide the source column"),
+    ("Escape", "Clear every filter"),
+    ("F1", "This list"),
 ];
 
 impl App {
@@ -775,6 +804,7 @@ impl App {
         file.parse_content(sample);
 
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             files: vec![file],
             active_file: 0,
@@ -890,6 +920,40 @@ impl App {
             return self.handle_key_search(key);
         }
         match key.key {
+            // The shortcut list, and the three columns the window drew and
+            // could not hide.
+            //
+            // All four are guarded on their modifier and sit above every bare
+            // letter below, because this match reads `key.key` and nothing
+            // else: an unguarded `Key::T` takes `Ctrl+T` as readily as `T`, so
+            // a chord placed after one never runs. `F1` needs no guard and is
+            // here for company.
+            //
+            // `show_line_numbers`, `show_timestamps` and `show_source` were
+            // `true` at construction with no writer anywhere -- three members
+            // missing from the group the author had already labelled
+            // "Display toggles" below. Found by
+            // `scripts/frozen-flag-survey.py`.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Key::Escape if self.show_help => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
+            Key::L if key.modifiers.ctrl => {
+                self.show_line_numbers = !self.show_line_numbers;
+                EventResult::Consumed
+            }
+            Key::T if key.modifiers.ctrl => {
+                self.show_timestamps = !self.show_timestamps;
+                EventResult::Consumed
+            }
+            Key::S if key.modifiers.ctrl => {
+                self.show_source = !self.show_source;
+                EventResult::Consumed
+            }
             // Views.
             Key::Num1 => self.set_view(ViewMode::List),
             Key::Num2 => self.set_view(ViewMode::Stats),
@@ -1138,6 +1202,18 @@ impl App {
         }
 
         self.render_status_bar(&mut cmds);
+
+        // Over everything, because it is the one thing a reader asked for.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (WINDOW_WIDTH, WINDOW_HEIGHT),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         cmds
     }
@@ -1397,16 +1473,93 @@ impl App {
         }
     }
 
+    /// Where a row's message column starts.
+    ///
+    /// The columns before it are not a constant width: the line numbers and
+    /// the timestamp are optional, the level badge is as wide as its word,
+    /// and the source cell advances by its *elided* width -- a distinction
+    /// this file has already had wrong once, when the cell was clipped at
+    /// `SOURCE_WIDTH` and `cx` advanced by the untruncated width. So the sum
+    /// lives here, and the renderer's running `cx` is checked against it by
+    /// `the_message_starts_where_the_columns_end`.
+    fn message_column_x(&self, entry: &LogEntry) -> f32 {
+        let mut cx = PADDING + 14.0;
+        if self.show_line_numbers {
+            cx += 46.0;
+        }
+        if self.show_timestamps && entry.timestamp > 0 {
+            cx += 104.0;
+        }
+        let level_w =
+            text::measure(entry.level.short_label(), BADGE_TEXT, FontWeightHint::Bold) + 8.0;
+        cx += level_w + 6.0;
+        if self.show_source && !entry.source.is_empty() {
+            // The one-character ellipsis the renderer uses, not three dots:
+            // they are different widths, and the agreement test below caught
+            // the 1.2 pixels between them the first time it ran.
+            let fitted = text::elide(
+                &format!("[{}]", entry.source),
+                SOURCE_WIDTH,
+                "\u{2026}",
+                SMALL_TEXT,
+                FontWeightHint::Bold,
+            );
+            cx += text::measure(&fitted, SMALL_TEXT, FontWeightHint::Bold) + 8.0;
+        }
+        cx
+    }
+
+    /// The message, as the lines it will be drawn on.
+    ///
+    /// One elided line normally. With `wrap_lines` on -- `L`, and the card
+    /// says "Wrap long lines" -- as many lines as the width takes, which is
+    /// what makes that row true. Until 2026-09-22 `wrap_lines` was declared,
+    /// initialised and inverted by `L` and read by nothing at all, so the
+    /// window advertised wrapping and elided every line exactly as before.
+    fn message_lines(&self, message: &str, width: f32) -> Vec<String> {
+        if self.wrap_lines {
+            text::wrap(message, width, NORMAL_TEXT, FontWeightHint::Regular)
+        } else {
+            vec![text::elide(
+                message,
+                width,
+                "...",
+                NORMAL_TEXT,
+                FontWeightHint::Regular,
+            )]
+        }
+    }
+
     fn render_log_list(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
         let entries = self.filtered_entries();
         let max_visible = (height / LINE_HEIGHT) as usize;
         let scroll = (self.scroll_offset / LINE_HEIGHT) as usize;
 
+        // `ey` is carried rather than computed from the row index, because a
+        // wrapped entry is taller than one row and the next one has to start
+        // under it. With wrapping off every row is `LINE_HEIGHT` and this is
+        // the same arithmetic the index form did.
+        let mut ey = y;
         for (vi, (original_idx, entry)) in entries.iter().enumerate().skip(scroll).take(max_visible)
         {
-            let ey = y + (vi.saturating_sub(scroll) as f32) * LINE_HEIGHT;
+            if ey >= y + height {
+                break;
+            }
             let selected = self.selected_entry == Some(*original_idx);
             let is_search_hit = self.search_results.contains(original_idx);
+
+            // How tall this row is, measured before anything is drawn in it
+            // because the background has to cover it. `message_column_x` is
+            // the one place the columns before the message are added up, and
+            // both this and the drawing below read it -- the alternative is
+            // two copies of an arithmetic this file has already had wrong.
+            let row_width = (WINDOW_WIDTH - self.message_column_x(entry) - PADDING).max(0.0);
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a wrapped log line is tens of rows, not millions"
+            )]
+            let row_h =
+                (self.message_lines(&entry.message, row_width).len() as f32).max(1.0) * LINE_HEIGHT;
 
             // Row background
             let bg = if selected {
@@ -1425,7 +1578,7 @@ impl App {
                 x: 0.0,
                 y: ey,
                 width: WINDOW_WIDTH,
-                height: LINE_HEIGHT,
+                height: row_h,
                 color: bg,
                 corner_radii: CornerRadii::ZERO,
             });
@@ -1538,25 +1691,36 @@ impl App {
                 cx += drawn_w + 8.0;
             }
 
-            // Message
+            // Message. One elided line, or as many wrapped ones as it takes.
+            //
+            // `cx` is where the columns before it happened to end, and it is
+            // not a constant: the line-number and timestamp columns are
+            // optional, the level badge is as wide as its word, and the source
+            // cell advances by its *elided* width -- which this file has
+            // already had wrong once. So the wrap is measured here, against
+            // the width this row really has, rather than against a second
+            // copy of that arithmetic computed somewhere else.
             let msg_width = (WINDOW_WIDTH - cx - PADDING).max(0.0);
-            let display_msg = text::elide(
-                &entry.message,
-                msg_width,
-                "...",
-                NORMAL_TEXT,
-                FontWeightHint::Regular,
-            );
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: ey + 3.0,
-                text: display_msg,
-                font_size: NORMAL_TEXT,
-                color: self.palette.text,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(msg_width),
-                overflow: TextOverflow::Ellipsis,
-            });
+            let lines = self.message_lines(&entry.message, msg_width);
+            for (li, line) in lines.iter().enumerate() {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "a wrapped log line is tens of rows, not millions"
+                )]
+                let ly = ey + 3.0 + li as f32 * LINE_HEIGHT;
+                cmds.push(RenderCommand::Text {
+                    x: cx,
+                    y: ly,
+                    text: line.clone(),
+                    font_size: NORMAL_TEXT,
+                    color: self.palette.text,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(msg_width),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+
+            ey += row_h;
         }
 
         if entries.is_empty() {
@@ -2181,6 +2345,127 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    /// A key with Ctrl held.
+    fn ctrl(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.ctrl = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table beside it here, which would be a third copy of the same fact.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states().iter_mut().any(|app| {
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Viewers chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<App> {
+        let plain = App::new();
+
+        // A filter set, so `Escape` has something to clear; and the selection
+        // moved, so the keys that go back have somewhere to go.
+        let mut filtered = App::new();
+        filtered.handle_event(&press(Key::W));
+        filtered.handle_event(&press(Key::Down));
+
+        // A search with matches, the one state `N` and `P` can step through.
+        let mut searching = App::new();
+        searching.handle_event(&press(Key::Slash));
+        for c in "e".chars() {
+            searching.handle_event(&typed(c));
+        }
+        searching.handle_event(&press(Key::Escape));
+
+        // In another view, so `1` has one to return from: setting the view
+        // already in force changes nothing, and nothing changing is how this
+        // app reports `Ignored`.
+        let mut elsewhere = App::new();
+        elsewhere.handle_event(&press(Key::Num2));
+
+        vec![plain, filtered, searching, elsewhere]
+    }
+
+    /// **The three display toggles change the display.**
+    ///
+    /// They were `true` at construction with no writer anywhere -- three
+    /// members missing from the group the source already called "Display
+    /// toggles". The chords are guarded and sit above every bare letter,
+    /// because this match reads `key.key` alone: an unguarded `Key::T` takes
+    /// `Ctrl+T` as readily as `T`. So this asserts the *effect*, which is the
+    /// only thing that can tell the two apart -- both are `Consumed`.
+    #[test]
+    fn the_display_toggles_move_and_do_not_change_the_level() {
+        let mut app = App::new();
+        let level = app.filter.min_level;
+        let before = (app.show_line_numbers, app.show_timestamps, app.show_source);
+
+        app.handle_event(&ctrl(Key::L));
+        app.handle_event(&ctrl(Key::T));
+        app.handle_event(&ctrl(Key::S));
+
+        assert_ne!(app.show_line_numbers, before.0, "Ctrl+L did nothing");
+        assert_ne!(app.show_timestamps, before.1, "Ctrl+T did nothing");
+        assert_ne!(app.show_source, before.2, "Ctrl+S did nothing");
+        assert_eq!(
+            app.filter.min_level, level,
+            "a display chord fell through to the level filter"
+        );
+    }
+
+    /// **The shortcut list reaches the window.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = App::new();
+        assert!(
+            !drawn_help_text(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = drawn_help_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(*keys), "{keys:?} never reached the window");
+            assert!(shown.contains(*what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !drawn_help_text(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn drawn_help_text(app: &App) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     fn typed(c: char) -> Event {
@@ -2939,6 +3224,85 @@ mod tests {
     // to SOURCE_WIDTH but advanced the cursor by its full untruncated width.
 
     /// An app whose one and only log entry has the given source.
+    /// **L wraps a long line, which the card has always said it does.**
+    ///
+    /// `wrap_lines` was declared, initialised and inverted by `L`, and read by
+    /// nothing -- while `("L", "Wrap long lines")` sat on this window's
+    /// shortcut card. An unnamed working key is a discoverability defect; a
+    /// card row for a key with no effect is a false claim, and the card made
+    /// the second out of the first.
+    #[test]
+    fn wrapping_gives_a_long_message_more_than_one_line() {
+        let long = "the quick brown fox jumps over the lazy dog and keeps going                     well past the width of any sensible log window so that there                     is certainly something to wrap here";
+        let mut app = app_with_source("svc");
+        if let Some(file) = app.files.first_mut()
+            && let Some(entry) = file.entries.first_mut()
+        {
+            entry.message = long.to_string();
+        }
+
+        let width = (WINDOW_WIDTH
+            - app.message_column_x(
+                app.files
+                    .first()
+                    .and_then(|f| f.entries.first())
+                    .expect("one entry"),
+            )
+            - PADDING)
+            .max(0.0);
+
+        assert_eq!(
+            app.message_lines(long, width).len(),
+            1,
+            "control: with wrapping off the message is one elided line"
+        );
+
+        app.wrap_lines = true;
+        let lines = app.message_lines(long, width);
+        assert!(
+            lines.len() > 1,
+            "L is on the card as \"Wrap long lines\" and the message is still one line"
+        );
+        assert!(
+            lines.iter().all(|l| !l.contains("...")),
+            "a wrapped line was elided as well: {lines:?}"
+        );
+    }
+
+    /// **The message is drawn where the columns actually end.**
+    ///
+    /// `message_column_x` adds the columns up and the renderer advances a
+    /// running `cx` through them; both have to reach the same number or the
+    /// row's height is measured against one width and drawn at another. The
+    /// source cell is why this is a test rather than an assumption -- it
+    /// advances by its *elided* width, and this file has had that wrong
+    /// before.
+    #[test]
+    fn the_message_starts_where_the_columns_end() {
+        for source in ["", "svc", "a-very-long-source-name-that-will-be-elided"] {
+            let app = app_with_source(source);
+            let entry = app
+                .files
+                .first()
+                .and_then(|f| f.entries.first())
+                .expect("one entry");
+            let expected = app.message_column_x(entry);
+            let drawn = app.render_commands().iter().find_map(|c| match c {
+                RenderCommand::Text { x, text, .. }
+                    if text.starts_with("the message that must survive") =>
+                {
+                    Some(*x)
+                }
+                _ => None,
+            });
+            assert_eq!(
+                drawn,
+                Some(expected),
+                "with source {source:?} the message is drawn somewhere else"
+            );
+        }
+    }
+
     fn app_with_source(source: &str) -> App {
         let mut app = App::new();
         app.files.truncate(1);

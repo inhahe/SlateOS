@@ -1,22 +1,80 @@
 //! Slate OS Photo Manager
 //!
 //! A photo library management application with:
-//! - Photo library with albums, collections, and smart albums
+//! - Photo library with albums: made from the sidebar, filled by
+//!   right-clicking a photograph, and browsable as a view; smart albums
+//!   exist as a model only
 //! - EXIF metadata parsing and display (camera, exposure, GPS, etc.)
-//! - Thumbnail grid view with multiple zoom levels
-//! - Single-photo view with zoom/pan
-//! - Basic image adjustments: brightness, contrast, saturation, exposure, temperature
-//! - Star ratings (0-5) and color labels
-//! - Tagging and keyword system
-//! - Face region detection placeholders
+//! - Thumbnail grid view at four card sizes (80/120/160/200 px), cycled from
+//!   the toolbar, each card showing the photograph itself
+//! - Single-photo view: the photograph itself, decoded through `imagecodec`
+//!   and drawn at its own proportions
+//! - Per-photograph adjustment values: brightness, contrast, saturation,
+//!   exposure, temperature
+//! - Star ratings (0-5) and colour labels, both applied to every selected
+//!   photograph
+//! - Several photographs at once, with Shift and an arrow
+//! - Tagging: right-click a photograph, "Add tag...", and the tag goes on
+//!   everything selected
 //! - Timeline view grouping photos by date
 //! - Slideshow mode with configurable interval and transitions
-//! - Import from directory with date-based organization
-//! - Export with format/quality selection
-//! - Re-import detection by path and size (NOT by image content:
-//!   nothing here decodes a picture)
+//! - Import of a single file through a picker, with its EXIF read
+//! - A search box that filters the library by name, path or tag as you
+//!   type
+//! - The library is saved to `photolibrary.txt` and read back at start:
+//!   photographs, ratings, flags, tags and colour labels survive closing
+//!   the window. See `library` for the format and what it omits.
+//! - Re-import detection by path and size, not by image content
 //! - Batch operations: tag, rate, move, delete
 //! - Multi-panel UI: sidebar, thumbnail grid, info panel
+//!
+//! # What it does not do yet
+//!
+//! Three claims in the list above used to say more than the code did, and they
+//! failed for one shared reason: nothing in this application had ever held a
+//! pixel. It could read a photograph -- `import_from_disk` has done that since
+//! the repair noted on it -- and then drew a card with the file's name on it.
+//! Two of the three are now true: the single-photo view decodes through
+//! `imagecodec`, and the grid generates thumbnails through `thumbs`. What
+//! follows is what is still owed.
+//!
+//! - **The adjustments cannot be set, let alone applied.** Each photograph
+//!   carries brightness, contrast, saturation, exposure, temperature,
+//!   highlights, shadows, sharpness, vignette and rotation; the info panel
+//!   lists them when they differ from the default, and nothing in this
+//!   application can make them differ. `ImageAdjustments::rotate_cw` and
+//!   `rotate_ccw` exist and are called from tests only. So the panel's
+//!   "adjusted" section has never been drawn outside a test, and no pixel has
+//!   ever been changed by one. (An earlier revision of this list said they
+//!   were "recorded, not applied", which is still too generous: there is no
+//!   way to record one.)
+//! - **Face regions are never detected.** `Photo::faces` is constructed empty
+//!   and nothing ever pushes to it.
+//! - **Smart albums cannot be made either.** `create_smart_album` and the
+//!   rule matching behind it are tested and unreachable, exactly as ordinary
+//!   albums were until now.
+//! - **Slideshow transitions are names only.** `SlideshowTransition` has six
+//!   variants, `SlideshowState::transition` holds one, and the only thing
+//!   that ever read it was the control line printing its own name -- so the
+//!   window said "Fade" while pictures were replaced instantly. The name is
+//!   no longer drawn; performing a cross-fade needs an alpha-blended image
+//!   draw the toolkit does not offer.
+//! - **Nothing is exported.** `ExportOptions` records a format, a quality and
+//!   a size, has a `Default` and a test, and is read by nothing: no function
+//!   in this crate writes a picture anywhere. The feature list offered
+//!   "Export with format/quality selection", which is the options without the
+//!   export -- a settings page is built when something obeys it.
+//! - **Import is one file at a time.** The list offered "import from directory
+//!   with date-based organization". There is no `read_dir` in this crate;
+//!   `import_from_disk` takes a single path from the picker, and nothing
+//!   organises anything by date.
+//! - **The single-photo view has no zoom and no pan.** The list claimed
+//!   both. The only `Zoom` in this file is the name of a slideshow
+//!   transition. The grid's four card sizes, listed above, are a different
+//!   thing and are real -- I deleted that entry too on the first pass, having
+//!   judged it by the company it kept rather than by reading
+//!   `cycle_thumb_size`. A feature list is corrected one claim at a time or
+//!   not at all.
 //!
 //! Uses the guitk library for UI rendering.
 
@@ -37,12 +95,20 @@
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::doc_markdown)]
 
+mod library;
+
 use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
+// The toolkit's rectangle rather than a private copy: this crate had
+// the same four floats under `width`/`height`, with the same half-open
+// `contains`. See `known-issues.md`
+// `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`.
 use guitk::Color;
 use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
+use guitk::menu::{ContextMenu, MenuItem};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
@@ -81,21 +147,6 @@ const MIN_WINDOW_HEIGHT: f32 = 400.0;
 const WINDOW_WIDTH: f32 = 1400.0;
 const WINDOW_HEIGHT: f32 = 900.0;
 
-/// A rectangle on screen.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl Rect {
-    fn contains(self, x: f32, y: f32) -> bool {
-        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
-    }
-}
-
 /// One row of the sidebar, as it is laid out down the column.
 ///
 /// The sidebar was drawn by walking a `cy` down through four blocks with
@@ -107,6 +158,16 @@ enum SidebarRow {
     Header(&'static str),
     /// Air between sections.
     Gap(f32),
+    /// A row that does something rather than going somewhere.
+    ///
+    /// Separate from `Item` because `SidebarItem` answers "which collection am
+    /// I looking at", and an action is not a collection. Folding one in would
+    /// mean every `match` over a selection -- `visible_photos`, the title, the
+    /// filter -- growing an arm for something that can never be selected.
+    Action {
+        label: String,
+        action: SidebarAction,
+    },
     /// A row that goes somewhere.
     Item {
         label: String,
@@ -125,9 +186,63 @@ impl SidebarRow {
         match self {
             Self::Header(_) => Self::HEADER_H,
             Self::Gap(h) => *h,
-            Self::Item { .. } => ITEM_HEIGHT,
+            Self::Item { .. } | Self::Action { .. } => ITEM_HEIGHT,
         }
     }
+}
+
+/// Every colour label, in the order the menu offers them.
+///
+/// Written out rather than derived, because the menu's order is a design
+/// choice and an enum's declaration order is not one -- reordering the enum
+/// for any other reason should not silently reorder a menu.
+const COLOR_LABELS: [ColorLabel; 7] = [
+    ColorLabel::None,
+    ColorLabel::Red,
+    ColorLabel::Orange,
+    ColorLabel::Yellow,
+    ColorLabel::Green,
+    ColorLabel::Blue,
+    ColorLabel::Purple,
+];
+
+/// The first of the menu ids that mean a colour label rather than an album.
+///
+/// The top of the `u64` range, like [`MENU_ADD_TAG`], and for the same reason:
+/// album ids come from an `IdGen` counting up, so the top is unreachable by
+/// construction rather than merely unused so far.
+const MENU_COLOR_BASE: u64 = u64::MAX - 8;
+
+/// The album menu's id for "Add tag...", which is not an album.
+///
+/// `u64::MAX` rather than 0: the menu's ids are album ids, and 0 is what an
+/// `IdGen` that has not been advanced would hand out. A sentinel has to be a
+/// value the real space cannot reach, not merely one it has not reached yet.
+const MENU_ADD_TAG: u64 = u64::MAX;
+
+/// What the keyboard is typing into, when it is typing into something.
+///
+/// One field rather than one flag per box. There were two -- a `bool` for the
+/// search box and an `Option<String>` for a new album's name -- and each new
+/// one had to remember to clear the others, at every place that could take
+/// focus. Two rows both showing a caret leaves no way to tell where the next
+/// character is going, and the bookkeeping that prevents it is exactly the
+/// kind nobody remembers on the fourth occasion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextEntry {
+    /// The toolbar's search box. Filters as it is typed.
+    Search,
+    /// A new album's name, in the sidebar row it will become.
+    AlbumName(String),
+    /// A tag, applied to the selection when it is committed.
+    Tag(String),
+}
+
+/// Something a sidebar row does, rather than somewhere it goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarAction {
+    /// Begin naming a new album.
+    NewAlbum,
 }
 
 /// A control in the toolbar.
@@ -139,6 +254,13 @@ pub enum ToolbarControl {
     Sort,
     /// Step the thumbnail size along.
     ThumbSize,
+    /// The search box. Clicking it puts the keyboard there.
+    ///
+    /// It was drawn from the beginning and was not a control at all: its
+    /// rectangle existed in the layout only to position the button after it,
+    /// so the one thing in this toolbar that looks like it takes typing was
+    /// the one thing that could not be clicked.
+    Search,
     /// Start or stop the slideshow.
     Slideshow,
     /// Open the file picker and bring a photograph in.
@@ -984,12 +1106,9 @@ impl ImageAdjustments {
 }
 
 // ============================================================================
-// Perceptual hash for duplicate detection
+// Import identity: "have I already imported this exact file?"
 // ============================================================================
 
-/// A simple perceptual hash (average hash) for duplicate detection.
-/// In a real implementation this would operate on pixel data; here we hash the
-/// file path + size as a placeholder.
 /// An identity key for an imported file: its path and its size, hashed.
 ///
 /// **This was called `ImportKey` and it is not one.** It is FNV-1a over
@@ -1017,10 +1136,17 @@ pub struct ImportKey {
 
 impl ImportKey {
     /// Hash the path and size. **Not** a function of the image's contents.
-    pub fn from_metadata(path: &str, file_size: u64) -> Self {
-        // Simple FNV-1a hash of the path + size
+    pub fn from_metadata(path: impl AsRef<std::path::Path>, file_size: u64) -> Self {
+        // Simple FNV-1a hash of the path + size.
+        //
+        // Over the path's *bytes*, through `as_encoded_bytes`, rather than
+        // over a UTF-8 rendering of it: two files whose names differ only in
+        // bytes that are not text would otherwise hash alike and the second
+        // would be refused as a duplicate of the first. For an ordinary
+        // ASCII path these are the same bytes, so nothing already imported
+        // changes its key.
         let mut hash: u64 = 0xcbf29ce484222325;
-        for byte in path.bytes() {
+        for byte in path.as_ref().as_os_str().as_encoded_bytes().iter().copied() {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
@@ -1081,7 +1207,16 @@ impl FaceRegion {
 #[derive(Clone, Debug)]
 pub struct Photo {
     pub id: PhotoId,
-    pub file_path: String,
+    /// Where the photograph is, as bytes rather than as text.
+    ///
+    /// A `PathBuf`, not a `String`. This was a `String` built through
+    /// `to_string_lossy`, which replaces any byte that is not UTF-8 with
+    /// U+FFFD -- and a name on this OS may hold every byte but `/` and NUL.
+    /// The result was a path nobody could open, saved into the library as
+    /// though it were the real one, so the photograph failed to decode while
+    /// pointing at a file that exists under a name this program had thrown
+    /// away.
+    pub file_path: std::path::PathBuf,
     pub file_name: String,
     pub file_size: u64,
     pub format: ImageFormat,
@@ -1102,7 +1237,7 @@ impl Photo {
     /// Create a new photo entry.
     pub fn new(
         id: PhotoId,
-        path: &str,
+        path: impl AsRef<std::path::Path>,
         name: &str,
         format: ImageFormat,
         size: u64,
@@ -1110,7 +1245,7 @@ impl Photo {
     ) -> Self {
         Self {
             id,
-            file_path: path.to_owned(),
+            file_path: path.as_ref().to_path_buf(),
             file_name: name.to_owned(),
             file_size: size,
             format,
@@ -1160,7 +1295,10 @@ impl Photo {
         if self.file_name.to_lowercase().contains(&q) {
             return true;
         }
-        if self.file_path.to_lowercase().contains(&q) {
+        // Lossy on purpose, and safe here in a way it is not elsewhere:
+        // this compares for a match and never opens anything, so a byte that
+        // is not text costs a search hit rather than a file.
+        if self.file_path.to_string_lossy().to_lowercase().contains(&q) {
             return true;
         }
         for tag in &self.tags {
@@ -1441,6 +1579,17 @@ pub struct SlideshowState {
     pub photo_ids: Vec<PhotoId>,
     pub current_index: usize,
     pub interval_ms: u64,
+    /// Which transition the slideshow would use between pictures.
+    ///
+    /// **Nothing performs it.** The only reader this field ever had was the
+    /// line that printed its own name in the slideshow controls, so the
+    /// window said "Fade" and pictures were replaced instantly. That is the
+    /// most persuasive shape a false claim takes: the evidence is the
+    /// program's own output at the moment somebody checks.
+    ///
+    /// Kept rather than deleted because it records what the six transitions
+    /// are for, and drawing a cross-fade needs an alpha-blended image draw
+    /// this toolkit does not have. The name is no longer printed.
     pub transition: SlideshowTransition,
     pub paused: bool,
     pub shuffle: bool,
@@ -1569,6 +1718,96 @@ pub enum SidebarItem {
 // ============================================================================
 
 /// The photo manager application.
+/// The image id the single-photo view draws under.
+///
+/// One fixed number rather than one per photograph, because exactly one
+/// picture is on screen here. A second id would buy nothing and cost a
+/// lifecycle: something would have to release the ids of photographs that
+/// have scrolled out of view, and nothing in this application is watching for
+/// that. The grid's thumbnails will need such a pool; this view does not, and
+/// borrowing the complexity early would be paying for it twice.
+const PHOTO_IMAGE_ID: u64 = 1;
+
+/// What the compositor is currently holding under [`PHOTO_IMAGE_ID`].
+///
+/// The pixels are deliberately not here. They are moved into the upload queue
+/// and thence to the compositor, which is the only thing that draws them; a
+/// retained copy would double this application's memory for a 24-megapixel
+/// photograph -- about 96 MB in this form -- to serve a reader that does not
+/// exist. What is kept is the pair of numbers the layout actually needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShownPicture {
+    /// The photograph it was decoded from, so a stale upload is never drawn
+    /// under a new selection.
+    photo: PhotoId,
+    width: u32,
+    height: u32,
+}
+
+/// A file's modification time, in seconds since the epoch, or zero.
+///
+/// Zero for a file that cannot be stat'ed, and that is a usable key rather
+/// than a failure: the thumbnail cached under it is invalidated the moment the
+/// file becomes readable and reports a real time, because the cache key
+/// carries the time it was made with.
+fn file_mtime(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The largest box with `w`:`h` proportions that fits within `max_w`/`max_h`.
+///
+/// Never enlarges. A small picture stretched to fill the pane is blurred in a
+/// way that reads as a fault in the decoder rather than as a small file, and
+/// the photograph's real size is information this view should not destroy.
+/// Photographs are almost always larger than the pane, so the clamp bites
+/// rarely and only where it helps.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "a pixel dimension is exact in f32 far beyond any real sensor"
+)]
+fn fit_within(w: u32, h: u32, max_w: f32, max_h: f32) -> (f32, f32) {
+    if w == 0 || h == 0 {
+        // Not reachable through `imagecodec`, which refuses a zero dimension,
+        // but the alternative to saying so is a division by zero.
+        return (max_w, max_h);
+    }
+    let (w, h) = (w as f32, h as f32);
+    let scale = (max_w / w).min(max_h / h).min(1.0);
+    (w * scale, h * scale)
+}
+
+/// The keys this window answers, as a reader sees them.
+///
+/// It named none of them, and the rating digits are the ones that matter:
+/// `0` through `5` set a photograph's stars, on every selected picture at
+/// once, with no dialog and no undo prompt.
+///
+/// **No `?` row.** This app has two tests called
+/// `typing_a_tag_changed_a_photographs_rating` and
+/// `typing_an_album_name_changed_a_photographs_rating`, both written after
+/// that really happened. Taking `?` for a card would put a seventh character
+/// back on the wrong side of the same branch. Seventh app where `?` was not
+/// free, and the first where the crate already carried the evidence.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Arrows", "Move through the pictures"),
+    ("Shift+Arrows", "Extend the selection"),
+    ("Home / End", "First or last picture"),
+    ("Enter", "Look at the selected picture on its own"),
+    ("Space", "Start the slideshow"),
+    ("0-5", "Set the rating, on everything selected"),
+    ("F", "Flag or unflag this picture"),
+    ("I", "Show or hide the information panel"),
+    ("S", "Change how the pictures are sorted"),
+    ("+ / -", "Thumbnail size"),
+    ("Delete", "Move the selection to the trash"),
+    ("Esc", "Back to the grid, from a single picture"),
+];
+
 pub struct PhotoApp {
     pub photos: Vec<Photo>,
     pub albums: Vec<Album>,
@@ -1588,6 +1827,8 @@ pub struct PhotoApp {
     /// pixel offset could only express positions the renderer then rounds
     /// away.
     pub grid_scroll: usize,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub show_info_panel: bool,
     pub slideshow: Option<SlideshowState>,
     pub export_options: ExportOptions,
@@ -1601,7 +1842,10 @@ pub struct PhotoApp {
     /// Carries the failure too. An import that silently does nothing is the
     /// defect this whole application was an instance of, so a file that cannot
     /// be read says so rather than leaving the grid unchanged and unexplained.
-    pub last_import: Option<String>,
+    /// The line the status bar shows, when there is something to say.
+    ///
+    /// Called `last_import` until it carried anything but an import.
+    pub status_message: Option<String>,
     photo_id_gen: IdGen,
     album_id_gen: IdGen,
     timestamp_counter: u64,
@@ -1611,6 +1855,81 @@ pub struct PhotoApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Pictures waiting to go to the compositor, drained by `App::take_images`.
+    pending_images: Vec<app::ImageChange>,
+    /// The photograph whose pixels are uploaded, once it has been decoded.
+    shown_picture: Option<ShownPicture>,
+    /// The photograph the two fields above were computed for, whether that
+    /// ended in a picture or in a reason.
+    ///
+    /// Separate from `shown_picture` because a failed decode has to be
+    /// remembered too. Without it, a photograph that cannot be decoded would
+    /// be retried on every single frame -- reading and failing to decode the
+    /// file sixty times a second for as long as it stayed selected.
+    picture_for: Option<PhotoId>,
+    /// Why the selected photograph is not on screen, when it is not.
+    ///
+    /// Shown in place of its dimensions. A failure that left the card blank
+    /// would be indistinguishable from one that had not been attempted yet.
+    picture_error: Option<String>,
+    /// The grid's thumbnails, and the image ids they are drawn under.
+    thumb_cache: thumbs::ThumbnailCache,
+    /// The queue that turns files into those thumbnails, a few per frame.
+    thumb_gen: thumbs::ThumbnailGenerator,
+    /// Which photographs have a thumbnail ready, and under what.
+    ///
+    /// The modification time is kept beside the id because the cache is keyed
+    /// on it, and re-reading it from the disk to draw a frame would be a stat
+    /// per visible card per frame.
+    thumb_ready: HashMap<PhotoId, (u64, u64)>,
+    /// Thumbnails waiting to go to the compositor.
+    thumb_uploads: Vec<(u64, thumbs::Thumbnail)>,
+    /// What the queue was last filled for.
+    ///
+    /// Requests are queued when the visible set changes, not every frame:
+    /// pushing the same request sixty times a second would grow the queue
+    /// without bound and starve the cards actually on screen behind it.
+    thumb_queued_for: Option<u64>,
+    /// Where the library is saved, or `None` for a library that is not saved
+    /// at all -- which is what every test gets unless it asks otherwise.
+    library_path: Option<std::path::PathBuf>,
+    /// The exact text last written, so a save happens only when something
+    /// changed.
+    ///
+    /// The whole serialization rather than a hash of it: a hash would be
+    /// smaller and would make two different libraries compare equal once in a
+    /// very long while, and the cost of that coincidence is a save that never
+    /// happens. A few hundred kilobytes is the cheaper side of that trade.
+    last_written: Option<String>,
+    /// Why the library could not be loaded or saved, when it could not.
+    library_note: Option<String>,
+    /// Records the file held that this build could not read.
+    ///
+    /// **Saving is refused while this is non-zero.** A file with one corrupt
+    /// line loads every other photograph; writing that back would delete the
+    /// corrupt one permanently, turning a line somebody could still repair by
+    /// hand into nothing at all.
+    library_unread: usize,
+    /// Whether typing goes to the search box.
+    ///
+    /// Without this the digits would still rate the selected photograph and
+    /// `f` would still flag it, so searching for "flag5" would silently change
+    /// the library while the user thought they were typing.
+    /// What the keyboard is typing into, if anything.
+    text_entry: Option<TextEntry>,
+    /// The album menu, while it is open.
+    ///
+    /// Rebuilt on every opening rather than kept and updated, because its
+    /// items are the albums and those change underneath it. A menu holding a
+    /// name the library no longer has is worse than one that costs a few
+    /// allocations to raise.
+    photo_menu: Option<ContextMenu>,
+    /// The photograph the open menu is about.
+    ///
+    /// Remembered rather than read from the selection when the menu is
+    /// clicked: a menu is a question about the thing you opened it on, and
+    /// nothing should be able to move the answer while it is up.
+    menu_photo: Option<PhotoId>,
 }
 
 impl Default for PhotoApp {
@@ -1624,6 +1943,22 @@ impl PhotoApp {
     pub fn new() -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            pending_images: Vec::new(),
+            shown_picture: None,
+            picture_for: None,
+            picture_error: None,
+            thumb_cache: thumbs::ThumbnailCache::default_capacity(),
+            thumb_gen: thumbs::ThumbnailGenerator::new(),
+            thumb_ready: HashMap::new(),
+            thumb_uploads: Vec::new(),
+            thumb_queued_for: None,
+            library_path: None,
+            last_written: None,
+            library_note: None,
+            library_unread: 0,
+            text_entry: None,
+            photo_menu: None,
+            menu_photo: None,
             photos: Vec::new(),
             albums: Vec::new(),
             smart_albums: Vec::new(),
@@ -1637,13 +1972,14 @@ impl PhotoApp {
             active_panel: ActivePanel::PhotoGrid,
             thumb_size_idx: 1,
             grid_scroll: 0,
+            show_help: false,
             show_info_panel: true,
             slideshow: None,
             export_options: ExportOptions::default(),
             window_width: 1400.0,
             window_height: 900.0,
             picker: FilePicker::new(),
-            last_import: None,
+            status_message: None,
             photo_id_gen: IdGen::new(1),
             album_id_gen: IdGen::new(1),
             timestamp_counter: 1000,
@@ -1662,7 +1998,7 @@ impl PhotoApp {
     /// Import a photo into the library.
     pub fn import_photo(
         &mut self,
-        path: &str,
+        path: impl AsRef<std::path::Path>,
         name: &str,
         format: ImageFormat,
         size: u64,
@@ -1677,13 +2013,13 @@ impl PhotoApp {
     /// Import a photo with EXIF data.
     pub fn import_photo_with_exif(
         &mut self,
-        path: &str,
+        path: impl AsRef<std::path::Path>,
         name: &str,
         format: ImageFormat,
         size: u64,
         exif: ExifData,
     ) -> PhotoId {
-        let id = self.import_photo(path, name, format, size);
+        let id = self.import_photo(path.as_ref(), name, format, size);
         if let Some(photo) = self.find_photo_mut(id) {
             photo.exif = exif;
         }
@@ -1728,6 +2064,320 @@ impl PhotoApp {
     }
 
     /// Find a photo by ID.
+    /// An application whose library is saved to `path`, and loaded from it now.
+    #[must_use]
+    pub fn with_storage(path: std::path::PathBuf) -> Self {
+        let mut app = Self::new();
+        app.library_path = Some(path);
+        app.load_library();
+        app
+    }
+
+    /// Read the library file, if there is one to read.
+    ///
+    /// A missing file is not an error: it is what a first run looks like, and
+    /// saying so would be an alarm about the ordinary case.
+    fn load_library(&mut self) {
+        let Some(path) = self.library_path.clone() else {
+            return;
+        };
+        let text = match safeio::read_to_string_capped(&path, Self::MAX_LIBRARY_BYTES) {
+            Ok(read) if read.truncated => {
+                self.library_note = Some(format!(
+                    "the library file is larger than {} MiB and was not read",
+                    Self::MAX_LIBRARY_BYTES / (1024 * 1024)
+                ));
+                // Nothing was loaded, so everything is unread; refusing to save
+                // is exactly right.
+                self.library_unread = 1;
+                return;
+            }
+            Ok(read) => read.text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                self.library_note = Some(format!("could not read the library: {e}"));
+                self.library_unread = 1;
+                return;
+            }
+        };
+        match library::parse(&text) {
+            Ok(loaded) => {
+                self.library_unread = loaded.skipped;
+                if loaded.skipped > 0 {
+                    self.library_note = Some(format!(
+                        "{} record(s) in the library could not be read; \
+                         it will not be overwritten",
+                        loaded.skipped
+                    ));
+                }
+                self.photo_id_gen = IdGen::new(
+                    loaded
+                        .photos
+                        .iter()
+                        .map(|p| p.id)
+                        .max()
+                        .map_or(1, |m| m.saturating_add(1)),
+                );
+                self.photos = loaded.photos;
+                // What is on disk is what is in memory, so nothing is owed
+                // until the user changes something.
+                self.last_written = Some(library::serialize(&self.photos));
+            }
+            Err(e) => {
+                self.library_note = Some(format!("could not read the library: {e}"));
+                self.library_unread = 1;
+            }
+        }
+    }
+
+    /// Write the library, but only if it differs from what is already there.
+    ///
+    /// Called after every event rather than from each of the dozen places that
+    /// change something. A flag set at each call site is one `self.dirty =
+    /// true` away from losing a change silently, and the failure is invisible
+    /// until someone notices their ratings did not survive a restart; a
+    /// comparison against the bytes last written cannot be forgotten.
+    fn persist_if_changed(&mut self) {
+        let Some(path) = self.library_path.clone() else {
+            return;
+        };
+        if self.library_unread > 0 {
+            // See `library_unread`: never overwrite a file we could not read
+            // in full.
+            return;
+        }
+        let text = library::serialize(&self.photos);
+        if self.last_written.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        if let Some(dir) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(dir)
+        {
+            self.library_note = Some(format!("could not save the library: {e}"));
+            return;
+        }
+        match safeio::write_atomically(&path, text.as_bytes()) {
+            Ok(()) => {
+                self.last_written = Some(text);
+                self.library_note = None;
+            }
+            Err(e) => {
+                self.library_note = Some(format!("could not save the library: {e}"));
+            }
+        }
+    }
+
+    /// The most bytes of library file to read.
+    ///
+    /// A library of a hundred thousand photographs is a few tens of megabytes
+    /// of text, so this is generous; the point is that a file which has been
+    /// corrupted into something enormous cannot be read into memory whole
+    /// before anything objects.
+    const MAX_LIBRARY_BYTES: usize = 64 * 1024 * 1024;
+
+    /// Thumbnails generated per frame.
+    ///
+    /// Generation is synchronous -- `thumbs` has no worker thread -- so this
+    /// is a frame budget, not a rate. Small, because the cards it fills are
+    /// already on screen: four per frame fills a screenful in well under a
+    /// second while leaving each frame short enough to stay smooth, where one
+    /// batch of forty would be a visible stall on the first scroll.
+    const THUMB_BATCH: usize = 4;
+
+    /// A number that changes when the grid would draw a different set of
+    /// cards.
+    ///
+    /// Cheap and deliberately approximate: it may change when the visible set
+    /// has not (a sort that reorders identical photographs), which costs one
+    /// wasted pass over an already-full cache. The opposite error -- missing a
+    /// change -- would leave cards blank until something unrelated moved.
+    fn thumb_fingerprint(&self) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for pid in self.visible_photos() {
+            hash ^= pid;
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        for part in [
+            self.grid_scroll as u64,
+            self.thumb_size_idx as u64,
+            u64::from(self.view_mode == ViewMode::Grid),
+        ] {
+            hash ^= part;
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        hash
+    }
+
+    /// Queue a thumbnail for every photograph the grid will draw one for.
+    ///
+    /// Anything already in the cache is skipped: the key carries the file's
+    /// modification time and size, so a hit is a hit on *this* version of the
+    /// file and a miss after an edit is automatic.
+    fn queue_thumbnails(&mut self) {
+        self.thumb_gen.cancel_all();
+        if self.view_mode != ViewMode::Grid {
+            return;
+        }
+        let config = self.thumb_config();
+        let wanted: Vec<PhotoId> = self.visible_photos();
+        for pid in wanted {
+            let Some(photo) = self.find_photo(pid) else {
+                continue;
+            };
+            let path = photo.file_path.clone();
+            let size = photo.file_size;
+            // Read once here rather than per frame: this runs when the visible
+            // set changes, which is a scroll or a filter, not a repaint.
+            let mtime = file_mtime(&path);
+            if self.thumb_cache.peek(&path, mtime, size).is_some() {
+                self.thumb_ready
+                    .insert(pid, (mtime, thumbs::image_id(&path, mtime, size)));
+                continue;
+            }
+            self.thumb_gen.push(thumbs::ThumbnailRequest {
+                path,
+                mtime,
+                size,
+                config: config.clone(),
+            });
+        }
+    }
+
+    /// How a thumbnail should look: the user's colours, at the grid's size.
+    fn thumb_config(&self) -> thumbs::ThumbConfig {
+        thumbs::ThumbConfig {
+            #[allow(
+                clippy::cast_sign_loss,
+                reason = "every entry of THUMB_SIZES is a positive constant"
+            )]
+            size: self.current_thumb_size() as u32,
+            bg_color: self.palette.surface0,
+            text_color: self.palette.text,
+            ..thumbs::ThumbConfig::default()
+        }
+    }
+
+    /// Generate a few queued thumbnails and file the results.
+    ///
+    /// Each result lands in three places: the cache the renderer reads, the
+    /// upload list the compositor needs, and `thumb_ready`, which is what says
+    /// a card may stop drawing its placeholder.
+    fn pump_thumbnails(&mut self) {
+        self.thumb_gen.process_batch(Self::THUMB_BATCH);
+        for (req, thumb) in self.thumb_gen.take_completed() {
+            let id = thumbs::image_id(&req.path, req.mtime, req.size);
+            let owner = self
+                .photos
+                .iter()
+                .find(|p| p.file_path == req.path)
+                .map(|p| p.id);
+            self.thumb_uploads.push((id, thumb.clone()));
+            self.thumb_cache
+                .insert(&req.path, req.mtime, req.size, thumb);
+            if let Some(pid) = owner {
+                self.thumb_ready.insert(pid, (req.mtime, id));
+            }
+        }
+    }
+
+    /// Keep the grid's thumbnails in step with what it is about to draw.
+    ///
+    /// Called from `render`, for the same reason `sync_picture` is: uploads
+    /// queued here are drained between this frame's render and its submit, so
+    /// a thumbnail generated now is held by the compositor before the frame
+    /// naming it arrives. That is what lets this draw a card's picture on the
+    /// frame it was generated, with no "generated but not yet uploaded" state
+    /// to carry -- a distinction the file manager does have to make, because
+    /// its uploads travel a different path.
+    fn sync_thumbnails(&mut self) {
+        let fingerprint = self.thumb_fingerprint();
+        if self.thumb_queued_for != Some(fingerprint) {
+            self.thumb_queued_for = Some(fingerprint);
+            self.queue_thumbnails();
+        }
+        self.pump_thumbnails();
+    }
+
+    /// The most bytes of picture file to read.
+    ///
+    /// Generous -- a lossless photograph from a full-frame sensor runs to tens
+    /// of megabytes -- and the point is not the number but that there is one.
+    const MAX_PICTURE_BYTES: usize = 256 * 1024 * 1024;
+
+    /// Decode the selected photograph, unless that is already what is uploaded.
+    ///
+    /// **Called from `render`, and it has to be.** `App::take_images` is
+    /// drained *between* the render and the submit, so a picture queued here
+    /// reaches the compositor in time for the very frame that names it.
+    /// Queued from an event handler it would also work, but every one of the
+    /// five places that move the selection would have to remember to do it.
+    /// Queued from `take_images` itself it would be uploaded after the frame
+    /// that wanted it and would not appear until something unrelated asked for
+    /// another -- the photograph would show up when the mouse next moved.
+    ///
+    /// Cheap when nothing has changed: one `Option<PhotoId>` comparison.
+    fn sync_picture(&mut self) {
+        if self.picture_for == self.selected_photo {
+            return;
+        }
+        self.picture_for = self.selected_photo;
+        self.shown_picture = None;
+        self.picture_error = None;
+
+        let Some(pid) = self.selected_photo else {
+            return;
+        };
+        // Copied out so the borrow of `self.photos` ends here; everything
+        // below writes back to `self`.
+        let Some(path) = self.find_photo(pid).map(|p| p.file_path.clone()) else {
+            return;
+        };
+
+        let read = match safeio::read_capped(&path, Self::MAX_PICTURE_BYTES) {
+            Ok(read) => read,
+            Err(e) => {
+                self.picture_error = Some(format!("could not be read: {e}"));
+                return;
+            }
+        };
+        if read.truncated {
+            // Refused rather than decoded. A picture's tail is not optional --
+            // a JPEG's scan runs to the last byte of the file -- so a cut file
+            // decodes to something that is not the photograph, and would then
+            // be shown without a word about it.
+            self.picture_error = Some(format!(
+                "is larger than {} MiB",
+                Self::MAX_PICTURE_BYTES / (1024 * 1024)
+            ));
+            return;
+        }
+        let image = match imagecodec::decode(&read.bytes, imagecodec::Limits::default()) {
+            Ok(image) => image,
+            Err(e) => {
+                self.picture_error = Some(format!("could not be decoded: {e}"));
+                return;
+            }
+        };
+
+        self.shown_picture = Some(ShownPicture {
+            photo: pid,
+            width: image.width,
+            height: image.height,
+        });
+        // One id for whatever is on screen, so this replaces the last upload
+        // rather than queueing behind it. Anything still waiting here has been
+        // overtaken by this selection and has no frame left to appear in.
+        self.pending_images.clear();
+        self.pending_images.push(app::ImageChange::Upload {
+            id: PHOTO_IMAGE_ID,
+            width: image.width,
+            height: image.height,
+            stride: image.stride(),
+            format: oswindow::PixelFormat::Argb8888,
+            bytes: guitk::canvas::WireBytes::from_le_argb(&image.pixels),
+        });
+    }
+
     pub fn find_photo(&self, id: PhotoId) -> Option<&Photo> {
         self.photos.iter().find(|p| p.id == id)
     }
@@ -2183,8 +2833,8 @@ impl PhotoApp {
         Rect {
             x: SIDEBAR_WIDTH,
             y: TOOLBAR_HEIGHT,
-            width: (self.window_width - SIDEBAR_WIDTH - info_w).max(1.0),
-            height: (self.window_height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT).max(1.0),
+            w: (self.window_width - SIDEBAR_WIDTH - info_w).max(1.0),
+            h: (self.window_height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT).max(1.0),
         }
     }
 
@@ -2223,6 +2873,16 @@ impl PhotoApp {
                 accent: self.palette.blue,
             });
         }
+        rows.push(SidebarRow::Action {
+            // The row is the input while a name is being typed, rather than a
+            // dialog over the top: the album will appear in this list, so this
+            // is where it should be born.
+            label: match &self.text_entry {
+                Some(TextEntry::AlbumName(typed)) => format!("{typed}|"),
+                _ => "+  New Album".to_owned(),
+            },
+            action: SidebarAction::NewAlbum,
+        });
         rows.push(SidebarRow::Gap(12.0));
         if !self.smart_albums.is_empty() {
             rows.push(SidebarRow::Header("SMART ALBUMS"));
@@ -2259,8 +2919,32 @@ impl PhotoApp {
             if y < next {
                 return match row {
                     SidebarRow::Item { target, .. } => Some(target),
-                    // A heading or the air around it is not a control.
-                    SidebarRow::Header(_) | SidebarRow::Gap(_) => None,
+                    // A heading, the air around it, and an action are not
+                    // places to go. `sidebar_action_at` answers for the last.
+                    SidebarRow::Header(_) | SidebarRow::Gap(_) | SidebarRow::Action { .. } => None,
+                };
+            }
+            row_y = next;
+        }
+        None
+    }
+
+    /// Which sidebar action a point is on, if any.
+    ///
+    /// A separate walk from [`Self::sidebar_item_at`] rather than one function
+    /// answering both, because the two have different answers for the same
+    /// point and every caller wants exactly one of them.
+    pub fn sidebar_action_at(&self, x: f32, y: f32) -> Option<SidebarAction> {
+        if x < 0.0 || x >= SIDEBAR_WIDTH {
+            return None;
+        }
+        let mut row_y = TOOLBAR_HEIGHT;
+        for row in self.sidebar_rows() {
+            let next = row_y + row.height();
+            if y < next {
+                return match row {
+                    SidebarRow::Action { action, .. } => Some(action),
+                    SidebarRow::Header(_) | SidebarRow::Gap(_) | SidebarRow::Item { .. } => None,
                 };
             }
             row_y = next;
@@ -2286,8 +2970,8 @@ impl PhotoApp {
                 Rect {
                     x: vx,
                     y: 8.0,
-                    width: w,
-                    height: 24.0,
+                    w,
+                    h: 24.0,
                 },
             ));
             vx += w + 4.0;
@@ -2298,19 +2982,28 @@ impl PhotoApp {
             Rect {
                 x: sort_x,
                 y: 8.0,
-                width: 112.0,
-                height: 24.0,
+                w: 112.0,
+                h: 24.0,
             },
         ));
         let search_x = sort_x + 124.0;
         let search_w = 200.0;
         out.push((
+            ToolbarControl::Search,
+            Rect {
+                x: search_x,
+                y: 8.0,
+                w: search_w,
+                h: 24.0,
+            },
+        ));
+        out.push((
             ToolbarControl::ThumbSize,
             Rect {
                 x: search_x + search_w + 16.0,
                 y: 8.0,
-                width: 48.0,
-                height: 24.0,
+                w: 48.0,
+                h: 24.0,
             },
         ));
         out.push((
@@ -2318,8 +3011,8 @@ impl PhotoApp {
             Rect {
                 x: self.window_width - 196.0,
                 y: 8.0,
-                width: 88.0,
-                height: 24.0,
+                w: 88.0,
+                h: 24.0,
             },
         ));
         out.push((
@@ -2327,8 +3020,8 @@ impl PhotoApp {
             Rect {
                 x: self.window_width - 100.0,
                 y: 8.0,
-                width: 88.0,
-                height: 24.0,
+                w: 88.0,
+                h: 24.0,
             },
         ));
         out
@@ -2345,7 +3038,7 @@ impl PhotoApp {
     /// How many thumbnails fit across the content area.
     pub fn grid_columns(&self) -> usize {
         let cell = self.current_thumb_size() + THUMB_PADDING;
-        let width = self.content_rect().width;
+        let width = self.content_rect().w;
         #[allow(clippy::cast_sign_loss)]
         let cols = (width / cell).floor() as usize;
         cols.max(1)
@@ -2362,7 +3055,7 @@ impl PhotoApp {
         let cell = self.current_thumb_size() + THUMB_PADDING;
         let total = self.visible_photos().len();
         let rows = total.div_ceil(self.grid_columns());
-        scroll_window::visible(rows, cell, content.height - THUMB_PADDING, self.grid_scroll)
+        scroll_window::visible(rows, cell, content.h - THUMB_PADDING, self.grid_scroll)
     }
 
     /// Where the thumbnail at `index` among the visible photos is drawn, or
@@ -2386,8 +3079,8 @@ impl PhotoApp {
         Some(Rect {
             x: content.x + THUMB_PADDING + col * cell,
             y: content.y + THUMB_PADDING + drawn * cell,
-            width: thumb,
-            height: thumb,
+            w: thumb,
+            h: thumb,
         })
     }
 
@@ -2433,7 +3126,7 @@ impl PhotoApp {
             .handle(event, self.window_width, self.window_height)
         {
             Picked::Chose(path) => {
-                self.last_import = Some(self.import_from_disk(&path));
+                self.status_message = Some(self.import_from_disk(&path));
                 return true;
             }
             // Cancelled grouped with Handled: this caller keeps no dialog
@@ -2483,7 +3176,7 @@ impl PhotoApp {
         // The EXIF parser was written, tested and never given a real file.
         let exif = parse_exif_from_bytes(&bytes);
         let size = bytes.len() as u64;
-        self.import_photo_with_exif(&path.to_string_lossy(), &name, format, size, exif);
+        self.import_photo_with_exif(path, &name, format, size, exif);
         format!("Imported {name}")
     }
 
@@ -2515,14 +3208,55 @@ impl PhotoApp {
     }
 
     fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        // An open menu takes the click before anything under it does --
+        // that is what being over everything means.
+        if self.photo_menu.is_some() {
+            if let MouseEventKind::Press(_) = event.kind {
+                let chosen = self
+                    .photo_menu
+                    .as_mut()
+                    .and_then(|m| m.handle_click(event.x, event.y));
+                self.photo_menu = None;
+                if let Some(id) = chosen {
+                    self.choose_from_photo_menu(id);
+                }
+                // Consumed either way: a click that dismisses a menu should
+                // not also land on whatever was behind it.
+                return true;
+            }
+        }
+        if matches!(event.kind, MouseEventKind::Press(MouseButton::Right))
+            && self.view_mode == ViewMode::Grid
+            && let Some(pid) = self.photo_at(event.x, event.y)
+        {
+            self.selected_photo = Some(pid);
+            self.open_photo_menu(pid, event.x, event.y);
+            return true;
+        }
         if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
             return false;
         }
-        if let Some(control) = self.toolbar_control_at(event.x, event.y) {
+        // Any press moves the keyboard out of the search box unless it is
+        // the search box being pressed. Done here rather than in each of the
+        // branches below so that a control added later cannot forget it.
+        let pressed = self.toolbar_control_at(event.x, event.y);
+        // One assignment: to the search box if that is what was pressed, and
+        // out of whatever held it otherwise. A text field added later cannot
+        // forget to be cleared here, because there is nothing to remember.
+        self.text_entry = (pressed == Some(ToolbarControl::Search)).then_some(TextEntry::Search);
+        if let Some(control) = pressed {
             self.press_toolbar(control);
             return true;
         }
+        if let Some(action) = self.sidebar_action_at(event.x, event.y) {
+            match action {
+                SidebarAction::NewAlbum => self.begin_naming_album(),
+            }
+            return true;
+        }
         if let Some(target) = self.sidebar_item_at(event.x, event.y) {
+            // No clearing here: the assignment at the top of this function
+            // already took the keyboard out of whatever had it.
             self.select_sidebar(target);
             return true;
         }
@@ -2530,6 +3264,10 @@ impl PhotoApp {
             && let Some(pid) = self.photo_at(event.x, event.y)
         {
             self.selected_photo = Some(pid);
+            // A plain click starts again. Without this, a card clicked after
+            // a Shift+arrow run would join a set the user believes they have
+            // just replaced, and the next rating would land on all of it.
+            self.selected_photos.clear();
             return true;
         }
         false
@@ -2562,6 +3300,9 @@ impl PhotoApp {
                     self.start_slideshow();
                 }
             }
+            // The click already moved the keyboard here; there is nothing
+            // else for pressing it to do.
+            ToolbarControl::Search => {}
             ToolbarControl::Import => self.open_import_dialog(),
         }
     }
@@ -2576,20 +3317,285 @@ impl PhotoApp {
         self.selected_photos.clear();
     }
 
+    /// Typing while a text field has the keyboard.
+    ///
+    /// **Consumes every key, including the ones it ignores.** The digits rate
+    /// the selected photograph and `f` flags it, so a query or an album name
+    /// or a tag containing one would otherwise rewrite the library as it was
+    /// typed. Three fields, one rule, one place to get it right.
+    fn handle_text_entry_key(&mut self, event: &KeyEvent) -> bool {
+        let Some(entry) = self.text_entry.clone() else {
+            return false;
+        };
+        match event.key {
+            Key::Escape => {
+                self.text_entry = None;
+                if matches!(entry, TextEntry::Search) {
+                    // Escape abandons the search rather than merely leaving
+                    // the box: a filter still applied by a box that no longer
+                    // looks active is a library that appears half-missing with
+                    // nothing on screen to say why.
+                    self.set_search("");
+                }
+                true
+            }
+            Key::Enter => {
+                self.text_entry = None;
+                match entry {
+                    // The filter is already applied; Enter just puts the
+                    // keyboard down.
+                    TextEntry::Search => {}
+                    TextEntry::AlbumName(name) => self.commit_album_name(&name),
+                    TextEntry::Tag(tag) => self.commit_tag(&tag),
+                }
+                true
+            }
+            Key::Backspace => {
+                self.edit_entry(|text| {
+                    text.pop();
+                });
+                true
+            }
+            _ => {
+                let typed: String = event.typed().collect();
+                self.edit_entry(|text| text.push_str(&typed));
+                true
+            }
+        }
+    }
+
+    /// Change the text being typed, wherever it lives.
+    ///
+    /// The search box is the odd one out: its text is `search_query`, because
+    /// the filter reads that on every frame, and a second copy would be a
+    /// second answer to the same question.
+    fn edit_entry(&mut self, change: impl FnOnce(&mut String)) {
+        if matches!(self.text_entry, Some(TextEntry::Search)) {
+            let mut query = self.search_query.clone();
+            change(&mut query);
+            self.set_search(&query);
+            return;
+        }
+        if let Some(TextEntry::AlbumName(text) | TextEntry::Tag(text)) = self.text_entry.as_mut() {
+            change(text);
+        }
+    }
+
+    /// Raise the album menu over a photograph.
+    ///
+    /// With no albums the menu still opens, carrying one disabled row saying
+    /// so. A menu that refuses to appear leaves the user with no way to find
+    /// out *why* nothing happened, and the answer -- there is nowhere to put
+    /// it yet -- is exactly what they need to know.
+    fn open_photo_menu(&mut self, pid: PhotoId, x: f32, y: f32) {
+        let items: Vec<MenuItem> = if self.albums.is_empty() {
+            vec![MenuItem::Action {
+                id: 0,
+                label: "No albums yet - make one in the sidebar".to_owned(),
+                shortcut: None,
+                icon: None,
+                enabled: false,
+                checked: None,
+            }]
+        } else {
+            self.albums
+                .iter()
+                .map(|album| MenuItem::Action {
+                    // The album's own id *is* the menu item's id, so nothing
+                    // has to map between two numbering schemes and get it
+                    // wrong when an album is deleted.
+                    id: album.id,
+                    label: format!("Add to {}", album.name),
+                    shortcut: None,
+                    icon: None,
+                    enabled: !album.photo_ids.contains(&pid),
+                    checked: None,
+                })
+                .collect()
+        };
+        let mut items = items;
+        items.push(MenuItem::Separator);
+        items.push(MenuItem::Submenu {
+            id: MENU_COLOR_BASE,
+            label: "Colour label".to_owned(),
+            icon: None,
+            enabled: true,
+            children: COLOR_LABELS
+                .iter()
+                .enumerate()
+                .map(|(i, label)| MenuItem::Action {
+                    id: MENU_COLOR_BASE.saturating_add(i as u64),
+                    label: label.label().to_owned(),
+                    shortcut: None,
+                    icon: None,
+                    enabled: true,
+                    // A tick against the one the photograph already has, so the
+                    // menu answers "what is it now" as well as offering to
+                    // change it.
+                    checked: Some(
+                        self.find_photo(pid)
+                            .is_some_and(|p| p.color_label == *label),
+                    ),
+                })
+                .collect(),
+        });
+        items.push(MenuItem::Action {
+            id: MENU_ADD_TAG,
+            label: "Add tag...".to_owned(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: None,
+        });
+        let mut menu = ContextMenu::new(items);
+        menu.show(x, y, (self.window_width, self.window_height));
+        self.photo_menu = Some(menu);
+        self.menu_photo = Some(pid);
+    }
+
+    /// Act on whatever the menu's row meant.
+    ///
+    /// The id is an album's, or one of the reserved values at the top of the
+    /// range that mean a colour label or a tag. One function because the menu
+    /// hands back one id and the caller should not have to know which kind it
+    /// is before asking.
+    fn choose_from_photo_menu(&mut self, album_id: AlbumId) {
+        let Some(pid) = self.menu_photo else {
+            return;
+        };
+        if let Some(offset) = album_id.checked_sub(MENU_COLOR_BASE)
+            && let Some(label) = COLOR_LABELS.get(usize::try_from(offset).unwrap_or(usize::MAX))
+        {
+            let ids = self.acting_on();
+            let mut n = 0usize;
+            for target in ids {
+                if self.set_color_label(target, *label) {
+                    n = n.saturating_add(1);
+                }
+            }
+            if n > 0 {
+                self.status_message = Some(match (n, *label) {
+                    (1, ColorLabel::None) => "Label cleared".to_owned(),
+                    (1, l) => format!("Labelled {}", l.label()),
+                    (_, ColorLabel::None) => format!("Cleared {n} labels"),
+                    (_, l) => format!("Labelled {n} photos {}", l.label()),
+                });
+            }
+            return;
+        }
+        if album_id == MENU_ADD_TAG {
+            // The selection is whatever it was when the menu went up, and
+            // `commit_tag` reads it again on Enter -- which is the same set,
+            // because the menu consumed the click that would have changed it.
+            self.text_entry = Some(TextEntry::Tag(String::new()));
+            return;
+        }
+        // The whole selection when the menu was raised on part of it, and that
+        // photograph alone otherwise -- right-clicking a card outside the
+        // selection is a statement about that card, not about the set.
+        let ids = if self.selected_photos.contains(&pid) {
+            self.selected_photos.clone()
+        } else {
+            vec![pid]
+        };
+        let name = self
+            .albums
+            .iter()
+            .find(|a| a.id == album_id)
+            .map(|a| a.name.clone());
+        if self.batch_add_to_album(&ids, album_id) {
+            let count = ids.len();
+            self.status_message = name.map(|n| {
+                if count == 1 {
+                    format!("Added to {n}")
+                } else {
+                    format!("Added {count} photos to {n}")
+                }
+            });
+        }
+    }
+
+    /// Start naming a new album.
+    fn begin_naming_album(&mut self) {
+        // Assigning the field is what takes the keyboard off whatever had it.
+        self.text_entry = Some(TextEntry::AlbumName(String::new()));
+    }
+
+    /// Put the typed tag on everything selected.
+    ///
+    /// `batch_tag` has been written and tested since this crate existed, and
+    /// had no caller outside the test module: the feature list offered a
+    /// "tagging and keyword system" with no way to type a tag.
+    ///
+    /// An empty tag cancels, for the same reason an empty album name does.
+    fn commit_tag(&mut self, typed: &str) {
+        let tag = typed.trim().to_owned();
+        if tag.is_empty() {
+            return;
+        }
+        let ids = self.acting_on();
+        let n = self.batch_tag(&ids, &tag);
+        if n > 0 {
+            self.status_message = Some(if n == 1 {
+                format!("Tagged {tag}")
+            } else {
+                format!("Tagged {n} photos {tag}")
+            });
+        }
+    }
+
+    /// Turn the typed name into an album, and show it.
+    ///
+    /// An empty name cancels rather than making an album called nothing --
+    /// pressing Enter on a row you have not typed into is much more likely to
+    /// be a change of mind than a request for a nameless album.
+    fn commit_album_name(&mut self, typed: &str) {
+        let name = typed.trim();
+        if name.is_empty() {
+            return;
+        }
+        let id = self.create_album(name);
+        // Show it. A new album that did not become the view would leave the
+        // user looking at the same screen, with the only evidence of success
+        // one more row in a list.
+        self.sidebar_selection = SidebarItem::Album(id);
+        self.grid_scroll = 0;
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        // Above the text-entry branch and the slideshow branch, both of which
+        // take the keyboard and return. F1 carries no text, so a tag being
+        // typed keeps every character it was given.
+        if event.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return true;
+        }
+        if self.show_help {
+            // Modal. Delete trashes the selection and a digit re-rates every
+            // picture in it; neither should happen from behind a list.
+            if matches!(event.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return true;
+        }
+
+        if self.text_entry.is_some() {
+            return self.handle_text_entry_key(event);
+        }
         if self.view_mode == ViewMode::Slideshow {
             return self.handle_slideshow_key(event);
         }
+        let extend = event.modifiers.shift;
         match event.key {
-            Key::Left => self.move_selection(-1),
-            Key::Right => self.move_selection(1),
+            Key::Left => self.step_selection(-1, extend),
+            Key::Right => self.step_selection(1, extend),
             Key::Up => {
                 let cols = self.row_step();
-                self.move_selection(cols.checked_neg().unwrap_or(-1))
+                self.step_selection(cols.checked_neg().unwrap_or(-1), extend)
             }
             Key::Down => {
                 let cols = self.row_step();
-                self.move_selection(cols)
+                self.step_selection(cols, extend)
             }
             Key::Home => self.select_index(0),
             Key::End => {
@@ -2630,8 +3636,8 @@ impl PhotoApp {
             // capping it again here would be a second statement of the range.
             '0'..='5' => {
                 let stars = u8::try_from(u32::from(ch).saturating_sub(u32::from('0'))).unwrap_or(0);
-                self.selected_photo
-                    .is_some_and(|pid| self.rate_photo(pid, stars))
+                let ids = self.acting_on();
+                self.batch_rate(&ids, stars) > 0
             }
             'f' | 'F' => self.selected_photo.is_some_and(|pid| self.toggle_flag(pid)),
             'i' | 'I' => {
@@ -2703,6 +3709,42 @@ impl PhotoApp {
     /// Stopping rather than wrapping: holding Right to the end of a library
     /// and silently arriving back at the first photo is a worse answer than
     /// stopping, because the grid looks much the same either way.
+    /// Move the selection, growing it instead when `extend` is set.
+    ///
+    /// Both ends join the set on every step, so a run of Shift+Right collects
+    /// everything it passes over rather than just where it started and
+    /// stopped. Moving *without* extending drops the set: an arrow key on its
+    /// own is a fresh single selection, and leaving six cards highlighted
+    /// behind a cursor that has moved away from them is how a batch operation
+    /// surprises somebody.
+    fn step_selection(&mut self, delta: isize, extend: bool) -> bool {
+        let anchor = self.selected_photo;
+        let moved = self.move_selection(delta);
+        if !extend {
+            self.selected_photos.clear();
+            return moved;
+        }
+        for pid in [anchor, self.selected_photo].into_iter().flatten() {
+            if !self.selected_photos.contains(&pid) {
+                self.selected_photos.push(pid);
+            }
+        }
+        moved
+    }
+
+    /// Every photograph an action should apply to.
+    ///
+    /// The multi-selection when there is one, and the single selection
+    /// otherwise -- so every caller gets a list and none has to remember that
+    /// there are two ways to have selected something.
+    fn acting_on(&self) -> Vec<PhotoId> {
+        if self.selected_photos.is_empty() {
+            self.selected_photo.into_iter().collect()
+        } else {
+            self.selected_photos.clone()
+        }
+    }
+
     fn move_selection(&mut self, delta: isize) -> bool {
         let total = self.visible_photos().len();
         if total == 0 {
@@ -2799,7 +3841,24 @@ impl PhotoApp {
 
         // The picker goes last so it sits over everything, which is the same
         // order in which `handle_event` gives it the click.
+        // Over the window, under the picker: the picker is modal, and a
+        // menu raised before it opened has no business on top of it.
+        if let Some(menu) = &self.photo_menu {
+            cmds.extend(menu.render(&self.palette));
+        }
+
         cmds.extend(self.picker.render(&self.palette, width, height));
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         cmds
     }
@@ -2835,8 +3894,8 @@ impl PhotoApp {
                 Rect {
                     x: 0.0,
                     y: 0.0,
-                    width: 0.0,
-                    height: 0.0,
+                    w: 0.0,
+                    h: 0.0,
                 },
                 |(_, r)| *r,
             )
@@ -2861,8 +3920,8 @@ impl PhotoApp {
             cmds.push(RenderCommand::FillRect {
                 x: rect.x,
                 y: rect.y,
-                width: rect.width,
-                height: rect.height,
+                width: rect.w,
+                height: rect.h,
                 color: bg,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
@@ -2873,7 +3932,7 @@ impl PhotoApp {
                 color: fg,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some((rect.width - 12.0).max(1.0)),
+                max_width: Some((rect.w - 12.0).max(1.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
@@ -2901,9 +3960,11 @@ impl PhotoApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Search box
-        let search_x = sort_x + 124.0;
-        let search_w = 200.0;
+        // Search box. The rectangle comes from `toolbar_controls` rather
+        // than being computed again here: it is the same law the click reads,
+        // and two copies of a layout drift the first time one is adjusted.
+        let search = rect_of(ToolbarControl::Search);
+        let (search_x, search_w) = (search.x, search.w);
         self.palette.push_surface(
             cmds,
             search_x,
@@ -2913,8 +3974,31 @@ impl PhotoApp {
             CORNER_RADIUS,
             Surface::Card,
         );
+        if matches!(self.text_entry, Some(TextEntry::Search)) {
+            // Where the typing is going. Without it a focused empty box and an
+            // unfocused empty box are the same picture, and the only way to
+            // find out which one is in front of you is to type and see what
+            // happens to the library.
+            cmds.push(RenderCommand::StrokeRect {
+                x: search_x,
+                y: 8.0,
+                width: search_w,
+                height: 24.0,
+                color: self.palette.blue,
+                line_width: 2.0,
+                corner_radii: CornerRadii::all(CORNER_RADIUS),
+            });
+        }
         let search_text = if self.search_query.is_empty() {
-            "Search photos...".to_owned()
+            if matches!(self.text_entry, Some(TextEntry::Search)) {
+                // The placeholder would read as text already typed once a
+                // caret is beside it.
+                "|".to_owned()
+            } else {
+                "Search photos...".to_owned()
+            }
+        } else if matches!(self.text_entry, Some(TextEntry::Search)) {
+            format!("{}|", self.search_query)
         } else {
             self.search_query.clone()
         };
@@ -2960,8 +4044,8 @@ impl PhotoApp {
             cmds,
             import_rect.x,
             import_rect.y,
-            import_rect.width,
-            import_rect.height,
+            import_rect.w,
+            import_rect.h,
             CORNER_RADIUS,
             Surface::Card,
         );
@@ -2972,7 +4056,7 @@ impl PhotoApp {
             color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some((import_rect.width - 12.0).max(1.0)),
+            max_width: Some((import_rect.w - 12.0).max(1.0)),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -3041,25 +4125,54 @@ impl PhotoApp {
 
         let stats = self.library_stats();
         let visible = self.visible_photos().len();
-        let status_text = self.last_import.as_ref().map_or_else(
-            || {
-                format!(
-                    "{} photos shown  |  {} total  |  {} albums  |  {} in trash",
-                    visible, stats.total_photos, stats.total_albums, stats.trash_count,
-                )
-            },
-            // The import result takes the bar until something else happens.
-            // A read that failed has to be visible somewhere, and the counts
-            // it replaces are the thing that would otherwise be read as the
-            // answer -- an unchanged total looks like a refusal nobody
-            // explained.
-            Clone::clone,
-        );
+        // The library note outranks the transient one. A failed load or a
+        // refused save is a standing condition -- it is still true after the
+        // next import reports success -- so it must not be pushed off the bar
+        // by something that happened afterwards.
+        //
+        // This field was written and never read until 2026-09-17, which lane
+        // A's sweep caught through `check-fields-written-never-read`: the
+        // application recorded why it could not read the library and then
+        // showed nobody. A test asserted the field was set and called that
+        // "the user is told", which is the exact mistake design-decisions 856
+        // names -- a thing is built when something obeys it, not when
+        // something stores it.
+        // A tag being typed outranks both: a text field the user cannot see is
+        // one they are typing into blind, and this one has no box of its own
+        // to put a caret in.
+        let tag_prompt = match &self.text_entry {
+            Some(TextEntry::Tag(typed)) => Some(format!("Tag: {typed}|")),
+            _ => None,
+        };
+        let status_text = tag_prompt
+            .as_ref()
+            .or(self.library_note.as_ref())
+            .or(self.status_message.as_ref())
+            .map_or_else(
+                || {
+                    format!(
+                        "{} photos shown  |  {} total  |  {} albums  |  {} in trash",
+                        visible, stats.total_photos, stats.total_albums, stats.trash_count,
+                    )
+                },
+                // The import result takes the bar until something else
+                // happens. A read that failed has to be visible somewhere, and
+                // the counts it replaces are the thing that would otherwise be
+                // read as the answer -- an unchanged total looks like a
+                // refusal nobody explained.
+                Clone::clone,
+            );
         cmds.push(RenderCommand::Text {
             x: 12.0,
             y: bar_y + 6.0,
             text: status_text,
-            color: self.palette.subtext0,
+            color: if tag_prompt.is_some() {
+                self.palette.ink(self.palette.blue)
+            } else if self.library_note.is_some() {
+                self.palette.ink(self.palette.red)
+            } else {
+                self.palette.subtext0
+            },
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
@@ -3119,6 +4232,27 @@ impl PhotoApp {
                     max_width: Some(SIDEBAR_WIDTH - 24.0),
                     overflow: TextOverflow::Ellipsis,
                 }),
+                SidebarRow::Action { label, .. } => {
+                    // Blue while it is taking typing, for the same reason the
+                    // search box is: an empty row waiting for a name and an
+                    // idle row offering to take one are otherwise the same
+                    // picture.
+                    let color = if matches!(self.text_entry, Some(TextEntry::AlbumName(_))) {
+                        self.palette.blue
+                    } else {
+                        self.palette.subtext0
+                    };
+                    cmds.push(RenderCommand::Text {
+                        x: 20.0,
+                        y: cy + 8.0,
+                        text: label.clone(),
+                        color,
+                        font_size: 11.0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(SIDEBAR_WIDTH - 36.0),
+                        overflow: TextOverflow::Ellipsis,
+                    });
+                }
                 SidebarRow::Item {
                     label,
                     target,
@@ -3514,6 +4648,18 @@ impl PhotoApp {
                 CORNER_RADIUS,
                 Surface::ControlTrack,
             );
+            // The photograph, inside the card rather than instead of it: the
+            // surface beneath shows through wherever the picture's proportions
+            // leave the square unfilled, and the border below is drawn after,
+            // so a selected card keeps its outline over its own picture.
+            if let Some(&(mtime, id)) = self.thumb_ready.get(&pid)
+                && let Some(photo) = self.find_photo(pid)
+                && let Some(picture) =
+                    self.thumb_cache
+                        .peek(&photo.file_path, mtime, photo.file_size)
+            {
+                cmds.extend(thumbs::render_thumbnail(picture, id, cx, cy, thumb));
+            }
             cmds.push(RenderCommand::StrokeRect {
                 x: cx,
                 y: cy,
@@ -3604,55 +4750,90 @@ impl PhotoApp {
             return;
         };
 
-        // Large photo placeholder
-        let photo_w = width - 40.0;
-        let photo_h = height - 60.0;
-        let ratio = (photo_w / photo_h).min(4.0 / 3.0);
-        let display_w = photo_h * ratio;
-        let display_h = photo_h;
+        // The room a picture has, before its own shape is taken into account.
+        let area_w = width - 40.0;
+        let area_h = height - 60.0;
+
+        // Only the picture decoded for *this* photograph may be drawn: the
+        // upload outlives a change of selection by the frame it takes to
+        // replace it, and drawing it under the new name would put the wrong
+        // photograph on screen.
+        let shown = self.shown_picture.filter(|s| s.photo == pid);
+
+        // A real picture is drawn at its own proportions. The 4:3 this used to
+        // assume was a guess -- one that every portrait photograph falsified,
+        // and that nothing could correct because nothing here had opened the
+        // file.
+        let (display_w, display_h) = match shown {
+            Some(picture) => fit_within(picture.width, picture.height, area_w, area_h),
+            None => {
+                let ratio = (area_w / area_h).min(4.0 / 3.0);
+                (area_h * ratio, area_h)
+            }
+        };
         let display_x = x + (width - display_w) / 2.0;
         let display_y = y + 10.0;
 
-        self.palette.push_surface(
-            cmds,
-            display_x,
-            display_y,
-            display_w,
-            display_h,
-            CORNER_RADIUS,
-            Surface::Card,
-        );
-        cmds.push(RenderCommand::StrokeRect {
-            x: display_x,
-            y: display_y,
-            width: display_w,
-            height: display_h,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        if shown.is_some() {
+            cmds.push(RenderCommand::Image {
+                x: display_x,
+                y: display_y,
+                width: display_w,
+                height: display_h,
+                image_id: PHOTO_IMAGE_ID,
+            });
+        } else {
+            self.palette.push_surface(
+                cmds,
+                display_x,
+                display_y,
+                display_w,
+                display_h,
+                CORNER_RADIUS,
+                Surface::Card,
+            );
+            cmds.push(RenderCommand::StrokeRect {
+                x: display_x,
+                y: display_y,
+                width: display_w,
+                height: display_h,
+                color: self.palette.surface1,
+                line_width: 1.0,
+                corner_radii: CornerRadii::all(CORNER_RADIUS),
+            });
 
-        // Photo name and format
-        cmds.push(RenderCommand::Text {
-            x: display_x + display_w / 2.0 - 60.0,
-            y: display_y + display_h / 2.0 - 10.0,
-            text: photo.file_name.clone(),
-            color: self.palette.text,
-            font_size: 14.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(display_w - 40.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cmds.push(RenderCommand::Text {
-            x: display_x + display_w / 2.0 - 50.0,
-            y: display_y + display_h / 2.0 + 10.0,
-            text: format!("{} — {}", photo.exif.resolution_str(), photo.human_size()),
-            color: self.palette.subtext0,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(display_w - 40.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+            cmds.push(RenderCommand::Text {
+                x: display_x + display_w / 2.0 - 60.0,
+                y: display_y + display_h / 2.0 - 10.0,
+                text: photo.file_name.clone(),
+                color: self.palette.text,
+                font_size: 14.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(display_w - 40.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            // The reason takes the place of the dimensions, and takes the
+            // colour that says it is one: a card that simply stayed blank
+            // could not be told from one whose photograph had not been
+            // reached yet.
+            let (detail, color) = match self.picture_error.as_ref() {
+                Some(reason) => (reason.clone(), self.palette.red),
+                None => (
+                    format!("{} — {}", photo.exif.resolution_str(), photo.human_size()),
+                    self.palette.subtext0,
+                ),
+            };
+            cmds.push(RenderCommand::Text {
+                x: display_x + display_w / 2.0 - 50.0,
+                y: display_y + display_h / 2.0 + 10.0,
+                text: detail,
+                color,
+                font_size: 12.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(display_w - 40.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Bottom bar with nav hint
         cmds.push(RenderCommand::Text {
@@ -3803,12 +4984,14 @@ impl PhotoApp {
         // Slideshow controls at bottom
         let ctrl_y = y + height - 40.0;
         let paused_label = if ss.paused { "Play" } else { "Pause" };
+        // The transition's name was printed here, and nothing performs
+        // one. A slideshow that says "Fade" and cuts is claiming something
+        // about what the viewer just saw.
         let progress = format!(
-            "{} / {}  |  {}  |  {}",
+            "{} / {}  |  {}",
             ss.current_index.saturating_add(1),
             ss.photo_ids.len(),
             paused_label,
-            ss.transition.label(),
         );
         cmds.push(RenderCommand::Text {
             x: x + width / 2.0 - 80.0,
@@ -3915,7 +5098,13 @@ impl App for PhotoApp {
                 }
             }
             other => {
-                if self.handle_event(other) {
+                let redraw = self.handle_event(other);
+                // After the handler, not inside it: every path that changes a
+                // rating, a flag or the photo list goes through here, and this
+                // is the one place that cannot be forgotten when a new one is
+                // added.
+                self.persist_if_changed();
+                if redraw {
                     Response::Redraw
                 } else {
                     Response::Idle
@@ -3924,12 +5113,61 @@ impl App for PhotoApp {
         }
     }
 
+    fn take_images(&mut self) -> Vec<app::ImageChange> {
+        // Drops first, and the order is load-bearing: the link checks its
+        // image budget against `held - freed + incoming`, so a batch that
+        // evicted as many thumbnails as it generated would be refused if it
+        // asked the compositor to hold both sets at once -- which is exactly
+        // the moment the cache is working as designed.
+        let mut changes: Vec<app::ImageChange> = self
+            .thumb_cache
+            .take_evicted_image_ids()
+            .into_iter()
+            .map(app::ImageChange::Drop)
+            .collect();
+        // An evicted thumbnail is no longer drawable, and a card that kept
+        // naming it would draw nothing at all: the compositor discards an
+        // `Image` command for an id it does not hold, and says nothing.
+        if !changes.is_empty() {
+            let dropped: Vec<u64> = changes
+                .iter()
+                .filter_map(|c| match c {
+                    app::ImageChange::Drop(id) => Some(*id),
+                    app::ImageChange::Upload { .. } => None,
+                })
+                .collect();
+            self.thumb_ready.retain(|_, (_, id)| !dropped.contains(id));
+        }
+        changes.append(&mut self.pending_images);
+        for (id, thumb) in std::mem::take(&mut self.thumb_uploads) {
+            let Some(bytes) = thumb.to_wire_bytes() else {
+                // Skipped rather than uploaded wrong; the card keeps its
+                // placeholder, which is what a card with no usable picture
+                // should show.
+                continue;
+            };
+            changes.push(app::ImageChange::Upload {
+                id,
+                width: thumb.width,
+                height: thumb.height,
+                stride: thumb.width.saturating_mul(4),
+                format: oswindow::PixelFormat::Argb8888,
+                bytes,
+            });
+        }
+        changes
+    }
+
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
         // The handed size wins over the recorded one: the first frame is drawn
         // before any `Event::Resize` arrives, so a window opened at another
         // size would be laid out for the size that was asked for, and every
         // hit box in it would name the wrong rectangle.
         self.set_window_size(width, height);
+        // Before the commands are built, so the frame that names the picture
+        // is the frame it is uploaded for. See `sync_picture`.
+        self.sync_picture();
+        self.sync_thumbnails();
         RenderTree {
             commands: self.render_commands(width, height),
         }
@@ -3949,7 +5187,13 @@ fn main() -> ExitCode {
     // that do not exist, taken on a camera you do not own, is a worse first
     // window than an empty one -- and it cannot be clicked through to anything
     // real, so the impression it makes is the only thing it ever does.
-    let mut app = PhotoApp::new();
+    // The library is read here rather than in `new()`, so that a test does
+    // not depend on the machine it runs on -- the same split as
+    // `load_appearance` elsewhere in the tree.
+    let mut app = match library::default_path() {
+        Some(path) => PhotoApp::with_storage(path),
+        None => PhotoApp::new(),
+    };
     app::launch("photomanager", &mut app)
 }
 
@@ -3962,6 +5206,8 @@ fn main() -> ExitCode {
     clippy::float_cmp
 )]
 mod tests {
+    use scratchdir::ScratchDir;
+
     use super::*;
 
     // --- ImageFormat tests ---
@@ -4451,7 +5697,7 @@ mod tests {
         // Import several photos (they'll get sequential timestamps)
         for i in 0..5 {
             app.import_photo(
-                &format!("/photo_{i}.jpg"),
+                format!("/photo_{i}.jpg"),
                 &format!("photo_{i}.jpg"),
                 ImageFormat::Jpeg,
                 1000,
@@ -4576,7 +5822,7 @@ mod tests {
     fn a_thumbnail_name_is_bounded_by_width_not_pre_truncated() {
         let name = "Sommerferien_Österreich_2026_Abend_am_See.jpg";
         let mut app = PhotoApp::new();
-        app.import_photo(&format!("/photos/{name}"), name, ImageFormat::Jpeg, 1000);
+        app.import_photo(format!("/photos/{name}"), name, ImageFormat::Jpeg, 1000);
         let cmds = app.render_commands(1400.0, 900.0);
         let label = cmds
             .iter()
@@ -4705,13 +5951,855 @@ mod tests {
         })
     }
 
+    /// The menu id for a colour label, by its place in `COLOR_LABELS`.
+    fn colour_id(label: ColorLabel) -> u64 {
+        let i = COLOR_LABELS
+            .iter()
+            .position(|l| *l == label)
+            .expect("a label that is offered");
+        MENU_COLOR_BASE.saturating_add(u64::try_from(i).unwrap_or(0))
+    }
+
+    /// A colour chosen from the menu is applied.
+    ///
+    /// `set_color_label` has existed with no production caller, so every
+    /// photograph's label has always been `None` and the swatch the grid draws
+    /// for it has always been the same colour.
+    #[test]
+    fn a_colour_chosen_from_the_menu_is_applied() {
+        let mut app = app_with_n_pictures("colour", 1);
+        app.set_window_size(900.0, 700.0);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+        assert_eq!(
+            app.find_photo(pid).expect("one").color_label,
+            ColorLabel::None,
+            "the control failed"
+        );
+        let cell = app.thumb_rect(0).expect("a card");
+        app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
+
+        app.choose_from_photo_menu(colour_id(ColorLabel::Red));
+
+        assert_eq!(
+            app.find_photo(pid).expect("one").color_label,
+            ColorLabel::Red,
+            "the label was not applied"
+        );
+        assert_eq!(app.status_message.as_deref(), Some("Labelled Red"));
+    }
+
+    /// Choosing None clears the label, and says so in those words.
+    ///
+    /// "Labelled None" would be a sentence about a colour that is really the
+    /// absence of one.
+    #[test]
+    fn choosing_none_clears_the_label() {
+        let mut app = app_with_n_pictures("clearcolour", 1);
+        app.set_window_size(900.0, 700.0);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+        assert!(
+            app.set_color_label(pid, ColorLabel::Blue),
+            "the control failed"
+        );
+        let cell = app.thumb_rect(0).expect("a card");
+        app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
+
+        app.choose_from_photo_menu(colour_id(ColorLabel::None));
+
+        assert_eq!(
+            app.find_photo(pid).expect("one").color_label,
+            ColorLabel::None
+        );
+        assert_eq!(app.status_message.as_deref(), Some("Label cleared"));
+    }
+
+    /// The label goes on everything selected.
+    #[test]
+    fn a_colour_goes_on_the_whole_selection() {
+        let mut app = app_with_n_pictures("colourall", 3);
+        app.set_window_size(900.0, 700.0);
+        app.selected_photo = app.visible_photos().first().copied();
+        app.handle_event(&shift_key(Key::Right));
+        let chosen = app.selected_photos.clone();
+        assert_eq!(chosen.len(), 2, "the control failed");
+        let cell = app.thumb_rect(0).expect("a card");
+        app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
+
+        app.choose_from_photo_menu(colour_id(ColorLabel::Green));
+
+        for pid in &chosen {
+            assert_eq!(
+                app.find_photo(*pid).expect("a photo").color_label,
+                ColorLabel::Green,
+                "photograph {pid} was not labelled"
+            );
+        }
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Labelled 2 photos Green")
+        );
+    }
+
+    /// A reserved id is not mistaken for an album.
+    ///
+    /// The ids in that menu are album ids, and these three sit at the top of
+    /// the `u64` range because an `IdGen` counting up cannot reach it. If that
+    /// ever stopped being true, a colour would silently add to an album.
+    #[test]
+    fn the_reserved_menu_ids_cannot_collide_with_an_album() {
+        let mut app = PhotoApp::new();
+        let mut ids = Vec::new();
+        for i in 0..64 {
+            ids.push(app.create_album(&format!("album {i}")));
+        }
+        let reserved = MENU_ADD_TAG;
+        let lowest_colour = MENU_COLOR_BASE;
+        assert!(
+            ids.iter().all(|id| *id < lowest_colour && *id != reserved),
+            "an album id reached the reserved range: {:?}",
+            ids.iter().max()
+        );
+    }
+
+    /// The tag being typed, if that is what has the keyboard.
+    fn tagging(app: &PhotoApp) -> Option<&str> {
+        match &app.text_entry {
+            Some(TextEntry::Tag(text)) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The menu offers a tag, and typing one applies it.
+    ///
+    /// `batch_tag` has been written and tested since this crate existed, with
+    /// every caller in the test module: the feature list offered a "tagging
+    /// and keyword system" and there was nowhere to type a tag.
+    #[test]
+    fn a_tag_typed_from_the_menu_reaches_the_photograph() {
+        let mut app = app_with_n_pictures("tagging", 1);
+        app.set_window_size(900.0, 700.0);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+        let cell = app.thumb_rect(0).expect("a card");
+        app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
+
+        app.choose_from_photo_menu(MENU_ADD_TAG);
+        assert_eq!(tagging(&app), Some(""), "the menu did not start a tag");
+
+        for (k, ch) in [(Key::P, 'p'), (Key::I, 'i'), (Key::E, 'e'), (Key::R, 'r')] {
+            app.handle_event(&typed(k, ch));
+        }
+        app.handle_event(&key(Key::Enter));
+
+        assert_eq!(
+            app.find_photo(pid).expect("one").tags,
+            vec!["pier".to_owned()],
+            "the tag never reached the photograph"
+        );
+        assert!(tagging(&app).is_none(), "still taking typing");
+    }
+
+    /// The tag being typed is on screen.
+    ///
+    /// It has no box of its own, so without this the user types blind.
+    #[test]
+    fn the_tag_being_typed_is_shown() {
+        let mut app = app_with_n_pictures("tagshown", 1);
+        app.set_window_size(900.0, 700.0);
+        app.selected_photo = app.photos.first().map(|p| p.id);
+        app.text_entry = Some(TextEntry::Tag("pi".to_owned()));
+
+        let tree = app.render(900.0, 700.0);
+
+        let shown = tree
+            .commands
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Tag: pi")));
+        assert!(shown, "the tag being typed is nowhere on screen");
+    }
+
+    /// A digit typed into a tag does not rate a photograph.
+    #[test]
+    fn a_digit_typed_into_a_tag_does_not_rate_a_photograph() {
+        let mut app = app_with_n_pictures("tagdigit", 1);
+        app.set_window_size(900.0, 700.0);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+
+        // Control: unfocused, the digit rates.
+        app.handle_event(&typed(Key::Num5, '5'));
+        assert_eq!(
+            app.find_photo(pid).expect("one").rating,
+            5,
+            "the control failed: digits do not rate, so this proves nothing"
+        );
+
+        app.text_entry = Some(TextEntry::Tag(String::new()));
+        app.handle_event(&typed(Key::Num3, '3'));
+
+        assert_eq!(
+            app.find_photo(pid).expect("one").rating,
+            5,
+            "typing a tag changed a photograph's rating"
+        );
+        assert_eq!(tagging(&app), Some("3"));
+    }
+
+    /// An empty tag makes no tag.
+    #[test]
+    fn enter_on_an_empty_tag_does_nothing() {
+        let mut app = app_with_n_pictures("emptytag", 1);
+        app.set_window_size(900.0, 700.0);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+        app.text_entry = Some(TextEntry::Tag(String::new()));
+
+        app.handle_event(&key(Key::Enter));
+
+        assert!(
+            app.find_photo(pid).expect("one").tags.is_empty(),
+            "an empty tag was added"
+        );
+    }
+
+    /// A tag goes on everything selected.
+    #[test]
+    fn a_tag_goes_on_the_whole_selection() {
+        let mut app = app_with_n_pictures("tagall", 3);
+        app.set_window_size(900.0, 700.0);
+        app.selected_photo = app.visible_photos().first().copied();
+        app.handle_event(&shift_key(Key::Right));
+        let chosen = app.selected_photos.clone();
+        assert_eq!(chosen.len(), 2, "the control failed");
+
+        app.text_entry = Some(TextEntry::Tag("holiday".to_owned()));
+        app.handle_event(&key(Key::Enter));
+
+        for pid in &chosen {
+            assert_eq!(
+                app.find_photo(*pid).expect("a photo").tags,
+                vec!["holiday".to_owned()],
+                "photograph {pid} was not tagged"
+            );
+        }
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Tagged 2 photos holiday")
+        );
+    }
+
+    /// The album name being typed, if that is what has the keyboard.
+    fn naming_album(app: &PhotoApp) -> Option<&str> {
+        match &app.text_entry {
+            Some(TextEntry::AlbumName(text)) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Whether the search box has the keyboard.
+    fn searching(app: &PhotoApp) -> bool {
+        matches!(app.text_entry, Some(TextEntry::Search))
+    }
+
+    fn shift_key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        })
+    }
+
+    /// Shift and an arrow select more than one photograph.
+    ///
+    /// `selected_photos` is a `Vec` production code never pushed to, so the
+    /// batch operations were written, tested and unreachable. The grid already
+    /// drew a card as selected when it was in this list.
+    #[test]
+    fn shift_and_an_arrow_selects_more_than_one() {
+        let mut app = app_with_n_pictures("multi", 3);
+        app.set_window_size(900.0, 700.0);
+        // The first card *on screen*: the default sort is newest-first, so
+        // `photos.first()` is the last one and an arrow from it goes nowhere.
+        app.selected_photo = app.visible_photos().first().copied();
+
+        app.handle_event(&shift_key(Key::Right));
+
+        assert_eq!(
+            app.selected_photos.len(),
+            2,
+            "both ends of the step should be in the set: {:?}",
+            app.selected_photos
+        );
+        app.handle_event(&shift_key(Key::Right));
+        assert_eq!(
+            app.selected_photos.len(),
+            3,
+            "a run should collect what it passes over"
+        );
+    }
+
+    /// An arrow on its own starts again.
+    ///
+    /// Leaving cards highlighted behind a cursor that has moved away from them
+    /// is how a batch operation surprises somebody.
+    #[test]
+    fn an_arrow_without_shift_starts_the_selection_again() {
+        let mut app = app_with_n_pictures("single", 3);
+        app.set_window_size(900.0, 700.0);
+        // The first card *on screen*: the default sort is newest-first, so
+        // `photos.first()` is the last one and an arrow from it goes nowhere.
+        app.selected_photo = app.visible_photos().first().copied();
+        app.handle_event(&shift_key(Key::Right));
+        assert!(!app.selected_photos.is_empty(), "the control failed");
+
+        app.handle_event(&key(Key::Right));
+
+        assert!(
+            app.selected_photos.is_empty(),
+            "a plain arrow left the old set behind"
+        );
+    }
+
+    /// A rating applies to everything selected.
+    ///
+    /// `batch_rate` has been written and tested since this crate existed, with
+    /// no way to reach it.
+    #[test]
+    fn a_rating_applies_to_everything_selected() {
+        let mut app = app_with_n_pictures("rateall", 3);
+        app.set_window_size(900.0, 700.0);
+        // The first card *on screen*: the default sort is newest-first, so
+        // `photos.first()` is the last one and an arrow from it goes nowhere.
+        app.selected_photo = app.visible_photos().first().copied();
+        app.handle_event(&shift_key(Key::Right));
+        let chosen = app.selected_photos.clone();
+        assert_eq!(chosen.len(), 2, "the control failed");
+
+        app.handle_event(&typed(Key::Num4, '4'));
+
+        for pid in &chosen {
+            assert_eq!(
+                app.find_photo(*pid).expect("a photo").rating,
+                4,
+                "photograph {pid} was not rated"
+            );
+        }
+        // The third was never selected and must be untouched.
+        let untouched = app
+            .photos
+            .iter()
+            .filter(|p| !chosen.contains(&p.id))
+            .all(|p| p.rating == 0);
+        assert!(untouched, "a photograph outside the selection was rated");
+    }
+
+    /// A plain click starts the selection again.
+    #[test]
+    fn a_plain_click_starts_the_selection_again() {
+        let mut app = app_with_n_pictures("clickreset", 3);
+        app.set_window_size(900.0, 700.0);
+        // The first card *on screen*: the default sort is newest-first, so
+        // `photos.first()` is the last one and an arrow from it goes nowhere.
+        app.selected_photo = app.visible_photos().first().copied();
+        app.handle_event(&shift_key(Key::Right));
+        assert!(!app.selected_photos.is_empty(), "the control failed");
+
+        let cell = app.thumb_rect(2).expect("a third card");
+        app.handle_event(&click(cell.x + 4.0, cell.y + 4.0));
+
+        assert!(
+            app.selected_photos.is_empty(),
+            "the click joined the old set instead of replacing it"
+        );
+    }
+
+    /// The menu adds the whole selection when it was raised on part of it.
+    #[test]
+    fn the_menu_adds_the_whole_selection() {
+        let mut app = app_with_n_pictures("batchalbum", 3);
+        app.set_window_size(900.0, 700.0);
+        let album = app.create_album("Holiday");
+        // The first card *on screen*: the default sort is newest-first, so
+        // `photos.first()` is the last one and an arrow from it goes nowhere.
+        app.selected_photo = app.visible_photos().first().copied();
+        app.handle_event(&shift_key(Key::Right));
+        let chosen = app.selected_photos.clone();
+        assert_eq!(chosen.len(), 2, "the control failed");
+
+        // Raise it on one of the selected cards.
+        let cell = app.thumb_rect(0).expect("a first card");
+        app.handle_event(&right_click(cell.x + 4.0, cell.y + 4.0));
+        app.choose_from_photo_menu(album);
+
+        let in_album = app
+            .albums
+            .iter()
+            .find(|a| a.id == album)
+            .expect("the album")
+            .photo_ids
+            .clone();
+        assert_eq!(in_album.len(), 2, "only part of the selection went in");
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Added 2 photos to Holiday")
+        );
+    }
+
+    fn right_click(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        })
+    }
+
+    /// Where the first grid card is drawn.
+    fn first_card_point(app: &PhotoApp) -> (f32, f32) {
+        let cell = app.thumb_rect(0).expect("a first card");
+        (cell.x + 4.0, cell.y + 4.0)
+    }
+
+    /// Right-clicking a photograph offers the albums it could go into.
+    #[test]
+    fn right_clicking_a_photograph_offers_the_albums() {
+        let mut app = app_with_n_pictures("menu", 1);
+        app.set_window_size(900.0, 700.0);
+        app.create_album("Holiday");
+        let (x, y) = first_card_point(&app);
+
+        app.handle_event(&right_click(x, y));
+
+        assert!(app.photo_menu.is_some(), "no menu appeared");
+        assert_eq!(
+            app.menu_photo,
+            app.photos.first().map(|p| p.id),
+            "the menu is about the wrong photograph"
+        );
+    }
+
+    /// Choosing an album puts the photograph in it.
+    ///
+    /// The point of the whole feature: `add_to_album` has been written and
+    /// tested since this crate existed and had no caller outside the test
+    /// module, so an album stayed empty however many photographs you had.
+    #[test]
+    fn choosing_an_album_puts_the_photograph_in_it() {
+        let mut app = app_with_n_pictures("addto", 1);
+        app.set_window_size(900.0, 700.0);
+        let album = app.create_album("Holiday");
+        let pid = app.photos.first().expect("one").id;
+        let (x, y) = first_card_point(&app);
+        app.handle_event(&right_click(x, y));
+
+        app.choose_from_photo_menu(album);
+
+        let in_album = app
+            .albums
+            .iter()
+            .find(|a| a.id == album)
+            .expect("the album")
+            .photo_ids
+            .clone();
+        assert_eq!(in_album, vec![pid], "the photograph did not go in");
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Added to Holiday"),
+            "nothing on screen said it worked"
+        );
+    }
+
+    /// With no albums the menu still opens and says why it is empty.
+    ///
+    /// A menu that refused to appear would leave no way to find out *why*
+    /// nothing happened.
+    #[test]
+    fn with_no_albums_the_menu_still_opens_and_says_so() {
+        let mut app = app_with_n_pictures("noalbums", 1);
+        app.set_window_size(900.0, 700.0);
+        assert!(app.albums.is_empty(), "the control failed");
+        let (x, y) = first_card_point(&app);
+
+        app.handle_event(&right_click(x, y));
+
+        assert!(app.photo_menu.is_some(), "the menu refused to appear");
+    }
+
+    /// A click while the menu is up dismisses it and does not fall through.
+    ///
+    /// Without that, dismissing a menu over the grid would also select
+    /// whatever card was underneath it.
+    #[test]
+    fn a_click_dismisses_the_menu_without_falling_through() {
+        let mut app = app_with_n_pictures("dismiss", 2);
+        app.set_window_size(900.0, 700.0);
+        app.create_album("Holiday");
+        let (x, y) = first_card_point(&app);
+        app.handle_event(&right_click(x, y));
+        let before = app.selected_photo;
+
+        // Far from the menu, over the grid.
+        let elsewhere = app.thumb_rect(1).expect("a second card");
+        assert!(
+            app.handle_event(&click(elsewhere.x + 4.0, elsewhere.y + 4.0)),
+            "the click was not consumed"
+        );
+
+        assert!(app.photo_menu.is_none(), "the menu is still up");
+        assert_eq!(
+            app.selected_photo, before,
+            "the dismissing click also selected the card behind it"
+        );
+    }
+
+    /// A photograph already in an album is not offered it again.
+    #[test]
+    fn a_photograph_already_in_an_album_is_not_offered_it_twice() {
+        let mut app = app_with_n_pictures("twice", 1);
+        app.set_window_size(900.0, 700.0);
+        let album = app.create_album("Holiday");
+        let pid = app.photos.first().expect("one").id;
+        assert!(app.add_to_album(album, pid), "the control failed");
+
+        let (x, y) = first_card_point(&app);
+        app.handle_event(&right_click(x, y));
+
+        // Choosing it anyway must not duplicate the entry.
+        app.choose_from_photo_menu(album);
+        let in_album = app
+            .albums
+            .iter()
+            .find(|a| a.id == album)
+            .expect("the album")
+            .photo_ids
+            .clone();
+        assert_eq!(in_album, vec![pid], "the photograph was added twice");
+    }
+
+    /// Where the "New Album" row is drawn, so a click can land on it.
+    fn new_album_row_y(app: &PhotoApp) -> f32 {
+        let mut y = TOOLBAR_HEIGHT;
+        for row in app.sidebar_rows() {
+            let h = row.height();
+            if matches!(row, SidebarRow::Action { .. }) {
+                return y + h / 2.0;
+            }
+            y += h;
+        }
+        panic!("the sidebar has no New Album row");
+    }
+
+    fn start_naming(app: &mut PhotoApp) {
+        app.set_window_size(900.0, 700.0);
+        let y = new_album_row_y(app);
+        app.handle_event(&click(20.0, y));
+        assert!(
+            naming_album(app).is_some(),
+            "the click did not start naming an album"
+        );
+    }
+
+    /// The sidebar offers a way to make an album.
+    ///
+    /// `create_album` has been written and tested since this crate existed,
+    /// and every caller was in the test module -- so the ALBUMS heading has
+    /// never had anything under it that a user put there.
+    #[test]
+    fn the_sidebar_offers_a_way_to_make_an_album() {
+        let mut app = PhotoApp::new();
+        app.set_window_size(900.0, 700.0);
+        let y = new_album_row_y(&app);
+
+        assert_eq!(
+            app.sidebar_action_at(20.0, y),
+            Some(SidebarAction::NewAlbum),
+            "the row is drawn but is not a control"
+        );
+        assert_eq!(
+            app.sidebar_item_at(20.0, y),
+            None,
+            "an action is not somewhere to go"
+        );
+    }
+
+    /// Typing a name and pressing Enter makes the album.
+    #[test]
+    fn typing_a_name_and_pressing_enter_creates_the_album() {
+        let mut app = PhotoApp::new();
+        assert!(app.albums.is_empty(), "the control failed");
+        start_naming(&mut app);
+
+        for (k, ch) in [(Key::P, 'p'), (Key::I, 'i'), (Key::E, 'e'), (Key::R, 'r')] {
+            app.handle_event(&typed(k, ch));
+        }
+        app.handle_event(&key(Key::Enter));
+
+        assert_eq!(app.albums.len(), 1, "no album was made");
+        let album = app.albums.first().expect("one");
+        assert_eq!(album.name, "pier");
+        assert_eq!(
+            app.sidebar_selection,
+            SidebarItem::Album(album.id),
+            "the new album did not become the view"
+        );
+        assert!(
+            naming_album(&app).is_none(),
+            "the row is still taking typing"
+        );
+    }
+
+    /// A digit typed into an album name does not rate a photograph.
+    ///
+    /// The same hazard as the search box: `0`-`5` rate the selection and `f`
+    /// flags it, so an album called "5 star" would rewrite the library as it
+    /// was typed.
+    #[test]
+    fn a_digit_typed_into_an_album_name_does_not_rate_a_photograph() {
+        let mut app = app_with_n_pictures("albumdigit", 1);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+
+        // Control: unfocused, the digit really does rate.
+        app.handle_event(&typed(Key::Num5, '5'));
+        assert_eq!(
+            app.find_photo(pid).expect("one").rating,
+            5,
+            "the control failed: digits do not rate, so this proves nothing"
+        );
+
+        start_naming(&mut app);
+        app.handle_event(&typed(Key::Num3, '3'));
+
+        assert_eq!(
+            app.find_photo(pid).expect("one").rating,
+            5,
+            "typing an album name changed a photograph's rating"
+        );
+        assert_eq!(naming_album(&app), Some("3"));
+    }
+
+    /// Escape abandons a half-typed name.
+    #[test]
+    fn escape_abandons_a_half_typed_album_name() {
+        let mut app = PhotoApp::new();
+        start_naming(&mut app);
+        app.handle_event(&typed(Key::P, 'p'));
+
+        app.handle_event(&key(Key::Escape));
+
+        assert!(naming_album(&app).is_none(), "still naming");
+        assert!(app.albums.is_empty(), "escape made an album anyway");
+    }
+
+    /// Enter on a row nobody typed into makes nothing.
+    ///
+    /// Much more likely a change of mind than a request for a nameless album.
+    #[test]
+    fn enter_on_an_empty_name_makes_no_album() {
+        let mut app = PhotoApp::new();
+        start_naming(&mut app);
+
+        app.handle_event(&key(Key::Enter));
+
+        assert!(app.albums.is_empty(), "an album with no name was made");
+        assert!(
+            naming_album(&app).is_none(),
+            "the row is still taking typing"
+        );
+    }
+
+    /// Only one text field takes the keyboard at a time.
+    #[test]
+    fn focusing_the_search_box_abandons_an_album_name() {
+        let mut app = PhotoApp::new();
+        start_naming(&mut app);
+        app.handle_event(&typed(Key::P, 'p'));
+
+        focus_search(&mut app);
+
+        assert!(
+            naming_album(&app).is_none(),
+            "two rows would both have been showing a caret"
+        );
+    }
+
+    /// The search box is a control the click handler knows about.
+    ///
+    /// It was drawn from the start and was never in the layout as anything
+    /// but a gap to position the next button past.
+    #[test]
+    fn the_search_box_is_a_control_that_can_be_clicked() {
+        let mut app = PhotoApp::new();
+        app.set_window_size(900.0, 700.0);
+        let hit = app
+            .toolbar_controls()
+            .into_iter()
+            .find(|(c, _)| *c == ToolbarControl::Search)
+            .map(|(_, r)| r)
+            .expect("the search box is not a control");
+        assert_eq!(
+            app.toolbar_control_at(hit.x + 4.0, hit.y + 4.0),
+            Some(ToolbarControl::Search),
+            "a click inside the drawn box does not land on it"
+        );
+    }
+
+    /// Focus the search box, wherever the toolbar happens to put it.
+    fn focus_search(app: &mut PhotoApp) {
+        app.set_window_size(900.0, 700.0);
+        let hit = app
+            .toolbar_controls()
+            .into_iter()
+            .find(|(c, _)| *c == ToolbarControl::Search)
+            .map(|(_, r)| r)
+            .expect("the search box is a control");
+        app.handle_event(&click(hit.x + 4.0, hit.y + 4.0));
+        assert!(searching(app), "the click did not take the keyboard");
+    }
+
+    /// Typing filters the library, which is what the box has always promised.
+    #[test]
+    fn typing_into_the_search_box_filters_the_library() {
+        let mut app = app_with_n_pictures("srch", 2);
+        let first = app.photos.first().expect("one").id;
+        app.add_tag(first, "pier");
+        assert_eq!(app.visible_photos().len(), 2, "the control failed");
+
+        focus_search(&mut app);
+        for (k, ch) in [(Key::P, 'p'), (Key::I, 'i'), (Key::E, 'e'), (Key::R, 'r')] {
+            app.handle_event(&typed(k, ch));
+        }
+
+        assert_eq!(app.search_query, "pier");
+        assert_eq!(
+            app.visible_photos().len(),
+            1,
+            "the query was stored but nothing was filtered"
+        );
+    }
+
+    /// A digit typed into the search box does not rate a photograph.
+    ///
+    /// The reason focus has to consume everything. `0`-`5` rate the selected
+    /// photograph and `f` flags it, so without this, searching for a filename
+    /// with a digit in it would quietly edit the library while the user
+    /// believed they were typing a query.
+    #[test]
+    fn a_digit_typed_into_the_search_box_does_not_rate_a_photograph() {
+        let mut app = app_with_n_pictures("digits", 1);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+
+        // Control: with the box unfocused, the digit really does rate.
+        app.handle_event(&typed(Key::Num5, '5'));
+        assert_eq!(
+            app.find_photo(pid).expect("one").rating,
+            5,
+            "the control failed: digits do not rate at all, so this proves nothing"
+        );
+
+        focus_search(&mut app);
+        app.handle_event(&typed(Key::Num3, '3'));
+
+        assert_eq!(
+            app.find_photo(pid).expect("one").rating,
+            5,
+            "typing into the search box changed a photograph's rating"
+        );
+        assert_eq!(app.search_query, "3", "and the digit went into the query");
+    }
+
+    /// `f` does not flag a photograph while the box has the keyboard either.
+    #[test]
+    fn a_letter_typed_into_the_search_box_does_not_flag_a_photograph() {
+        let mut app = app_with_n_pictures("flagging", 1);
+        let pid = app.photos.first().expect("one").id;
+        app.selected_photo = Some(pid);
+        assert!(!app.find_photo(pid).expect("one").flagged);
+
+        focus_search(&mut app);
+        app.handle_event(&typed(Key::F, 'f'));
+
+        assert!(
+            !app.find_photo(pid).expect("one").flagged,
+            "typing into the search box flagged a photograph"
+        );
+        assert_eq!(app.search_query, "f");
+    }
+
+    /// Backspace removes the last character.
+    #[test]
+    fn backspace_removes_the_last_character() {
+        let mut app = app_with_n_pictures("backspace", 1);
+        focus_search(&mut app);
+        app.handle_event(&typed(Key::P, 'p'));
+        app.handle_event(&typed(Key::I, 'i'));
+        assert_eq!(app.search_query, "pi");
+
+        app.handle_event(&key(Key::Backspace));
+        assert_eq!(app.search_query, "p");
+    }
+
+    /// Escape abandons the search rather than merely leaving the box.
+    ///
+    /// A filter left in place by a box that no longer looks active is a
+    /// library that appears half-missing with nothing on screen explaining
+    /// why.
+    #[test]
+    fn escape_abandons_the_search_and_restores_the_library() {
+        let mut app = app_with_n_pictures("escape", 2);
+        let first = app.photos.first().expect("one").id;
+        app.add_tag(first, "pier");
+        focus_search(&mut app);
+        for (k, ch) in [(Key::P, 'p'), (Key::I, 'i'), (Key::E, 'e'), (Key::R, 'r')] {
+            app.handle_event(&typed(k, ch));
+        }
+        assert_eq!(app.visible_photos().len(), 1, "the control failed");
+
+        app.handle_event(&key(Key::Escape));
+
+        assert!(!searching(&app), "escape left the keyboard in the box");
+        assert!(
+            app.search_query.is_empty(),
+            "escape left the query in place"
+        );
+        assert_eq!(
+            app.visible_photos().len(),
+            2,
+            "the library did not come back"
+        );
+    }
+
+    /// Clicking anything else takes the keyboard out of the box.
+    #[test]
+    fn clicking_elsewhere_takes_the_keyboard_out_of_the_search_box() {
+        let mut app = app_with_n_pictures("unfocus", 1);
+        focus_search(&mut app);
+
+        // The sort button, which is a control and is not the search box.
+        let sort = app
+            .toolbar_controls()
+            .into_iter()
+            .find(|(c, _)| *c == ToolbarControl::Sort)
+            .map(|(_, r)| r)
+            .expect("sort is a control");
+        app.handle_event(&click(sort.x + 4.0, sort.y + 4.0));
+
+        assert!(!searching(&app), "the keyboard stayed in the search box");
+    }
+
     /// A library of `n` photos, all visible.
     fn library(n: usize) -> PhotoApp {
         let mut app = PhotoApp::new();
         app.set_window_size(WINDOW_WIDTH, WINDOW_HEIGHT);
         for i in 0..n {
             app.import_photo(
-                &format!("/photos/p{i:04}.jpg"),
+                format!("/photos/p{i:04}.jpg"),
                 &format!("p{i:04}.jpg"),
                 ImageFormat::Jpeg,
                 1_000_000,
@@ -4824,10 +6912,7 @@ mod tests {
             .iter()
             .find(|(c, _)| *c == ToolbarControl::View(ViewMode::Timeline))
             .expect("a Timeline button");
-        assert!(app.handle_event(&click(
-            rect.x + rect.width / 2.0,
-            rect.y + rect.height / 2.0
-        )));
+        assert!(app.handle_event(&click(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)));
         assert_eq!(app.view_mode, ViewMode::Timeline);
     }
 
@@ -4836,7 +6921,7 @@ mod tests {
         let app = library(3);
         for (control, rect) in app.toolbar_controls() {
             assert_eq!(
-                app.toolbar_control_at(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+                app.toolbar_control_at(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0),
                 Some(control),
                 "{control:?} is drawn at {rect:?} and must be clickable there"
             );
@@ -4851,7 +6936,7 @@ mod tests {
             .iter()
             .find(|(c, _)| *c == ToolbarControl::Slideshow)
             .expect("a Slideshow button");
-        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
         app.handle_event(&click(x, y));
         assert!(app.slideshow.is_some());
         assert_eq!(app.view_mode, ViewMode::Slideshow);
@@ -4920,7 +7005,7 @@ mod tests {
         let mut app = library(20);
         let visible = app.visible_photos();
         let rect = app.thumb_rect(5).expect("a sixth thumbnail");
-        let (x, y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
         assert_eq!(app.photo_at(x, y), Some(visible[5]));
         assert!(app.handle_event(&click(x, y)));
         assert_eq!(app.selected_photo, Some(visible[5]));
@@ -4970,9 +7055,9 @@ mod tests {
     fn opening_the_info_panel_narrows_the_grid() {
         let mut app = library(50);
         app.show_info_panel = false;
-        let wide = app.content_rect().width;
+        let wide = app.content_rect().w;
         app.show_info_panel = true;
-        assert_eq!(app.content_rect().width, wide - INFO_PANEL_WIDTH);
+        assert_eq!(app.content_rect().w, wide - INFO_PANEL_WIDTH);
     }
 
     // --- the keyboard ---
@@ -5246,7 +7331,7 @@ mod tests {
         assert!(app.window_width >= MIN_WINDOW_WIDTH);
         assert!(app.window_height >= MIN_WINDOW_HEIGHT);
         assert!(app.grid_columns() >= 1);
-        assert!(app.content_rect().width >= 1.0);
+        assert!(app.content_rect().w >= 1.0);
     }
 
     #[test]
@@ -5269,6 +7354,126 @@ mod tests {
     /// This was production code until 2026-09-15 and `main` called it, so the
     /// window opened on albums and photographs that were not on the machine.
     /// It is a perfectly good *fixture*; what was wrong was where it lived.
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Letters and digits are pressed with the text they typed, because
+    /// `handle_typed` reads the character and not the key code. Two
+    /// selections, because `Esc` clears one and correctly reports nothing to
+    /// do when there is none.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [0_u8, 1, 2].into_iter().any(|state| {
+                    let mut app = seeded_library();
+                    if state > 0 {
+                        app.handle_event(&key(Key::Right));
+                        app.handle_event(&key(Key::Right));
+                    }
+                    if state == 2 {
+                        // The single-picture view, which is the only place
+                        // Esc has anything to leave. My row said "Clear the
+                        // selection", which this app does not do -- third
+                        // invented row in this queue, after screenrecorder
+                        // and podcast, and all three said some form of
+                        // "back".
+                        app.handle_event(&key(Key::Enter));
+                    }
+                    let mut event = key(stroke.key);
+                    if let Event::Key(k) = &mut event {
+                        k.modifiers = stroke.modifiers;
+                    }
+                    if let Some(ch) = photo_typed_char(stroke.key, stroke.modifiers.shift) {
+                        event = typed(stroke.key, ch);
+                    }
+                    app.handle_event(&event)
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// The character a keystroke types, for the rows that reach
+    /// `handle_typed`. Taken from the stroke rather than the row label: a row
+    /// reads "+ / -" and splits into two, so the label is not the key.
+    fn photo_typed_char(k: Key, shift: bool) -> Option<char> {
+        let simple = [
+            (Key::F, 'f'),
+            (Key::I, 'i'),
+            (Key::S, 's'),
+            (Key::Num0, '0'),
+            (Key::Num1, '1'),
+            (Key::Num2, '2'),
+            (Key::Num3, '3'),
+            (Key::Num4, '4'),
+            (Key::Num5, '5'),
+            (Key::Minus, '-'),
+        ];
+        if let Some((_, ch)) = simple.into_iter().find(|(want, _)| *want == k) {
+            return Some(ch);
+        }
+        match k {
+            Key::Equals => Some(if shift { '+' } else { '=' }),
+            _ => None,
+        }
+    }
+
+    /// **The card reaches the window, and nothing re-rates behind it.**
+    ///
+    /// The control is the last third: `1` behind the card must not set a
+    /// rating, and must set one with the card down. That is the key worth
+    /// controlling here -- it writes to every selected picture at once.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &PhotoApp| -> Vec<String> {
+            app.render_commands(1200.0, 800.0)
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut app = seeded_library();
+        app.handle_event(&key(Key::Right));
+        assert!(
+            !drawn(&app).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_event(&key(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&drawn(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let before = app
+            .selected_photo
+            .and_then(|pid| app.find_photo(pid))
+            .map(|p| p.rating);
+        app.handle_event(&typed(Key::Num1, '1'));
+        assert_eq!(
+            app.selected_photo
+                .and_then(|pid| app.find_photo(pid))
+                .map(|p| p.rating),
+            before,
+            "a rating was set through the shortcut card"
+        );
+
+        app.handle_event(&key(Key::F1));
+        app.handle_event(&typed(Key::Num1, '1'));
+        assert_ne!(
+            app.selected_photo
+                .and_then(|pid| app.find_photo(pid))
+                .map(|p| p.rating),
+            before,
+            "control: the rating key does nothing even with the card down"
+        );
+    }
+
     fn seeded_library() -> PhotoApp {
         let mut app = PhotoApp::new();
         let _album = app.create_album("Vacation 2025");
@@ -5395,7 +7600,7 @@ mod tests {
             .expect("no Import control")
             .1;
         assert_eq!(
-            app.toolbar_control_at(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
+            app.toolbar_control_at(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0),
             Some(ToolbarControl::Import),
             "the middle of the Import rectangle does not hit Import"
         );
@@ -5412,6 +7617,60 @@ mod tests {
     /// `start_slideshow` is a no-op without them. The first version of the
     /// test below used `new()` and its own control caught that: "no slideshow
     /// to advance" rather than a green pass proving nothing.
+    /// The slideshow does not name a transition it will not perform.
+    ///
+    /// `SlideshowState::transition` had exactly one reader: the control line
+    /// printing its own name. So the window read "Fade" and the pictures were
+    /// replaced instantly -- the panel reads the value in order to draw the
+    /// value, and the evidence for the claim is the program's own output at
+    /// the moment somebody checks it.
+    #[test]
+    fn the_slideshow_controls_do_not_name_a_transition() {
+        let mut app = app_with_photos("transition");
+        app.start_slideshow();
+        assert!(
+            app.slideshow.is_some(),
+            "control: the fixture must be running a slideshow"
+        );
+
+        let texts: Vec<String> = app
+            .render_commands(1400.0, 900.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // The control line specifically, not the whole window: "None" and
+        // "Zoom" are ordinary words other controls may legitimately use, and
+        // a test that failed on those would be testing the vocabulary.
+        let control_line = texts
+            .iter()
+            .find(|t| t.contains(" / ") && t.contains('|'))
+            .unwrap_or_else(|| {
+                panic!(
+                    "control: the slideshow control line should be on screen; the window drew {} text command(s)",
+                    texts.len()
+                )
+            });
+
+        for transition in [
+            SlideshowTransition::None,
+            SlideshowTransition::Fade,
+            SlideshowTransition::SlideLeft,
+            SlideshowTransition::SlideRight,
+            SlideshowTransition::Dissolve,
+            SlideshowTransition::Zoom,
+        ] {
+            assert!(
+                !control_line.contains(transition.label()),
+                "the slideshow control line names the {} transition and performs none: {control_line:?}",
+                transition.label()
+            );
+        }
+    }
+
     fn app_with_photos(tag: &str) -> PhotoApp {
         let mut app = PhotoApp::new();
         let dir = std::env::temp_dir().join("slateos-photomanager-slideshow");
@@ -5423,6 +7682,483 @@ mod tests {
         }
         assert_eq!(app.photos.len(), 2, "the fixture did not import its photos");
         app
+    }
+
+    /// A photograph, its rating and its flag survive closing the window.
+    ///
+    /// The whole point. Before this, every import, rating and flag lasted
+    /// exactly as long as the process.
+    #[test]
+    fn a_library_survives_a_restart() {
+        let scratch = ScratchDir::new("photomanager-restart");
+        let path = scratch.path("photolibrary.txt");
+        let picture = scratch.path("holiday.png");
+        std::fs::write(&picture, imagecodec::testing::png_gradient(4, 4)).expect("write");
+
+        let pid = {
+            let mut app = PhotoApp::with_storage(path.clone());
+            app.import_from_disk(&picture);
+            let pid = app.photos.first().expect("imported").id;
+            assert!(app.rate_photo(pid, 5), "the control failed: not rated");
+            assert!(app.toggle_flag(pid), "the control failed: not flagged");
+            app.add_tag(pid, "pier");
+            app.persist_if_changed();
+            pid
+        };
+
+        let reopened = PhotoApp::with_storage(path);
+        assert_eq!(reopened.photos.len(), 1, "the photograph did not come back");
+        let photo = reopened.photos.first().expect("one");
+        assert_eq!(photo.id, pid, "and it is the same one");
+        assert_eq!(photo.rating, 5, "the rating did not survive");
+        assert!(photo.flagged, "the flag did not survive");
+        assert_eq!(
+            photo.tags,
+            vec!["pier".to_owned()],
+            "the tag did not survive"
+        );
+        assert!(
+            reopened.library_note.is_none(),
+            "{:?}",
+            reopened.library_note
+        );
+    }
+
+    /// The save goes through `safeio`, not `fs::write`.
+    ///
+    /// The two leave identical bytes, so nothing else can tell them apart --
+    /// and `fs::write` truncates before it writes, so an interrupted save
+    /// would destroy the whole library rather than one photograph.
+    #[test]
+    fn the_save_is_atomic() {
+        let scratch = ScratchDir::new("photomanager-atomic");
+        let path = scratch.path("photolibrary.txt");
+        let picture = scratch.path("p.png");
+        std::fs::write(&picture, imagecodec::testing::png_gradient(4, 4)).expect("write");
+
+        let mut app = PhotoApp::with_storage(path);
+        app.import_from_disk(&picture);
+        let before = safeio::writes_performed();
+        app.persist_if_changed();
+        assert!(
+            safeio::writes_performed() > before,
+            "the library must be written through safeio::write_atomically"
+        );
+    }
+
+    /// Nothing is written when nothing changed.
+    #[test]
+    fn an_unchanged_library_is_not_rewritten() {
+        let scratch = ScratchDir::new("photomanager-unchanged");
+        let path = scratch.path("photolibrary.txt");
+        let picture = scratch.path("p.png");
+        std::fs::write(&picture, imagecodec::testing::png_gradient(4, 4)).expect("write");
+
+        let mut app = PhotoApp::with_storage(path);
+        app.import_from_disk(&picture);
+        app.persist_if_changed();
+
+        let before = safeio::writes_performed();
+        app.persist_if_changed();
+        app.persist_if_changed();
+        assert_eq!(
+            safeio::writes_performed(),
+            before,
+            "an unchanged library was written again"
+        );
+    }
+
+    /// A library file that could not be read in full is never overwritten.
+    ///
+    /// The dangerous case, and the reason `library_unread` exists. One corrupt
+    /// line still loads every other photograph -- and saving that back would
+    /// delete the corrupt one for good, turning something a person could still
+    /// repair in a text editor into nothing at all.
+    #[test]
+    fn a_library_that_did_not_fully_load_is_not_overwritten() {
+        let scratch = ScratchDir::new("photomanager-unread");
+        let path = scratch.path("photolibrary.txt");
+        // The second record is truncated: too few fields to be a photograph.
+        let original = "PHOTOLIBRARY|1\n\
+             PHOTO|1|/a.jpg|a.jpg|10|jpeg|100||3|none|0|0|\n\
+             PHOTO|2|/b.jpg\n";
+        std::fs::write(&path, original).expect("write");
+
+        let mut app = PhotoApp::with_storage(path.clone());
+        assert_eq!(app.photos.len(), 1, "the good record still loaded");
+        assert_eq!(
+            app.library_unread, 1,
+            "the control failed: nothing was skipped"
+        );
+        // Not `library_note.is_some()`: that asserts a field was written,
+        // which is what let this ship with nothing displaying it. Assert the
+        // words reach the screen.
+        let tree = app.render(900.0, 700.0);
+        let told = tree.commands.iter().any(
+            |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("could not be read")),
+        );
+        assert!(told, "the reason was recorded but never put on screen");
+
+        // Change something, then try to save.
+        assert!(app.rate_photo(1, 5));
+        app.persist_if_changed();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            original,
+            "a file that could not be read in full was overwritten"
+        );
+    }
+
+    /// A first run has no library file, and that is not an error.
+    #[test]
+    fn a_missing_library_is_an_ordinary_first_run() {
+        let scratch = ScratchDir::new("photomanager-firstrun");
+        let path = scratch.path("nothing-here.txt");
+
+        let app = PhotoApp::with_storage(path);
+        assert!(app.photos.is_empty());
+        assert_eq!(app.library_unread, 0);
+        assert!(
+            app.library_note.is_none(),
+            "a first run was reported as a problem: {:?}",
+            app.library_note
+        );
+    }
+
+    /// Ids carry on from where the saved library left off.
+    ///
+    /// Without this the generator would restart at 1 and the next import
+    /// would be given an id a saved photograph already has -- so a rating
+    /// typed on one would land on the other.
+    #[test]
+    fn ids_do_not_restart_over_a_saved_library() {
+        let scratch = ScratchDir::new("photomanager-ids");
+        let path = scratch.path("photolibrary.txt");
+        let one = scratch.path("one.png");
+        let two = scratch.path("two.png");
+        std::fs::write(&one, imagecodec::testing::png_gradient(4, 4)).expect("write");
+        std::fs::write(&two, imagecodec::testing::png_gradient(5, 4)).expect("write");
+
+        let first_id = {
+            let mut app = PhotoApp::with_storage(path.clone());
+            app.import_from_disk(&one);
+            app.persist_if_changed();
+            app.photos.first().expect("one").id
+        };
+
+        let mut reopened = PhotoApp::with_storage(path);
+        reopened.import_from_disk(&two);
+        let ids: Vec<PhotoId> = reopened.photos.iter().map(|p| p.id).collect();
+        assert_eq!(ids.len(), 2, "both photographs are present");
+        assert_ne!(
+            ids.first(),
+            ids.get(1),
+            "the new import reused a saved photograph's id: {ids:?} (first was {first_id})"
+        );
+    }
+
+    /// A fixture whose files are real pictures, not merely real files.
+    ///
+    /// `app_with_photos` above writes "a real file, if not a real png", which
+    /// was sufficient while nothing ever opened one. It is exactly what these
+    /// tests must not use: every one of them would pass on the placeholder.
+    fn app_with_pictures(tag: &str) -> PhotoApp {
+        let mut app = PhotoApp::new();
+        let dir = std::env::temp_dir().join("slateos-photomanager-pictures");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        for i in 0..2 {
+            let path = dir.join(format!("{tag}-{i}.png"));
+            std::fs::write(&path, imagecodec::testing::png_gradient(6, 4)).expect("write");
+            app.import_from_disk(&path);
+        }
+        assert_eq!(app.photos.len(), 2, "the fixture did not import its photos");
+        app.view_mode = ViewMode::Single;
+        app
+    }
+
+    /// A library of `n` real pictures, for the grid's tests.
+    fn app_with_n_pictures(tag: &str, n: usize) -> PhotoApp {
+        let mut app = PhotoApp::new();
+        let dir = std::env::temp_dir().join("slateos-photomanager-grid");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        for i in 0..n {
+            let path = dir.join(format!("{tag}-{i}.png"));
+            // Different sizes so the files differ, and so a thumbnail drawn
+            // under the wrong id would be visibly the wrong picture.
+            std::fs::write(
+                &path,
+                imagecodec::testing::png_gradient(
+                    6u32.saturating_add(u32::try_from(i).unwrap_or(0)),
+                    4,
+                ),
+            )
+            .expect("write");
+            app.import_from_disk(&path);
+        }
+        assert_eq!(app.photos.len(), n, "the fixture did not import its photos");
+        app.view_mode = ViewMode::Grid;
+        app
+    }
+
+    /// The grid draws the photographs, not cards with names on them.
+    ///
+    /// This is the increment. `sync_thumbnails` runs inside `render` and
+    /// before the commands are built, so a thumbnail generated for this frame
+    /// is drawable in this frame -- there is no state where a card has a
+    /// picture that cannot yet be named.
+    #[test]
+    fn the_grid_draws_the_photographs_once_their_thumbnails_exist() {
+        let mut app = app_with_n_pictures("drawn", 2);
+
+        let tree = app.render(900.0, 700.0);
+
+        let drawn = tree
+            .commands
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::Image { .. }))
+            .count();
+        assert!(drawn >= 2, "the grid drew {drawn} photographs, expected 2");
+        assert!(
+            !app.take_images().is_empty(),
+            "the pictures were drawn but never sent to the compositor"
+        );
+    }
+
+    /// More photographs than fit in one frame's budget still all arrive.
+    ///
+    /// The budget is what keeps a scroll smooth; the thing to prove is that it
+    /// bounds the work per frame without dropping any of it.
+    #[test]
+    fn a_screenful_fills_over_successive_frames() {
+        let n = PhotoApp::THUMB_BATCH + 3;
+        let mut app = app_with_n_pictures("fills", n);
+
+        let after_one = {
+            let _ = app.render(900.0, 700.0);
+            let _ = app.take_images();
+            app.thumb_ready.len()
+        };
+        assert_eq!(
+            after_one,
+            PhotoApp::THUMB_BATCH,
+            "one frame did exactly its budget, no more and no less"
+        );
+
+        for _ in 0..3 {
+            let _ = app.render(900.0, 700.0);
+            let _ = app.take_images();
+        }
+        assert_eq!(app.thumb_ready.len(), n, "the rest never arrived");
+    }
+
+    /// Drops are announced before uploads, which the image budget requires.
+    ///
+    /// The compositor checks `held - freed + incoming`, so a batch that
+    /// evicted as many thumbnails as it generated would be refused if it asked
+    /// for both sets at once -- at exactly the moment the cache is doing its
+    /// job. The cache here holds one, so importing two forces an eviction.
+    #[test]
+    fn an_eviction_is_announced_before_the_upload_that_caused_it() {
+        let mut app = app_with_n_pictures("order", 2);
+        app.thumb_cache = thumbs::ThumbnailCache::new(1);
+
+        let _ = app.render(900.0, 700.0);
+        let changes = app.take_images();
+
+        let first_upload = changes
+            .iter()
+            .position(|c| matches!(c, oswindow::app::ImageChange::Upload { .. }))
+            .expect("something was uploaded");
+        let last_drop = changes
+            .iter()
+            .rposition(|c| matches!(c, oswindow::app::ImageChange::Drop(_)))
+            .expect("the one-entry cache evicted something");
+        assert!(
+            last_drop < first_upload,
+            "a drop was announced after an upload: {last_drop} vs {first_upload}"
+        );
+    }
+
+    /// An evicted thumbnail stops being claimed as drawable.
+    ///
+    /// A card still naming a dropped id would draw nothing at all: the
+    /// compositor discards an `Image` command for an id it does not hold, and
+    /// says nothing about it. A placeholder is the honest fallback.
+    #[test]
+    fn an_evicted_thumbnail_is_no_longer_claimed_as_drawable() {
+        let mut app = app_with_n_pictures("evicted", 2);
+        app.thumb_cache = thumbs::ThumbnailCache::new(1);
+
+        let _ = app.render(900.0, 700.0);
+        let evicted = app
+            .take_images()
+            .iter()
+            .filter(|c| matches!(c, oswindow::app::ImageChange::Drop(_)))
+            .count();
+
+        assert_eq!(evicted, 1, "the control failed: nothing was evicted");
+        assert!(
+            app.thumb_ready.len() < 2,
+            "both photographs still claim a thumbnail after one was dropped"
+        );
+    }
+
+    /// Selecting a photograph decodes it and queues its pixels.
+    #[test]
+    fn the_selected_photograph_is_decoded_and_queued_for_upload() {
+        let mut app = app_with_pictures("upload");
+        app.selected_photo = app.photos.first().map(|p| p.id);
+
+        let _ = app.render(900.0, 700.0);
+
+        let queued = app.take_images();
+        assert_eq!(queued.len(), 1, "one photograph, one upload");
+        match queued.first().expect("the upload") {
+            oswindow::app::ImageChange::Upload {
+                id, width, height, ..
+            } => {
+                assert_eq!(*id, PHOTO_IMAGE_ID);
+                assert_eq!(
+                    (*width, *height),
+                    (6, 4),
+                    "the picture's own size, read from the file"
+                );
+            }
+            oswindow::app::ImageChange::Drop(id) => {
+                panic!("expected an upload, got a drop of {id}")
+            }
+        }
+    }
+
+    /// The single-photo view draws the photograph instead of a card.
+    ///
+    /// This is the whole increment. Until it passed, every view in this
+    /// application drew a rectangle with a file name in it over a file it had
+    /// genuinely read.
+    #[test]
+    fn the_single_view_draws_the_picture_rather_than_a_card() {
+        let mut app = app_with_pictures("drawn");
+        app.selected_photo = app.photos.first().map(|p| p.id);
+
+        let tree = app.render(900.0, 700.0);
+
+        let drawn = tree.commands.iter().any(
+            |c| matches!(c, RenderCommand::Image { image_id, .. } if *image_id == PHOTO_IMAGE_ID),
+        );
+        assert!(
+            drawn,
+            "a decoded photograph was still drawn as a placeholder"
+        );
+    }
+
+    /// A file that is not a picture says why, rather than looking unloaded.
+    #[test]
+    fn a_file_that_is_not_a_picture_says_why_instead_of_staying_blank() {
+        let mut app = PhotoApp::new();
+        app.view_mode = ViewMode::Single;
+        let dir = std::env::temp_dir().join("slateos-photomanager-pictures");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("not-really-a-picture.png");
+        std::fs::write(&path, b"this file is named .png and is not one").expect("write");
+        app.import_from_disk(&path);
+        app.selected_photo = app.photos.first().map(|p| p.id);
+
+        let tree = app.render(900.0, 700.0);
+
+        assert!(app.picture_error.is_some(), "no reason was recorded");
+        assert!(
+            app.take_images().is_empty(),
+            "nothing decodable, nothing uploaded"
+        );
+        let said = tree.commands.iter().any(|c| {
+            matches!(c, RenderCommand::Text { text, .. } if text.contains("could not be decoded"))
+        });
+        assert!(said, "the reason was recorded but never put on screen");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A photograph that cannot be decoded is attempted once, not every frame.
+    ///
+    /// Proved by deleting the file between the two frames: a retry would have
+    /// to open it again, and would report that it was missing rather than that
+    /// it was not a picture. Without `picture_for` this application would read
+    /// and fail to decode the same file for as long as it stayed selected --
+    /// sixty times a second.
+    #[test]
+    fn a_photograph_that_cannot_be_decoded_is_not_read_again_every_frame() {
+        let mut app = PhotoApp::new();
+        app.view_mode = ViewMode::Single;
+        let dir = std::env::temp_dir().join("slateos-photomanager-pictures");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("attempted-once.png");
+        std::fs::write(&path, b"not a picture either").expect("write");
+        app.import_from_disk(&path);
+        app.selected_photo = app.photos.first().map(|p| p.id);
+
+        let _ = app.render(900.0, 700.0);
+        let first = app.picture_error.clone();
+        assert!(
+            first.as_ref().is_some_and(|r| r.contains("decoded")),
+            "the control failed: {first:?}"
+        );
+
+        std::fs::remove_file(&path).expect("remove");
+        let _ = app.render(900.0, 700.0);
+
+        assert_eq!(
+            app.picture_error, first,
+            "the file was opened a second time, so every frame re-reads it"
+        );
+    }
+
+    /// A second selection replaces the upload rather than queueing behind it.
+    ///
+    /// The queue is deliberately not drained between the two frames, which is
+    /// what a click arriving before the compositor has taken the last picture
+    /// looks like. Both uploads carry the same id, so a queue holding both
+    /// would send pixels that are already stale.
+    #[test]
+    fn a_new_selection_replaces_the_upload_rather_than_queueing_behind_it() {
+        let mut app = app_with_pictures("replace");
+        let ids: Vec<PhotoId> = app.photos.iter().map(|p| p.id).collect();
+
+        app.selected_photo = ids.first().copied();
+        let _ = app.render(900.0, 700.0);
+        app.selected_photo = ids.get(1).copied();
+        let _ = app.render(900.0, 700.0);
+
+        assert_eq!(
+            app.take_images().len(),
+            1,
+            "the overtaken upload was still in the queue"
+        );
+    }
+
+    /// Fitting never enlarges a picture past its own size.
+    #[test]
+    fn fitting_a_small_picture_leaves_it_at_its_own_size() {
+        assert_eq!(fit_within(10, 10, 900.0, 700.0), (10.0, 10.0));
+    }
+
+    /// A portrait photograph is bounded by the height, not the width.
+    ///
+    /// The case the discarded 4:3 assumption got wrong: it gave every
+    /// photograph a landscape box regardless of which way the camera was held.
+    #[test]
+    fn a_portrait_picture_is_bounded_by_the_height() {
+        let (w, h) = fit_within(2000, 4000, 900.0, 700.0);
+        assert!((h - 700.0).abs() < 0.01, "height fills the pane: {h}");
+        assert!((w - 350.0).abs() < 0.01, "width follows the shape: {w}");
+    }
+
+    /// A landscape photograph is bounded by the width.
+    #[test]
+    fn a_landscape_picture_is_bounded_by_the_width() {
+        let (w, h) = fit_within(4000, 2000, 900.0, 700.0);
+        assert!((w - 900.0).abs() < 0.01, "width fills the pane: {w}");
+        assert!((h - 450.0).abs() < 0.01, "height follows the shape: {h}");
     }
 
     /// The slideshow keeps running while the picker is open.
@@ -5608,7 +8344,7 @@ mod tests {
             app.cycle_thumb_size();
         }
         assert!(
-            app.content_rect().width < app.current_thumb_size(),
+            app.content_rect().w < app.current_thumb_size(),
             "the fixture must be narrower than one thumbnail"
         );
         assert!(

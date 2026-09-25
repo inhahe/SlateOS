@@ -1,5 +1,43 @@
 # A -> C: `ziparchive` ranged-reader + streaming-writer design
 
+**Status:** LANDED 2026-09-16 by lane C, and the caller arrived too --
+re-checked 2026-09-21: `apps/archivemanager/src/backend.rs` implements
+`ziparchive::ReadAt` (line 214) and calls `parse_at` (329) and
+`extract_entry_at` (668), so the memory saving is real and not just
+available.
+
+(The history that used to sit in this line -- that it was PARTIAL earlier
+the same day, with the API present and no caller -- moved below, because
+`open-requests.py` reads the status *block* and `PARTIAL` outranks `LANDED`
+in it. A file describing its own past as open reads as open, which kept
+this one in the unresolved list for five days after it was finished.)
+
+`ziparchive` has `ReadAt` (lib.rs:649), `WriteStream` (1219) and the ranged
+entry points, spelled `_at` rather than the `_from` sketched here: `parse_at`,
+`extract_entry_at`, `extract_entry_at_limited`, `entry_data_at`.
+
+`apps/archivemanager` now uses them. `ArchiveSource` holds an `ArchiveBytes` --
+a file handle and its length -- and reads each member at its offset, so opening
+an archive to look at its listing costs a handle and a `Vec<ZipEntry>` rather
+than the file's size.
+
+Two things the design did not anticipate, both worth having:
+
+* `ReadAt` takes `&mut self`, correct for a source consumed as it is read. An
+  archive is not, so a `RefCell` keeps a positional read an immutable operation;
+  otherwise that mutability spreads through every `&ArchiveSource` caller to
+  express a detail of how reading is done.
+* `RangedError`'s Zip/Read split gave the application information it did not
+  have. Every extraction failure used to become "Corrupted"; there are now
+  `SkipReason::Unreadable` and `TestResult::Unreadable`, so testing an intact
+  archive on a failing disk no longer tells the user to find another copy. The
+  note on `SkipReason::Encrypted` had already made that argument for a different
+  pair of facts.
+
+Marked PARTIAL rather than LANDED deliberately: an API with no caller is the
+defect this lane spent 2026-09-16 removing elsewhere, and calling it done because
+the crate compiles is how it stays that way.
+
 **From:** Lane A. **Date:** 2026-09-08.
 **In response to:**
 `c-a-ziparchive-wants-a-ranged-reader-and-a-streaming-writer.md`.

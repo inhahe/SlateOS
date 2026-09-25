@@ -70,6 +70,7 @@ use crate::dispatch;
 use crate::global::{self, Extension};
 use crate::icd::CURRENT;
 use crate::instance::{DriverInstance, Instance, PhysicalDevice, adopt_all, array_query, outcome};
+use crate::messenger;
 use crate::physical::{self, Ask, Command};
 use crate::registry::{Admission, Driver, Entry, Registry};
 use crate::unknown;
@@ -408,6 +409,17 @@ pub unsafe extern "C" fn get_instance_proc_addr(instance: Handle, name: *const c
             // `instance` is non-null on this path, and the caller guarantees it
             // is one this loader created; `raw` is the caller's NUL-terminated
             // string, which is the same one `name` was decoded from.
+            // The two `VK_EXT_debug_utils` commands taking a `VkInstance`.
+            // Unlike everything above, these are answered *conditionally*: a
+            // machine whose drivers have no debug-utils gets null, because a
+            // pointer to a function that could only fail is the same false
+            // claim as advertising an extension with no entry points.
+            b"vkCreateDebugUtilsMessengerEXT" => {
+                messenger_entry_point(instance, erase(create_debug_utils_messenger as *const ()))
+            }
+            b"vkDestroyDebugUtilsMessengerEXT" => {
+                messenger_entry_point(instance, erase(destroy_debug_utils_messenger as *const ()))
+            }
             _ => physical::lookup(name)
                 .map(physical_trampoline)
                 .or_else(|| unknown_physical_device_command(instance, raw, name)),
@@ -1700,6 +1712,102 @@ pub unsafe extern "C" fn destroy_device(device: Handle, allocator: *const c_void
     // Freed only now: the driver's `vkDestroyDevice` runs first, and until it
     // returns the device's dispatch word still points here.
     drop(record);
+}
+
+// ---------------------------------------------------------------------------
+// VK_EXT_debug_utils — the instance-level half
+// ---------------------------------------------------------------------------
+
+/// Answer a messenger entry point only if some driver behind `instance` has
+/// one.
+///
+/// The physical-device path reaches the same judgement by a different route:
+/// [`unknown_across`] hands out a trampoline only once a driver has said yes.
+/// This is that rule for a command the loader implements itself.
+///
+/// # Safety
+///
+/// `instance` must be null or a `VkInstance` this loader created.
+unsafe fn messenger_entry_point(instance: Handle, f: unsafe extern "C" fn()) -> VoidFn {
+    if instance.is_null() {
+        // These are instance-level commands, so there is no driver to ask and
+        // no honest answer but null. `vkGetInstanceProcAddr` with a null
+        // instance is for the handful of commands that precede one.
+        return None;
+    }
+    // SAFETY: the caller guarantees this handle came from this loader's
+    // `vkCreateInstance`. Borrowed shared: nothing here mutates the instance.
+    let borrowed: &Instance = unsafe { &*instance.cast::<Instance>() };
+    let registry = DRIVERS.lock();
+    // SAFETY: the drivers behind this instance are this registry's.
+    if unsafe { messenger::supported(&registry, borrowed) } {
+        Some(f)
+    } else {
+        None
+    }
+}
+
+/// `vkCreateDebugUtilsMessengerEXT`.
+///
+/// # Safety
+///
+/// `instance` must be a `VkInstance` this loader created, `out` must be a
+/// writable `VkDebugUtilsMessengerEXT` slot, and `create_info` and `allocator`
+/// must be the application's own.
+#[unsafe(export_name = "vkCreateDebugUtilsMessengerEXT")]
+pub unsafe extern "C" fn create_debug_utils_messenger(
+    instance: Handle,
+    create_info: *const c_void,
+    allocator: *const c_void,
+    out: *mut u64,
+) -> VkResult {
+    if instance.is_null() || out.is_null() {
+        // Vulkan leaves both of these undefined rather than defining an error,
+        // so any answer is allowed; returning one beats reading the pointer.
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    // SAFETY: the caller guarantees this handle came from this loader's
+    // `vkCreateInstance`. Borrowed shared: nothing here mutates the instance.
+    let borrowed: &Instance = unsafe { &*instance.cast::<Instance>() };
+    let registry = DRIVERS.lock();
+    // SAFETY: the drivers behind this instance are this registry's, and
+    // `create_info` and `allocator` are forwarded from this function's contract.
+    match unsafe { messenger::create_across(&registry, borrowed, create_info, allocator) } {
+        Ok(built) => {
+            // SAFETY: `out` is the caller's writable slot, per the contract.
+            unsafe { out.write(built.into_handle()) };
+            VK_SUCCESS
+        }
+        // Nothing to write on failure, and deliberately so: Vulkan leaves the
+        // application's handle untouched when a create command fails, which is
+        // what lets a caller keep a previous messenger in the same variable.
+        Err(code) => code,
+    }
+}
+
+/// `vkDestroyDebugUtilsMessengerEXT`.
+///
+/// # Safety
+///
+/// `messenger` must be zero or a messenger this loader created and has not
+/// already destroyed, and `allocator` must match the one creation was given.
+#[unsafe(export_name = "vkDestroyDebugUtilsMessengerEXT")]
+pub unsafe extern "C" fn destroy_debug_utils_messenger(
+    _instance: Handle,
+    messenger: u64,
+    allocator: *const c_void,
+) {
+    // SAFETY: forwarded from this function's contract; zero is handled inside.
+    let Some(built) = (unsafe { messenger::from_handle(messenger) }) else {
+        return;
+    };
+    let registry = DRIVERS.lock();
+    // SAFETY: every entry is one `create_across` made on that driver and this
+    // is the only path that destroys it. The instance argument is ignored
+    // because each entry already carries the *driver's* own instance, which is
+    // the handle the driver must be given — the loader's would be a pointer to
+    // its own object.
+    unsafe { messenger::destroy_across(&registry, built.drivers(), allocator) };
 }
 
 // The five defensive lints the workspace turns on are for production code: a

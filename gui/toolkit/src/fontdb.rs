@@ -33,7 +33,7 @@
 //! accident. Failing the whole scan because one file is bad would mean one
 //! bad font costs the user every font.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -66,8 +66,28 @@ pub struct FaceInfo {
     /// either should find it. Which of the two a *request* means is settled
     /// by width class, not by the name.
     pub families: Vec<String>,
+    /// The same names as the face spells them, for showing to a person.
+    ///
+    /// [`families`](Self::families) is lower-cased because it is the *key* an
+    /// index is searched by, and a test pins that: "the index is what the rest
+    /// of the system trusts". But a font picker that listed `arial` and
+    /// `segoe ui` would look broken, and there is nowhere to recover the
+    /// capitals from afterwards short of reopening every font. So the spelling
+    /// is kept here at scan time, when the name table is already open.
+    ///
+    /// Not necessarily the same length as `families`: two spellings that
+    /// differ only in case are one name to the index and one entry here.
+    pub display: Vec<String>,
     /// Weight, slant and width, from the face's own `OS/2` table.
     pub style: Style,
+    /// Whether every glyph advances by the same width.
+    ///
+    /// Recorded here rather than asked for later because the scan already
+    /// parses each face to read the two fields above -- it discards the
+    /// *bytes*, not the parse -- so this costs one bool per face. Asking
+    /// afterwards would mean opening every font on the system a second time,
+    /// which is the expense this struct's own doc comment exists to avoid.
+    pub monospaced: bool,
 }
 
 impl FaceInfo {
@@ -154,14 +174,16 @@ impl FontDb {
         // no place in an index keyed by name. It is still perfectly
         // renderable if a caller finds it some other way.
         let mut families = BTreeSet::new();
+        let mut display = BTreeSet::new();
         for id in [
             osfont::sfnt::name_id::TYPOGRAPHIC_FAMILY,
             osfont::sfnt::name_id::FAMILY,
         ] {
             if let Some(name) = face.name(id) {
-                let name = name.trim().to_lowercase();
+                let name = name.trim();
                 if !name.is_empty() {
-                    families.insert(name);
+                    families.insert(name.to_lowercase());
+                    display.insert(name.to_string());
                 }
             }
         }
@@ -171,7 +193,9 @@ impl FontDb {
         self.faces.push(FaceInfo {
             path: path.to_path_buf(),
             families: families.into_iter().collect(),
+            display: display.into_iter().collect(),
             style: face.style(),
+            monospaced: face.is_monospaced(),
         });
     }
 
@@ -196,13 +220,49 @@ impl FontDb {
     /// Every distinct family name, sorted — what a font picker lists.
     #[must_use]
     pub fn families(&self) -> Vec<String> {
-        let mut names: BTreeSet<&str> = BTreeSet::new();
-        for face in &self.faces {
-            for f in &face.families {
-                names.insert(f.as_str());
+        Self::spellings(self.faces.iter())
+    }
+
+    /// The display spellings of `faces`, one per name, sorted.
+    ///
+    /// Keyed on the lower-cased name and valued by the spelling, so that two
+    /// faces disagreeing about capitalisation ("DejaVu Sans" and "DejaVu
+    /// sans") become one entry rather than two that look like duplicates to a
+    /// reader and are duplicates to nobody else. First spelling seen wins,
+    /// which is stable because `finish` sorts the index by path.
+    ///
+    /// Ordering comes from the key, so the list sorts case-insensitively --
+    /// what a picker wants, and not what sorting the spellings would give
+    /// (every capitalised name before every lower-case one).
+    fn spellings<'a>(faces: impl Iterator<Item = &'a FaceInfo>) -> Vec<String> {
+        let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+        for face in faces {
+            for name in &face.display {
+                seen.entry(name.to_lowercase()).or_insert(name.as_str());
             }
         }
-        names.into_iter().map(str::to_string).collect()
+        seen.into_values().map(str::to_string).collect()
+    }
+
+    /// The families with at least one fixed-pitch face.
+    ///
+    /// What a "Terminal Font" picker lists, as distinct from [`families`] for
+    /// the interface one. Before this existed nothing could make the
+    /// distinction, and `guitk::text::set_mono_family`'s own note records the
+    /// consequence: it installs whatever it is handed, so a caller pointing it
+    /// at a proportional face "gets a terminal with a broken grid, and that is
+    /// the caller's decision to have made". This is how a caller stops making
+    /// that decision by accident.
+    ///
+    /// *At least one* face rather than all of them: a family's bold or italic
+    /// member sometimes omits the declaration its regular member makes, and
+    /// dropping the whole family over one under-described face would hide
+    /// fonts a terminal can use perfectly well.
+    ///
+    /// [`families`]: Self::families
+    #[must_use]
+    pub fn monospaced_families(&self) -> Vec<String> {
+        Self::spellings(self.faces.iter().filter(|f| f.monospaced))
     }
 
     /// The best file for `family` at `want`, or `None` if the family is not
@@ -339,12 +399,31 @@ mod tests {
             db.faces.push(FaceInfo {
                 path: PathBuf::from(path),
                 families: families.iter().map(|f| f.to_lowercase()).collect(),
+                display: families.iter().map(|f| (*f).to_string()).collect(),
                 style: Style {
                     weight: *weight,
                     italic: *italic,
                     width: *width,
                 },
+                // Proportional unless a test says otherwise, so the existing
+                // entries keep their shape. `db_mono` is how a test says
+                // otherwise.
+                monospaced: false,
             });
+        }
+        db.finish();
+        db
+    }
+
+    /// An index whose every face is fixed-pitch.
+    ///
+    /// Separate from [`db`] rather than a sixth tuple field, so that the
+    /// twenty-odd existing fixtures do not all have to grow a `false` to say
+    /// something they were never about.
+    fn db_mono(entries: &[(&str, &[&str], u16, bool, u8)]) -> FontDb {
+        let mut db = db(entries);
+        for face in &mut db.faces {
+            face.monospaced = true;
         }
         db.finish();
         db
@@ -459,6 +538,71 @@ mod tests {
         let db = arial();
         assert_eq!(db.families(), vec!["arial", "arial narrow"]);
         assert!(FontDb::new().families().is_empty());
+    }
+
+    /// The list a picker shows keeps the font's own capitals.
+    ///
+    /// The index lower-cases for matching and a neighbouring test pins that;
+    /// this pins the other half. Without it the change is invisible to the
+    /// suite: every other fixture here spells its families in lower case
+    /// already, so they pass whether or not the spelling survives -- which is
+    /// exactly how a picker came to list `arial` and `segoe ui` with a green
+    /// suite.
+    #[test]
+    fn the_family_list_keeps_the_fonts_own_capitals() {
+        let db = db(&[
+            ("s.ttf", &["Segoe UI"], 400, false, 5),
+            ("d.ttf", &["DejaVu Sans"], 400, false, 5),
+        ]);
+        assert_eq!(db.families(), vec!["DejaVu Sans", "Segoe UI"]);
+
+        // The match key is untouched, so lookups still work and the invariant
+        // the other test asserts still holds.
+        assert!(
+            db.faces()
+                .iter()
+                .all(|f| f.families.iter().all(|n| *n == n.to_lowercase())),
+            "the match key stopped being lower-cased"
+        );
+        assert!(
+            db.faces().iter().any(|f| f.matches("SEGOE ui")),
+            "a differently-cased request stopped matching"
+        );
+    }
+
+    /// Two faces spelling one family differently are one entry, not two.
+    ///
+    /// A picker showing "DejaVu Sans" above "DejaVu sans" looks like two fonts
+    /// and is one, and the index has always treated them as one.
+    #[test]
+    fn spellings_that_differ_only_in_case_collapse() {
+        let db = db(&[
+            ("a.ttf", &["DejaVu Sans"], 400, false, 5),
+            ("b.ttf", &["DejaVu sans"], 700, false, 5),
+        ]);
+        assert_eq!(db.families().len(), 1, "got {:?}", db.families());
+    }
+
+    /// A terminal picker is offered fixed-pitch families and nothing else.
+    ///
+    /// The same entries twice, differing only in the flag, so what is asserted
+    /// is the flag rather than the fixture: a `monospaced_families` that
+    /// forgot to filter would return `consolas` from both halves and pass a
+    /// test that only checked the first.
+    #[test]
+    fn only_fixed_pitch_families_are_offered_to_a_terminal() {
+        let entries: &[(&str, &[&str], u16, bool, u8)] = &[("c.ttf", &["consolas"], 400, false, 5)];
+
+        assert_eq!(db_mono(entries).monospaced_families(), vec!["consolas"]);
+        assert!(
+            db(entries).monospaced_families().is_empty(),
+            "a proportional face was offered as a terminal font"
+        );
+
+        // The ordinary list is the same either way: this filters a picker, it
+        // does not remove a family from the system.
+        assert_eq!(db(entries).families(), vec!["consolas"]);
+        assert_eq!(db_mono(entries).families(), vec!["consolas"]);
     }
 
     #[test]

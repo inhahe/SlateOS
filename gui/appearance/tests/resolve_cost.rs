@@ -31,6 +31,16 @@
 //! to catch was 30-100x: a `powf` creeping back in does not cost 50%, it costs
 //! two orders of magnitude. A bound that only catches a catastrophe is the
 //! right bound when only catastrophes are possible.
+//!
+//! **That reasoning is right about the bound and was wrong to stop there.** A
+//! wide bound makes host noise *less likely* to fail the test; it does not
+//! make it unable to. The measurement itself is now the best of three runs
+//! (see `per_call`), which is the other half of the answer and the one lane A
+//! settled on in design-decisions.md §952 -- a measurement the host can
+//! distort needs a repeat, not only a wider bound. With both, the ceiling
+//! could be tightened; it deliberately has not been, because the regression
+//! this exists to catch is two orders of magnitude and a tighter bound would
+//! buy sensitivity nobody needs at the price of the flakiness just removed.
 // A benchmark divides and asserts on the result; the defensive lints that
 // forbid that in production code are off here, as `CLAUDE.md` prescribes for
 // test code.
@@ -39,16 +49,39 @@
 use appearance::{AppearanceSettings, Palette, SurfaceStyle};
 use std::time::Instant;
 
-/// Nanoseconds per call, over `n` iterations after a warm-up.
+/// Nanoseconds per call, over `n` iterations after a warm-up, taking the best
+/// of three runs.
+///
+/// **The minimum rather than the mean, and three runs rather than one.** The
+/// thing being measured is the code; the thing that distorts it is whatever
+/// else the machine is doing. Load can only ever push a measurement *up* -- a
+/// descheduled thread does not run faster -- so the smallest of several
+/// samples is the one least contaminated by the host, while a genuine
+/// regression raises every sample including the smallest. That makes the
+/// statistic one-sided in the same direction as the noise, which is what lets
+/// a ceiling mean something.
+///
+/// Lane A reached this from a red boot whose kernel delta was comment text
+/// (design-decisions.md §952): *a measurement the host can distort needs a
+/// repeat, not a wider bound.* This test originally took the other option --
+/// see the module doc above -- and a sibling in `apps/benchmark` failed a
+/// `cargo test --workspace` on exactly this, a 5ms sleep measuring 1.407s
+/// because it was descheduled. Averaging over 50 000 iterations makes that
+/// far less likely here than it was there, not impossible, and a red
+/// workspace run blocks all three lanes rather than just this one.
 fn per_call(n: u32, mut f: impl FnMut()) -> u128 {
     for _ in 0..1000 {
         f();
     }
-    let t = Instant::now();
-    for _ in 0..n {
-        f();
+    let mut best = u128::MAX;
+    for _ in 0..3 {
+        let t = Instant::now();
+        for _ in 0..n {
+            f();
+        }
+        best = best.min(t.elapsed().as_nanos() / u128::from(n));
     }
-    t.elapsed().as_nanos() / u128::from(n)
+    best
 }
 
 #[test]

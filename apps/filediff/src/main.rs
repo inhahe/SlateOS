@@ -85,17 +85,27 @@ pub mod colors {
 // ============================================================================
 
 /// Font size for diff content display.
-/// What the window says instead of a comparison.
+/// What the window says before anything has been opened.
 ///
-/// Three lines. The second is the one that separates this from a reader that
-/// ships with a sample document: the old fixture named its two sides
-/// `left.rs` and `right.rs`. **A filename is a claim that a file exists.**
-/// `apps/ebook` ships three books with titles and authors and keeps them,
-/// because a title claims nothing about a disk; a path does.
-const CANNOT_COMPARE_LINES: [&str; 3] = [
-    "This program cannot open files to compare.",
-    "It has no filesystem access, so nothing has been read -- there is no left file and no right file.",
-    "The diff engine itself is real and tested; what is missing is any way to give it two files.",
+/// Three lines, and the third is load-bearing: two empty panes look exactly
+/// like two identical empty files, and a diff tool showing "no differences"
+/// about files it never read is the worst thing this program could say. The
+/// line forecloses that reading, which is why a test pins it rather than the
+/// wording around it.
+///
+/// **This text used to say the opposite and was false.** It read "This
+/// program cannot open files to compare -- it has no filesystem access", and
+/// it was accurate when written; a picker and a capped reader were built
+/// afterwards and the message was not revisited. `Ctrl+O` had been filling
+/// the left pane for some time while the window insisted nothing could be
+/// read. Found by `scripts/find-stale-admissions.py`, which looks for a
+/// standing sentence denying a capability the crate holds — the direction
+/// of error that gets believed, because nobody tries a thing they have been
+/// told is impossible.
+const NOTHING_OPEN_YET_LINES: [&str; 3] = [
+    "No files are open yet.",
+    "Ctrl+O opens the left side, Ctrl+Shift+O the right.",
+    "These panes are empty because nothing has been read, not because two files matched.",
 ];
 
 const CONTENT_FONT_SIZE: f32 = 13.0;
@@ -801,6 +811,45 @@ pub enum Side {
     Right,
 }
 
+/// Every key this program answers, and what it does.
+///
+/// Twenty-six bindings, none of them anywhere on screen. `J` and `K` are the
+/// two worst: they are vim's movement keys, which is a thing you either
+/// already know or cannot possibly guess, and nothing in the window hinted
+/// that this program had opinions about vim. The `Alt` merge keys are next --
+/// accepting a side is the reason a diff tool with a merge mode exists, and it
+/// was reachable only by somebody who had read the handler.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`, which reads each label with
+/// `guitk::shortcut` and presses every key it names.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Up / Down", "Scroll a line"),
+    ("K / J", "Scroll a line, the vim way"),
+    ("PageUp / PageDown", "Scroll a screen"),
+    ("Ctrl+Home / Ctrl+End", "Jump to the top / bottom"),
+    ("F7 / F8", "Previous / next change"),
+    ("Ctrl+P / Ctrl+N", "Previous / next change"),
+    ("Tab", "Next hunk, for merging"),
+    (
+        "Alt+Left / Alt+Right",
+        "Take this hunk from the left / right side",
+    ),
+    ("Alt+B", "Take both sides of this hunk"),
+    ("Ctrl+O", "Open a file into the left pane"),
+    (
+        "Ctrl+1 / Ctrl+2 / Ctrl+3",
+        "Side by side / inline / unified view",
+    ),
+    ("Ctrl+Shift+S", "Scroll the two panes together, or not"),
+    ("Ctrl+F", "Search"),
+    ("F3", "Find the next match"),
+    ("Ctrl+I", "Match case in the search, or not"),
+    ("Alt+W", "Ignore whitespace, or stop ignoring it"),
+    ("Alt+C", "Ignore case, or stop ignoring it"),
+    ("F1", "This list"),
+];
+
 pub struct FileDiffApp {
     /// The open picker.
     ///
@@ -856,6 +905,8 @@ pub struct FileDiffApp {
     pub scroll_right: f32,
     /// Whether scroll is synchronized between panels.
     pub sync_scroll: bool,
+    /// Whether the shortcut list is up.
+    pub show_help: bool,
     /// Index of the current change being viewed.
     pub current_change_index: usize,
     /// Indices of change edits in the edit list (for navigation).
@@ -917,6 +968,7 @@ impl FileDiffApp {
             scroll_left: 0.0,
             scroll_right: 0.0,
             sync_scroll: true,
+            show_help: false,
             current_change_index: 0,
             change_indices: Vec::new(),
             ignore_opts: IgnoreOptions::default(),
@@ -1185,6 +1237,17 @@ impl FileDiffApp {
 
     /// Handle keyboard input.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // The shortcut list, before the search box below can turn the
+        // keystroke into text. `F1` rather than `?`, because the search box
+        // takes `key.typed()` and a `?` belongs in somebody's query.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if key.key == Key::Escape && self.show_help {
+            self.show_help = false;
+            return EventResult::Consumed;
+        }
         if self.search.visible {
             return self.handle_search_key(key);
         }
@@ -1382,6 +1445,21 @@ impl FileDiffApp {
                 self.scroll_to_current_match();
                 EventResult::Consumed
             }
+            // Whether the search matches case. `SearchState::case_sensitive`
+            // is handed to `textfind::Case::sensitive` on every search and
+            // was `false` with no writer, so finding `Config` also found
+            // `config` and there was no way to ask for only one of them --
+            // in a tool people open to find out which of two files says
+            // `MAX_SIZE` and which says `max_size`.
+            //
+            // Ahead of the text branch, which would otherwise type an `i`
+            // into the query. Alt+C beside it is a different question: that
+            // one is whether the *comparison* ignores case.
+            Key::I if key.modifiers.ctrl => {
+                self.search.case_sensitive = !self.search.case_sensitive;
+                self.rerun_search();
+                EventResult::Consumed
+            }
             _ => {
                 if key.types_text() {
                     self.search.query.extend(key.typed());
@@ -1467,7 +1545,7 @@ impl FileDiffApp {
         // After the background, or it would be painted over. Keyed on there
         // being nothing loaded, so it retires itself when a picker lands.
         if self.diff.is_none() {
-            for (i, line) in CANNOT_COMPARE_LINES.iter().enumerate() {
+            for (i, line) in NOTHING_OPEN_YET_LINES.iter().enumerate() {
                 tree.push(RenderCommand::Text {
                     x: 10.0,
                     #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
@@ -1531,6 +1609,19 @@ impl FileDiffApp {
 
         // The picker last, so it draws over both panes rather than under them.
         tree.extend(self.picker.render(&self.palette, self.width, self.height));
+
+        // And the shortcut list over even that, because it is the one thing a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (self.width, self.height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         tree
     }
@@ -2338,10 +2429,28 @@ impl FileDiffApp {
                 color: self.palette.text,
                 font_size: CONTENT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(bar_w - 140.0),
+                max_width: Some((bar_w - 290.0).max(60.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
+
+        // Whether case matters, and the key that changes it -- a search
+        // that silently folds case turns "not found" into a claim about the
+        // file rather than about the query.
+        tree.push(RenderCommand::Text {
+            x: bar_x + bar_w - 230.0,
+            y: bar_y + 10.0,
+            text: if self.search.case_sensitive {
+                "Case: on  Ctrl+I".to_string()
+            } else {
+                "Case: off  Ctrl+I".to_string()
+            },
+            color: self.palette.subtext0,
+            font_size: UI_FONT_SIZE,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(110.0),
+            overflow: TextOverflow::Ellipsis,
+        });
 
         // Match count
         let match_info = if self.search.matches.is_empty() {
@@ -3000,16 +3109,16 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for line in CANNOT_COMPARE_LINES {
+        for line in NOTHING_OPEN_YET_LINES {
             assert!(
                 texts.iter().any(|t| t == line),
                 "the window never said {line:?}"
             );
         }
         assert!(
-            CANNOT_COMPARE_LINES
+            NOTHING_OPEN_YET_LINES
                 .iter()
-                .any(|l| l.contains("no left file and no right file")),
+                .any(|l| l.contains("not because two files matched")),
             "nothing forecloses reading the empty panes as two empty files",
         );
     }
@@ -4574,6 +4683,73 @@ mod tests {
         )
     }
 
+    /// `Ctrl+I` decides whether the search matches case, and the bar says so.
+    ///
+    /// `SearchState::case_sensitive` is handed to `textfind::Case::sensitive`
+    /// on every search and was `false` at construction with no writer, so
+    /// finding `Config` also found `config` and there was no way to ask for
+    /// only one of them -- in a tool people open to find out which of two
+    /// files says `MAX_SIZE` and which says `max_size`.
+    #[test]
+    fn ctrl_i_decides_whether_the_search_matches_case() {
+        let mut app = searching_app_on(
+            ViewMode::Unified,
+            "Config here\nconfig there\n",
+            "Config here\nconfig there\n",
+            "config",
+        );
+        let folded = app.search.matches.len();
+        assert!(
+            folded >= 2,
+            "control: case-insensitively, both spellings should match; got {folded}"
+        );
+
+        assert_eq!(
+            app.handle_key(&ctrl(Key::I)),
+            EventResult::Consumed,
+            "Ctrl+I was ignored in the search bar"
+        );
+        assert!(app.search.case_sensitive, "Ctrl+I did not turn case on");
+        let exact = app.search.matches.len();
+        assert!(
+            exact < folded,
+            "with case on, {exact} matches should be fewer than {folded}"
+        );
+
+        app.handle_key(&ctrl(Key::I));
+        assert!(!app.search.case_sensitive, "Ctrl+I is a switch, not a door");
+        assert_eq!(
+            app.search.matches.len(),
+            folded,
+            "turning case back off did not restore the matches"
+        );
+    }
+
+    /// The search bar says which way case is set.
+    #[test]
+    fn the_search_bar_says_whether_case_matters() {
+        let mut app = searching_app(ViewMode::Unified, "alpha");
+        let texts = |a: &mut FileDiffApp| -> Vec<String> {
+            a.render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(
+            texts(&mut app).iter().any(|t| t == "Case: off  Ctrl+I"),
+            "the bar does not say case is off"
+        );
+        app.handle_key(&ctrl(Key::I));
+        assert!(
+            texts(&mut app).iter().any(|t| t == "Case: on  Ctrl+I"),
+            "the bar did not follow the setting"
+        );
+    }
+
     /// The feature this whole section is about: matches were computed, counted
     /// in the status bar and cycled through with Enter, and never drawn. On any
     /// file longer than a screen, find-in-diff was a number that changed.
@@ -4862,6 +5038,132 @@ mod tests {
             plain + current > 0,
             "the hit is still there, and still drawn"
         );
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table beside it here -- a third copy of the same fact drifts from both
+    /// the list and the handler, which is how `apps/rssreader` came to
+    /// advertise twenty-one shortcuts of which about four worked.
+    ///
+    /// The property is "some reachable state answers this key", not "this key
+    /// is taken right now". This program opens with *no files*, where nothing
+    /// can scroll and there are no changes to step through, so the states
+    /// below load a comparison first: a guard run against a fresh window would
+    /// have called most of this program dead.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|app| app.handle_key(&stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Comparisons chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<FileDiffApp> {
+        // Two files that differ, long enough to scroll, on a short window so
+        // there is somewhere to scroll *to*.
+        let differing = || {
+            let mut app = FileDiffApp::new();
+            let mut left = String::new();
+            let mut right = String::new();
+            for i in 0..200 {
+                left.push_str(
+                    "same
+",
+                );
+                right.push_str(if i % 40 == 7 {
+                    "changed
+"
+                } else {
+                    "same
+"
+                });
+            }
+            app.load_files("a", &left, "b", &right);
+            app.height = TOOLBAR_HEIGHT + STATUS_BAR_HEIGHT + LINE_HEIGHT * 10.0;
+            app
+        };
+
+        let top = differing();
+
+        // ...scrolled down, so `Up`, `K`, `PageUp` and `Ctrl+Home` have
+        // somewhere to go back to.
+        let mut scrolled = differing();
+        for _ in 0..30 {
+            scrolled.handle_key(&key(Key::Down));
+        }
+
+        // ...in another view, so `Ctrl+1` has one to return from: setting the
+        // mode already in force is declined, and side-by-side is the default.
+        let mut inline = differing();
+        inline.handle_key(&ctrl(Key::Num2));
+
+        // ...searching, with a query that matches, which is the one state
+        // `F3` can act in.
+        let mut searching = differing();
+        searching.search.visible = true;
+        searching.search.query = "changed".to_string();
+        searching.rerun_search();
+
+        vec![top, scrolled, inline, searching]
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/rssreader`'s overlay drew twenty of its
+    /// twenty-one rows for weeks, because its box was a third quantity
+    /// agreeing with neither the list nor the handler.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = FileDiffApp::new();
+        assert!(
+            !help_text(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_key(&key(Key::F1));
+        let shown = help_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        app.handle_key(&key(Key::Escape));
+        assert!(
+            !help_text(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn help_text(app: &FileDiffApp) -> String {
+        app.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// A key with Ctrl held.
+    fn ctrl(k: Key) -> KeyEvent {
+        let mut ev = key(k);
+        ev.modifiers.ctrl = true;
+        ev
     }
 
     fn key(k: Key) -> KeyEvent {

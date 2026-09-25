@@ -32,7 +32,7 @@
 # "additive only... No Rust coreutil is touched, shadowed or retired" and that
 # "a silent swap is a user-visible policy change and is not Claude's to make."
 # Listing them here would be exactly that swap. Which implementation a stock
-# install should prefer is deferred-questions.md D-Q1, whose trigger -- a fastpy
+# install should prefer is deferred-questions.md DQ1, whose trigger -- a fastpy
 # utility with a parity suite and a performance bar -- has not been met.
 # The staging block also refuses to overwrite a name already staged, so this
 # list and that guard have to BOTH be wrong before a swap can happen silently.

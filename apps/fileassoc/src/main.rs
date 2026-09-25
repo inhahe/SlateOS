@@ -49,7 +49,7 @@ const SEARCH_WIDTH: f32 = 260.0;
 const SEARCH_HEIGHT: f32 = 30.0;
 const SIDEBAR_ITEM_HEIGHT: f32 = 34.0;
 const DIALOG_WIDTH: f32 = 400.0;
-const DIALOG_HEIGHT: f32 = 360.0;
+const DIALOG_HEIGHT: f32 = 384.0;
 const DIALOG_APP_ROW_HEIGHT: f32 = 36.0;
 
 // The toolbar's three buttons. They are different widths because their
@@ -71,7 +71,14 @@ const DETAIL_LABEL_WIDTH: f32 = 84.0;
 
 /// The dialog's title strip, and the footer that holds its buttons.
 const DIALOG_TITLE_HEIGHT: f32 = 44.0;
-const DIALOG_FOOTER_HEIGHT: f32 = 52.0;
+// Two checkbox rows' worth, not one. The second row -- "use for every type in
+// this group" -- is only *drawn* when the type being assigned belongs to one of
+// the offered groups, but the space is reserved either way: `Layout` is built
+// from the window size alone and cannot know which type is selected, and a
+// footer that changed height with the selection would move the OK button under
+// the pointer between one frame and the next. `DIALOG_HEIGHT` grew by the same
+// 24 so the body above keeps its size.
+const DIALOG_FOOTER_HEIGHT: f32 = 76.0;
 const DIALOG_BUTTON_WIDTH: f32 = 88.0;
 const DIALOG_BUTTON_HEIGHT: f32 = 30.0;
 /// The "always use this app" tick box.
@@ -106,6 +113,33 @@ impl FileCategory {
         Self::Code,
         Self::Other,
     ];
+
+    /// The sidebar group a toolkit category belongs to.
+    ///
+    /// The toolkit distinguishes sixteen kinds; this program groups them into
+    /// seven, because the list on the left of the window is a way to find a
+    /// file type rather than a statement about what a file *is*. So this is a
+    /// deliberate narrowing, not a copy that has fallen behind: a spreadsheet
+    /// and a presentation are both things you open to read, and a separate row
+    /// for each would make the list longer without making anything easier to
+    /// find.
+    ///
+    /// Total by construction -- every toolkit variant is named, so adding one
+    /// there fails to compile here rather than silently landing in `Other`.
+    fn from_toolkit(category: guitk::filetypes::FileCategory) -> Self {
+        use guitk::filetypes::FileCategory as Tk;
+        match category {
+            Tk::Document | Tk::Spreadsheet | Tk::Presentation => Self::Documents,
+            Tk::Image => Self::Images,
+            Tk::Audio => Self::Audio,
+            Tk::Video => Self::Video,
+            Tk::Archive | Tk::Package | Tk::DiskImage => Self::Archives,
+            Tk::Code | Tk::Config => Self::Code,
+            // Executables, libraries, raw data, system files and the unknown
+            // are not a group anyone browses *for*; they are what is left.
+            Tk::Executable | Tk::Library | Tk::Data | Tk::System | Tk::Unknown => Self::Other,
+        }
+    }
 
     /// Human-readable label.
     pub fn label(self) -> &'static str {
@@ -338,11 +372,19 @@ impl core::fmt::Display for AssocError {
 
 /// The central registry managing file types, applications, and their associations.
 /// The configuration file associations live in, under the user's config
-/// directory. Named without an extension because `settingsfile` adds one.
-pub const CONFIG_NAME: &str = "fileassoc";
+/// directory.
+///
+/// Re-exported from `gui/associations` rather than declared, so that this
+/// program and the two that read what it writes cannot disagree about the
+/// name. It used to be a string here, with a comment hoping it matched.
+pub use associations::CONFIG_NAME;
 
-/// The mapping inside that file: extension -> application id.
-const ASSOCIATIONS_KEY: &str = "associations";
+/// The mapping inside that file: extension -> **executable path**.
+///
+/// Not an application id: an id is a name only this program could resolve, and
+/// `apps/explorer` has no catalogue to resolve one in. The comment here said
+/// "id" for as long as the code wrote a path.
+use associations::ASSOCIATIONS as ASSOCIATIONS_KEY;
 
 /// What a freshly written associations file says about itself.
 ///
@@ -378,6 +420,20 @@ impl Default for AssociationRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// What happened when a whole group was pointed at one program.
+///
+/// Both halves are needed. Reporting only the successes would let the
+/// window say "Music now opens with Player" while some music file on the
+/// machine still opened with nothing -- the `Mixed` case `gui/associations`
+/// exists to keep honest, arriving one layer up.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GroupOutcome {
+    /// Extensions now pointing at the program.
+    pub set: Vec<String>,
+    /// Extensions left alone, and why, in the order they were tried.
+    pub skipped: Vec<(String, String)>,
 }
 
 impl AssociationRegistry {
@@ -563,6 +619,34 @@ impl AssociationRegistry {
     }
 
     // -- Association management ----------------------------------------------
+
+    /// Point every type in `category` that `app_id` can open at `app_id`.
+    ///
+    /// **Best effort, and it reports the rest.** A program that opens `mp3`
+    /// and `flac` but not `aac` should still become the default for the two it
+    /// handles; refusing the whole group over one member would make the action
+    /// useless for the common case. But the caller must be told, because the
+    /// difference between "all of Music" and "most of Music" is exactly what
+    /// the Settings page reads back as `Agreed` versus `Mixed`.
+    ///
+    /// Each member goes through [`Self::set_default_app`] rather than writing
+    /// the maps here: that method also keeps `handler_history`, which is what
+    /// lets uninstalling a program fall back to the one it replaced. A loop
+    /// that inserted directly would silently skip that bookkeeping.
+    pub fn set_group_default(
+        &mut self,
+        category: &associations::Category,
+        app_id: &str,
+    ) -> GroupOutcome {
+        let mut outcome = GroupOutcome::default();
+        for extension in category.extensions() {
+            match self.set_default_app(extension, app_id) {
+                Ok(()) => outcome.set.push(extension.to_string()),
+                Err(e) => outcome.skipped.push((extension.to_string(), e.to_string())),
+            }
+        }
+        outcome
+    }
 
     /// Set (or replace) the default app for a file extension.
     /// Validates that the file type exists, the app exists, and the app
@@ -776,186 +860,22 @@ impl AssociationRegistry {
 
     // -- Built-in data -------------------------------------------------------
 
-    /// Populate with 30+ built-in file types covering all categories.
+    /// Populate with every file type the toolkit's table knows.
     fn add_default_file_types(&mut self) {
-        // (extension, mime_type, description, category)
-        let defaults: &[(&str, &str, &str, FileCategory)] = &[
-            // Documents
-            (
-                "txt",
-                "text/plain",
-                "Plain Text Document",
-                FileCategory::Documents,
-            ),
-            (
-                "pdf",
-                "application/pdf",
-                "PDF Document",
-                FileCategory::Documents,
-            ),
-            (
-                "doc",
-                "application/msword",
-                "Word Document",
-                FileCategory::Documents,
-            ),
-            (
-                "docx",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "Word Document (OOXML)",
-                FileCategory::Documents,
-            ),
-            (
-                "xls",
-                "application/vnd.ms-excel",
-                "Excel Spreadsheet",
-                FileCategory::Documents,
-            ),
-            (
-                "xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "Excel Spreadsheet (OOXML)",
-                FileCategory::Documents,
-            ),
-            (
-                "pptx",
-                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                "PowerPoint Presentation",
-                FileCategory::Documents,
-            ),
-            (
-                "odt",
-                "application/vnd.oasis.opendocument.text",
-                "OpenDocument Text",
-                FileCategory::Documents,
-            ),
-            (
-                "rtf",
-                "application/rtf",
-                "Rich Text Format",
-                FileCategory::Documents,
-            ),
-            (
-                "csv",
-                "text/csv",
-                "Comma-Separated Values",
-                FileCategory::Documents,
-            ),
-            // Images
-            ("png", "image/png", "PNG Image", FileCategory::Images),
-            ("jpg", "image/jpeg", "JPEG Image", FileCategory::Images),
-            ("jpeg", "image/jpeg", "JPEG Image", FileCategory::Images),
-            ("gif", "image/gif", "GIF Image", FileCategory::Images),
-            ("bmp", "image/bmp", "Bitmap Image", FileCategory::Images),
-            (
-                "svg",
-                "image/svg+xml",
-                "SVG Vector Image",
-                FileCategory::Images,
-            ),
-            ("webp", "image/webp", "WebP Image", FileCategory::Images),
-            ("ico", "image/x-icon", "Icon File", FileCategory::Images),
-            // Audio
-            ("mp3", "audio/mpeg", "MP3 Audio", FileCategory::Audio),
-            ("wav", "audio/wav", "WAV Audio", FileCategory::Audio),
-            ("flac", "audio/flac", "FLAC Audio", FileCategory::Audio),
-            ("ogg", "audio/ogg", "OGG Audio", FileCategory::Audio),
-            ("m4a", "audio/mp4", "M4A Audio", FileCategory::Audio),
-            // Video
-            ("mp4", "video/mp4", "MP4 Video", FileCategory::Video),
-            (
-                "mkv",
-                "video/x-matroska",
-                "Matroska Video",
-                FileCategory::Video,
-            ),
-            ("avi", "video/x-msvideo", "AVI Video", FileCategory::Video),
-            ("webm", "video/webm", "WebM Video", FileCategory::Video),
-            (
-                "mov",
-                "video/quicktime",
-                "QuickTime Video",
-                FileCategory::Video,
-            ),
-            // Archives
-            (
-                "zip",
-                "application/zip",
-                "ZIP Archive",
-                FileCategory::Archives,
-            ),
-            (
-                "tar",
-                "application/x-tar",
-                "Tar Archive",
-                FileCategory::Archives,
-            ),
-            (
-                "gz",
-                "application/gzip",
-                "Gzip Archive",
-                FileCategory::Archives,
-            ),
-            (
-                "7z",
-                "application/x-7z-compressed",
-                "7-Zip Archive",
-                FileCategory::Archives,
-            ),
-            (
-                "rar",
-                "application/vnd.rar",
-                "RAR Archive",
-                FileCategory::Archives,
-            ),
-            // Code
-            ("rs", "text/x-rust", "Rust Source", FileCategory::Code),
-            ("py", "text/x-python", "Python Source", FileCategory::Code),
-            (
-                "js",
-                "text/javascript",
-                "JavaScript Source",
-                FileCategory::Code,
-            ),
-            (
-                "ts",
-                "text/typescript",
-                "TypeScript Source",
-                FileCategory::Code,
-            ),
-            ("html", "text/html", "HTML Document", FileCategory::Code),
-            ("css", "text/css", "CSS Stylesheet", FileCategory::Code),
-            ("json", "application/json", "JSON Data", FileCategory::Code),
-            ("xml", "application/xml", "XML Document", FileCategory::Code),
-            (
-                "toml",
-                "application/toml",
-                "TOML Config",
-                FileCategory::Code,
-            ),
-            ("yaml", "text/yaml", "YAML Config", FileCategory::Code),
-            ("c", "text/x-c", "C Source", FileCategory::Code),
-            ("cpp", "text/x-c++", "C++ Source", FileCategory::Code),
-            ("h", "text/x-c", "C/C++ Header", FileCategory::Code),
-            // Other
-            ("log", "text/plain", "Log File", FileCategory::Other),
-            ("ini", "text/plain", "INI Config File", FileCategory::Other),
-            (
-                "iso",
-                "application/x-iso9660-image",
-                "Disc Image",
-                FileCategory::Other,
-            ),
-            (
-                "bin",
-                "application/octet-stream",
-                "Binary File",
-                FileCategory::Other,
-            ),
-        ];
-
-        for (ext, mime, desc, category) in defaults {
-            self.register_file_type(FileType::new(ext, mime, desc), *category);
+        // Derived from the toolkit's table rather than written again here.
+        // `guitk::filetypes::FILE_TYPE_TABLE` already carries the extension,
+        // MIME type, description and category of every type this system
+        // recognises, and `apps/explorer` already resolves through it. A second
+        // list of the same facts drifts silently: a format added there and not
+        // here would be a type the file manager knows and this program cannot
+        // associate. It also raises what this registry knows from about two
+        // dozen types to every type in the table.
+        for info in guitk::filetypes::all() {
+            let ext = info.extension.strip_prefix('.').unwrap_or(info.extension);
+            self.register_file_type(
+                FileType::new(ext, info.mime_type, info.description),
+                FileCategory::from_toolkit(info.category),
+            );
         }
     }
 
@@ -1209,6 +1129,9 @@ pub enum Target {
     /// A row of the "Open With" dialog's application list.
     DialogApp(usize),
     DialogAlwaysUse,
+    /// "Use for every type in this group". Only hit-tested when the type being
+    /// assigned is in one of the offered groups.
+    DialogUseForGroup,
     DialogOk,
     DialogCancel,
     /// One of the "Add File Type" dialog's text boxes.
@@ -1410,7 +1333,19 @@ impl Layout {
     /// includes its caption -- a 16-pixel box is a hard target for a mouse and
     /// a harder one for a finger.
     fn dialog_checkbox(&self) -> (Rect, Rect) {
-        let y = self.dialog.bottom() - DIALOG_FOOTER_HEIGHT + PADDING;
+        self.dialog_checkbox_row(0)
+    }
+
+    /// The second checkbox: "use for every type in this group".
+    fn dialog_group_checkbox(&self) -> (Rect, Rect) {
+        self.dialog_checkbox_row(1)
+    }
+
+    /// The `row`th checkbox of the footer, counting from the top.
+    fn dialog_checkbox_row(&self, row: u16) -> (Rect, Rect) {
+        let y = self.dialog.bottom() - DIALOG_FOOTER_HEIGHT
+            + PADDING
+            + f32::from(row) * (CHECKBOX_SIZE + 8.0);
         let box_rect = Rect::new(self.dialog.x + PADDING, y, CHECKBOX_SIZE, CHECKBOX_SIZE);
         let strip = Rect::new(
             self.dialog.x + PADDING,
@@ -1454,6 +1389,33 @@ impl Layout {
 }
 
 /// Full UI state for the file association manager.
+/// The keys this window answers, as a reader sees them.
+///
+/// None of them were named. Two write files -- `Ctrl+E` exports every
+/// association and `Ctrl+I` reads a set back in -- which is not a pair to
+/// find out about by pressing things.
+///
+/// **No `?` row.** `handle_key` sends any keystroke carrying text to the
+/// caret before it reads the named keys, so `?` types a question mark into
+/// whatever field has focus. Sixth app where `?` was not free.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Move through the file types"),
+    (
+        "Enter",
+        "Choose what opens this type, or confirm the dialog",
+    ),
+    (
+        "Esc",
+        "Back out of one thing: a dialog, then a search, then the selection",
+    ),
+    ("Tab", "Next field, while adding a file type"),
+    ("Ctrl+F", "Jump to the search box"),
+    ("Ctrl+E", "Export every association to a file"),
+    ("Ctrl+I", "Import associations from a file"),
+    ("Ctrl+Q", "Quit"),
+];
+
 pub struct FileAssocUI {
     /// The underlying association registry.
     pub registry: AssociationRegistry,
@@ -1462,6 +1424,8 @@ pub struct FileAssocUI {
     /// Current search query string.
     pub search_query: String,
     /// Whether typed text goes to the search box.
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub search_focused: bool,
     /// Index of the selected file type in the current filtered list.
     pub selected_index: Option<usize>,
@@ -1473,6 +1437,12 @@ pub struct FileAssocUI {
     pub dialog_selected_app: Option<usize>,
     /// "Always use this app" checkbox state in the "Open With" dialog.
     pub dialog_always_use: bool,
+    /// Whether to apply the choice to the whole offered group, not one type.
+    ///
+    /// Only meaningful when the type being assigned belongs to one of the
+    /// three groups `gui/associations` offers; the control is not drawn
+    /// otherwise, because there would be nothing for it to apply to.
+    pub dialog_use_for_group: bool,
     /// The extension that the "Open With" dialog is targeting.
     pub dialog_target_ext: String,
     /// The "Add File Type" dialog's three text fields.
@@ -1608,12 +1578,14 @@ impl FileAssocUI {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             selected_category: None,
             search_query: String::new(),
+            show_help: false,
             search_focused: false,
             selected_index: None,
             scroll_offset: 0.0,
             active_dialog: ActiveDialog::None,
             dialog_selected_app: None,
             dialog_always_use: false,
+            dialog_use_for_group: false,
             dialog_target_ext: String::new(),
             new_ext: String::new(),
             new_mime: String::new(),
@@ -1678,6 +1650,7 @@ impl FileAssocUI {
         self.dialog_target_ext = ext;
         self.active_dialog = ActiveDialog::OpenWith;
         self.dialog_always_use = false;
+        self.dialog_use_for_group = false;
     }
 
     /// Open the "Add File Type" dialog with empty fields.
@@ -1707,12 +1680,45 @@ impl FileAssocUI {
         let mut outcome = Ok(());
         if let Some(app_id) = chosen {
             if self.dialog_always_use {
-                outcome = self.registry.set_default_app(&ext, &app_id);
-                self.status = match &outcome {
-                    Ok(()) => format!(".{ext} now opens with {app_id}"),
-                    Err(e) => format!("Could not set the default for .{ext}: {e}"),
-                };
-                self.persist();
+                match associations::category_of(&ext).filter(|_| self.dialog_use_for_group) {
+                    Some(category) => {
+                        let group = self.registry.set_group_default(category, &app_id);
+                        // Both numbers, always. "4 of 6" is the honest reading
+                        // of a group only partly claimed, and it is what the
+                        // Settings page will show as Mixed rather than as the
+                        // program's name.
+                        // The group's own size, not the sum of the two
+                        // outcomes. Same number, but it cannot drift if a
+                        // member ever ends up in neither list, and it needs no
+                        // arithmetic to defend.
+                        let total = category.extensions().count();
+                        self.status = if group.skipped.is_empty() {
+                            format!("All {total} {} types now open with {app_id}", category.name)
+                        } else {
+                            let missed: Vec<String> = group
+                                .skipped
+                                .iter()
+                                .map(|(ext, _)| format!(".{ext}"))
+                                .collect();
+                            format!(
+                                "{} of {total} {} types now open with {app_id}; {} not ({})",
+                                group.set.len(),
+                                category.name,
+                                missed.len(),
+                                missed.join(" ")
+                            )
+                        };
+                        self.persist();
+                    }
+                    None => {
+                        outcome = self.registry.set_default_app(&ext, &app_id);
+                        self.status = match &outcome {
+                            Ok(()) => format!(".{ext} now opens with {app_id}"),
+                            Err(e) => format!("Could not set the default for .{ext}: {e}"),
+                        };
+                        self.persist();
+                    }
+                }
             } else {
                 // Without "always", the choice is a one-off launch. There is no
                 // launcher to hand it to yet, so say so rather than pretending
@@ -2097,6 +2103,17 @@ impl FileAssocUI {
                 self.dialog_always_use = !self.dialog_always_use;
                 EventResult::Consumed
             }
+            Some(Target::DialogUseForGroup) => {
+                self.dialog_use_for_group = !self.dialog_use_for_group;
+                // Applying to a group is a way of setting the default, so
+                // turning it on turns on "always use" too. Without this the
+                // combination "for the whole group, but not as the default"
+                // would be selectable and would do nothing.
+                if self.dialog_use_for_group {
+                    self.dialog_always_use = true;
+                }
+                EventResult::Consumed
+            }
             Some(Target::DialogOk) => {
                 self.confirm_dialog();
                 EventResult::Consumed
@@ -2162,6 +2179,21 @@ impl FileAssocUI {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Above the typed-text branch, which claims every printable key. F1
+        // carries no text, so this does not take anything from the caret.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal. Ctrl+E writes a file and Enter picks what opens a type;
+            // neither should happen from behind a list.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         // Typed text goes wherever the caret is, and is checked before the
         // named keys so a key that produces text is not also read as a command.
         if !key.text.is_empty() && !key.modifiers.ctrl && !key.modifiers.alt {
@@ -2404,6 +2436,17 @@ impl FileAssocUI {
                 }
                 ActiveDialog::None => {}
             }
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (l.width, l.height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
         }
 
         frame
@@ -3232,6 +3275,48 @@ impl FileAssocUI {
             overflow: TextOverflow::Ellipsis,
         });
         frame.hit(Target::DialogAlwaysUse, strip);
+
+        // The group row, drawn only when there is a group to apply. `.txt` and
+        // `.zip` belong to none of the three offered, and a checkbox offering
+        // to set "all of nothing" would be the fabrication 856 is about --
+        // cheaper to omit than to explain.
+        if let Some(category) = associations::category_of(&self.dialog_target_ext) {
+            let (group_box, group_strip) = l.dialog_group_checkbox();
+            frame.push(RenderCommand::StrokeRect {
+                x: group_box.x,
+                y: group_box.y,
+                width: group_box.w,
+                height: group_box.h,
+                color: self.palette.overlay0,
+                line_width: 1.0,
+                corner_radii: CornerRadii::all(2.0),
+            });
+            if self.dialog_use_for_group {
+                frame.push(RenderCommand::FillRect {
+                    x: group_box.x + 3.0,
+                    y: group_box.y + 3.0,
+                    width: (group_box.w - 6.0).max(0.0),
+                    height: (group_box.h - 6.0).max(0.0),
+                    color: self.palette.blue,
+                    corner_radii: CornerRadii::all(2.0),
+                });
+            }
+            // The count is in the label because it is the whole decision: the
+            // difference between changing one file type and changing eleven is
+            // not something a user should have to open another window to learn.
+            let total = category.extensions().count();
+            frame.push(RenderCommand::Text {
+                x: group_box.right() + 8.0,
+                y: group_box.y + 1.0,
+                text: format!("Use for all {total} {} types", category.name),
+                color: self.palette.text,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((group_strip.right() - group_box.right() - 8.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            frame.hit(Target::DialogUseForGroup, group_strip);
+        }
 
         Self::draw_dialog_buttons(frame, &self.palette, l, "OK");
     }
@@ -4247,6 +4332,19 @@ mod tests {
         settingsfile::testing::with_scratch_config(tag, |_| body())
     }
 
+    /// A scratch directory, resolved while holding the environment lock.
+    ///
+    /// `ScratchDir::new` calls `std::env::temp_dir()`, which READS the
+    /// environment, and this binary also WRITES it -- `with_scratch_config`
+    /// above `remove_var`s `HOME`. Concurrent read-and-write of the process
+    /// environment is undefined, and the tests are threads in one process.
+    /// The same defect was fixed in `gui/desktop` and `apps/explorer` on
+    /// 2026-09-18 after it produced two red workspace runs.
+    fn guarded_scratch(label: &str) -> scratchdir::ScratchDir {
+        let _turn = settingsfile::testing::config_turn();
+        scratchdir::ScratchDir::new(label)
+    }
+
     #[test]
     fn test_ui_confirm_open_with() {
         writing("confirm_open_with", || {
@@ -4552,10 +4650,46 @@ mod tests {
         );
 
         // Clicking the scrim shuts the dialog and changes nothing else.
-        probe::click(&mut ui, Target::Scrim);
+        //
+        // At a corner, not through `probe::click(Target::Scrim)`. That clicks
+        // the *centre* of the matched control, and the scrim is the whole
+        // window, so its centre is the centre of the dialog sitting on top of
+        // it. This passed until the dialog grew by 24 pixels on 2026-09-16 and
+        // a field landed under that point -- the test had been relying on the
+        // window's centre happening to be over nothing.
+        ui.click_at(8.0, 8.0, MouseButton::Left, (WINDOW_WIDTH, WINDOW_HEIGHT));
         assert_eq!(ui.active_dialog, ActiveDialog::None);
         assert_eq!(ui.selected_category, before);
         assert!(probe::is_visible(&ui, Target::ResetButton));
+    }
+
+    /// Every type the toolkit knows is a type this program can associate.
+    ///
+    /// The point of deriving the defaults rather than listing them again. If
+    /// the two ever diverge, the file manager would recognise a format that
+    /// this editor could not assign a program to -- a gap with no error
+    /// anywhere, because each side is internally consistent.
+    #[test]
+    fn the_registry_knows_every_type_the_toolkit_does() {
+        let reg = AssociationRegistry::with_defaults();
+        for info in guitk::filetypes::all() {
+            let ext = info.extension.strip_prefix('.').unwrap_or(info.extension);
+            assert!(
+                reg.get_file_type(ext).is_some(),
+                "the toolkit lists .{ext} and the registry does not know it"
+            );
+        }
+        // Exactly as many as the table holds, which is a stronger statement
+        // than "at least N" and needs no number maintaining. It also catches a
+        // duplicate in the toolkit's table: two entries whose extensions strip
+        // to the same key would collapse into one registry entry, and the
+        // count would drop below the table's without any assertion above
+        // firing. The old hand-written list here held about two dozen.
+        assert_eq!(
+            reg.file_type_count(),
+            guitk::filetypes::all().count(),
+            "the registry and the toolkit table disagree on how many types exist"
+        );
     }
 
     #[test]
@@ -4563,14 +4697,27 @@ mod tests {
         let mut ui = FileAssocUI::new();
         let before = ui.registry.file_type_count();
 
+        // An extension the registry cannot already know, asserted rather than
+        // assumed. This test used "opus" until 2026-09-16, when the default
+        // types started coming from the toolkit's table -- which has `.opus` in
+        // it. The dialog then correctly refused a duplicate, and the test
+        // failed reporting only that a dialog had stayed open. A fixture that
+        // quietly stops being the case under test is worse than one that
+        // breaks, so the precondition is now checked here.
+        const UNKNOWN_EXT: &str = "slateunknown";
+        assert!(
+            ui.registry.get_file_type(UNKNOWN_EXT).is_none(),
+            ".{UNKNOWN_EXT} is already a known type, so this test no longer adds a new one"
+        );
+
         probe::click(&mut ui, Target::AddButton);
         assert_eq!(ui.new_field, NewField::Extension);
-        probe::type_str(&mut ui, "opus");
+        probe::type_str(&mut ui, UNKNOWN_EXT);
         probe::key(&mut ui, &probe::press(Key::Tab));
         assert_eq!(ui.new_field, NewField::MimeType);
-        probe::type_str(&mut ui, "audio/opus");
+        probe::type_str(&mut ui, "application/x-slate-unknown");
         probe::key(&mut ui, &probe::press(Key::Tab));
-        probe::type_str(&mut ui, "Opus Audio");
+        probe::type_str(&mut ui, "Slate Test Type");
 
         // Clicking the category button cycles it, which is the only way to set
         // it -- there is no room in a 400-pixel dialog for a seven-item list.
@@ -4583,10 +4730,10 @@ mod tests {
         assert_eq!(ui.registry.file_type_count(), before + 1);
         let added = ui
             .registry
-            .get_file_type("opus")
-            .expect(".opus was not registered");
-        assert_eq!(added.mime_type, "audio/opus");
-        assert_eq!(added.description, "Opus Audio");
+            .get_file_type(UNKNOWN_EXT)
+            .expect("the typed extension was not registered");
+        assert_eq!(added.mime_type, "application/x-slate-unknown");
+        assert_eq!(added.description, "Slate Test Type");
     }
 
     #[test]
@@ -4614,6 +4761,85 @@ mod tests {
         probe::click(&mut ui, Target::DialogCancel);
         assert_eq!(ui.active_dialog, ActiveDialog::None);
         assert_eq!(ui.registry.file_type_count(), before);
+    }
+
+    /// The group row appears only for a type that belongs to a group.
+    #[test]
+    fn the_group_row_is_offered_only_for_a_type_in_a_group() {
+        let mut ui = FileAssocUI::new();
+
+        select_ext(&mut ui, "mp3");
+        probe::click(&mut ui, Target::OpenWithButton);
+        assert!(
+            probe::is_visible(&ui, Target::DialogUseForGroup),
+            "mp3 is in the Music group and the row was not drawn"
+        );
+        probe::click(&mut ui, Target::DialogCancel);
+
+        // A text file belongs to none of the three groups offered, so there is
+        // nothing for the control to apply and it must not be drawn at all.
+        select_ext(&mut ui, "txt");
+        probe::click(&mut ui, Target::OpenWithButton);
+        assert!(
+            !probe::is_visible(&ui, Target::DialogUseForGroup),
+            "txt is in no offered group, so the row is a control that cannot act"
+        );
+    }
+
+    /// Applying to a group sets what the app opens, and reports the rest.
+    ///
+    /// The partial case is the one worth pinning. `musicplayer` opens five of
+    /// the ten types in Music, so the honest outcome is five changed and five
+    /// named -- not "Music now opens with Music Player", which would read as
+    /// settled while half the group still opened with nothing.
+    #[test]
+    fn applying_to_a_group_sets_what_it_can_and_names_what_it_cannot() {
+        writing("group_apply", || {
+            let mut ui = FileAssocUI::new();
+            select_ext(&mut ui, "mp3");
+            probe::click(&mut ui, Target::OpenWithButton);
+
+            let idx = ui
+                .registry
+                .apps_for_extension("mp3")
+                .iter()
+                .position(|a| a.id == "musicplayer")
+                .expect("musicplayer opens mp3");
+            probe::click(&mut ui, Target::DialogApp(idx));
+            probe::click(&mut ui, Target::DialogUseForGroup);
+            assert!(
+                ui.dialog_always_use,
+                "choosing the group must also make it the default, or the pair does nothing"
+            );
+            probe::click(&mut ui, Target::DialogOk);
+
+            for ext in ["mp3", "wav", "flac", "ogg", "m4a"] {
+                assert_eq!(
+                    ui.registry.get_default_app(ext).map(|a| a.id.clone()),
+                    Some(String::from("musicplayer")),
+                    ".{ext} is opened by musicplayer and was not set"
+                );
+            }
+            // The five it cannot open were left alone rather than cleared.
+            for ext in ["aac", "wma", "opus", "midi", "mid"] {
+                assert_ne!(
+                    ui.registry.get_default_app(ext).map(|a| a.id.clone()),
+                    Some(String::from("musicplayer")),
+                    ".{ext} was set to an app that cannot open it"
+                );
+            }
+
+            assert!(
+                ui.status.contains("5 of 10"),
+                "the status does not give both numbers: {}",
+                ui.status
+            );
+            assert!(
+                ui.status.contains(".aac"),
+                "the status does not name what it skipped: {}",
+                ui.status
+            );
+        });
     }
 
     #[test]
@@ -4867,7 +5093,7 @@ mod tests {
     /// file back off the disk.
     #[test]
     fn export_writes_the_associations_to_the_chosen_file() {
-        let dir = scratchdir::ScratchDir::new("fileassoc_export");
+        let dir = guarded_scratch("fileassoc_export");
         let mut ui = FileAssocUI::new();
 
         probe::click(&mut ui, Target::ExportButton);
@@ -4908,7 +5134,7 @@ mod tests {
     #[test]
     fn an_association_survives_export_and_import_into_another_copy() {
         writing("fileassoc_transfer", || {
-            let dir = scratchdir::ScratchDir::new("fileassoc_transfer");
+            let dir = guarded_scratch("fileassoc_transfer");
 
             let mut from = FileAssocUI::new();
             from.registry
@@ -4967,7 +5193,7 @@ mod tests {
     /// proven by `an_association_survives_export_and_import_into_another_copy`.
     #[test]
     fn an_unreadable_import_says_so_instead_of_failing_silently() {
-        let dir = scratchdir::ScratchDir::new("fileassoc_missing");
+        let dir = guarded_scratch("fileassoc_missing");
         let mut ui = FileAssocUI::new();
         ui.transfer = Transfer::Import;
 
@@ -5064,6 +5290,87 @@ mod tests {
         // The three body panels tile the window without overlapping.
         assert_eq!(narrow.sidebar.right(), narrow.table.x);
         assert_eq!(narrow.table.right(), narrow.details.x);
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// `Ctrl+Q` is checked through `on_event`, not `handle_key`: quitting is
+    /// decided a level up and returns `Response::Exit` rather than an
+    /// `EventResult`. A guard that only knew `handle_key` would call the one
+    /// row nothing else covers a lie -- the same shape `apps/benchmark` had.
+    ///
+    /// Two states, because `Tab` belongs to the add-file-type dialog and
+    /// `Esc` needs something to back out of.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let quits = {
+                    let mut ui = FileAssocUI::new();
+                    matches!(ui.on_event(&Event::Key(stroke.clone())), Response::Exit)
+                };
+                let answered = quits
+                    || [false, true].into_iter().any(|in_dialog| {
+                        let mut ui = FileAssocUI::new();
+                        // Twice: `Up` on the first row stops rather than
+                        // wrapping, so one press leaves it with nowhere to
+                        // go. Third app in this queue with that shape, after
+                        // apps/notes and apps/podcast.
+                        ui.handle_event(&Event::Key(probe::press(Key::Down)));
+                        ui.handle_event(&Event::Key(probe::press(Key::Down)));
+                        if in_dialog {
+                            ui.open_add_file_type_dialog();
+                        }
+                        ui.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                    });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the last third: Ctrl+F behind the card must not focus
+    /// the search box, and must focus it with the card down.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |ui: &FileAssocUI| -> Vec<String> {
+            ui.render()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut ui = FileAssocUI::new();
+        assert!(
+            !drawn(&ui).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        ui.handle_event(&Event::Key(probe::press(Key::F1)));
+        let missing = guitk::shortcut::missing_rows(&drawn(&ui), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        ui.handle_event(&Event::Key(probe::ctrl(Key::F)));
+        assert!(
+            !ui.search_focused,
+            "Ctrl+F focused the search box through the shortcut card"
+        );
+
+        ui.handle_event(&Event::Key(probe::press(Key::F1)));
+        ui.handle_event(&Event::Key(probe::ctrl(Key::F)));
+        assert!(
+            ui.search_focused,
+            "control: Ctrl+F does nothing even with the card down"
+        );
     }
 
     #[test]

@@ -61,6 +61,44 @@ use std::time::Duration;
 const WINDOW_WIDTH: f32 = 1100.0;
 const WINDOW_HEIGHT: f32 = 750.0;
 const TOOLBAR_HEIGHT: f32 = 40.0;
+
+/// Every key this program answers, and what it does.
+///
+/// This app is the reason `TD-C-A-HUNDRED-APPS-BIND-KEYS-NOBODY-CAN-FIND`
+/// exists. Eight letter keys each add a rename rule -- and adding a rule is
+/// the entire point of the program, since a pipeline with no rules previews
+/// every name unchanged. The nearest thing to a mention anywhere in the crate
+/// was `"kebab-case"`, which is the label of the *operation*, not of the `K`
+/// that adds it.
+///
+/// **Each row is a key this program actually answers**, which is not a
+/// property the list has on its own: `every_advertised_key_does_something`
+/// walks it, reads each label with `guitk::shortcut` and presses every key it
+/// names. `apps/rssreader` shipped an overlay of twenty-one shortcuts of which
+/// about four worked.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Up / Down", "Move through the files"),
+    ("Space", "Select or deselect this file"),
+    ("Ctrl+A", "Select every file"),
+    ("Ctrl+Delete", "Take every file off the list"),
+    (
+        "L / U / T",
+        "Add a rule: lower case / UPPER CASE / Title Case",
+    ),
+    ("S / K", "Add a rule: snake_case / kebab-case"),
+    ("W", "Add a rule: trim the spaces off both ends"),
+    ("E / X", "Add a rule: lower-case the extension / remove it"),
+    ("N", "Add a rule: number the files"),
+    ("Delete", "Remove the selected rule"),
+    ("PageUp / PageDown", "Move the selected rule up / down"),
+    ("Ctrl+Backspace", "Remove every rule"),
+    ("Enter", "Rename the selected files"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo the rename"),
+    ("Ctrl+O", "Open a folder"),
+    ("/", "Search the file names"),
+    ("C", "Show only the names that would collide"),
+    ("F1 / ?", "This list"),
+];
 const SIDEBAR_WIDTH: f32 = 280.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 const PADDING: f32 = 8.0;
@@ -916,6 +954,8 @@ struct RenamerApp {
     /// Without it, typing "c" to search would toggle the conflicts filter. The
     /// app had no input at all, so nothing had needed the distinction.
     searching: bool,
+    /// Whether the shortcut list is up.
+    show_help: bool,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -954,6 +994,7 @@ impl RenamerApp {
             history: Vec::new(),
             search_text: String::new(),
             searching: false,
+            show_help: false,
         }
     }
 
@@ -1521,6 +1562,21 @@ impl RenamerApp {
                 self.redo();
                 EventResult::Consumed
             }
+            // The shortcut list. Before the unguarded `Key::Slash` below,
+            // which would otherwise take a shifted slash and open the search
+            // box -- a guard narrows only the arm it is on.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Key::Slash if key.modifiers.shift => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Key::Escape if self.show_help => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
             Key::Slash => {
                 self.searching = true;
                 EventResult::Consumed
@@ -1707,6 +1763,19 @@ impl RenamerApp {
 
         // Status bar
         self.render_status_bar(&mut cmds);
+
+        // And the shortcut list over everything, because it is the one thing a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (WINDOW_WIDTH, WINDOW_HEIGHT),
+                TOOLBAR_HEIGHT,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
 
         cmds
     }
@@ -2488,6 +2557,141 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// A list on screen and the handler behind it are two copies of one fact,
+    /// and they drift: `apps/rssreader` shipped an overlay of twenty-one
+    /// shortcuts of which about four worked. The label is read by
+    /// `guitk::shortcut` rather than matched against a table written beside it
+    /// here -- that table would be a third copy, drifting from both.
+    ///
+    /// The property is "some reachable state answers this key", not "this key
+    /// is taken right now". `Delete` with no rule in the pipeline, `Enter`
+    /// with no file selected and `Ctrl+Z` with nothing done all decline on
+    /// purpose, and declining from its own arm is answering.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let event = Event::Key(stroke.clone());
+                let answered = states()
+                    .iter_mut()
+                    .any(|app| app.handle_event(&event) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Lists chosen so that between them every advertised key has work to do.
+    fn states() -> Vec<RenamerApp> {
+        let plain = seeded();
+
+        // A file selected and a rule in the pipeline: what `Enter`, `Delete`
+        // and the two reordering keys each need before they will act. The
+        // `Down` first is for `Up`, which declines at the top of the list --
+        // every other state here stands on the first file.
+        let mut loaded = seeded();
+        loaded.handle_event(&press(Key::Down));
+        loaded.handle_event(&press(Key::Space));
+        loaded.handle_event(&press(Key::L));
+        loaded.handle_event(&press(Key::U));
+
+        // ...and the selected rule lifted off the bottom of the pipeline, so
+        // `PageDown` has somewhere to put it. Adding a rule selects it, and
+        // the newest is the last, so no state has a rule with room both above
+        // and below it.
+        let mut reordered = seeded();
+        for k in [Key::Space, Key::L, Key::U, Key::PageUp] {
+            reordered.handle_event(&press(k));
+        }
+
+        // ...and that rename carried out, so undo has something to undo.
+        //
+        // `app_with`, not `seeded`: `execute_rename` renames files on the
+        // filesystem and records nothing unless one actually moves, so a list
+        // of names with no directory under it leaves the undo stack empty --
+        // the trap `app_with`'s own doc comment was written about. `N` rather
+        // than `L`, too, because lower-casing a name that is already lower
+        // case changes nothing, and numbering always changes something.
+        // No `Ctrl+A` here: files arrive *already* selected, so select-all
+        // sees that and does its opposite, which is how the first version of
+        // this deselected everything and renamed nothing.
+        let renamed_keys = [press(Key::N), press(Key::Enter)];
+        let mut renamed = app_with(&["one.txt", "two.txt"]);
+        for e in &renamed_keys {
+            renamed.handle_event(e);
+        }
+        assert!(
+            !renamed.undo_stack.is_empty(),
+            "nothing was renamed, so the undo state this test needs was never reached"
+        );
+
+        // ...and undone, so redo does.
+        let mut undone = app_with(&["three.txt", "four.txt"]);
+        for e in &renamed_keys {
+            undone.handle_event(e);
+        }
+        undone.handle_event(&press_ctrl(Key::Z));
+
+        vec![plain, loaded, reordered, renamed, undone]
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/netscan`'s `wol_note` was written by the
+    /// model and drawn by nothing for three commits with every model-level
+    /// test passing.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = seeded();
+        assert!(
+            !drawn_text(&app).contains("? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = drawn_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !drawn_text(&app).contains("? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// A shifted slash asks for help; a plain one still opens the search box.
+    #[test]
+    fn the_help_key_did_not_take_the_search_key_with_it() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::Slash));
+        assert!(app.searching, "`/` no longer opens the search box");
+        assert!(
+            !drawn_text(&app).contains("? closes this"),
+            "`/` opened the shortcut list"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn drawn_text(app: &RenamerApp) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     fn press_ctrl(k: Key) -> Event {

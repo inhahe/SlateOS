@@ -27,6 +27,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::Response;
+#[cfg(test)]
 use pwkdf::{KdfError, KdfParams, PasswordVerifier};
 
 use std::path::Path;
@@ -332,6 +333,11 @@ pub trait PasswordAuthority: core::fmt::Debug {
 /// Without it, a user who reuses one password would produce the same stored
 /// value here and in the credential vault, and either could be replayed
 /// against the other.
+/// `#[cfg(test)]` with the validator it separates: the shipped screen derives
+/// nothing, so it has no verifier of its own to keep apart from anyone
+/// else's. If a future caller here does derive again, this constant and the
+/// reasoning above it come back with it.
+#[cfg(test)]
 const VERIFIER_DOMAIN: &[u8] = b"slateos-lockscreen-verifier";
 
 /// Checks a typed password against a stored, salted, stretched verifier.
@@ -362,6 +368,19 @@ const VERIFIER_DOMAIN: &[u8] = b"slateos-lockscreen-verifier";
 /// day someone wires the two together the cheap way to reconcile them is to
 /// weaken the store to match the screen. Sharing the derivation now settles
 /// the format while nothing depends on it.
+// Scaffolding, and now only the tests use it. `main` authenticates through
+// `SystemAuthority`, which asks lane B's `authlib` and never sees a stored
+// entry; `requests/b-c-desktop-password-checks-go-through-a-privileged-verifier.md`
+// is the answer that settled that shape, and it says this type ends as
+// scaffolding and the screen ends "with no cryptography in it at all".
+//
+// `#[cfg(test)]` rather than deletion, because the tests below are worth
+// keeping: they exercise the trait against a *real* key derivation, including
+// the regression that a stored verifier is not a bare `sha256(password)`. A
+// hand-written stub would have let that assertion pass while proving nothing.
+// The shipped binary links no key derivation either way -- `pwkdf` and `sha2`
+// are dev-dependencies now.
+#[cfg(test)]
 #[derive(Clone, Debug)]
 pub struct PasswordValidator {
     /// The stored verifier, with the salt and cost it was derived under.
@@ -372,6 +391,7 @@ pub struct PasswordValidator {
     verifier: PasswordVerifier,
 }
 
+#[cfg(test)]
 impl PasswordValidator {
     /// Rebuild a validator from what a credential store holds.
     ///
@@ -460,6 +480,7 @@ impl PasswordValidator {
 /// screen's own [`LockoutTimer`], which is the wrong place for it (see the
 /// trait's note) and is where it has to stay while the tally has nowhere else
 /// to live.
+#[cfg(test)]
 impl PasswordAuthority for PasswordValidator {
     fn authenticate(&mut self, _username: &str, password: &[u8]) -> AuthOutcome {
         if self.verifier.check(password) {

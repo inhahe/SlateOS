@@ -687,6 +687,29 @@ impl<T: Transport> Connection<T> {
         self.confirm(RequestBody::GrabModifierChord { window, modifiers })
     }
 
+    /// Ask to be told when the session has been idle for `after`.
+    ///
+    /// Thereafter `Event::SessionIdle` arrives each time the session goes
+    /// quiet for that long -- once per quiet stretch, not once per frame.
+    /// Asking again replaces the delay and arms it afresh; a delay of nought
+    /// withdraws.
+    ///
+    /// Sub-millisecond precision is dropped and anything past `u32::MAX`
+    /// milliseconds saturates: the wire carries milliseconds, and a delay
+    /// measured in weeks is a caller that meant `None`.
+    ///
+    /// # Errors
+    ///
+    /// As [`grab_modifier_chord`](Self::grab_modifier_chord).
+    pub fn watch_idle(
+        &mut self,
+        window: u64,
+        after: core::time::Duration,
+    ) -> Result<(), ClientError<T::Error>> {
+        let after_ms = u32::try_from(after.as_millis()).unwrap_or(u32::MAX);
+        self.confirm(RequestBody::WatchIdle { window, after_ms })
+    }
+
     /// Give a modifier chord back.
     ///
     /// Releasing one this window never held is not an error, on

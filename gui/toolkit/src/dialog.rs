@@ -1774,22 +1774,6 @@ fn default_quick_access() -> Vec<QuickAccess> {
     ]
 }
 
-/// Reinterpret bytes taken from an [`OsStr`] as an [`OsStr`] again.
-///
-/// # Safety
-///
-/// `bytes` must be a subslice of `OsStr::as_encoded_bytes` output taken on
-/// boundaries of the ASCII bytes it was split at. `OsStr::from_encoded_bytes_unchecked`
-/// documents exactly that contract: the encoding is self-synchronising at
-/// ASCII, so splitting at an ASCII byte cannot land inside a multi-byte
-/// sequence on any platform.
-unsafe fn os_str_from_bytes(bytes: &[u8]) -> &OsStr {
-    // SAFETY: the caller guarantees `bytes` came from `as_encoded_bytes` and
-    // was cut only at ASCII `/`, which is a valid boundary in every encoding
-    // `OsStr` uses.
-    unsafe { OsStr::from_encoded_bytes_unchecked(bytes) }
-}
-
 /// Get the parent of a path (simple slash-based splitting).
 ///
 /// Split on the raw bytes at `/` alone rather than through [`Path::parent`],
@@ -1816,7 +1800,9 @@ fn parent_path(path: &OsStr) -> OsString {
         Some(0) | None => OsString::from("/"),
         // SAFETY: `idx` is the position of an ASCII `/` in bytes that came
         // from `as_encoded_bytes`, so the prefix ends on a valid boundary.
-        Some(idx) => unsafe { os_str_from_bytes(trimmed.get(..idx).unwrap_or(&[])) }.to_os_string(),
+        Some(idx) => {
+            unsafe { crate::osbytes::from_bytes(trimmed.get(..idx).unwrap_or(&[])) }.to_os_string()
+        }
     }
 }
 
@@ -1851,7 +1837,7 @@ fn extension_of(name: &OsStr) -> OsString {
     // SAFETY: `ext` is a suffix of `as_encoded_bytes` output cut just after an
     // ASCII `.`, which is a valid boundary; ASCII-lowercasing maps ASCII bytes
     // to ASCII bytes and leaves every other byte alone, so the encoding holds.
-    unsafe { os_str_from_bytes(&lowered) }.to_os_string()
+    unsafe { crate::osbytes::from_bytes(&lowered) }.to_os_string()
 }
 
 /// The key a listing is sorted by when sorting on Name.

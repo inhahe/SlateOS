@@ -77,6 +77,48 @@ use guitk::style::CornerRadii;
 use guitk::text;
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+/// A program to start, with the arguments it is to be started with.
+///
+/// The arguments are the whole reason this is a struct rather than a
+/// `PathBuf`. One program can be two shortcuts — `screenshot --fullscreen`
+/// and `screenshot --region` — and putting the difference inside the path
+/// makes a filename that cannot exist. `Command::new` took it literally and
+/// both shortcuts failed at every press.
+///
+/// The program stays a [`PathBuf`] for the reason
+/// `ShellSession::take_launches` gives: a program's name is a filesystem path,
+/// our paths are byte strings, and a program whose name has no UTF-8 spelling
+/// must reach the process server as the bytes that name it. The arguments are
+/// [`OsString`] for exactly the same reason — an argument is very often a
+/// path, and one that cannot be spelled is one the user meant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Launch {
+    /// The program to start.
+    pub program: PathBuf,
+    /// Its arguments, in order, not including the program name itself.
+    pub args: Vec<OsString>,
+}
+
+impl Launch {
+    /// The whole invocation, as one line, for showing to a person.
+    ///
+    /// Display only. Both halves go through `Path::display`, which renders
+    /// unspellable bytes rather than refusing -- right for a label and wrong
+    /// for anything that opens a file, which is why nothing here feeds it back
+    /// into a `PathBuf`.
+    #[must_use]
+    pub fn display_line(&self) -> String {
+        let mut out = self.program.display().to_string();
+        for arg in &self.args {
+            out.push(' ');
+            out.push_str(&std::path::Path::new(arg).display().to_string());
+        }
+        out
+    }
+}
 use std::fmt;
 use yamldoc::Document;
 
@@ -538,8 +580,17 @@ pub(crate) const LOCK_COMMAND: &str = "/usr/bin/lockscreen";
 /// which parses `--fullscreen`/`-f` and `--region`/`-r` as its first argument.
 /// A flag it does not know would leave it sitting in its interactive menu, which
 /// is not what either shortcut promises.
-const SCREENSHOT_COMMAND: &str = "/usr/bin/screenshot --fullscreen";
-const SCREENSHOT_REGION_COMMAND: &str = "/usr/bin/screenshot --region";
+/// The screenshot tool, and the two ways the shell asks for it.
+///
+/// One program, two invocations — which is why a launch has to carry
+/// arguments. These were written as `"/usr/bin/screenshot --fullscreen"` and
+/// `"/usr/bin/screenshot --region"` until 2026-09-17, single strings that were
+/// then turned into a `PathBuf` and handed to `Command::new`. That names a file
+/// with a space and two dashes in it, which cannot exist, so both screenshot
+/// shortcuts failed with "cannot start" every time they were pressed.
+const SCREENSHOT_COMMAND: &str = "/usr/bin/screenshot";
+const SCREENSHOT_FULLSCREEN_ARG: &str = "--fullscreen";
+const SCREENSHOT_REGION_ARG: &str = "--region";
 
 impl HotkeyAction {
     /// Whether the press is claimed only when the shell has something to do.
@@ -552,6 +603,33 @@ impl HotkeyAction {
     #[must_use]
     pub const fn is_conditional(&self) -> bool {
         matches!(self, Self::DismissPopup)
+    }
+
+    /// The program this action starts, and how to invoke it.
+    ///
+    /// `None` for every action that acts on a window or on the shell itself.
+    ///
+    /// Separate from [`command`](Self::command), which answers only the
+    /// program: a caller that wants to *start* the action needs both halves,
+    /// and one that only wants to name it (the shortcut card, the settings
+    /// list) wants neither the arguments nor to have to ignore them.
+    #[must_use]
+    pub fn launch(&self) -> Option<Launch> {
+        let plain = |p: &str| Launch {
+            program: PathBuf::from(p),
+            args: Vec::new(),
+        };
+        match self {
+            Self::Screenshot => Some(Launch {
+                program: PathBuf::from(SCREENSHOT_COMMAND),
+                args: vec![OsString::from(SCREENSHOT_FULLSCREEN_ARG)],
+            }),
+            Self::ScreenshotRegion => Some(Launch {
+                program: PathBuf::from(SCREENSHOT_COMMAND),
+                args: vec![OsString::from(SCREENSHOT_REGION_ARG)],
+            }),
+            _ => self.command().map(plain),
+        }
     }
 
     /// The program this action starts, if starting a program is what it does.
@@ -567,8 +645,9 @@ impl HotkeyAction {
             Self::ShowTaskManager => Some(TASK_MANAGER_COMMAND),
             Self::SystemSettings => Some(SETTINGS_COMMAND),
             Self::ScreenLock => Some(LOCK_COMMAND),
-            Self::Screenshot => Some(SCREENSHOT_COMMAND),
-            Self::ScreenshotRegion => Some(SCREENSHOT_REGION_COMMAND),
+            // Both, because `command` answers *which program*; the two
+            // differ only in how it is invoked, which is `launch`'s answer.
+            Self::Screenshot | Self::ScreenshotRegion => Some(SCREENSHOT_COMMAND),
             _ => None,
         }
     }
@@ -1013,9 +1092,29 @@ fn register_defaults(reg: &mut HotkeyRegistry) {
 /// Super+E=launch:/usr/bin/explorer
 /// Ctrl+Alt+Delete=show_task_manager
 /// ```
+/// What the left-hand side reads when an action is deliberately unbound.
+///
+/// `none=screenshot` says "screenshot is on no keys". That is a different
+/// statement from the line being absent: absent means "this file has nothing
+/// to say about it", and the defaults then apply. A deletion has to be said
+/// out loud or it cannot survive one, because [`load_shortcuts`] merges onto
+/// the defaults rather than replacing them — deliberately, so that a
+/// shortcut added in a later version still reaches a user who has customised
+/// theirs. See design-decisions 860.
+///
+/// [`load_shortcuts`]: crate::DesktopShell::load_shortcuts
+pub const UNBOUND: &str = "none";
+
 pub struct HotkeyConfig {
     /// Parsed bindings.
     bindings: Vec<(Hotkey, HotkeyAction)>,
+    /// Actions this file says are on no keys at all.
+    ///
+    /// Held apart from `bindings` rather than as a binding to a sentinel
+    /// chord, because there is no such chord: every `Hotkey` names keys a
+    /// user could press, and inventing one that cannot be pressed would put a
+    /// value into the registry that every other reader has to know to skip.
+    unbound: Vec<HotkeyAction>,
 }
 
 impl HotkeyConfig {
@@ -1025,13 +1124,43 @@ impl HotkeyConfig {
             .all_bindings()
             .map(|(k, v)| (*k, v.clone()))
             .collect();
-        Self { bindings }
+        // A default that this registry no longer holds was deleted by the
+        // user, and saying so is the only way the deletion survives a restart.
+        // Computed against `defaults()` rather than remembered, so that a
+        // registry assembled any other way still writes a truthful file.
+        let unbound: Vec<HotkeyAction> = Self::from_registry_defaults()
+            .into_iter()
+            .filter(|action| !bindings.iter().any(|(_, a)| a == action))
+            .collect();
+        Self { bindings, unbound }
+    }
+
+    /// Every action the shipped defaults bind, without duplicates.
+    ///
+    /// Its own function so that "what counts as a default" has one answer;
+    /// `from_registry` asks it to decide which actions a save must record as
+    /// deliberately unbound.
+    fn from_registry_defaults() -> Vec<HotkeyAction> {
+        let mut seen: Vec<HotkeyAction> = Vec::new();
+        for (_, action) in HotkeyRegistry::defaults().all_bindings() {
+            if !seen.contains(action) {
+                seen.push(action.clone());
+            }
+        }
+        seen
+    }
+
+    /// The actions this config says are bound to nothing.
+    #[must_use]
+    pub fn unbound(&self) -> &[HotkeyAction] {
+        &self.unbound
     }
 
     /// Parse hotkey configuration from text. Lines starting with '#' are
     /// comments. Blank lines are skipped.
     pub fn load(text: &str) -> Result<Self, HotkeyError> {
         let mut bindings = Vec::new();
+        let mut unbound = Vec::new();
 
         for (line_idx, raw_line) in text.lines().enumerate() {
             let line = raw_line.trim();
@@ -1047,10 +1176,42 @@ impl HotkeyConfig {
             // number reported for an implausibly long file is wrong by one
             // rather than wrapping to zero.
             let line_number = line_idx.saturating_add(1);
-            bindings.push(Self::parse_line(line, line_number)?);
+            Self::take_line(line, line_number, &mut bindings, &mut unbound)?;
         }
 
-        Ok(Self { bindings })
+        Ok(Self { bindings, unbound })
+    }
+
+    /// Take one line into either the bindings or the unbound list.
+    ///
+    /// The classification is here rather than at each call site so that the
+    /// two readers (a text file and a settings document) cannot disagree about
+    /// what `none=` means.
+    fn take_line(
+        line: &str,
+        line_number: usize,
+        bindings: &mut Vec<(Hotkey, HotkeyAction)>,
+        unbound: &mut Vec<HotkeyAction>,
+    ) -> Result<(), HotkeyError> {
+        if let Some(value) = line.strip_prefix(UNBOUND) {
+            // Only when `none` is the whole left-hand side. A chord could
+            // legitimately be parsed from something starting with those
+            // letters, and swallowing it here would silently unbind it.
+            if let Some(rest) = value.strip_prefix('=') {
+                let action = HotkeyAction::from_config_value(rest.trim()).map_err(|e| {
+                    HotkeyError::ParseError {
+                        line_number,
+                        message: format!("{e}"),
+                    }
+                })?;
+                if !unbound.contains(&action) {
+                    unbound.push(action);
+                }
+                return Ok(());
+            }
+        }
+        bindings.push(Self::parse_line(line, line_number)?);
+        Ok(())
     }
 
     /// Parse one `chord=action` line.
@@ -1081,12 +1242,19 @@ impl HotkeyConfig {
 
     /// The bindings, as the lines a configuration file carries.
     fn lines(&self) -> Vec<String> {
-        self.bindings
+        let mut out: Vec<String> = self
+            .bindings
             .iter()
             .map(|(hotkey, action)| {
                 format!("{}={}", hotkey.display_name(), action.to_config_value())
             })
-            .collect()
+            .collect();
+        out.extend(
+            self.unbound
+                .iter()
+                .map(|action| format!("{UNBOUND}={}", action.to_config_value())),
+        );
+        out
     }
 
     /// Write the bindings into a configuration document.
@@ -1118,18 +1286,20 @@ impl HotkeyConfig {
         let Some(entries) = doc.get_seq(&["shortcuts"]) else {
             return Ok(Self {
                 bindings: Vec::new(),
+                unbound: Vec::new(),
             });
         };
 
         let mut bindings = Vec::new();
+        let mut unbound = Vec::new();
         for (index, entry) in entries.iter().enumerate() {
             let line = entry.trim();
             if line.is_empty() {
                 continue;
             }
-            bindings.push(Self::parse_line(line, index.saturating_add(1))?);
+            Self::take_line(line, index.saturating_add(1), &mut bindings, &mut unbound)?;
         }
-        Ok(Self { bindings })
+        Ok(Self { bindings, unbound })
     }
 
     /// The bindings this config holds.
@@ -1708,13 +1878,19 @@ pub fn render_settings_panel(
         // "Launch application" — but the fixed-command actions get it too,
         // because "Task manager" is a name and `/usr/bin/procexplorer` is the
         // answer to *which* task manager.
-        let extra_text = action.command();
+        // The whole invocation, not just the program. Asked of `launch`
+        // rather than `command` because those two stopped being the same
+        // thing when a launch gained arguments: the two screenshot rows name
+        // one program and differ only in the argument, so a card built from
+        // `command` alone drew the same line twice and gave the user no way to
+        // tell which row was which.
+        let extra_text = action.launch().map(|l| l.display_line());
         if let Some(detail) = extra_text {
             let detail_x = panel_x + PADDING + content_width * 0.2;
             cmds.push(RenderCommand::Text {
                 x: detail_x,
                 y: row_y + (ROW_HEIGHT - KEY_FONT_SIZE) / 2.0 + 1.0,
-                text: detail.to_string(),
+                text: detail.clone(),
                 // Dimmer than either label branch: the app name is an
                 // argument to the action beside it, not a second action.
                 color: p.subtext0,
@@ -3010,7 +3186,9 @@ mod tests {
     fn detail_lines() -> Vec<String> {
         HotkeyRegistry::defaults()
             .all_bindings()
-            .filter_map(|(_, action)| action.command().map(str::to_owned))
+            // `launch`, not `command`: the card draws the whole invocation, and
+            // this list is only useful while it names the same strings.
+            .filter_map(|(_, action)| action.launch().map(|l| l.display_line()))
             .collect()
     }
 

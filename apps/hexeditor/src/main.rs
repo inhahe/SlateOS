@@ -1458,6 +1458,8 @@ pub struct HexEditor {
     pub search: SearchState,
     /// Whether the data inspector panel is visible.
     pub show_inspector: bool,
+    /// Whether the shortcut list is up.
+    pub show_help: bool,
     /// Recent file paths.
     pub recent_files: VecDeque<String>,
     /// The picker. Holds the dialog and the routing thirteen
@@ -1500,6 +1502,40 @@ pub struct HexEditor {
     palette: Palette,
 }
 
+/// Every key this program answers, and what it does.
+///
+/// Thirteen chords and a page of navigation, none of which appeared anywhere
+/// on screen. `Ctrl+B`, `Ctrl+N` and `Ctrl+P` are the worst of them: bookmarks
+/// are invisible until one is set, so the feature could not be found by
+/// looking at the window in any state.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`, which reads each label with
+/// `guitk::shortcut` and presses every key it names.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows", "Move the cursor"),
+    ("PageUp / PageDown", "One screen up / down"),
+    ("Home / End", "Start / end of the line"),
+    ("Ctrl+Home / Ctrl+End", "Start / end of the file"),
+    ("Tab", "Swap between the hex and text panes"),
+    ("0-9, A-F", "Type a byte, in the hex pane"),
+    (
+        "Delete / Backspace",
+        "Delete the byte at / before the cursor",
+    ),
+    ("Ctrl+O", "Open a file"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+C / Ctrl+V", "Copy / paste the selection"),
+    ("Ctrl+F", "Find"),
+    ("Ctrl+I", "Match case, while the search bar is up"),
+    ("Ctrl+G", "Go to an offset"),
+    ("Ctrl+B", "Set or clear a bookmark here"),
+    ("Ctrl+D", "Show or hide the data inspector"),
+    ("Ctrl+N / Ctrl+P", "Next / previous bookmark"),
+    ("Ctrl+Tab", "Next tab"),
+    ("F1", "This list"),
+];
+
 impl HexEditor {
     /// Create a new hex editor with one empty document.
     pub fn new(width: f32, height: f32) -> Self {
@@ -1509,6 +1545,7 @@ impl HexEditor {
             active_tab: 0,
             search: SearchState::default(),
             show_inspector: true,
+            show_help: false,
             recent_files: VecDeque::new(),
             picker: FilePicker::new(),
             last_open: None,
@@ -1786,6 +1823,22 @@ impl HexEditor {
             return EventResult::Ignored;
         }
 
+        // The shortcut list, before anything else.
+        //
+        // `F1` rather than `?`: the ASCII pane writes `key.typed()` straight
+        // into the file, and the search and go-to boxes both take text, so `?`
+        // is a character in three different places here. Ahead of every one of
+        // them, because a key that is sometimes help and sometimes a byte
+        // written into somebody's file is worse than no key at all.
+        if key.key == Key::F1 && !key.modifiers.ctrl {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if key.key == Key::Escape && self.show_help {
+            self.show_help = false;
+            return EventResult::Consumed;
+        }
+
         // Global shortcuts (regardless of focus).
         if key.modifiers.ctrl {
             match key.key {
@@ -1855,6 +1908,15 @@ impl HexEditor {
                     doc.ensure_cursor_visible(vis);
                     return EventResult::Consumed;
                 }
+                // `show_inspector` was `true` at construction with no writer
+                // anywhere, so the panel was permanent and the bytes it sat
+                // beside had that much less room. `Ctrl+D` for "data
+                // inspector", which is what every other hex editor calls it.
+                // Found by `scripts/frozen-flag-survey.py`.
+                Key::D => {
+                    self.show_inspector = !self.show_inspector;
+                    return EventResult::Consumed;
+                }
                 Key::B => {
                     // Toggle bookmark at cursor.
                     let cursor = self.active_doc().cursor;
@@ -1902,8 +1964,18 @@ impl HexEditor {
             return EventResult::Consumed;
         }
 
-        // Enter in search bar: perform search.
+        // Enter in search bar: perform search. Shift goes the other way.
+        //
+        // `SearchDirection::Backward` and `find_backward` were written and
+        // tested, and `direction` was `Forward` at construction with nothing
+        // to change it -- so every search this program ran went forwards and
+        // the way back through a file was by starting again from the top.
         if key.key == Key::Enter && self.focused_panel == FocusedPanel::SearchBar {
+            self.search.query.direction = if key.modifiers.shift {
+                SearchDirection::Backward
+            } else {
+                SearchDirection::Forward
+            };
             self.perform_search();
             return EventResult::Consumed;
         }
@@ -1945,6 +2017,29 @@ impl HexEditor {
 
         // Text input for search/goto dialogs.
         if self.focused_panel == FocusedPanel::SearchBar {
+            // Case sensitivity. Before the text branch, which would otherwise
+            // take this and type an `i` into the query.
+            //
+            // `SearchQuery::case_sensitive` is honoured by `match_at` and had
+            // no writer anywhere in production, so every search this program
+            // ran was case-sensitive and there was no way to ask for anything
+            // else -- in a tool whose whole job is finding a byte sequence
+            // somebody half remembers.
+            if key.key == Key::I && key.modifiers.ctrl {
+                self.search.query.case_sensitive = !self.search.query.case_sensitive;
+                self.perform_search();
+                return EventResult::Consumed;
+            }
+            // Whether the search runs past the end and starts again.
+            // `find_forward` and `find_backward` both take it and it was
+            // `true` with no writer, so a search could not be asked to stop
+            // at the end of the file -- which is the difference between "not
+            // below here" and "not in the file".
+            if key.key == Key::W && key.modifiers.ctrl {
+                self.search.query.wrap_around = !self.search.query.wrap_around;
+                self.perform_search();
+                return EventResult::Consumed;
+            }
             if key.types_text() {
                 self.search.input_text.extend(key.typed());
                 return EventResult::Consumed;
@@ -2262,7 +2357,13 @@ impl HexEditor {
         };
 
         self.search.query.pattern = pattern;
-        let from = self.active_doc().cursor.saturating_add(1);
+        // One step off the cursor, on the side the search is heading, or
+        // every press finds the match already under it.
+        let cursor = self.active_doc().cursor;
+        let from = match self.search.query.direction {
+            SearchDirection::Forward => cursor.saturating_add(1),
+            SearchDirection::Backward => cursor.saturating_sub(1),
+        };
         if let Some(offset) = self.active_doc().find_next(&self.search.query, from) {
             let vis = self.visible_lines();
             let doc = self.active_doc_mut();
@@ -3185,7 +3286,30 @@ impl HexEditor {
             color: input_color,
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(bar_width - 120.0),
+            // Stops where the options begin. It used to reach to
+            // `bar_width - 120`, which was clear of one option and is not
+            // clear of three.
+            max_width: Some((bar_width - 400.0).max(60.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        // What the search will do, and the keys that change it. A search
+        // box that silently ignores case -- or silently insists on it, or
+        // silently stops at the end of the file -- turns a miss into "it is
+        // not in the file", which is a claim about the file.
+        let on_off = |on: bool| if on { "on" } else { "off" };
+        tree.push(RenderCommand::Text {
+            x: x + bar_width - 340.0,
+            y: y + 12.0,
+            text: format!(
+                "Case: {} Ctrl+I   Wrap: {} Ctrl+W   Shift+Enter back",
+                on_off(self.search.query.case_sensitive),
+                on_off(self.search.query.wrap_around),
+            ),
+            color: self.palette.subtext0,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(265.0),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -3450,6 +3574,19 @@ impl App for HexEditor {
         // of it.
         tree.commands
             .extend(self.picker.render(&self.palette, width, height));
+
+        // And the shortcut list over even that, because it is the one thing a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
         tree
     }
 }
@@ -3522,6 +3659,149 @@ mod tests {
             *first = doc;
         }
         editor
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table written beside it here -- that table would be a third copy of the
+    /// same fact, drifting from both the list and the handler.
+    ///
+    /// The property is "some reachable state answers this key", not "this key
+    /// is taken right now". This program opens on an *empty document*, where
+    /// almost nothing can act, which is why the states below load bytes first:
+    /// a guard run against a fresh window would call most of this program dead.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|ed| ed.handle_key(&stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Editors chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<HexEditor> {
+        // 256 bytes, cursor at the start.
+        let plain = loaded();
+
+        // ...and away from the start, so `Left`, `Up`, `Backspace` and the
+        // keys that go *back* have somewhere to go.
+        let mut moved = loaded();
+        for _ in 0..40 {
+            moved.handle_key(&key_press(Key::Right, Modifiers::NONE));
+        }
+        for _ in 0..3 {
+            moved.handle_key(&key_press(Key::Down, Modifiers::NONE));
+        }
+
+        // ...with a bookmark set, which is the only state `Ctrl+N` and
+        // `Ctrl+P` can act in -- and bookmarks are invisible until one exists,
+        // so this is also the state a user cannot discover by looking.
+        let mut marked = loaded();
+        for _ in 0..16 {
+            marked.handle_key(&key_press(Key::Right, Modifiers::NONE));
+        }
+        marked.handle_key(&key_press(Key::B, Modifiers::ctrl()));
+        for _ in 0..16 {
+            marked.handle_key(&key_press(Key::Right, Modifiers::NONE));
+        }
+
+        // ...with the search bar up, which is the only state `Ctrl+I` means
+        // anything in.
+        let mut searching = loaded();
+        searching.handle_key(&key_press(Key::F, Modifiers::ctrl()));
+
+        vec![plain, moved, marked, searching]
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/rssreader`'s overlay drew twenty of its
+    /// twenty-one rows for weeks -- the list and the handler agreed, and the
+    /// box was a third quantity agreeing with neither.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut editor = loaded();
+        assert!(
+            !help_text(&mut editor).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        editor.handle_key(&key_press(Key::F1, Modifiers::NONE));
+        let shown = help_text(&mut editor);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        editor.handle_key(&key_press(Key::Escape, Modifiers::NONE));
+        assert!(
+            !help_text(&mut editor).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// **The data inspector can be put away.**
+    ///
+    /// `show_inspector` was `true` at construction and written nowhere, so the
+    /// panel was permanent and the bytes beside it had that much less room.
+    /// `Ctrl+D` and not a bare `D`, which types the hex digit 0xD -- the
+    /// chord is in the Ctrl block that runs first, and this asserts the byte
+    /// under the cursor did not change, which is the only way to tell the two
+    /// apart when both answer `Consumed`.
+    #[test]
+    fn the_data_inspector_can_be_hidden() {
+        let mut editor = loaded();
+        let before = editor.show_inspector;
+        let byte = editor.active_doc().data.first().copied();
+
+        editor.handle_key(&key_press(Key::D, Modifiers::ctrl()));
+
+        assert_ne!(
+            editor.show_inspector, before,
+            "Ctrl+D did not move the panel"
+        );
+        assert_eq!(
+            editor.active_doc().data.first().copied(),
+            byte,
+            "Ctrl+D was taken as hex-digit entry and wrote a byte"
+        );
+    }
+
+    /// `?` stays a byte, because the ASCII pane has to be able to write one.
+    #[test]
+    fn a_question_mark_is_not_the_help_key_here() {
+        let mut editor = loaded();
+        let mut ask = key_press(Key::Slash, Modifiers::NONE);
+        ask.modifiers.shift = true;
+        editor.handle_key(&ask);
+        assert!(
+            !help_text(&mut editor).contains("F1 closes this"),
+            "`?` opened the list in a program that writes it into a file"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn help_text(editor: &mut HexEditor) -> String {
+        editor
+            .render(1200.0, 800.0)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     fn key(k: Key) -> Event {
@@ -5456,6 +5736,126 @@ mod tests {
         editor
     }
 
+    /// Shift+Enter walks back through the matches.
+    ///
+    /// `SearchDirection::Backward` and `find_backward` were written and
+    /// tested, and `direction` was `Forward` at construction with nothing in
+    /// the program to change it -- so every search went forwards, and the way
+    /// back through a file was to start again from the top and count.
+    #[test]
+    fn shift_enter_walks_back_through_the_matches() {
+        // "zz" at 0, 10 and 20, and nothing else that matches. Not "aa":
+        // every character of that is a hex digit, so the search box reads it
+        // as the byte 0xAA rather than as two letters, which is this
+        // program's documented first guess at what was typed.
+        let mut data = vec![0u8; 32];
+        for at in [0usize, 10, 20] {
+            data[at] = b'z';
+            data[at.saturating_add(1)] = b'z';
+        }
+        let mut editor = make_test_editor(data);
+        editor.focused_panel = FocusedPanel::SearchBar;
+        editor.search.input_text = String::from("zz");
+
+        // Forward to the second and third.
+        editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
+        assert_eq!(editor.active_doc().cursor, 10, "the first Enter");
+        editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
+        assert_eq!(editor.active_doc().cursor, 20, "the second Enter");
+
+        // And back.
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::NONE
+        };
+        editor.handle_key(&key_press(Key::Enter, shift));
+        assert_eq!(
+            editor.active_doc().cursor,
+            10,
+            "Shift+Enter did not go back to the previous match"
+        );
+        editor.handle_key(&key_press(Key::Enter, shift));
+        assert_eq!(
+            editor.active_doc().cursor,
+            0,
+            "Shift+Enter did not keep going back"
+        );
+    }
+
+    /// `Ctrl+W` decides whether a search runs past the end and starts again.
+    ///
+    /// Both `find_forward` and `find_backward` take `wrap_around` and it was
+    /// `true` with no writer, so a search could not be asked to stop at the
+    /// end -- which is the difference between "not below here" and "not in
+    /// the file".
+    #[test]
+    fn ctrl_w_decides_whether_the_search_starts_again_at_the_top() {
+        // Letters rather than hex digits, for the reason above.
+        let mut data = vec![0u8; 32];
+        data[0] = b'z';
+        data[1] = b'z';
+        let mut editor = make_test_editor(data);
+        editor.focused_panel = FocusedPanel::SearchBar;
+        editor.search.input_text = String::from("zz");
+
+        // Past the only match, wrapping on: it comes back round to it.
+        editor.active_doc_mut().cursor = 20;
+        assert!(editor.search.query.wrap_around, "control: wrap starts on");
+        editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
+        assert_eq!(
+            editor.active_doc().cursor,
+            0,
+            "with wrapping on, the search should have come back to the top"
+        );
+
+        // Wrapping off: it stays where it is rather than pretending.
+        editor.active_doc_mut().cursor = 20;
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            editor.handle_key(&key_press(Key::W, ctrl)),
+            EventResult::Consumed,
+            "Ctrl+W was ignored in the search bar"
+        );
+        assert!(
+            !editor.search.query.wrap_around,
+            "Ctrl+W did not turn it off"
+        );
+        editor.active_doc_mut().cursor = 20;
+        editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
+        assert_eq!(
+            editor.active_doc().cursor,
+            20,
+            "with wrapping off, the search should not have started again"
+        );
+    }
+
+    /// The search bar names every key that changes what the search does.
+    #[test]
+    fn the_search_bar_names_its_keys() {
+        let mut editor = make_test_editor(vec![0; 64]);
+        editor.focused_panel = FocusedPanel::SearchBar;
+        editor.search.visible = true;
+        let texts: Vec<String> = editor
+            .render(1200.0, 800.0)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        for hint in ["Ctrl+I", "Ctrl+W", "Shift+Enter"] {
+            assert!(
+                texts.iter().any(|t| t.contains(hint)),
+                "the search bar never mentions {hint}: {texts:?}"
+            );
+        }
+    }
+
     fn key_press(key: Key, modifiers: Modifiers) -> KeyEvent {
         KeyEvent {
             key,
@@ -5598,6 +5998,107 @@ mod tests {
         assert!(!editor.active_doc().cursor_in_hex);
         editor.handle_key(&key_press(Key::Tab, Modifiers::NONE));
         assert!(editor.active_doc().cursor_in_hex);
+    }
+
+    // ====================================================================
+    // HexEditor — search case sensitivity
+    // ====================================================================
+
+    /// An editor holding "Hello" with the search bar focused.
+    fn editor_searching(text: &str) -> HexEditor {
+        let mut editor = make_test_editor(text.as_bytes().to_vec());
+        editor.focused_panel = FocusedPanel::SearchBar;
+        // The bar is drawn on `search.visible`, not on focus; without this the
+        // render assertions test a bar that is not on screen.
+        editor.search.visible = true;
+        editor
+    }
+
+    /// Ctrl+I turns case matching off and on.
+    ///
+    /// `SearchQuery::case_sensitive` is honoured by `match_at` and had no
+    /// writer anywhere in production, so every search this program ran was
+    /// case-sensitive and nothing could ask for anything else.
+    #[test]
+    fn ctrl_i_toggles_case_sensitivity() {
+        let mut editor = editor_searching("Hello");
+        let before = editor.search.query.case_sensitive;
+
+        editor.handle_key(&key_press(Key::I, Modifiers::ctrl()));
+
+        assert_eq!(
+            editor.search.query.case_sensitive, !before,
+            "Ctrl+I did not change the setting"
+        );
+    }
+
+    /// Ctrl+I is not typed into the query.
+    ///
+    /// The text branch sits directly below and would otherwise take it.
+    #[test]
+    fn ctrl_i_does_not_type_into_the_query() {
+        let mut editor = editor_searching("Hello");
+
+        editor.handle_key(&key_press(Key::I, Modifiers::ctrl()));
+
+        assert!(
+            editor.search.input_text.is_empty(),
+            "Ctrl+I typed into the box: {:?}",
+            editor.search.input_text
+        );
+    }
+
+    /// With case matching off, a search finds text that differs only in case.
+    ///
+    /// The behaviour, not the flag: a flag that flips and changes no result
+    /// is the defect this replaces, one step along.
+    #[test]
+    fn a_case_insensitive_search_finds_what_a_sensitive_one_misses() {
+        let mut editor = editor_searching("Hello");
+        for c in "hello".chars() {
+            editor.search.input_text.push(c);
+        }
+
+        editor.perform_search();
+        assert_eq!(
+            editor.search.match_count, 0,
+            "control: 'hello' should not match 'Hello' while case matters"
+        );
+
+        editor.handle_key(&key_press(Key::I, Modifiers::ctrl()));
+
+        assert!(
+            editor.search.match_count > 0,
+            "turning case matching off did not find 'Hello'"
+        );
+    }
+
+    /// The search bar says which way it is set, and which key changes it.
+    #[test]
+    fn the_search_bar_says_whether_case_matters() {
+        let mut editor = editor_searching("Hello");
+        let drawn = |e: &mut HexEditor| -> Vec<String> {
+            e.render(1200.0, 800.0)
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        assert!(
+            drawn(&mut editor).iter().any(|t| t.contains("Case: on")),
+            "the bar does not say case matters"
+        );
+
+        editor.handle_key(&key_press(Key::I, Modifiers::ctrl()));
+
+        assert!(
+            drawn(&mut editor).iter().any(|t| t.contains("Case: off")),
+            "the bar still says case matters after it stopped"
+        );
     }
 
     // ====================================================================

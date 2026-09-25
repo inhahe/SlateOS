@@ -355,6 +355,9 @@ impl Server {
     pub fn tick(&mut self, compositor: &mut Compositor) -> io::Result<()> {
         self.accept_pending()?;
         self.read_and_serve(compositor);
+        // Before routing, so a deadline that passed during this tick reaches
+        // its claimant in this tick's batch rather than waiting for the next.
+        compositor.queue_idle_notifications(Instant::now());
         self.route_and_flush(compositor);
         self.reap(compositor);
         Ok(())

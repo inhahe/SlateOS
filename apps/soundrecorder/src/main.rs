@@ -4,6 +4,12 @@
 //! visualization, VU metering, markers, trim tool, playback, and a file
 //! browser for saved recordings. Uses the guitk library for UI rendering
 //! with Catppuccin Mocha theme.
+//!
+//! **This program has no audio input, and the window says so.** Nothing here
+//! can enumerate or open a capture device. The distinction it draws is the one
+//! that matters: *"This is not a missing microphone -- this program has no way
+//! to open a capture device at all."* Told only that there is no input, a user
+//! goes looking for a hardware fault they do not have.
 
 #![allow(dead_code, clippy::too_many_arguments, clippy::vec_init_then_push)]
 
@@ -1742,9 +1748,23 @@ impl Default for RecordingHistory {
 // Main application state
 // ============================================================================
 
+/// The keys this window answers, as a reader sees them.
+///
+/// Three keys, none of them named. `M` drops a marker into the recording as
+/// it runs, which is the one a reader cannot guess and cannot discover after
+/// the fact.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Space", "Record, pause, or carry on"),
+    ("S", "Stop"),
+    ("M", "Drop a marker here"),
+];
+
 /// Top-level application state for the sound recorder.
 pub struct SoundRecorderApp {
     /// Current recording state.
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub state: RecordingState,
     /// Selected quality preset.
     pub preset: QualityPreset,
@@ -1797,6 +1817,7 @@ impl SoundRecorderApp {
         let preset = QualityPreset::Music;
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            show_help: false,
             state: RecordingState::Idle,
             preset,
             sample_rate: preset.sample_rate(),
@@ -2045,6 +2066,17 @@ impl SoundRecorderApp {
     /// ends the take — and a key that both pauses and ends depending on state
     /// is how a take gets lost.
     fn handle_key(&mut self, key: &KeyEvent) -> bool {
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return true;
+        }
+        if self.show_help {
+            // Modal: Space starts a recording.
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return true;
+        }
         match key.key {
             Key::Space => match self.state {
                 RecordingState::Idle | RecordingState::Stopped => {
@@ -2211,6 +2243,17 @@ impl SoundRecorderApp {
 
         // Recording history (right side or below)
         cmds.extend(self.history.render(&self.palette, 20.0, 390.0, 560.0));
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         cmds
     }
@@ -2410,6 +2453,88 @@ mod tests {
                 RenderCommand::Text { text, .. } if text == "--:--:--"
             )),
             "the unknown figure did not reach the screen unadorned",
+        );
+    }
+
+    fn key_of(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// The recording state is set directly rather than reached by pressing
+    /// Space, and that is the finding rather than a convenience. There is no
+    /// input device in this tree, so `transition_to(Recording)` refuses and
+    /// Space from Idle answers nothing -- which is correct, and is what the
+    /// banner at the top of the window exists to explain. Every row on this
+    /// card is a key this program answers *once a take is running*, a state
+    /// the machine cannot enter. The keys are named anyway, for the same
+    /// reason `apps/screenrecorder`'s are: the note explains the situation
+    /// and the card explains the keyboard.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|recording| {
+                    let mut app = SoundRecorderApp::new();
+                    if recording {
+                        app.state = RecordingState::Recording;
+                    }
+                    app.handle_key(&key_of(stroke.key))
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing records behind it.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &SoundRecorderApp| -> Vec<String> {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut app = SoundRecorderApp::new();
+        assert!(
+            !drawn(&app).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_key(&key_of(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&drawn(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        // `S` and a running take, not Space and an idle one: Space cannot
+        // start a take on a machine with no input, so "the state did not
+        // change" would be satisfied by the card *and* by its absence.
+        app.state = RecordingState::Recording;
+        let state = app.state;
+        app.handle_key(&key_of(Key::S));
+        assert_eq!(
+            app.state, state,
+            "S stopped the take through the shortcut card"
+        );
+
+        app.handle_key(&key_of(Key::F1));
+        app.handle_key(&key_of(Key::S));
+        assert_ne!(
+            app.state, state,
+            "control: S does nothing even with the card down"
         );
     }
 

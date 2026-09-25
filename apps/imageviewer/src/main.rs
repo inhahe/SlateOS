@@ -33,6 +33,40 @@ use std::process::ExitCode;
 // ============================================================================
 
 const TOOLBAR_HEIGHT: f32 = 40.0;
+
+/// Every key this program answers, and what it does.
+///
+/// Twenty-one bindings and, until this list existed, no way to learn one but
+/// reading the source. `B` and `S` are the worst of them: each is the only way
+/// to bring back the bar it hides, so pressing one once removes the thing that
+/// would have said how to undo it. A toolbar cannot advertise the key that
+/// hides the toolbar.
+///
+/// **Each row is a key this program actually answers**, which is not a
+/// property the list has on its own: `every_advertised_key_does_something`
+/// walks it, reads each label with `guitk::shortcut` and presses every key it
+/// names. `apps/rssreader` shipped an overlay of twenty-one shortcuts of which
+/// about four worked.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Left / Right", "Previous / next image"),
+    ("Home / End", "First / last image"),
+    ("Ctrl+= / Ctrl+-", "Zoom in / out"),
+    ("Ctrl+0", "Fit the image to the window"),
+    ("Ctrl+1", "Actual size"),
+    ("Ctrl+R / Ctrl+Shift+R", "Rotate right / left"),
+    ("Ctrl+H / Ctrl+V", "Flip across / down"),
+    ("I", "Show or hide the image details"),
+    ("T", "Show or hide the thumbnails"),
+    ("B", "Show or hide the toolbar"),
+    ("S", "Show or hide the status bar"),
+    ("D", "How long each slide stays up"),
+    ("F5", "Start or stop the slideshow"),
+    ("Space", "Pause or resume the slideshow"),
+    ("F11", "Full screen"),
+    ("Delete", "Delete this image"),
+    ("Escape", "Leave full screen or the slideshow"),
+    ("F1 / ?", "This list"),
+];
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 const INFO_PANEL_WIDTH: f32 = 280.0;
 const THUMBNAIL_STRIP_HEIGHT: f32 = 80.0;
@@ -460,6 +494,8 @@ pub enum ViewerAction {
     ToggleSlideshow,
     ToggleInfo,
     ToggleThumbnails,
+    ToggleToolbar,
+    ToggleStatusBar,
     ToggleFullscreen,
     FirstImage,
     LastImage,
@@ -499,6 +535,8 @@ pub struct ViewerState {
     pub show_info_panel: bool,
     pub show_thumbnails: bool,
     pub show_toolbar: bool,
+    /// Whether the shortcut list is up.
+    pub show_help: bool,
     pub show_status_bar: bool,
 
     // Slideshow
@@ -554,6 +592,7 @@ impl ViewerState {
             show_info_panel: false,
             show_thumbnails: false,
             show_toolbar: true,
+            show_help: false,
             show_status_bar: true,
             slideshow: SlideshowState::default(),
             dragging: false,
@@ -607,6 +646,17 @@ impl ViewerState {
     /// old dimensions, format and EXIF. "This picture is `holiday.jpg`" is the
     /// one claim an image viewer makes, and it was false in exactly the case
     /// the user most needed to be told about.
+    /// The most bytes of picture file to read.
+    ///
+    /// Generous: a lossless photograph at the largest size the compositor can
+    /// store runs to tens of megabytes, and a caller has no way to ask for
+    /// more. The point is not the number but that there is one --
+    /// `std::fs::read` had no bound at all, so a file larger than memory was
+    /// read whole before `imagecodec::Limits` was consulted, and those limits
+    /// exist precisely to be checked "before any buffer the header describes
+    /// is allocated".
+    const MAX_PICTURE_BYTES: usize = 256 * 1024 * 1024;
+
     fn display_image(&mut self, path: &Path) -> bool {
         let filename = path
             .file_name()
@@ -619,8 +669,22 @@ impl ViewerState {
             ..ImageInfo::default()
         };
 
-        let data = match std::fs::read(path) {
-            Ok(data) => data,
+        let data = match safeio::read_capped(path, Self::MAX_PICTURE_BYTES) {
+            Ok(read) if read.truncated => {
+                // Refused rather than decoded: the tail of a picture is not
+                // optional. A JPEG's scan runs to the end of the file and a
+                // PNG's `IEND` is the last chunk, so a cut file decodes to
+                // something that is not what the photographer took -- and
+                // would be shown without a word about it.
+                self.image_info = info;
+                self.fail_with(format!(
+                    "{} is larger than {} MiB",
+                    path.display(),
+                    Self::MAX_PICTURE_BYTES / (1024 * 1024)
+                ));
+                return false;
+            }
+            Ok(read) => read.bytes,
             Err(e) => {
                 // Committed anyway: the user asked for *this* file, so the UI
                 // must name this file — but with no image and no borrowed
@@ -917,6 +981,15 @@ impl ViewerState {
             ViewerAction::ToggleThumbnails => {
                 self.show_thumbnails = !self.show_thumbnails;
             }
+            // Both of these gate a draw and had no writer, so the two bars
+            // could not be got out of the way of the picture -- which is the
+            // one thing a viewer is for.
+            ViewerAction::ToggleToolbar => {
+                self.show_toolbar = !self.show_toolbar;
+            }
+            ViewerAction::ToggleStatusBar => {
+                self.show_status_bar = !self.show_status_bar;
+            }
             ViewerAction::ToggleFullscreen => {
                 self.fullscreen = !self.fullscreen;
             }
@@ -1016,6 +1089,26 @@ impl ViewerState {
                 self.execute_action(ViewerAction::ToggleThumbnails);
                 true
             }
+            Key::B if !ctrl => {
+                self.execute_action(ViewerAction::ToggleToolbar);
+                true
+            }
+            // How long each picture stays up. `SlideshowInterval::next`
+            // was written with four options and had no caller, so the module
+            // doc's "configurable intervals" described a constant: five
+            // seconds, for everybody, with no way to ask for anything else.
+            Key::D if !ctrl => {
+                self.slideshow.interval = self.slideshow.interval.next();
+                // The clock restarts, or shortening the interval can change
+                // the picture at once -- which reads as the key advancing the
+                // slideshow rather than setting its pace.
+                self.slideshow.elapsed_ms = 0;
+                true
+            }
+            Key::S if !ctrl => {
+                self.execute_action(ViewerAction::ToggleStatusBar);
+                true
+            }
 
             // Slideshow
             Key::F5 => {
@@ -1036,6 +1129,27 @@ impl ViewerState {
             // Delete
             Key::Delete => {
                 self.execute_action(ViewerAction::DeleteImage);
+                true
+            }
+
+            // `?`, which is Shift and the slash key.
+            // The shortcut list. `F1` raises it in every app in this tree,
+            // including `apps/spreadsheet`, where `?` is a character the
+            // program has to be able to type into a cell -- so somebody who
+            // has learned one key is never stuck. `?` as well, wherever the
+            // program is not obliged to type one.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                true
+            }
+            Key::Slash if shift => {
+                self.show_help = !self.show_help;
+                true
+            }
+            // Before the plain `Escape` arm below, which would otherwise take
+            // this and leave the list up while exiting fullscreen.
+            Key::Escape if self.show_help => {
+                self.show_help = false;
                 true
             }
 
@@ -1215,6 +1329,20 @@ pub fn render(state: &ViewerState) -> RenderTree {
         render_status_bar(state, &mut tree, status_y);
     }
 
+    // The shortcut list over everything, because it is the one thing a reader
+    // asked for explicitly -- and because two of the keys it names hide the
+    // bars it would otherwise have to fit between.
+    if state.show_help {
+        guitk::shortcut::render_card(
+            &mut tree,
+            &state.palette,
+            (state.window_width, state.window_height),
+            0.0,
+            SHORTCUTS,
+            "F1 or ? closes this",
+        );
+    }
+
     tree
 }
 
@@ -1346,10 +1474,14 @@ fn render_image(
 
     // Slideshow overlay indicator
     if state.slideshow.active {
+        // The interval is on the badge because `D` changes it, and a
+        // setting that can be changed and not seen is a key that appears to
+        // do nothing: the next picture is three seconds or thirty away, and
+        // either way nothing happens at the moment of pressing.
         let indicator_text = if state.slideshow.paused {
-            "PAUSED"
+            format!("PAUSED {}", state.slideshow.interval.label())
         } else {
-            "SLIDESHOW"
+            format!("SLIDE {}", state.slideshow.interval.label())
         };
         let indicator_color = if state.slideshow.paused {
             with_alpha(state.palette.yellow, 200)
@@ -1374,7 +1506,7 @@ fn render_image(
         tree.push(RenderCommand::Text {
             x: area_x + area_w - 92.0,
             y: area_y + 14.0,
-            text: String::from(indicator_text),
+            text: indicator_text.clone(),
             color: indicator_color,
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
@@ -1848,10 +1980,16 @@ fn toolbar_buttons() -> Vec<ToolbarButton> {
 fn decode_failure(format: ImageFormat, why: &imagecodec::ImageError) -> String {
     match (format, why) {
         // A named format that no decoder claimed: not the file's fault.
-        (
-            ImageFormat::Bmp | ImageFormat::Jpeg | ImageFormat::Gif,
-            imagecodec::ImageError::UnknownFormat,
-        ) => format!("{} images cannot be displayed yet", format.name()),
+        //
+        // JPEG left this list when `imagecodec` learned to decode it. Leaving
+        // it would have told someone whose file begins `FF D8` but is not a
+        // JPEG that "JPEG images cannot be displayed yet" -- a sentence about
+        // this program that stopped being true, pointed at a file that is
+        // genuinely wrong. The two diagnoses this function exists to keep
+        // apart had swapped places.
+        (ImageFormat::Bmp | ImageFormat::Gif, imagecodec::ImageError::UnknownFormat) => {
+            format!("{} images cannot be displayed yet", format.name())
+        }
         _ => why.to_string(),
     }
 }
@@ -2011,6 +2149,172 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// A list on screen and the handler behind it are two copies of one fact,
+    /// and they drift: `apps/rssreader` shipped an overlay of twenty-one
+    /// shortcuts of which about four worked. The label is read by
+    /// `guitk::shortcut` rather than matched against a table written beside it
+    /// here -- that table would be a third copy, drifting from both.
+    ///
+    /// The property is "some reachable state answers this key", not "this key
+    /// is taken right now": `Escape` means nothing until there is a full
+    /// screen or a slideshow to leave, and declining from its own arm is
+    /// answering.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|state| state.handle_key_event(&stroke));
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and no viewer answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Viewers chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<ViewerState> {
+        let plain = ViewerState::new(1024.0, 768.0);
+
+        // Full screen, which is the one state `Escape` has anything to leave.
+        let mut full = ViewerState::new(1024.0, 768.0);
+        full.fullscreen = true;
+
+        vec![plain, full]
+    }
+
+    /// `D` changes how long each slide stays up, and the badge says so.
+    ///
+    /// `SlideshowInterval` has four options and a `next()` that cycles them,
+    /// and `SlideshowState::interval` was `FiveSeconds` at construction with
+    /// no writer in the crate. So the module doc's "Slideshow mode with
+    /// configurable intervals" described a constant, and `next()` -- written
+    /// and tested -- had no caller.
+    #[test]
+    fn d_changes_how_long_each_slide_stays_up() {
+        let mut state = ViewerState::new(1024.0, 768.0);
+        state.slideshow.active = true;
+        state.current_image = Some(ImageData {
+            width: 640,
+            height: 480,
+            image_id: VIEWER_IMAGE_ID,
+        });
+
+        let mut seen = vec![state.slideshow.interval];
+        for _ in 0..3 {
+            assert!(state.handle_key_event(&plain(Key::D)), "D was ignored");
+            seen.push(state.slideshow.interval);
+        }
+        for want in [
+            SlideshowInterval::ThreeSeconds,
+            SlideshowInterval::FiveSeconds,
+            SlideshowInterval::TenSeconds,
+            SlideshowInterval::ThirtySeconds,
+        ] {
+            assert!(
+                seen.contains(&want),
+                "cycling never reached {}",
+                want.label()
+            );
+        }
+        state.handle_key_event(&plain(Key::D));
+        assert_eq!(
+            state.slideshow.interval, seen[0],
+            "the intervals do not come back round"
+        );
+
+        // And the badge names the one in force. Without that, pressing `D`
+        // changes when the *next* picture arrives -- three seconds or thirty
+        // away -- and nothing happens at the moment of pressing.
+        let shown = help_text(&state);
+        assert!(
+            shown.contains(state.slideshow.interval.label()),
+            "the slideshow badge does not name the interval in force: {shown:?}"
+        );
+    }
+
+    /// The clock restarts when the interval changes.
+    #[test]
+    fn changing_the_interval_restarts_the_clock() {
+        let mut state = ViewerState::new(1024.0, 768.0);
+        state.slideshow.active = true;
+        state.slideshow.elapsed_ms = 4000;
+        state.handle_key_event(&plain(Key::D));
+        assert_eq!(
+            state.slideshow.elapsed_ms, 0,
+            "a shorter interval with the old clock still running can change \
+the picture at once, which reads as D advancing the slideshow"
+        );
+    }
+
+    fn plain(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/netscan`'s `wol_note` was written by the
+    /// model and drawn by nothing for three commits with every model-level
+    /// test passing.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert!(
+            !help_text(&state).contains("? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        let mut ask = KeyEvent {
+            key: Key::Slash,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+        ask.modifiers.shift = true;
+        assert!(state.handle_key_event(&ask));
+
+        let shown = help_text(&state);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        assert!(state.handle_key_event(&KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }));
+        assert!(
+            !help_text(&state).contains("? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn help_text(state: &ViewerState) -> String {
+        render(state)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
 
     /// Every colour the viewer's chrome draws comes from the user's palette.
     ///
@@ -2559,26 +2863,73 @@ mod tests {
         assert!(queued(&state).is_empty());
     }
 
+    /// A picture larger than the cap is refused, not read whole.
+    ///
+    /// `imagecodec::Limits` documents that its bounds are checked against a
+    /// file's header, "before any buffer the header describes is allocated --
+    /// a limit applied afterwards is not a limit, it is a post-mortem". This
+    /// viewer used to read the file with `std::fs::read` and consult those
+    /// limits afterwards, so a file larger than memory was already in memory
+    /// before anything could object.
+    ///
+    /// The cap is deliberately far below the real one here, because a test
+    /// that had to write 256 MiB to prove a bound is a test nobody runs.
+    #[test]
+    fn a_picture_past_the_cap_is_refused_before_it_is_decoded() {
+        let guard = scratch("capped-read");
+        let dir = guard.dir().to_path_buf();
+        let path = dir.join("huge.png");
+        // Bigger than the cap this test uses, and a valid PNG besides, so the
+        // refusal cannot be mistaken for "not a picture".
+        let picture = imagecodec::testing::png_gradient(8, 8);
+        std::fs::write(&path, &picture).expect("write picture");
+
+        let read = safeio::read_capped(&path, 8).expect("the read itself succeeds");
+        assert!(
+            read.truncated,
+            "the cap did not bite, so this test proves nothing"
+        );
+        assert!(read.bytes.len() <= 8, "and it stopped where it said");
+    }
+
     /// A format this system recognises but cannot decode must not be reported
     /// as "not a picture". Those are opposite diagnoses — one blames the file,
     /// the other the viewer — and telling a user their photograph is not a
     /// picture sends them looking for a corrupt disk.
+    ///
+    /// This used to use a JPEG, and had to move when `imagecodec` learned to
+    /// decode one: the stub it wrote is not a valid JPEG, so the honest
+    /// diagnosis became "file ends mid-structure" -- which blames the file,
+    /// correctly. GIF is still recognised and still undecodable, so it carries
+    /// the property the test is about.
     #[test]
     fn an_undecodable_but_recognised_format_says_which_it_is() {
         let guard = scratch("unsupported-format");
         let dir = guard.dir().to_path_buf();
-        let jpeg = dir.join("holiday.jpg");
-        // A real JPEG signature, then a plausible APP0 segment: enough for
+        let gif = dir.join("holiday.gif");
+        // A real GIF signature and a logical screen descriptor: enough for
         // `ImageFormat::detect`, and nothing this system can decode.
-        std::fs::write(&jpeg, [0xFF, 0xD8, 0xFF, 0xE0, 0, 16, b'J', b'F']).expect("write jpeg");
+        std::fs::write(&gif, b"GIF89a\x10\x00\x10\x00\x00\x00\x00").expect("write gif");
 
         let mut state = ViewerState::new(800.0, 600.0);
-        assert!(!state.open_file(&jpeg));
+        assert!(!state.open_file(&gif));
         let reason = state.load_error.as_deref().expect("a reason");
         assert!(
-            reason.contains("JPEG images cannot be displayed yet"),
+            reason.contains("GIF images cannot be displayed yet"),
             "the reason must name the format, not blame the file: {reason}"
         );
+    }
+
+    /// A real JPEG now opens, where it used to be named as undecodable.
+    #[test]
+    fn a_jpeg_opens() {
+        let guard = scratch("jpeg-opens");
+        let dir = guard.dir().to_path_buf();
+        let path = dir.join("photo.jpg");
+        std::fs::write(&path, imagecodec::testing::SMALL_JPEG).expect("write jpeg");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&path), "{:?}", state.load_error);
     }
 
     /// A truncated PNG used to report a size: `parse_png_dimensions` read
@@ -2599,6 +2950,38 @@ mod tests {
             None,
             "a chunk that ends mid-header must not yield a size"
         );
+    }
+
+    /// `B` and `S` hide the toolbar and the status bar.
+    ///
+    /// Both flags gate a draw and had no writer, so neither bar could be got
+    /// out of the way of the picture -- which is the one thing a viewer is
+    /// for.
+    #[test]
+    fn b_and_s_hide_the_two_bars() {
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.show_toolbar, "control: the toolbar starts shown");
+        assert!(
+            state.show_status_bar,
+            "control: the status bar starts shown"
+        );
+
+        let press = |k: Key| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+
+        state.handle_key_event(&press(Key::B));
+        assert!(!state.show_toolbar, "B did not hide the toolbar");
+        assert!(state.show_status_bar, "B hid the status bar as well");
+
+        state.handle_key_event(&press(Key::S));
+        assert!(!state.show_status_bar, "S did not hide the status bar");
+
+        state.handle_key_event(&press(Key::B));
+        assert!(state.show_toolbar, "B does not bring the toolbar back");
     }
 
     #[test]

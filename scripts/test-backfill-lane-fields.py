@@ -215,7 +215,7 @@ def test_the_single_agent_history_is_not_claimed_by_anyone(bf):
                   "**Date:** 2026-08-01\n"
                   "**Decided by:** Claude (autonomous)\n\n"
                   "**In short:** something.")
-    for lane in ("A", "B", "C"):
+    for lane in ("A", "B", "C", "D", "E", "F"):
         _out, edits = run_backfill(bf, lines, lane=lane)
         check(f"lane {lane} does not annotate the pre-lane history",
               edits == [])

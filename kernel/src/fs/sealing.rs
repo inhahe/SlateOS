@@ -1,8 +1,25 @@
 //! File sealing — immutability contracts for shared files.
 //!
-//! File sealing (inspired by Linux's `memfd_seal`) provides a mechanism
-//! to place irrevocable restrictions on file operations. Once a seal
-//! is applied, it cannot be removed. This enables:
+//! **NOT ENFORCED YET. A seal is recorded and nothing checks it.** Every
+//! `sealing::` reference outside this file is `procfs` (`stats`,
+//! `list_sealed`) or `kshell` (`add_seals`, `get_seals`); `fs/vfs.rs` and
+//! `fs/handle.rs` contain no reference to seals at all. So a seal can be
+//! applied, `/proc/sealing` will list the file as sealed, and a write to
+//! it succeeds. An unenforced *irrevocable* restriction is worse than no
+//! restriction, because the word invites reliance -- which is why this
+//! paragraph is first rather than a footnote.
+//!
+//! Note also that `stats()`'s `denied` count can only ever be 0, since
+//! nothing checks a seal in order to deny anything. In `/proc` that reads
+//! as *nobody has tried*, not as *nothing is enforced*.
+//!
+//! Enforcement belongs in the VFS write and truncate paths and needs a
+//! capability story; tracked in `known-issues.md`.
+//!
+//! The design, which is what the rest of this module implements:
+//! file sealing (inspired by Linux's `memfd_seal`) is a mechanism to
+//! place irrevocable restrictions on file operations. Once a seal
+//! is applied, it cannot be removed. This is intended to enable:
 //!
 //! - **Shared memory safety**: a process sharing a file can seal it to
 //!   prevent the other side from growing, shrinking, or writing it.

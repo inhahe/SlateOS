@@ -48,6 +48,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-boot-test-reexec.sh` | Prove the boot-test re-exec actually makes a run immune to a mid-run edit. |
 | `scripts/check-cfg-unix.py` | Compile the `#[cfg(unix)]` code that `cargo test` never looks at. |
 | `scripts/check-collapsed-messages.py` | Refuse an assertion message whose line continuation rustfmt collapsed. |
+| `scripts/check-config-turn-guards.py` | Refuse a test that drives an event loop without pinning the config directory. |
 | `scripts/check-control-bytes.py` | Refuse a raw control byte in a tracked text file. |
 | `scripts/check-cp-diff-sees-nul.py` | Prove `cp-diff.sh`'s `contents()` can still see a NUL-only difference. |
 | `scripts/check-crate-names.py` | Refuse a crate whose directory name is a *different* crate's package name. |
@@ -119,6 +120,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-tick-wiring.py` | Find apps that keep time but never receive the clock. |
 | `scripts/check-unreachable-mutators.py` | Find accounting-module mutators that nothing outside their own module calls. |
 | `scripts/check-untested-crates.py` | Refuse a NEW crate that ships with no tests at all. |
+| `scripts/check-unused-exports.py` | Report library exports that no other crate names. |
 | `scripts/check-usage-names-reach-the-command.py` | Refuse a kshell usage line that names a word running a different command. |
 | `scripts/check-usage-status.py` | Guard the rule that printing a diagnostic is *reporting a failure*. |
 | `scripts/check-user-access-sites.py` | Keep kernel writes to user memory confined to the validated primitives. |
@@ -182,6 +184,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/flake-hunt.sh` | flake-hunt.sh — run a crate's test suite N times and report only the runs |
 | `scripts/fold-diff.sh` | Differential test: our fold against GNU fold. |
 | `scripts/free-diff.sh` | Differential test: our `free` against procps-ng `free`. |
+| `scripts/frozen-flag-survey.py` | Boolean fields an app reads and can never change. |
 | `scripts/gen-chmod-fixture.sh` | Measure GNU chmod's answer for a cross product of mode strings, starting |
 | `scripts/gen-human-fixture.sh` | Regenerate userspace/coreutils/tests/data/human-gnu.txt — the table of |
 | `scripts/gen-oils-bind-tables.py` | Regenerate `userspace/oils/src/bind_tables.rs` from the reference bash. |
@@ -201,6 +204,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/join-probe.py` | Ad-hoc measurement of GNU `join`. Not part of the build; kept only so the |
 | `scripts/kasan-build.sh` | kasan-build.sh — build the kernel with LLVM's KernelAddressSanitizer. |
 | `scripts/kasan-check-preshadow.py` | kasan-check-preshadow.py — prove the pre-shadow window is uninstrumented. |
+| `scripts/key-survey.py` | Which apps answer keys they never name on screen? |
 | `scripts/ki_archive.py` | Move lane B's resolved entries from `known-issues.md` into the archive. |
 | `scripts/ki_dupes.py` | Detect entries that exist in BOTH `known-issues.md` and its resolved archive. |
 | `scripts/ki_split.py` | Fence-aware structural scanner for `known-issues.md`. |
@@ -218,6 +222,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/mutate-gate.py` | Break one piece of a Python gate at a time and demand its `--selftest` notice. |
 | `scripts/mutation_harness.py` | The mutation-sweep harness shared by every app's `mutate.py`. |
 | `scripts/mv-diff.sh` | Differential test: our `mv` against GNU coreutils'. |
+| `scripts/never-read-probe.py` | How many fields are declared, initialised, and never read? |
 | `scripts/nice-diff.sh` | Differential test: our `nice` against GNU coreutils'. |
 | `scripts/nl-diff.sh` | Differential test: our nl against GNU nl. |
 | `scripts/nohup-diff.sh` | Differential test: our `nohup` against GNU coreutils'. |
@@ -381,7 +386,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/wdog-nmi-soak.sh` | wdog-nmi-soak.sh — DIAGNOSTIC (throwaway): boot repeatedly under the |
 | `scripts/wdog-reset-experiment.sh` | wdog-reset-experiment.sh — DIAGNOSTIC (throwaway) loop to discriminate, for the |
 | `scripts/wedge-soak.sh` | wedge-soak.sh — armed hang-repro soak for the still-open boot wedge race. |
-| `scripts/which-lane.py` | Print which of the three parallel-agent lanes *this* session owns. |
+| `scripts/which-lane.py` | Print which of the six parallel-agent lanes this session is, and what it owns. |
 | `scripts/who-holds-dir.py` | Report which processes are keeping a directory un-renamable, without admin. |
 | `scripts/whoami-diff.sh` | whoami-diff.sh — compare our `whoami` against the real GNU one, inside WSL. |
 | `scripts/workspace-test.py` | workspace-test.py — the workspace test gate, with the three mistakes |
@@ -389,4 +394,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_379 scripts._
+_384 scripts._

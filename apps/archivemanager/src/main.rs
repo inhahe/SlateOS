@@ -4,15 +4,32 @@
 //! - ZIP, TAR, TAR.GZ, TAR.BZ2, 7Z
 //! - Browse archive contents in a tree view
 //! - Extract all, extract selected, extract to folder
-//! - Create new archives from file lists
+//! - Create a new, empty archive, then add files to it
 //! - Add/remove files from existing archives
-//! - Compression level selection (store/fast/normal/best)
 //! - Progress tracking for operations
 //! - File list with sortable columns
 //! - Drag-and-drop model
-//! - Password/encryption for ZIP/7Z
-//! - Split archive support
+//! - Encrypted members are recognised and reported as needing a password
+//!   (this manager neither encrypts nor decrypts)
 //! - Archive testing/verification
+//!
+//! Four claims were removed from this list on 2026-09-17 because nothing
+//! backed them. `create_archive` calls `backend::create_empty`, which takes a
+//! path and no file list; the backend has no compression-level parameter at
+//! all; and there is no split handling anywhere. The fields that stood for
+//! them were set once and read nowhere -- found by
+//! `scripts/never-read-probe.py`, which is worth pointing at documentation as
+//! well as at code: a field nobody reads is often a sentence in a feature
+//! list nobody can honour.
+//!
+//! **The types went too, on 2026-09-22.** Removing the sentences left
+//! `CreateArchiveSettings`, `EncryptionSettings`, `SplitSettings`,
+//! `CompressionLevel` and the whole `ArchiveOperation` enum standing -- a
+//! complete set of options, with `Default`, validation and tests, that no
+//! code path could reach. An option struct that outruns its backend is how a
+//! dialog with one working entry gets shipped, so they are gone until there
+//! is a writer behind them. `ziparchive::create` takes `store_only: bool`
+//! and no level at all, which is the measure of how far they had run ahead.
 //!
 //! Uses the guitk library for UI rendering.
 //!
@@ -134,47 +151,6 @@ impl ArchiveFormat {
 // Compression levels
 // ============================================================================
 
-/// Compression level presets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum CompressionLevel {
-    /// No compression, store only.
-    Store,
-    /// Fast compression with lower ratio.
-    Fast,
-    /// Balanced compression (default).
-    #[default]
-    Normal,
-    /// Maximum compression, slower.
-    Best,
-}
-
-impl CompressionLevel {
-    /// Display name.
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::Store => "Store (no compression)",
-            Self::Fast => "Fast",
-            Self::Normal => "Normal",
-            Self::Best => "Best (slowest)",
-        }
-    }
-
-    /// Numeric level (0-9 scale used by most compressors).
-    pub fn numeric_level(self) -> u8 {
-        match self {
-            Self::Store => 0,
-            Self::Fast => 3,
-            Self::Normal => 6,
-            Self::Best => 9,
-        }
-    }
-
-    /// All levels.
-    pub fn all() -> &'static [Self] {
-        &[Self::Store, Self::Fast, Self::Normal, Self::Best]
-    }
-}
-
 // ============================================================================
 // Encryption settings
 // ============================================================================
@@ -200,69 +176,9 @@ impl EncryptionMethod {
     }
 }
 
-/// Encryption settings for an archive.
-#[derive(Clone, Debug)]
-pub struct EncryptionSettings {
-    /// The password. Empty means no encryption.
-    pub password: String,
-    /// Encryption method.
-    pub method: EncryptionMethod,
-    /// Whether to encrypt file names (7z only).
-    pub encrypt_filenames: bool,
-}
-
-impl Default for EncryptionSettings {
-    fn default() -> Self {
-        Self {
-            password: String::new(),
-            method: EncryptionMethod::Aes256,
-            encrypt_filenames: false,
-        }
-    }
-}
-
-impl EncryptionSettings {
-    /// Whether encryption is actually enabled (password is non-empty).
-    pub fn is_enabled(&self) -> bool {
-        !self.password.is_empty()
-    }
-}
-
 // ============================================================================
 // Split archive settings
 // ============================================================================
-
-/// Settings for split/multi-volume archives.
-#[derive(Clone, Debug)]
-pub struct SplitSettings {
-    /// Whether splitting is enabled.
-    pub enabled: bool,
-    /// Volume size in bytes.
-    pub volume_size: u64,
-}
-
-impl Default for SplitSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            volume_size: 700 * 1024 * 1024, // 700 MiB (CD-ROM)
-        }
-    }
-}
-
-impl SplitSettings {
-    /// Common split size presets (label, size in bytes).
-    pub fn presets() -> &'static [(&'static str, u64)] {
-        &[
-            ("1.44 MB (Floppy)", 1_440 * 1024),
-            ("100 MB", 100 * 1024 * 1024),
-            ("700 MB (CD)", 700 * 1024 * 1024),
-            ("4.7 GB (DVD)", 4_700_000_000),
-            ("25 GB (Blu-ray)", 25_000_000_000),
-            ("Custom", 0),
-        ]
-    }
-}
 
 // ============================================================================
 // Archive entry (file/directory inside an archive)
@@ -635,35 +551,6 @@ pub fn build_directory_tree(entries: &[ArchiveEntry], archive_name: &str) -> Tre
 // Operations / actions
 // ============================================================================
 
-/// An operation that can be performed on an archive.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ArchiveOperation {
-    /// Open an archive file.
-    Open(PathBuf),
-    /// Extract all files to a destination directory.
-    ExtractAll { destination: PathBuf },
-    /// Extract only selected files.
-    ExtractSelected {
-        entries: Vec<String>,
-        destination: PathBuf,
-    },
-    /// Create a new archive from a list of source files.
-    Create {
-        output: PathBuf,
-        sources: Vec<PathBuf>,
-        format: ArchiveFormat,
-        level: CompressionLevel,
-    },
-    /// Add files to an existing archive.
-    AddFiles { files: Vec<PathBuf> },
-    /// Remove entries from an archive.
-    RemoveEntries { paths: Vec<String> },
-    /// Test archive integrity.
-    TestArchive,
-    /// Close the current archive.
-    Close,
-}
-
 // ============================================================================
 // Progress tracking
 // ============================================================================
@@ -803,6 +690,15 @@ pub enum TestResult {
     DecryptionFailed,
     /// Entry not tested yet.
     Pending,
+    /// The archive could not be read at this entry.
+    ///
+    /// Not a verdict on the archive. "Test" answers "is this file intact?",
+    /// and a disk that stopped answering leaves that question unanswered
+    /// rather than answering it badly -- reporting `Corrupted` here would send
+    /// someone to find another copy of an archive that may be perfectly fine.
+    /// Same distinction `ziparchive::RangedError` draws at the source and
+    /// `SkipReason::Unreadable` carries through extraction.
+    Unreadable(String),
 }
 
 impl TestResult {
@@ -813,6 +709,7 @@ impl TestResult {
             Self::Corrupted(_) => "Corrupted",
             Self::DecryptionFailed => "Decrypt Failed",
             Self::Pending => "Pending",
+            Self::Unreadable(_) => "Unreadable",
         }
     }
 
@@ -922,7 +819,9 @@ impl ArchiveTestResults {
 // ============================================================================
 
 /// Represents a currently open archive.
-#[derive(Clone, Debug)]
+// `Debug` but not `Clone`: the model owns an `ArchiveSource`, which owns an
+// open file. See the note there.
+#[derive(Debug)]
 pub struct ArchiveModel {
     /// Path to the archive file on disk.
     pub path: PathBuf,
@@ -1144,84 +1043,6 @@ impl ArchiveModel {
 // Create archive settings
 // ============================================================================
 
-/// Settings for creating a new archive.
-#[derive(Clone, Debug)]
-pub struct CreateArchiveSettings {
-    /// Output path for the new archive.
-    pub output_path: PathBuf,
-    /// Archive format.
-    pub format: ArchiveFormat,
-    /// Compression level.
-    pub level: CompressionLevel,
-    /// Source files/directories to include.
-    pub sources: Vec<PathBuf>,
-    /// Encryption settings.
-    pub encryption: EncryptionSettings,
-    /// Split archive settings.
-    pub split: SplitSettings,
-    /// Archive comment.
-    pub comment: String,
-    /// Whether to include empty directories.
-    pub include_empty_dirs: bool,
-    /// Whether to store full paths or relative paths.
-    pub store_full_paths: bool,
-}
-
-impl Default for CreateArchiveSettings {
-    fn default() -> Self {
-        Self {
-            output_path: PathBuf::new(),
-            format: ArchiveFormat::Zip,
-            level: CompressionLevel::Normal,
-            sources: Vec::new(),
-            encryption: EncryptionSettings::default(),
-            split: SplitSettings::default(),
-            comment: String::new(),
-            include_empty_dirs: true,
-            store_full_paths: false,
-        }
-    }
-}
-
-impl CreateArchiveSettings {
-    /// Validate settings before creating. Returns a list of problems.
-    pub fn validate(&self) -> Vec<String> {
-        let mut problems = Vec::new();
-
-        if self.output_path.as_os_str().is_empty() {
-            problems.push("Output path is required".into());
-        }
-
-        if self.sources.is_empty() {
-            problems.push("No source files selected".into());
-        }
-
-        if self.encryption.is_enabled() && !self.format.supports_encryption() {
-            problems.push(format!(
-                "{} does not support encryption",
-                self.format.display_name()
-            ));
-        }
-
-        if self.split.enabled && !self.format.supports_split() {
-            problems.push(format!(
-                "{} does not support split archives",
-                self.format.display_name()
-            ));
-        }
-
-        if self.split.enabled && self.split.volume_size < 65536 {
-            problems.push("Volume size must be at least 64 KiB".into());
-        }
-
-        if self.encryption.is_enabled() && self.encryption.password.is_empty() {
-            problems.push("Password cannot be empty when encryption is enabled".into());
-        }
-
-        problems
-    }
-}
-
 // ============================================================================
 // Application state
 // ============================================================================
@@ -1234,6 +1055,29 @@ pub enum ViewMode {
     /// Only entries in the currently selected directory.
     #[default]
     DirectoryView,
+}
+
+impl ViewMode {
+    /// The name the status bar shows, so a reader can tell which list they
+    /// are looking at. Without it, `Ctrl+L` changes the number of rows for
+    /// no stated reason -- an archive whose folders happen to be empty looks
+    /// identical in both modes.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FlatList => "All files",
+            Self::DirectoryView => "This folder",
+        }
+    }
+
+    /// The other one.
+    #[must_use]
+    pub fn other(self) -> Self {
+        match self {
+            Self::FlatList => Self::DirectoryView,
+            Self::DirectoryView => Self::FlatList,
+        }
+    }
 }
 
 /// What the file dialog currently on screen is being used to choose.
@@ -1280,8 +1124,28 @@ pub struct PendingChoice {
     pub dialog: FileDialog,
 }
 
+/// The keys this window answers, as a reader sees them.
+///
+/// The status bar named exactly one of them -- `View: Flat (Ctrl+L)` -- and
+/// that one only because the view it switches had answered `FlatList` since
+/// it was written with nothing able to ask it. The key is newer than the
+/// feature, and the rest of the keyboard was never written down at all.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Move through the entries"),
+    ("PageUp / PageDown", "Move a screenful"),
+    ("Home / End", "First or last entry"),
+    ("Enter", "Open the folder, or the entry"),
+    ("Space", "Select or deselect the entry under the cursor"),
+    ("Ctrl+A", "Select everything in the archive"),
+    ("Ctrl+B", "Show or hide the sidebar"),
+    ("Ctrl+L", "Flat list, or one folder at a time"),
+    ("Delete", "Delete the selected entries"),
+];
+
 /// The full application state.
-#[derive(Clone, Debug)]
+// `Debug` but not `Clone`, since the archive it holds owns an open file.
+#[derive(Debug)]
 pub struct AppState {
     /// Currently open archive, if any.
     pub archive: Option<ArchiveModel>,
@@ -1296,6 +1160,8 @@ pub struct AppState {
     /// Drag-and-drop state.
     pub drag: DragState,
     /// Whether the sidebar (tree view) is visible.
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub sidebar_visible: bool,
     /// Sidebar width in pixels.
     pub sidebar_width: f32,
@@ -1348,6 +1214,7 @@ impl Default for AppState {
             view_mode: ViewMode::default(),
             progress: None,
             drag: DragState::default(),
+            show_help: false,
             sidebar_visible: true,
             sidebar_width: 220.0,
             window_width: 900.0,
@@ -1481,15 +1348,16 @@ impl AppState {
                 let selected = archive.selected_entries().len();
                 let total_files = archive.file_count;
                 let ratio = archive.overall_ratio();
+                let view = self.view_mode.label();
                 if selected > 0 {
                     let sel_size: u64 = archive.selected_entries().iter().map(|e| e.size).sum();
                     format!(
-                        "{selected} of {total_files} files selected ({}) | Ratio: {ratio:.1}%",
+                        "{selected} of {total_files} files selected ({}) | Ratio: {ratio:.1}% | View: {view} (Ctrl+L)",
                         ArchiveEntry::format_size(sel_size)
                     )
                 } else {
                     format!(
-                        "{total_files} files, {} dirs | {} -> {} | Ratio: {ratio:.1}%",
+                        "{total_files} files, {} dirs | {} -> {} | Ratio: {ratio:.1}% | View: {view} (Ctrl+L)",
                         archive.dir_count,
                         ArchiveEntry::format_size(archive.total_size),
                         ArchiveEntry::format_size(archive.total_compressed),
@@ -2603,6 +2471,17 @@ pub fn build_frame(state: &AppState, width: f32, height: f32) -> Frame {
     // Drag overlay (on top of everything).
     render_drag_overlay(&state.drag, &state.palette, &mut frame, w, h);
 
+    if state.show_help {
+        guitk::shortcut::render_card(
+            &mut frame,
+            &state.palette,
+            (w, h),
+            0.0,
+            SHORTCUTS,
+            "F1 closes this",
+        );
+    }
+
     frame
 }
 
@@ -3285,6 +3164,23 @@ impl AppState {
             // A key *release* must not repeat the action of its press.
             return Action::None;
         }
+        // Above the dialog branch, which keeps the key: a card raised from
+        // the list and not dismissable from a dialog is a list with no way
+        // out, which is the failure this ordering has avoided in eight apps
+        // now.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return Action::Redraw;
+        }
+        if self.show_help {
+            // Modal. Delete removes entries and Ctrl+A selects the archive;
+            // neither should happen from behind a list.
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return Action::Redraw;
+        }
+
         // A dialog is modal, so it gets the key first and keeps it. Falling
         // through would let Delete remove rows from the list the user cannot
         // see, and Escape close the window instead of the dialog.
@@ -3326,6 +3222,14 @@ impl AppState {
             }
             Key::B if key.modifiers.ctrl => {
                 self.sidebar_visible = !self.sidebar_visible;
+                Action::Redraw
+            }
+            // The two listings. `visible_entries` has answered `FlatList`
+            // since it was written and nothing could ask it: an archive could
+            // only ever be read one directory at a time.
+            Key::L if key.modifiers.ctrl => {
+                self.view_mode = self.view_mode.other();
+                self.set_cursor(0, size.1);
                 Action::Redraw
             }
             Key::O if key.modifiers.ctrl => self.run_toolbar(ToolbarAction::Open),
@@ -3569,7 +3473,7 @@ fn sample_archive_bytes() -> Vec<u8> {
 pub fn create_sample_archive() -> ArchiveModel {
     let path = PathBuf::from("/home/user/project.zip");
     #[allow(clippy::expect_used)]
-    backend::parse_zip(&path, sample_archive_bytes())
+    backend::parse_zip(&path, backend::ArchiveBytes::Memory(sample_archive_bytes()))
         .expect("the ZIP writer must produce something the ZIP reader accepts")
 }
 
@@ -3838,50 +3742,6 @@ mod tests {
         assert!(all.contains(&ArchiveFormat::SevenZip));
     }
 
-    // --- CompressionLevel tests ---
-
-    #[test]
-    fn test_compression_level_numeric() {
-        assert_eq!(CompressionLevel::Store.numeric_level(), 0);
-        assert_eq!(CompressionLevel::Fast.numeric_level(), 3);
-        assert_eq!(CompressionLevel::Normal.numeric_level(), 6);
-        assert_eq!(CompressionLevel::Best.numeric_level(), 9);
-    }
-
-    #[test]
-    fn test_compression_level_default() {
-        assert_eq!(CompressionLevel::default(), CompressionLevel::Normal);
-    }
-
-    #[test]
-    fn test_compression_level_all() {
-        let all = CompressionLevel::all();
-        assert_eq!(all.len(), 4);
-    }
-
-    #[test]
-    fn test_compression_level_display_name() {
-        assert!(CompressionLevel::Store.display_name().contains("Store"));
-        assert!(CompressionLevel::Best.display_name().contains("Best"));
-    }
-
-    // --- EncryptionSettings tests ---
-
-    #[test]
-    fn test_encryption_default_disabled() {
-        let enc = EncryptionSettings::default();
-        assert!(!enc.is_enabled());
-    }
-
-    #[test]
-    fn test_encryption_enabled_with_password() {
-        let enc = EncryptionSettings {
-            password: "secret".into(),
-            ..Default::default()
-        };
-        assert!(enc.is_enabled());
-    }
-
     #[test]
     fn test_encryption_method_display() {
         assert_eq!(EncryptionMethod::Aes256.display_name(), "AES-256");
@@ -3890,23 +3750,6 @@ mod tests {
                 .display_name()
                 .contains("legacy")
         );
-    }
-
-    // --- SplitSettings tests ---
-
-    #[test]
-    fn test_split_default_disabled() {
-        let split = SplitSettings::default();
-        assert!(!split.enabled);
-        assert_eq!(split.volume_size, 700 * 1024 * 1024);
-    }
-
-    #[test]
-    fn test_split_presets_nonempty() {
-        let presets = SplitSettings::presets();
-        assert!(!presets.is_empty());
-        // First preset should be floppy size.
-        assert_eq!(presets[0].1, 1_440 * 1024);
     }
 
     // --- ArchiveEntry tests ---
@@ -4762,78 +4605,6 @@ mod tests {
         assert_eq!(src_entries[0].name, "main.rs");
     }
 
-    // --- CreateArchiveSettings tests ---
-
-    #[test]
-    fn test_create_settings_validate_empty() {
-        let s = CreateArchiveSettings::default();
-        let problems = s.validate();
-        assert!(problems.iter().any(|p| p.contains("Output path")));
-        assert!(problems.iter().any(|p| p.contains("No source")));
-    }
-
-    #[test]
-    fn test_create_settings_validate_ok() {
-        let s = CreateArchiveSettings {
-            output_path: PathBuf::from("out.zip"),
-            sources: vec![PathBuf::from("file.txt")],
-            ..Default::default()
-        };
-        let problems = s.validate();
-        assert!(
-            problems.is_empty(),
-            "expected no problems, got: {problems:?}"
-        );
-    }
-
-    #[test]
-    fn test_create_settings_validate_encryption_unsupported() {
-        let s = CreateArchiveSettings {
-            output_path: PathBuf::from("out.tar"),
-            format: ArchiveFormat::Tar,
-            sources: vec![PathBuf::from("file.txt")],
-            encryption: EncryptionSettings {
-                password: "secret".into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let problems = s.validate();
-        assert!(problems.iter().any(|p| p.contains("encryption")));
-    }
-
-    #[test]
-    fn test_create_settings_validate_split_unsupported() {
-        let s = CreateArchiveSettings {
-            output_path: PathBuf::from("out.tar.gz"),
-            format: ArchiveFormat::TarGz,
-            sources: vec![PathBuf::from("file.txt")],
-            split: SplitSettings {
-                enabled: true,
-                volume_size: 1_000_000,
-            },
-            ..Default::default()
-        };
-        let problems = s.validate();
-        assert!(problems.iter().any(|p| p.contains("split")));
-    }
-
-    #[test]
-    fn test_create_settings_validate_split_too_small() {
-        let s = CreateArchiveSettings {
-            output_path: PathBuf::from("out.zip"),
-            format: ArchiveFormat::Zip,
-            sources: vec![PathBuf::from("file.txt")],
-            split: SplitSettings {
-                enabled: true,
-                volume_size: 100, // too small
-            },
-            ..Default::default()
-        };
-        let problems = s.validate();
-        assert!(problems.iter().any(|p| p.contains("64 KiB")));
-    }
-
     // --- AppState tests ---
 
     #[test]
@@ -5091,6 +4862,84 @@ mod tests {
             .centre()
     }
 
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Against a loaded archive, because an empty one answers none of the
+    /// keys that move through what is in it. `Action::None` is this app's
+    /// "nothing happened".
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [0_usize, 2].into_iter().any(|rows| {
+                    let mut state = loaded();
+                    for _ in 0..rows {
+                        state.handle_key(&guitk::probe::press(Key::Down), SIZE);
+                    }
+                    state.handle_key(&stroke, SIZE) != Action::None
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing selects behind it.**
+    ///
+    /// The control is the last third: Ctrl+A behind the card must not select
+    /// the archive, and must select it with the card down.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |state: &AppState| -> Vec<String> {
+            build_frame(state, SIZE.0, SIZE.1)
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut state = loaded();
+        assert!(
+            !drawn(&state).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        state.handle_key(&guitk::probe::press(Key::F1), SIZE);
+        let missing = guitk::shortcut::missing_rows(&drawn(&state), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let selected = state
+            .archive
+            .as_ref()
+            .map(|a| a.entries.iter().filter(|e| e.selected).count());
+        state.handle_key(&ctrl(Key::A), SIZE);
+        assert_eq!(
+            state
+                .archive
+                .as_ref()
+                .map(|a| a.entries.iter().filter(|e| e.selected).count()),
+            selected,
+            "Ctrl+A selected the archive through the shortcut card"
+        );
+
+        state.handle_key(&guitk::probe::press(Key::F1), SIZE);
+        state.handle_key(&ctrl(Key::A), SIZE);
+        assert_ne!(
+            state
+                .archive
+                .as_ref()
+                .map(|a| a.entries.iter().filter(|e| e.selected).count()),
+            selected,
+            "control: Ctrl+A does nothing even with the card down"
+        );
+    }
+
     fn loaded() -> AppState {
         AppState {
             archive: Some(create_sample_archive()),
@@ -5126,11 +4975,16 @@ mod tests {
     fn a_click_on_empty_background_does_nothing() {
         let mut state = loaded();
         // The far bottom-left of the status bar is not a control.
-        let before = state.clone();
+        //
+        // The two fields this compares, rather than a clone of the whole
+        // state: the state owns the open archive now, and copying a file
+        // handle to compare two strings is a cost with no reader.
+        let before_status = state.status_message.clone();
+        let before_dir = state.current_dir.clone();
         let action = click(&mut state, (5.0, SIZE.1 - 2.0));
         assert_eq!(action, Action::None);
-        assert_eq!(state.status_message, before.status_message);
-        assert_eq!(state.current_dir, before.current_dir);
+        assert_eq!(state.status_message, before_status);
+        assert_eq!(state.current_dir, before_dir);
     }
 
     #[test]
@@ -5986,6 +5840,55 @@ mod tests {
         assert_eq!(state.current_dir, "");
         // At the root there is nowhere to go, and it says so by doing nothing.
         assert_eq!(state.handle_key(&key(Key::Backspace), SIZE), Action::None);
+    }
+
+    /// Both listings can be reached, and the status bar says which is up.
+    ///
+    /// `visible_entries` has always had two arms and `view_mode` was
+    /// `DirectoryView` at construction with no writer in the crate, so the
+    /// flat listing -- every entry in the archive, at once -- could not be
+    /// asked for. The archive could only be read one folder at a time.
+    #[test]
+    fn ctrl_l_switches_between_the_two_listings() {
+        let mut state = loaded();
+        let in_folder = state.visible_entries().len();
+        let all = state.archive.as_ref().map_or(0, |a| a.entries.len());
+        assert!(
+            in_folder < all,
+            "control: the fixture needs an archive where one folder holds \
+fewer than all {all} entries, and this one shows {in_folder}"
+        );
+        assert_eq!(state.view_mode, ViewMode::DirectoryView);
+
+        assert_eq!(
+            state.handle_key(&ctrl(Key::L), (900.0, 600.0)),
+            Action::Redraw,
+            "Ctrl+L was ignored"
+        );
+        assert_eq!(state.view_mode, ViewMode::FlatList);
+        assert_eq!(
+            state.visible_entries().len(),
+            all,
+            "the flat listing did not show every entry"
+        );
+        assert!(
+            state.status_text().contains("All files"),
+            "the status bar does not say which listing is up: {:?}",
+            state.status_text()
+        );
+
+        state.handle_key(&ctrl(Key::L), (900.0, 600.0));
+        assert_eq!(state.view_mode, ViewMode::DirectoryView);
+        assert_eq!(
+            state.visible_entries().len(),
+            in_folder,
+            "Ctrl+L did not come back to the folder listing"
+        );
+        assert!(
+            state.status_text().contains("This folder"),
+            "the status bar does not say which listing is up: {:?}",
+            state.status_text()
+        );
     }
 
     #[test]

@@ -2499,7 +2499,22 @@ impl Vfs {
             return Ok(Vec::new());
         }
         let out_len = usize::try_from(size).map_err(|_| KernelError::InvalidArgument)?;
-        let mut buf = alloc::vec![0u8; out_len];
+        // `alloc::vec![0u8; out_len]` aborts the process on allocation
+        // failure, which in a kernel is a panic. On 2026-09-18 a
+        // 22,526,200-byte read did exactly that with 2.7 GB free: the
+        // buddy allocator rounds a request up to a power-of-two frame
+        // count (heap.rs:883), so 1,376 frames became 2,048 and a 22.5 MB
+        // file demanded a 32 MiB CONTIGUOUS block. A 20.5 MB file is the
+        // same order and reads fine, so this is fragmentation rather than
+        // a size limit -- i.e. nondeterministic, which is the worst kind of
+        // panic to leave in a read path.
+        //
+        // `try_reserve_exact` returns instead of aborting. The `resize`
+        // after it cannot fail, because the capacity is already reserved.
+        let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        buf.try_reserve_exact(out_len)
+            .map_err(|_| crate::error::KernelError::OutOfMemory)?;
+        buf.resize(out_len, 0u8);
         crate::mm::page_cache::read_through(file_id, 0, &mut buf, |page_off, page_buf| {
             Self::fill_file_page(path, page_off, page_buf)
         })?;
@@ -3027,7 +3042,22 @@ impl Vfs {
             return Ok(Vec::new());
         }
 
-        let mut buf = alloc::vec![0u8; out_len];
+        // `alloc::vec![0u8; out_len]` aborts the process on allocation
+        // failure, which in a kernel is a panic. On 2026-09-18 a
+        // 22,526,200-byte read did exactly that with 2.7 GB free: the
+        // buddy allocator rounds a request up to a power-of-two frame
+        // count (heap.rs:883), so 1,376 frames became 2,048 and a 22.5 MB
+        // file demanded a 32 MiB CONTIGUOUS block. A 20.5 MB file is the
+        // same order and reads fine, so this is fragmentation rather than
+        // a size limit -- i.e. nondeterministic, which is the worst kind of
+        // panic to leave in a read path.
+        //
+        // `try_reserve_exact` returns instead of aborting. The `resize`
+        // after it cannot fail, because the capacity is already reserved.
+        let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        buf.try_reserve_exact(out_len)
+            .map_err(|_| crate::error::KernelError::OutOfMemory)?;
+        buf.resize(out_len, 0u8);
         crate::mm::page_cache::read_through(file_id, offset, &mut buf, |page_off, page_buf| {
             Self::fill_file_page(path, page_off, page_buf)
         })?;

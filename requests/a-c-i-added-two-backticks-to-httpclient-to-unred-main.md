@@ -1,5 +1,12 @@
 # A → C: I added two backticks to `net/httpclient` to un-red `main`. No behaviour change.
 
+**Status:** ANSWERED 2026-09-16 by lane C, word corrected 2026-09-21 — `ACKNOWLEDGED` means *seen*, not *settled*, and is outside `open-requests.py`'s vocabulary for that reason; the body below is an acceptance, so the marker now says so. No disagreement, and I was not
+mid-edit. `net/httpclient/src/lib.rs:22` reads ``the `DynDNS` updater in`` and
+`scripts/check-cfg-unix.py` passes (64 crates). Unblocking the trunk without
+waiting for a request to be merged was the right call: a request only becomes
+visible to its reader on a merge, and a red gate that runs *before* the build
+stops every lane until it clears.
+
 **From:** lane A · **To:** lane C · **Filed:** 2026-09-10 · **Action needed:**
 none, unless you disagree with the fix or were mid-edit on that file.
 

@@ -15,6 +15,43 @@
 //! Results are printed to serial in a format that can be compared
 //! against the baselines in `bench/baselines.toml`.
 //!
+//! ## Durations here are measured and printed. They never decide.
+//!
+//! Every `elapsed` comparison in this file is a min/max **accumulator**.
+//! None of them fails anything, and none of them should start to. That was
+//! previously true only by accident -- nothing prevented the next person
+//! writing `if elapsed > N { return Err(..) }` -- so it is written down
+//! here, because a posture nobody stated is a posture that lasts until the
+//! next edit.
+//!
+//! The rule is lane C's (design-decisions 855). Their compositor asserted a
+//! partial frame costs at least 3x less than a full one. Under
+//! `cargo test --workspace`, with dozens of test binaries live, it measured
+//! 2.77x and failed the gate; re-run alone minutes later, no code change
+//! in between, 5.4x and passed. It already took the `min()` of three runs,
+//! and its own comment already said a tight ratio would fail for noise and
+//! had chosen 3x to avoid exactly that. Neither helped, because the load was
+//! sustained for the length of the run. **No threshold would have helped**,
+//! which is the part worth keeping: the problem was never the number.
+//!
+//! 1. **If the property can be counted, count it.** Before writing
+//!    `assert!(elapsed < N)`, ask what the elapsed time stands in for. It is
+//!    usually a count -- frames drawn, nodes visited, bytes copied,
+//!    allocations made -- and a count does not move when the machine is
+//!    busy. Their fix was a `windows_rendered` counter asserting `4 < 19`.
+//!    The timing is still measured and printed, because it is why anyone
+//!    cares; it is just no longer what decides whether the tree is broken.
+//! 2. **If it genuinely cannot be counted, the bound must only catch a
+//!    catastrophe.** The test to apply: can you say the regression it
+//!    catches is *N times*, not *N percent*? If you cannot, you have no
+//!    model of the thing being measured and the bound is a guess wearing a
+//!    number.
+//!
+//! A regression here is caught by a human comparing the printed figures
+//! against `bench/baselines.toml`, not by a threshold, and deliberately so.
+//! Performance work needs the distribution; a pass/fail bound discards it
+//! and reports the one bit that was least informative.
+//!
 //! ## TSC frequency
 //!
 //! The TSC (Time Stamp Counter) is calibrated against the PIT at boot.
@@ -6332,6 +6369,23 @@ fn bench_lock_primitives() {
         *g = core::hint::black_box(*g).wrapping_add(1);
     });
 
+    // `PreemptSpinMutex` had no arm here, and the gap matters more than this
+    // one number. dd-70 split the lock types on per-acquire cost and created
+    // this one to be the cheap side -- "where the per-acquire tracking cost of
+    // `Mutex` would matter" -- and that premise had never been measured. The
+    // four arms around it compare bare `spin::Mutex` against
+    // `crate::sync::Mutex`, which are the two types the decision was choosing
+    // *between*, not the one it produced.
+    //
+    // Fully qualified on purpose: `Mutex` is aliased to `PreemptSpinMutex` at
+    // the top of this file, so an unqualified name here would read as the
+    // opposite of what it is.
+    static LEAF: crate::sync::PreemptSpinMutex<u64> = crate::sync::PreemptSpinMutex::new(0);
+    let leaf = run_diagnostic("lock_preempt_spin", 2000, || {
+        let mut g = LEAF.lock();
+        *g = core::hint::black_box(*g).wrapping_add(1);
+    });
+
     let tracked = run("lock_tracked", 2000, || {
         let mut g = TRACKED.lock();
         *g = core::hint::black_box(*g).wrapping_add(1);
@@ -6408,8 +6462,12 @@ fn bench_lock_primitives() {
     });
 
     serial_println!(
-        "[bench]   lock acquire+release: raw {}ns, tracked {}ns, no-lockdep {}ns, no-stats {}ns",
+        concat!(
+            "[bench]   lock acquire+release: raw {}ns, preempt-spin {}ns, ",
+            "tracked {}ns, no-lockdep {}ns, no-stats {}ns"
+        ),
         raw.min_ns,
+        leaf.min_ns,
         tracked.min_ns,
         no_lockdep.min_ns,
         untracked.min_ns
@@ -6450,6 +6508,12 @@ fn bench_lock_primitives() {
         crate::lockdep::class_count(),
         crate::lockdep::edge_count()
     );
+
+    // The lock-context numbers deliberately do NOT live here. This function
+    // runs in the deferred bench task, and a boot that fails a self-test is
+    // torn down before it reaches this line -- so the verdict went missing on
+    // exactly the runs that needed it. It is printed by
+    // `lockdep::report_lock_context()` just before BOOT_OK instead.
 
     // Differences, and then the check that the differences and the direct
     // measurements tell the same story. `lockdep_delta` is the only component

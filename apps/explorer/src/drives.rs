@@ -194,10 +194,19 @@ fn device_of(path: &Path) -> Option<u64> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     // Case-insensitively: `C:\x` and `c:\x` are one volume on Windows, and a
     // drag between the two must not look like a drag between two drives.
+    // Folded as *bytes*, ASCII-only, and this is defensive rather than a fix
+    // for anything observed. What is hashed is the volume *prefix* -- a drive
+    // letter, a UNC share, or `/` -- which is ASCII in every case anyone has
+    // hit, so the previous `to_string_lossy().to_lowercase()` was not wrong in
+    // practice. It was wrong in two ways that cost nothing to remove: every
+    // undecodable byte became the same U+FFFD, which would merge two prefixes
+    // that differ only there, and Unicode lowercasing folds far more than the
+    // drive letters this is for. ASCII folding over bytes is exactly the
+    // `C:` / `c:` case Windows needs and leaves everything else alone.
     prefix
         .as_os_str()
-        .to_string_lossy()
-        .to_lowercase()
+        .as_encoded_bytes()
+        .to_ascii_lowercase()
         .hash(&mut hasher);
     Some(hasher.finish())
 }
@@ -209,12 +218,11 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
-    use scratchdir::ScratchDir;
     use std::fs;
 
     #[test]
     fn two_paths_in_one_directory_are_on_one_drive() {
-        let scratch = ScratchDir::new("drives_same");
+        let scratch = crate::guarded_scratch("drives_same");
         let root = scratch.dir();
         fs::write(root.join("a.txt"), "a").unwrap();
         fs::write(root.join("b.txt"), "b").unwrap();
@@ -228,7 +236,7 @@ mod tests {
     /// The destination of a copy does not exist yet, and must still resolve.
     #[test]
     fn a_path_that_does_not_exist_yet_resolves_through_its_parent() {
-        let scratch = ScratchDir::new("drives_future");
+        let scratch = crate::guarded_scratch("drives_future");
         let root = scratch.dir();
         fs::write(root.join("here.txt"), "x").unwrap();
         let not_yet = root.join("deeper/and/deeper/new.txt");
@@ -241,7 +249,7 @@ mod tests {
     /// A directory and a file inside it are on one drive.
     #[test]
     fn a_directory_and_its_contents_are_on_one_drive() {
-        let scratch = ScratchDir::new("drives_parent");
+        let scratch = crate::guarded_scratch("drives_parent");
         let root = scratch.dir();
         fs::create_dir(root.join("sub")).unwrap();
         fs::write(root.join("sub/file.txt"), "x").unwrap();
@@ -268,7 +276,7 @@ mod tests {
 
     #[test]
     fn two_operations_under_one_directory_share_its_drive() {
-        let scratch = ScratchDir::new("driveset_share");
+        let scratch = crate::guarded_scratch("driveset_share");
         let root = scratch.dir();
         fs::write(root.join("a.txt"), "a").unwrap();
         fs::write(root.join("b.txt"), "b").unwrap();
@@ -282,7 +290,7 @@ mod tests {
     /// An operation that touches nothing is in nothing's way.
     #[test]
     fn an_empty_set_shares_with_nothing() {
-        let scratch = ScratchDir::new("driveset_empty");
+        let scratch = crate::guarded_scratch("driveset_empty");
         let root = scratch.dir();
         fs::write(root.join("a.txt"), "a").unwrap();
 
@@ -301,7 +309,7 @@ mod tests {
     /// one disk is what the rule exists to prevent.
     #[test]
     fn an_unresolved_path_collides_with_everything() {
-        let scratch = ScratchDir::new("driveset_unknown");
+        let scratch = crate::guarded_scratch("driveset_unknown");
         let root = scratch.dir();
         fs::write(root.join("a.txt"), "a").unwrap();
 
@@ -316,7 +324,7 @@ mod tests {
     /// And one known side is not enough either.
     #[test]
     fn one_known_side_still_answers_nothing() {
-        let scratch = ScratchDir::new("drives_half");
+        let scratch = crate::guarded_scratch("drives_half");
         let root = scratch.dir();
         fs::write(root.join("real.txt"), "x").unwrap();
 
@@ -324,5 +332,13 @@ mod tests {
             same_drive(&root.join("real.txt"), Path::new("no-such-dir-xyzzy/f")),
             None
         );
+    }
+
+    /// A drive letter still folds case, which is what the folding is for.
+    #[test]
+    fn a_drive_letter_is_case_insensitive() {
+        let upper = device_of(Path::new(r"C:\x"));
+        let lower = device_of(Path::new(r"c:\x"));
+        assert_eq!(upper, lower, "C: and c: are one volume on Windows");
     }
 }

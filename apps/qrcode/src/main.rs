@@ -67,6 +67,31 @@ const CORNER_RADIUS: f32 = 4.0;
 // ============================================================================
 
 /// Generator polynomial primitive: x^8 + x^4 + x^3 + x^2 + 1 (0x11D)
+/// Every key this program answers, and what it does.
+///
+/// One list, drawn by `F1` and checked by `every_advertised_key_does_something`
+/// -- so a key cannot be bound without being findable, and cannot be
+/// advertised without working. Before this the program had eleven keys and
+/// printed none of them: `Ctrl+E` changed the error correction of a code
+/// somebody was about to print, and the only way to know was to read the
+/// source.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+I", "What kind of thing to encode"),
+    ("Tab", "Next box, where a mode has more than one"),
+    ("Ctrl+Q / Ctrl+B", "Make a QR code / a Code128 barcode"),
+    (
+        "Ctrl+E",
+        "Error correction: more of it survives more damage",
+    ),
+    ("Ctrl+M", "How big each square is drawn"),
+    ("Ctrl+S", "WiFi: open, WEP or WPA"),
+    ("Ctrl+H", "WiFi: whether the network is hidden"),
+    ("Ctrl+K", "Forget the history"),
+    ("Backspace", "Delete a character from the box"),
+    ("Escape", "Empty the box"),
+    ("F1", "This list"),
+];
+
 const GF_PRIMITIVE: u16 = 0x11D;
 
 /// Compute GF(2^8) log and exp tables at compile time is not trivial,
@@ -1324,6 +1349,86 @@ impl InputMode {
             InputMode::VCard,
         ]
     }
+
+    /// The boxes this mode shows, in the order they are drawn.
+    ///
+    /// The four text-shaped modes share one box: `format_qr_data` wraps what
+    /// is typed -- `https://`, `mailto:`, `tel:` -- rather than asking for
+    /// anything extra.
+    #[must_use]
+    pub fn fields(self) -> &'static [Field] {
+        match self {
+            Self::Text | Self::Url | Self::Email | Self::Phone => &[Field::Text],
+            Self::Wifi => &[Field::Ssid, Field::Password],
+            Self::VCard => &[
+                Field::FirstName,
+                Field::LastName,
+                Field::Phone,
+                Field::Email,
+                Field::Organization,
+            ],
+        }
+    }
+
+    /// The next mode along `all()`, wrapping.
+    #[must_use]
+    pub fn step(self, forward: bool) -> Self {
+        let modes = Self::all();
+        let at = modes.iter().position(|m| *m == self).unwrap_or(0);
+        let last = modes.len().saturating_sub(1);
+        let next = if forward {
+            if at >= last { 0 } else { at.saturating_add(1) }
+        } else if at == 0 {
+            last
+        } else {
+            at.saturating_sub(1)
+        };
+        modes.get(next).copied().unwrap_or(Self::Text)
+    }
+}
+
+/// One typed-into box of the left panel.
+///
+/// Six input modes were drawn as a row of buttons with the active one
+/// highlighted, and `input_mode` was `Text` at construction with no writer in
+/// the crate -- so `format_qr_data`'s Url, Email, Phone, Wifi and VCard arms,
+/// all written and all tested, encoded nothing for anybody. Making the row
+/// work exposed the next layer: the Wifi and VCard modes draw labelled boxes
+/// reading "Enter SSID..." and there was no way to type into one, because
+/// `wifi_config` and `vcard_info` had no writers either.
+///
+/// So the boxes are this list. `InputMode::fields` says which of them a mode
+/// shows, the renderer walks that, Tab walks that, and typing goes to the one
+/// the walk has landed on. A box cannot be drawn without being typeable,
+/// because being drawn means being in the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    /// The single box the four text-shaped modes share.
+    Text,
+    Ssid,
+    Password,
+    FirstName,
+    LastName,
+    Phone,
+    Email,
+    Organization,
+}
+
+impl Field {
+    /// The label above the box.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Text => "Content",
+            Self::Ssid => "SSID",
+            Self::Password => "Password",
+            Self::FirstName => "First Name",
+            Self::LastName => "Last Name",
+            Self::Phone => "Phone",
+            Self::Email => "Email",
+            Self::Organization => "Organization",
+        }
+    }
 }
 
 /// `WiFi` configuration for QR encoding.
@@ -1490,6 +1595,10 @@ pub struct HistoryEntry {
 pub struct QrApp {
     pub input_text: String,
     pub input_mode: InputMode,
+    /// Which of this mode's boxes the keyboard is typing into.
+    pub focused_field: usize,
+    /// Whether the shortcut list is up.
+    pub show_help: bool,
     pub code_type: CodeType,
     pub ec_level: EcLevel,
     pub module_size: ModuleSize,
@@ -1524,6 +1633,8 @@ impl QrApp {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             input_text: String::new(),
             input_mode: InputMode::Text,
+            focused_field: 0,
+            show_help: false,
             code_type: CodeType::QrCode,
             ec_level: EcLevel::M,
             module_size: ModuleSize::Medium,
@@ -1605,6 +1716,76 @@ impl QrApp {
         self.input_text = text.to_owned();
     }
 
+    /// The box the keyboard is typing into.
+    ///
+    /// Clamped rather than stored blindly: the mode decides how many boxes
+    /// there are, and moving from vCard's five to WiFi's two must not leave
+    /// the cursor pointing past the end.
+    #[must_use]
+    pub fn focused_field(&self) -> Field {
+        let fields = self.input_mode.fields();
+        fields
+            .get(self.focused_field.min(fields.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(Field::Text)
+    }
+
+    /// What is in a box.
+    #[must_use]
+    pub fn field_text(&self, field: Field) -> &str {
+        match field {
+            Field::Text => &self.input_text,
+            Field::Ssid => &self.wifi_config.ssid,
+            Field::Password => &self.wifi_config.password,
+            Field::FirstName => &self.vcard_info.first_name,
+            Field::LastName => &self.vcard_info.last_name,
+            Field::Phone => &self.vcard_info.phone,
+            Field::Email => &self.vcard_info.email,
+            Field::Organization => &self.vcard_info.organization,
+        }
+    }
+
+    fn field_text_mut(&mut self, field: Field) -> &mut String {
+        match field {
+            Field::Text => &mut self.input_text,
+            Field::Ssid => &mut self.wifi_config.ssid,
+            Field::Password => &mut self.wifi_config.password,
+            Field::FirstName => &mut self.vcard_info.first_name,
+            Field::LastName => &mut self.vcard_info.last_name,
+            Field::Phone => &mut self.vcard_info.phone,
+            Field::Email => &mut self.vcard_info.email,
+            Field::Organization => &mut self.vcard_info.organization,
+        }
+    }
+
+    /// Move the keyboard to the next box of this mode, wrapping.
+    fn step_field(&mut self, forward: bool) {
+        let count = self.input_mode.fields().len();
+        if count <= 1 {
+            self.focused_field = 0;
+            return;
+        }
+        let at = self.focused_field.min(count.saturating_sub(1));
+        let last = count.saturating_sub(1);
+        self.focused_field = if forward {
+            if at >= last { 0 } else { at.saturating_add(1) }
+        } else if at == 0 {
+            last
+        } else {
+            at.saturating_sub(1)
+        };
+    }
+
+    /// Change what kind of thing is being encoded.
+    fn set_input_mode(&mut self, mode: InputMode) {
+        self.input_mode = mode;
+        // The new mode's boxes are a different list; starting anywhere but
+        // its first box would put the cursor somewhere the eye has to hunt
+        // for, and possibly past the end.
+        self.focused_field = 0;
+        self.generate();
+    }
+
     /// Clear history.
     pub fn clear_history(&mut self) {
         self.history.clear();
@@ -1649,20 +1830,50 @@ impl QrApp {
         }
         let ctrl = key.modifiers.ctrl;
         match key.key {
-            Key::Backspace => {
-                let mut text = self.input_text.clone();
-                if text.pop().is_none() {
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Key::Escape if self.show_help => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
+            // What kind of thing is being encoded. Six modes were drawn as
+            // a row of buttons with the active one highlighted, and nothing
+            // could move the highlight, so `format_qr_data`'s Url, Email,
+            // Phone, Wifi and VCard arms encoded nothing for anybody.
+            Key::I if ctrl => {
+                self.set_input_mode(self.input_mode.step(!key.modifiers.shift));
+                EventResult::Consumed
+            }
+            // Between this mode's boxes. Modes with one box answer by doing
+            // nothing, which is the honest reply to "next box" when there
+            // is not one.
+            Key::Tab => {
+                if self.input_mode.fields().len() <= 1 {
                     return EventResult::Ignored;
                 }
-                self.set_input(&text);
+                self.step_field(!key.modifiers.shift);
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                let field = self.focused_field();
+                if self.field_text_mut(field).pop().is_none() {
+                    return EventResult::Ignored;
+                }
                 self.generate();
                 EventResult::Consumed
             }
             Key::Escape => {
-                if self.input_text.is_empty() {
+                // The box the cursor is on, for the same reason Backspace
+                // works on that one: clearing a box the user is not looking
+                // at is a surprise, and clearing the only box four modes
+                // have was all this could ever do.
+                let field = self.focused_field();
+                if self.field_text_mut(field).is_empty() {
                     return EventResult::Ignored;
                 }
-                self.set_input("");
+                self.field_text_mut(field).clear();
                 self.generate();
                 EventResult::Consumed
             }
@@ -1691,6 +1902,31 @@ impl QrApp {
                 // itself does not change, so there is nothing to regenerate.
                 EventResult::Consumed
             }
+            // What the WiFi code claims about the network. Both were
+            // fixed at construction, so a code for an open network told the
+            // phone it was WPA -- which is a connection that fails with no
+            // useful message -- and a hidden network's code left out the
+            // flag that makes a phone go looking for it.
+            Key::S if ctrl => {
+                if self.input_mode != InputMode::Wifi {
+                    return EventResult::Ignored;
+                }
+                self.wifi_config.encryption = match self.wifi_config.encryption {
+                    WifiEncryption::None => WifiEncryption::Wep,
+                    WifiEncryption::Wep => WifiEncryption::Wpa,
+                    WifiEncryption::Wpa => WifiEncryption::None,
+                };
+                self.generate();
+                EventResult::Consumed
+            }
+            Key::H if ctrl => {
+                if self.input_mode != InputMode::Wifi {
+                    return EventResult::Ignored;
+                }
+                self.wifi_config.hidden = !self.wifi_config.hidden;
+                self.generate();
+                EventResult::Consumed
+            }
             Key::K if ctrl => {
                 if self.history.is_empty() {
                     return EventResult::Ignored;
@@ -1702,9 +1938,12 @@ impl QrApp {
                 if key.text.is_empty() || ctrl {
                     return EventResult::Ignored;
                 }
-                let mut text = self.input_text.clone();
-                text.push_str(&key.text);
-                self.set_input(&text);
+                // Into the box the cursor is on. It was always `input_text`,
+                // which is the only box four of the six modes have -- and
+                // none of the boxes the other two draw.
+                let field = self.focused_field();
+                let typed = key.text.clone();
+                self.field_text_mut(field).push_str(&typed);
                 self.generate();
                 EventResult::Consumed
             }
@@ -1755,6 +1994,17 @@ impl QrApp {
         // Right panel: options
         let right_x = width - RIGHT_PANEL_WIDTH;
         self.render_options_panel(&mut cmds, right_x, content_y, RIGHT_PANEL_WIDTH, content_h);
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         cmds
     }
@@ -2036,15 +2286,7 @@ impl QrApp {
         cy += 72.0;
 
         // Mode-specific fields
-        match self.input_mode {
-            InputMode::Wifi => {
-                self.render_wifi_fields(cmds, lx, &mut cy, max_w);
-            }
-            InputMode::VCard => {
-                self.render_vcard_fields(cmds, lx, &mut cy, max_w);
-            }
-            _ => {}
-        }
+        self.render_mode_fields(cmds, lx, &mut cy, max_w);
 
         // History section
         cy += 12.0;
@@ -2108,31 +2350,62 @@ impl QrApp {
         }
     }
 
-    fn render_wifi_fields(&self, cmds: &mut Vec<RenderCommand>, lx: f32, cy: &mut f32, max_w: f32) {
-        let fields = [
-            ("SSID", &self.wifi_config.ssid),
-            ("Password", &self.wifi_config.password),
-        ];
-
-        for (label, value) in &fields {
+    /// Draw the boxes this mode has, marking the one being typed into.
+    ///
+    /// One function walking `InputMode::fields` rather than two hand-written
+    /// lists, so the boxes drawn are exactly the boxes Tab visits and typing
+    /// reaches. The pair it replaces wrote out "SSID"/"Password" and the five
+    /// vCard labels inline, which is the second copy that made them look
+    /// editable while nothing could edit them.
+    ///
+    /// `Field::Text` is skipped: the big box above already draws it.
+    fn render_mode_fields(&self, cmds: &mut Vec<RenderCommand>, lx: f32, cy: &mut f32, max_w: f32) {
+        let focused = self.focused_field();
+        for field in self.input_mode.fields() {
+            if *field == Field::Text {
+                continue;
+            }
+            let is_focused = *field == focused;
             cmds.push(RenderCommand::Text {
                 x: lx,
                 y: *cy,
-                text: (*label).to_owned(),
-                color: self.palette.subtext0,
+                text: field.label().to_owned(),
+                color: if is_focused {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: 10.0,
-                font_weight: FontWeightHint::Regular,
+                font_weight: if is_focused {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(max_w),
                 overflow: TextOverflow::Ellipsis,
             });
             *cy += 14.0;
 
-            self.palette
-                .push_surface(cmds, lx, *cy, max_w, 24.0, CORNER_RADIUS, Surface::Card);
+            // The focused box is drawn on a different surface. Without it the
+            // cursor is invisible and Tab is a key with no effect on screen.
+            self.palette.push_surface(
+                cmds,
+                lx,
+                *cy,
+                max_w,
+                24.0,
+                CORNER_RADIUS,
+                if is_focused {
+                    Surface::Selected
+                } else {
+                    Surface::Card
+                },
+            );
+            let value = self.field_text(*field);
             let disp = if value.is_empty() {
-                format!("Enter {label}...")
+                format!("Enter {}...", field.label())
             } else {
-                (*value).clone()
+                value.to_owned()
             };
             let color = if value.is_empty() {
                 self.palette.overlay0
@@ -2152,74 +2425,30 @@ impl QrApp {
             *cy += 30.0;
         }
 
-        // Encryption selector
-        cmds.push(RenderCommand::Text {
-            x: lx,
-            y: *cy,
-            text: format!("Encryption: {}", self.wifi_config.encryption.label()),
-            color: self.palette.subtext0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(max_w),
-            overflow: TextOverflow::Ellipsis,
-        });
-        *cy += 18.0;
-    }
-
-    fn render_vcard_fields(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        lx: f32,
-        cy: &mut f32,
-        max_w: f32,
-    ) {
-        let fields = [
-            ("First Name", &self.vcard_info.first_name),
-            ("Last Name", &self.vcard_info.last_name),
-            ("Phone", &self.vcard_info.phone),
-            ("Email", &self.vcard_info.email),
-            ("Organization", &self.vcard_info.organization),
-        ];
-
-        for (label, value) in &fields {
+        if self.input_mode == InputMode::Wifi {
+            // The two settings that decide what the WiFi code actually says.
+            // `format_qr_data` writes `T:WPA` or `T:nopass` from the first and
+            // `H:true` from the second, and both were fixed at construction --
+            // so a code for an open network told the phone it was encrypted,
+            // and a hidden network's code left out the flag that makes a
+            // phone look for it.
             cmds.push(RenderCommand::Text {
                 x: lx,
                 y: *cy,
-                text: (*label).to_owned(),
+                text: format!(
+                    "Encryption: {} (Ctrl+S)    Hidden: {} (Ctrl+H)",
+                    self.wifi_config.encryption.label(),
+                    if self.wifi_config.hidden { "yes" } else { "no" },
+                ),
                 color: self.palette.subtext0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
                 overflow: TextOverflow::Ellipsis,
             });
-            *cy += 14.0;
-
-            self.palette
-                .push_surface(cmds, lx, *cy, max_w, 22.0, CORNER_RADIUS, Surface::Card);
-            let disp = if value.is_empty() {
-                format!("Enter {label}...")
-            } else {
-                (*value).clone()
-            };
-            let color = if value.is_empty() {
-                self.palette.overlay0
-            } else {
-                self.palette.text
-            };
-            cmds.push(RenderCommand::Text {
-                x: lx + 8.0,
-                y: *cy + 5.0,
-                text: disp,
-                color,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(max_w - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            *cy += 26.0;
+            *cy += 18.0;
         }
     }
-
     fn render_preview_panel(
         &self,
         cmds: &mut Vec<RenderCommand>,
@@ -3709,5 +3938,328 @@ mod tests {
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // The input modes, and the boxes they need
+    // ------------------------------------------------------------------
+
+    /// States a shortcut might need to be able to answer in.
+    fn help_states() -> Vec<QrApp> {
+        let typed = || {
+            let mut app = QrApp::new();
+            app.set_input("hello");
+            app.generate();
+            app
+        };
+        // With history, so `Ctrl+K` has something to forget.
+        let mut with_history = typed();
+        with_history.generate();
+        // In WiFi mode, so `Ctrl+S`, `Ctrl+H` and `Tab` have a reason to act.
+        let mut wifi = QrApp::new();
+        wifi.set_input_mode(InputMode::Wifi);
+        wifi.wifi_config.ssid = String::from("net");
+        // With the list up, so `Escape` has something to close.
+        let mut helping = QrApp::new();
+        helping.show_help = true;
+        // Making a barcode, so `Ctrl+Q` has somewhere to switch *to*. It
+        // declines when the program is already making what it asks for, and
+        // every other state here is already a QR code -- which is what the
+        // guard caught.
+        let mut barcode = typed();
+        barcode.set_code_type(CodeType::Barcode128);
+        vec![typed(), with_history, wifi, helping, barcode]
+    }
+
+    /// Every key the list advertises does something somewhere.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|app| app.handle_key(&stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// And the list reaches the window.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = QrApp::new();
+        assert!(
+            !drawn_text(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_key(&press_key(Key::F1));
+        let shown = drawn_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        app.handle_key(&press_key(Key::Escape));
+        assert!(
+            !drawn_text(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every input mode can be reached, and each encodes differently.
+    ///
+    /// Six modes were drawn as a row of buttons with the active one
+    /// highlighted and nothing could move the highlight, so `format_qr_data`'s
+    /// Url, Email, Phone, Wifi and VCard arms -- all written, all tested --
+    /// encoded nothing for anybody.
+    #[test]
+    fn every_input_mode_can_be_reached_and_encodes_its_own_way() {
+        let mut app = QrApp::new();
+        let mut seen = vec![app.input_mode];
+        for _ in 1..InputMode::all().len() {
+            assert_eq!(
+                app.handle_key(&ctrl_key(Key::I)),
+                EventResult::Consumed,
+                "Ctrl+I was ignored"
+            );
+            seen.push(app.input_mode);
+        }
+        for mode in InputMode::all() {
+            assert!(seen.contains(mode), "Ctrl+I never reached {}", mode.label());
+        }
+        app.handle_key(&ctrl_key(Key::I));
+        assert_eq!(
+            app.input_mode,
+            InputMode::Text,
+            "the modes do not come back round"
+        );
+
+        // The same typing encodes differently in each of the four text modes.
+        let mut encoded = Vec::new();
+        for mode in [
+            InputMode::Text,
+            InputMode::Url,
+            InputMode::Email,
+            InputMode::Phone,
+        ] {
+            let mut a = QrApp::new();
+            a.set_input_mode(mode);
+            for c in "example.com".chars() {
+                a.handle_key(&typed_key(c));
+            }
+            encoded.push(format_qr_data(
+                a.input_mode,
+                &a.input_text,
+                &a.wifi_config,
+                &a.vcard_info,
+            ));
+        }
+        for (i, one) in encoded.iter().enumerate() {
+            for (j, other) in encoded.iter().enumerate() {
+                assert!(
+                    i == j || one != other,
+                    "two modes encode the same typing identically: {one:?}"
+                );
+            }
+        }
+    }
+
+    /// The WiFi and vCard boxes can be typed into.
+    ///
+    /// Making the mode row work exposed the next layer: those modes draw
+    /// labelled boxes reading "Enter SSID..." and `wifi_config` and
+    /// `vcard_info` had no writers, so the boxes looked editable and were
+    /// not.
+    #[test]
+    fn every_box_a_mode_draws_can_be_typed_into() {
+        for mode in InputMode::all() {
+            for (i, field) in mode.fields().iter().enumerate() {
+                let mut app = QrApp::new();
+                app.set_input_mode(*mode);
+                app.focused_field = i;
+                assert_eq!(
+                    app.focused_field(),
+                    *field,
+                    "the cursor does not land on {} in {}",
+                    field.label(),
+                    mode.label()
+                );
+                for c in "abc".chars() {
+                    assert_eq!(
+                        app.handle_key(&typed_key(c)),
+                        EventResult::Consumed,
+                        "{} in {} refused a character",
+                        field.label(),
+                        mode.label()
+                    );
+                }
+                assert_eq!(
+                    app.field_text(*field),
+                    "abc",
+                    "{} in {} did not take what was typed",
+                    field.label(),
+                    mode.label()
+                );
+                app.handle_key(&press_key(Key::Backspace));
+                assert_eq!(
+                    app.field_text(*field),
+                    "ab",
+                    "Backspace did not reach {} in {}",
+                    field.label(),
+                    mode.label()
+                );
+            }
+        }
+    }
+
+    /// Tab walks the boxes of a mode that has more than one, and the drawn
+    /// panel shows where it has got to.
+    #[test]
+    fn tab_walks_the_boxes_and_the_panel_shows_which() {
+        let mut app = QrApp::new();
+        app.set_input_mode(InputMode::VCard);
+        let fields = InputMode::VCard.fields();
+        assert!(fields.len() > 1, "control: vCard should have several boxes");
+
+        let focused_label_is_bold = |a: &QrApp, want: Field| {
+            a.render_commands(1200.0, 800.0).iter().any(|c| match c {
+                RenderCommand::Text {
+                    text, font_weight, ..
+                } => text == want.label() && *font_weight == FontWeightHint::Bold,
+                _ => false,
+            })
+        };
+        assert!(
+            focused_label_is_bold(&app, fields[0]),
+            "the first box is not marked as the one being typed into"
+        );
+
+        for expected in fields.iter().skip(1) {
+            assert_eq!(
+                app.handle_key(&press_key(Key::Tab)),
+                EventResult::Consumed,
+                "Tab was ignored in vCard mode"
+            );
+            assert_eq!(app.focused_field(), *expected, "Tab skipped a box");
+            assert!(
+                focused_label_is_bold(&app, *expected),
+                "{} is focused and the panel does not show it",
+                expected.label()
+            );
+        }
+
+        // Round the end, and back the other way.
+        app.handle_key(&press_key(Key::Tab));
+        assert_eq!(app.focused_field(), fields[0], "Tab does not wrap");
+        let mut shift_tab = press_key(Key::Tab);
+        shift_tab.modifiers.shift = true;
+        app.handle_key(&shift_tab);
+        assert_eq!(
+            app.focused_field(),
+            fields[fields.len() - 1],
+            "Shift+Tab does not go back"
+        );
+
+        // A mode with one box answers Tab by declining, rather than
+        // pretending to move a cursor that has nowhere to go.
+        let mut single = QrApp::new();
+        assert_eq!(single.input_mode.fields().len(), 1);
+        assert_eq!(
+            single.handle_key(&press_key(Key::Tab)),
+            EventResult::Ignored,
+            "Tab claimed to move a cursor in a mode with one box"
+        );
+    }
+
+    /// The two WiFi settings reach the code that is produced.
+    ///
+    /// `format_qr_data` writes `T:WPA` or `T:nopass` from one and `H:true`
+    /// from the other. Both were fixed at construction, so a code for an open
+    /// network told the phone it was encrypted -- which is a connection that
+    /// fails with no useful message.
+    #[test]
+    fn the_wifi_settings_reach_the_encoded_text() {
+        let mut app = QrApp::new();
+        app.set_input_mode(InputMode::Wifi);
+        app.wifi_config.ssid = String::from("net");
+        let encoded =
+            |a: &QrApp| format_qr_data(a.input_mode, &a.input_text, &a.wifi_config, &a.vcard_info);
+
+        assert!(encoded(&app).contains("T:WPA"), "control: WPA by default");
+        app.handle_key(&ctrl_key(Key::S));
+        assert!(
+            !encoded(&app).contains("T:WPA"),
+            "Ctrl+S did not change what the code says about encryption"
+        );
+
+        assert!(
+            !encoded(&app).contains("H:true"),
+            "control: not hidden by default"
+        );
+        app.handle_key(&ctrl_key(Key::H));
+        assert!(
+            encoded(&app).contains("H:true"),
+            "Ctrl+H did not mark the network hidden"
+        );
+    }
+
+    /// Those two keys belong to WiFi mode and decline elsewhere.
+    #[test]
+    fn the_wifi_keys_decline_outside_wifi_mode() {
+        let mut app = QrApp::new();
+        assert_eq!(app.input_mode, InputMode::Text);
+        assert_eq!(
+            app.handle_key(&ctrl_key(Key::S)),
+            EventResult::Ignored,
+            "Ctrl+S acted on a setting this mode does not show"
+        );
+        assert_eq!(
+            app.handle_key(&ctrl_key(Key::H)),
+            EventResult::Ignored,
+            "Ctrl+H acted on a setting this mode does not show"
+        );
+    }
+
+    fn drawn_text(app: &QrApp) -> String {
+        app.render_commands(1200.0, 800.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn press_key(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
+    fn ctrl_key(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: String::new(),
+        }
+    }
+
+    fn typed_key(c: char) -> KeyEvent {
+        KeyEvent {
+            key: Key::Unknown(0),
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: c.to_string(),
+        }
     }
 }

@@ -187,9 +187,15 @@ fn main() -> ExitCode {
 /// exist. Saying so is the difference between "this desktop cannot start
 /// anything" and "that entry is wrong", and only the second is actionable.
 fn drain<T: guiremote::client::Transport>(session: &mut ShellSession<T>) -> bool {
-    for path in session.take_launches() {
-        if let Err(e) = Command::new(&path).spawn() {
-            eprintln!("desktop: cannot start {}: {e}", path.display());
+    for launch in session.take_launches() {
+        // `args`, not a path with spaces in it. `SCREENSHOT_COMMAND` was
+        // "/usr/bin/screenshot --fullscreen" until 2026-09-17 and arrived here
+        // as one `PathBuf`, so this line asked the operating system for a file
+        // with a space and two dashes in its name. Both screenshot shortcuts
+        // failed at every press, and said so politely enough that it read like
+        // a missing program rather than a malformed request.
+        if let Err(e) = Command::new(&launch.program).args(&launch.args).spawn() {
+            eprintln!("desktop: cannot start {}: {e}", launch.program.display());
         }
     }
     // Logging rather than acting, for now: there is no channel to whatever

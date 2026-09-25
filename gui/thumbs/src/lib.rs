@@ -1,4 +1,10 @@
-//! Thumbnail generation and caching for the file explorer's icon view.
+//! Thumbnails: generating them, caching them, and owning the image ids they
+//! are drawn under.
+//!
+//! Used by the file manager's icon view and by the photo library's grid. It
+//! lived inside `apps/explorer` as `mod thumbs` until the second caller
+//! arrived; nothing in it was ever explorer-specific, and it referenced none
+//! of that binary's types.
 //!
 //! Provides:
 //! - **Image thumbnails** (BMP/PNG/JPEG/GIF): header parsing for dimensions,
@@ -12,10 +18,17 @@
 //! file automatically invalidates.  An optional disk cache under
 //! `~/.cache/thumbs/` persists thumbnails across sessions.
 //!
-//! Background generation is supported via a request queue that can be polled
-//! for completed thumbnails, keeping the UI thread non-blocking.
-
-#![allow(dead_code)]
+//! Generation is **deferred, not backgrounded**, and the difference is the
+//! whole of what a caller needs to know. Requests go on a queue, and
+//! [`ThumbnailGenerator::process_batch`] retires up to `batch_size` of them
+//! *synchronously, on the calling thread*. There is no worker thread in this
+//! module and nothing here is asynchronous.
+//!
+//! So the cost of a thumbnail is moved and capped, never removed: a frame pays
+//! for the thumbnails it retires, and `batch_size` is the size of that
+//! payment. Choosing it is a real decision -- a large batch over a directory
+//! of full-size photographs buys a shorter queue with a longer frame. The
+//! honest version of "non-blocking" here is "bounded".
 
 use guitk::canvas::Canvas;
 use guitk::color::Color;
@@ -24,7 +37,7 @@ use guitk::style::CornerRadii;
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::io::{BufRead, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -84,6 +97,19 @@ const FOLDER_PREVIEW_ITEMS: usize = 4;
 /// Disk cache directory name under the user's cache root.
 const DISK_CACHE_DIR: &str = ".cache/thumbs";
 
+/// How many bytes of thumbnails to keep on disk, by default.
+///
+/// A fixed figure, not the install-time fraction of the drive
+/// `roadmap-detailed.md` §4.1 asks for: sizing it that way needs the capacity
+/// of the filesystem the home directory is on, which nothing in this tree can
+/// read yet -- the same gap that leaves the shell's disk meter at `None`. The
+/// budget is a *parameter* of [`DiskCache::enforce_cap`] so that when the
+/// reading exists it supplies a number and the eviction below is untouched.
+///
+/// 256 MiB holds a few thousand thumbnails at the sizes this generator makes,
+/// which is a large photo collection browsed several times.
+const DEFAULT_DISK_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+
 // ============================================================================
 // Thumbnail
 // ============================================================================
@@ -111,6 +137,11 @@ pub struct Thumbnail {
 
 impl Thumbnail {
     /// Total number of pixels.
+    // Kept deliberately, and now said to the compiler rather than to a
+    // blanket allow over the whole file: `is_valid` exists because `pixels`,
+    // `width` and `height` are public and a `Thumbnail` can be built outside
+    // this module, and `pixel_count` exists for `is_valid`.
+    #[allow(dead_code, reason = "a guard for Thumbnails this module did not build")]
     fn pixel_count(&self) -> usize {
         (self.width as usize).saturating_mul(self.height as usize)
     }
@@ -121,6 +152,7 @@ impl Thumbnail {
     /// is the only constructor here and it cannot produce a `Thumbnail` for
     /// which this is false. It survives because `pixels`, `width` and `height`
     /// are public, so code outside the module can still assemble one by hand.
+    #[allow(dead_code, reason = "see pixel_count above")]
     fn is_valid(&self) -> bool {
         self.pixels.len() == self.pixel_count().saturating_mul(4)
     }
@@ -1296,7 +1328,22 @@ pub struct ThumbnailGenerator {
     disk: Option<DiskCache>,
 }
 
+impl Default for ThumbnailGenerator {
+    /// The same thing [`ThumbnailGenerator::new`] makes: an empty queue and no
+    /// disk cache.
+    ///
+    /// Present because this is a library now. A `new()` taking no arguments is
+    /// expected to have a `Default` beside it, so that the type composes with
+    /// everything that derives or requires one -- which a caller outside this
+    /// crate can need and cannot add.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThumbnailGenerator {
+    /// A generator with nothing queued and no disk behind it.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             pending: VecDeque::new(),
@@ -1319,7 +1366,19 @@ impl ThumbnailGenerator {
     /// if there is no home directory to put it in.
     #[must_use]
     pub fn with_default_disk_cache() -> Self {
-        DiskCache::default_location().map_or_else(Self::new, Self::with_disk_cache)
+        DiskCache::default_location().map_or_else(Self::new, |cache| {
+            // Once per session, not per save: the cut needs a directory scan,
+            // and paying that on every thumbnail written would slow the path
+            // the cache exists to speed up. Once at start-up bounds what a
+            // session can leave behind, which is what was unbounded.
+            //
+            // The error is dropped deliberately: a cache that cannot be tidied
+            // is still a usable cache, and refusing to start a file manager
+            // because its thumbnail directory is unreadable would be worse
+            // than the overgrowth.
+            let _ = cache.enforce_cap(DEFAULT_DISK_CACHE_BYTES);
+            Self::with_disk_cache(cache)
+        })
     }
 
     /// The disk cache this generator reads and writes, if it has one.
@@ -1418,10 +1477,13 @@ impl DiskCache {
 
     /// Create a disk cache using the default location (`~/.cache/thumbs/`).
     pub fn default_location() -> Option<Self> {
-        // Use HOME on Unix-like systems, USERPROFILE on Windows.
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .ok()?;
+        // `var_os`, not `var`. An environment variable is bytes, and a home
+        // directory holding any byte but `/` and NUL is legal here -- `var`
+        // answers `None` for one that is not UTF-8, which would disable the
+        // thumbnail cache entirely for that user and do it silently, with
+        // thumbnails regenerating on every listing and nothing to explain why.
+        // `PathBuf` takes the `OsString` unchanged, so nothing is lost.
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
         let dir = PathBuf::from(home).join(DISK_CACHE_DIR);
         Some(Self::new(dir))
     }
@@ -1478,6 +1540,61 @@ impl DiskCache {
         data.extend_from_slice(&thumb.height.to_le_bytes());
         data.extend_from_slice(&thumb.pixels);
         fs::write(file_path, &data)
+    }
+
+    /// Delete oldest entries until the cache holds at most `max_bytes`.
+    ///
+    /// Returns the number of bytes kept. The cache had no ceiling at all until
+    /// 2026-09-16: every thumbnail ever made stayed for the life of the
+    /// install, which this project's own instructions single out as the way
+    /// disk space is actually lost.
+    ///
+    /// **Oldest-written, not least-recently-used, and deliberately so.** The
+    /// honest LRU wants a last-*read* time, and there is no reliable one: file
+    /// access times are off or coarse on most systems, and touching each entry
+    /// as it is served would mean a write for every thumbnail displayed --
+    /// paying a disk write to save a disk read, on the exact path that exists
+    /// to be fast. Oldest-written approximates it and cannot be worse than the
+    /// unbounded growth it replaces.
+    ///
+    /// Only files this cache wrote are considered, matched on the `.thumb`
+    /// suffix **as bytes**, for the reason [`Self::purge_stale`] gives: a
+    /// foreign name rendered lossily could come to look like one of ours, and
+    /// this function deletes what it matches.
+    pub fn enforce_cap(&self, max_bytes: u64) -> std::io::Result<u64> {
+        if !self.cache_dir.is_dir() {
+            return Ok(0);
+        }
+        let mut entries: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+        let mut total: u64 = 0;
+        for entry in fs::read_dir(&self.cache_dir)? {
+            let entry = entry?;
+            if !entry.file_name().as_encoded_bytes().ends_with(b".thumb") {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            let written = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            let size = meta.len();
+            total = total.saturating_add(size);
+            entries.push((written, size, entry.path()));
+        }
+        if total <= max_bytes {
+            return Ok(total);
+        }
+        // Oldest first, so the newest survive the cut.
+        entries.sort_by_key(|(written, _, _)| *written);
+        for (_, size, path) in entries {
+            if total <= max_bytes {
+                break;
+            }
+            if fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(size);
+            }
+        }
+        Ok(total)
     }
 
     /// Remove the cached thumbnail for a specific path/mtime/cap.
@@ -1726,14 +1843,37 @@ fn read_file_header(path: &Path, n: usize) -> Option<Vec<u8>> {
 }
 
 /// Read the first `max_lines` lines of a text file.
-fn read_text_lines(path: &Path, max_lines: usize) -> Option<Vec<String>> {
-    let file = fs::File::open(path).ok()?;
-    let reader = std::io::BufReader::new(file.take(TEXT_PREVIEW_MAX_BYTES as u64));
-    let lines: Vec<String> = reader
-        .lines()
-        .take(max_lines)
-        .filter_map(|l| l.ok())
-        .collect();
+///
+/// Public for the file manager's preview pane, which shows the same lines
+/// this reads for a thumbnail — at a readable size instead of a 96-pixel
+/// minimap. One reader, so the panel and the icon cannot disagree about what
+/// is in a file. It was `pub(crate)` while this was a module inside that
+/// binary; the crate boundary is what changed, not the intent.
+///
+/// **A line that is not UTF-8 is dropped**, because `BufRead::lines` yields an
+/// error for it and this filters errors out. That is tolerable in a minimap,
+/// where a missing line among twenty is invisible; in a readable preview it
+/// means a Latin-1 log quietly shows the wrong lines rather than showing
+/// something marked as undecodable. Replacement characters would be the
+/// honest rendering, and `String::from_utf8_lossy` is what draws them, which
+/// `scripts/lossy-decode.py` governs — so it is a change with a gate to
+/// answer to and not one to slip in here.
+pub fn read_text_lines(path: &Path, max_lines: usize) -> Option<Vec<String>> {
+    let bytes = read_file_header(path, TEXT_PREVIEW_MAX_BYTES)?;
+    // Lossy on purpose, and this is the audited kind. A preview draws file
+    // *contents* as text; a byte that is not text cannot be drawn as itself,
+    // so the choice is between a replacement character and nothing. What makes
+    // it safe is the same thing that makes the path bar's rendering safe: the
+    // rendering is never written anywhere. It is drawn and dropped, and the
+    // path beside it is the untouched bytes.
+    //
+    // This used to be `BufRead::lines().filter_map(|l| l.ok())`, which
+    // *dropped* a line that was not UTF-8. In a 96-pixel minimap one missing
+    // line among twenty is invisible. In the preview pane it meant a Latin-1
+    // log showed the wrong lines with nothing to say so -- the silent kind of
+    // wrong, where the reader has no reason to doubt what they are looking at.
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<String> = text.lines().take(max_lines).map(str::to_owned).collect();
     Some(lines)
 }
 
@@ -2103,6 +2243,40 @@ mod tests {
     }
 
     // -- Text preview truncation --------------------------------------------
+
+    /// **A line that is not UTF-8 is shown, not dropped.**
+    ///
+    /// The reader used to be `BufRead::lines().filter_map(|l| l.ok())`, which
+    /// discarded any line that failed to decode. A Latin-1 log then previewed
+    /// as its *decodable* lines only, with nothing to say the others were
+    /// missing -- plausible text that is not what the file says. A
+    /// replacement character is the honest answer: it marks where the bytes
+    /// stopped being text.
+    #[test]
+    fn a_line_that_is_not_utf8_is_shown_rather_than_dropped() {
+        let dir = std::env::temp_dir().join(format!("thumbs_lossy_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("latin1.log");
+        // `caf` + 0xE9 + ` ok`, which is `café ok` in Latin-1 and not UTF-8.
+        let mut bytes = b"first line\n".to_vec();
+        bytes.extend_from_slice(b"caf\xe9 ok\n");
+        bytes.extend_from_slice(b"last line\n");
+        fs::write(&path, &bytes).expect("write");
+
+        let lines = read_text_lines(&path, 10).expect("read");
+        assert_eq!(
+            lines.len(),
+            3,
+            "a line went missing instead of being rendered: {lines:?}"
+        );
+        assert!(
+            lines[1].contains('\u{fffd}'),
+            "the undecodable byte was not marked: {:?}",
+            lines[1]
+        );
+        assert_eq!(lines[2], "last line", "the lines after it shifted up");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn text_preview_truncates_to_max_lines() {
@@ -2844,6 +3018,93 @@ mod tests {
     /// Purging is keyed on the hash alone, so a live file keeps its entries at
     /// every cap. A purge that matched whole filenames would delete the sizes
     /// the caller did not happen to name.
+    /// Set a file's modified time, so an eviction test does not depend on how
+    /// fine the clock is.
+    ///
+    /// Two files written in the same tick can share a timestamp, which would
+    /// make "the older one goes" a coin toss on a fast machine.
+    fn filetime_set(path: &Path, when: std::time::SystemTime) {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("the cache entry is writable");
+        file.set_times(fs::FileTimes::new().set_modified(when))
+            .expect("the filesystem records a modified time");
+    }
+
+    /// Over budget, the oldest entries go and the newest stay.
+    #[test]
+    fn the_cap_evicts_oldest_first() {
+        let scratch = ScratchDir::new("thumbs_cap_evicts");
+        let cache = DiskCache::new(scratch.dir().to_path_buf());
+        cache.ensure_dir().unwrap();
+
+        // Written oldest-first, with the mtimes set explicitly rather than
+        // trusted: two files written in the same tick can share a timestamp,
+        // and a test whose order depends on clock resolution is a test that
+        // passes on one machine.
+        let old = make_test_thumb("old.png", 16);
+        let new_one = make_test_thumb("new.png", 16);
+        cache.save(&old, 64).unwrap();
+        cache.save(&new_one, 64).unwrap();
+        let old_file = cache.cache_filename(&old.source_path, old.source_mtime, 64);
+        let new_file = cache.cache_filename(&new_one.source_path, new_one.source_mtime, 64);
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+        filetime_set(&old_file, long_ago);
+
+        let one_entry = fs::metadata(&new_file).unwrap().len();
+        let kept = cache.enforce_cap(one_entry).unwrap();
+
+        assert!(
+            kept <= one_entry,
+            "kept {kept} bytes against a cap of {one_entry}"
+        );
+        assert!(!old_file.exists(), "the older entry survived the cut");
+        assert!(new_file.exists(), "the newer entry was evicted instead");
+    }
+
+    /// Under budget, nothing is touched.
+    #[test]
+    fn the_cap_leaves_a_small_cache_alone() {
+        let scratch = ScratchDir::new("thumbs_cap_small");
+        let cache = DiskCache::new(scratch.dir().to_path_buf());
+        cache.ensure_dir().unwrap();
+        let thumb = make_test_thumb("only.png", 8);
+        cache.save(&thumb, 64).unwrap();
+
+        let kept = cache.enforce_cap(u64::MAX).unwrap();
+        assert!(kept > 0, "reported an empty cache when one entry exists");
+        assert!(
+            cache
+                .load(Path::new("only.png"), thumb.source_mtime, 64)
+                .is_some(),
+            "an entry was evicted while under budget"
+        );
+    }
+
+    /// A file this cache did not write is never deleted, whatever its name.
+    ///
+    /// The cut deletes what it matches, so what it matches has to be ours.
+    /// Matched on the `.thumb` suffix as bytes, so a name that is not UTF-8
+    /// cannot be rendered into looking like one of ours.
+    #[test]
+    fn the_cap_only_deletes_its_own_files() {
+        let scratch = ScratchDir::new("thumbs_cap_foreign");
+        let cache = DiskCache::new(scratch.dir().to_path_buf());
+        cache.ensure_dir().unwrap();
+
+        let stranger = scratch.dir().join("someone-elses.png");
+        fs::write(&stranger, vec![7_u8; 4096]).unwrap();
+        let thumb = make_test_thumb("ours.png", 16);
+        cache.save(&thumb, 64).unwrap();
+
+        cache.enforce_cap(0).unwrap();
+        assert!(
+            stranger.exists(),
+            "the cut deleted a file this cache never wrote"
+        );
+    }
+
     #[test]
     fn purging_keeps_a_live_files_other_sizes() {
         let scratch = ScratchDir::new("thumbs_test_purge_caps");

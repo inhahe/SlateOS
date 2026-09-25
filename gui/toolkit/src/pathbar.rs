@@ -9,12 +9,15 @@
 
 use crate::color::Color;
 use crate::event::{EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
+use crate::osbytes::split_on_slash;
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::step;
 use crate::style::CornerRadii;
 use crate::surface::Surface;
 use crate::text::TextCursor;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Catppuccin Mocha palette
@@ -75,7 +78,7 @@ pub struct CompletionItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PathBarEvent {
     /// User navigated to a new path (clicked a breadcrumb or pressed Enter).
-    Navigate(String),
+    Navigate(PathBuf),
     /// Widget requests autocomplete results for the given prefix.
     RequestAutoComplete { prefix: String },
     /// Edit mode was entered.
@@ -95,9 +98,9 @@ enum Mode {
 #[derive(Clone, Debug)]
 pub struct PathBar {
     /// Current confirmed path (what breadcrumb mode displays).
-    path: String,
+    path: PathBuf,
     /// Parsed segments of `path`.
-    segments: Vec<String>,
+    segments: Vec<Segment>,
 
     /// Current mode.
     mode: Mode,
@@ -105,6 +108,14 @@ pub struct PathBar {
     // --- Edit mode state ---
     /// The text being edited.
     edit_text: String,
+    /// The bytes `edit_text` was rendered from, while editing.
+    ///
+    /// `edit_text` is a text field with a caret, so it must stay a `String`.
+    /// That makes it a *lossy* view of a path that need not be text. Keeping
+    /// the original here lets an unedited field navigate to the bytes it was
+    /// opened with rather than to their `U+FFFD`-substituted rendering --
+    /// exactly how `RunDialog::command_exact` keeps a command.
+    edit_exact: Option<PathBuf>,
     /// Cursor position: a byte offset into `edit_text`, plus which side of a
     /// direction boundary the caret is drawn on.
     ///
@@ -141,14 +152,15 @@ pub struct PathBar {
 
 impl PathBar {
     /// Create a new path bar with the given initial path.
-    pub fn new(initial_path: &str) -> Self {
-        let path = normalize_path(initial_path);
-        let segments = split_path(&path);
+    pub fn new(initial_path: impl AsRef<Path>) -> Self {
+        let path = normalize_path(initial_path.as_ref().as_os_str());
+        let segments = split_path(path.as_os_str());
         Self {
             path,
             segments,
             mode: Mode::Breadcrumb,
             edit_text: String::new(),
+            edit_exact: None,
             cursor: TextCursor::default(),
             selection_anchor: None,
             completions: Vec::new(),
@@ -162,14 +174,14 @@ impl PathBar {
     }
 
     /// Update the displayed path (resets to breadcrumb mode).
-    pub fn set_path(&mut self, path: &str) {
-        self.path = normalize_path(path);
-        self.segments = split_path(&self.path);
+    pub fn set_path(&mut self, path: impl AsRef<Path>) {
+        self.path = normalize_path(path.as_ref().as_os_str());
+        self.segments = split_path(self.path.as_os_str());
         self.exit_edit_mode(false);
     }
 
     /// Current confirmed path.
-    pub fn current_path(&self) -> &str {
+    pub fn current_path(&self) -> &Path {
         &self.path
     }
 
@@ -281,7 +293,8 @@ impl PathBar {
             return;
         }
         self.mode = Mode::Edit;
-        self.edit_text = self.path.clone();
+        self.edit_text = self.path.as_os_str().to_string_lossy().into_owned();
+        self.edit_exact = Some(self.path.clone());
         self.cursor = self.edit_text.len().into();
         self.selection_anchor = None;
         self.completions.clear();
@@ -300,6 +313,7 @@ impl PathBar {
             // Path was already updated by the caller.
         }
         self.edit_text.clear();
+        self.edit_exact = None;
         self.cursor = TextCursor::default();
         self.selection_anchor = None;
         self.completions.clear();
@@ -541,9 +555,19 @@ impl PathBar {
     // -----------------------------------------------------------------------
 
     fn navigate_to_edit_text(&mut self) {
-        let new_path = normalize_path(&self.edit_text);
-        self.path = new_path.clone();
-        self.segments = split_path(&self.path);
+        // If the field still reads exactly as the path it was opened with,
+        // the user did not edit it, so navigate to the bytes rather than to
+        // their lossy rendering. Typing anything makes the text the source of
+        // truth, because then it is what the user actually asked for.
+        let typed = match &self.edit_exact {
+            Some(exact) if exact.as_os_str().to_string_lossy() == self.edit_text => {
+                exact.clone().into_os_string()
+            }
+            _ => OsString::from(self.edit_text.clone()),
+        };
+        let new_path = normalize_path(&typed);
+        self.path.clone_from(&new_path);
+        self.segments = split_path(self.path.as_os_str());
         self.pending_events.push(PathBarEvent::Navigate(new_path));
         self.exit_edit_mode(false);
     }
@@ -551,8 +575,8 @@ impl PathBar {
     fn navigate_to_segment(&mut self, segment_index: usize) {
         // Build path from segments[0..=segment_index].
         let new_path = rebuild_path(&self.segments, segment_index);
-        self.path = new_path.clone();
-        self.segments = split_path(&self.path);
+        self.path.clone_from(&new_path);
+        self.segments = split_path(self.path.as_os_str());
         self.pending_events.push(PathBarEvent::Navigate(new_path));
     }
 
@@ -711,7 +735,7 @@ impl PathBar {
             if i > 0 {
                 total_width += SEGMENT_GAP + SEPARATOR_WIDTH;
             }
-            total_width += pill_width(seg);
+            total_width += pill_width(&seg.label);
         }
 
         // When the trail is too long the leading segments are dropped, so the
@@ -725,7 +749,7 @@ impl PathBar {
             let mut accum = 0.0f32;
             let mut first = self.segments.len();
             for (i, seg) in self.segments.iter().enumerate().rev() {
-                let seg_total = pill_width(seg) + SEGMENT_GAP + SEPARATOR_WIDTH;
+                let seg_total = pill_width(&seg.label) + SEGMENT_GAP + SEPARATOR_WIDTH;
                 if accum + seg_total > available {
                     break;
                 }
@@ -756,7 +780,7 @@ impl PathBar {
                 push_separator(palette, cmds, x, y_center);
                 x += SEPARATOR_WIDTH;
             }
-            let (rx, ry, rw, rh) = push_pill(palette, cmds, x, y_center, seg, palette.text);
+            let (rx, ry, rw, rh) = push_pill(palette, cmds, x, y_center, &seg.label, palette.text);
             self.segment_rects.push((rx, ry, rw, rh));
             x += rw + SEGMENT_GAP;
             preceded = true;
@@ -1040,66 +1064,101 @@ fn push_separator(palette: &Palette, cmds: &mut Vec<RenderCommand>, x: f32, y_ce
 // Path utilities
 // ---------------------------------------------------------------------------
 
-/// Normalize a path: collapse double slashes, remove trailing slash (except root).
-fn normalize_path(path: &str) -> String {
-    if path.is_empty() {
-        return "/".to_string();
+/// Normalize a path: collapse repeated slashes, drop a trailing slash except
+/// at the root.
+///
+/// # Why this works on bytes and not on `str`
+///
+/// A path here is bytes: `design.txt` allows every byte in a name except `/`
+/// and NUL, so a path need not be text at all. Rendering it through `str`
+/// would replace whatever is not UTF-8 with `U+FFFD` and then *navigate to the
+/// replacement* -- a different path that looks right on screen.
+///
+/// The split is on `/` rather than through `Path::components()` on purpose.
+/// `components()` is host-dependent: on the Windows machine these tests run on
+/// it also treats `\` as a separator and `C:\` as a prefix, so the widget
+/// would behave one way under test and another on the target. SlateOS has a
+/// single separator, so splitting on it is the target-correct thing to do.
+fn normalize_path(path: &OsStr) -> PathBuf {
+    let mut out = OsString::new();
+
+    if path.as_encoded_bytes().first() == Some(&b'/') {
+        out.push("/");
     }
 
-    let mut result = String::with_capacity(path.len());
-    let mut prev_slash = false;
+    let mut first = true;
+    for part in split_on_slash(path) {
+        if part.is_empty() {
+            continue;
+        }
+        if !first {
+            out.push("/");
+        }
+        out.push(part);
+        first = false;
+    }
 
-    for ch in path.chars() {
-        if ch == '/' {
-            if !prev_slash {
-                result.push('/');
-            }
-            prev_slash = true;
-        } else {
-            result.push(ch);
-            prev_slash = false;
+    if out.is_empty() {
+        return PathBuf::from("/");
+    }
+    PathBuf::from(out)
+}
+
+/// One breadcrumb: the bytes it navigates to, and the text drawn on it.
+///
+/// Two fields rather than one because they answer different questions and only
+/// one of them can be lossy. `label` is what the pill shows, and a pill is
+/// text -- bytes that are not text cannot be drawn, so the lossy rendering is
+/// correct *for drawing*. `exact` is what a click navigates to, and must be
+/// the original bytes. The same split as `dialog.rs`'s `filename_input` /
+/// `filename_exact` and `RunDialog`'s `command_exact`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Segment {
+    /// The exact bytes of this path component. Never derived from `label`.
+    exact: OsString,
+    /// What is drawn. Lossy, and never used to build a path.
+    label: String,
+}
+
+impl Segment {
+    /// A segment for one path component.
+    fn new(exact: &OsStr) -> Self {
+        Self {
+            exact: exact.to_os_string(),
+            label: exact.to_string_lossy().into_owned(),
         }
     }
 
-    // Remove trailing slash unless it's the root.
-    if result.len() > 1 && result.ends_with('/') {
-        result.pop();
+    /// The leading `"/"` pill of an absolute path.
+    fn root() -> Self {
+        Self::new(OsStr::new("/"))
     }
 
-    if result.is_empty() {
-        "/".to_string()
-    } else {
-        result
+    /// Whether this is the root pill.
+    fn is_root(&self) -> bool {
+        self.exact == OsStr::new("/")
     }
 }
 
 /// Split a normalized path into display segments.
 ///
 /// `"/"` becomes `["/"]`; `"/home/user"` becomes `["/", "home", "user"]`.
-fn split_path(path: &str) -> Vec<String> {
-    if path.is_empty() || path == "/" {
-        return vec!["/".to_string()];
-    }
-
+fn split_path(path: &OsStr) -> Vec<Segment> {
     let mut segments = Vec::new();
 
-    if let Some(rest) = path.strip_prefix('/') {
-        segments.push("/".to_string());
-        for part in rest.split('/') {
-            if !part.is_empty() {
-                segments.push(part.to_string());
-            }
+    if path.as_encoded_bytes().first() == Some(&b'/') {
+        segments.push(Segment::root());
+    }
+
+    for part in split_on_slash(path) {
+        if part.is_empty() {
+            continue;
         }
-    } else {
-        for part in path.split('/') {
-            if !part.is_empty() {
-                segments.push(part.to_string());
-            }
-        }
+        segments.push(Segment::new(part));
     }
 
     if segments.is_empty() {
-        segments.push("/".to_string());
+        segments.push(Segment::root());
     }
 
     segments
@@ -1111,33 +1170,32 @@ fn split_path(path: &str) -> Vec<String> {
 /// `take` clamps by construction, so there is no prefix length to compute and
 /// then clamp back against the slice it was derived from.
 ///
-/// The two early returns this replaced — for an empty slice and for a prefix
-/// that is exactly the root — both re-derived answers the loop below already
+/// The two early returns this replaced -- for an empty slice and for a prefix
+/// that is exactly the root -- both re-derived answers the loop below already
 /// gives: no segments leaves `path` empty, and a lone `"/"` segment pushes a
 /// single slash.
-fn rebuild_path(segments: &[String], up_to_index: usize) -> String {
-    let mut path = String::new();
+fn rebuild_path(segments: &[Segment], up_to_index: usize) -> PathBuf {
+    let mut path = OsString::new();
     for (i, seg) in segments
         .iter()
         .take(up_to_index.saturating_add(1))
         .enumerate()
     {
-        if i == 0 && seg == "/" {
-            path.push('/');
+        if i == 0 && seg.is_root() {
+            path.push("/");
         } else {
-            if i > 0 && !path.ends_with('/') {
-                path.push('/');
+            if i > 0 && !path.as_encoded_bytes().ends_with(b"/") {
+                path.push("/");
             }
-            path.push_str(seg);
+            path.push(&seg.exact);
         }
     }
 
     // An empty trail, or one whose segments were all empty, is the root.
     if path.is_empty() {
-        "/".to_string()
-    } else {
-        path
+        return PathBuf::from("/");
     }
+    PathBuf::from(path)
 }
 
 /// Determine the prefix to use for autocomplete based on current edit text and cursor.
@@ -1172,6 +1230,17 @@ mod tests {
 
     use super::*;
     use crate::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    /// The drawn labels of a trail, for tests about the split rather than
+    /// about the bytes.
+    fn labels(segments: &[Segment]) -> Vec<String> {
+        segments.iter().map(|s| s.label.clone()).collect()
+    }
+
+    /// Build a trail from text components, for the rebuild tests.
+    fn segs(parts: &[&str]) -> Vec<Segment> {
+        parts.iter().map(|p| Segment::new(OsStr::new(p))).collect()
+    }
 
     fn key_press(key: Key) -> KeyEvent {
         KeyEvent {
@@ -1269,57 +1338,69 @@ mod tests {
 
     #[test]
     fn test_split_path_root() {
-        assert_eq!(split_path("/"), vec!["/"]);
+        assert_eq!(labels(&split_path(OsStr::new("/"))), vec!["/"]);
     }
 
     #[test]
     fn test_split_path_simple() {
         assert_eq!(
-            split_path("/home/user/Documents"),
+            labels(&split_path(OsStr::new("/home/user/Documents"))),
             vec!["/", "home", "user", "Documents"]
         );
     }
 
     #[test]
     fn test_split_path_single_dir() {
-        assert_eq!(split_path("/usr"), vec!["/", "usr"]);
+        assert_eq!(labels(&split_path(OsStr::new("/usr"))), vec!["/", "usr"]);
     }
 
     #[test]
     fn test_split_path_empty() {
-        assert_eq!(split_path(""), vec!["/"]);
+        assert_eq!(labels(&split_path(OsStr::new(""))), vec!["/"]);
     }
 
     #[test]
     fn test_split_path_relative() {
-        assert_eq!(split_path("home/user"), vec!["home", "user"]);
+        assert_eq!(
+            labels(&split_path(OsStr::new("home/user"))),
+            vec!["home", "user"]
+        );
     }
 
     // --- Path normalization tests ---
 
     #[test]
     fn test_normalize_double_slashes() {
-        assert_eq!(normalize_path("/home//user///docs"), "/home/user/docs");
+        assert_eq!(
+            normalize_path(OsStr::new("/home//user///docs")),
+            Path::new("/home/user/docs")
+        );
     }
 
     #[test]
     fn test_normalize_trailing_slash() {
-        assert_eq!(normalize_path("/home/user/"), "/home/user");
+        assert_eq!(
+            normalize_path(OsStr::new("/home/user/")),
+            Path::new("/home/user")
+        );
     }
 
     #[test]
     fn test_normalize_root_trailing() {
-        assert_eq!(normalize_path("/"), "/");
+        assert_eq!(normalize_path(OsStr::new("/")), Path::new("/"));
     }
 
     #[test]
     fn test_normalize_empty() {
-        assert_eq!(normalize_path(""), "/");
+        assert_eq!(normalize_path(OsStr::new("")), Path::new("/"));
     }
 
     #[test]
     fn test_normalize_multiple_trailing() {
-        assert_eq!(normalize_path("/home/user///"), "/home/user");
+        assert_eq!(
+            normalize_path(OsStr::new("/home/user///")),
+            Path::new("/home/user")
+        );
     }
 
     // --- Breadcrumb rendering tests ---
@@ -1412,7 +1493,7 @@ mod tests {
         let events = bar.drain_events();
         assert!(events.contains(&PathBarEvent::EditModeExited));
         // Path should not have changed (reverted).
-        assert_eq!(bar.current_path(), "/home/user");
+        assert_eq!(bar.current_path(), Path::new("/home/user"));
     }
 
     // --- Text editing tests ---
@@ -1654,9 +1735,9 @@ mod tests {
         bar.handle_key_event(&key_press(Key::Enter));
         let events = bar.drain_events();
 
-        assert!(events.contains(&PathBarEvent::Navigate("/usr/local/bin".to_string())));
+        assert!(events.contains(&PathBarEvent::Navigate(PathBuf::from("/usr/local/bin"))));
         assert!(!bar.is_editing());
-        assert_eq!(bar.current_path(), "/usr/local/bin");
+        assert_eq!(bar.current_path(), Path::new("/usr/local/bin"));
     }
 
     #[test]
@@ -1681,8 +1762,8 @@ mod tests {
         assert_eq!(result, EventResult::Consumed);
 
         let events = bar.drain_events();
-        assert!(events.contains(&PathBarEvent::Navigate("/home".to_string())));
-        assert_eq!(bar.current_path(), "/home");
+        assert!(events.contains(&PathBarEvent::Navigate(PathBuf::from("/home"))));
+        assert_eq!(bar.current_path(), Path::new("/home"));
     }
 
     #[test]
@@ -1701,8 +1782,8 @@ mod tests {
 
         bar.handle_mouse_event(&click);
         let events = bar.drain_events();
-        assert!(events.contains(&PathBarEvent::Navigate("/".to_string())));
-        assert_eq!(bar.current_path(), "/");
+        assert!(events.contains(&PathBarEvent::Navigate(PathBuf::from("/"))));
+        assert_eq!(bar.current_path(), Path::new("/"));
     }
 
     // --- Overflow tests ---
@@ -1735,17 +1816,15 @@ mod tests {
 
     #[test]
     fn test_rebuild_path_from_segments() {
-        let segments = vec![
-            "/".to_string(),
-            "home".to_string(),
-            "user".to_string(),
-            "Documents".to_string(),
-        ];
+        let segments = segs(&["/", "home", "user", "Documents"]);
 
-        assert_eq!(rebuild_path(&segments, 0), "/");
-        assert_eq!(rebuild_path(&segments, 1), "/home");
-        assert_eq!(rebuild_path(&segments, 2), "/home/user");
-        assert_eq!(rebuild_path(&segments, 3), "/home/user/Documents");
+        assert_eq!(rebuild_path(&segments, 0), Path::new("/"));
+        assert_eq!(rebuild_path(&segments, 1), Path::new("/home"));
+        assert_eq!(rebuild_path(&segments, 2), Path::new("/home/user"));
+        assert_eq!(
+            rebuild_path(&segments, 3),
+            Path::new("/home/user/Documents")
+        );
     }
 
     // --- Autocomplete prefix tests ---
@@ -1776,8 +1855,8 @@ mod tests {
     fn test_set_path_updates_segments() {
         let mut bar = PathBar::new("/old/path");
         bar.set_path("/new/path/here");
-        assert_eq!(bar.current_path(), "/new/path/here");
-        assert_eq!(bar.segments, vec!["/", "new", "path", "here"]);
+        assert_eq!(bar.current_path(), Path::new("/new/path/here"));
+        assert_eq!(labels(&bar.segments), vec!["/", "new", "path", "here"]);
     }
 
     // --- Click on empty area enters edit mode ---
@@ -1918,12 +1997,12 @@ mod tests {
     /// must not be a panic.
     #[test]
     fn rebuilding_past_the_end_yields_the_whole_path() {
-        let segments = vec!["/".to_string(), "home".to_string(), "user".to_string()];
-        assert_eq!(rebuild_path(&segments, 2), "/home/user");
-        assert_eq!(rebuild_path(&segments, 99), "/home/user");
-        assert_eq!(rebuild_path(&segments, usize::MAX), "/home/user");
-        assert_eq!(rebuild_path(&[], 0), "/");
-        assert_eq!(rebuild_path(&[], usize::MAX), "/");
+        let segments = segs(&["/", "home", "user"]);
+        assert_eq!(rebuild_path(&segments, 2), Path::new("/home/user"));
+        assert_eq!(rebuild_path(&segments, 99), Path::new("/home/user"));
+        assert_eq!(rebuild_path(&segments, usize::MAX), Path::new("/home/user"));
+        assert_eq!(rebuild_path(&[], 0), Path::new("/"));
+        assert_eq!(rebuild_path(&[], usize::MAX), Path::new("/"));
     }
 
     // --- Editing text that is not one byte per character ---
@@ -1996,5 +2075,115 @@ mod tests {
         bar.handle_key_event(&key_press_with_text(Key::E, 'é'));
         assert_eq!(bar.edit_text, "é/");
         assert_eq!(bar.cursor.byte, 2);
+    }
+
+    // --- A path that is not text ---
+    //
+    // `design.txt` allows every byte in a name but `/` and NUL, so a folder
+    // can have a name with no text form at all. These pin that such a name
+    // survives the widget rather than being flattened to its replacement-
+    // character rendering and navigated to as a different path.
+
+    /// A name with no text form round-trips through the breadcrumb.
+    #[cfg(windows)]
+    #[test]
+    fn a_path_that_is_not_text_survives_the_breadcrumb() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let odd = PathBuf::from(OsString::from_wide(&[
+            u16::from(b'/'),
+            u16::from(b'z'),
+            0xD800,
+        ]));
+        let bar = PathBar::new(&odd);
+
+        assert_eq!(
+            bar.current_path(),
+            odd.as_path(),
+            "the address bar changed a path it was only asked to display"
+        );
+    }
+
+    /// The pill is drawn lossily and navigated to exactly.
+    ///
+    /// Both halves matter: a pill is text, so the label *must* be lossy; the
+    /// click target is a path, so `exact` must not be.
+    #[cfg(windows)]
+    #[test]
+    fn a_pill_is_drawn_lossily_and_navigated_to_exactly() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let name = OsString::from_wide(&[u16::from(b'z'), 0xD800]);
+        let odd = PathBuf::from(OsString::from_wide(&[
+            u16::from(b'/'),
+            u16::from(b'z'),
+            0xD800,
+        ]));
+        let bar = PathBar::new(&odd);
+
+        let last = bar.segments.last().expect("the trail has a leaf");
+        assert!(
+            last.label.contains(char::REPLACEMENT_CHARACTER),
+            "the fixture is not lossy, so this test proves nothing: {:?}",
+            last.label
+        );
+        assert_eq!(
+            last.exact, name,
+            "the click target was rebuilt from the drawn text"
+        );
+    }
+
+    /// Confirming an address the user never touched navigates to the bytes.
+    ///
+    /// The field itself has to be a `String` -- it is a text input with a
+    /// caret. That makes it a lossy view, so confirming it verbatim would
+    /// navigate to a path that merely *looks* like the one displayed. The
+    /// widget keeps the original beside it and prefers it while the text still
+    /// reads as the rendering of those bytes, which is how
+    /// `RunDialog::command_exact` already distinguishes "unedited" from
+    /// "typed".
+    #[cfg(windows)]
+    #[test]
+    fn confirming_an_untouched_address_navigates_to_the_bytes() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let odd = PathBuf::from(OsString::from_wide(&[
+            u16::from(b'/'),
+            u16::from(b'z'),
+            0xD800,
+        ]));
+        let mut bar = PathBar::new(&odd);
+        bar.enter_edit_mode();
+
+        assert!(
+            bar.edit_text.contains(char::REPLACEMENT_CHARACTER),
+            "the fixture is not lossy, so this test proves nothing: {:?}",
+            bar.edit_text
+        );
+
+        bar.navigate_to_edit_text();
+        let events = bar.drain_events();
+        assert!(
+            events.contains(&PathBarEvent::Navigate(odd.clone())),
+            "an address bar nobody typed into navigated somewhere else: {events:?}"
+        );
+    }
+
+    /// Typing makes the text the source of truth again.
+    ///
+    /// The other side of the rule above: keeping the original bytes must not
+    /// mean ignoring what the user actually asked for.
+    #[test]
+    fn typing_an_address_makes_the_text_the_source_of_truth() {
+        let mut bar = PathBar::new("/home/user");
+        bar.enter_edit_mode();
+        bar.edit_text = "/etc".to_string();
+        bar.navigate_to_edit_text();
+
+        let events = bar.drain_events();
+        assert!(
+            events.contains(&PathBarEvent::Navigate(PathBuf::from("/etc"))),
+            "the typed address was discarded: {events:?}"
+        );
     }
 }

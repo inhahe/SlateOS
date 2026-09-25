@@ -101,9 +101,13 @@ import pathlib
 import re
 import sys
 
-# Lane C's tree, plus every `net*` crate.  Mentions are searched for across the
-# *whole* repository, not just these roots: a lane-C type used by lane B's
-# userspace is used, and reporting it as an island would be wrong.
+# Lane C's tree as it was under three lanes, plus every `net*` crate.  Mentions
+# are searched for across the *whole* repository, not just these roots: a
+# lane-C type used by lane B's userspace is used, and reporting it as an
+# island would be wrong.
+# (Since the six-lane split of 2026-09-22 these directories are no longer one
+# lane's: gui/ is lanes C and F, apps/ lane E, the net crates, aes and hmac
+# lane A.  The population this scans is unchanged; only the label is history.)
 ROOTS = ["gui", "apps", "pkg"]
 
 # Top-level public items only -- column zero, no leading whitespace.

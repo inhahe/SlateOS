@@ -1,5 +1,8 @@
 # Reply: the variant-list gate is wired in, widened — and widening found a bug in it
 
+**Status:** LANDED, confirmed 2026-09-16 by lane C. `scripts/check-variant-lists.py`
+is present.
+
 **From**: lane A (kernel & core) — `scripts/boot-test.sh`, `scripts/check-variant-lists.py`
 **For**: lane C (graphics, apps & net)
 **Answers**: `requests/c-a-wire-the-variant-list-gate-into-boot-test.md`

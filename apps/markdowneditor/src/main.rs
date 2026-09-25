@@ -1846,6 +1846,12 @@ pub struct FindReplaceState {
     pub matches: Vec<(usize, usize, usize)>,
     /// Index of the currently highlighted match.
     pub current_match: usize,
+    /// Whether typing goes to the replacement box rather than the query box.
+    ///
+    /// The panel has two text boxes and this app has no pointer, so there has
+    /// to be something that says which one a keystroke belongs to. `Tab`
+    /// moves between them.
+    pub focus_replacement: bool,
 }
 
 impl Default for FindReplaceState {
@@ -1864,6 +1870,7 @@ impl FindReplaceState {
             case_sensitive: false,
             matches: Vec::new(),
             current_match: 0,
+            focus_replacement: false,
         }
     }
 
@@ -4280,7 +4287,13 @@ pub fn render_find_replace(
 
     // Action buttons.
     let btn_x = x + 70.0 + width * 0.4 + 12.0;
-    let btn_labels = ["Replace", "Replace All", "Close"];
+    // Labels for keys, not targets for a pointer: this app handles no
+    // pointer events, so a button here can only ever tell you what to press.
+    let btn_labels = [
+        "Replace  Ctrl+Enter",
+        "Replace All  Ctrl+Shift+Enter",
+        "Close  Esc",
+    ];
     let mut bx = btn_x;
     for label in &btn_labels {
         let bw = text::width(label, SMALL_BUTTON_FONT_SIZE) + 16.0;
@@ -4460,6 +4473,8 @@ pub struct App {
     pub find_state: FindReplaceState,
     /// Toolbar button definitions.
     pub toolbar_buttons: Vec<ToolbarButton>,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     /// Whether auto-save is enabled.
     pub autosave_enabled: bool,
     /// Auto-save interval in seconds.
@@ -4536,6 +4551,7 @@ impl App {
             toc_visible: false,
             find_state: FindReplaceState::new(),
             toolbar_buttons: default_toolbar_buttons(),
+            show_help: false,
             autosave_enabled: true,
             autosave_interval: DEFAULT_AUTOSAVE_INTERVAL,
             template_chooser_open: false,
@@ -5089,6 +5105,17 @@ impl App {
             cmds.extend(self.render_external_prompt(prompt));
         }
 
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
+
         cmds
     }
 
@@ -5412,17 +5439,216 @@ pub enum Key {
 }
 
 /// Handle a key press event in the application.
-pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) {
+/// Recompute the matches against the document as it stands.
+///
+/// The lines are moved out and back rather than cloned: `find_all` needs them
+/// by reference while `find_state` is borrowed mutably, and both live on
+/// `App`.
+fn refresh_matches(app: &mut App) {
+    let lines = std::mem::take(&mut app.active_document_mut().lines);
+    app.find_state.find_all(&lines);
+    app.active_document_mut().lines = lines;
+}
+
+/// Put the cursor on the match the panel is pointing at.
+///
+/// Without this the panel counts matches it will not show you, which is the
+/// half of "find" that is not searching. It is also the only caller
+/// `go_to_line` has ever had.
+fn show_current_match(app: &mut App) {
+    let Some((line, _, _)) = app.find_state.current_match_info() else {
+        return;
+    };
+    app.active_document_mut().go_to_line(line);
+    let visible = compute_visible_lines(app);
+    app.active_document_mut().ensure_cursor_visible(visible);
+}
+
+/// Replace the current match, or every match.
+fn replace_in_active(app: &mut App, all: bool) {
+    let mut lines = std::mem::take(&mut app.active_document_mut().lines);
+    let changed = if all {
+        app.find_state.replace_all(&mut lines) > 0
+    } else {
+        app.find_state.replace_current(&mut lines)
+    };
+    app.active_document_mut().lines = lines;
+    if changed {
+        app.active_document_mut().modified = true;
+        app.refresh_cache();
+    }
+}
+
+/// Keys while the find and replace panel is open.
+///
+/// The panel takes the keyboard for the reason every text mode in this tree
+/// does: a query containing `s` must not save the document behind it. Returns
+/// whether the key was used here.
+///
+/// Before this, **nothing in production wrote `query` or `replacement`**, so
+/// the panel opened with two boxes that could never hold a character and three
+/// buttons that could not be clicked -- this app handles no pointer events at
+/// all. `replace_current`, `replace_all`, `next_match` and `prev_match` each
+/// appeared exactly once in the crate: their own definition.
+fn handle_find_key(app: &mut App, key: Key, modifiers: Modifiers) -> bool {
+    if modifiers.ctrl {
+        return match key {
+            // The keys that opened it close it again.
+            Key::Char('h' | 'H' | 'f' | 'F') => {
+                app.find_state.visible = false;
+                true
+            }
+            // Match case. `case_sensitive` was `false` at construction with no
+            // writer anywhere, so `Case::sensitive(self.case_sensitive)` was
+            // handed `false` for every search this program has ever run --
+            // the find could not be made to match case. Found by
+            // `scripts/frozen-flag-survey.py`.
+            //
+            // `Ctrl+I` inside the find bar, which is what `apps/hexeditor` and
+            // `apps/jsonviewer` use for the same question. The global `Ctrl+I`
+            // is italic and lives in a different handler, so the two do not
+            // collide.
+            Key::Char('i' | 'I') => {
+                app.find_state.case_sensitive = !app.find_state.case_sensitive;
+                refresh_matches(app);
+                true
+            }
+            // Replace, and replace every match. On the buttons the panel
+            // draws, which are labels for these keys rather than targets for
+            // a pointer that does not exist.
+            Key::Enter => {
+                replace_in_active(app, modifiers.shift);
+                refresh_matches(app);
+                show_current_match(app);
+                true
+            }
+            _ => false,
+        };
+    }
+    match key {
+        Key::Escape => {
+            app.find_state.visible = false;
+            true
+        }
+        Key::Tab => {
+            app.find_state.focus_replacement = !app.find_state.focus_replacement;
+            true
+        }
+        Key::Enter => {
+            if modifiers.shift {
+                app.find_state.prev_match();
+            } else {
+                app.find_state.next_match();
+            }
+            show_current_match(app);
+            true
+        }
+        Key::Backspace => {
+            if app.find_state.focus_replacement {
+                app.find_state.replacement.pop();
+            } else {
+                app.find_state.query.pop();
+                refresh_matches(app);
+            }
+            true
+        }
+        Key::Char(c) => {
+            if app.find_state.focus_replacement {
+                app.find_state.replacement.push(c);
+            } else {
+                app.find_state.query.push(c);
+                // On every keystroke rather than on Enter: the panel reports a
+                // match count, and a count that lags what is typed is worse
+                // than none.
+                refresh_matches(app);
+                show_current_match(app);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The keys this program answers, as a reader sees them.
+///
+/// Every one of these was already written down -- in `ToolbarButton::tooltip`,
+/// which nothing in this crate reads and no pointer could ever summon, because
+/// this app handles no mouse event of any kind. A shortcut named only in a
+/// field with no reader is not named.
+///
+/// `Ctrl+O` was in that list too and was bound to nothing at all. It is bound
+/// here, because the honest repair for an advertised key is to make it work.
+///
+/// **No `?` row.** `Key::Char(ch)` with no Ctrl inserts the character into the
+/// document, so binding `?` would cost a question mark in a markdown file to
+/// buy a list `F1` already opens. Same reason `apps/ebook` does not offer it.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Ctrl+N", "New document"),
+    ("Ctrl+O", "Open a file"),
+    ("Ctrl+S", "Save"),
+    ("Ctrl+B", "Bold"),
+    ("Ctrl+I", "Italic; match case in the find panel"),
+    ("Ctrl+K", "Link"),
+    ("Ctrl+Shift+K", "Code block"),
+    ("Ctrl+Z", "Undo"),
+    ("Ctrl+Y", "Redo"),
+    ("Ctrl+Shift+Z", "Redo"),
+    ("Ctrl+F", "Find"),
+    ("Ctrl+H", "Find and replace"),
+    ("Tab", "Indent; switch boxes in the find panel"),
+    ("Enter", "New line; next match in the find panel"),
+    ("Ctrl+Enter", "Replace, in the find panel"),
+    ("Ctrl+Shift+Enter", "Replace all, in the find panel"),
+    ("Esc", "Close the find panel"),
+];
+
+/// Answer a keystroke. Reports whether this program did anything with it.
+///
+/// The return value is not decoration. Without it "did the app answer this
+/// key?" can only be inferred from some field moving, and picking that field
+/// is the mistake this tree has made six times: the observable whose name
+/// matches the verb is usually not the one the action writes.
+pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) -> bool {
+    // Above the find panel's branch, which returns before everything below
+    // it. Placed after, the card could be raised from the editor and then not
+    // dismissed while the panel was open -- a list with no way out, which is
+    // the third app in this tree where this placement was the difference.
+    if key == Key::Function(1) {
+        app.show_help = !app.show_help;
+        return true;
+    }
+    if app.show_help {
+        // Modal. Letting keys through would edit a document the reader cannot
+        // see, and typing is what most keys do here.
+        if matches!(key, Key::Escape | Key::Enter) {
+            app.show_help = false;
+        }
+        return true;
+    }
+
+    // The find panel takes the keyboard while it is open.
+    if app.find_state.visible && handle_find_key(app, key, modifiers) {
+        return true;
+    }
+
     // Global shortcuts.
     if modifiers.ctrl {
         match key {
             Key::Char('n') | Key::Char('N') => {
                 app.new_document();
-                return;
+                return true;
+            }
+            // Advertised by the Open button's tooltip since that toolbar was
+            // written, and answered by nothing. The toolbar cannot be clicked
+            // either, so this was the only route left to a file.
+            Key::Char('o') | Key::Char('O') => {
+                app.picker.open_to_read();
+                return true;
             }
             Key::Char('s') | Key::Char('S') => {
                 app.save_active();
-                return;
+                return true;
             }
             Key::Char('z') | Key::Char('Z') => {
                 if modifiers.shift {
@@ -5431,22 +5657,22 @@ pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) {
                     app.active_document_mut().undo();
                 }
                 app.refresh_cache();
-                return;
+                return true;
             }
             Key::Char('y') | Key::Char('Y') => {
                 app.active_document_mut().redo();
                 app.refresh_cache();
-                return;
+                return true;
             }
             Key::Char('b') | Key::Char('B') => {
                 insert_bold(app.active_document_mut());
                 app.refresh_cache();
-                return;
+                return true;
             }
             Key::Char('i') | Key::Char('I') => {
                 insert_italic(app.active_document_mut());
                 app.refresh_cache();
-                return;
+                return true;
             }
             Key::Char('k') | Key::Char('K') => {
                 if modifiers.shift {
@@ -5455,15 +5681,15 @@ pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) {
                     insert_link(app.active_document_mut());
                 }
                 app.refresh_cache();
-                return;
+                return true;
             }
             Key::Char('h') | Key::Char('H') => {
                 app.find_state.visible = !app.find_state.visible;
-                return;
+                return true;
             }
             Key::Char('f') | Key::Char('F') => {
                 app.find_state.visible = true;
-                return;
+                return true;
             }
             _ => {}
         }
@@ -5473,37 +5699,43 @@ pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) {
     if key == Key::Escape {
         if app.template_chooser_open {
             app.template_chooser_open = false;
-            return;
+            return true;
         }
         if app.find_state.visible {
             app.find_state.visible = false;
-            return;
+            return true;
         }
     }
 
     // Navigation keys.
-    match key {
+    let answered = match key {
         Key::Up => {
             app.active_document_mut().move_cursor_up();
             let visible = compute_visible_lines(app);
             app.active_document_mut().ensure_cursor_visible(visible);
+            true
         }
         Key::Down => {
             app.active_document_mut().move_cursor_down();
             let visible = compute_visible_lines(app);
             app.active_document_mut().ensure_cursor_visible(visible);
+            true
         }
         Key::Left => {
             app.active_document_mut().move_cursor_left();
+            true
         }
         Key::Right => {
             app.active_document_mut().move_cursor_right();
+            true
         }
         Key::Home => {
             app.active_document_mut().move_cursor_home();
+            true
         }
         Key::End => {
             app.active_document_mut().move_cursor_end();
+            true
         }
         Key::PageUp => {
             let visible = compute_visible_lines(app);
@@ -5512,6 +5744,7 @@ pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) {
                 doc.move_cursor_up();
             }
             doc.ensure_cursor_visible(visible);
+            true
         }
         Key::PageDown => {
             let visible = compute_visible_lines(app);
@@ -5520,32 +5753,39 @@ pub fn handle_key(app: &mut App, key: Key, modifiers: Modifiers) {
                 doc.move_cursor_down();
             }
             doc.ensure_cursor_visible(visible);
+            true
         }
         Key::Enter => {
             app.active_document_mut().insert_newline();
             app.refresh_cache();
+            true
         }
         Key::Backspace => {
             app.active_document_mut().delete_backward();
             app.refresh_cache();
+            true
         }
         Key::Delete => {
             app.active_document_mut().delete_forward();
             app.refresh_cache();
+            true
         }
         Key::Tab => {
             app.active_document_mut().insert_text("    ");
             app.refresh_cache();
+            true
         }
         Key::Char(ch) if !modifiers.ctrl && !modifiers.alt => {
             app.active_document_mut().insert_char(ch);
             app.refresh_cache();
+            true
         }
-        _ => {}
-    }
+        _ => false,
+    };
 
     // Sync scroll after any edit.
     app.sync_scroll();
+    answered
 }
 
 /// Compute the number of visible lines in the editor area.
@@ -5742,8 +5982,13 @@ impl oswindow::app::App for App {
                 let Some((k, m)) = translate_key(key) else {
                     return Response::Idle;
                 };
-                handle_key(self, k, m);
-                Response::Redraw
+                // Idle when nothing answered, so a stray key does not
+                // repaint the whole document.
+                if handle_key(self, k, m) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
             }
             _ => Response::Idle,
         }
@@ -7318,6 +7563,311 @@ mod tests {
         app.refresh_cache();
         assert!(!app.cached_blocks.is_empty());
         assert!(!app.cached_toc.is_empty());
+    }
+
+    // --- Find and replace ---
+
+    fn ctrl(shift: bool) -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            shift,
+            alt: false,
+        }
+    }
+
+    /// **The find can be made to match case.**
+    ///
+    /// `case_sensitive` was `false` at construction with no writer anywhere,
+    /// so `Case::sensitive(self.case_sensitive)` received `false` for every
+    /// search this program has ever run. The setting existed, was read, and
+    /// could not be changed. Found by `scripts/frozen-flag-survey.py`.
+    ///
+    /// Asserts the *match count*, not the flag: a key that flips a boolean the
+    /// searcher ignores would pass the weaker version, which is the defect
+    /// `apps/regextester`'s `multiline` had.
+    #[test]
+    fn the_find_can_be_made_to_match_case() {
+        let mut app = App::new(1280.0, 800.0);
+        {
+            let doc = app.active_document_mut();
+            doc.lines = vec!["Beta".to_string(), "beta".to_string()];
+        }
+        app.refresh_cache();
+
+        app.find_state.visible = true;
+        app.find_state.query = "beta".to_string();
+        refresh_matches(&mut app);
+        let insensitive = app.find_state.matches.len();
+        assert_eq!(insensitive, 2, "the fixture should match both spellings");
+
+        assert!(
+            handle_find_key(&mut app, Key::Char('i'), ctrl(false)),
+            "Ctrl+I in the find bar was not answered"
+        );
+        assert!(app.find_state.case_sensitive, "the flag did not move");
+        assert!(
+            app.find_state.matches.len() < insensitive,
+            "matching case returned the same {insensitive} matches"
+        );
+    }
+
+    /// An app holding one document with three lines of known text.
+    fn app_with_text() -> App {
+        let mut app = App::new(1280.0, 800.0);
+        {
+            let doc = app.active_document_mut();
+            doc.lines = vec![
+                "alpha beta".to_string(),
+                "beta gamma".to_string(),
+                "delta".to_string(),
+            ];
+        }
+        app.refresh_cache();
+        app
+    }
+
+    /// Typing reaches the find box, and the matches follow what is typed.
+    ///
+    /// Nothing in production wrote `query` or `replacement`, so the panel
+    /// opened with two boxes that could never hold a character.
+    #[test]
+    fn typing_reaches_the_find_box() {
+        let mut app = app_with_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+        assert!(app.find_state.visible, "control: Ctrl+H opens the panel");
+
+        for c in "beta".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+
+        assert_eq!(app.find_state.query, "beta", "the letters never arrived");
+        assert_eq!(
+            app.find_state.matches.len(),
+            2,
+            "the matches did not follow"
+        );
+    }
+
+    /// While the panel is open, typing does not reach the document behind it.
+    #[test]
+    fn typing_into_the_panel_does_not_edit_the_document() {
+        let mut app = app_with_text();
+        let before = app.active_document().full_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+
+        for c in "beta".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+
+        assert_eq!(
+            app.active_document().full_text(),
+            before,
+            "the query was typed into the document"
+        );
+    }
+
+    /// Tab moves to the replacement box.
+    #[test]
+    fn tab_moves_between_the_two_boxes() {
+        let mut app = app_with_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+        handle_key(&mut app, Key::Char('x'), Modifiers::default());
+
+        handle_key(&mut app, Key::Tab, Modifiers::default());
+        handle_key(&mut app, Key::Char('y'), Modifiers::default());
+
+        assert_eq!(app.find_state.query, "x", "the query changed after Tab");
+        assert_eq!(
+            app.find_state.replacement, "y",
+            "Tab did not reach the second box"
+        );
+    }
+
+    /// Enter puts the cursor on the match, rather than only counting it.
+    ///
+    /// This is also the only caller `go_to_line` has ever had.
+    #[test]
+    fn enter_moves_the_cursor_to_the_match() {
+        let mut app = app_with_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+        for c in "gamma".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+
+        handle_key(&mut app, Key::Enter, Modifiers::default());
+
+        let (line, _, _) = app
+            .find_state
+            .current_match_info()
+            .expect("there is a match to be on");
+        assert_eq!(line, 1, "gamma is on the second line");
+        assert_eq!(
+            app.active_document().cursor_line,
+            line,
+            "the cursor stayed where it was"
+        );
+    }
+
+    /// Ctrl+Enter replaces the current match in the document.
+    /// **Every key the card advertises is answered by this program.**
+    ///
+    /// Two panel states, because `Esc`, `Enter`, `Tab` and `Ctrl+I` are
+    /// claimed by the find panel when it is open and by the editor when it is
+    /// not -- and `Esc` is answered *only* with a panel open. A single state
+    /// would have hidden that in whichever direction it was written.
+    ///
+    /// This runs the real bridge: `keystrokes` builds a toolkit `KeyEvent`
+    /// with no text, exactly as a chord arrives, and `translate_key` is what
+    /// turns it into the key this app matches on. A guard that skipped it
+    /// would pass on a list whose keys the bridge drops.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for ev in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|panel_open| {
+                    let Some((k, m)) = translate_key(&ev) else {
+                        return false;
+                    };
+                    let mut app = App::new(1280.0, 800.0);
+                    app.find_state.visible = panel_open;
+                    handle_key(&mut app, k, m)
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    ev.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the last third. `Ctrl+N` behind the card must not open a
+    /// document -- but asserting only that would pass just as well on an app
+    /// that had lost `Ctrl+N` altogether, so the same keystroke is then run
+    /// with the card down and required to work.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        fn drawn(app: &App) -> String {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        }
+
+        let mut app = App::new(1280.0, 800.0);
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "the card is up before anybody asked for it"
+        );
+
+        handle_key(&mut app, Key::Function(1), Modifiers::default());
+        let shown = drawn(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let before = app.documents.count();
+        handle_key(&mut app, Key::Char('n'), ctrl(false));
+        assert_eq!(
+            app.documents.count(),
+            before,
+            "Ctrl+N opened a document through the shortcut card"
+        );
+
+        handle_key(&mut app, Key::Escape, Modifiers::default());
+        handle_key(&mut app, Key::Char('n'), ctrl(false));
+        assert!(
+            app.documents.count() > before,
+            "control: Ctrl+N does nothing even with the card down"
+        );
+    }
+
+    #[test]
+    fn ctrl_enter_replaces_the_current_match() {
+        let mut app = app_with_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+        for c in "beta".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+        handle_key(&mut app, Key::Tab, Modifiers::default());
+        for c in "ZZ".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+
+        handle_key(&mut app, Key::Enter, ctrl(false));
+
+        let text = app.active_document().full_text();
+        assert!(text.contains("ZZ"), "nothing was replaced: {text}");
+        assert_eq!(text.matches("beta").count(), 1, "it replaced more than one");
+        assert!(
+            app.active_document().modified,
+            "the document is not marked modified"
+        );
+    }
+
+    /// Ctrl+Shift+Enter replaces every match.
+    #[test]
+    fn ctrl_shift_enter_replaces_every_match() {
+        let mut app = app_with_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+        for c in "beta".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+        handle_key(&mut app, Key::Tab, Modifiers::default());
+        for c in "ZZ".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+
+        handle_key(&mut app, Key::Enter, ctrl(true));
+
+        let text = app.active_document().full_text();
+        assert_eq!(text.matches("beta").count(), 0, "a match survived: {text}");
+        assert_eq!(
+            text.matches("ZZ").count(),
+            2,
+            "not every match was replaced"
+        );
+    }
+
+    /// Backspace deletes from the focused box.
+    #[test]
+    fn backspace_deletes_from_the_focused_box() {
+        let mut app = app_with_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+        for c in "beta".chars() {
+            handle_key(&mut app, Key::Char(c), Modifiers::default());
+        }
+
+        handle_key(&mut app, Key::Backspace, Modifiers::default());
+
+        assert_eq!(
+            app.find_state.query, "bet",
+            "backspace did not reach the box"
+        );
+    }
+
+    /// Escape closes the panel and the keyboard goes back to the document.
+    #[test]
+    fn escape_closes_the_panel_and_returns_the_keyboard() {
+        let mut app = app_with_text();
+        handle_key(&mut app, Key::Char('h'), ctrl(false));
+        handle_key(&mut app, Key::Char('q'), Modifiers::default());
+
+        handle_key(&mut app, Key::Escape, Modifiers::default());
+        assert!(!app.find_state.visible, "Escape did not close the panel");
+
+        handle_key(&mut app, Key::Char('q'), Modifiers::default());
+        assert!(
+            app.active_document().full_text().contains('q'),
+            "the document did not get the keyboard back"
+        );
     }
 
     // --- Keyboard shortcut tests ---

@@ -1237,6 +1237,8 @@ pub struct CalendarApp {
 
     // UI state
     pub sidebar_visible: bool,
+    /// Whether the shortcut list is up.
+    pub show_help: bool,
     pub search_query: String,
     pub search_results: Vec<u64>,
     pub selected_event_id: Option<u64>,
@@ -1283,6 +1285,7 @@ impl CalendarApp {
             last_file_action: None,
             store: EventStore::new(),
             sidebar_visible: true,
+            show_help: false,
             search_query: String::new(),
             search_results: Vec::new(),
             selected_event_id: None,
@@ -1707,6 +1710,19 @@ impl CalendarApp {
             self.picker
                 .render(&self.palette, layout.window.w, layout.window.h),
         );
+
+        // And the shortcut list over even that, because it is the one thing a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (layout.window.w, layout.window.h),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
 
         frame
     }
@@ -2794,6 +2810,35 @@ pub fn handle_event(state: &mut CalendarApp, event: &Event) -> EventResult {
     }
 }
 
+/// Every key this program answers, and what it does.
+///
+/// Sixteen bindings and, until this list existed, no way to learn one but
+/// reading the source. `W` is the worst of them: it decides which day a week
+/// begins on, which is a question with no universally right answer, and it was
+/// answered once at compile time until the key existed and then answerable
+/// only by someone who had read the handler.
+///
+/// **Each row is a key this program actually answers**, which is not a
+/// property the list has on its own: `every_advertised_key_does_something`
+/// walks it, reads each label with `guitk::shortcut` and presses every key it
+/// names. `apps/rssreader` shipped an overlay of twenty-one shortcuts of which
+/// about four worked.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("1 / 2 / 3", "Month / week / day"),
+    ("4 / 5", "Year / agenda"),
+    ("Left / Right", "Back / forward one period"),
+    ("PageUp / PageDown", "Back / forward one period"),
+    ("Home", "Go to today"),
+    ("Up / Down", "Scroll the day or week"),
+    ("W", "Start the week on Monday or Sunday"),
+    ("H", "Show times as 24-hour or 12-hour"),
+    ("Escape", "Clear the selected event"),
+    ("Ctrl+F", "Search"),
+    ("Ctrl+B", "Show or hide the sidebar"),
+    ("Ctrl+O / Ctrl+S", "Import / export a calendar file"),
+    ("F1 / ?", "This list"),
+];
+
 /// The view a digit key selects, by its index in [`CalendarView::all`].
 fn view_for_digit(key: Key) -> Option<usize> {
     match key {
@@ -2935,6 +2980,24 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
     }
 
     match key.key {
+        // Which day a week begins on. `week_starts_monday` was `true` at
+        // construction and had no writer, so every month grid began on Monday
+        // for everyone -- a question with no universally right answer, being
+        // answered once at compile time.
+        Key::W => {
+            state.week_starts_monday = !state.week_starts_monday;
+            EventResult::Consumed
+        }
+        // `use_24h` was `false` at construction with no writer anywhere, so
+        // every time this program drew was 12-hour for everybody -- the same
+        // shape as `week_starts_monday` above, which is why it gets the same
+        // kind of answer. A bare letter, next to `W`, because both are
+        // questions with no universally right answer that were being settled
+        // once at compile time. Found by `scripts/frozen-flag-survey.py`.
+        Key::H => {
+            state.use_24h = !state.use_24h;
+            EventResult::Consumed
+        }
         Key::Left | Key::PageUp => {
             state.navigate_backward();
             state.content_scroll = 0.0;
@@ -2958,6 +3021,28 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
         Key::Down => {
             state.content_scroll += WEEK_HOUR_H;
             state.clamp_scroll();
+            EventResult::Consumed
+        }
+        // `?`, which is Shift and the slash key. The search branch above
+        // returns first when the box has focus, so this cannot swallow a `?`
+        // somebody is typing into a query.
+        // The shortcut list. `F1` raises it in every app in this tree,
+        // including `apps/spreadsheet`, where `?` is a character the
+        // program has to be able to type into a cell -- so somebody who
+        // has learned one key is never stuck. `?` as well, wherever the
+        // program is not obliged to type one.
+        Key::F1 => {
+            state.show_help = !state.show_help;
+            EventResult::Consumed
+        }
+        Key::Slash if key.modifiers.shift => {
+            state.show_help = !state.show_help;
+            EventResult::Consumed
+        }
+        // Before the plain `Escape` arm below, which would otherwise take this
+        // and clear the selection while the list stayed up.
+        Key::Escape if state.show_help => {
+            state.show_help = false;
             EventResult::Consumed
         }
         Key::Escape => {
@@ -5140,6 +5225,126 @@ mod tests {
         assert_eq!(app.content_scroll, 0.0);
     }
 
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// A list on screen and the handler behind it are two copies of one fact,
+    /// and they drift: `apps/rssreader` shipped an overlay of twenty-one
+    /// shortcuts of which about four worked. The label is read by
+    /// `guitk::shortcut` rather than matched against a table written beside it
+    /// here -- that table would be a third copy, drifting from both.
+    ///
+    /// A fresh calendar per keystroke, because `Ctrl+O` and `Ctrl+S` each put
+    /// a file picker up that would take the next key.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut app = sample_app(june_2024());
+                assert_eq!(
+                    handle_event(&mut app, &Event::Key(stroke.clone())),
+                    EventResult::Consumed,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/netscan`'s `wol_note` was written by the
+    /// model and drawn by nothing for three commits with every model-level
+    /// test passing.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = sample_app(june_2024());
+        assert!(
+            !help_text(&app).contains("? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        let ask = guitk::shortcut::keystrokes("?").unwrap_or_else(|e| panic!("{e}"));
+        for stroke in &ask {
+            handle_event(&mut app, &Event::Key(stroke.clone()));
+        }
+
+        let shown = help_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        handle_event(
+            &mut app,
+            &Event::Key(KeyEvent {
+                key: Key::Escape,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: String::new(),
+            }),
+        );
+        assert!(
+            !help_text(&app).contains("? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// **The clock can be put into 24-hour time.**
+    ///
+    /// `use_24h` was `false` at construction and written nowhere, so every
+    /// time this program drew was 12-hour for every user in every locale. The
+    /// guard test only asks whether `H` was consumed; this asks whether the
+    /// clock moved, and that the neighbouring preference did not come with it.
+    #[test]
+    fn the_hour_format_can_be_changed() {
+        let mut app = sample_app(june_2024());
+        let before = (app.use_24h, app.week_starts_monday);
+
+        probe::key(&mut app, &probe::press(Key::H));
+
+        assert_ne!(app.use_24h, before.0, "H did not change the hour format");
+        assert_eq!(
+            app.week_starts_monday, before.1,
+            "H moved the week-start preference as well"
+        );
+    }
+
+    /// A `?` typed into the search box stays a `?`.
+    #[test]
+    fn a_question_mark_in_the_search_box_is_not_the_help_key() {
+        let mut app = sample_app(june_2024());
+        app.search_focused = true;
+        handle_event(
+            &mut app,
+            &Event::Key(KeyEvent {
+                key: Key::Slash,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: String::from("?"),
+            }),
+        );
+        assert!(
+            !help_text(&app).contains("? closes this"),
+            "the help key was taken out of somebody's search query"
+        );
+        assert!(app.search_query.contains('?'), "the `?` was dropped");
+    }
+
+    /// Every string the window is drawing, joined.
+    fn help_text(app: &CalendarApp) -> String {
+        app.frame(DEFAULT_WIDTH, DEFAULT_HEIGHT)
+            .into_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
     #[test]
     fn the_wheel_over_the_sidebar_steps_the_mini_calendar() {
         let mut app = sample_app(june_2024());
@@ -5221,6 +5426,22 @@ mod tests {
         assert_eq!(app.view, CalendarView::Month);
         assert_eq!(app.view_date.month, 11);
         assert_eq!(app.selected_date, target);
+    }
+
+    /// `W` changes which day a week begins on.
+    ///
+    /// `week_starts_monday` was `true` at construction and had no writer, so
+    /// every month grid began on Monday for everyone -- a question with no
+    /// universally right answer, answered once at compile time.
+    #[test]
+    fn w_changes_the_day_a_week_starts_on() {
+        let mut app = sample_app(june_2024());
+        app.view = CalendarView::Month;
+        assert!(app.week_starts_monday, "control: it starts on Monday");
+
+        probe::key(&mut app, &probe::press(Key::W));
+
+        assert!(!app.week_starts_monday, "W did not change the week start");
     }
 
     #[test]

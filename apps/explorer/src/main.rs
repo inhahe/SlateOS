@@ -1,7 +1,7 @@
 //! Slate OS File Explorer
 //!
 //! Graphical file manager with:
-//! - Directory tree sidebar
+//! - Quick-access sidebar (five fixed places, each a drop target)
 //! - File/folder list with an extensible column set (see [`columns`]): the
 //!   built-in Name/Size/Date/Type, plus whatever the directory's contents
 //!   warrant — image dimensions, audio duration, source line counts
@@ -24,23 +24,27 @@
 // out the arithmetic that names the unit.
 #![allow(clippy::duration_suboptimal_units)]
 
+mod columnprefs;
 mod columns;
 mod drives;
 mod dropzone;
 mod fileops;
-mod thumbs;
+mod manualorder;
+mod search;
 
 use appearance::Palette;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::layout::Axis;
 use guitk::listview::ListViewport;
 use guitk::modal::{AlertDialog, DialogResult, InputDialog};
 use guitk::render::RenderTree;
 use guitk::scroll_window;
 use guitk::scrollbar;
+use guitk::splitter;
 use guitk::theme::with_alpha;
 use guitk::wheel::Accumulator as WheelAccumulator;
 
-use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
+use columns::{ColumnId, ColumnManager, ColumnValue, SortOrder};
 use drives::DriveSet;
 use guitk::disabled::DisabledState;
 use guitk::filetypes::{self, FileCategory};
@@ -231,9 +235,53 @@ const ICON_GUTTER: f32 = 28.0;
 /// Width of one icon-view cell.
 const ICON_CELL_W: f32 = 96.0;
 
+/// Every key this program answers, and what it does.
+///
+/// Nineteen bindings and, until this list existed, no way to learn one but
+/// reading the source. `Ctrl+L` is the worst of them: it is the only way to
+/// type a path, and the address bar gives no sign that it can be typed into.
+/// `Ctrl+H` is next -- a user who cannot see a file they know is there has no
+/// way to find out that hidden files are a thing this program has an opinion
+/// about.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`, which reads each label with
+/// `guitk::shortcut` and presses every key it names.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows", "Move the selection"),
+    ("Home / End", "First / last item"),
+    ("Enter", "Open the selected item"),
+    ("Backspace", "Go up one folder"),
+    (
+        "Alt+Left / Alt+Right",
+        "Back / forward through where you have been",
+    ),
+    ("1 / 2 / 3", "Details / list / icons"),
+    ("F5", "Read the folder again"),
+    ("F2", "Rename"),
+    ("Delete", "Move to the recycle bin"),
+    ("Shift+Delete", "Delete for good, without the bin"),
+    ("Ctrl+A", "Select everything"),
+    ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy / cut / paste"),
+    ("Ctrl+Z", "Undo the last file operation"),
+    ("Ctrl+F", "Search this folder"),
+    ("Ctrl+H", "Show or hide hidden files"),
+    ("Ctrl+L", "Type a path into the address bar"),
+    ("Escape", "Cancel, close the search, or drop the selection"),
+    ("F1 / ?", "This list"),
+];
+
 /// Height of one icon-view cell: the thumbnail box, the gap, and two lines of
 /// name beneath it.
-const ICON_CELL_H: f32 = 108.0;
+/// An icon cell with no labels under it: the thumbnail and its padding.
+const ICON_CELL_BASE_H: f32 = 92.0;
+
+/// Height of one label line under an icon.
+///
+/// `ICON_CELL_BASE_H` plus one of these is 108, which is what the cell was
+/// before the labels became choosable -- so the default view is unchanged to
+/// the pixel, and only a user who asks for more lines gets taller cells.
+const ICON_LABEL_LINE_H: f32 = 16.0;
 
 /// Side of the square a thumbnail is fitted into, inside its cell.
 const ICON_THUMB_SIZE: f32 = 64.0;
@@ -283,6 +331,15 @@ pub enum SortBy {
     Size,
     Modified,
     Type,
+    /// The user's own arrangement, saved per folder.
+    ///
+    /// Not a column: there is nothing to put in a header, and clicking one
+    /// leaves this mode. `roadmap-detailed.md` §4.1 calls it "Custom" /
+    /// "Manual" and requires that a column sort override it *temporarily* --
+    /// which is why the arrangement lives on disk against the folder and not
+    /// in the order of `entries`. Sorting by Name writes nothing, so the
+    /// arrangement is still there when Custom comes back.
+    Custom,
 }
 
 /// Sort direction.
@@ -392,6 +449,65 @@ impl Outcome {
     }
 }
 
+/// A press on a row that may become a drag to a new position.
+///
+/// Held from the press rather than created on the first move, because the
+/// press is the only event that knows *which* row is under the pointer -- a
+/// move carries a position and nothing else. `active` is what separates a
+/// click from a drag, so that selecting a file does not rearrange the folder.
+#[derive(Clone, Debug, PartialEq)]
+struct RowDrag {
+    /// Where the press landed, to measure the threshold against.
+    start_x: f32,
+    start_y: f32,
+    /// The rows being moved, as indices into `entries`.
+    rows: Vec<usize>,
+    /// Whether the pointer has travelled far enough to mean a drag.
+    active: bool,
+    /// Where the rows would land: before this index, or at the end.
+    insert_at: usize,
+}
+
+/// The narrowest the listing may be squeezed to by the preview's divider.
+///
+/// Wide enough for a name and a size: a listing narrower than this is not a
+/// listing, and a user who drags that far has overshot rather than asked for
+/// it.
+/// How many lines of a text file the preview pane reads.
+///
+/// More than the twenty a thumbnail uses, because this one is read rather
+/// than glanced at, and bounded because a preview that reads a gigabyte to
+/// show the top of it is a preview that stalls the window. `read_text_lines`
+/// caps the bytes as well, so a file of one enormous line cannot beat this.
+const PREVIEW_MAX_LINES: usize = 200;
+
+const LIST_MIN_W: f32 = 240.0;
+
+/// The narrowest the preview may be squeezed to.
+const PREVIEW_MIN_W: f32 = 160.0;
+
+/// The shortest the listing may be squeezed to, with the preview above or
+/// below it. Smaller than the width minimum because a few rows is still a
+/// usable listing, where a few pixels of width is not.
+const LIST_MIN_H: f32 = 120.0;
+
+/// The shortest the preview may be squeezed to.
+const PREVIEW_MIN_H: f32 = 100.0;
+
+/// How thick the line marking a pending drop is.
+///
+/// Centred on the boundary rather than drawn below it, so it reads as "between
+/// these two rows" rather than "on this row" -- which is a different drop.
+const INSERTION_LINE_H: f32 = 2.0;
+
+/// How far the pointer must travel before a press becomes a rearrangement.
+///
+/// A file manager where a slightly unsteady click reorders the folder is worse
+/// than one with no manual order at all: the damage is silent, persistent and
+/// attributed to the wrong cause. Matches the threshold `guitk::dnd` uses for
+/// starting a file drag, so the two feel the same.
+const ROW_DRAG_THRESHOLD: f32 = 4.0;
+
 /// A modal the file manager is waiting on, and what to do when it answers.
 ///
 /// One field rather than one `Option` per dialog kind: only one modal can be
@@ -464,6 +580,8 @@ enum Modal {
     /// answer the same dialog and do opposite things with it, and a target
     /// that means "no file" is a `None` somebody will forget to check.
     NewFolder { dialog: InputDialog },
+    /// A search awaiting the text to look for.
+    Search { dialog: InputDialog },
     /// A rename in progress, awaiting the new name.
     Rename {
         dialog: InputDialog,
@@ -643,8 +761,6 @@ pub struct ExplorerState {
     pending: VecDeque<PendingOperation>,
     /// Derived one-line description of the current directory's contents.
     pub dir_summary: String,
-    /// Tree sidebar expanded paths.
-    pub tree_expanded: Vec<PathBuf>,
     /// Window dimensions.
     pub window_width: u32,
     pub window_height: u32,
@@ -664,6 +780,49 @@ pub struct ExplorerState {
     /// listing: a confirmation that also let Delete move the selection would
     /// act on a different file than the one it named.
     modal: Option<Modal>,
+    /// Whether the shortcut list is up.
+    show_help: bool,
+    /// The query whose results are being shown, if the listing is a search.
+    ///
+    /// `Some` is the whole difference between "this folder" and "matches from
+    /// this folder downwards", and it has to be held rather than inferred: the
+    /// entries of a search look exactly like the entries of a directory, so
+    /// nothing else on screen can tell Escape which one to undo.
+    /// The arrangement in force for the folder on screen, if any.
+    ///
+    /// Cached from the settings document on navigation rather than read per
+    /// comparison: `sort_by` runs this against every pair, and a YAML lookup
+    /// per comparison would turn a sort into a parse.
+    manual_order: Vec<String>,
+    /// A row press that may be turning into a rearrangement.
+    row_drag: Option<RowDrag>,
+    /// Whether the preview panel is showing beside the listing.
+    preview_open: bool,
+    /// The listing's share of the file pane, along the split's axis.
+    preview_split: f32,
+    /// Which side of the listing the preview sits on.
+    preview_side: columnprefs::PreviewSide,
+    /// The lines of the file the preview pane is showing, and which file they
+    /// came from.
+    ///
+    /// Keyed by path *and* mtime so that editing a file while it is selected
+    /// re-reads it -- the same key the thumbnail cache uses, for the same
+    /// reason. `None` when the pane is shut, nothing is selected, or the
+    /// selection is not a text file.
+    preview_text: Option<(PathBuf, u64, Vec<String>)>,
+    /// Where inside the divider a pointer grabbed it, while dragging.
+    ///
+    /// The offset is kept rather than just a flag so the divider does not jump
+    /// to centre itself under the pointer on the first move -- a drag should
+    /// move what is under the finger, not snap it.
+    divider_grab: Option<f32>,
+    search_showing: Option<String>,
+    /// The folder a search started from, to go back to when it is dismissed.
+    ///
+    /// Kept separately from `current_path` because opening a result navigates,
+    /// and a user who then presses Escape means "stop searching", not "go back
+    /// to wherever I last clicked".
+    search_origin: Option<PathBuf>,
     /// The detail view's column set: which columns are shown, in what order,
     /// at what widths, and which one carries the sort arrow.
     ///
@@ -671,6 +830,13 @@ pub struct ExplorerState {
     /// images grows a Dimensions column and a folder of source grows Language
     /// and Lines without the user asking.
     pub columns: ColumnManager,
+    /// The saved column preferences, read once rather than per listing.
+    ///
+    /// Held rather than re-read on every navigation: `load_directory` runs on
+    /// every step through the tree, and a settings file opened that often is a
+    /// cost the user pays for a value that changes only when they change it.
+    /// Re-read when the picker writes, which is the only thing that alters it.
+    pub column_prefs: yamldoc::Document,
     /// Generated thumbnails, keyed by path + mtime + size.
     ///
     /// Read from [`Self::render`] through [`ThumbnailCache::peek`], never
@@ -685,6 +851,8 @@ pub struct ExplorerState {
     pub thumb_gen: ThumbnailGenerator,
     /// Size and colours new thumbnails are generated at.
     pub thumb_config: ThumbConfig,
+    /// Which labels the icon view draws under each thumbnail.
+    pub icon_labels: columnprefs::IconLabels,
     /// Thumbnails generated but not yet handed to the compositor.
     ///
     /// Drained by [`Self::take_pending_uploads`]. The explorer cannot register
@@ -719,6 +887,9 @@ pub struct ExplorerState {
 
 impl ExplorerState {
     pub fn new(start_path: &Path) -> Self {
+        // Read once, before the literal: two fields are derived from it, and
+        // reading the file twice would let them disagree if it changed between.
+        let prefs = settingsfile::load(columnprefs::CONFIG_NAME);
         let mut state = Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             current_path: start_path.to_path_buf(),
@@ -734,7 +905,7 @@ impl ExplorerState {
             show_hidden: false,
             clipboard: None,
             selected_indices: Vec::new(),
-            pathbar: PathBar::new(&start_path.to_string_lossy()),
+            pathbar: PathBar::new(start_path),
             address_editing: false,
             status_message: String::new(),
             hover_hint: String::new(),
@@ -742,17 +913,40 @@ impl ExplorerState {
             operations: Vec::new(),
             pending: VecDeque::new(),
             dir_summary: String::new(),
-            tree_expanded: vec![PathBuf::from("/")],
             window_width: 900,
             window_height: 600,
             sidebar_width: 200.0,
             undo: UndoStack::new(),
             recycle: RecycleBin::default_location(),
             modal: None,
+            show_help: false,
+            manual_order: Vec::new(),
+            row_drag: None,
+            preview_open: columnprefs::preview_open(&prefs),
+            preview_split: columnprefs::preview_split(&prefs),
+            preview_side: columnprefs::preview_side(&prefs),
+            preview_text: None,
+            divider_grab: None,
+            search_showing: None,
+            search_origin: None,
             columns: ColumnManager::with_defaults(),
+            column_prefs: prefs,
             thumbs: ThumbnailCache::default_capacity(),
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
-            thumb_config: ThumbConfig::default(),
+            icon_labels: columnprefs::icon_labels(&settingsfile::load(columnprefs::CONFIG_NAME)),
+            thumb_config: {
+                // The size the user last chose, if they chose one. Applied
+                // here rather than after construction so the first listing is
+                // already generating at the right size -- otherwise every
+                // thumbnail on screen at start-up is made twice.
+                let mut config = ThumbConfig::default();
+                if let Some(size) =
+                    columnprefs::thumb_size(&settingsfile::load(columnprefs::CONFIG_NAME))
+                {
+                    config.size = size;
+                }
+                config
+            },
             pending_uploads: Vec::new(),
             uploaded: HashSet::new(),
             dropzone: DropZoneManager::new(start_path.to_path_buf()),
@@ -778,7 +972,7 @@ impl ExplorerState {
         }
         self.history_forward.clear();
         self.current_path = path.to_path_buf();
-        self.pathbar.set_path(&self.current_path.to_string_lossy());
+        self.pathbar.set_path(&self.current_path);
         self.selected_indices.clear();
         // The previous directory's operation result no longer applies here.
         self.status_message.clear();
@@ -790,7 +984,7 @@ impl ExplorerState {
         if let Some(prev) = self.history_back.pop_back() {
             self.history_forward.push_back(self.current_path.clone());
             self.current_path = prev;
-            self.pathbar.set_path(&self.current_path.to_string_lossy());
+            self.pathbar.set_path(&self.current_path);
             self.selected_indices.clear();
             self.status_message.clear();
             self.load_directory();
@@ -802,7 +996,7 @@ impl ExplorerState {
         if let Some(next) = self.history_forward.pop_back() {
             self.history_back.push_back(self.current_path.clone());
             self.current_path = next;
-            self.pathbar.set_path(&self.current_path.to_string_lossy());
+            self.pathbar.set_path(&self.current_path);
             self.selected_indices.clear();
             self.status_message.clear();
             self.load_directory();
@@ -853,14 +1047,287 @@ impl ExplorerState {
     /// association in another window while this one is showing a folder, and a
     /// cache would open the previous choice with no way to notice.
     fn opener_for(path: &Path) -> Option<String> {
-        let ext = path.extension().and_then(|e| e.to_str())?.to_lowercase();
-        let doc = settingsfile::load(ASSOC_CONFIG_NAME);
-        doc.get_str(&["associations", &ext])
+        // `to_str` rather than bytes: the associations are keys in a YAML
+        // document, so they are text by construction and an extension that is
+        // not UTF-8 could never match one. Answering `None` here is a refusal,
+        // not a lossy conversion.
+        let ext = path.extension().and_then(|e| e.to_str())?;
+        let doc = settingsfile::load(associations::CONFIG_NAME);
+        associations::program_for(&doc, ext)
+    }
+
+    /// Describe one path as a row.
+    ///
+    /// Extracted rather than written twice: search and the folder listing both
+    /// need it, and two copies would be two answers to "what is a row" that
+    /// could drift -- the type column deriving an extension one way here and
+    /// another there. `None` when the path has no final component, which is
+    /// the root, and the root is never a row in its own listing.
+    fn entry_for(path: PathBuf) -> Option<FileEntry> {
+        let name = path.file_name()?.to_string_lossy().to_string();
+        let meta = fs::metadata(&path).ok();
+        let is_dir = meta.as_ref().is_some_and(std::fs::Metadata::is_dir);
+        let size = meta.as_ref().map_or(0, std::fs::Metadata::len);
+        let modified = meta.as_ref().and_then(|m| m.modified().ok());
+
+        let file_type = if is_dir {
+            FileType::Directory
+        } else {
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default();
+            FileType::from_extension(&ext)
+        };
+
+        Some(FileEntry {
+            name,
+            path,
+            is_dir,
+            size,
+            modified,
+            file_type,
+            selected: false,
+            icon_id: 0,
+        })
+    }
+
+    // ======================================================================
+    // Search
+    // ======================================================================
+
+    /// How a search result names itself: its path below the search root.
+    ///
+    /// Falls back to the whole path when the result is not under `root`, which
+    /// should not happen but is not worth a panic if it ever does -- an
+    /// over-long label is a worse-looking row, while an unwrap here would be a
+    /// crash in a file manager for a cosmetic reason.
+    fn relative_label(path: &Path, root: &Path) -> String {
+        let shown = path.strip_prefix(root).unwrap_or(path);
+        // Lossy on purpose and safe here: this is the text a row is drawn
+        // with, and `FileEntry::path` beside it is what opening the row uses.
+        // Named rather than chained so the exemption in `lossy-decode.py` has
+        // something specific to anchor on -- a bare `.to_string_lossy()` would
+        // match every future lossy call in this file too.
+        shown.to_string_lossy().into_owned()
+    }
+
+    /// Ask what to look for.
+    fn open_search(&mut self) {
+        // Pre-filled with the query in force, so refining a search is an edit
+        // rather than a retype. Empty when this is a fresh one.
+        let initial = self.search_showing.clone().unwrap_or_default();
+        let dialog = InputDialog::prompt("Find", "Name contains:", &initial);
+        self.modal = Some(Modal::Search { dialog });
+    }
+
+    /// Replace the listing with everything under this folder matching `query`.
+    fn run_search(&mut self, query: &str) {
+        // Remembered before the first search, not on every one: refining a
+        // query must not move the origin to wherever the previous search left
+        // the view.
+        if self.search_origin.is_none() {
+            self.search_origin = Some(self.current_path.clone());
+        }
+        let root = self
+            .search_origin
+            .clone()
+            .unwrap_or_else(|| self.current_path.clone());
+
+        let found = search::find(&root, query, self.show_hidden);
+        self.status_message = search::describe(&found, query);
+
+        self.entries.clear();
+        for path in found.paths {
+            if let Some(mut entry) = Self::entry_for(path) {
+                // A search row says where it is, not only what it is. Every
+                // row in a folder listing shares one parent, so the bare name
+                // is enough there; results come from all over the subtree, and
+                // two files called `notes.txt` in different folders are the
+                // same row twice to anyone reading the screen.
+                //
+                // Qualifying the Name column rather than adding a Location
+                // one, because a column that appears and disappears is the
+                // view changing shape -- the thing roadmap-detailed.md §4.1
+                // objects to -- and this needs no new column machinery to
+                // answer the same question.
+                entry.name = Self::relative_label(&entry.path, &root);
+                self.entries.push(entry);
+            }
+        }
+        self.selected_indices.clear();
+        self.viewport.scroll_to(0, self.entries.len());
+        self.search_showing = Some(query.to_string());
+        self.sort_entries();
+    }
+
+    /// Put the folder listing back.
+    fn leave_search(&mut self) {
+        let Some(origin) = self.search_origin.take() else {
+            return;
+        };
+        self.search_showing = None;
+        // Through `navigate_to` rather than by reloading in place: the search
+        // may have been left from a different folder, and every other thing
+        // that has to stay in step with the current directory -- the address
+        // bar, the drop target, the history -- is kept in step there.
+        self.navigate_to(&origin);
+        self.status_message = "Search cleared".to_string();
     }
 
     // ======================================================================
     // Directory loading
     // ======================================================================
+
+    /// Where the insertion line goes, as (y, x, width), or `None`.
+    ///
+    /// The top edge of the row the drop would land before; the bottom edge of
+    /// the last row when it would land at the end. `None` when nothing is
+    /// being dragged, and when the frame holds no rows to measure against --
+    /// which is every headless test, so this is the one part of the drag that
+    /// the suite can only check the negative of.
+    fn insertion_line(&self) -> Option<(f32, f32, f32)> {
+        let drag = self.row_drag.as_ref()?;
+        if !drag.active {
+            return None;
+        }
+        if let Some(rect) = self.dropzone.file_row_rect(drag.insert_at) {
+            return Some((rect.y, rect.x, rect.w));
+        }
+        // Past the last row: sit on its bottom edge rather than vanishing,
+        // because "drop at the end" is a real target and a user aiming at it
+        // should see the same feedback as any other.
+        let last = self.entries.len().checked_sub(1)?;
+        let rect = self.dropzone.file_row_rect(last)?;
+        Some((rect.y + rect.h, rect.x, rect.w))
+    }
+
+    /// Track a press that is turning into a rearrangement.
+    fn drag_row(&mut self, x: f32, y: f32) -> bool {
+        let Some(drag) = self.row_drag.as_mut() else {
+            return false;
+        };
+        if !drag.active {
+            let dx = x - drag.start_x;
+            let dy = y - drag.start_y;
+            if dx.mul_add(dx, dy * dy) < ROW_DRAG_THRESHOLD * ROW_DRAG_THRESHOLD {
+                return false;
+            }
+            drag.active = true;
+        }
+        // Before the row under the pointer; past the last row, at the end.
+        // Simple enough for a user to predict without being shown an
+        // insertion bar, which is the alternative and needs the row
+        // rectangles this deliberately does not recompute.
+        let target = self.dropzone.find_file_row(x, y);
+        let len = self.entries.len();
+        if let Some(drag) = self.row_drag.as_mut() {
+            drag.insert_at = target.unwrap_or(len);
+        }
+        true
+    }
+
+    /// Finish a row drag, rearranging if it ever became one.
+    fn drop_row(&mut self) -> bool {
+        let Some(drag) = self.row_drag.take() else {
+            return false;
+        };
+        if !drag.active {
+            return false;
+        }
+        self.reorder_rows(drag.rows, drag.insert_at)
+    }
+
+    /// Read the folder's arrangement, and fall out of Custom if it has none.
+    ///
+    /// The fall-back matters: Custom with no arrangement is name order wearing
+    /// a different label, and a user who navigates from an arranged folder to
+    /// an unarranged one should see a mode that describes what they are
+    /// looking at. `sort_by` is view state, so this is the one place that can
+    /// keep it honest as the view moves.
+    fn load_manual_order(&mut self) {
+        self.manual_order =
+            manualorder::for_folder(&self.column_prefs, &self.current_path).unwrap_or_default();
+        if self.sort_by == SortBy::Custom && self.manual_order.is_empty() {
+            self.sort_by = SortBy::Name;
+        }
+    }
+
+    /// Record the listing's present order as this folder's arrangement.
+    ///
+    /// Answers whether it could be written down. `false` for a folder whose
+    /// path is not text, and the caller says so rather than pretending --
+    /// see [`manualorder::set_for_folder`].
+    ///
+    /// Names that are not text are left out of the saved list, because a YAML
+    /// scalar cannot hold them. They keep their place on screen for this
+    /// session and sort with the newcomers next time. That is a real
+    /// limitation and it is C-Q24's; the alternative, writing a lossy
+    /// rendering, would file the position under a name that belongs to a
+    /// different file.
+    fn save_manual_order(&mut self) -> bool {
+        let names: Vec<String> = self
+            .entries
+            .iter()
+            .filter_map(|e| e.path.file_name().and_then(|n| n.to_str()))
+            .map(ToString::to_string)
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let path = self.current_path.clone();
+        if !manualorder::set_for_folder(&mut self.column_prefs, &path, &refs) {
+            return false;
+        }
+        self.manual_order = names;
+        self.status_message =
+            match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                Ok(()) => String::from("Custom order saved for this folder"),
+                // Reported rather than swallowed: the arrangement is on screen
+                // either way, so a silent failure looks like success until the
+                // folder is revisited and the order has gone.
+                Err(e) => format!("Could not save the order: {e}"),
+            };
+        true
+    }
+
+    /// Move the rows at `from` to sit before the row currently at `to`.
+    ///
+    /// Indices into `entries`, which is what the view hands back from a drag.
+    /// Out-of-range indices are ignored rather than clamped: a clamp turns a
+    /// bug in the caller into a file moving somewhere the user did not point
+    /// at, which is worse than nothing happening.
+    fn reorder_rows(&mut self, mut from: Vec<usize>, to: usize) -> bool {
+        if from.is_empty() || to > self.entries.len() {
+            return false;
+        }
+        from.sort_unstable();
+        from.dedup();
+        if from.iter().any(|&i| i >= self.entries.len()) {
+            return false;
+        }
+
+        // How many of the moved rows sit above the insertion point: the target
+        // shifts down by that many once they are lifted out.
+        let above = from.iter().filter(|&&i| i < to).count();
+        let target = to.saturating_sub(above);
+
+        let mut moved = Vec::with_capacity(from.len());
+        for &i in from.iter().rev() {
+            moved.push(self.entries.remove(i));
+        }
+        moved.reverse();
+
+        let at = target.min(self.entries.len());
+        for (offset, entry) in moved.into_iter().enumerate() {
+            self.entries.insert(at.saturating_add(offset), entry);
+        }
+
+        // Arranging is what puts the view into Custom: a user who drags a file
+        // has plainly stopped wanting name order, and leaving the mode alone
+        // would re-sort their arrangement away on the next refresh.
+        self.sort_by = SortBy::Custom;
+        self.sync_sort_indicator();
+        self.save_manual_order()
+    }
 
     /// Load entries from the current directory.
     pub fn load_directory(&mut self) {
@@ -880,39 +1347,19 @@ impl ExplorerState {
                         Err(_) => continue,
                     };
 
-                    let name = entry.file_name().to_string_lossy().to_string();
-
-                    // Skip hidden files if not showing them
-                    if !self.show_hidden && name.starts_with('.') {
+                    // Hidden-ness from the bytes, so a name with no text
+                    // form is judged by the same rule as every other. The
+                    // leading dot is ASCII, so this agrees with the text test
+                    // for every name that has one.
+                    if !self.show_hidden
+                        && entry.file_name().as_encoded_bytes().first() == Some(&b'.')
+                    {
                         continue;
                     }
 
-                    let path = entry.path();
-                    let meta = fs::metadata(&path).ok();
-                    let is_dir = meta.as_ref().is_some_and(|m| m.is_dir());
-                    let size = meta.as_ref().map_or(0, |m| m.len());
-                    let modified = meta.as_ref().and_then(|m| m.modified().ok());
-
-                    let file_type = if is_dir {
-                        FileType::Directory
-                    } else {
-                        let ext = path
-                            .extension()
-                            .map(|e| e.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        FileType::from_extension(&ext)
-                    };
-
-                    self.entries.push(FileEntry {
-                        name,
-                        path,
-                        is_dir,
-                        size,
-                        modified,
-                        file_type,
-                        selected: false,
-                        icon_id: 0,
-                    });
+                    if let Some(file_entry) = Self::entry_for(entry.path()) {
+                        self.entries.push(file_entry);
+                    }
                 }
             }
             Err(e) => {
@@ -920,9 +1367,18 @@ impl ExplorerState {
             }
         }
 
+        self.load_manual_order();
         self.sort_entries();
         self.update_status();
-        detect_columns(&mut self.columns, &self.entries);
+        // A folder shows what the user saved for it, the default they saved,
+        // or the fixed out-of-the-box set -- and nothing derived from what is
+        // inside it. `roadmap-detailed.md` §4.1 forbids content-based column
+        // selection outright: it makes the view change shape as you navigate,
+        // lets one odd file alter the columns, and leaves "why did my columns
+        // change?" with no answer a user can reach. Until the picker landed,
+        // the guess was the only way any extra column ever appeared, which is
+        // why it outlived the rule.
+        self.apply_saved_columns();
         self.queue_thumbnails();
     }
 
@@ -1057,25 +1513,37 @@ impl ExplorerState {
     /// need the path, and are the one place a non-UTF-8 name costs anything:
     /// a blank cell, never a wrong one.
     fn row_values(&self, entry: &FileEntry) -> Vec<ColumnValue> {
-        let path = entry.path.to_str();
         self.columns
             .active_columns()
             .iter()
-            .map(|&id| match id {
-                ColumnId::NAME => ColumnValue::Text(entry.name.clone()),
-                // A directory's own byte count is not what a Size column
-                // means, so it stays blank — as it did before this view used
-                // the column system at all.
-                ColumnId::SIZE if entry.is_dir => ColumnValue::Empty,
-                ColumnId::SIZE => ColumnValue::Size(entry.size),
-                ColumnId::DATE_MODIFIED => entry
-                    .modified
-                    .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-                    .map_or(ColumnValue::Empty, |d| ColumnValue::DateTime(d.as_secs())),
-                ColumnId::TYPE => ColumnValue::Text(entry.type_label()),
-                other => path.map_or(ColumnValue::Empty, |p| self.columns.get_value(p, other)),
-            })
+            .map(|&id| self.entry_value(entry, id))
             .collect()
+    }
+
+    /// One column's value for one entry.
+    ///
+    /// Extracted from [`Self::row_values`] so the icon view's labels come from
+    /// the same place as the detail cells. §4.1 asks for exactly that -- "the
+    /// date/size shown match" -- and the only way to be sure of it is for both
+    /// to call one function rather than to format the same field twice.
+    fn entry_value(&self, entry: &FileEntry, id: ColumnId) -> ColumnValue {
+        match id {
+            ColumnId::NAME => ColumnValue::Text(entry.name.clone()),
+            // A directory's own byte count is not what a Size column
+            // means, so it stays blank — as it did before this view used
+            // the column system at all.
+            ColumnId::SIZE if entry.is_dir => ColumnValue::Empty,
+            ColumnId::SIZE => ColumnValue::Size(entry.size),
+            ColumnId::DATE_MODIFIED => entry
+                .modified
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map_or(ColumnValue::Empty, |d| ColumnValue::DateTime(d.as_secs())),
+            ColumnId::TYPE => ColumnValue::Text(entry.type_label()),
+            other => entry
+                .path
+                .to_str()
+                .map_or(ColumnValue::Empty, |p| self.columns.get_value(p, other)),
+        }
     }
 
     /// Keep the detail header's sort arrow on the column the list is actually
@@ -1089,6 +1557,14 @@ impl ExplorerState {
             SortBy::Size => ColumnId::SIZE,
             SortBy::Modified => ColumnId::DATE_MODIFIED,
             SortBy::Type => ColumnId::TYPE,
+            // A hand arrangement is not a column, so no header carries an
+            // arrow. Pointing one at Name would say the list is in name order
+            // when it is in the user's own -- a header that lies about what it
+            // is showing is worse than a header that says nothing.
+            SortBy::Custom => {
+                self.columns.set_sort(ColumnId::NAME, SortOrder::None);
+                return;
+            }
         };
         let order = match self.sort_dir {
             SortDir::Ascending => SortOrder::Ascending,
@@ -1099,7 +1575,29 @@ impl ExplorerState {
 
     /// Sort entries according to current sort settings.
     fn sort_entries(&mut self) {
-        // Directories always come first
+        // A hand arrangement is applied to a listing that is already in name
+        // order, so that the files the user has *not* placed appear after the
+        // ones they have, in an order that is stable rather than whatever the
+        // filesystem returned. `sort_by` is stable, so the earlier pass shows
+        // through wherever the arrangement ties.
+        if self.sort_by == SortBy::Custom {
+            self.entries.sort_by_key(|e| e.name.to_lowercase());
+            let order = core::mem::take(&mut self.manual_order);
+            self.entries.sort_by(|a, b| {
+                manualorder::compare(
+                    &order,
+                    a.path.file_name().unwrap_or(a.path.as_os_str()),
+                    b.path.file_name().unwrap_or(b.path.as_os_str()),
+                )
+            });
+            self.manual_order = order;
+            return;
+        }
+
+        // Directories always come first -- except in Custom, handled above.
+        // The spec has the user arranging "files/folders" together, so forcing
+        // folders to the top there would fight the arrangement it asks for:
+        // a user who drags a folder below a file would watch it spring back.
         self.entries.sort_by(|a, b| {
             if a.is_dir != b.is_dir {
                 return if a.is_dir {
@@ -1118,6 +1616,11 @@ impl ExplorerState {
                     let ext_b = b.path.extension().map(|e| e.to_string_lossy().to_string());
                     ext_a.cmp(&ext_b)
                 }
+                // Unreachable: handled above, before the folders-first rule
+                // this arm sits inside. Spelled out rather than left to a
+                // wildcard so that adding a mode is a compile error here
+                // rather than a mode that silently sorts by nothing.
+                SortBy::Custom => core::cmp::Ordering::Equal,
             };
 
             match self.sort_dir {
@@ -1675,7 +2178,7 @@ impl ExplorerState {
             let h = TRANSFER_ROW_H - 4.0;
             // Laid out from the right edge inwards, so a long label is what
             // gets squeezed rather than the buttons sliding off the panel.
-            let mut x = panel.x + panel.width - TRANSFER_BTN - 4.0;
+            let mut x = panel.x + panel.w - TRANSFER_BTN - 4.0;
             let mut place = |control: TransferControl, controls: &mut Vec<_>| {
                 controls.push((control, Rect::new(x, y, TRANSFER_BTN, h)));
                 x -= TRANSFER_BTN + 2.0;
@@ -1746,6 +2249,338 @@ impl ExplorerState {
         self.menu = Some(menu);
     }
 
+    /// Whether `(x, y)` is over the detail view's header row.
+    ///
+    /// Only in Details: the other views draw no header, and a menu offering to
+    /// choose columns from a view that has none would be a control that cannot
+    /// act.
+    fn over_column_header(&self, x: f32, y: f32) -> bool {
+        if self.view_mode != ViewMode::Details {
+            return false;
+        }
+        let pane = self.pane_rect();
+        x >= pane.x && x < pane.x + pane.w && y >= pane.y && y < pane.y + HEADER_H
+    }
+
+    /// How tall one icon cell is, given the labels in force.
+    ///
+    /// The grid stays even because every cell in it is the same height: the
+    /// count of *lines* decides it, not the length of any one file's name.
+    /// §4.1 asks for that directly -- long names ellipsize rather than wrap
+    /// the cell taller than its neighbours.
+    fn icon_cell_h(&self) -> f32 {
+        ICON_CELL_BASE_H + f32::from(self.icon_labels.lines()) * ICON_LABEL_LINE_H
+    }
+
+    /// The three labels an icon may carry, ticked where they are drawn.
+    fn icon_label_menu(&self) -> MenuItem {
+        let labels = self.icon_labels;
+        MenuItem::Submenu {
+            id: MENU_ICON_LABEL_BASE,
+            label: String::from("Show under icons"),
+            icon: None,
+            enabled: true,
+            children: vec![
+                Self::label_row(MENU_ICON_LABEL_BASE, "Name", labels.name),
+                Self::label_row(MENU_ICON_LABEL_BASE + 1, "Date modified", labels.date),
+                Self::label_row(MENU_ICON_LABEL_BASE + 2, "Size", labels.size),
+            ],
+        }
+    }
+
+    /// One tickable label row.
+    fn label_row(id: u64, label: &str, on: bool) -> MenuItem {
+        MenuItem::Action {
+            id,
+            label: label.to_string(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: Some(on),
+        }
+    }
+
+    /// Toggle one icon label and remember the set. Answers whether it was ours.
+    fn icon_label_action(&mut self, id: u64) -> bool {
+        let Some(which) = id.checked_sub(MENU_ICON_LABEL_BASE) else {
+            return false;
+        };
+        let labels = &mut self.icon_labels;
+        match which {
+            0 => labels.name = !labels.name,
+            1 => labels.date = !labels.date,
+            2 => labels.size = !labels.size,
+            _ => return false,
+        }
+
+        let chosen = self.icon_labels;
+        columnprefs::set_icon_labels(&mut self.column_prefs, chosen);
+        self.status_message =
+            match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                // Said as a count rather than a list, because the menu already
+                // shows which: the sentence is here to confirm the change was
+                // written down, not to repeat what is on screen.
+                Ok(()) => match chosen.lines() {
+                    0 => String::from("Icons now show no labels"),
+                    1 => String::from("Icons now show 1 label"),
+                    n => format!("Icons now show {n} labels"),
+                },
+                Err(e) => format!("The label choice was not saved: {e}"),
+            };
+        true
+    }
+
+    /// The thumbnail sizes offered, ticked at the one in force.
+    ///
+    /// A submenu rather than four rows in the folder menu: the sizes are one
+    /// choice, and four siblings among the file actions would read as four
+    /// unrelated commands.
+    fn thumb_size_menu(&self) -> MenuItem {
+        MenuItem::Submenu {
+            id: MENU_THUMB_SIZE_BASE,
+            label: String::from("Thumbnail size"),
+            icon: None,
+            enabled: true,
+            children: columnprefs::THUMB_SIZES
+                .iter()
+                .map(|size| MenuItem::Action {
+                    id: MENU_THUMB_SIZE_BASE.saturating_add(u64::from(*size)),
+                    label: format!("{size} pixels"),
+                    shortcut: None,
+                    icon: None,
+                    enabled: true,
+                    checked: Some(self.thumb_config.size == *size),
+                })
+                .collect(),
+        }
+    }
+
+    /// Adopt `size` for thumbnails and remember it. Answers whether it was ours.
+    fn thumb_size_action(&mut self, id: u64) -> bool {
+        let Some(offset) = id.checked_sub(MENU_THUMB_SIZE_BASE) else {
+            return false;
+        };
+        let Ok(size) = u32::try_from(offset) else {
+            return false;
+        };
+        if !columnprefs::THUMB_SIZES.contains(&size) {
+            return false;
+        }
+        if self.thumb_config.size == size {
+            return true;
+        }
+        self.thumb_config.size = size;
+
+        // The in-memory cache holds pictures made at the *old* size, and
+        // `queue_thumbnails` skips anything it already has -- so without this
+        // the view keeps showing the previous size until the folder changes.
+        // The cache on disk needs no such help: its filenames carry the size,
+        // so a new size misses and regenerates while the old entries stay
+        // valid for anyone who switches back.
+        self.thumbs.clear();
+        self.queue_thumbnails();
+
+        columnprefs::set_thumb_size(&mut self.column_prefs, size);
+        self.status_message =
+            match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                Ok(()) => format!("Thumbnails are now {size} pixels"),
+                Err(e) => {
+                    format!("Thumbnails are now {size} pixels, but the choice was not saved: {e}")
+                }
+            };
+        true
+    }
+
+    /// Write the view preferences, saying either `done` or what went wrong.
+    ///
+    /// One place rather than the same `match settingsfile::store(..)` at each
+    /// call site: a preference that is applied on screen but not written down
+    /// looks identical to one that was saved, right up until the next start.
+    fn persist_view_prefs(&mut self, done: &str) {
+        self.status_message =
+            match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                Ok(()) => done.to_string(),
+                Err(e) => format!("Could not save the view settings: {e}"),
+            };
+    }
+
+    /// The file pane split into the listing and the preview, when it is open.
+    ///
+    /// `None` when the preview is closed, and also when the pane is too narrow
+    /// to hold both at their minimums -- a window that cannot fit the preview
+    /// shows the listing rather than two unusable slivers, and the preference
+    /// stays on so it comes back when the window grows.
+    fn preview_panes(&self) -> Option<(Rect, Rect)> {
+        if !self.preview_open {
+            return None;
+        }
+        let area = self.pane_rect();
+        let side = self.preview_side;
+        let axis = if side.is_horizontal() {
+            Axis::Horizontal
+        } else {
+            Axis::Vertical
+        };
+        // Measured along the axis being divided: a panel on the left needs
+        // room across the width, one below needs it down the height, and
+        // checking the wrong one would hide the panel on a window that could
+        // hold it perfectly well.
+        let span = if side.is_horizontal() { area.w } else { area.h };
+        let (list_min, preview_min) = if side.is_horizontal() {
+            (LIST_MIN_W, PREVIEW_MIN_W)
+        } else {
+            (LIST_MIN_H, PREVIEW_MIN_H)
+        };
+        if span < list_min + preview_min + splitter::DIVIDER {
+            return None;
+        }
+
+        // `preview_split` is always the LISTING's share, whichever side the
+        // panel is on. Storing it that way means moving the panel from right
+        // to left keeps the listing the same size, instead of swapping the two
+        // and surprising the user with a preview that suddenly fills the
+        // window.
+        let fractions = if side.is_first() {
+            [1.0 - self.preview_split, self.preview_split]
+        } else {
+            [self.preview_split, 1.0 - self.preview_split]
+        };
+        let panes = splitter::panes(area, axis, &fractions, splitter::DIVIDER);
+        let (first, second) = match (panes.first(), panes.get(1)) {
+            (Some(a), Some(b)) => (*a, *b),
+            _ => return None,
+        };
+        Some(if side.is_first() {
+            (second, first)
+        } else {
+            (first, second)
+        })
+    }
+
+    /// The column picker: every column, ticked when shown, and the two saves.
+    fn open_column_menu(&mut self, x: f32, y: f32) {
+        let mut items = self.column_menu_items();
+        items.push(MenuItem::Separator);
+        items.push(Self::menu_action(
+            MENU_COLUMNS_SAVE_FOLDER,
+            "Save as default for this folder",
+            true,
+        ));
+        items.push(Self::menu_action(
+            MENU_COLUMNS_SAVE_GLOBAL,
+            "Save as default for all folders",
+            true,
+        ));
+        let mut menu = ContextMenu::new(items);
+        menu.show(x, y, (self.window_width as f32, self.window_height as f32));
+        self.menu = Some(menu);
+    }
+
+    /// One row per column, ticked when it is currently shown.
+    ///
+    /// Every column the manager knows, not only the ones on screen -- a picker
+    /// that listed only what is already visible could never add anything.
+    fn column_menu_items(&self) -> Vec<MenuItem> {
+        self.columns
+            .all_column_defs()
+            .iter()
+            .map(|def| MenuItem::Action {
+                id: MENU_COLUMN_BASE.saturating_add(u64::from(def.id.0)),
+                label: def.label.clone(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: Some(self.columns.is_visible(def.id)),
+            })
+            .collect()
+    }
+
+    /// Toggle a column, or save the current set. Answers whether it was ours.
+    fn column_menu_action(&mut self, id: u64) -> bool {
+        match id {
+            id if (MENU_PREVIEW_SIDE_BASE..MENU_PREVIEW_SIDE_BASE.saturating_add(4))
+                .contains(&id) =>
+            {
+                // Bounded at both ends: an unbounded `>=` would swallow every
+                // later menu range, which is the defect the column range
+                // already carries a comment about.
+                let Some(offset) = usize::try_from(id.saturating_sub(MENU_PREVIEW_SIDE_BASE)).ok()
+                else {
+                    return false;
+                };
+                let Some(side) = columnprefs::PreviewSide::ALL.get(offset).copied() else {
+                    return false;
+                };
+                self.preview_side = side;
+                columnprefs::set_preview_side(&mut self.column_prefs, side);
+                self.persist_view_prefs(side.label());
+                true
+            }
+            MENU_PREVIEW_TOGGLE => {
+                self.preview_open = !self.preview_open;
+                columnprefs::set_preview_open(&mut self.column_prefs, self.preview_open);
+                self.persist_view_prefs(if self.preview_open {
+                    "Preview panel shown"
+                } else {
+                    "Preview panel hidden"
+                });
+                true
+            }
+            MENU_COLUMNS_SAVE_FOLDER => {
+                let keys = self.columns.visible_keys();
+                let saved =
+                    columnprefs::set_for_folder(&mut self.column_prefs, &self.current_path, &keys);
+                self.status_message = if saved {
+                    match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                        Ok(()) => format!("{} columns saved for this folder", keys.len()),
+                        Err(e) => format!("Could not save the columns: {e}"),
+                    }
+                } else {
+                    // The path has no text form, so there is no key to save it
+                    // under. Said plainly rather than failing silently.
+                    String::from(
+                        "This folder's name cannot be written to the settings file, so its columns cannot be saved",
+                    )
+                };
+                true
+            }
+            MENU_COLUMNS_SAVE_GLOBAL => {
+                let keys = self.columns.visible_keys();
+                columnprefs::set_global(&mut self.column_prefs, &keys);
+                self.status_message =
+                    match settingsfile::store(columnprefs::CONFIG_NAME, &self.column_prefs) {
+                        Ok(()) => format!("{} columns saved as the default", keys.len()),
+                        Err(e) => format!("Could not save the columns: {e}"),
+                    };
+                true
+            }
+            // Bounded at both ends. This was `id >= MENU_COLUMN_BASE`, which
+            // claimed every id allocated above it -- so the thumbnail sizes,
+            // based at 2000 to stay clear, were swallowed here and never
+            // reached their own handler. An open-ended range does not stay
+            // clear of anything; it takes everything added later.
+            _ if (MENU_COLUMN_BASE..MENU_THUMB_SIZE_BASE).contains(&id) => {
+                let Ok(raw) = u32::try_from(id.saturating_sub(MENU_COLUMN_BASE)) else {
+                    return false;
+                };
+                let column = ColumnId(raw);
+                if self.columns.is_visible(column) {
+                    // The last column is not removable: a header row with
+                    // nothing in it shows a list the user cannot read.
+                    if self.columns.active_columns().len() > 1 {
+                        self.columns.remove_column(column);
+                    } else {
+                        self.status_message = String::from("At least one column has to stay");
+                    }
+                } else {
+                    self.columns.add_column(column);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// What can be done to the file under the pointer.
     fn file_menu_items(&self) -> Vec<MenuItem> {
         vec![
@@ -1760,7 +2595,7 @@ impl ExplorerState {
 
     /// What can be done to the folder being shown.
     fn folder_menu_items(&self) -> Vec<MenuItem> {
-        vec![
+        let mut items = vec![
             Self::menu_action(MENU_NEW_FOLDER, "New folder", true),
             // Greyed rather than absent when the clipboard is empty, for the
             // reason the toolbar's buttons are: a menu whose rows come and go
@@ -1768,7 +2603,44 @@ impl ExplorerState {
             // next.
             Self::menu_action(MENU_PASTE, "Paste", self.clipboard.is_some()),
             Self::menu_action(MENU_REFRESH, "Refresh", true),
-        ]
+        ];
+        // Only where thumbnails are drawn. In Details and List the sizes
+        // change nothing visible, and a submenu that silently does nothing is
+        // the control-that-cannot-act this tree has plenty of already.
+        if self.view_wants_thumbnails() {
+            items.push(MenuItem::Separator);
+            items.push(self.thumb_size_menu());
+            items.push(self.icon_label_menu());
+        }
+
+        // Here rather than on the column header's menu, which only Details
+        // view has: a panel that can only be switched on from one of three
+        // views is a panel most users will never find. The thumbnail settings
+        // above are here for the same reason.
+        items.push(MenuItem::Separator);
+        items.push(MenuItem::Action {
+            id: MENU_PREVIEW_TOGGLE,
+            label: String::from("Preview panel"),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: Some(self.preview_open),
+        });
+        // The sides are offered only while the panel is showing: a choice of
+        // where to put something invisible is a control with nothing to obey.
+        if self.preview_open {
+            for (i, side) in columnprefs::PreviewSide::ALL.into_iter().enumerate() {
+                items.push(MenuItem::Action {
+                    id: MENU_PREVIEW_SIDE_BASE.saturating_add(i as u64),
+                    label: String::from(side.label()),
+                    shortcut: None,
+                    icon: None,
+                    enabled: true,
+                    checked: Some(self.preview_side == side),
+                });
+            }
+        }
+        items
     }
 
     /// One row of a menu.
@@ -1803,6 +2675,12 @@ impl ExplorerState {
 
     /// Carry out a menu row.
     fn activate_menu_item(&mut self, id: u64) {
+        // The column picker first: its per-column ids are allocated above
+        // every action below, so asking it first costs one comparison and
+        // keeps the two id spaces from having to be interleaved here.
+        if self.column_menu_action(id) || self.thumb_size_action(id) || self.icon_label_action(id) {
+            return;
+        }
         match id {
             MENU_OPEN => {
                 if let Some(&index) = self.selected_indices.first() {
@@ -2482,6 +3360,7 @@ impl ExplorerState {
     /// which a freshly-constructed manager would drop — making the highlight
     /// flicker off on every frame of a stationary hover.
     pub fn render(&mut self) -> RenderTree {
+        self.refresh_preview_text();
         let mut tree = RenderTree::new();
         let w = self.window_width as f32;
         let h = self.window_height as f32;
@@ -2538,10 +3417,27 @@ impl ExplorerState {
             Some(Modal::Confirm { dialog, .. } | Modal::Notice { dialog }) => {
                 dialog.render(&self.palette, w, h, &mut tree);
             }
-            Some(Modal::Rename { dialog, .. } | Modal::NewFolder { dialog }) => {
+            Some(
+                Modal::Rename { dialog, .. }
+                | Modal::NewFolder { dialog }
+                | Modal::Search { dialog },
+            ) => {
                 dialog.render(&self.palette, w, h, &mut tree);
             }
             None => {}
+        }
+
+        // And the shortcut list over even the dialogs, because it is the one
+        // thing a reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (self.window_width as f32, self.window_height as f32),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
         }
 
         tree
@@ -2695,13 +3591,7 @@ impl ExplorerState {
                     self.palette.surface1,
                 );
             }
-            tree.fill_rect(
-                rect.x,
-                rect.y,
-                rect.width,
-                rect.height,
-                self.palette.surface0,
-            );
+            tree.fill_rect(rect.x, rect.y, rect.w, rect.h, self.palette.surface0);
             let ink = if self.toolbar_button_state(button).is_enabled() {
                 self.palette.text
             } else {
@@ -2712,7 +3602,7 @@ impl ExplorerState {
             tree.text_in(
                 rect.x + 6.0,
                 rect.y + 6.0,
-                rect.width - 8.0,
+                rect.w - 8.0,
                 button.glyph(),
                 ink,
                 14.0,
@@ -2739,13 +3629,35 @@ impl ExplorerState {
         // renderer honours, so extending the command list inside one places
         // the whole widget without it having to be told.
         tree.translate(rect.x, rect.y);
-        let commands = self.pathbar.render(
-            &palette,
-            rect.width.max(0.0) as u32,
-            rect.height.max(0.0) as u32,
-        );
+        let commands =
+            self.pathbar
+                .render(&palette, rect.w.max(0.0) as u32, rect.h.max(0.0) as u32);
         tree.commands.extend(commands);
         tree.untranslate();
+    }
+
+    /// Show the columns saved for this folder, or the saved default.
+    ///
+    /// Answers whether either existed. The folder's own preference wins; a
+    /// folder with none falls back to the default the user saved for
+    /// everything; with neither, the caller decides what to show.
+    fn apply_saved_columns(&mut self) -> bool {
+        let saved = columnprefs::for_folder(&self.column_prefs, &self.current_path)
+            .or_else(|| columnprefs::global(&self.column_prefs));
+        let Some(keys) = saved else {
+            return false;
+        };
+        let unknown = self.columns.apply_keys(&keys);
+        if !unknown.is_empty() {
+            // Named rather than silently dropped: a column that vanishes from
+            // a saved view with no explanation reads as a bug in the view.
+            self.status_message = format!(
+                "{} saved column(s) are not available here: {}",
+                unknown.len(),
+                unknown.join(", ")
+            );
+        }
+        true
     }
 
     /// Hand an event to the address bar and act on what it says.
@@ -2755,8 +3667,7 @@ impl ExplorerState {
         let events = self.pathbar.drain_events();
         for event in events {
             match event {
-                PathBarEvent::Navigate(path) => {
-                    let target = PathBuf::from(&path);
+                PathBarEvent::Navigate(target) => {
                     if target.is_dir() {
                         self.navigate_to(&target);
                     } else {
@@ -2765,7 +3676,10 @@ impl ExplorerState {
                         // there, so a mistyped path can be corrected instead
                         // of retyped.
                         self.pathbar.set_path_valid(false);
-                        self.status_message = format!("No such folder: {path}");
+                        // `display()` only because this is a sentence for a
+                        // human; the path itself was carried here as bytes and
+                        // is never rebuilt from this string.
+                        self.status_message = format!("No such folder: {}", target.display());
                     }
                 }
                 PathBarEvent::RequestAutoComplete { prefix } => {
@@ -2794,7 +3708,16 @@ impl ExplorerState {
         let mut items: Vec<CompletionItem> = entries
             .filter_map(Result::ok)
             .filter_map(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
+                // `to_str`, not `to_string_lossy`. A name that is not UTF-8
+                // would come back with U+FFFD substituted for the bytes that
+                // are not, and completing to it would produce a path that does
+                // not exist -- the bar would offer a folder and then report
+                // "No such folder" when it was chosen. Our filenames may hold
+                // any byte but `/` and NUL, and this widget is a text field
+                // that cannot represent them, so such an entry is skipped
+                // rather than mangled. Skipping loses a completion; mangling
+                // loses the user's trust in the ones that are offered.
+                let name = entry.file_name().to_str()?.to_owned();
                 if !name.starts_with(partial) {
                     return None;
                 }
@@ -2838,22 +3761,287 @@ impl ExplorerState {
     }
 
     fn render_file_list(&self, tree: &mut RenderTree, zones: &mut DropZoneManager) {
-        let list_x = self.sidebar_width;
-        let list_y = 64.0;
-        let list_w = self.window_width as f32 - self.sidebar_width;
-        let list_h = self.window_height as f32 - 64.0 - 24.0;
+        // With the preview open the listing gets the left pane; without it,
+        // the whole thing. Both come from one place so the drop target, the
+        // rows and the divider cannot be computed against different widths --
+        // which would drop a file into the folder next to the one it was
+        // dragged onto.
+        // Both from `list_rect`, which is the one place that knows the panel
+        // is open. The listing's width used to be decided here and again in
+        // `icon_columns`, and the two disagreed.
+        let list_rect = self.list_rect();
+        let preview_rect = self.preview_panes().map(|(_, preview)| preview);
+        let (list_x, list_y, list_w, list_h) = (list_rect.x, list_rect.y, list_rect.w, list_rect.h);
 
         // The pane itself is the fallback target: anything inside it that is
         // not a folder row means "into the directory being shown".
-        zones.set_list_area(Rect::new(list_x, list_y, list_w, list_h));
+        zones.set_list_area(list_rect);
 
         match self.view_mode {
             ViewMode::Details => self.render_details(tree, zones, list_x, list_y, list_w, list_h),
             ViewMode::Icons => self.render_icons(tree, zones, list_x, list_y, list_w, list_h),
             ViewMode::List => self.render_list(tree, zones, list_x, list_y, list_w, list_h),
         }
+        if let Some(preview) = preview_rect {
+            self.render_preview(tree, preview);
+            // The divider last, so it sits over both panes' edges rather than
+            // being clipped by whichever drew second.
+            tree.fill_rect(
+                list_rect.x + list_rect.w,
+                list_rect.y,
+                splitter::DIVIDER,
+                list_rect.h,
+                self.palette.surface2,
+            );
+        }
+
+        // Over the rows, under the scrollbar: the line marks a place
+        // between two rows, so it has to be visible above them, but it is not
+        // furniture and should not sit over the bar the user may be holding.
+        if let Some((line_y, line_x, line_w)) = self.insertion_line() {
+            tree.fill_rect(
+                line_x,
+                line_y - INSERTION_LINE_H / 2.0,
+                line_w,
+                INSERTION_LINE_H,
+                self.palette.blue,
+            );
+        }
         // After the view, so the bar sits over the rows rather than under them.
         self.render_scrollbar(tree);
+    }
+
+    /// The divider's rectangle, between the two panes.
+    ///
+    /// One function, used by both the hit test and the renderer. A line drawn
+    /// in one place and grabbed in another is the defect this crate's
+    /// `pane_rect` comment already warns about.
+    fn preview_divider_rect(&self) -> Option<Rect> {
+        let (list, preview) = self.preview_panes()?;
+        Some(if self.preview_side.is_horizontal() {
+            let left = if list.x < preview.x { list } else { preview };
+            Rect::new(left.x + left.w, left.y, splitter::DIVIDER, left.h)
+        } else {
+            let top = if list.y < preview.y { list } else { preview };
+            Rect::new(top.x, top.y + top.h, top.w, splitter::DIVIDER)
+        })
+    }
+
+    /// Where inside the divider `(x, y)` grabbed it, if it did.
+    fn divider_grab_at(&self, x: f32, y: f32) -> Option<f32> {
+        let rect = self.preview_divider_rect()?;
+        // Grown by the same margin the toolkit uses, on whichever axis the
+        // divider runs across: the grab region is deliberately wider than the
+        // drawn line so nobody has to pixel-hunt for it.
+        let grown = if self.preview_side.is_horizontal() {
+            Rect::new(
+                rect.x - splitter::GRAB_MARGIN,
+                rect.y,
+                rect.w + splitter::GRAB_MARGIN * 2.0,
+                rect.h,
+            )
+        } else {
+            Rect::new(
+                rect.x,
+                rect.y - splitter::GRAB_MARGIN,
+                rect.w,
+                rect.h + splitter::GRAB_MARGIN * 2.0,
+            )
+        };
+        if !grown.contains(x, y) {
+            return None;
+        }
+        // The offset from the divider's leading edge, so the line keeps its
+        // position under the pointer instead of jumping to centre itself.
+        Some(if self.preview_side.is_horizontal() {
+            x - rect.x
+        } else {
+            y - rect.y
+        })
+    }
+
+    /// Move the divider to follow the pointer. Answers whether it moved.
+    fn drag_divider(&mut self, x: f32, y: f32) -> bool {
+        let Some(offset) = self.divider_grab else {
+            return false;
+        };
+        let area = self.pane_rect();
+        let side = self.preview_side;
+        let horizontal = side.is_horizontal();
+        let (pointer, start, span) = if horizontal {
+            (x, area.x, area.w)
+        } else {
+            (y, area.y, area.h)
+        };
+        let (list_min, preview_min) = if horizontal {
+            (LIST_MIN_W, PREVIEW_MIN_W)
+        } else {
+            (LIST_MIN_H, PREVIEW_MIN_H)
+        };
+
+        // Fractions are in LAYOUT order, so the minimums must be too. With the
+        // preview first, index 0 is the preview and its minimum belongs there;
+        // passing them the other way round would let a drag squeeze whichever
+        // pane happened to be leading past a limit that is not its own.
+        let mut fractions = if side.is_first() {
+            [1.0 - self.preview_split, self.preview_split]
+        } else {
+            [self.preview_split, 1.0 - self.preview_split]
+        };
+        let mins = if side.is_first() {
+            [preview_min, list_min]
+        } else {
+            [list_min, preview_min]
+        };
+
+        let moved = splitter::resize(
+            &mut fractions,
+            0,
+            pointer - offset - start,
+            span,
+            splitter::DIVIDER,
+            &mins,
+        );
+        if moved {
+            // Stored as the LISTING's share whichever side the panel is on, so
+            // moving the panel across does not resize it.
+            self.preview_split = if side.is_first() {
+                fractions[1]
+            } else {
+                fractions[0]
+            };
+        }
+        moved
+    }
+
+    /// Let go of the divider, remembering where it was left.
+    ///
+    /// Written on release rather than on every move: a drag is dozens of
+    /// events and each one would be a file write, which is both wasteful and a
+    /// way to leave a half-written settings file if the drag is interrupted.
+    fn drop_divider(&mut self) -> bool {
+        if self.divider_grab.take().is_none() {
+            return false;
+        }
+        columnprefs::set_preview_split(&mut self.column_prefs, self.preview_split);
+        self.persist_view_prefs("Preview panel resized");
+        true
+    }
+
+    /// Draw the preview panel: the selected picture, or why there is none.
+    ///
+    /// Shows the thumbnail rather than decoding the original at full size. A
+    /// preview pane is a few hundred pixels wide, the thumbnail is already
+    /// decoded and already uploaded, and re-reading a forty-megapixel photo to
+    /// fill it would stall the window on every arrow-key press. A larger
+    /// thumbnail size is the lever if the preview looks soft, and that is a
+    /// setting the user already has.
+    /// Re-read the previewed file when the selection moves to another one.
+    ///
+    /// Here rather than at each of the eight places the selection changes: a
+    /// refresh every one of those has to remember is a refresh one of them
+    /// forgets. `render` already takes `&mut self`, so this costs a path
+    /// comparison per frame and a read only when the answer changed.
+    fn refresh_preview_text(&mut self) {
+        if !self.preview_open {
+            self.preview_text = None;
+            return;
+        }
+        let selected = self
+            .selected_indices
+            .first()
+            .and_then(|i| self.entries.get(*i))
+            .map(|e| (e.path.clone(), mtime_secs(e.modified)));
+        let Some((path, mtime)) = selected else {
+            self.preview_text = None;
+            return;
+        };
+        if matches!(&self.preview_text, Some((p, m, _)) if *p == path && *m == mtime) {
+            return;
+        }
+        self.preview_text = thumbs::read_text_lines(&path, PREVIEW_MAX_LINES)
+            .filter(|lines| !lines.is_empty())
+            .map(|lines| (path, mtime, lines));
+    }
+
+    fn render_preview(&self, tree: &mut RenderTree, area: Rect) {
+        tree.fill_rect(area.x, area.y, area.w, area.h, self.palette.surface0);
+
+        let selected = self
+            .selected_indices
+            .first()
+            .and_then(|i| self.entries.get(*i));
+
+        let Some(entry) = selected else {
+            self.preview_note(tree, area, "Select a file to preview it");
+            return;
+        };
+
+        // Text before pictures, because a text file has both: the thumbnailer
+        // draws its first lines as a 96-pixel minimap, and centred unscaled in
+        // a pane this wide that is a picture *of* writing rather than writing.
+        // The same lines, at a size a person can read.
+        if let Some((path, _, lines)) = &self.preview_text
+            && *path == entry.path
+        {
+            let pad = 12.0;
+            let mut view = guitk::textview::SimpleTextView::new(
+                (area.w - pad * 2.0).max(0.0),
+                (area.h - pad * 2.0).max(0.0),
+            );
+            view.set_text(&lines.join(
+                "
+",
+            ));
+            tree.translate(area.x + pad, area.y + pad);
+            view.render(&self.palette, tree);
+            tree.untranslate();
+            return;
+        }
+
+        let Some((id, thumb)) = self.drawable_thumb(entry) else {
+            // Said plainly rather than left blank: a blank panel beside a
+            // selected file reads as a broken preview, and "no picture" and
+            // "not a picture" are different answers.
+            self.preview_note(tree, area, "No preview for this file");
+            return;
+        };
+
+        // Fitted inside the pane, never enlarged past its own pixels: blowing
+        // a 96-pixel thumbnail up to fill a wide pane looks like a fault
+        // rather than a preview.
+        let pad = 12.0;
+        let avail_w = (area.w - pad * 2.0).max(0.0);
+        let avail_h = (area.h - pad * 2.0).max(0.0);
+        let tw = thumb.width as f32;
+        let th = thumb.height as f32;
+        if tw <= 0.0 || th <= 0.0 || avail_w <= 0.0 || avail_h <= 0.0 {
+            return;
+        }
+        let scale = (avail_w / tw).min(avail_h / th).min(1.0);
+        let w = tw * scale;
+        let h = th * scale;
+        tree.push(guitk::render::RenderCommand::Image {
+            x: area.x + (area.w - w) / 2.0,
+            y: area.y + (area.h - h) / 2.0,
+            width: w,
+            height: h,
+            image_id: id,
+        });
+    }
+
+    /// One line of explanation, centred in the preview pane.
+    fn preview_note(&self, tree: &mut RenderTree, area: Rect, text: &str) {
+        tree.push(guitk::render::RenderCommand::Text {
+            x: area.x + 12.0,
+            y: area.y + area.h / 2.0,
+            text: text.to_string(),
+            color: self.palette.subtext0,
+            font_size: 13.0,
+            font_weight: guitk::render::FontWeightHint::Regular,
+            max_width: Some((area.w - 24.0).max(0.0)),
+            overflow: guitk::render::TextOverflow::Ellipsis,
+        });
     }
 
     /// The file pane's rectangle: below the toolbar, right of the sidebar.
@@ -2877,9 +4065,9 @@ impl ExplorerState {
     fn visible_capacity(&self) -> usize {
         let pane = self.pane_rect();
         match self.view_mode {
-            ViewMode::List => scroll_window::capacity(LIST_ROW_H, pane.height),
-            ViewMode::Details => scroll_window::capacity(ROW_H, (pane.height - HEADER_H).max(0.0)),
-            ViewMode::Icons => scroll_window::capacity(ICON_CELL_H, pane.height)
+            ViewMode::List => scroll_window::capacity(LIST_ROW_H, pane.h),
+            ViewMode::Details => scroll_window::capacity(ROW_H, (pane.h - HEADER_H).max(0.0)),
+            ViewMode::Icons => scroll_window::capacity(self.icon_cell_h(), pane.h)
                 .saturating_mul(self.icon_columns()),
         }
     }
@@ -2899,10 +4087,10 @@ impl ExplorerState {
             ViewMode::List | ViewMode::Icons => pane.y,
         };
         Some(Rect::new(
-            pane.x + pane.width - scrollbar::WIDTH,
+            pane.x + pane.w - scrollbar::WIDTH,
             top,
             scrollbar::WIDTH,
-            (pane.y + pane.height - top).max(0.0),
+            (pane.y + pane.h - top).max(0.0),
         ))
     }
 
@@ -2910,7 +4098,7 @@ impl ExplorerState {
     fn scrollbar_thumb(&self) -> Option<guitk::frame::Rect> {
         let track = self.scrollbar_track()?;
         Some(scrollbar::thumb(
-            guitk::frame::Rect::new(track.x, track.y, track.width, track.height),
+            track,
             self.entries.len(),
             self.visible_capacity(),
             self.viewport.first_visible(),
@@ -2924,10 +4112,10 @@ impl ExplorerState {
         let (Some(track), Some(thumb)) = (self.scrollbar_track(), self.scrollbar_thumb()) else {
             return false;
         };
-        if x < track.x || x >= track.x + track.width {
+        if x < track.x || x >= track.x + track.w {
             return false;
         }
-        if y < track.y || y >= track.y + track.height {
+        if y < track.y || y >= track.y + track.h {
             return false;
         }
         if y >= thumb.y && y < thumb.y + thumb.h {
@@ -2961,7 +4149,7 @@ impl ExplorerState {
             return false;
         };
         let Some(first) = scrollbar::first_from_drag(
-            guitk::frame::Rect::new(track.x, track.y, track.width, track.height),
+            track,
             thumb.h,
             grab,
             y,
@@ -2984,20 +4172,14 @@ impl ExplorerState {
         };
         // The toolkit's `Rect` names its sides `w`/`h` where explorer's names
         // them `width`/`height`; converted here, at the one call that crosses.
-        let track_gui = guitk::frame::Rect::new(track.x, track.y, track.width, track.height);
+        let track_gui = track;
         let thumb = scrollbar::thumb(
             track_gui,
             self.entries.len(),
             self.visible_capacity(),
             self.viewport.first_visible(),
         );
-        tree.fill_rect(
-            track.x,
-            track.y,
-            track.width,
-            track.height,
-            self.palette.mantle,
-        );
+        tree.fill_rect(track.x, track.y, track.w, track.h, self.palette.mantle);
         tree.fill_rounded_rect(
             thumb.x + 1.0,
             thumb.y,
@@ -3016,8 +4198,36 @@ impl ExplorerState {
     /// wheel stepping by a different column count than the grid is laid out in
     /// would move by a fraction of a row and feel stuck.
     fn icon_columns(&self) -> usize {
-        let pane_w = (self.window_width as f32 - self.sidebar_width).max(0.0);
-        ((pane_w / ICON_CELL_W) as usize).max(1)
+        Self::columns_for(self.list_rect().w)
+    }
+
+    /// The part of the pane the *listing* gets.
+    ///
+    /// With the preview panel open that is the left half, not the whole pane,
+    /// and the difference is not small: at 900x700 the grid goes from seven
+    /// columns to four. Both the renderer and [`icon_columns`](Self::icon_columns)
+    /// come here, because they used to disagree -- `icon_columns` measured the
+    /// whole pane while `render_file_list` handed the grid the narrower list
+    /// rect, so **with the preview open the wheel stepped seven entries per
+    /// row through a grid four wide**, and the top-left cell reported whichever
+    /// file the wheel's arithmetic thought was there. `icon_columns`'s own doc
+    /// comment already said the two must not disagree; nothing held them to it
+    /// until this existed.
+    fn list_rect(&self) -> Rect {
+        match self.preview_panes() {
+            Some((list, _)) => list,
+            None => self.pane_rect(),
+        }
+    }
+
+    /// How many icon cells fit across `w`.
+    ///
+    /// One formula, called by the renderer and by the wheel. At least one
+    /// column however narrow: a zero would make the row index a division by
+    /// zero, and a pane too narrow for a cell should clip one rather than draw
+    /// none.
+    fn columns_for(w: f32) -> usize {
+        ((w / ICON_CELL_W) as usize).max(1)
     }
 
     /// The icon view: a grid of thumbnail cells, each captioned with its name.
@@ -3040,10 +4250,7 @@ impl ExplorerState {
         w: f32,
         h: f32,
     ) {
-        // At least one column, however narrow the pane: a zero here would make
-        // the row index a division by zero, and a pane too narrow for a cell
-        // should clip one cell rather than draw none.
-        let cols = ((w / ICON_CELL_W) as usize).max(1);
+        let cols = Self::columns_for(w);
         // The offset is kept in *entries*, one number for all three views, so
         // changing view mode lands you at roughly the same place rather than
         // back at the top. The grid rounds it down to a whole row of icons:
@@ -3055,7 +4262,8 @@ impl ExplorerState {
             .checked_div(cols)
             .unwrap_or(0)
             .saturating_mul(cols);
-        let icon_rows = scroll_window::capacity(ICON_CELL_H, h);
+        let cell_h = self.icon_cell_h();
+        let icon_rows = scroll_window::capacity(cell_h, h);
         let visible_cells = icon_rows.saturating_mul(cols);
 
         tree.translate(x, y);
@@ -3081,7 +4289,7 @@ impl ExplorerState {
             // loop free of an operation whose safety the reader has to prove
             // from a line thirty above it.
             let cx = cell.checked_rem(cols).unwrap_or(0) as f32 * ICON_CELL_W;
-            let cy = cell.checked_div(cols).unwrap_or(0) as f32 * ICON_CELL_H;
+            let cy = cell.checked_div(cols).unwrap_or(0) as f32 * cell_h;
 
             // Registered in window coordinates, not the pane-local ones the
             // commands are emitted in: the pointer position a drop arrives
@@ -3091,7 +4299,7 @@ impl ExplorerState {
             zones.register_file_row(
                 i,
                 &entry.path,
-                Rect::new(x + cx, y + cy, ICON_CELL_W, ICON_CELL_H),
+                Rect::new(x + cx, y + cy, ICON_CELL_W, cell_h),
                 entry.is_dir,
             );
 
@@ -3100,7 +4308,7 @@ impl ExplorerState {
                     cx + 2.0,
                     cy + 2.0,
                     ICON_CELL_W - 4.0,
-                    ICON_CELL_H - 4.0,
+                    cell_h - 4.0,
                     with_alpha(self.palette.accent, 40),
                     guitk::style::CornerRadii::all(4.0),
                 );
@@ -3112,7 +4320,7 @@ impl ExplorerState {
             let ty = cy + 8.0;
             self.push_thumb(tree, entry, tx, ty, ICON_THUMB_SIZE);
 
-            let label_y = ty + ICON_THUMB_SIZE + 6.0;
+            let mut label_y = ty + ICON_THUMB_SIZE + 6.0;
             let name_color = if entry.is_dir {
                 self.palette.accent
             } else {
@@ -3121,14 +4329,45 @@ impl ExplorerState {
             // Elided rather than clipped: a name cut mid-word with no mark is
             // read as the whole name, which is how one file gets mistaken for
             // another whose name it is a prefix of.
-            tree.text_in(
-                cx + 4.0,
-                label_y,
-                ICON_CELL_W - 8.0,
-                &entry.name,
-                name_color,
-                ICON_LABEL_SIZE,
-            );
+            if self.icon_labels.name {
+                tree.text_in(
+                    cx + 4.0,
+                    label_y,
+                    ICON_CELL_W - 8.0,
+                    &entry.name,
+                    name_color,
+                    ICON_LABEL_SIZE,
+                );
+                label_y += ICON_LABEL_LINE_H;
+            }
+            // Date and size come from `entry_value`, which is what the detail
+            // cells use, so the two views cannot disagree about the same file.
+            // Drawn in the dimmer ink: they are context for the name, and
+            // three lines of equal weight under every icon reads as a table
+            // that has lost its columns.
+            for (wanted, id) in [
+                (self.icon_labels.date, ColumnId::DATE_MODIFIED),
+                (self.icon_labels.size, ColumnId::SIZE),
+            ] {
+                if !wanted {
+                    continue;
+                }
+                let text = self.entry_value(entry, id).display();
+                if !text.is_empty() {
+                    tree.text_in(
+                        cx + 4.0,
+                        label_y,
+                        ICON_CELL_W - 8.0,
+                        &text,
+                        self.palette.subtext0,
+                        ICON_LABEL_SIZE,
+                    );
+                }
+                // Advanced even when the value is blank -- a folder has no
+                // size -- so every cell's lines land at the same heights and
+                // the grid reads as rows rather than as drifting text.
+                label_y += ICON_LABEL_LINE_H;
+            }
         }
 
         tree.unclip();
@@ -3320,13 +4559,7 @@ impl ExplorerState {
         let Some(panel) = self.transfers_rect() else {
             return;
         };
-        tree.fill_rect(
-            panel.x,
-            panel.y,
-            panel.width,
-            panel.height,
-            self.palette.mantle,
-        );
+        tree.fill_rect(panel.x, panel.y, panel.w, panel.h, self.palette.mantle);
 
         let controls = self.transfers_layout();
         // The leftmost button on each row is where its label has to stop.
@@ -3338,21 +4571,15 @@ impl ExplorerState {
             let row_band = y..y + TRANSFER_ROW_H;
             let leftmost = controls
                 .iter()
-                .filter(|(_, r)| row_band.contains(&(r.y + r.height / 2.0)))
+                .filter(|(_, r)| row_band.contains(&(r.y + r.h / 2.0)))
                 .map(|(_, r)| r.x)
-                .fold(panel.x + panel.width, f32::min);
+                .fold(panel.x + panel.w, f32::min);
             let room = (leftmost - panel.x - 16.0).max(0.0);
             tree.text_in(panel.x + 8.0, y + 4.0, room, label, self.palette.text, 11.0);
         }
 
         for (control, rect) in controls {
-            tree.fill_rect(
-                rect.x,
-                rect.y,
-                rect.width,
-                rect.height,
-                self.palette.surface0,
-            );
+            tree.fill_rect(rect.x, rect.y, rect.w, rect.h, self.palette.surface0);
             let glyph = match control {
                 TransferControl::CancelRunning(_) | TransferControl::CancelQueued(_) => "\u{2715}",
                 TransferControl::MoveQueuedUp(_) => "\u{25B2}",
@@ -3362,7 +4589,7 @@ impl ExplorerState {
             tree.text_in(
                 rect.x + 4.0,
                 rect.y + 2.0,
-                rect.width - 6.0,
+                rect.w - 6.0,
                 glyph,
                 self.palette.text,
                 11.0,
@@ -3501,25 +4728,6 @@ const fn entry_category(entry: &FileEntry) -> ThumbCategory {
 
 /// Re-derive the active column set from what the directory actually holds.
 ///
-/// A free function rather than a method because it borrows two fields of
-/// [`ExplorerState`] at once — the entries immutably and the manager mutably —
-/// which the borrow checker allows at a call site but not through `&mut self`.
-///
-/// Paths are converted with [`Path::to_str`], not `to_string_lossy`: a name
-/// that is not valid UTF-8 simply does not vote on which columns appear, which
-/// is right, since every extension auto-detection looks for is ASCII. Making
-/// one up with replacement characters could only produce a wrong answer.
-fn detect_columns(columns: &mut ColumnManager, entries: &[FileEntry]) {
-    let infos: Vec<FileInfo<'_>> = entries
-        .iter()
-        .map(|e| FileInfo {
-            path: e.path.to_str().unwrap_or(""),
-            extension: e.path.extension().and_then(|x| x.to_str()).unwrap_or(""),
-        })
-        .collect();
-    columns.auto_detect_columns(&infos);
-}
-
 /// Check that `name` is usable as a single entry name in a directory.
 ///
 /// The rule the OS itself enforces is "all bytes except `/` and NUL" — see
@@ -3603,14 +4811,23 @@ const OPERATION_TICK: std::time::Duration = std::time::Duration::from_millis(16)
 
 // Context menu row ids. Numbered rather than positional, so inserting a row
 // cannot silently reassign what the ones below it do.
-/// The File Associations program's configuration, which this one only reads.
-///
-/// Named here rather than imported because `apps/fileassoc` is a *binary*:
-/// there is nothing to link against, which is exactly why the file it writes
-/// records a runnable path instead of an id.
-const ASSOC_CONFIG_NAME: &str = "fileassoc";
-
 const MENU_OPEN: u64 = 1;
+/// Save the visible columns for the folder being shown.
+const MENU_COLUMNS_SAVE_FOLDER: u64 = 100;
+/// Save them as the default for folders with no preference of their own.
+const MENU_COLUMNS_SAVE_GLOBAL: u64 = 101;
+/// Show or hide the preview panel.
+const MENU_PREVIEW_TOGGLE: u64 = 102;
+/// Put the preview panel on one of the four sides. Offset by `PreviewSide`'s
+/// index in `ALL`, which is the order the menu lists them in.
+const MENU_PREVIEW_SIDE_BASE: u64 = 200;
+/// One id per column, offset so it cannot collide with an action above.
+/// `ColumnId` is a small integer, and 1000 is far above every action here.
+const MENU_COLUMN_BASE: u64 = 1000;
+/// One id per offered thumbnail size, offset clear of the column ids above.
+const MENU_THUMB_SIZE_BASE: u64 = 2000;
+/// One id per icon-view label toggle, clear of the sizes above.
+const MENU_ICON_LABEL_BASE: u64 = 3000;
 const MENU_CUT: u64 = 2;
 const MENU_COPY: u64 = 3;
 const MENU_RENAME: u64 = 4;
@@ -3856,6 +5073,8 @@ impl ExplorerState {
             | Event::FocusOut
             | Event::ScaleChanged { .. }
             | Event::ModifierChord { .. }
+            // Never arrives: this program claims no idle watch.
+            | Event::SessionIdle
             // Cannot arrive here: a tray click is addressed to the connection
             // and `oswindow` hands it to `App::tray_icon_clicked` before the
             // window dispatch. Listed because this match is exhaustive on
@@ -3877,14 +5096,25 @@ impl ExplorerState {
                 self.press_scrollbar(m.x, m.y) || self.click_at(m.x, m.y)
             }
             MouseEventKind::Press(MouseButton::Right) => {
-                self.open_context_menu(m.x, m.y);
+                if self.over_column_header(m.x, m.y) {
+                    self.open_column_menu(m.x, m.y);
+                } else {
+                    self.open_context_menu(m.x, m.y);
+                }
                 true
             }
             MouseEventKind::Release(MouseButton::Left) => {
                 let was = self.thumb_grab.take();
-                was.is_some()
+                // A row drag is finished here whether or not it became active,
+                // so an ordinary click cannot leave one armed to fire on the
+                // next stray move.
+                let dropped = self.drop_row();
+                let divider = self.drop_divider();
+                was.is_some() || dropped || divider
             }
             MouseEventKind::Move if self.thumb_grab.is_some() => self.drag_scrollbar(m.y),
+            MouseEventKind::Move if self.divider_grab.is_some() => self.drag_divider(m.x, m.y),
+            MouseEventKind::Move if self.row_drag.is_some() => self.drag_row(m.x, m.y),
             // Motion with nothing grabbed: the only thing the explorer does
             // with it is say why the button under the pointer is greyed.
             MouseEventKind::Move => self.update_hover_hint(m.x, m.y),
@@ -3924,6 +5154,14 @@ impl ExplorerState {
     /// A single left click: select the row under the pointer, follow the
     /// sidebar place under it, or clear the selection.
     fn click_at(&mut self, x: f32, y: f32) -> bool {
+        // The divider first: it is drawn over the panes' edges, so a press on
+        // it must be spent here rather than selecting whatever row happens to
+        // end underneath. Its grab region is wider than the line, which is the
+        // whole reason to ask the toolkit rather than compare against `x`.
+        if let Some(offset) = self.divider_grab_at(x, y) {
+            self.divider_grab = Some(offset);
+            return true;
+        }
         // The toolbar first. It is drawn above the list and does not overlap
         // it, but asking in draw order is what keeps that true when one of
         // them moves.
@@ -3955,6 +5193,27 @@ impl ExplorerState {
             return self.route_to_pathbar(taken);
         }
         if let Some(index) = self.dropzone.find_file_row(x, y) {
+            // Remembered on every row press, not only in Custom mode: dragging
+            // a file is how a user *enters* Custom, so requiring the mode
+            // first would make it unreachable by the gesture that is supposed
+            // to create it.
+            // Dragging a row that is already part of the selection moves the
+            // whole selection; dragging an unselected row moves just it. Read
+            // *before* the selection handling below runs, because that is
+            // about to replace the selection with this row -- and the question
+            // being asked is what the user had chosen when they grabbed it.
+            let rows = if self.selected_indices.contains(&index) {
+                self.selected_indices.clone()
+            } else {
+                vec![index]
+            };
+            self.row_drag = Some(RowDrag {
+                start_x: x,
+                start_y: y,
+                rows,
+                active: false,
+                insert_at: index,
+            });
             self.select_single(index);
             return true;
         }
@@ -4020,6 +5279,21 @@ impl ExplorerState {
                 return true;
             }
         }
+        // The shortcut list, after the address bar and only with no dialog up:
+        // both of those take typed text, and `?` belongs in a filename or a
+        // path before it belongs to help.
+        if self.modal.is_none() {
+            let asked = k.key == Key::F1 || (k.key == Key::Slash && k.modifiers.shift);
+            if asked {
+                self.show_help = !self.show_help;
+                return true;
+            }
+            if k.key == Key::Escape && self.show_help {
+                self.show_help = false;
+                return true;
+            }
+        }
+
         let ctrl = k.modifiers.ctrl;
         match k.key {
             Key::A if ctrl => {
@@ -4027,6 +5301,10 @@ impl ExplorerState {
                     return false;
                 }
                 self.select_all();
+                true
+            }
+            Key::F if ctrl => {
+                self.open_search();
                 true
             }
             Key::Backspace => self.go_up_if_possible(),
@@ -4054,6 +5332,14 @@ impl ExplorerState {
                 self.cancel_all_operations();
                 true
             }
+            // Ordered after cancelling work and before clearing a selection,
+            // on the same reasoning the comment above gives: the more
+            // surprising state to be left in is the one Escape should undo
+            // first, and a listing that is secretly a search is exactly that.
+            Key::Escape if self.search_showing.is_some() => {
+                self.leave_search();
+                true
+            }
             Key::Escape => {
                 if self.selected_indices.is_empty() {
                     return false;
@@ -4063,6 +5349,23 @@ impl ExplorerState {
             }
             Key::F5 => {
                 self.load_directory();
+                true
+            }
+            // The three view modes. `set_view_mode` was the only writer of
+            // `view_mode` and had no caller, so this window was permanently
+            // in Details: `List` and `Icons` both render correctly, are
+            // obeyed by the layout, the navigation step and the header, and
+            // could never be seen.
+            Key::Num1 => {
+                self.set_view_mode(ViewMode::Details);
+                true
+            }
+            Key::Num2 => {
+                self.set_view_mode(ViewMode::List);
+                true
+            }
+            Key::Num3 => {
+                self.set_view_mode(ViewMode::Icons);
                 true
             }
             // Shift+Delete is the permanent one, by long convention. It is
@@ -4195,14 +5498,16 @@ impl ExplorerState {
 
         let consumed = match modal {
             Modal::Confirm { dialog, .. } | Modal::Notice { dialog } => dialog.handle_event(event),
-            Modal::Rename { dialog, .. } | Modal::NewFolder { dialog } => {
-                dialog.handle_event(event)
-            }
+            Modal::Rename { dialog, .. }
+            | Modal::NewFolder { dialog }
+            | Modal::Search { dialog } => dialog.handle_event(event),
         } == EventResult::Consumed;
 
         let answer = match modal {
             Modal::Confirm { dialog, .. } | Modal::Notice { dialog } => dialog.result().cloned(),
-            Modal::Rename { dialog, .. } | Modal::NewFolder { dialog } => dialog.result().cloned(),
+            Modal::Rename { dialog, .. }
+            | Modal::NewFolder { dialog }
+            | Modal::Search { dialog } => dialog.result().cloned(),
         };
 
         let Some(answer) = answer else {
@@ -4229,6 +5534,17 @@ impl ExplorerState {
                     self.status_message = "Delete cancelled".to_string();
                 }
             }
+            Some(Modal::Search { .. }) => match answer {
+                // An empty query is a dismissal that happens to have been
+                // typed, the same judgement `NewFolder` makes below: running
+                // it would replace the listing with nothing and report no
+                // matches for an empty string as though a question had
+                // been asked.
+                DialogResult::Text(query) if !query.trim().is_empty() => {
+                    self.run_search(query.trim());
+                }
+                _ => self.status_message = "Search cancelled".to_string(),
+            },
             Some(Modal::Rename { target, .. }) => match answer {
                 DialogResult::Text(name) => self.rename_path(&target, &name),
                 _ => self.status_message = "Rename cancelled".to_string(),
@@ -4346,6 +5662,31 @@ impl ExplorerState {
 // ============================================================================
 // Main
 // ============================================================================
+
+/// A scratch directory, resolved while holding the environment lock.
+///
+/// `ScratchDir::new` calls `std::env::temp_dir()`, which **reads** the
+/// environment, and tests in this same binary **write** it --
+/// `settingsfile::testing::with_scratch_config` removes `HOME` and sets
+/// `XDG_CONFIG_HOME` under `ENV_LOCK`. The environment is process-global and
+/// the tests are threads, so a scratch directory could be resolved while
+/// another thread was rewriting the block. Concurrent read-and-write of the
+/// environment is undefined, which is why `std::env::set_var` is `unsafe` in
+/// Rust 2024.
+///
+/// `ENV_LOCK` only serialises the tests that take it, and **a reader is the
+/// side that forgets**. Every scratch directory in this crate is now resolved
+/// here, so the lock is taken once and cannot be omitted by a new test that
+/// copies an old one.
+///
+/// See known-issues `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE`,
+/// whose original unidentified instance was this crate's suite failing by
+/// exactly one test.
+#[cfg(test)]
+pub(crate) fn guarded_scratch(label: &str) -> scratchdir::ScratchDir {
+    let _turn = settingsfile::testing::config_turn();
+    scratchdir::ScratchDir::new(label)
+}
 
 fn main() -> std::process::ExitCode {
     // The folder to open, then the home directory, then the root. A path given
@@ -4633,7 +5974,24 @@ mod tests {
     }
 
     fn temp_dir(label: &str) -> ScratchDir {
-        ScratchDir::new(&format!("explorer_test_{label}"))
+        // `ScratchDir::new` calls `std::env::temp_dir()`, which READS the
+        // environment -- and five tests in this binary call
+        // `settingsfile::testing::with_scratch_config`, which WRITES it
+        // (`remove_var("HOME")`, `set_var("XDG_CONFIG_HOME")`). The
+        // environment is process-global and these tests are threads, so a
+        // scratch directory could be resolved while another thread was
+        // rewriting the block.
+        //
+        // `ENV_LOCK` only serialises the tests that take it, and a reader is
+        // the side that forgets -- the same defect fixed in
+        // `gui/desktop/src/icons.rs` tonight, and the likely mechanism behind
+        // `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE`, whose
+        // signature was this crate's own suite with exactly one failure.
+        //
+        // The guard only has to span the resolution: once the directory is
+        // named, nothing later re-reads the environment.
+        let _turn = settingsfile::testing::config_turn();
+        crate::guarded_scratch(&format!("explorer_test_{label}"))
     }
 
     fn write(path: &Path, content: &str) {
@@ -4649,7 +6007,29 @@ mod tests {
     /// from it, so the same test would pass or fail depending on what the
     /// developer had browsed.
     fn state_at(dir: &Path) -> ExplorerState {
-        let mut state = ExplorerState::new(dir);
+        // `ExplorerState::new` READS the configuration directory -- it takes
+        // `preview_open`, `preview_split`, `preview_side`, the icon labels and
+        // the thumbnail size from `settingsfile::load`. Five tests in this
+        // binary WRITE the environment that resolves it, and
+        // `the_preview_can_move_to_any_side` writes `side: bottom` into its
+        // scratch config before restoring anything. Tests are threads of one
+        // process, so a construction here could read that file.
+        //
+        // That is not hypothetical: it is the `7 -> 7` this crate's own
+        // `the_preview_panel_narrows_the_grid_for_the_wheel_too` reported in
+        // one workspace run and in no isolated one -- a preview on the bottom
+        // divides the height, so the column count is unchanged and the test
+        // that asserts it narrows looks broken.
+        //
+        // The turn is held only across the constructor because the values are
+        // copied out of the document there; nothing later reads the
+        // environment again. `settingsfile::testing`'s own doc names this
+        // exact failure: "a reader that never called it would resolve
+        // XDG_CONFIG_HOME in the middle of somebody else's scratch directory".
+        let mut state = {
+            let _turn = settingsfile::testing::config_turn();
+            ExplorerState::new(dir)
+        };
         state.recycle = RecycleBin::new(dir.join(".recycle"), Duration::from_secs(3600));
         state.thumb_gen =
             ThumbnailGenerator::with_disk_cache(thumbs::DiskCache::new(dir.join(".thumbs")));
@@ -4677,12 +6057,65 @@ mod tests {
             .collect()
     }
 
+    /// The three view modes can all be reached.
+    ///
+    /// `set_view_mode` was the only writer of `view_mode` and had no caller,
+    /// so this window was permanently in Details. `List` and `Icons` both
+    /// render, are obeyed by the layout and the navigation step, and could
+    /// never be seen.
+    #[test]
+    fn the_view_modes_can_be_reached() {
+        let dir = temp_dir("view_modes");
+        let root = dir.dir();
+        write(&root.join("a.txt"), "a");
+        let mut state = state_at(root);
+        assert_eq!(
+            state.view_mode,
+            ViewMode::Details,
+            "control: starts in Details"
+        );
+
+        send(&mut state, &key(Key::Num2));
+        assert_eq!(state.view_mode, ViewMode::List, "2 did not select List");
+
+        send(&mut state, &key(Key::Num3));
+        assert_eq!(state.view_mode, ViewMode::Icons, "3 did not select Icons");
+
+        send(&mut state, &key(Key::Num1));
+        assert_eq!(
+            state.view_mode,
+            ViewMode::Details,
+            "1 did not return to Details"
+        );
+    }
+
+    /// And the window actually looks different in them.
+    ///
+    /// The field changing proves only that the field changed; Details draws a
+    /// column header that the other two do not.
+    #[test]
+    fn a_view_mode_changes_what_is_drawn() {
+        let dir = temp_dir("view_render");
+        let root = dir.dir();
+        write(&root.join("a.txt"), "a");
+        let mut state = state_at(root);
+
+        let details = state.render().commands.len();
+        send(&mut state, &key(Key::Num3));
+        let icons = state.render().commands.len();
+
+        assert_ne!(
+            details, icons,
+            "Details and Icons drew the same number of commands"
+        );
+    }
+
     #[test]
     fn a_listing_longer_than_the_window_can_be_scrolled_to_its_end() {
         // The defect: the renderer drew as many rows as fit and stopped, so
         // every file past the bottom edge was unreachable -- not merely
         // awkward to reach, but not drawn and not clickable at any point.
-        let dir = ScratchDir::new("explorer-scroll");
+        let dir = crate::guarded_scratch("explorer-scroll");
         dir_with_files(&dir.path(""), 60);
         let mut state = state_at(&dir.path(""));
         let window_h = HEADER_H + 10.0 * ROW_H;
@@ -4701,7 +6134,7 @@ mod tests {
 
     #[test]
     fn the_wheel_scrolls_and_a_trackpads_fractions_are_not_lost() {
-        let dir = ScratchDir::new("explorer-wheel");
+        let dir = crate::guarded_scratch("explorer-wheel");
         dir_with_files(&dir.path(""), 60);
         let mut state = state_at(&dir.path(""));
 
@@ -4729,7 +6162,7 @@ mod tests {
 
     #[test]
     fn the_wheel_does_not_scroll_past_either_end() {
-        let dir = ScratchDir::new("explorer-wheel-ends");
+        let dir = crate::guarded_scratch("explorer-wheel-ends");
         dir_with_files(&dir.path(""), 12);
         let mut state = state_at(&dir.path(""));
         state.viewport.set_height(10, state.entries.len());
@@ -4750,7 +6183,7 @@ mod tests {
         // The symptom that made this read as a *lost* selection: the arrow
         // keys moved an index into the full listing, the renderer drew only
         // the first screenful, and the highlighted row was off screen.
-        let dir = ScratchDir::new("explorer-follow");
+        let dir = crate::guarded_scratch("explorer-follow");
         dir_with_files(&dir.path(""), 60);
         let mut state = state_at(&dir.path(""));
         state.viewport.set_height(10, state.entries.len());
@@ -4772,7 +6205,7 @@ mod tests {
 
     #[test]
     fn the_icon_grid_scrolls_and_reaches_the_last_file() {
-        let dir = ScratchDir::new("explorer-icons-scroll");
+        let dir = crate::guarded_scratch("explorer-icons-scroll");
         dir_with_files(&dir.path(""), 60);
         let mut state = state_at(&dir.path(""));
         state.view_mode = ViewMode::Icons;
@@ -4792,7 +6225,7 @@ mod tests {
         // the step were counted in entries, a notch would move three files --
         // less than one visible row on any pane wider than three cells -- and
         // the grid would look unresponsive.
-        let dir = ScratchDir::new("explorer-icons-wheel");
+        let dir = crate::guarded_scratch("explorer-icons-wheel");
         dir_with_files(&dir.path(""), 200);
         let mut state = state_at(&dir.path(""));
         state.view_mode = ViewMode::Icons;
@@ -4811,6 +6244,139 @@ mod tests {
         );
     }
 
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table beside it here -- that table would be a third copy of the same
+    /// fact, drifting from both the list and the handler.
+    ///
+    /// The property is "some reachable state answers this key", not "this key
+    /// is taken right now". A window on an empty folder can select nothing,
+    /// open nothing and rename nothing, so the states below put files in it.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|(_dir, state)| state.handle_key(&stroke));
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Windows chosen so that between them every advertised key has work.
+    ///
+    /// The `ScratchDir` is carried alongside each state because dropping it
+    /// removes the directory the state is showing.
+    fn help_states() -> Vec<(scratchdir::ScratchDir, ExplorerState)> {
+        let mut out = Vec::new();
+
+        // A folder with files, selection on the first.
+        let dir = crate::guarded_scratch("explorer-help-plain");
+        dir_with_files(&dir.path(""), 12);
+        let mut plain = state_at(&dir.path(""));
+        plain.move_selection(1);
+        out.push((dir, plain));
+
+        // ...with something on the clipboard and an operation to undo, which
+        // is what `Ctrl+V` and `Ctrl+Z` each need before they will act.
+        let dir = crate::guarded_scratch("explorer-help-clip");
+        dir_with_files(&dir.path(""), 12);
+        let mut copied = state_at(&dir.path(""));
+        copied.move_selection(1);
+        copied.copy_selected();
+        out.push((dir, copied));
+
+        // ...having walked into a subfolder, so `Alt+Left` has somewhere to
+        // go back to; and then back out, so `Alt+Right` has somewhere to go
+        // forward to. Neither key can act without the other's history, and no
+        // single state holds both.
+        let dir = crate::guarded_scratch("explorer-help-history");
+        let sub = dir.path("into");
+        std::fs::create_dir_all(&sub).expect("subfolder");
+        dir_with_files(&sub, 3);
+        let mut walked = state_at(&dir.path(""));
+        walked.navigate_to(&sub);
+        out.push((dir, walked));
+
+        let dir2 = crate::guarded_scratch("explorer-help-forward");
+        let sub2 = dir2.path("into");
+        std::fs::create_dir_all(&sub2).expect("subfolder");
+        dir_with_files(&sub2, 3);
+        let mut forward = state_at(&dir2.path(""));
+        forward.navigate_to(&sub2);
+        forward.go_back_if_possible();
+        out.push((dir2, forward));
+
+        // ...and with the search panel up, the one state its Escape closes.
+        let dir = crate::guarded_scratch("explorer-help-search");
+        dir_with_files(&dir.path(""), 12);
+        let mut searching = state_at(&dir.path(""));
+        searching.open_search();
+        out.push((dir, searching));
+
+        out
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/rssreader`'s overlay drew twenty of its
+    /// twenty-one rows for weeks, because its box was a third quantity
+    /// agreeing with neither the list nor the handler.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let dir = crate::guarded_scratch("explorer-help-drawn");
+        dir_with_files(&dir.path(""), 6);
+        let mut state = state_at(&dir.path(""));
+        assert!(
+            !help_text(&mut state).contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        state.handle_key(&key_press(Key::F1));
+        let shown = help_text(&mut state);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        state.handle_key(&key_press(Key::Escape));
+        assert!(
+            !help_text(&mut state).contains("F1 or ? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn help_text(state: &mut ExplorerState) -> String {
+        state
+            .render()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// A plain press.
+    fn key_press(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+
     #[test]
     fn a_scrolled_icon_cell_names_the_file_that_is_drawn_in_it() {
         // The sharpest thing that can go wrong in a scrolled grid: the cell is
@@ -4818,29 +6384,72 @@ mod tests {
         // the listing, and using one number for both means the first cell
         // after a scroll claims to be the first file in the folder. A click
         // would then open the wrong file, silently.
-        let dir = ScratchDir::new("explorer-icons-zones");
-        dir_with_files(&dir.path(""), 60);
+        //
+        // **Run with the preview panel shut and open**, because those are two
+        // different grids -- seven columns and four at this size -- and the
+        // program used to measure one and draw the other. With the panel open
+        // the wheel stepped seven entries per row through a grid four wide,
+        // and the top-left cell reported whichever file that arithmetic landed
+        // on. This test found it *intermittently* before it took the panel in
+        // hand: `preview_open` is read from persisted preferences at
+        // construction, so whether the bug showed up depended on what some
+        // other test had saved, in another thread, moments earlier.
+        for open in [false, true] {
+            let dir = crate::guarded_scratch("explorer-icons-zones");
+            dir_with_files(&dir.path(""), 60);
+            let mut state = state_at(&dir.path(""));
+            state.view_mode = ViewMode::Icons;
+            state.preview_open = open;
+
+            let cols = state.icon_columns();
+            state.viewport.scroll_by(cols as isize, state.entries.len());
+
+            // Through the real path: render to register the zones, then click
+            // the top-left cell and see which file the program thinks was hit.
+            drop(state.render());
+            let first_drawn = (state.viewport.first_visible() / cols) * cols;
+            assert_ne!(
+                first_drawn, 0,
+                "the grid did not scroll with the preview {open}, so this proves nothing"
+            );
+
+            let clicked = state.click_at(state.sidebar_width + 10.0, 64.0 + 10.0);
+            assert!(clicked, "the top-left cell was not clickable");
+            assert_eq!(
+                state.selected_indices.as_slice(),
+                [first_drawn],
+                "with the preview {open}, the top-left cell named file {:?}, not the one drawn in it",
+                state.selected_indices
+            );
+        }
+    }
+
+    /// The wheel and the grid count the same columns.
+    ///
+    /// `icon_columns` measured the whole pane while the grid was drawn in the
+    /// narrower list rect, and its own doc comment already said the two must
+    /// not disagree -- nothing held them to it. The panel has to actually
+    /// change the count for this to be checking anything, so it asserts that
+    /// first.
+    #[test]
+    fn the_preview_panel_narrows_the_grid_for_the_wheel_too() {
+        let dir = crate::guarded_scratch("explorer-icons-preview-cols");
+        dir_with_files(&dir.path(""), 12);
         let mut state = state_at(&dir.path(""));
         state.view_mode = ViewMode::Icons;
-        let cols = state.icon_columns();
-        state.viewport.scroll_by(cols as isize, state.entries.len());
 
-        // Through the real path: render to register the zones, then click
-        // the top-left cell and see which file the program thinks was hit.
-        drop(state.render());
-        let first_drawn = (state.viewport.first_visible() / cols) * cols;
-        assert_ne!(
-            first_drawn, 0,
-            "the grid did not scroll, so this proves nothing"
+        state.preview_open = false;
+        let wide = state.icon_columns();
+        state.preview_open = true;
+        let narrow = state.icon_columns();
+        assert!(
+            narrow < wide,
+            "the preview panel did not narrow the listing ({wide} -> {narrow}), so this checks nothing"
         );
-
-        let clicked = state.click_at(state.sidebar_width + 10.0, 64.0 + 10.0);
-        assert!(clicked, "the top-left cell was not clickable");
         assert_eq!(
-            state.selected_indices.as_slice(),
-            [first_drawn],
-            "the top-left cell named file {:?} instead of the one drawn in it",
-            state.selected_indices
+            narrow,
+            ExplorerState::columns_for(state.list_rect().w),
+            "the wheel counts columns across a different width than the grid"
         );
     }
 
@@ -4855,7 +6464,7 @@ mod tests {
     #[test]
     fn a_short_listing_has_no_scrollbar() {
         // A permanent grey stripe beside a three-item folder reads as broken.
-        let dir = ScratchDir::new("explorer-sb-short");
+        let dir = crate::guarded_scratch("explorer-sb-short");
         dir_with_files(&dir.path(""), 3);
         let state = state_at(&dir.path(""));
         assert!(state.scrollbar_track().is_none());
@@ -4863,7 +6472,7 @@ mod tests {
 
     #[test]
     fn a_long_listing_has_one_and_the_thumb_tracks_the_view() {
-        let dir = ScratchDir::new("explorer-sb-long");
+        let dir = crate::guarded_scratch("explorer-sb-long");
         dir_with_files(&dir.path(""), 200);
         let mut state = state_at(&dir.path(""));
         let track = state.scrollbar_track().expect("a long listing needs a bar");
@@ -4874,14 +6483,14 @@ mod tests {
 
         assert!(bottom > top, "the thumb did not move with the view");
         assert!(
-            bottom + state.scrollbar_thumb().unwrap().h <= track.y + track.height + 0.01,
+            bottom + state.scrollbar_thumb().unwrap().h <= track.y + track.h + 0.01,
             "the thumb ran past the end of its track"
         );
     }
 
     #[test]
     fn dragging_the_thumb_scrolls_the_listing() {
-        let dir = ScratchDir::new("explorer-sb-drag");
+        let dir = crate::guarded_scratch("explorer-sb-drag");
         dir_with_files(&dir.path(""), 200);
         let mut state = state_at(&dir.path(""));
         let track = state.scrollbar_track().expect("a bar");
@@ -4891,7 +6500,7 @@ mod tests {
         assert!(press(&mut state, track.x + 2.0, thumb.y + 2.0));
         state.handle_mouse(&MouseEvent {
             x: track.x + 2.0,
-            y: track.y + track.height,
+            y: track.y + track.h,
             kind: MouseEventKind::Move,
         });
 
@@ -4906,7 +6515,7 @@ mod tests {
         // The bar is drawn *over* the rows, so without the check the click
         // falls through and selects whatever file the thumb happens to cover --
         // the kind of wrong that looks like a misclick and is not.
-        let dir = ScratchDir::new("explorer-sb-steal");
+        let dir = crate::guarded_scratch("explorer-sb-steal");
         dir_with_files(&dir.path(""), 200);
         let mut state = state_at(&dir.path(""));
         state.selected_indices.clear();
@@ -4933,7 +6542,7 @@ mod tests {
         // one. Passing zero compiles, drags smoothly, and jumps the view the
         // instant you take hold anywhere but the thumb's very top -- a defect
         // that looks like a twitchy scrollbar rather than a bug.
-        let dir = ScratchDir::new("explorer-sb-grab");
+        let dir = crate::guarded_scratch("explorer-sb-grab");
         dir_with_files(&dir.path(""), 200);
         let mut state = state_at(&dir.path(""));
         state.viewport.scroll_by(80, state.entries.len());
@@ -4960,7 +6569,7 @@ mod tests {
 
     #[test]
     fn a_release_lets_go_of_the_thumb() {
-        let dir = ScratchDir::new("explorer-sb-release");
+        let dir = crate::guarded_scratch("explorer-sb-release");
         dir_with_files(&dir.path(""), 200);
         let mut state = state_at(&dir.path(""));
         let track = state.scrollbar_track().expect("a bar");
@@ -4981,7 +6590,7 @@ mod tests {
 
     #[test]
     fn clicking_the_track_below_the_thumb_pages_down() {
-        let dir = ScratchDir::new("explorer-sb-page");
+        let dir = crate::guarded_scratch("explorer-sb-page");
         dir_with_files(&dir.path(""), 200);
         let mut state = state_at(&dir.path(""));
         let track = state.scrollbar_track().expect("a bar");
@@ -5078,8 +6687,8 @@ mod tests {
         send(
             state,
             &Event::Mouse(MouseEvent {
-                x: rect.x + rect.width / 2.0,
-                y: rect.y + rect.height / 2.0,
+                x: rect.x + rect.w / 2.0,
+                y: rect.y + rect.h / 2.0,
                 kind: MouseEventKind::Press(MouseButton::Left),
             }),
         );
@@ -5193,11 +6802,367 @@ mod tests {
 
         state.navigate_to(&root.join("sub"));
 
+        // `ends_with` on a `Path` matches a whole final component, so this is
+        // stricter than the substring test it replaced: a folder named
+        // `subterranean` no longer satisfies it.
         assert!(
-            state.pathbar.current_path().contains("sub"),
+            state.pathbar.current_path().ends_with("sub"),
             "the address bar still shows the old folder: {:?}",
             state.pathbar.current_path()
         );
+    }
+
+    /// Turning a label on puts it under the icons; turning it off removes it.
+    ///
+    /// Drawn text is the check, not the flag: a toggle that flips a bool the
+    /// renderer ignores would pass any test of the state alone.
+    #[test]
+    fn icon_labels_appear_and_disappear_as_they_are_toggled() {
+        settingsfile::testing::with_scratch_config("explorer-icon-labels", |_root| {
+            let scratch = temp_dir("icon_labels");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("note.txt"), "hello");
+
+            let mut state = state_at(&root);
+            state.view_mode = ViewMode::Icons;
+
+            // The name alone by default, which is what this view always drew.
+            let drawn = texts(&icons_tree(&state));
+            assert!(drawn.iter().any(|t| t == "note.txt"), "no name: {drawn:?}");
+
+            // Size on: the same text the detail view shows for that file.
+            state.activate_menu_item(MENU_ICON_LABEL_BASE + 2);
+            let entry = state
+                .entries
+                .iter()
+                .find(|e| e.name == "note.txt")
+                .expect("the file is in the listing")
+                .clone();
+            let expected = state.entry_value(&entry, ColumnId::SIZE).display();
+            let drawn = texts(&icons_tree(&state));
+            assert!(
+                drawn.contains(&expected),
+                "the size label {expected:?} is missing from {drawn:?}"
+            );
+
+            // Name off: the pure-image wall, with the size still there.
+            state.activate_menu_item(MENU_ICON_LABEL_BASE);
+            let drawn = texts(&icons_tree(&state));
+            assert!(
+                !drawn.iter().any(|t| t == "note.txt"),
+                "the name is still drawn after being turned off: {drawn:?}"
+            );
+            assert!(drawn.contains(&expected), "the size went too");
+        });
+    }
+
+    /// The cell grows by exactly one line per label.
+    #[test]
+    fn the_icon_cell_grows_with_the_labels() {
+        let scratch = temp_dir("icon_cell_h");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "x");
+        let mut state = state_at(&root);
+
+        state.icon_labels = columnprefs::IconLabels {
+            name: false,
+            date: false,
+            size: false,
+        };
+        let bare = state.icon_cell_h();
+        state.icon_labels = columnprefs::IconLabels {
+            name: true,
+            date: false,
+            size: false,
+        };
+        let one = state.icon_cell_h();
+        state.icon_labels = columnprefs::IconLabels {
+            name: true,
+            date: true,
+            size: true,
+        };
+        let three = state.icon_cell_h();
+
+        assert!(
+            (one - bare - ICON_LABEL_LINE_H).abs() < 0.001,
+            "one line: {one} vs {bare}"
+        );
+        assert!(
+            (three - bare - 3.0 * ICON_LABEL_LINE_H).abs() < 0.001,
+            "three lines: {three} vs {bare}"
+        );
+        // The default has to be what the view was before any of this existed,
+        // or every user's icons move on upgrade for a feature they never used.
+        assert!(
+            (one - 108.0).abs() < 0.001,
+            "the default cell changed height: {one}"
+        );
+    }
+
+    /// The choice survives a fresh window.
+    #[test]
+    fn icon_labels_are_remembered() {
+        settingsfile::testing::with_scratch_config("explorer-icon-labels-saved", |_root| {
+            let scratch = temp_dir("icon_labels_saved");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.activate_menu_item(MENU_ICON_LABEL_BASE + 1); // date on
+            state.activate_menu_item(MENU_ICON_LABEL_BASE); // name off
+            let chosen = state.icon_labels;
+
+            let again = state_at(&root);
+            assert_eq!(again.icon_labels, chosen, "the labels did not survive");
+        });
+    }
+
+    /// Choosing a size applies it and it survives the next window.
+    ///
+    /// The loop the control exists for. Applying without remembering, or
+    /// remembering without applying, both look like success from inside a
+    /// single test.
+    #[test]
+    fn a_chosen_thumbnail_size_applies_and_is_remembered() {
+        settingsfile::testing::with_scratch_config("explorer-thumb-size", |_root| {
+            let scratch = temp_dir("thumb_size");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+
+            let mut state = state_at(&root);
+            let before = state.thumb_config.size;
+            let wanted = columnprefs::THUMB_SIZES
+                .iter()
+                .copied()
+                .find(|s| *s != before)
+                .expect("the offered sizes are not all the same");
+
+            state.activate_menu_item(MENU_THUMB_SIZE_BASE + u64::from(wanted));
+            assert_eq!(state.thumb_config.size, wanted, "the size was not applied");
+
+            let again = state_at(&root);
+            assert_eq!(
+                again.thumb_config.size, wanted,
+                "the chosen size did not survive a fresh window"
+            );
+        });
+    }
+
+    /// A size we do not offer is not adopted from a menu id.
+    ///
+    /// The ids are derived by adding the size to a base, so an id from
+    /// anywhere else lands in the same range. It has to be checked against the
+    /// list rather than trusted for being in range.
+    #[test]
+    fn an_unoffered_thumbnail_size_is_refused() {
+        let scratch = temp_dir("thumb_size_bad");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "x").unwrap();
+        let mut state = state_at(&root);
+        let before = state.thumb_config.size;
+
+        assert!(
+            !state.thumb_size_action(MENU_THUMB_SIZE_BASE + 300),
+            "a size outside the offered list was accepted"
+        );
+        assert_eq!(state.thumb_config.size, before);
+    }
+
+    /// The sizes are offered only where thumbnails are drawn.
+    #[test]
+    fn the_size_menu_is_absent_from_a_view_without_thumbnails() {
+        let scratch = temp_dir("thumb_size_view");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "x").unwrap();
+        let mut state = state_at(&root);
+
+        state.view_mode = ViewMode::Details;
+        let details = state.folder_menu_items();
+        assert!(
+            !details
+                .iter()
+                .any(|i| matches!(i, MenuItem::Submenu { .. })),
+            "the size submenu was offered in a view that draws no thumbnails"
+        );
+
+        state.view_mode = ViewMode::Icons;
+        let icons = state.folder_menu_items();
+        assert!(
+            icons.iter().any(|i| matches!(i, MenuItem::Submenu { .. })),
+            "the size submenu was missing from the icon view"
+        );
+    }
+
+    /// Ticking a column in the picker shows it; ticking it again hides it.
+    #[test]
+    fn the_picker_toggles_a_column() {
+        let scratch = temp_dir("picker_toggle");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "x").unwrap();
+        let mut state = state_at(&root);
+
+        let target = ColumnId::DATE_CREATED;
+        let id = MENU_COLUMN_BASE + u64::from(target.0);
+        let before = state.columns.is_visible(target);
+
+        state.activate_menu_item(id);
+        assert_ne!(
+            state.columns.is_visible(target),
+            before,
+            "the picker did not change the column"
+        );
+        state.activate_menu_item(id);
+        assert_eq!(
+            state.columns.is_visible(target),
+            before,
+            "ticking twice did not return to where it started"
+        );
+    }
+
+    /// The last column cannot be turned off.
+    ///
+    /// A header row with nothing in it leaves a list nobody can read, and the
+    /// picker is the only way to reach that state.
+    #[test]
+    fn the_picker_will_not_empty_the_header_row() {
+        let scratch = temp_dir("picker_last");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "x").unwrap();
+        let mut state = state_at(&root);
+
+        state.columns.set_columns(vec![ColumnId::NAME]);
+        state.activate_menu_item(MENU_COLUMN_BASE + u64::from(ColumnId::NAME.0));
+        assert_eq!(
+            state.columns.visible_keys(),
+            vec!["name"],
+            "the last column was removed"
+        );
+        assert!(
+            state.status_message.contains("at least one")
+                || state.status_message.contains("At least one"),
+            "no reason was given: {}",
+            state.status_message
+        );
+    }
+
+    /// Choose columns, save them for the folder, come back: they are there.
+    ///
+    /// The loop the feature exists for. Each half is tested on its own above,
+    /// and neither proves the picker's save is the thing the next visit reads.
+    #[test]
+    fn columns_saved_from_the_picker_come_back_on_the_next_visit() {
+        settingsfile::testing::with_scratch_config("explorer-picker-save", |_root| {
+            let scratch = temp_dir("picker_save");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+
+            let mut state = state_at(&root);
+            state
+                .columns
+                .set_columns(vec![ColumnId::NAME, ColumnId::SIZE]);
+            state.activate_menu_item(MENU_COLUMNS_SAVE_FOLDER);
+            assert!(
+                state.status_message.contains("saved"),
+                "the save said nothing: {}",
+                state.status_message
+            );
+
+            // A fresh window, which re-reads the settings file.
+            let again = state_at(&root);
+            assert_eq!(
+                again.columns.visible_keys(),
+                vec!["name", "size"],
+                "the saved columns did not come back"
+            );
+        });
+    }
+
+    /// A column set saved for a folder is what that folder shows.
+    ///
+    /// The whole point of the preference, and the thing a wiring change can
+    /// break without any unit test noticing: the module round-trips its keys,
+    /// the manager applies them, and neither proves the explorer ever asks.
+    #[test]
+    fn a_folder_shows_the_columns_saved_for_it() {
+        settingsfile::testing::with_scratch_config("explorer-saved-columns", |_root| {
+            let scratch = temp_dir("saved_columns");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+
+            // Saved before the state exists, because the preferences are read
+            // once when it is built rather than on every listing.
+            let mut doc = settingsfile::load(columnprefs::CONFIG_NAME);
+            assert!(columnprefs::set_for_folder(
+                &mut doc,
+                &root,
+                &["size", "name"]
+            ));
+            settingsfile::store(columnprefs::CONFIG_NAME, &doc)
+                .expect("the scratch config is writable");
+
+            let state = state_at(&root);
+            assert_eq!(
+                state.columns.visible_keys(),
+                vec!["size", "name"],
+                "the folder's saved columns were not applied, or not in order"
+            );
+        });
+    }
+
+    /// With nothing saved for the folder, the saved default is used.
+    #[test]
+    fn a_folder_with_no_preference_falls_back_to_the_default() {
+        settingsfile::testing::with_scratch_config("explorer-default-columns", |_root| {
+            let scratch = temp_dir("default_columns");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+
+            let mut doc = settingsfile::load(columnprefs::CONFIG_NAME);
+            columnprefs::set_global(&mut doc, &["name", "date_modified"]);
+            settingsfile::store(columnprefs::CONFIG_NAME, &doc)
+                .expect("the scratch config is writable");
+
+            let state = state_at(&root);
+            assert_eq!(state.columns.visible_keys(), vec!["name", "date_modified"]);
+        });
+    }
+
+    /// A name the address bar cannot represent is skipped, not mangled.
+    ///
+    /// Windows-only because that is where a non-UTF-8 filename is
+    /// constructible in a test. The defect is not platform-specific:
+    /// `to_string_lossy` would offer a completion with U+FFFD where the real
+    /// bytes are, and choosing it would report "No such folder" for a folder
+    /// the user can see in the listing.
+    #[cfg(windows)]
+    #[test]
+    fn a_name_that_is_not_utf8_is_not_offered_as_a_completion() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+
+        let scratch = temp_dir("completion_nonutf8");
+        let root = scratch.dir().to_path_buf();
+        // An unpaired surrogate: a legal Windows filename with no UTF-8 form.
+        let bad = root.join(OsString::from_wide(&[0x0041_u16, 0xD800]));
+        std::fs::create_dir(&bad).expect("the scratch directory is writable");
+        std::fs::create_dir(root.join("Alpha")).expect("writable");
+
+        let prefix = format!("{}/A", root.to_str().expect("scratch path is UTF-8"));
+        let names: Vec<String> = ExplorerState::completions_for(&prefix)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+
+        assert!(
+            names.contains(&String::from("Alpha")),
+            "the representable sibling was not offered: {names:?}"
+        );
+        for name in &names {
+            assert!(
+                !name.contains(char::REPLACEMENT_CHARACTER),
+                "offered a mangled name: {name:?}"
+            );
+        }
     }
 
     /// Completions are read off the disk, sorted, and filtered by the prefix.
@@ -5239,8 +7204,16 @@ mod tests {
     fn opening_a_file_starts_what_the_user_chose_for_it() {
         settingsfile::testing::with_scratch_config("explorer-open-assoc", |_root| {
             let mut doc = yamldoc::Document::new();
-            doc.set_str(&["associations", "txt"], "/nowhere/chosen-editor");
-            settingsfile::store("fileassoc", &doc).expect("scratch config is writable");
+            // Through the shared constants, because what this test is about is
+            // that the file manager obeys the association -- not what the file
+            // is called. Spelled out here, a rename would leave this writing one
+            // file while the code read another.
+            doc.set_str(
+                &[associations::ASSOCIATIONS, "txt"],
+                "/nowhere/chosen-editor",
+            );
+            settingsfile::store(associations::CONFIG_NAME, &doc)
+                .expect("scratch config is writable");
 
             let scratch = temp_dir("open_assoc");
             let root = scratch.dir().to_path_buf();
@@ -5324,7 +7297,7 @@ mod tests {
             .into_iter()
             .find(|(b, _)| *b == button)
             .unwrap_or_else(|| panic!("{button:?} is not in the layout"));
-        (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0)
+        (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
     }
 
     /// **A greyed button says why**, which a bare `bool` could not.
@@ -5660,8 +7633,8 @@ mod tests {
         send(
             state,
             &Event::Mouse(MouseEvent {
-                x: rect.x + rect.width / 2.0,
-                y: rect.y + rect.height / 2.0,
+                x: rect.x + rect.w / 2.0,
+                y: rect.y + rect.h / 2.0,
                 kind: MouseEventKind::Press(MouseButton::Left),
             }),
         );
@@ -5850,7 +7823,7 @@ mod tests {
                 panel.contains(rect.x, rect.y),
                 "{control:?} is drawn outside the panel"
             );
-            let (cx, cy) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+            let (cx, cy) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
             assert_eq!(
                 state.transfers_control_at(cx, cy),
                 Some(control),
@@ -5876,8 +7849,8 @@ mod tests {
         send(
             state,
             &Event::Mouse(MouseEvent {
-                x: rect.x + rect.width / 2.0,
-                y: rect.y + rect.height / 2.0,
+                x: rect.x + rect.w / 2.0,
+                y: rect.y + rect.h / 2.0,
                 kind: MouseEventKind::Press(MouseButton::Left),
             }),
         );
@@ -7045,6 +9018,13 @@ mod tests {
             .collect()
     }
 
+    fn icons_tree(state: &ExplorerState) -> RenderTree {
+        let mut tree = RenderTree::new();
+        let mut zones = DropZoneManager::new(state.current_path.clone());
+        state.render_icons(&mut tree, &mut zones, 0.0, 0.0, 600.0, 400.0);
+        tree
+    }
+
     fn details_tree(state: &ExplorerState) -> RenderTree {
         let mut tree = RenderTree::new();
         let mut zones = DropZoneManager::new(state.current_path.clone());
@@ -7061,9 +9041,19 @@ mod tests {
         let state = state_at(&root);
         let drawn = texts(&details_tree(&state));
 
-        for label in ["Name", "Size", "Date Modified", "Type"] {
+        // Asked of the manager rather than listed here: this test is about the
+        // header drawing what is active, and a hand-written list makes it a
+        // test of which columns ship visible as well -- which is how it failed
+        // when the default set was trimmed to the three the spec names.
+        for id in state.columns.active_columns() {
+            let label = state
+                .columns
+                .column_def(*id)
+                .expect("an active column with no definition")
+                .label
+                .clone();
             assert!(
-                drawn.iter().any(|t| t == label),
+                drawn.contains(&label),
                 "the header should name every active column; {label:?} missing from {drawn:?}"
             );
         }
@@ -7092,9 +9082,23 @@ mod tests {
         );
     }
 
-    /// A directory has no meaningful byte count, so its Size cell stays blank
-    /// — which is what the hand-written view did, and what every file manager
-    /// does.
+    /// A directory's Size cell is blank today, and the spec says it should not
+    /// be.
+    ///
+    /// This said "what every file manager does", which is true and is the
+    /// reasoning `roadmap-detailed.md` §4.1 explicitly considered and
+    /// rejected: *"Most file managers leave this blank because computing it on
+    /// every directory listing is expensive; we cache instead."* The intended
+    /// behaviour is a recursive total of the contents, served from the
+    /// directory-size cache.
+    ///
+    /// The cache is not buildable yet -- its invalidation rides on the
+    /// filesystem change-notification stream, which does not exist, and its
+    /// shrinking on the kernel shrinker. Both are lane A's. So the blank cell
+    /// stays, and this test pins it; what changed is that the reason is now
+    /// "the cache it needs is not built" rather than "this is what everyone
+    /// does", because the second reads as a decision that has been made.
+    /// See known-issues TD-C-THE-SIZE-CELL-AGREES-WITH-CONVENTION-AND-NOT-WITH-THE-SPEC.
     #[test]
     fn a_folder_row_leaves_the_size_cell_blank() {
         let root_scratch = temp_dir("cols_dir_size");
@@ -7139,21 +9143,6 @@ mod tests {
                 // knows it is Rust -- went unread.
                 ColumnValue::Text("Rust Source File".to_string()),
             ]
-        );
-    }
-
-    /// A directory of source gains the code columns without the user asking.
-    #[test]
-    fn a_folder_of_source_grows_the_code_columns() {
-        let root_scratch = temp_dir("cols_detect");
-        let root = root_scratch.dir().to_path_buf();
-        write(&root.join("main.rs"), "fn main() {}");
-
-        let state = state_at(&root);
-        assert!(
-            state.columns.is_visible(ColumnId::LANGUAGE),
-            "a .rs file should switch on the Language column: {:?}",
-            state.columns.active_columns()
         );
     }
 
@@ -7426,7 +9415,7 @@ mod tests {
         assert!((ya - yb).abs() < f32::EPSILON, "a and b share a row");
         assert!(yc > yb, "c wrapped onto the next row: {yc} vs {yb}");
         assert!(
-            (yc - ya - ICON_CELL_H).abs() < 0.001,
+            (yc - ya - state.icon_cell_h()).abs() < 0.001,
             "exactly one cell height down: {yc} - {ya}"
         );
 
@@ -7476,8 +9465,8 @@ mod tests {
                 (
                     x + index.checked_rem(cols).unwrap_or(0) as f32 * ICON_CELL_W
                         + ICON_CELL_W / 2.0,
-                    y + index.checked_div(cols).unwrap_or(0) as f32 * ICON_CELL_H
-                        + ICON_CELL_H / 2.0,
+                    y + index.checked_div(cols).unwrap_or(0) as f32 * state.icon_cell_h()
+                        + state.icon_cell_h() / 2.0,
                 )
             }
         }
@@ -8825,5 +10814,939 @@ mod tests {
             "got {:?}",
             state.status_message
         );
+    }
+
+    // ======================================================================
+    // Preview panel
+    // ======================================================================
+
+    /// Closed by default, and the listing has the whole pane.
+    #[test]
+    fn the_preview_is_closed_until_asked_for() {
+        settingsfile::testing::with_scratch_config("preview-default", |_root| {
+            let scratch = temp_dir("preview_default");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let state = state_at(&root);
+            assert!(!state.preview_open);
+            assert!(state.preview_panes().is_none());
+        });
+    }
+
+    /// Opening it splits the pane, and the two halves tile it exactly.
+    /// **A text file previews as text, not as a picture of text.**
+    ///
+    /// The thumbnailer draws a text file's first lines as a 96-pixel minimap,
+    /// and `render_preview` never enlarges a thumbnail past its own pixels --
+    /// deliberately, since a blown-up thumbnail reads as a fault. Together
+    /// those meant selecting a text file put a tiny picture of writing in the
+    /// middle of a wide pane. The same lines are now drawn as text.
+    ///
+    /// Asserted on the drawn commands: a `Text` command carrying a line of the
+    /// file, and no `Image`. Checking only that `preview_text` was populated
+    /// would pass against a renderer that still drew the minimap.
+    #[test]
+    fn a_text_file_previews_as_readable_text() {
+        settingsfile::testing::with_scratch_config("preview-text", |_root| {
+            let scratch = temp_dir("preview_text");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("notes.txt"), "alpha line\nbeta line\n");
+
+            let mut state = state_at(&root);
+            assert!(state.column_menu_action(MENU_PREVIEW_TOGGLE));
+            let at = state
+                .entries
+                .iter()
+                .position(|e| e.name == "notes.txt")
+                .expect("the file is listed");
+            state.selected_indices = vec![at];
+
+            let tree = state.render();
+            let texts: Vec<&str> = tree
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    guitk::render::RenderCommand::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                texts.iter().any(|t| t.contains("alpha line")),
+                "the preview drew no line of the file: {texts:?}"
+            );
+            assert!(
+                !tree
+                    .commands
+                    .iter()
+                    .any(|c| matches!(c, guitk::render::RenderCommand::Image { .. })),
+                "the preview drew the thumbnail as well as the text"
+            );
+        });
+    }
+
+    /// Closing the pane forgets the file it was showing.
+    ///
+    /// The cache is keyed by path, so a stale entry would be shown again the
+    /// next time the pane opened on a different selection.
+    #[test]
+    fn closing_the_preview_drops_what_it_was_reading() {
+        settingsfile::testing::with_scratch_config("preview-text-drop", |_root| {
+            let scratch = temp_dir("preview_text_drop");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("notes.txt"), "alpha line\n");
+
+            let mut state = state_at(&root);
+            assert!(state.column_menu_action(MENU_PREVIEW_TOGGLE));
+            let at = state
+                .entries
+                .iter()
+                .position(|e| e.name == "notes.txt")
+                .expect("the file is listed");
+            state.selected_indices = vec![at];
+            drop(state.render());
+            assert!(state.preview_text.is_some(), "nothing was read");
+
+            assert!(state.column_menu_action(MENU_PREVIEW_TOGGLE));
+            assert!(!state.preview_open);
+            drop(state.render());
+            assert!(
+                state.preview_text.is_none(),
+                "the shut pane is still holding a file open in memory"
+            );
+        });
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the last pane reaching the edge exactly is the property under test"
+    )]
+    fn opening_the_preview_splits_the_pane() {
+        settingsfile::testing::with_scratch_config("preview-split", |_root| {
+            let scratch = temp_dir("preview_split");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            assert!(state.column_menu_action(MENU_PREVIEW_TOGGLE));
+            assert!(state.preview_open);
+
+            let (list, preview) = state.preview_panes().expect("a split");
+            let whole = state.pane_rect();
+            assert!(list.w > 0.0 && preview.w > 0.0);
+            // Exact, not a tolerance: the splitter gives the last pane what
+            // remains precisely so this holds to the bit, and a tolerance here
+            // would pass against an implementation that had dropped that --
+            // which is exactly how the splitter's own tiling test managed to
+            // prove nothing until it was sabotage-checked.
+            assert_eq!(
+                preview.x + preview.w,
+                whole.x + whole.w,
+                "the preview must reach the pane's edge exactly"
+            );
+            assert!(
+                (preview.x - (list.x + list.w) - splitter::DIVIDER).abs() < 0.01,
+                "the divider belongs between them"
+            );
+        });
+    }
+
+    /// The choice is remembered, not just applied.
+    #[test]
+    fn the_preview_preference_is_written_down() {
+        settingsfile::testing::with_scratch_config("preview-persist", |_root| {
+            let scratch = temp_dir("preview_persist");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            assert!(state.column_menu_action(MENU_PREVIEW_TOGGLE));
+
+            let saved = settingsfile::load(columnprefs::CONFIG_NAME);
+            assert!(
+                columnprefs::preview_open(&saved),
+                "the toggle was applied on screen but not saved"
+            );
+        });
+    }
+
+    /// A pane too narrow for both keeps the listing, and keeps the preference.
+    ///
+    /// Shrinking the window must not silently forget that a preview was
+    /// wanted: it comes back when there is room for it.
+    #[test]
+    fn a_pane_too_narrow_for_both_shows_the_listing() {
+        settingsfile::testing::with_scratch_config("preview-narrow", |_root| {
+            let scratch = temp_dir("preview_narrow");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+            state.window_width = 300;
+
+            assert!(
+                state.preview_panes().is_none(),
+                "two unusable slivers is worse than one listing"
+            );
+            assert!(state.preview_open, "the preference was silently dropped");
+        });
+    }
+
+    /// Dragging the divider moves it and writes the new split down.
+    #[test]
+    fn dragging_the_divider_resizes_and_remembers() {
+        settingsfile::testing::with_scratch_config("preview-drag", |_root| {
+            let scratch = temp_dir("preview_drag");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+            let before = state.preview_split;
+
+            let (list, _) = state.preview_panes().expect("a split");
+            let divider_x = list.x + list.w;
+            state.divider_grab = Some(0.0);
+            assert!(
+                state.drag_divider(divider_x - 120.0, 0.0),
+                "the drag did nothing"
+            );
+            assert!(
+                state.preview_split < before,
+                "the listing should have shrunk"
+            );
+
+            assert!(state.drop_divider());
+            let saved = settingsfile::load(columnprefs::CONFIG_NAME);
+            assert!(
+                (columnprefs::preview_split(&saved) - state.preview_split).abs() < 0.02,
+                "the new split was applied but not saved"
+            );
+        });
+    }
+
+    /// The listing is never dragged below its minimum.
+    #[test]
+    fn the_divider_stops_at_the_listing_minimum() {
+        settingsfile::testing::with_scratch_config("preview-min", |_root| {
+            let scratch = temp_dir("preview_min");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+            state.divider_grab = Some(0.0);
+            // Aim far past the left edge of the window.
+            state.drag_divider(-2_000.0, 0.0);
+
+            let (list, _) = state.preview_panes().expect("a split");
+            assert!(
+                list.w >= LIST_MIN_W - 1.0,
+                "the listing was squeezed to {}, below its minimum",
+                list.w
+            );
+        });
+    }
+
+    /// A press on the divider is spent there, not on the row beneath it.
+    #[test]
+    fn a_press_on_the_divider_does_not_reach_the_listing() {
+        settingsfile::testing::with_scratch_config("preview-press", |_root| {
+            let scratch = temp_dir("preview_press");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+            let (list, _) = state.preview_panes().expect("a split");
+
+            let grabbed = state.divider_grab_at(list.x + list.w, list.y + 40.0);
+            assert!(grabbed.is_some(), "the divider was not grabbable");
+        });
+    }
+
+    /// With the preview closed there is no divider to grab.
+    #[test]
+    fn there_is_no_divider_when_the_preview_is_closed() {
+        settingsfile::testing::with_scratch_config("preview-nodiv", |_root| {
+            let scratch = temp_dir("preview_nodiv");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let state = state_at(&root);
+            let whole = state.pane_rect();
+            assert_eq!(
+                state.divider_grab_at(whole.x + whole.w * 0.65, whole.y + 40.0),
+                None
+            );
+        });
+    }
+
+    /// The panel can sit on any of the four sides, and the split follows.
+    #[test]
+    fn the_preview_can_move_to_any_side() {
+        settingsfile::testing::with_scratch_config("preview-sides", |_root| {
+            let scratch = temp_dir("preview_sides");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+
+            for (i, side) in columnprefs::PreviewSide::ALL.into_iter().enumerate() {
+                assert!(state.column_menu_action(MENU_PREVIEW_SIDE_BASE.saturating_add(i as u64)));
+                assert_eq!(state.preview_side, side);
+
+                let (list, preview) = state.preview_panes().expect("a split");
+                match side {
+                    columnprefs::PreviewSide::Left => assert!(preview.x < list.x),
+                    columnprefs::PreviewSide::Right => assert!(preview.x > list.x),
+                    columnprefs::PreviewSide::Top => assert!(preview.y < list.y),
+                    columnprefs::PreviewSide::Bottom => assert!(preview.y > list.y),
+                }
+            }
+        });
+    }
+
+    /// The side survives a restart.
+    ///
+    /// The commit that added this said the choice "is remembered" and nothing
+    /// checked it. A preference applied on screen and not written down looks
+    /// identical to one that was saved, right up until the next start -- which
+    /// is the failure `persist_view_prefs` exists to report and no test had
+    /// yet pinned for this setting.
+    #[test]
+    fn the_panel_side_survives_a_restart() {
+        settingsfile::testing::with_scratch_config("preview-side-persist", |_root| {
+            let scratch = temp_dir("preview_side_persist");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            {
+                let mut state = state_at(&root);
+                state.preview_open = true;
+                // Bottom, because it is neither the default nor adjacent to it
+                // in `ALL` -- a test that picks the default proves nothing.
+                let bottom = columnprefs::PreviewSide::ALL
+                    .iter()
+                    .position(|s| *s == columnprefs::PreviewSide::Bottom)
+                    .expect("Bottom is one of the sides");
+                assert!(
+                    state.column_menu_action(MENU_PREVIEW_SIDE_BASE.saturating_add(bottom as u64))
+                );
+                assert_eq!(state.preview_side, columnprefs::PreviewSide::Bottom);
+            }
+
+            // A second explorer, reading the same settings file.
+            let restarted = state_at(&root);
+            assert_eq!(
+                restarted.preview_side,
+                columnprefs::PreviewSide::Bottom,
+                "the side was applied but not written down"
+            );
+        });
+    }
+
+    /// A side nobody recognises leaves the panel where it was.
+    ///
+    /// The settings file is meant to be hand-editable, so `side: rihgt` is a
+    /// thing that will happen. Falling back to the default would move a
+    /// panel the user never asked to move; `from_yaml_name` answers `None` and
+    /// lets the caller keep what it had.
+    #[test]
+    fn an_unrecognised_side_is_not_a_silent_move() {
+        assert_eq!(columnprefs::PreviewSide::from_yaml_name("rihgt"), None);
+        assert_eq!(
+            columnprefs::PreviewSide::from_yaml_name("bottom"),
+            Some(columnprefs::PreviewSide::Bottom)
+        );
+        // Whitespace is forgiven, since a person typed it.
+        assert_eq!(
+            columnprefs::PreviewSide::from_yaml_name("  top  "),
+            Some(columnprefs::PreviewSide::Top)
+        );
+    }
+
+    /// Moving the panel does not resize the listing.
+    ///
+    /// `preview_split` is the listing's share whichever side the panel is on,
+    /// so swapping sides mirrors the layout without redistributing it. Stored
+    /// the other way round, moving right-to-left would hand the listing's
+    /// width to the preview and look like a bug in the drag.
+    #[test]
+    fn moving_the_panel_keeps_the_listing_the_same_size() {
+        settingsfile::testing::with_scratch_config("preview-mirror", |_root| {
+            let scratch = temp_dir("preview_mirror");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+            state.preview_side = columnprefs::PreviewSide::Right;
+            let (right_list, _) = state.preview_panes().expect("a split");
+
+            state.preview_side = columnprefs::PreviewSide::Left;
+            let (left_list, _) = state.preview_panes().expect("a split");
+
+            assert!(
+                (right_list.w - left_list.w).abs() < 0.01,
+                "the listing changed width when the panel moved: {} then {}",
+                right_list.w,
+                left_list.w
+            );
+        });
+    }
+
+    /// The divider is grabbable on a vertical split too.
+    #[test]
+    fn the_divider_can_be_grabbed_when_the_panel_is_below() {
+        settingsfile::testing::with_scratch_config("preview-vgrab", |_root| {
+            let scratch = temp_dir("preview_vgrab");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            state.preview_open = true;
+            state.preview_side = columnprefs::PreviewSide::Bottom;
+
+            let d = state.preview_divider_rect().expect("a divider");
+            assert!(d.w > d.h, "a horizontal divider should be wide, not tall");
+            assert!(
+                state.divider_grab_at(d.x + d.w / 2.0, d.y).is_some(),
+                "the divider was not grabbable"
+            );
+        });
+    }
+
+    /// The side choice is only offered while the panel is showing.
+    #[test]
+    fn the_sides_are_not_offered_for_a_hidden_panel() {
+        settingsfile::testing::with_scratch_config("preview-hidden-sides", |_root| {
+            let scratch = temp_dir("preview_hidden_sides");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let state = state_at(&root);
+            assert!(!state.preview_open);
+            let labels: Vec<String> = state
+                .folder_menu_items()
+                .iter()
+                .filter_map(|i| match i {
+                    MenuItem::Action { label, .. } => Some(label.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                !labels.iter().any(|l| l.contains("Preview on")),
+                "a hidden panel offered a choice of where to put it: {labels:?}"
+            );
+        });
+    }
+
+    // ======================================================================
+    // Manual order
+    // ======================================================================
+
+    /// Dragging a row to the top puts it there and keeps it there.
+    #[test]
+    fn a_rearranged_folder_stays_rearranged() {
+        settingsfile::testing::with_scratch_config("manual-basic", |_root| {
+            let scratch = temp_dir("manual_basic");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            assert_eq!(state.entries[0].name, "a.txt");
+
+            // Move the third row (c.txt) to the front.
+            assert!(state.reorder_rows(vec![2], 0));
+            assert_eq!(state.entries[0].name, "c.txt");
+            assert_eq!(state.sort_by, SortBy::Custom);
+
+            // Re-listing the folder must not undo it.
+            state.load_directory();
+            assert_eq!(
+                state.entries[0].name, "c.txt",
+                "the arrangement did not survive a refresh"
+            );
+        });
+    }
+
+    /// A column sort overrides the arrangement without discarding it.
+    ///
+    /// The precedence rule `roadmap-detailed.md` §4.1 states outright, and the
+    /// one an implementation that reorders `entries` in place gets wrong: it
+    /// looks correct until the user sorts by a column and comes back.
+    #[test]
+    fn a_column_sort_overrides_the_arrangement_without_losing_it() {
+        settingsfile::testing::with_scratch_config("manual-prec", |_root| {
+            let scratch = temp_dir("manual_precedence");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            assert!(state.reorder_rows(vec![2], 0));
+            assert_eq!(state.entries[0].name, "c.txt");
+
+            // Sort by name: the view changes...
+            state.sort_by = SortBy::Name;
+            state.sort_entries();
+            assert_eq!(state.entries[0].name, "a.txt");
+
+            // ...and switching back restores the arrangement intact.
+            state.sort_by = SortBy::Custom;
+            state.sort_entries();
+            assert_eq!(
+                state.entries[0].name, "c.txt",
+                "the hand arrangement was discarded by a column sort"
+            );
+        });
+    }
+
+    /// A file that appears later lands at the end, not in the middle.
+    #[test]
+    fn a_new_file_joins_the_end_of_the_arrangement() {
+        settingsfile::testing::with_scratch_config("manual-new", |_root| {
+            let scratch = temp_dir("manual_newcomer");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            assert!(state.reorder_rows(vec![1], 0));
+            assert_eq!(state.entries[0].name, "b.txt");
+
+            write(&root.join("aaa-new.txt"), "x");
+            state.load_directory();
+
+            assert_eq!(state.entries[0].name, "b.txt", "the arrangement moved");
+            assert_eq!(
+                state.entries.last().expect("entries").name,
+                "aaa-new.txt",
+                "a newcomer jumped the arrangement despite sorting first by name"
+            );
+        });
+    }
+
+    /// Arrangements do not leak between folders.
+    #[test]
+    fn each_folder_keeps_its_own_arrangement() {
+        settingsfile::testing::with_scratch_config("manual-perfolder", |_root| {
+            let scratch = temp_dir("manual_perfolder");
+            let root = scratch.dir().to_path_buf();
+            let other = root.join("other");
+            fs::create_dir_all(&other).expect("mkdir");
+            for name in ["a.txt", "b.txt"] {
+                write(&root.join(name), "x");
+                write(&other.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            // `other/` is a row too, and folders sort first, so the files are at
+            // 1 and 2 rather than 0 and 1. Naming the index by what is in it
+            // rather than by counting: a fixture that silently means a different
+            // row than the test says is how a green test proves nothing.
+            let last = state.entries.len().saturating_sub(1);
+            assert_eq!(state.entries[last].name, "b.txt");
+            assert!(state.reorder_rows(vec![last], 0));
+            assert_eq!(state.entries[0].name, "b.txt");
+
+            state.navigate_to(&other);
+            assert_eq!(
+                state.entries[0].name, "a.txt",
+                "one folder's arrangement was applied to another"
+            );
+            assert_eq!(
+                state.sort_by,
+                SortBy::Name,
+                "Custom stuck on a folder with no arrangement, where it means nothing"
+            );
+        });
+    }
+
+    /// A press that does not move is a click, not a rearrangement.
+    ///
+    /// The whole reason for the threshold. A file manager where an unsteady
+    /// click reorders the folder does silent, persistent damage that gets
+    /// blamed on something else.
+    #[test]
+    fn a_press_without_movement_does_not_rearrange() {
+        settingsfile::testing::with_scratch_config("manual-thresh", |_root| {
+            let scratch = temp_dir("manual_threshold");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            state.row_drag = Some(RowDrag {
+                start_x: 10.0,
+                start_y: 10.0,
+                rows: vec![1],
+                active: false,
+                insert_at: 0,
+            });
+            // A jitter of one pixel, well inside the threshold.
+            let _ = state.drag_row(11.0, 10.0);
+            assert!(!state.drop_row(), "a click rearranged the folder");
+            assert_eq!(state.entries[0].name, "a.txt");
+            assert_eq!(state.sort_by, SortBy::Name);
+        });
+    }
+
+    /// Past the threshold, the same gesture rearranges.
+    ///
+    /// Dropped below every row -- which is what an empty hit-test means, and
+    /// is the only thing a headless test can express, since the drop zones
+    /// hold the rectangles the last *frame* drew and no frame has been drawn.
+    /// So this pins the append case: a file dragged past the end goes last.
+    #[test]
+    fn a_press_that_travels_far_enough_rearranges() {
+        settingsfile::testing::with_scratch_config("manual-thresh-pass", |_root| {
+            let scratch = temp_dir("manual_threshold_pass");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            assert_eq!(state.entries[0].name, "a.txt");
+            state.row_drag = Some(RowDrag {
+                start_x: 10.0,
+                start_y: 10.0,
+                rows: vec![0],
+                active: false,
+                insert_at: 0,
+            });
+            let _ = state.drag_row(10.0, 60.0);
+            assert!(state.drop_row(), "a real drag did nothing");
+            assert_eq!(
+                state.entries.last().expect("entries").name,
+                "a.txt",
+                "a row dropped past the end did not go last"
+            );
+            assert_eq!(state.sort_by, SortBy::Custom);
+        });
+    }
+
+    /// Several rows move together and keep their relative order.
+    #[test]
+    fn a_multi_row_drag_moves_them_all_in_order() {
+        settingsfile::testing::with_scratch_config("manual-multi", |_root| {
+            let scratch = temp_dir("manual_multi");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            // Move b and c (rows 1 and 2) to the front, together.
+            assert!(state.reorder_rows(vec![1, 2], 0));
+            let names: Vec<&str> = state.entries.iter().map(|e| e.name.as_str()).collect();
+            assert_eq!(
+                names,
+                vec!["b.txt", "c.txt", "a.txt", "d.txt"],
+                "the moved rows lost their order relative to each other"
+            );
+        });
+    }
+
+    /// Moving rows downward accounts for the gap they leave behind.
+    ///
+    /// The off-by-one this arithmetic exists for: lifting two rows out from
+    /// above the target shifts the target up by two, and not adjusting drops
+    /// them two places further down than the user pointed.
+    #[test]
+    fn rows_moved_downward_land_where_they_were_dropped() {
+        settingsfile::testing::with_scratch_config("manual-down", |_root| {
+            let scratch = temp_dir("manual_down");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+                write(&root.join(name), "x");
+            }
+
+            let mut state = state_at(&root);
+            // Drop a.txt (row 0) before d.txt (row 3).
+            assert!(state.reorder_rows(vec![0], 3));
+            let names: Vec<&str> = state.entries.iter().map(|e| e.name.as_str()).collect();
+            assert_eq!(names, vec!["b.txt", "c.txt", "a.txt", "d.txt"]);
+        });
+    }
+
+    /// The line sits on the top edge of the row a drop would land before.
+    #[test]
+    fn the_insertion_line_marks_the_row_it_would_drop_before() {
+        let scratch = temp_dir("manual_line");
+        let root = scratch.dir().to_path_buf();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            write(&root.join(name), "x");
+        }
+
+        let mut state = state_at(&root);
+        // Stand in for a frame having been drawn: the indicator reads the
+        // rectangles the last render registered, which is the same source the
+        // hit-testing uses.
+        for (i, entry) in state.entries.iter().enumerate() {
+            let y = 100.0 + (i as f32) * 20.0;
+            state.dropzone.register_file_row(
+                i,
+                &entry.path,
+                Rect::new(10.0, y, 200.0, 20.0),
+                entry.is_dir,
+            );
+        }
+
+        state.row_drag = Some(RowDrag {
+            start_x: 10.0,
+            start_y: 10.0,
+            rows: vec![2],
+            active: true,
+            insert_at: 1,
+        });
+        let (y, x, w) = state.insertion_line().expect("a line while dragging");
+        assert!(
+            (y - 120.0).abs() < 0.01,
+            "line at {y}, expected the top of row 1"
+        );
+        assert!((x - 10.0).abs() < 0.01);
+        assert!((w - 200.0).abs() < 0.01);
+    }
+
+    /// Dropping past the end marks the bottom of the last row.
+    ///
+    /// "At the end" is a real target, so it gets the same feedback as any
+    /// other rather than the line disappearing when the user aims there.
+    #[test]
+    fn the_insertion_line_marks_the_end_when_the_drop_is_past_it() {
+        let scratch = temp_dir("manual_line_end");
+        let root = scratch.dir().to_path_buf();
+        for name in ["a.txt", "b.txt"] {
+            write(&root.join(name), "x");
+        }
+
+        let mut state = state_at(&root);
+        for (i, entry) in state.entries.iter().enumerate() {
+            let y = 100.0 + (i as f32) * 20.0;
+            state.dropzone.register_file_row(
+                i,
+                &entry.path,
+                Rect::new(10.0, y, 200.0, 20.0),
+                entry.is_dir,
+            );
+        }
+
+        state.row_drag = Some(RowDrag {
+            start_x: 10.0,
+            start_y: 10.0,
+            rows: vec![0],
+            active: true,
+            insert_at: 2,
+        });
+        let (y, _, _) = state.insertion_line().expect("a line while dragging");
+        assert!(
+            (y - 140.0).abs() < 0.01,
+            "line at {y}, expected the bottom of row 1"
+        );
+    }
+
+    /// Nothing is drawn for a press that has not become a drag.
+    ///
+    /// The visible half of the threshold: a line that flickered on every click
+    /// would make the folder look like it was about to rearrange itself.
+    #[test]
+    fn no_insertion_line_before_the_threshold() {
+        let scratch = temp_dir("manual_line_none");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "x");
+
+        let mut state = state_at(&root);
+        assert!(state.insertion_line().is_none(), "a line with no drag");
+
+        state.row_drag = Some(RowDrag {
+            start_x: 10.0,
+            start_y: 10.0,
+            rows: vec![0],
+            active: false,
+            insert_at: 0,
+        });
+        assert!(
+            state.insertion_line().is_none(),
+            "a line for a press that is still just a click"
+        );
+    }
+
+    /// An out-of-range target is refused rather than clamped.
+    #[test]
+    fn an_impossible_move_is_refused() {
+        settingsfile::testing::with_scratch_config("manual-range", |_root| {
+            let scratch = temp_dir("manual_range");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("a.txt"), "x");
+
+            let mut state = state_at(&root);
+            assert!(
+                !state.reorder_rows(vec![9], 0),
+                "moved a row that is not there"
+            );
+            assert!(!state.reorder_rows(vec![0], 99), "moved a row past the end");
+            assert!(!state.reorder_rows(Vec::new(), 0), "moved nothing, loudly");
+        });
+    }
+
+    // ======================================================================
+    // Search
+    // ======================================================================
+
+    /// A search replaces the listing with matches from below the folder.
+    #[test]
+    fn a_search_shows_matches_from_the_whole_subtree() {
+        let scratch = temp_dir("search_subtree");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("sub")).expect("mkdir");
+        write(&root.join("alpha-report.txt"), "x");
+        write(&root.join("sub/beta-report.txt"), "x");
+        write(&root.join("unrelated.dat"), "x");
+
+        let mut state = state_at(&root);
+        state.run_search("report");
+
+        assert_eq!(state.entries.len(), 2, "{:?}", state.entries);
+        assert!(state.search_showing.is_some(), "the view is a search");
+    }
+
+    /// A result in a subfolder says which subfolder.
+    ///
+    /// Without this, two files called `notes.txt` in different folders are the
+    /// same row twice to anyone reading the screen.
+    #[test]
+    fn a_nested_result_is_labelled_with_its_folder() {
+        let scratch = temp_dir("search_label");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("sub")).expect("mkdir");
+        write(&root.join("notes.txt"), "x");
+        write(&root.join("sub/notes.txt"), "x");
+
+        let mut state = state_at(&root);
+        state.run_search("notes");
+
+        let mut labels: Vec<&str> = state.entries.iter().map(|e| e.name.as_str()).collect();
+        labels.sort_unstable();
+        assert_eq!(labels.len(), 2, "{labels:?}");
+        assert!(
+            labels.iter().any(|l| l.contains("sub")),
+            "the nested result does not say where it is: {labels:?}"
+        );
+        assert_ne!(labels[0], labels[1], "two rows are indistinguishable");
+    }
+
+    /// Escape puts the folder back.
+    #[test]
+    fn escape_leaves_a_search_and_restores_the_listing() {
+        let scratch = temp_dir("search_escape");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("sub")).expect("mkdir");
+        write(&root.join("only-match.txt"), "x");
+        write(&root.join("sub/also-match.txt"), "x");
+
+        let mut state = state_at(&root);
+        let before = state.entries.len();
+        state.run_search("match");
+        assert_eq!(state.entries.len(), 2);
+
+        state.leave_search();
+        assert!(state.search_showing.is_none(), "still in search mode");
+        assert_eq!(state.current_path, root, "did not return to the folder");
+        assert_eq!(
+            state.entries.len(),
+            before,
+            "the folder listing was not restored"
+        );
+    }
+
+    /// Leaving a search returns to where it started, not to a result's folder.
+    ///
+    /// The reason `search_origin` exists at all. Opening a result navigates
+    /// away; Escape after that means "stop searching", and a user who is
+    /// returned to the subfolder they happened to open has lost the place they
+    /// were searching from.
+    #[test]
+    fn leaving_a_search_returns_to_where_it_started() {
+        let scratch = temp_dir("search_origin");
+        let root = scratch.dir().to_path_buf();
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).expect("mkdir");
+        write(&sub.join("deep-match.txt"), "x");
+
+        let mut state = state_at(&root);
+        state.run_search("match");
+        // Simulate opening a result, which navigates into the subfolder.
+        state.navigate_to(&sub);
+        assert_eq!(state.current_path, sub);
+
+        state.leave_search();
+        assert_eq!(
+            state.current_path, root,
+            "Escape should return to the folder the search began in"
+        );
+    }
+
+    /// Refining a search keeps the original starting folder.
+    #[test]
+    fn refining_a_search_does_not_move_its_origin() {
+        let scratch = temp_dir("search_refine");
+        let root = scratch.dir().to_path_buf();
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).expect("mkdir");
+        write(&sub.join("aaa-bbb.txt"), "x");
+
+        let mut state = state_at(&root);
+        state.run_search("aaa");
+        state.navigate_to(&sub);
+        state.run_search("bbb");
+
+        state.leave_search();
+        assert_eq!(state.current_path, root, "the origin moved on refinement");
+    }
+
+    /// A search that finds nothing says so, and does not look like an empty
+    /// folder.
+    #[test]
+    fn a_search_with_no_matches_says_so() {
+        let scratch = temp_dir("search_none");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "x");
+
+        let mut state = state_at(&root);
+        state.run_search("nothing-like-this");
+
+        assert!(state.entries.is_empty());
+        assert!(
+            state.status_message.contains("No matches"),
+            "{}",
+            state.status_message
+        );
+    }
+
+    /// Leaving a search that was never started does nothing.
+    ///
+    /// Escape in an ordinary listing must not navigate anywhere.
+    #[test]
+    fn leaving_when_not_searching_is_a_no_op() {
+        let scratch = temp_dir("search_noop");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "x");
+
+        let mut state = state_at(&root);
+        let before = state.current_path.clone();
+        state.leave_search();
+        assert_eq!(state.current_path, before);
+        assert!(state.search_showing.is_none());
     }
 }

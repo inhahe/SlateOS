@@ -159,48 +159,24 @@ pub fn init_defaults() {
         return;
     }
 
-    let drivers = alloc::vec![
-        InstalledDriver {
-            id: 1,
-            name: String::from("Virtual Display Driver"),
-            category: DriverCategory::Display,
-            version: String::from("1.2.0"),
-            available_version: String::new(),
-            status: DriverStatus::UpToDate,
-            provider: String::from("MintOS"),
-            install_ns: 0,
-            previous_version: String::from("1.1.0"),
-            auto_update: true,
-        },
-        InstalledDriver {
-            id: 2,
-            name: String::from("HD Audio Driver"),
-            category: DriverCategory::Audio,
-            version: String::from("2.0.1"),
-            available_version: String::new(),
-            status: DriverStatus::UpToDate,
-            provider: String::from("MintOS"),
-            install_ns: 0,
-            previous_version: String::from("2.0.0"),
-            auto_update: true,
-        },
-        InstalledDriver {
-            id: 3,
-            name: String::from("Virtio Network Driver"),
-            category: DriverCategory::Network,
-            version: String::from("1.0.0"),
-            available_version: String::from("1.1.0"),
-            status: DriverStatus::UpdateAvailable,
-            provider: String::from("MintOS"),
-            install_ns: 0,
-            previous_version: String::new(),
-            auto_update: true,
-        },
-    ];
+    // No drivers. This list used to hold three -- a display, an audio and a
+    // network driver, each with a version history and one with an update
+    // pending from provider "MintOS" -- and `procfs::gen_driverupdate`
+    // published the count as `driver_count`. Nothing had installed anything,
+    // so every one of those facts was invented.
+    //
+    // Worse than an invented count, because `cmd_driverupdate`'s list arm
+    // calls this function and *then* lists: an operator asking what is
+    // installed caused three drivers to exist and was shown them. The honest
+    // branch under it, "No drivers registered.", could not run. It can now.
+    //
+    // A driver appears here when something calls `register_driver`. Until
+    // then the answer to "what is installed" is nothing, which is true.
+    let drivers: Vec<InstalledDriver> = Vec::new();
 
     *guard = Some(State {
         drivers,
-        next_id: 4,
+        next_id: 1,
         auto_check: true,
         check_interval_hours: 24,
         total_updates: 0,
@@ -236,6 +212,30 @@ pub fn register_driver(
             auto_update: true,
         });
         Ok(id)
+    })
+}
+
+/// Remove a driver from the registry.
+///
+/// The registry could previously only grow, which is a gap on its own
+/// terms: a driver that is uninstalled had no way to stop being reported.
+/// It is also what stopped `self_test` cleaning up after itself. The state
+/// this writes to is the one `procfs::gen_driverupdate` publishes as
+/// `driver_count`, so anything registered here is a fact `/proc` will
+/// state for the rest of the boot -- including anything a test registers.
+///
+/// # Errors
+///
+/// `NotFound` if no driver carries `id`; `NotSupported` before
+/// `init_defaults`.
+pub fn unregister_driver(id: u32) -> KernelResult<()> {
+    with_state(|state| {
+        let before = state.drivers.len();
+        state.drivers.retain(|d| d.id != id);
+        if state.drivers.len() == before {
+            return Err(KernelError::NotFound);
+        }
+        Ok(())
     })
 }
 
@@ -377,49 +377,72 @@ fn self_test_inner() {
     crate::serial_println!("driverupdate::self_test() — running tests...");
     init_defaults();
 
-    // 1: Default drivers.
+    // The fixture is built HERE rather than shipped. These three used to be
+    // seeded by `init_defaults` and published through /proc as installed
+    // drivers; this test asserting `len() == 3` is what made them look
+    // load-bearing. A test that needs three drivers registers three, and
+    // the names say so. Step 12 removes them again.
+    let display = register_driver(
+        "Test Display",
+        DriverCategory::Display,
+        "1.2.0",
+        "Test Corp",
+    )
+    .expect("register display");
+    let _audio = register_driver("Test Audio", DriverCategory::Audio, "2.0.1", "Test Corp")
+        .expect("register audio");
+    let net = register_driver(
+        "Test Network",
+        DriverCategory::Network,
+        "1.0.0",
+        "Test Corp",
+    )
+    .expect("register network");
+    set_available_update(net, "1.1.0").expect("offer network update");
+
+    // 1: Registered drivers.
     let drivers = list_drivers();
     assert_eq!(drivers.len(), 3);
-    crate::serial_println!("  [1/11] default drivers: OK");
+    crate::serial_println!("  [1/12] registered drivers: OK");
 
     // 2: Update available.
     let avail = updates_available();
     assert_eq!(avail, 1);
-    crate::serial_println!("  [2/11] update available: OK");
+    crate::serial_println!("  [2/12] update available: OK");
 
     // 3: Install update.
-    install_update(3).expect("install update");
-    let d = get_driver(3).expect("get driver");
+    install_update(net).expect("install update");
+    let d = get_driver(net).expect("get driver");
     assert_eq!(d.version, "1.1.0");
     assert_eq!(d.status, DriverStatus::UpToDate);
-    crate::serial_println!("  [3/11] install update: OK");
+    crate::serial_println!("  [3/12] install update: OK");
 
     // 4: Rollback.
-    rollback(3).expect("rollback");
-    let d = get_driver(3).expect("get driver 2");
+    rollback(net).expect("rollback");
+    let d = get_driver(net).expect("get driver 2");
     assert_eq!(d.version, "1.0.0");
     assert_eq!(d.status, DriverStatus::RolledBack);
-    crate::serial_println!("  [4/11] rollback: OK");
+    crate::serial_println!("  [4/12] rollback: OK");
 
     // 5: Register new driver.
     let id = register_driver("Test Camera", DriverCategory::Camera, "0.1.0", "Test Corp")
         .expect("register");
     assert!(id > 0);
     assert_eq!(list_drivers().len(), 4);
-    crate::serial_println!("  [5/11] register driver: OK");
+    crate::serial_println!("  [5/12] register driver: OK");
 
     // 6: Set available update.
     set_available_update(id, "0.2.0").expect("set update");
     let d = get_driver(id).expect("get new driver");
     assert_eq!(d.status, DriverStatus::UpdateAvailable);
-    crate::serial_println!("  [6/11] set update: OK");
+    crate::serial_println!("  [6/12] set update: OK");
 
     // 7: No rollback without previous.
     let r = rollback(id);
     // The driver now has a previous_version of "" since we set_available_update but haven't installed.
     // Actually install_update hasn't been called, so previous_version is still empty.
     assert!(r.is_err());
-    crate::serial_println!("  [7/11] no rollback without previous: OK");
+    crate::serial_println!("  [7/12] no rollback without previous: OK");
 
     // 8: Install then rollback.
     install_update(id).expect("install cam");
@@ -428,17 +451,17 @@ fn self_test_inner() {
     rollback(id).expect("rollback cam");
     let d = get_driver(id).expect("get cam 2");
     assert_eq!(d.version, "0.1.0");
-    crate::serial_println!("  [8/11] install+rollback: OK");
+    crate::serial_println!("  [8/12] install+rollback: OK");
 
     // 9: Not found.
     let r = get_driver(999);
     assert!(r.is_err());
-    crate::serial_println!("  [9/11] not found: OK");
+    crate::serial_println!("  [9/12] not found: OK");
 
     // 10: Category check.
-    let d = get_driver(1).expect("get display");
+    let d = get_driver(display).expect("get display");
     assert_eq!(d.category, DriverCategory::Display);
-    crate::serial_println!("  [10/11] category: OK");
+    crate::serial_println!("  [10/12] category: OK");
 
     // 11: Stats.
     let (count, updates, total_updates, total_rollbacks, ops) = stats();
@@ -447,7 +470,21 @@ fn self_test_inner() {
     assert!(total_rollbacks >= 2);
     assert!(ops > 0);
     let _ = updates;
-    crate::serial_println!("  [11/11] stats: OK");
+    crate::serial_println!("  [11/12] stats: OK");
 
-    crate::serial_println!("driverupdate::self_test() — all 11 tests passed");
+    // 12: Residue. Everything registered above is removed, because the
+    // registry this test writes to is the one `/proc` publishes as
+    // `driver_count` -- and this self-test runs at boot. A test that
+    // leaves four drivers behind is the same defect as shipping three,
+    // wearing the word `Test`. The count after cleanup is the honest
+    // answer to what is installed on this machine: nothing.
+    for d in list_drivers() {
+        unregister_driver(d.id).expect("unregister");
+    }
+    let (residue, _, _, _, _) = stats();
+    assert_eq!(residue, 0);
+    assert!(get_driver(display).is_err(), "display survived cleanup");
+    crate::serial_println!("  [12/12] residue-free: OK");
+
+    crate::serial_println!("driverupdate::self_test() — all 12 tests passed");
 }

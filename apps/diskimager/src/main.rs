@@ -237,6 +237,25 @@ struct ToolbarLayout {
     refresh_w: f32,
 }
 
+/// Every key this program answers, and what it does.
+///
+/// `V` and `C` are the two the window already draws as checkboxes: a colour is
+/// chosen from `verify_after_write` and from `compress`, and neither had a
+/// writer anywhere, so both were painted and neither could be ticked.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+1 / Ctrl+2", "Write / create"),
+    ("Ctrl+3 / Ctrl+4", "Browse / verify"),
+    ("Ctrl+O", "Open an image"),
+    ("Up / Down", "Move the selection"),
+    ("V", "Verify the device after writing, or not"),
+    ("C", "Compress the image being created, or not"),
+    ("H", "Which checksum to compute"),
+    ("F1", "This list"),
+];
+
 impl ToolbarLayout {
     /// Width of the Refresh Drives button, sized to its label.
     const REFRESH_WIDTH: f32 = 128.0;
@@ -351,6 +370,21 @@ pub enum HashAlgorithm {
 }
 
 impl HashAlgorithm {
+    /// Every algorithm, in the order the chips are drawn.
+    ///
+    /// The strip wrote its own array of three. One list, so a chip drawn is a
+    /// chip `H` can reach and an algorithm added here appears there.
+    pub const ALL: [HashAlgorithm; 3] = [Self::Sha256, Self::Sha1, Self::Md5];
+
+    /// The next algorithm along, wrapping.
+    #[must_use]
+    pub fn next(self) -> Self {
+        let at = Self::ALL.iter().position(|a| *a == self).unwrap_or(0);
+        let last = Self::ALL.len().saturating_sub(1);
+        let next = if at >= last { 0 } else { at.saturating_add(1) };
+        Self::ALL.get(next).copied().unwrap_or(Self::Sha256)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Md5 => "MD5",
@@ -1635,6 +1669,8 @@ pub struct DiskImagerApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut list is up.
+    show_help: bool,
 }
 
 impl Default for DiskImagerApp {
@@ -1654,6 +1690,7 @@ impl DiskImagerApp {
             Err(e) => (Vec::new(), e, true),
         };
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             active_tab: MainTab::Write,
             window_width: 960.0,
@@ -2406,6 +2443,40 @@ impl DiskImagerApp {
         }
 
         // Tab switching
+        // Two checkboxes this window draws and could not tick, and the
+        // shortcut list that names them. `verify_after_write` was `true` and
+        // `compress` was `false`, both with no writer anywhere, and both are
+        // drawn -- a colour is chosen from each. Found by
+        // `scripts/frozen-flag-survey.py`.
+        match key.key {
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                return EventResult::Consumed;
+            }
+            Key::Escape if self.show_help => {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            Key::V if !key.modifiers.ctrl => {
+                self.write_options.verify_after_write = !self.write_options.verify_after_write;
+                return EventResult::Consumed;
+            }
+            // Which checksum to compute. Three chips were drawn with the
+            // selected one highlighted and bold, and `hash_algorithm` was
+            // `Sha256` at construction with no writer -- so the other two
+            // could not be chosen, and a download published with an MD5 could
+            // not be checked against it by this program.
+            Key::H if !key.modifiers.ctrl => {
+                self.hash_algorithm = self.hash_algorithm.next();
+                return EventResult::Consumed;
+            }
+            Key::C if !key.modifiers.ctrl => {
+                self.create_options.compress = !self.create_options.compress;
+                return EventResult::Consumed;
+            }
+            _ => {}
+        }
+
         if key.modifiers.ctrl {
             match key.key {
                 Key::Num1 => {
@@ -2749,6 +2820,18 @@ impl DiskImagerApp {
         // too -- it is drawn at the full window size because the widget lays
         // itself out from its own origin and there is no translate command to
         // move a finished list of absolute coordinates somewhere else.
+        // The shortcut list over everything, including both dialogs.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut *rt,
+                &self.palette,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
+
         if let Some(dialog) = self.open_dialog.as_ref() {
             for cmd in dialog.render(&self.palette, self.window_width, self.window_height) {
                 rt.push(cmd);
@@ -3730,11 +3813,7 @@ impl DiskImagerApp {
         });
         cy += 24.0;
 
-        let algorithms = [
-            HashAlgorithm::Sha256,
-            HashAlgorithm::Sha1,
-            HashAlgorithm::Md5,
-        ];
+        let algorithms = HashAlgorithm::ALL;
         let btn_gap = 8.0_f32;
         let alg_btn_w = 90.0_f32;
         for (idx, alg) in algorithms.iter().enumerate() {
@@ -6457,6 +6536,174 @@ mod tests {
         });
         app.handle_event(&ev);
         assert_eq!(app.operation, Operation::Idle);
+    }
+
+    /// A plain key press.
+    /// `H` picks which checksum to compute, and the strip shows which.
+    ///
+    /// Three chips were drawn with the selected one highlighted and bold, and
+    /// `hash_algorithm` was `Sha256` at construction with no writer in the
+    /// crate -- so `HashJob::open` was handed the same algorithm every time
+    /// and a download published with an MD5 could not be checked against it
+    /// by this program.
+    #[test]
+    fn h_picks_the_checksum_and_the_strip_follows() {
+        let mut app = DiskImagerApp::new();
+        app.active_tab = MainTab::Verify;
+
+        let mut seen = vec![app.hash_algorithm];
+        for _ in 1..HashAlgorithm::ALL.len() {
+            assert_eq!(
+                app.handle_event(&press(Key::H)),
+                EventResult::Consumed,
+                "H was ignored"
+            );
+            seen.push(app.hash_algorithm);
+        }
+        for alg in HashAlgorithm::ALL {
+            assert!(seen.contains(&alg), "cycling never reached {}", alg.name());
+        }
+        app.handle_event(&press(Key::H));
+        assert_eq!(
+            app.hash_algorithm, seen[0],
+            "the algorithms do not come back round"
+        );
+
+        // The chip strip draws the one in force, so the drawn text has to
+        // name it -- otherwise `H` changes a field and the window says the
+        // same thing either way.
+        app.handle_event(&press(Key::H));
+        let chosen = app.hash_algorithm;
+        let mut rt = RenderTree::new();
+        app.render(&mut rt);
+        let texts: Vec<String> = rt
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t == chosen.name()),
+            "the strip does not name {}",
+            chosen.name()
+        );
+    }
+
+    fn press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    /// A key press with Ctrl held.
+    fn press_ctrl(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.ctrl = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states().iter_mut().any(|app| {
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Imagers chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<DiskImagerApp> {
+        // Drives to move through, so Up and Down have somewhere to go.
+        let mut listed = app_with_drives(3);
+        listed.handle_event(&press(Key::Down));
+
+        // On another tab, so `Ctrl+1` has one to return from.
+        let mut elsewhere = app_with_drives(3);
+        elsewhere.handle_event(&press_ctrl(Key::Num3));
+
+        vec![listed, elsewhere]
+    }
+
+    /// **The two checkboxes the window draws can be ticked.**
+    ///
+    /// `verify_after_write` was `true` and `compress` was `false`, both with
+    /// no writer anywhere -- and both are *drawn*, a colour being chosen from
+    /// each. So the window showed two settings and offered neither.
+    ///
+    /// Asserts each moved and that the other did not move with it: `Consumed`
+    /// cannot tell a toggle from a neighbour's arm.
+    #[test]
+    fn the_write_and_create_checkboxes_can_be_ticked() {
+        let mut app = DiskImagerApp::new();
+        let before = (
+            app.write_options.verify_after_write,
+            app.create_options.compress,
+        );
+
+        app.handle_event(&press(Key::V));
+        assert_ne!(
+            app.write_options.verify_after_write, before.0,
+            "V did not move the verify setting"
+        );
+        assert_eq!(
+            app.create_options.compress, before.1,
+            "V moved the compression setting too"
+        );
+
+        app.handle_event(&press(Key::C));
+        assert_ne!(
+            app.create_options.compress, before.1,
+            "C did not move the compression setting"
+        );
+    }
+
+    /// **The shortcut list reaches the window.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = DiskImagerApp::new();
+        let drawn = |app: &mut DiskImagerApp| -> String {
+            let mut rt = RenderTree::new();
+            DiskImagerApp::render(app, &mut rt);
+            rt.commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+
+        assert!(!drawn(&mut app).contains("F1 closes this"));
+        app.handle_event(&press(Key::F1));
+        let shown = drawn(&mut app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(*keys), "{keys:?} never reached the window");
+            assert!(shown.contains(*what), "{what:?} never reached the window");
+        }
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !drawn(&mut app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
     }
 
     #[test]

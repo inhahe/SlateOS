@@ -200,12 +200,12 @@ def stale(text, resolved):
 # answer, in full, about a population that excluded the failure -- the same
 # shape as a `grep -c` on a path that does not exist. See known-issues ->
 # "never pipe a command whose exit status you intend to believe".
-QUESTION_REF = re.compile(r"\b([ABC]-Q\d+)\b")
+QUESTION_REF = re.compile(r"\b([A-F]-Q\d+)\b")
 
 # `## B-Q7 - ...` in the live half; `- B-Q7 ...` in the archive below
 # `# Resolved`.
-QUESTION_OPEN = re.compile(r"^## ([ABC]-Q\d+)\b", re.M)
-QUESTION_DONE = re.compile(r"^- ([ABC]-Q\d+)\b", re.M)
+QUESTION_OPEN = re.compile(r"^## ([A-F]-Q\d+)\b", re.M)
+QUESTION_DONE = re.compile(r"^- ([A-F]-Q\d+)\b", re.M)
 RESOLVED_HEAD = re.compile(r"^# Resolved\s*$", re.M)
 
 
@@ -762,7 +762,7 @@ def document_texts():
 # point in the last year" is not news about a document.
 HISTORY_WINDOW = "4.months"
 
-ENTRY_DATE = re.compile(r"\((?:lane [ABC], )?(\d{4}-\d{2}-\d{2})\)")
+ENTRY_DATE = re.compile(r"\((?:lane [A-F], )?(\d{4}-\d{2}-\d{2})\)")
 
 # Present-tense claims that the entry is parked. Deliberately does NOT include
 # "the proper fix is", which `CLAUDE.md` asks every entry to carry and which

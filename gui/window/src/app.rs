@@ -149,6 +149,8 @@ pub struct Reloads {
     pub input: bool,
     /// `notifications.yaml` was rewritten.
     pub notifications: bool,
+    /// `session.yaml` was rewritten -- the screen-lock delay.
+    pub session: bool,
 }
 
 /// A picture an application wants the compositor to be holding, or to stop
@@ -681,6 +683,9 @@ fn announce_reloads<T: Transport>(
     if reloads.notifications {
         events.notifications_changed()?;
     }
+    if reloads.session {
+        events.session_changed()?;
+    }
     Ok(())
 }
 
@@ -984,9 +989,28 @@ impl ThemeWatch {
             return false;
         }
         self.settings = settings;
+        self.hand_over(app);
+        true
+    }
+
+    /// Install the settings in this process, then tell the application.
+    ///
+    /// The order is the point. `appearance_changed` is where an application
+    /// recomputes whatever it derived from the settings, and that work
+    /// measures text; installing the font family afterwards would leave the
+    /// layout measured in the old face and drawn in the new one, which is
+    /// exactly the disagreement `guitk::text::set_font_family`'s own note
+    /// warns about.
+    fn hand_over<A: App + ?Sized>(&self, app: &mut A) {
+        // The outcome is deliberately not acted on here. A family the machine
+        // does not have leaves the previous, working font in place, and there
+        // is nothing an event loop can usefully do about that; the place it
+        // is *reported* is the Settings font page, which asks
+        // `guitk::text::font_family()` what is actually in use rather than
+        // assuming the configured name took effect.
+        let _ = self.settings.fonts.apply();
         app.appearance_changed(&self.settings);
         app.theme_changed(&Palette::from_settings(&self.settings));
-        true
     }
 
     /// Hand over the opening palette, whether or not a file exists.
@@ -997,8 +1021,7 @@ impl ThemeWatch {
     /// to report.
     fn deliver<A: App + ?Sized>(&mut self, app: &mut A) {
         if !self.poll(app) {
-            app.appearance_changed(&self.settings);
-            app.theme_changed(&Palette::from_settings(&self.settings));
+            self.hand_over(app);
         }
     }
 }
@@ -1666,6 +1689,12 @@ mod tests {
             .filter_map(|r| match r.body {
                 crate::RequestBody::ReloadAppearance => Some("appearance"),
                 crate::RequestBody::ReloadInput => Some("input"),
+                // Both were falling into the wildcard below, so a test that
+                // announced either saw an empty list and could only assert
+                // that nothing else was sent. Named now, which is what the
+                // wildcard was hiding.
+                crate::RequestBody::ReloadNotifications => Some("notifications"),
+                crate::RequestBody::ReloadSession => Some("session"),
                 _ => None,
             })
             .collect()
@@ -1685,6 +1714,7 @@ mod tests {
             appearance: true,
             input: false,
             notifications: false,
+            session: false,
         });
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");
@@ -1698,6 +1728,31 @@ mod tests {
         assert_eq!(reloads_seen(&desktop), ["appearance"]);
     }
 
+    /// A rewritten session file is announced too.
+    ///
+    /// The delay it carries is claimed by the shell at startup and nowhere
+    /// else, so without this announcement a user who changes it waits until
+    /// the next sign-in for it to mean anything.
+    #[test]
+    fn a_rewritten_session_file_is_announced_to_the_compositor() {
+        let mut app = Recorder::new(Response::Redraw).having_written(Reloads {
+            appearance: false,
+            input: false,
+            notifications: false,
+            session: true,
+        });
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+
+        desktop
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(window, Event::FocusIn)]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert_eq!(reloads_seen(&desktop), ["session"]);
+    }
+
     /// Drained, not peeked: an implementation that answered the same news for
     /// ever would have the compositor re-read the file on every mouse move for
     /// the rest of the session.
@@ -1707,6 +1762,7 @@ mod tests {
             appearance: true,
             input: false,
             notifications: false,
+            session: false,
         });
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");
@@ -1736,6 +1792,7 @@ mod tests {
             appearance: false,
             input: true,
             notifications: false,
+            session: false,
         });
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");
@@ -1762,6 +1819,7 @@ mod tests {
             appearance: true,
             input: true,
             notifications: false,
+            session: false,
         });
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");
@@ -1799,6 +1857,7 @@ mod tests {
             appearance: true,
             input: false,
             notifications: false,
+            session: false,
         });
         let (mut events, desktop) = desktop();
         let window = open(&mut events, &app).expect("granted");

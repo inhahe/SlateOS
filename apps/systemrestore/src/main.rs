@@ -83,6 +83,23 @@ const CANNOT_RESTORE: &str =
 const CANNOT_CREATE: &str =
     "Cannot create a snapshot: this program has no filesystem access, so nothing was captured";
 
+/// What the list of snapshots is.
+///
+/// `CANNOT_RESTORE` and `CANNOT_CREATE` appear on a progress overlay, which
+/// is dismissed and gone. The *list* stays, and it is the thing a person
+/// reads: five restore points with dates, sizes and components, one of them
+/// marked as the current system. Nothing on screen said they are a model
+/// this program built at startup rather than snapshots of this machine.
+///
+/// That is the belief the two constants above exist to prevent -- somebody
+/// who thinks a restore point exists proceeds with the risky change it was
+/// taken for -- and a message that has to be provoked before it appears does
+/// not prevent it. This one is always on screen, for the same reason
+/// `apps/screenrecorder` draws its refusal unconditionally: there is no state
+/// in which these entries become real, so a condition here would be one that
+/// is always true.
+const SNAPSHOTS_ARE_NOT_REAL: &str = "Demonstration data: these are not snapshots of this machine, and none of them can restore anything";
+
 const WINDOW_WIDTH: f32 = 1050.0;
 const WINDOW_HEIGHT: f32 = 700.0;
 const HEADER_HEIGHT: f32 = 48.0;
@@ -184,6 +201,29 @@ impl SnapshotType {
             Self::PreInstall,
             Self::Scheduled,
         ]
+    }
+
+    /// The next filter choice, treating "no filter" as the first.
+    ///
+    /// `None` is inside the cycle rather than on a key of its own, because
+    /// the way out of a filter has to be as reachable as the way in -- a
+    /// filter you cannot clear hides snapshots and looks like a program that
+    /// has lost them.
+    #[must_use]
+    pub fn step_filter(current: Option<Self>) -> Option<Self> {
+        let types = Self::all();
+        let at = match current {
+            None => 0,
+            Some(ty) => types
+                .iter()
+                .position(|t| *t == ty)
+                .map_or(0, |i| i.saturating_add(1)),
+        };
+        if at >= types.len() {
+            None
+        } else {
+            types.get(at).copied()
+        }
     }
 
     /// Icon indicator color for each type.
@@ -1998,6 +2038,29 @@ pub enum DialogButton {
 }
 
 /// Main application UI state for the system restore manager.
+/// The keys this program answers, raised by `F1` or `?`.
+///
+/// Nothing here takes a `?`: the search box filters snapshot names and the
+/// create form takes a description, but both are reached through a dialog that
+/// the card sits above.
+///
+/// The five `Ctrl` chords are the actions, and the bare keys move around --
+/// that split is the app's own and is why `F` filters rather than finds.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+N", "Take a snapshot"),
+    ("Ctrl+E / Ctrl+I", "Export / import one"),
+    ("Ctrl+L", "Lock or unlock the selected snapshot"),
+    ("Ctrl+F", "Cycle which kinds are listed"),
+    ("Tab", "The next view; Shift+Tab the one before"),
+    ("Up / Down", "Choose a snapshot"),
+    ("Home / End", "First / last"),
+    ("Enter", "Restore the chosen one"),
+    ("Delete", "Delete it"),
+    ("Backspace", "Rub out a letter of the search"),
+    ("Esc", "Clear the search, or close a dialog"),
+    ("F1 / ?", "This list"),
+];
+
 pub struct SystemRestoreUI {
     /// The snapshot manager.
     pub manager: SnapshotManager,
@@ -2054,6 +2117,8 @@ pub struct SystemRestoreUI {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 impl SystemRestoreUI {
@@ -2139,6 +2204,7 @@ impl SystemRestoreUI {
         };
 
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             manager,
             view_mode: ViewMode::Tree,
@@ -2222,6 +2288,16 @@ impl SystemRestoreUI {
             self.render_progress_overlay(&mut rt);
         }
 
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut rt,
+                &self.palette,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
         rt
     }
 
@@ -2502,6 +2578,22 @@ impl SystemRestoreUI {
 
     /// Handle a key press.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Above the dialog branch below, which returns before the main match:
+        // a check placed after it could raise the card from the list and not
+        // dismiss it from a dialog.
+        if key.key == Key::F1 || (key.key == Key::Slash && key.modifiers.shift) {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal. Letting keys through would mean restoring a snapshot the
+            // reader cannot see.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         if self.progress.is_some() {
             // An operation is running and the window is showing a progress
             // overlay over everything. Escape abandons it; nothing else reaches
@@ -2534,6 +2626,23 @@ impl SystemRestoreUI {
                 }
                 Key::L => {
                     self.toggle_lock();
+                    EventResult::Consumed
+                }
+                // The snapshot-type filter. `passes_filters` has consulted it
+                // since it was written and `type_filter` was `None` at
+                // construction with no writer, so the status bar's "Filter:"
+                // half could never appear and the list could not be narrowed
+                // to, say, the snapshots taken before an update.
+                Key::F => {
+                    self.type_filter = SnapshotType::step_filter(self.type_filter);
+                    // The selection is a snapshot id, and the filter may have
+                    // just hidden it. Leaving it selected would show the
+                    // details of a row that is not in the list, which reads
+                    // as the list being wrong rather than the filter working.
+                    let visible = self.visible_ids();
+                    if !self.selected_id.is_some_and(|id| visible.contains(&id)) {
+                        self.selected_id = visible.first().copied();
+                    }
                     EventResult::Consumed
                 }
                 _ => EventResult::Ignored,
@@ -3047,6 +3156,19 @@ impl SystemRestoreUI {
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(300.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        // What those snapshots are. Beside the count rather than under
+        // it: the count is the claim this qualifies.
+        rt.push(RenderCommand::Text {
+            x: 360.0,
+            y: HEADER_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
+            text: SNAPSHOTS_ARE_NOT_REAL.to_owned(),
+            color: self.palette.ink(self.palette.yellow),
+            font_size: FONT_SIZE_SMALL,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some((self.window_width - 380.0).max(120.0)),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -5380,6 +5502,221 @@ mod tests {
             modifiers: guitk::event::Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    fn ctrl(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    /// Every string the window draws, joined.
+    fn card_text(ui: &SystemRestoreUI) -> String {
+        ui.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// Two states, because `Esc`, `Enter`, `Tab` and `Backspace` are claimed
+    /// by the dialog handler when a dialog is up and by the list when it is
+    /// not -- the same keys, two different jobs, and the dialog branch returns
+    /// before the main match.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|in_dialog| {
+                    let mut ui = SystemRestoreUI::new();
+                    if in_dialog {
+                        ui.open_create_dialog();
+                    }
+                    ui.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the half that matters: `Ctrl+N` behind the card must not
+    /// open the create dialog, and asserting only that it does not would pass
+    /// on an app that had lost `Ctrl+N` altogether.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut ui = SystemRestoreUI::new();
+        assert!(
+            !card_text(&ui).contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        ui.handle_event(&press(Key::F1));
+        let shown = card_text(&ui);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let dialog = ui.dialog.clone();
+        ui.handle_event(&ctrl(Key::N));
+        assert_eq!(
+            ui.dialog, dialog,
+            "Ctrl+N opened a dialog through the shortcut card"
+        );
+
+        ui.handle_event(&press(Key::Escape));
+        assert!(
+            !card_text(&ui).contains("F1 or ? closes this"),
+            "Escape did not close it"
+        );
+
+        ui.handle_event(&ctrl(Key::N));
+        assert_ne!(
+            ui.dialog, dialog,
+            "control: Ctrl+N does nothing even with the card down"
+        );
+    }
+
+    /// The snapshot list can be narrowed by type, and the status bar says so.
+    ///
+    /// `passes_filters` has consulted `type_filter` since it was written, and
+    /// the field was `None` at construction with no writer anywhere in the
+    /// crate -- so the status bar's "Filter: ..." half could never appear and
+    /// the list could not be narrowed to, say, the snapshots taken before an
+    /// update.
+    #[test]
+    fn ctrl_f_narrows_the_list_by_snapshot_type() {
+        let mut ui = SystemRestoreUI::new();
+        let all = ui.visible_ids().len();
+        assert!(all > 0, "control: the fixture has no snapshots");
+        assert!(
+            !status_text(&ui).contains("Filter:"),
+            "control: the status bar should say nothing about a filter yet"
+        );
+
+        let mut narrowed_somewhere = false;
+        for _ in SnapshotType::all() {
+            assert_eq!(
+                ui.handle_event(&press_ctrl(Key::F)),
+                EventResult::Consumed,
+                "Ctrl+F was ignored"
+            );
+            let Some(ty) = ui.type_filter else {
+                continue;
+            };
+            assert!(
+                status_text(&ui).contains(ty.label()),
+                "the status bar does not name the filter that is on: {:?}",
+                status_text(&ui)
+            );
+            let shown = ui.visible_ids();
+            if shown.len() < all {
+                narrowed_somewhere = true;
+            }
+            for id in &shown {
+                let snap = ui
+                    .manager
+                    .tree
+                    .get_snapshot(*id)
+                    .expect("a visible id must name a snapshot");
+                assert_eq!(
+                    snap.snapshot_type,
+                    ty,
+                    "a {} filter left a {} snapshot in the list",
+                    ty.label(),
+                    snap.snapshot_type.label()
+                );
+            }
+            // Whatever is selected has to be something the list is showing.
+            if let Some(sel) = ui.selected_id {
+                assert!(
+                    shown.contains(&sel),
+                    "the selection is a snapshot the filter has hidden"
+                );
+            }
+        }
+        assert!(
+            narrowed_somewhere,
+            "no filter value removed anything; the fixture cannot tell a \
+working filter from a broken one"
+        );
+
+        // One more step comes back out to no filter at all.
+        ui.handle_event(&press_ctrl(Key::F));
+        assert!(
+            ui.type_filter.is_none(),
+            "the filter does not cycle back to showing everything"
+        );
+        assert_eq!(
+            ui.visible_ids().len(),
+            all,
+            "clearing the filter did not bring every snapshot back"
+        );
+    }
+
+    fn status_text(ui: &SystemRestoreUI) -> String {
+        ui.render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .find(|t| t.starts_with("View: "))
+            .unwrap_or_default()
+    }
+
+    /// The window says what the list of snapshots is.
+    ///
+    /// `CANNOT_RESTORE` and `CANNOT_CREATE` are drawn on a progress overlay,
+    /// which has to be provoked and is then dismissed. The list stays: five
+    /// restore points with dates, sizes and components, one marked as the
+    /// current system, and nothing saying they are a model this program built
+    /// at startup. That is precisely the belief those two constants exist to
+    /// prevent.
+    #[test]
+    fn the_window_says_the_snapshots_are_not_real() {
+        let ui = SystemRestoreUI::new();
+        let texts: Vec<String> = ui
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            texts.iter().any(|t| t.ends_with(" snapshots")),
+            "control: the header must be claiming a number of snapshots for \
+this test to be about anything -- it drew {} text command(s)",
+            texts.len()
+        );
+        // Against the words, not the constant: `t == SNAPSHOTS_ARE_NOT_REAL`
+        // passes with the constant rewritten to "Snapshots", which is the
+        // same defect wearing this test as cover.
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Demonstration data") && t.contains("restore anything")),
+            "the window lists restore points and does not say they are not real"
+        );
     }
 
     fn press_ctrl(k: Key) -> Event {

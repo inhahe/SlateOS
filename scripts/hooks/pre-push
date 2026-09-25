@@ -139,7 +139,36 @@
 #      this repository executed before 2026-09-15. Its subject list is read
 #      from the exclude list rather than written down, so the next crate
 #      anyone excludes is covered without anybody remembering to add it.
-#  47. Refuse two packages that build a binary of the same name. They share
+#  47. Refuse a test that drives an event loop without pinning the
+#      configuration directory, in a crate that also repoints it. The other
+#      half of gate 35: that one covers the tests that *write* settings, this
+#      one the tests that read them a hundred times a second. The race it
+#      catches has been diagnosed from scratch twice, eight days apart,
+#      because the first cure sits behind `gui/window`'s own `#[cfg(test)]`
+#      and cannot reach a dependent's test binary.
+#  48. Refuse text drawn in an accent-family colour without `ink()`, which
+#      decides a readable foreground for the surface the text is on. The
+#      checker already ran at boot; it runs here too because a boot-only gate
+#      is paid for by whoever boots next, and that is never the person who
+#      broke it -- two commits went out green and cost lane A two dead
+#      pre-flights before anyone knew.
+#
+#  49. Refuse text inked against a ground it is not drawn on -- gate 48's
+#      sibling, and here for the same reason. Chosen out of the twenty-six
+#      boot-only checkers because it costs 1.6s and carries twelve self-test
+#      cases; `check-frame-needles` is cheaper still and is deliberately left
+#      out, having no self-test and a `return 2` for "I could not look".
+#
+#  50. Refuse a field written in production and read only by a test. Same
+#      reason as 48 and 49, and the same day: a second change of this lane's
+#      went out green and stopped lane A's sweep, because
+#      `check-fields-written-never-read` runs in that sweep and in the boot
+#      battery and was not on a push. It costs 20s, which is the most of the
+#      three, and it is worth it because the failure it catches is one lane
+#      handing another a red main -- twice in one day, from the same lane,
+#      through the same hole.
+#
+#  51. Refuse two packages that build a binary of the same name. They share
 #      one path under `target/<triple>/<profile>/`, so the survivor is
 #      whichever cargo linked last and that is the file the rootfs stages.
 #      Proved by running one `logger.exe` twice half an hour apart with no
@@ -150,7 +179,7 @@
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
 # section and the bypass landed in `0ab4b55bc` and this list did not; and
-# wrong again at 19 and at 22, and at 35, and at 47. SIX OUT OF SIX RECENT
+# wrong again at 19 and at 22, and at 35, and at 51. SIX OUT OF SIX RECENT
 # ADDITIONS -- lane A counted the first four and it is worth having, because a
 # note that stops at the second instance reads as though the problem was dealt
 # with. The fifth was written by someone who had just read this paragraph:
@@ -158,8 +187,8 @@
 # `test-pre-push-gates.py` refused the push. The note is not the mechanism;
 # the test is.
 #
-# The sixth, gate 47, added a SECOND way to get this wrong that the first five
-# did not show. Its author looked for the highest number in use with
+# The sixth, gate 51 -- numbered 45, then 47, then 51 -- added a SECOND way
+# to get this wrong that the first five did not show. Its author looked for the highest number in use with
 #
 #     grep -o "^# Gate [0-9]*:" scripts/hooks/pre-push | sort -n | tail
 #
@@ -171,6 +200,16 @@
 # says plainly where it ends. The test caught both faults -- the duplicate and
 # the missing line -- and named them separately, which is why the fix took one
 # minute rather than a bisect.
+#
+# It then found a THIRD way, which no test in one tree can see: every lane
+# derives `n+1` from its own branch. On 2026-09-16 lane B numbered this gate 47
+# on `lane-b`, hours after another lane had committed a different gate 47 that
+# had not yet reached `main` when lane B last merged it; that lane went on to
+# add 48 through 50. Each branch's list was internally perfect -- the collision
+# existed only in the merge, which is where it was caught, as a textual conflict
+# on this header, and where the renumbering to 51 was made. A number is not a
+# lane-safe identifier. If this recurs, the fix is to give each lane its own
+# band here as design-decisions.md does, not a better search.
 #
 # Adding a gate is THREE edits: this list, the `# Gate N` section, and the
 # bypass variable. scripts/test-pre-push-gates.py checks all three against each
@@ -850,6 +889,47 @@ if [ "$skip_lossy" != "1" ]; then
         echo "pre-push: lossy-decode.py FAILED ITS OWN SELF-TEST — its result is not trustworthy." >&2
         lossy_failed=1
     elif ! run_checker lossy-decode "$py" "$lossy"; then
+        lossy_failed=1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 43b: the same checker, ratcheted, over gui/ and apps/.
+#
+# Gate 43 above is scoped to userspace/ and says so -- "which is where it
+# looks". That was true of the tool and stopped being the whole truth the
+# moment the tool could look elsewhere: its default scope was a bare
+# os.walk(ROOT/"userspace") left over from the coreutils audit it was built
+# for, so lane C's entire tree was unscanned. Five lossy decodes that reached
+# a value were found there by hand on 2026-09-16, in code this checker ran
+# past every push without reading.
+#
+# It cannot be a hard failure here the way it is for userspace/. That tree was
+# audited down to six sites, all IGNORE-exempt with reasons, so zero is the
+# expected state and any finding is new. gui/ and apps/ have 74 sites and have
+# never been audited; failing on them would block every lane C push on a
+# backlog, and a gate that must be bypassed to work is not a gate.
+#
+# So this half is a ratchet against scripts/lossy-decode-baseline.txt: a NEW
+# file with a lossy decode fails, and so does an extra decode in a file already
+# listed, because the count is part of the key. A line that has become true
+# again also fails, so the baseline cannot quietly accumulate dead entries --
+# the failure mode argv-utf8-baseline.txt records having actually suffered,
+# 17 already-fixed lines deep.
+#
+# The backlog is not a list to add to. A site that is genuinely safe belongs in
+# the script's IGNORE table, which records WHY; the baseline records only THAT.
+skip_lossy_c=0
+[ -f "$lossy" ] || skip_lossy_c=1
+# Same no-pushed_shas-guard reasoning as gate 43: one run against the working
+# tree, not a loop over shas that could silently degrade to zero iterations.
+touches gui/ apps/ scripts/lossy-decode.py scripts/lossy-decode-baseline.txt \
+    || skip_lossy_c=1
+note_gate lossy-decode-lane-c "$skip_lossy_c"
+
+if [ "$skip_lossy_c" != "1" ]; then
+    if ! run_checker lossy-decode-lane-c "$py" "$lossy" \
+            --under gui --under apps --check; then
         lossy_failed=1
     fi
 fi
@@ -3781,7 +3861,7 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 47: two packages must not build a binary of the same name.
+# Gate 51: two packages must not build a binary of the same name.
 #
 # Gate 18 above asks whether a *directory* name is another crate's *package*
 # name, because `cargo test -p <name>` then tests the wrong thing. This asks
@@ -5393,6 +5473,84 @@ fi
 
 
 # ---------------------------------------------------------------------------
+# Gate 47 -- config-turn guards.  The other half of gate 35.
+#
+# Gate 35 (scratch-config) makes every test that *writes* a settings file do so
+# inside a scratch directory.  This one covers the readers.  A test that drives
+# an application event loop re-reads the configuration directory every turn, so
+# when a writer elsewhere in the same binary swaps `XDG_CONFIG_HOME`, the
+# reader sees the swap, concludes the user edited their settings, and repaints
+# -- one frame more than it counted.
+#
+# Why a gate and not a note: this has been diagnosed from scratch twice, eight
+# days apart, and the second time was in a crate the first fix could not reach.
+# `TestDesktop` holds the guard behind `gui/window`'s own `#[cfg(test)]`,
+# because the type comes from a dev-dependency and cannot appear in the shipped
+# library -- so every dependent's test binary is unguarded.  See known-issues
+# TD-C-THE-CONFIG-DIRECTORY-RACE-WAS-CURED-IN-ONE-BINARY-AND-RECURS-IN-EVERY-OTHER.
+#
+# The rate is the argument.  It did not reproduce once in ten consecutive runs
+# of the affected binary; it appeared under the load of four crates at once.
+# At that rate the reasonable human response to a red run is to run it again,
+# and running it again is what hides it.
+# ---------------------------------------------------------------------------
+cfgturn="${repo_root:-.}/scripts/check-config-turn-guards.py"
+skip_cfgturn=0
+# Bypass: ALLOW_CONFIG_TURN_DRIFT=1 git push origin <branch>
+if [ "${ALLOW_CONFIG_TURN_DRIFT:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_CONFIG_TURN_DRIFT=1 set - skipping the config-turn gate." >&2
+    skip_cfgturn=1
+fi
+[ -n "$py" ] || skip_cfgturn=1
+[ -f "$cfgturn" ] || skip_cfgturn=1
+touches gui/ apps/ scripts/check-config-turn-guards.py || skip_cfgturn=1
+# No `[ -n "${pushed_shas# }" ]` guard, for gate 35's reason: that guard is for
+# gates that loop over `$pushed_shas`, and this one runs once over the
+# worktree.  A redundant guard would make `test-pre-push-gates.py`'s
+# guards-match-loops count disagree, which is the count that catches the real
+# omission.
+note_gate config-turn "$skip_cfgturn"
+
+cfgturn_failed=0
+if [ "$skip_cfgturn" != "1" ]; then
+    # The checker before its verdict, as gates 3-5 and 35 do.  This one's
+    # silent failure is the bad shape: a body-parser that found no function
+    # bodies would report a clean sweep over nothing, so the floor and the
+    # brace matching are both self-test cases.
+    if ! run_checker config-turn-selftest "$py" "$cfgturn" --selftest; then
+        echo "pre-push: check-config-turn-guards.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        cfgturn_failed=1
+    elif ! run_checker config-turn "$py" "$cfgturn"; then
+        cfgturn_failed=1
+    fi
+fi
+if [ "$cfgturn_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - a test drives an event loop without pinning the
+configuration directory, in a crate that also repoints it.
+
+The loop re-reads that directory every turn.  When the neighbouring test
+swaps it, this one decides the user changed their settings and redraws, and
+an assertion about how many frames were drawn fails.  It reproduces at well
+under one run in ten, so a red build looks like noise and a re-run looks
+like a fix.
+
+One line at the top of the test:
+
+    let _config_turn = settingsfile::testing::config_turn();
+
+It takes the same lock \`with_scratch_config\` holds, so the two take turns
+instead of overlapping.
+
+To push anyway:
+    ALLOW_CONFIG_TURN_DRIFT=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+
+# ---------------------------------------------------------------------------
 # The gate tally, printed here because here is after every gate.  See the note
 # where it used to live, above gate 19's history.
 # ---------------------------------------------------------------------------
@@ -5400,6 +5558,238 @@ n_ran=0
 n_skipped=0
 for _g in $gates_ran; do n_ran=$((n_ran + 1)); done
 for _g in $gates_skipped; do n_skipped=$((n_skipped + 1)); done
+
+# ---------------------------------------------------------------------------
+# Gate 48 -- accent-family text drawn without `ink()`.
+#
+# check-text-ink.py, which boot-test.sh already runs.  This adds it here for
+# the reason gate 43b was added: a check that only runs at boot is a check
+# whose failures are paid for by whoever boots next, and that is never the
+# person who wrote them.
+#
+# On 2026-09-17 two commits of mine reached origin/main green -- the gate is
+# not a pre-push one -- and lane A's next two release boots died in pre-flight
+# on them, at ~658s and ~2022s.  Every lane merging main was blocked until it
+# was fixed, and the fix was two lines in a file only this lane may write.  The
+# asymmetry is the argument: the cost of catching it here is nine seconds on a
+# push that already takes minutes, and the cost of not catching it is a
+# half-hour boot, for someone else, twice.
+#
+# `touches gui/ apps/` keeps it off pushes that cannot have broken it, so a
+# lane pushing kernel code never waits on it.
+# ---------------------------------------------------------------------------
+
+inktext="${repo_root:-.}/scripts/check-text-ink.py"
+skip_inktext=0
+# Bypass: ALLOW_TEXT_INK_DRIFT=1 git push origin <branch>
+if [ "${ALLOW_TEXT_INK_DRIFT:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_TEXT_INK_DRIFT=1 set - skipping the text-ink gate." >&2
+    skip_inktext=1
+fi
+[ -n "$py" ] || skip_inktext=1
+[ -f "$inktext" ] || skip_inktext=1
+touches gui/ apps/ scripts/check-text-ink.py || skip_inktext=1
+# No `pushed_shas` guard: this runs once over the worktree, as gates 35, 43b
+# and 47 do, and a redundant guard would make `test-pre-push-gates.py`'s
+# guards-match-loops count disagree.
+note_gate text-ink "$skip_inktext"
+
+inktext_failed=0
+if [ "$skip_inktext" != "1" ]; then
+    # The self-test first, as gates 3-5, 35 and 47 do.  This checker's silent
+    # failure is the bad shape: one that matched no text sites would report a
+    # clean sweep over nothing.
+    if ! run_checker text-ink-selftest "$py" "$inktext" --self-test; then
+        echo "pre-push: check-text-ink.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        inktext_failed=1
+    elif ! run_checker text-ink "$py" "$inktext"; then
+        inktext_failed=1
+    fi
+fi
+if [ "$inktext_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - text is drawn in an accent-family colour without
+going through \`ink()\`.
+
+The site is named above.  An accent hue drawn straight has whatever contrast
+that colour happens to have on whatever ground it lands on, which differs per
+theme; \`ink()\` is what decides a readable foreground for the surface the text
+is actually on.
+
+The tree's own fixer does it, and its diff is small enough to read:
+
+    python gui/appearance/ink-text.py --apply
+
+Note that the fixer and this gate are two different scripts with similar
+names.  Running \`ink-text.py\` with no \`--apply\` reports what it *would*
+change and exits 0, which reads like a clean tree and is not one.
+
+To push anyway:
+    ALLOW_TEXT_INK_DRIFT=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 49 -- text inked against overlay0.
+#
+# check-overlay0-ink.py, gate 48's sibling: 48 catches an accent hue drawn
+# without `ink()`, this one catches text inked against the wrong ground.  Both
+# already ran at boot and only at boot.
+#
+# What a gate here is actually for, which is worth stating because the obvious
+# reading is wrong.  It is not "catch it earlier for the author": lane A's
+# chain is clippy -> commit -> merge -> sweep -> boot, with push a later step,
+# so the pre-push battery has not run when their boot starts and moving a
+# checker here buys them nothing defensively.  What it buys is **containment**
+# -- one lane's breakage stops before it reaches the other two.  That is the
+# only good that justifies spending every lane's push time, and it is why the
+# `touches` guard below matters: the cost falls on the lane that can create
+# the failure and on nobody else.
+#
+# Why this one and not the other twenty-five.  A survey on 2026-09-17 found 26
+# of the 33 checkers boot-test runs for real are absent from pre-push, and the
+# instinct is to wire the lot.  Measured, they do not deserve it:
+#
+#     check-frame-needles         0.3s
+#     check-overlay0-ink          1.6s
+#     check-option-refusal       10.0s
+#     check-variant-lists        15.9s
+#     check-tick-wiring          28.6s
+#     check-live-counter-reads   92.6s
+#
+# Wholesale, that is about two and a half minutes added to every push of every
+# lane, to catch failures that are mostly not that lane's.  This one is 1.6s
+# and carries twelve self-test cases.
+#
+# check-frame-needles is cheaper still and is deliberately NOT here: it has no
+# self-test, and reports "I could not look" with a `return 2`, so it cannot
+# satisfy the self-test-before-verdict shape gates 3-5, 35, 47 and 48 use.
+# Fast is not the same as safe to gate on.
+# ---------------------------------------------------------------------------
+
+overlay0="${repo_root:-.}/scripts/check-overlay0-ink.py"
+skip_overlay0=0
+# Bypass: ALLOW_OVERLAY0_INK_DRIFT=1 git push origin <branch>
+if [ "${ALLOW_OVERLAY0_INK_DRIFT:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_OVERLAY0_INK_DRIFT=1 set - skipping the overlay0-ink gate." >&2
+    skip_overlay0=1
+fi
+[ -n "$py" ] || skip_overlay0=1
+[ -f "$overlay0" ] || skip_overlay0=1
+touches gui/ apps/ scripts/check-overlay0-ink.py || skip_overlay0=1
+# No `pushed_shas` guard: one run over the worktree, as gates 35, 43b, 47 and
+# 48 do.
+note_gate overlay0-ink "$skip_overlay0"
+
+overlay0_failed=0
+if [ "$skip_overlay0" != "1" ]; then
+    if ! run_checker overlay0-ink-selftest "$py" "$overlay0" --self-test; then
+        echo "pre-push: check-overlay0-ink.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        overlay0_failed=1
+    elif ! run_checker overlay0-ink "$py" "$overlay0"; then
+        overlay0_failed=1
+    fi
+fi
+if [ "$overlay0_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - text is inked against a ground it is not drawn
+on.
+
+The site is named above.  \`ink()\` picks a readable foreground for the surface
+underneath, so naming the wrong surface gives text whose contrast was computed
+against something else - which looks right on whichever theme it was written
+under and wrong on the others.
+
+To push anyway:
+    ALLOW_OVERLAY0_INK_DRIFT=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 50 -- a field written in production and read only by a test.
+#
+# `check-fields-written-never-read.py`, which lane A's sweep and the boot
+# battery already run.  This adds it here for the reason gates 43b, 48 and 49
+# were added, and on the strength of the same day's evidence: on 2026-09-17 a
+# commit of this lane's reached origin/main green and stopped lane A's sweep
+# on `library_note` -- a field this application set to say why it could not
+# read the library, and then showed to nobody.
+#
+# That is the second time in one day that work of this lane's went out green
+# from here and arrived red there, through the same hole: a checker this lane
+# owns, running everywhere except on the push that introduces the fault.  The
+# containment argument is the one that settled gate 48 -- the point is not to
+# protect the author, whose own tree is already fine, but to stop one lane's
+# breakage reaching the other two.
+#
+# It costs 20s, more than either sibling.  That is the whole cost, and it buys
+# not handing two other lanes a main they cannot build on.
+#
+# The self-test runs first, as gates 3-5, 35, 47, 48 and 49 do.  This
+# checker's `return 2` cases are both misuse -- an unrecognised option, a
+# missing directory -- rather than "I could not look", so a non-zero exit here
+# is always a real verdict; that is what makes it safe to gate on, and is the
+# distinction that keeps `check-frame-needles` out of this file.
+#
+# `touches gui/ apps/` keeps it off pushes that cannot have broken it.
+# ---------------------------------------------------------------------------
+
+wofields="${repo_root:-.}/scripts/check-fields-written-never-read.py"
+skip_wofields=0
+# Bypass: ALLOW_WRITE_ONLY_FIELDS=1 git push origin <branch>
+if [ "${ALLOW_WRITE_ONLY_FIELDS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_WRITE_ONLY_FIELDS=1 set - skipping the write-only-field gate." >&2
+    skip_wofields=1
+fi
+[ -n "$py" ] || skip_wofields=1
+[ -f "$wofields" ] || skip_wofields=1
+touches gui/ apps/ scripts/check-fields-written-never-read.py || skip_wofields=1
+# No `pushed_shas` guard: one run over the worktree, as gates 35, 43b, 47, 48
+# and 49 do.
+note_gate write-only-fields "$skip_wofields"
+
+wofields_failed=0
+if [ "$skip_wofields" != "1" ]; then
+    if ! run_checker write-only-fields-selftest "$py" "$wofields" --selftest; then
+        echo "pre-push: check-fields-written-never-read.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        wofields_failed=1
+    elif ! run_checker write-only-fields "$py" "$wofields"; then
+        wofields_failed=1
+    fi
+fi
+if [ "$wofields_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - a field is written in production and read by
+nothing but a test.
+
+The field is named above.  This is not what \`dead_code\` catches: a test
+counts as a read, and so does a \`derive(Debug)\`, so the compiler is content
+with a field nothing in the shipped program ever looks at.
+
+It is usually one of two things, and they want opposite fixes:
+
+  * something recorded for a reader that was never written -- a message set
+    and never displayed, a count kept and never shown.  Wire up the reader.
+    design-decisions 856: a thing is built when something obeys it, not when
+    something stores it.
+  * something genuinely finished with.  Delete the field.
+
+A test asserting the field was written is not a reader.  That is what the
+gate is distinguishing, and it is the case it was added for.
+
+    python scripts/check-fields-written-never-read.py
+    python scripts/check-fields-written-never-read.py --list
+
+To push anyway:
+    ALLOW_WRITE_ONLY_FIELDS=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
 
 echo "pre-push: $n_ran gate(s) ran, $n_skipped skipped." >&2
 [ "$n_ran" -gt 0 ] && echo "  ran:    ${gates_ran# }" >&2

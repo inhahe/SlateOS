@@ -1778,6 +1778,9 @@ struct Document {
     view_mode: ViewMode,
     /// Expanded paths in tree view.
     expanded_paths: Vec<Vec<PathSegment>>,
+    /// Counts content changes, so an edit reads as a redraw. See
+    /// [`invalidate_caches`](Self::invalidate_caches).
+    revision: u64,
     /// Selected tree node index.
     selected_node: usize,
     /// Scroll offset for tree view.
@@ -1815,6 +1818,7 @@ impl Document {
             view_mode: ViewMode::Tree,
             expanded_paths: Vec::new(),
             selected_node: 0,
+            revision: 0,
             tree_scroll: 0.0,
             raw_scroll: 0.0,
             indent: IndentStyle::Spaces2,
@@ -1892,10 +1896,19 @@ impl Document {
         yaml
     }
 
+    /// The document's content changed: drop the derived text and count it.
+    ///
+    /// `revision` is what makes an *edit* read as a redraw. Deleting a node or
+    /// committing a new value rewrites `input` and `parsed`, and neither is in
+    /// the redraw fingerprint -- a `1` edited to a `2` is the same length, so
+    /// even a cheap proxy like `input.len()` would miss it and the change
+    /// would sit on screen undrawn. Every content change already comes through
+    /// here, so one counter here is exact and costs nothing.
     fn invalidate_caches(&mut self) {
         self.formatted_cache = None;
         self.highlighted_cache = None;
         self.yaml_cache = None;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     fn run_diff(&mut self) {
@@ -1937,6 +1950,8 @@ struct App {
     search_index: usize,
     /// Whether search panel is visible.
     search_visible: bool,
+    /// Whether the shortcut list is up.
+    show_help: bool,
     /// Edit mode flag.
     edit_mode: bool,
     /// Edit buffer for value editing.
@@ -2058,6 +2073,86 @@ fn stats_table(columns: &[Column]) -> Table<'_> {
     Table::with_gap(columns, STATS_INSET - STATS_GAP, STATS_GAP)
 }
 
+/// Every key this program answers, and what it does.
+///
+/// Thirty-odd bindings across five views and nothing on screen naming one.
+/// `I` and `M` are the worst: they cycle the indent and toggle minification,
+/// they work only in the raw view, and a reader looking at pretty-printed JSON
+/// has no way to learn that the program can reformat it at all.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`, which reads each label with
+/// `guitk::shortcut` and presses every key it names.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("1 / 2 / 3", "Tree / raw text / YAML"),
+    ("4 / 5", "Statistics / diff"),
+    ("Up / Down", "Move through the tree"),
+    ("Left", "Collapse this node, or go to its parent"),
+    ("Right", "Expand this node, or go to its first child"),
+    ("Enter / Space", "Expand or collapse"),
+    ("PageUp / PageDown", "A screen at a time"),
+    ("Home / End", "First / last node"),
+    ("Delete", "Remove this node"),
+    ("I", "Cycle the indent, in the raw view"),
+    ("M", "Minify or pretty-print, in the raw view"),
+    ("Ctrl+O", "Open a file"),
+    ("Ctrl+N / Ctrl+W", "New tab / close this tab"),
+    ("Ctrl+Tab", "Next tab"),
+    ("Ctrl+F", "Find"),
+    ("Ctrl+I", "Match case while searching"),
+    ("Ctrl+G", "Find the next match"),
+    ("Ctrl+E", "Editing on or off"),
+    ("F1 / ?", "This list"),
+];
+
+/// Everything that decides whether a frame is worth drawing.
+///
+/// `handle_key` reports nothing about whether it did anything, so this is
+/// compared around every event and the answer *is* `EventResult`. A field
+/// missing from here is a change the user cannot see: the picker once opened
+/// invisibly for that reason, and so -- until the shortcut list's guard test
+/// pressed `Enter` and found nothing happened -- did expanding a node.
+///
+/// A struct rather than the tuple this was. Sixteen fields is past the twelve
+/// Rust implements `PartialEq` for, and it was past readable long before that:
+/// `(usize, String, usize, bool, bool, bool, String, usize, ...)` gives a
+/// reader adding a field no way to check they put it in the right place.
+#[derive(Clone, PartialEq)]
+struct Fingerprint {
+    active_tab: usize,
+    search_query: String,
+    search_index: usize,
+    search_visible: bool,
+    /// Whether the search is case-sensitive, which the "Aa" button draws.
+    search_case_sensitive: bool,
+    edit_mode: bool,
+    input_focused: bool,
+    edit_buffer: String,
+    cursor_pos: usize,
+    /// Document state: the selection, and the view it is shown in.
+    selected_node: usize,
+    view_mode: ViewMode,
+    /// Opening or closing the picker is a redraw.
+    picker_open: bool,
+    /// ...and so is raising or dismissing the shortcut list.
+    show_help: bool,
+    /// The *count* of expanded paths, not the paths: one event toggles at most
+    /// one, so the count always moves, and cloning a `Vec<Vec<PathSegment>>`
+    /// every keystroke to learn that costs real time for no more information.
+    /// An operation that expanded one path and collapsed another in a single
+    /// event would defeat it, and the clone is then the honest replacement.
+    expanded: usize,
+    /// Content changes -- a deleted node, a committed value -- which nothing
+    /// else here can see: `parsed` and `input` are not fields of this, and a
+    /// same-length edit moves no other number.
+    revision: u64,
+    /// Scrolling moved the view, which the old tuple's comment claimed was
+    /// covered and was not.
+    tree_scroll: f32,
+    raw_scroll: f32,
+    diff_scroll: f32,
+}
+
 impl App {
     fn new() -> Self {
         // Opens empty. It used to load `SAMPLE_JSON` -- a document describing
@@ -2078,6 +2173,7 @@ impl App {
             search_results: Vec::new(),
             search_index: 0,
             search_visible: false,
+            show_help: false,
             edit_mode: false,
             edit_buffer: String::new(),
             editing_path: None,
@@ -2183,6 +2279,27 @@ impl App {
     ) {
         use guitk::event::Key;
 
+        // The shortcut list, before anything else -- but **not** while the
+        // find bar or a value edit is open, because both of those take typed
+        // characters and `?` belongs in somebody's query or their string.
+        //
+        // That gate is here because the first survey of this app said it had
+        // no text entry at all: it takes characters as an `Option<char>`
+        // argument to this function rather than through `key.text` or
+        // `typed()`, so a search for either found nothing. The keystroke does
+        // become text; it just arrives by a road the search did not cover.
+        let typing = self.search_visible || self.editing_path.is_some();
+        if !typing {
+            if key == Key::F1 || (key == Key::Slash && modifiers.shift) {
+                self.show_help = !self.show_help;
+                return;
+            }
+            if key == Key::Escape && self.show_help {
+                self.show_help = false;
+                return;
+            }
+        }
+
         // Global shortcuts
         if modifiers.ctrl {
             match key {
@@ -2201,6 +2318,18 @@ impl App {
                 }
                 Key::F => {
                     self.search_visible = !self.search_visible;
+                    return;
+                }
+                // The "Aa" button the search bar draws, whose colour has
+                // tracked this flag since it was written and whose flag had
+                // no writer: `search_case_sensitive` was `false` at
+                // construction, passed to `search_json`, drawn twice, and
+                // changeable only from a test. `Ctrl+I` is what
+                // `apps/hexeditor` uses for the same question.
+                // Found by `scripts/frozen-flag-survey.py`.
+                Key::I => {
+                    self.search_case_sensitive = !self.search_case_sensitive;
+                    self.perform_search();
                     return;
                 }
                 Key::G => {
@@ -2837,44 +2966,28 @@ impl App {
     ///
     /// A tuple of small copies rather than a hash: a hash could collide and
     /// silently drop a redraw.
-    fn state_fingerprint(
-        &self,
-    ) -> (
-        usize,
-        String,
-        usize,
-        bool,
-        bool,
-        bool,
-        String,
-        usize,
-        usize,
-        ViewMode,
-        bool,
-    ) {
+    fn state_fingerprint(&self) -> Fingerprint {
         let doc = self.documents.get(self.active_tab);
-        (
-            self.active_tab,
-            self.search_query.clone(),
-            self.search_index,
-            self.search_visible,
-            self.edit_mode,
-            self.input_focused,
-            self.edit_buffer.clone(),
-            self.cursor_pos,
-            // Scrolling and expanding are document state, and a wheel event
-            // that moved the view has to read as a redraw.
-            doc.map_or(0, |d| d.selected_node),
-            doc.map_or(ViewMode::Tree, |d| d.view_mode),
-            // Opening or closing the picker is a redraw. Without this the
-            // dialog would be invisible until something else changed state:
-            // `handle_key` reports nothing, so this tuple is the only thing
-            // deciding whether a frame is drawn. `apps/hexeditor` nearly
-            // shipped the same invisible-picker bug today by a different
-            // route, which is why this line has a comment instead of being
-            // one more field in a tuple.
-            self.picker.is_open(),
-        )
+        Fingerprint {
+            active_tab: self.active_tab,
+            search_query: self.search_query.clone(),
+            search_index: self.search_index,
+            search_visible: self.search_visible,
+            search_case_sensitive: self.search_case_sensitive,
+            edit_mode: self.edit_mode,
+            input_focused: self.input_focused,
+            edit_buffer: self.edit_buffer.clone(),
+            cursor_pos: self.cursor_pos,
+            selected_node: doc.map_or(0, |d| d.selected_node),
+            view_mode: doc.map_or(ViewMode::Tree, |d| d.view_mode),
+            picker_open: self.picker.is_open(),
+            show_help: self.show_help,
+            expanded: doc.map_or(0, |d| d.expanded_paths.len()),
+            revision: doc.map_or(0, |d| d.revision),
+            tree_scroll: doc.map_or(0.0, |d| d.tree_scroll),
+            raw_scroll: doc.map_or(0.0, |d| d.raw_scroll),
+            diff_scroll: doc.map_or(0.0, |d| d.diff_scroll),
+        }
     }
 
     /// Named `render_commands` and not `render`: at equal arity an inherent
@@ -4522,6 +4635,19 @@ impl oswindow::app::App for App {
         // Last, so it is above everything -- the same order in which
         // `handle_event` gives it the click.
         commands.extend(self.picker.render(&self.palette, width, height));
+
+        // And the shortcut list over even that, because it is the one thing a
+        // reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut commands,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
         RenderTree { commands }
     }
 }
@@ -4649,6 +4775,196 @@ mod tests {
             key: k,
             pressed: true,
             modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// `Consumed` means something here that it does not mean in every app:
+    /// `handle_event` compares a `state_fingerprint` around the call, so a key
+    /// only reads as consumed if it actually changed the program. That makes
+    /// this a stronger check than the same test elsewhere -- and it is why
+    /// `show_help` had to join that fingerprint, or `F1` would have flipped it,
+    /// the tuple would have compared equal, and the card would have been open
+    /// and undrawn.
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table beside it here, which would be a third copy of the same fact.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states().iter_mut().any(|app| {
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Documents chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<App> {
+        // Two tabs, tree view, selection at the top.
+        let plain = two_tabs();
+
+        // ...with the selection moved down, so `Up`, `Home` and the keys that
+        // go back have somewhere to go.
+        let mut moved = two_tabs();
+        moved.handle_event(&press(Key::Down));
+
+        // ...in the raw view, the one place `I` and `M` mean anything.
+        let mut raw = two_tabs();
+        raw.handle_event(&press(Key::Num2));
+
+        // ...with editing on *and the selection on a child*, which is the one
+        // state `Delete` can remove a node in: the root has no path, and
+        // `delete_at_path` declines to delete the document itself.
+        let mut editing = two_tabs();
+        editing.handle_event(&press_ctrl(Key::E));
+        editing.handle_event(&press(Key::Right));
+        editing.handle_event(&press(Key::Down));
+
+        // ...with a search that has matches, the one state `Ctrl+G` can step
+        // through: with no matches `search_next` moves nothing, and nothing
+        // moving is how this app reports `Ignored`.
+        //
+        // Its own document, with *three* matches: `two_tabs` holds one `a`
+        // each, and stepping from the only match wraps straight back to it, so
+        // nothing moves and the app rightly says nothing happened.
+        let mut searching = App::new();
+        searching.documents.clear();
+        let text = r#"{"aa":1,"ab":2,"ac":3}"#;
+        let mut doc = Document::new(0, "search".to_owned());
+        doc.input = text.to_owned();
+        doc.parsed = parse_json(text).ok();
+        searching.documents.push(doc);
+        searching.active_tab = 0;
+        searching.handle_event(&press_ctrl(Key::F));
+        searching.handle_event(&typed('a'));
+
+        // ...in a view other than the tree, so `1` has one to return from:
+        // setting the view already in force changes nothing, and nothing
+        // changing is how this app reports `Ignored`.
+        let mut elsewhere = two_tabs();
+        elsewhere.handle_event(&press(Key::Num4));
+
+        vec![plain, moved, raw, editing, searching, elsewhere]
+    }
+
+    /// **The "Aa" button can be turned on, and the search follows it.**
+    ///
+    /// `search_case_sensitive` was `false` at construction, passed to
+    /// `search_json`, drawn twice as the colour of a button, and written only
+    /// by a test. The toolbar showed a case-sensitivity control that could not
+    /// be operated.
+    ///
+    /// Asserts the search result, not the flag: a toggle that flips a boolean
+    /// the matcher ignores is the defect `apps/regextester`'s `multiline` had,
+    /// and only a changed answer tells the two apart.
+    #[test]
+    fn matching_case_can_be_turned_on_and_changes_the_answer() {
+        let mut app = App::new();
+        app.documents.clear();
+        let text = r#"{"Name":"x","name":"y"}"#;
+        let mut doc = Document::new(0, "case".to_owned());
+        doc.input = text.to_owned();
+        doc.parsed = parse_json(text).ok();
+        app.documents.push(doc);
+        app.active_tab = 0;
+
+        app.handle_event(&press_ctrl(Key::F));
+        for c in "Name".chars() {
+            app.handle_event(&typed(c));
+        }
+        let insensitive = app.search_results.len();
+        assert!(insensitive >= 2, "the fixture should match both spellings");
+
+        assert_eq!(
+            app.handle_event(&press_ctrl(Key::I)),
+            EventResult::Consumed,
+            "Ctrl+I did not read as a redraw, so the button would not repaint"
+        );
+        assert!(app.search_case_sensitive, "the flag did not move");
+        assert!(
+            app.search_results.len() < insensitive,
+            "the search returned the same answer with matching on: {} then {}",
+            insensitive,
+            app.search_results.len()
+        );
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// The guard above reads the list against the handler; this reads it
+    /// against the screen. `apps/rssreader`'s overlay drew twenty of its
+    /// twenty-one rows for weeks, because its box was a third quantity
+    /// agreeing with neither the list nor the handler.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = two_tabs();
+        assert!(
+            !help_text(&mut app).contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        assert_eq!(
+            app.handle_event(&press(Key::F1)),
+            EventResult::Consumed,
+            "raising the list did not read as a redraw, so it would be invisible"
+        );
+        let shown = help_text(&mut app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !help_text(&mut app).contains("F1 or ? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// A `?` typed into the find bar stays a `?`.
+    #[test]
+    fn the_help_key_does_not_take_a_character_out_of_a_search() {
+        let mut app = two_tabs();
+        app.handle_event(&press_ctrl(Key::F));
+        assert!(app.search_visible, "Ctrl+F did not open the find bar");
+        app.handle_event(&typed('?'));
+        assert!(
+            !help_text(&mut app).contains("F1 or ? closes this"),
+            "the help key was taken out of somebody's query"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn help_text(app: &mut App) -> String {
+        let (w, h) = (app.width, app.height);
+        app.render(w, h)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// A key with Ctrl held.
+    fn press_ctrl(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.ctrl = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
             text: String::new(),
         })
     }

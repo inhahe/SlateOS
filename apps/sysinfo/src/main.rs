@@ -621,6 +621,22 @@ struct ToolbarLayout {
     copy: Rect,
 }
 
+/// The keys this window answers, as a reader sees them.
+///
+/// `Ctrl+C` is the row that matters: it reports that there is no clipboard
+/// to copy to, which is a useful thing to be told and a useless thing to
+/// discover by guessing the key.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Move through the entries"),
+    ("Left / Right", "Previous or next section"),
+    ("PageUp / PageDown", "Move a screenful"),
+    ("Enter", "Go to the first search result"),
+    ("Ctrl+F", "Jump to the search box"),
+    ("Ctrl+C", "Copy -- and say why it cannot"),
+    ("Ctrl+E", "Export the report to a file"),
+];
+
 pub struct SysInfoState {
     /// The save picker, shared with sixteen other applications.
     pub picker: FilePicker,
@@ -667,6 +683,8 @@ pub struct SysInfoState {
     /// Search query text.
     pub search_text: String,
     /// Whether search box is focused.
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub search_focused: bool,
     /// Status message.
     pub status_message: String,
@@ -772,6 +790,7 @@ impl SysInfoState {
             window_height: DEFAULT_HEIGHT,
             hovered_tree_row: None,
             search_text: String::new(),
+            show_help: false,
             search_focused: false,
             status_message: String::from("Ready"),
             cpu_info: provider.query_cpu().ok(),
@@ -1765,6 +1784,17 @@ impl SysInfoState {
             return EventResult::Ignored;
         }
 
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         // Search box input handling.
         if self.search_focused {
             return self.handle_search_key(key);
@@ -1985,6 +2015,17 @@ impl SysInfoState {
             self.picker
                 .render(&self.palette, self.window_width, self.window_height),
         );
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut tree,
+                &self.palette,
+                (self.window_width, self.window_height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         tree
     }
@@ -3523,6 +3564,93 @@ mod tests {
         assert!(
             provider.query_startup().is_err(),
             "an unreadable file reported as a machine with nothing starting up"
+        );
+    }
+
+    fn plain(key: Key) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                // Two states: `Enter` jumps to the first search result and
+                // correctly reports nothing to do when no search has been
+                // typed. My row read "Open the entry" until this asked what
+                // the arm does -- the sixth row in this queue I wrote from
+                // the key rather than from the code.
+                let answered = [false, true].into_iter().any(|searched| {
+                    let mut app = SysInfoState::new();
+                    if searched {
+                        // A property to find, put there rather than assumed:
+                        // this machine has no /proc, so every category the
+                        // provider fills is empty and a search over them
+                        // matches nothing whatever the query is.
+                        // Focused, not merely non-empty: `Enter` lives in
+                        // `handle_search_key`, so it is answered while the
+                        // box has focus and nowhere else. And a property to
+                        // find, put there rather than assumed -- this machine
+                        // has no /proc, so every category the provider fills
+                        // is empty whatever the query is.
+                        app.env_vars
+                            .push((String::from("CARDKEY"), String::from("present")));
+                        app.search_text = String::from("cardkey");
+                        app.search_focused = true;
+                    }
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing acts behind it.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &SysInfoState| -> Vec<String> {
+            app.render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut app = SysInfoState::new();
+        assert!(
+            !drawn(&app).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_event(&plain(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&drawn(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let focused = app.search_focused;
+        app.handle_event(&ctrl(Key::F));
+        assert_eq!(
+            app.search_focused, focused,
+            "Ctrl+F focused the search box through the shortcut card"
+        );
+
+        app.handle_event(&plain(Key::F1));
+        app.handle_event(&ctrl(Key::F));
+        assert_ne!(
+            app.search_focused, focused,
+            "control: Ctrl+F does nothing even with the card down"
         );
     }
 

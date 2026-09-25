@@ -136,6 +136,25 @@ ALLOWED: dict[str, str] = {
         'attaches vda as a raw swap disk, so `fs::fat::init("vda")` returns an '
         "error there and the suite is skipped; it runs on a real FAT boot. This "
         "entry ends the day the harness attaches a FAT-formatted vda.",
+    "[spawn] Running userspace netstack daemon (ring 3) integration test...":
+        "A usable network at boot. The rung IS called every boot -- its "
+        "conditional `!netstack_client::userspace_enabled()` is true by "
+        "default -- and it declines INSIDE, before its banner, when "
+        "`!ifinfo.up || ip == 0.0.0.0 || gateway == 0.0.0.0`. Its proof is an "
+        "ARP round-trip with the gateway, so it needs a bound address and a "
+        "gateway, which the boot test's QEMU user-mode networking does not "
+        "configure. OBSERVABLE: the SKIP line prints up=, ip= and gw= on "
+        "every boot, so the reason is in the serial rather than inferred. "
+        "This entry ends the day the harness boots with DHCP or a static "
+        "address and gateway.",
+    "[spawn] Running netstack DNS-over-IPC (ring 3) integration test...":
+        "The same network as the daemon rung above, for the same reason and "
+        "in the same way: it forwards a DNS resolve to the daemon over the "
+        "Service Registry, so it needs the daemon to have come up, which "
+        "needs the address and gateway. Declared separately rather than "
+        "folded in, because the two can start running on different days -- "
+        "the daemon could come up while DNS-over-IPC still failed, and one "
+        "entry for both would hide that.",
 }
 
 

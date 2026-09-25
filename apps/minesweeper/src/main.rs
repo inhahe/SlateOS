@@ -113,11 +113,12 @@ pub const CLOCK_MS: u64 = 1_000;
 /// The keys the board answers, drawn along the bottom.
 pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Arrows", "move"),
-    ("Space", "reveal"),
+    ("Space / Enter", "reveal"),
     ("F", "flag"),
     ("C", "chord"),
     ("D", "level"),
-    ("N", "new"),
+    ("Ctrl+1-3", "level directly"),
+    ("N / F2", "new"),
 ];
 
 // ── Steps and neighbours ───────────────────────────────────────────────────
@@ -1568,6 +1569,7 @@ mod tests {
     use super::*;
     use guitk::event::Modifiers;
     use guitk::probe::{self, ctrl, press, press_with};
+    use guitk::shortcut::keystrokes;
     use std::collections::HashSet;
 
     // ── Helpers ────────────────────────────────────────────────────────────
@@ -3718,6 +3720,62 @@ mod tests {
         }
     }
 
+    /// **Every key the footer names is one the board answers.**
+    ///
+    /// `the_footer_names_the_keys_that_do_something` reads the drawn strings
+    /// and finds all six, which says the footer is *complete* and nothing at
+    /// all about whether it is *true*: a row naming a key nothing handles
+    /// passes it exactly as loudly. `apps/rssreader` shipped an overlay of
+    /// twenty-one shortcuts of which about four worked, and three of its rows
+    /// named operations that existed nowhere in the crate. Both halves are
+    /// needed, and this is the other one.
+    ///
+    /// The property is "some reachable state answers this key", not "this key
+    /// is taken right now". Several of these decline on purpose -- `C` on a
+    /// number whose flags are missing, an arrow at the edge -- and declining
+    /// from its own arm is answering. The defect to catch is a key that falls
+    /// through to the catch-all on every board.
+    #[test]
+    fn every_key_the_footer_names_does_something() {
+        for &(label, what) in SHORTCUTS {
+            for stroke in keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = states().into_iter().any(|mut a| {
+                    handle_event(&mut a, &Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the footer names {label:?} for {what:?}, and no board answers it"
+                );
+            }
+        }
+    }
+
+    /// Boards chosen so that between them every key in the footer has work.
+    ///
+    /// A key none of the three takes is a key nothing acts on.
+    fn states() -> Vec<MinesweeperApp> {
+        // Dealt but untouched, cursor off the edges so all four arrows move
+        // and every cell is still coverable.
+        let mut fresh = game(7);
+        walk_cursor_to(&mut fresh, 2, 2);
+
+        // Opened, so the flood has run and there is something revealed.
+        let opened = started(7);
+
+        // A satisfied number under the cursor, which is the one state a chord
+        // will act in.
+        let chordable = (0..80u64)
+            .find_map(|seed| {
+                let mut a = started(seed);
+                let (r, c) = a_satisfied_number(&mut a)?;
+                walk_cursor_to(&mut a, r, c);
+                Some(a)
+            })
+            .expect("a board with a satisfied number to chord");
+
+        vec![fresh, opened, chordable]
+    }
+
     #[test]
     fn the_footer_lays_its_hints_out_in_a_row_rather_than_in_a_heap() {
         // Reading the strings back proves every hint was *drawn*; it says
@@ -3754,42 +3812,24 @@ mod tests {
         }
     }
 
-    #[test]
-    fn every_key_the_footer_advertises_is_a_key_the_board_answers() {
-        // The footer is a promise. A line in it naming a key that does nothing
-        // is worse than no line at all.
-        for &(k, _) in SHORTCUTS {
-            let mut a = started(110);
-            let event = match k {
-                "Arrows" => press(Key::Right),
-                "Space" => press(Key::Space),
-                "F" => press(Key::F),
-                "C" => press(Key::C),
-                "D" => press(Key::D),
-                "N" => press(Key::N),
-                other => panic!("the footer advertises {other}, which no test knows"),
-            };
-            // Space, F and C each act on the cell under the cursor, so put the
-            // cursor somewhere they have work to do: C wants a satisfied
-            // number, Space and F want a cell that is still covered.
-            let want = if k == "C" {
-                a_satisfied_number(&mut a).expect("a number")
-            } else {
-                *all_cells(&a)
-                    .iter()
-                    .find(|&&(r, c)| !a.is_revealed(r, c))
-                    .expect("a covered cell")
-            };
-            if matches!(k, "Space" | "F" | "C") {
-                walk_cursor_to(&mut a, want.0, want.1);
-            }
-            assert_eq!(
-                probe::key(&mut a, &event),
-                EventResult::Consumed,
-                "the footer advertises {k}, which does nothing"
-            );
-        }
-    }
+    // `every_key_the_footer_advertises_is_a_key_the_board_answers` was here and
+    // is deleted. It did the same job as
+    // `every_key_the_footer_names_does_something` above, with one difference:
+    // it mapped each footer label to a key through a `match` written beside it
+    // -- "Arrows" => press(Key::Right), "Space" => press(Key::Space), and so on
+    // -- and panicked on any label it did not recognise.
+    //
+    // That table was a third copy of the shortcut list, and it behaved like
+    // one. Widening the footer to name `Space / Enter`, `Ctrl+1-3` and
+    // `N / F2` -- three sets of keys the board has always answered and the
+    // footer never mentioned -- broke this test and nothing else, because the
+    // table had to learn every label separately. design-decisions 863 names
+    // exactly this: the label is read by `guitk::shortcut` rather than matched
+    // against a table written beside it, since that table drifts from both of
+    // the other two.
+    //
+    // The test above covers the same property and parses the label instead, so
+    // nothing is lost by the deletion.
 
     #[test]
     fn the_footer_drops_the_hints_that_do_not_fit_rather_than_running_off_the_edge() {

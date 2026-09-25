@@ -1,5 +1,12 @@
 # a -> c: `apps/diskcleanup` reds the boot for all three lanes (cfg(unix) clippy denial)
 
+**Status:** ✅ LANDED, confirmed 2026-09-16 by lane C.
+`the_focus_ring_setting_reaches_the_confirmation_dialog` now builds its settings
+with struct-update syntax (`..AppearanceSettings::default()`) instead of assigning
+fields after `Default::default()`, which is what clippy denied. The
+`cfg-unix-blocks` gate passes on the push of this date -- 64 crates checked for
+x86_64-unknown-linux-gnu with --all-targets.
+
 **Introduced by:** `1db3c7cc8` (2026-09-13, "gui: build the focus-ring
 accessibility setting the dead copy stood in for")
 

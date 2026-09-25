@@ -337,8 +337,33 @@ pub struct KeyFrame<'a> {
     pub key_data: &'a [u8],
 }
 
+/// A parsed EAPOL-Key frame, together with the octets its MIC covers.
+///
+/// Returned by [`KeyFrame::parse_frame`]. The point of pairing the two is that
+/// the MIC range is computed **once**, by the code that just read the header,
+/// instead of being reconstructed by every caller. An EAPOL frame rides inside
+/// an Ethernet or 802.11 data frame and is padded to that frame's minimum
+/// length, so the buffer a driver hands you is routinely longer than the octets
+/// the sender hashed; two callers trimming separately are two chances to
+/// disagree about where the frame ends. Both trees that wrote that trim by hand
+/// got it wrong at least once, which is why this type exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParsedFrame<'a> {
+    /// The parsed body.
+    pub key: KeyFrame<'a>,
+    /// **The exact octets the MIC covers** -- the frame truncated to the length
+    /// its own header declares. Pass this to [`crate::kdf::verify_mic`], never
+    /// the caller's buffer, which may carry padding the sender did not hash.
+    pub hashed: &'a [u8],
+}
+
 impl<'a> KeyFrame<'a> {
     /// Parse an EAPOL-Key *body* (that is, the output of [`body`]).
+    ///
+    /// [`parse_frame`](Self::parse_frame) is the better entry point for a
+    /// frame received off the wire: it hands back the octets the MIC covers
+    /// so the caller does not reconstruct them. Reach for this one only when
+    /// the body is genuinely all you have.
     ///
     /// `mic_len` comes from [`mic_len_for_akm`] for the AKM that was
     /// negotiated during association — it is not discoverable from the frame.
@@ -375,6 +400,50 @@ impl<'a> KeyFrame<'a> {
             rsc,
             mic,
             key_data,
+        })
+    }
+
+    /// Parse a whole EAPOL frame, returning the body **and the octets the MIC
+    /// covers**.
+    ///
+    /// Prefer this to [`parse`](Self::parse). It takes the frame as it arrived
+    /// off the wire, so the caller never computes the MIC range by hand -- see
+    /// [`ParsedFrame`] for why that matters. `mic_len` is as for
+    /// [`parse`](Self::parse).
+    ///
+    /// Returns `None` for everything [`parse`](Self::parse) rejects, and also
+    /// when the header's Packet Type is not [`packet_type::KEY`].
+    ///
+    /// That type check earns its place by rejecting a genuine EAPOL-Start or
+    /// EAPOL-Logoff -- both real things on the wire -- instead of parsing one as
+    /// far as its length allows. **It is not, however, a complete defence
+    /// against handing this function a body by mistake**, and the distinction
+    /// is worth stating because it is tempting to assume otherwise. Octet 1 of
+    /// a *body* is the high half of Key Information, so it lands where the
+    /// Packet Type is read; for messages 1, 2 and 3 and group message 1 that
+    /// octet is `0x00`, `0x01` or `0x13` and the check rejects them by rule.
+    /// But message 4 carries `PAIRWISE | KEY_MIC | SECURE` (`0x0308`) and group
+    /// message 2 carries `KEY_MIC | SECURE` (`0x0300`) -- high byte `0x03`,
+    /// which *is* [`packet_type::KEY`]. Those two are still caught, because
+    /// octets 2-3 of a body read as a five-figure body length that overruns the
+    /// buffer, but they are caught by arithmetic rather than by rule. Only a
+    /// type distinction between a frame and a body would close that properly.
+    #[must_use]
+    pub fn parse_frame(frame: &'a [u8], mic_len: usize) -> Option<ParsedFrame<'a>> {
+        let hdr = Header::parse(frame)?;
+        if hdr.packet_type != packet_type::KEY {
+            return None;
+        }
+        let end = HEADER_LEN.checked_add(usize::from(hdr.body_len))?;
+        let hashed = frame.get(..end)?;
+        // Deriving the body from `hashed` rather than from `frame` is what
+        // makes the two quantities one computation: there is no arithmetic
+        // here that could yield a body of one length and a MIC range of
+        // another. `hashed.len() == end >= HEADER_LEN`, so this cannot fail.
+        let body = hashed.get(HEADER_LEN..)?;
+        Some(ParsedFrame {
+            key: Self::parse(body, mic_len)?,
+            hashed,
         })
     }
 
@@ -806,6 +875,108 @@ mod tests {
             );
         }
         assert!(KeyFrame::parse(body, MIC_LEN_DEFAULT).is_some());
+    }
+
+    #[test]
+    fn parse_frame_hands_back_the_octets_the_mic_covers_not_the_padding() {
+        // The whole point of `parse_frame`: the caller never computes this
+        // range, so it cannot disagree with the range the parser used.
+        let (buf, n) = m2_frame(&[48, 2, 1, 0]);
+        let mut padded = [0u8; 256];
+        padded[..n].copy_from_slice(&buf[..n]);
+        for (i, b) in padded.iter_mut().enumerate().take(n + 20).skip(n) {
+            *b = u8::try_from(i & 0xFF).expect("masked");
+        }
+
+        let parsed = KeyFrame::parse_frame(&padded, MIC_LEN_DEFAULT).expect("parses");
+        assert_eq!(
+            parsed.hashed.len(),
+            n,
+            "hashed must stop where the header says"
+        );
+        assert_eq!(parsed.hashed, &buf[..n]);
+        assert_eq!(parsed.key.key_data, &[48, 2, 1, 0]);
+
+        // And it agrees with the two-step it replaces, on the same buffer.
+        let body = body(&padded).expect("body");
+        assert_eq!(
+            parsed.key,
+            KeyFrame::parse(body, MIC_LEN_DEFAULT).expect("parses")
+        );
+    }
+
+    #[test]
+    fn an_eapol_start_or_logoff_is_refused_by_the_key_frame_parser() {
+        // Both are real frames on the wire. Before the Packet Type check they
+        // parsed as far as their length allowed, which for a Start carrying a
+        // key-frame-shaped body means "successfully".
+        let (mut buf, n) = m2_frame(&[]);
+        for ty in [
+            packet_type::START,
+            packet_type::LOGOFF,
+            packet_type::EAP_PACKET,
+        ] {
+            buf[1] = ty;
+            assert_eq!(
+                KeyFrame::parse_frame(&buf[..n], MIC_LEN_DEFAULT),
+                None,
+                "packet type {ty} must not parse as an EAPOL-Key frame"
+            );
+        }
+        buf[1] = packet_type::KEY;
+        assert!(KeyFrame::parse_frame(&buf[..n], MIC_LEN_DEFAULT).is_some());
+    }
+
+    #[test]
+    fn a_message_2_body_passed_as_a_frame_is_refused_by_both_checks() {
+        // Deliberately *not* named after the Packet Type check. This test was
+        // first written as "refused by the packet_type check" and it passed
+        // with that check deleted -- the length overrun was doing the work and
+        // the name was a claim the assertion could not see. What it can
+        // honestly pin is that both checks independently refuse this shape,
+        // which is what makes message 4 (the next test) the interesting case.
+        let (buf, n) = m2_frame(&[48, 2, 1, 0]);
+        let body = body(&buf[..n]).expect("body");
+        let hdr = Header::parse(body).expect("four octets");
+
+        // Octet 1 of a body is the high half of Key Information, which lands
+        // where a frame carries its Packet Type. For message 2 it is 0x01.
+        assert_eq!(hdr.packet_type, 0x01);
+        assert_ne!(hdr.packet_type, packet_type::KEY);
+        // And octets 2-3 read as a length that overruns.
+        assert!(usize::from(hdr.body_len) > body.len());
+
+        assert_eq!(KeyFrame::parse_frame(body, MIC_LEN_DEFAULT), None);
+    }
+
+    #[test]
+    fn a_message_4_body_passed_as_a_frame_is_caught_by_length_not_by_type() {
+        // The gap `parse_frame`'s doc comment admits, pinned here so it cannot
+        // be quietly believed away: message 4 and group message 2 carry a Key
+        // Information whose high byte is 0x03, which *is* `packet_type::KEY`.
+        // The type check passes on those two and the length is what rejects
+        // them. A future reader tightening this function should know which of
+        // the two checks is actually load-bearing here.
+        let (mut buf, n) = m2_frame(&[]);
+        let ki = u16::from(key_info::VERSION_HMAC_SHA1_AES)
+            | key_info::PAIRWISE
+            | key_info::KEY_MIC
+            | key_info::SECURE;
+        assert_eq!(ki, 0x030A, "message 4's Key Information");
+        buf[HEADER_LEN + 1..HEADER_LEN + 3].copy_from_slice(&ki.to_be_bytes());
+        let body = body(&buf[..n]).expect("body");
+
+        // The type check does not fire.
+        let hdr = Header::parse(body).expect("four octets");
+        assert_eq!(hdr.packet_type, packet_type::KEY);
+        // The length does.
+        assert!(
+            usize::from(hdr.body_len) > body.len(),
+            "{} must overrun {}",
+            hdr.body_len,
+            body.len()
+        );
+        assert_eq!(KeyFrame::parse_frame(body, MIC_LEN_DEFAULT), None);
     }
 
     #[test]

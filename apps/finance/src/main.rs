@@ -8,6 +8,15 @@
 //!
 //! Track income and expenses across categories, set budgets, view spending
 //! trends, manage accounts, and get financial summaries.
+//!
+//! **This program cannot record your finances, and the window says so.** It
+//! has no filesystem access; `add_account`, `add_transaction` and `set_budget`
+//! exist and have no production caller, so nothing above can actually be done.
+//! It opened on an invented Main Checking of 3,500 and Savings of 12,000 until
+//! 2026-09-15, and nothing replaced them.
+//!
+//! The list above is what the layouts draw when something supplies a model,
+//! which today only tests do.
 
 use appearance::Palette;
 use appearance::Surface;
@@ -323,6 +332,39 @@ struct FinanceApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+}
+
+/// Everything that decides whether a frame is worth drawing.
+///
+/// `handle_key` reports nothing about whether it did anything, so this is
+/// compared around every event and the answer *is* `EventResult`. A field
+/// missing from here is a change the user cannot see.
+///
+/// `search_query` was missing. Typing is safe -- that path answers `Consumed`
+/// outright, ahead of this comparison -- but `Backspace` comes through
+/// `handle_key`, changes only the query, and so answered `Ignored`: the search
+/// bar draws the query with a caret after it, and the deleted character stayed
+/// on screen. One half of an edit repainting and the other half not is worse
+/// than neither, because it reads as the key having failed.
+///
+/// A struct rather than the tuple this was. Seven fields was still legible and
+/// eight is where it stops being, and `apps/jsonviewer` and `apps/flashcards`
+/// both reached the same shape the same day -- one because Rust implements
+/// `PartialEq` for tuples only up to twelve, the other because clippy refused
+/// eleven. A reader adding a field to a positional list has no way to check
+/// they put it in the right place, which is how all three came to be missing
+/// one.
+#[derive(Clone, Debug, PartialEq)]
+struct Fingerprint {
+    screen: Screen,
+    selected_id: Option<u32>,
+    search_active: bool,
+    /// What is in the search box, not merely that it is open.
+    search_query: String,
+    transactions: usize,
+    category_filter: Option<Category>,
+    year: u16,
+    month: u8,
 }
 
 impl FinanceApp {
@@ -1032,16 +1074,17 @@ impl FinanceApp {
     /// than have every arm of that match remember to report, this compares the
     /// state around the call. It is a tuple of small copies, not a hash: a
     /// hash could collide and silently drop a redraw.
-    fn state_fingerprint(&self) -> (Screen, Option<u32>, bool, usize, Option<Category>, u16, u8) {
-        (
-            self.screen,
-            self.selected_id,
-            self.search_active,
-            self.transactions.len(),
-            self.category_filter,
-            self.view_month.year,
-            self.view_month.month,
-        )
+    fn state_fingerprint(&self) -> Fingerprint {
+        Fingerprint {
+            screen: self.screen,
+            selected_id: self.selected_id,
+            search_active: self.search_active,
+            search_query: self.search_query.clone(),
+            transactions: self.transactions.len(),
+            category_filter: self.category_filter,
+            year: self.view_month.year,
+            month: self.view_month.month,
+        }
     }
 
     // ── Rendering ───────────────────────────────────────────────────
@@ -2355,6 +2398,44 @@ mod tests {
         for (_, tx) in &f {
             assert_eq!(tx.category, Category::Food);
         }
+    }
+
+    /// A key press with the text a real keyboard would send with it.
+    fn keyed(k: Key, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: text.to_owned(),
+        })
+    }
+
+    /// **Backspacing the search box has to read as a redraw.**
+    ///
+    /// `handle_key` reports nothing, so `state_fingerprint` decides whether a
+    /// frame is drawn, and `search_query` is not in it. Typing is safe --
+    /// that path answers `Consumed` outright -- but `Backspace` goes through
+    /// the fingerprint, changes only the query, and so answered `Ignored`:
+    /// the search bar draws the query with a caret after it, and the deleted
+    /// character stayed on screen.
+    ///
+    /// `apps/jsonviewer` had three of these and `apps/flashcards` one; this is
+    /// the third app in the tree that decides redraws by comparing a snapshot.
+    #[test]
+    fn deleting_a_character_from_the_search_is_a_redraw() {
+        let mut app = FinanceApp::with_sample_data();
+        app.handle_event(&keyed(Key::Slash, "/"));
+        assert!(app.search_active, "`/` did not open the search box");
+
+        app.handle_event(&keyed(Key::Unknown(0), "g"));
+        assert_eq!(app.search_query, "g", "the box did not take the character");
+
+        assert_eq!(
+            app.handle_event(&keyed(Key::Backspace, "")),
+            EventResult::Consumed,
+            "backspacing did not read as a redraw, so the deleted character stays on screen"
+        );
+        assert!(app.search_query.is_empty(), "the character was not deleted");
     }
 
     #[test]

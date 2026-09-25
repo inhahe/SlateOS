@@ -174,6 +174,115 @@ def strip_noise(src: str, keep_literals: bool = False) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Words that begin an *item* -- something with a `{` block or a `;` of its
+#: own. Anything else after an attribute is a struct field, an enum variant or
+#: a tuple element, all of which end at a comma.
+#:
+#: `union` and `macro_rules` are contextual keywords and could in principle
+#: name a field. A field called `union` decorated with `#[cfg(test)]` would be
+#: read as a union declaration and its block blanked; nothing in this tree
+#: does that, and the alternative -- dropping them from the list -- misreads
+#: the far commoner real `union`. The ambiguity is Rust's and is recorded
+#: rather than resolved.
+_ITEM_KEYWORDS = frozenset(
+    {
+        "pub",
+        "fn",
+        "mod",
+        "impl",
+        "struct",
+        "enum",
+        "trait",
+        "union",
+        "use",
+        "const",
+        "static",
+        "type",
+        "extern",
+        "unsafe",
+        "async",
+        "macro_rules",
+    }
+)
+
+
+def _decorated_item_kind(masked: str, at: int) -> str:
+    """`"item"` or `"field"` for whatever follows an attribute at `at`.
+
+    Reads the next word, skipping whitespace and any further attributes --
+    `#[cfg(test)] #[derive(Debug)] struct X {` is one item with two of them.
+    """
+    i = at
+    while i < len(masked):
+        c = masked[i]
+        if c.isspace():
+            i += 1
+            continue
+        if c == "#":
+            # Another attribute. Step over its brackets rather than its
+            # characters: `#[cfg(all(test, feature = "x"))]` has nested ones.
+            j = masked.find("[", i)
+            if j < 0:
+                return "item"
+            depth = 0
+            while j < len(masked):
+                if masked[j] == "[":
+                    depth += 1
+                elif masked[j] == "]":
+                    depth -= 1
+                    if depth == 0:
+                        j += 1
+                        break
+                j += 1
+            i = j
+            continue
+        break
+    word = ""
+    while i < len(masked) and (masked[i].isalnum() or masked[i] == "_"):
+        word += masked[i]
+        i += 1
+    return "item" if word in _ITEM_KEYWORDS else "field"
+
+
+def _field_end(masked: str, at: int) -> int:
+    """Where the non-item thing beginning at `at` ends.
+
+    Three terminators, because an attribute lands on three shapes that are
+    none of them blocks:
+
+      * a struct field or enum variant -- ends at its separating comma;
+      * a *statement* -- `#[cfg(test)] self.computes.set(..);` in
+        `apps/mandelbrot` -- ends at its semicolon. Without this the scan ran
+        to the enclosing block's `}` and blanked every live statement after
+        it, which is the same defect as the one this function was changed to
+        fix, one shape along. It was invisible in `mandelbrot` only because
+        the statement happens to be the last in its block;
+      * the last field or statement of a container -- ends at the `}` or `)`
+        that closes it, and that character belongs to the container, so the
+        scan stops *before* it rather than consuming it.
+
+    Commas and semicolons inside `<..>`, `(..)` and `[..]` belong to a type
+    or an argument list -- `buf: [u8; 4],` has both -- so only depth-zero
+    ones end anything.
+    """
+    depth = 0
+    i = at
+    while i < len(masked):
+        c = masked[i]
+        if c in "([<{":
+            depth += 1
+        elif c in "}])":
+            if depth <= 0:
+                return i
+            depth -= 1
+        elif c == ">":
+            depth -= 1
+        elif c in ",;" and depth <= 0:
+            return i + 1
+        i += 1
+    return len(masked)
+
+
 def live_code(src: str) -> tuple[str, str]:
     """`src` with test code removed and nothing else.
 
@@ -243,6 +352,39 @@ def live_code(src: str) -> tuple[str, str]:
         #
         # Blanking the module instead of cutting at it costs nothing: the tests
         # are just as gone, and nothing is assumed about where they sit.
+        # WHAT THE ATTRIBUTE IS ON decides where the item ends, and the
+        # answer is not always a brace or a semicolon.
+        #
+        # `#[cfg(test)] rng: SeededRng,` is a STRUCT FIELD. It ends at a
+        # comma. Looking for the next `{` finds one belonging to the next
+        # item -- in `apps/speedtest/src/main.rs` the attribute sits on the
+        # last field of `SpeedTestUI` and the next brace opens
+        # `impl SpeedTestUI`, so brace-matching blanked the whole impl:
+        # `start_test`, `begin_simulated_run`, the tick handler, 70% of the
+        # file's production code. Every checker reading this function saw an
+        # app whose only live code was its type declarations, and
+        # `frozen-flag-survey` reported `phase` as a field nothing writes
+        # while eight live assignments sat inside the blanked region.
+        #
+        # This is the third instance of one assumption in this function, and
+        # the doc comment above already names the first two: "the first
+        # `#[cfg(test)]` is the last thing in the file", then "the first
+        # `#[cfg(test)] mod` is". Now: "the next `{` belongs to this
+        # attribute". Each time the fix was to stop guessing the extent from
+        # a character and read what the attribute is actually on.
+        kind = _decorated_item_kind(masked, i + len("#[cfg(test)]"))
+        if kind == "field":
+            # A field or an enum variant: it ends at the comma that separates
+            # it from the next one, or at the `}` that closes the container if
+            # it is the last. Commas inside `<..>`, `(..)` and `[..]` are
+            # parts of a type, not separators.
+            end = _field_end(masked, i + len("#[cfg(test)]"))
+            for k in range(i, min(end, len(out))):
+                if out[k] != "\n":
+                    out[k] = " "
+                    mout[k] = " "
+            i = end
+            continue
         brace = masked.find("{", i)
         semi = masked.find(";", i)
         if brace < 0 or (0 <= semi < brace):
@@ -430,6 +572,112 @@ fn after_tests() {}
     expect("the helper mod body goes", "cap" in live, False)
     expect("the test mod body goes", "fn t()" in live, False)
     expect("live_code preserves length", len(live), len(helper_first))
+
+    # THE SHIPPED BUG, third instance of one assumption. A `#[cfg(test)]` on a
+    # STRUCT FIELD ends at a comma, and the next `{` belongs to whatever item
+    # follows the struct. `apps/speedtest/src/main.rs` has the attribute on
+    # `SpeedTestUI`'s last field and `impl SpeedTestUI` immediately after, so
+    # brace-matching blanked the entire impl: `start_test`, the tick handler,
+    # every assignment to `phase`. 29% of that file was read as live where 56%
+    # is. `frozen-flag-survey` duly reported `phase` as written by nothing.
+    field_then_impl = """struct S {
+    real: u8,
+    #[cfg(test)]
+    rng: SeededRng,
+}
+
+impl S {
+    pub fn start(&mut self) { self.phase = Phase::Idle; }
+}
+"""
+    live, _ = live_code(field_then_impl)
+    expect("a cfg(test) field does not swallow the impl after it",
+           "start" in live, True)
+    expect("...and the assignment inside it is live",
+           ".phase =" in live, True)
+    expect("...while the field itself is gone", "SeededRng" in live, False)
+    expect("...and the struct still closes", live.count("}") , field_then_impl.count("}"))
+
+    # The last field of a struct has no trailing comma: it ends at the `}`,
+    # which belongs to the struct and must survive.
+    last_field = """struct S {
+    real: u8,
+    #[cfg(test)]
+    rng: SeededRng
+}
+fn kept_after_last_field() {}
+"""
+    live, _ = live_code(last_field)
+    expect("a cfg(test) last field does not eat the closing brace",
+           "kept_after_last_field" in live, True)
+
+    # A comma inside a generic type is part of the type, not the separator
+    # that ends the field.
+    generic_field = """struct S {
+    #[cfg(test)]
+    seen: HashMap<String, u64>,
+    real: u8,
+}
+"""
+    live, _ = live_code(generic_field)
+    expect("a comma inside a generic does not end the field early",
+           "HashMap" in live, False)
+    expect("...and the field after it survives", "real" in live, True)
+
+    # An enum variant is the same shape as a field.
+    variant = """enum E {
+    Real,
+    #[cfg(test)]
+    OnlyInTests,
+}
+fn kept_after_variant() {}
+"""
+    live, _ = live_code(variant)
+    expect("a cfg(test) enum variant ends at its comma",
+           "OnlyInTests" in live, False)
+    expect("...and what follows the enum is live",
+           "kept_after_variant" in live, True)
+
+    # And a function is still a block item: the brace path must not regress.
+    fn_item = """#[cfg(test)]
+fn helper(a: u8, b: u8) -> u8 { a + b }
+fn kept_after_fn() {}
+"""
+    live, _ = live_code(fn_item)
+    expect("a cfg(test) fn with a comma in its arguments is still blanked",
+           "helper" in live, False)
+    expect("...and the item after it survives", "kept_after_fn" in live, True)
+
+    # A `#[cfg(test)]` on a STATEMENT ends at its semicolon.
+    # `apps/mandelbrot/src/main.rs:594` has one on
+    # `self.computes.set(..);` inside an `if`. Scanning to the enclosing
+    # block's `}` instead blanks every live statement after it -- and that
+    # file hid the fault, because there the statement happens to be the last
+    # in its block.
+    stmt = """fn f(&mut self) {
+    let a = 1;
+    #[cfg(test)]
+    self.counter.set(2);
+    let kept_after_stmt = 3;
+}
+"""
+    live, _ = live_code(stmt)
+    expect("a cfg(test) statement ends at its semicolon",
+           "counter" in live, False)
+    expect("...and the statements after it are live",
+           "kept_after_stmt" in live, True)
+
+    # A semicolon inside a type is part of the type: `[u8; 4]`.
+    array_field = """struct S {
+    #[cfg(test)]
+    buf: [u8; 4],
+    real: u8,
+}
+"""
+    live, _ = live_code(array_field)
+    expect("a semicolon inside an array type does not end the field early",
+           "buf" in live, False)
+    expect("...and the field after it survives", "real" in live, True)
 
     # An attribute on a non-block item has no braces of its own. Searching on
     # for a `{` finds the NEXT item's and blanks everything in between.

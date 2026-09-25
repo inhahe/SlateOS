@@ -1180,11 +1180,25 @@ fn gauge_color_at(fraction: f32, p: &Palette) -> Color {
 // Speed Test UI
 // ============================================================================
 
+/// The keys this window answers, as a reader sees them.
+///
+/// `Ctrl+E` writes the result to a file and `Ctrl+Q` closes the program;
+/// neither was named.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Enter / Space", "Start the test, or run it again"),
+    ("Ctrl+E", "Export the result to a file"),
+    ("Ctrl+Q", "Quit"),
+    ("Esc", "Close the server list, or stop the test"),
+];
+
 /// Main application state for the speed test utility.
 pub struct SpeedTestUI {
     /// The user's colours, handed over by the framework (§822).
     pub palette: Palette,
     /// Current phase.
+    /// Whether the shortcut card is up.
+    show_help: bool,
     phase: SpeedTestPhase,
     /// Configuration for the test.
     config: SpeedTestConfig,
@@ -1259,6 +1273,7 @@ impl SpeedTestUI {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             #[cfg(test)]
             rng: SeededRng::new(FALLBACK_SEED),
+            show_help: false,
             phase: SpeedTestPhase::Idle,
             config: SpeedTestConfig::default(),
             current_speed_mbps: 0.0,
@@ -1656,6 +1671,16 @@ impl SpeedTestUI {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         match key.key {
             Key::Enter | Key::Space => {
                 if self.phase.is_idle() || self.phase.is_complete() {
@@ -1805,6 +1830,17 @@ impl SpeedTestUI {
             frame.discard_hits();
             frame.hit(Target::DropdownScrim, Rect::new(0.0, 0.0, width, height));
             self.draw_server_dropdown(&mut frame, &l);
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut frame,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
         }
 
         frame
@@ -2784,6 +2820,85 @@ mod tests {
     // The free helpers -- `click`, `rect_of`, `press`. The production code
     // imports only the `Probe` trait it implements.
     use guitk::probe;
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// `Ctrl+Q` is checked through `on_event`, because quitting is decided a
+    /// level up and returns `Response::Exit`. Two states, because `Esc`
+    /// closes the server list or stops a running test and correctly reports
+    /// nothing to do when neither is happening.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let quits = {
+                    let mut ui = SpeedTestUI::new();
+                    matches!(ui.on_event(&Event::Key(stroke.clone())), Response::Exit)
+                };
+                let answered = quits
+                    || [false, true].into_iter().any(|dropdown| {
+                        let mut ui = SpeedTestUI::new();
+                        if dropdown {
+                            // The server list open, which is the first thing
+                            // Esc has to close. The other -- a running test
+                            // -- cannot be reached here, since this program
+                            // has no network.
+                            ui.server_dropdown_open = true;
+                        }
+                        ui.handle_key(&stroke) == EventResult::Consumed
+                    });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and no test starts behind it.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let size = <SpeedTestUI as Probe>::SIZE;
+        let drawn = |ui: &SpeedTestUI| -> Vec<String> {
+            ui.frame(size.0, size.1)
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut ui = SpeedTestUI::new();
+        assert!(
+            !drawn(&ui).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        ui.handle_key(&probe::press(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&drawn(&ui), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        // Enter is itself a dismiss key, so pressing it behind the card
+        // both proves the guard and closes the card. A second F1 here would
+        // re-open it and the follow-up press would dismiss instead of
+        // starting a test -- which is exactly what the first draft of this
+        // did, and why it read "Enter does nothing even with the card down".
+        let phase = ui.phase.clone();
+        ui.handle_key(&probe::press(Key::Enter));
+        assert_eq!(
+            ui.phase, phase,
+            "Enter started a test through the shortcut card"
+        );
+
+        ui.handle_key(&probe::press(Key::Enter));
+        assert_ne!(
+            ui.phase, phase,
+            "control: Enter does nothing even with the card down"
+        );
+    }
 
     /// A frame at roughly 60 Hz, the interval `oswindow` would hand us.
     const FRAME_MS: u64 = 16;

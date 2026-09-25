@@ -780,6 +780,53 @@ enum Clipboard {
 // Slides application
 // ============================================================================
 
+/// Every key this program answers, and what it does.
+///
+/// Twenty bindings and, until this list existed, no way to learn any of them
+/// but reading the source -- including the five that put shapes on a slide,
+/// which are the ones somebody wants first.
+///
+/// **Each row is a key this program actually answers**, which is not a
+/// property the list has on its own: `every_advertised_key_does_something`
+/// walks it and asserts each one is taken. `apps/rssreader` shipped an
+/// overlay of twenty-one shortcuts of which about four worked, and the only
+/// thing that keeps a list and a handler together is a test that reads both.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Left / Right", "Previous / next slide"),
+    ("Home / End", "First / last slide"),
+    ("1 / 2", "Edit view / sorter view"),
+    ("Tab", "Cycle the view"),
+    ("Ctrl+N", "New slide"),
+    ("Ctrl+D", "Duplicate this slide"),
+    ("Ctrl+C / Ctrl+V", "Copy / paste a slide"),
+    ("Ctrl+PageUp / Ctrl+PageDown", "Move this slide up / down"),
+    ("T", "Add a text box"),
+    ("S / O / L / A", "Add a rectangle / ellipse / line / arrow"),
+    ("I", "Add an image placeholder"),
+    ("Enter / F2", "Type into the selected text box"),
+    ("Delete", "Delete the selected element, or the slide"),
+    ("Shift+Delete", "Delete the slide"),
+    ("Ctrl+T", "Next theme"),
+    ("Ctrl+Shift+T", "Name the deck"),
+    ("Ctrl+R", "Next transition"),
+    ("B", "Show or hide the speaker notes"),
+    ("Ctrl+E", "Export"),
+    ("F1 / ?", "This list"),
+];
+
+/// What a typed string is going onto.
+///
+/// An enum because the deck's own name is not an element and has no id, and a
+/// second `Option` beside the first would be a state where both could be set
+/// at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditTarget {
+    /// A text box on the current slide.
+    Element(ElementId),
+    /// The deck's name, which the window bar and every export use.
+    DeckTitle,
+}
+
 /// The main presentation application state.
 #[derive(Debug)]
 pub struct SlidesApp {
@@ -815,6 +862,17 @@ pub struct SlidesApp {
     selected_element: Option<ElementId>,
     /// Whether the notes panel is visible.
     show_notes: bool,
+    /// Whether the shortcut list is up.
+    show_help: bool,
+    /// The thing being typed into, and what has been typed.
+    ///
+    /// This program could not put a word on a slide: there were zero
+    /// assignments to `.text` anywhere in the crate, tests included, and zero
+    /// `key.text` sites, so every box said "New Text" or "Presentation Title"
+    /// forever. The buffer is held here rather than written straight into the
+    /// element so that `Escape` and `Enter` can mean different things -- and
+    /// the element is named by id, because the selection can move.
+    editing: Option<(EditTarget, String)>,
     /// Title of the presentation.
     title: String,
     /// The user's colours, replaced whenever the theme changes.
@@ -850,6 +908,8 @@ impl SlidesApp {
             clipboard: Clipboard::Empty,
             selected_element: None,
             show_notes: true,
+            show_help: false,
+            editing: None,
             title: String::from("Untitled Presentation"),
         }
     }
@@ -1082,6 +1142,166 @@ impl SlidesApp {
     // ---- Theme -------------------------------------------------------------
 
     /// Set the presentation theme and re-apply it to all slides.
+    /// The words a box is born holding: a prompt, not content.
+    ///
+    /// Typing into a new box must replace these rather than append to them:
+    /// nobody wants "New TextHi", and making the user delete the prompt first is
+    /// the friction that stops them writing at all. Every presentation tool on
+    /// earth behaves this way. The cost is that a user who genuinely wants a box
+    /// reading exactly "New Text" has to type it twice, which is a fair trade.
+    const PLACEHOLDER_TEXT: &[&str] = &[
+        "New Text",
+        "Presentation Title",
+        "Section Title",
+        "Slide Title",
+        "Subtitle goes here",
+        "Two Column Layout",
+        "Caption and description text goes here.",
+    ];
+
+    /// Begin typing into the selected text box, seeded with what it says.
+    ///
+    /// Seeded because editing is usually an edit: a blank box would make the
+    /// existing words something the user has to retype, and the words are
+    /// what they came for.
+    fn begin_editing(&mut self) -> EventResult {
+        let Some(eid) = self.selected_element else {
+            return EventResult::Ignored;
+        };
+        let Some(slide) = self.slides.get(self.current_index) else {
+            return EventResult::Ignored;
+        };
+        let Some(SlideElement::TextBox { text, .. }) =
+            slide.elements.iter().find(|e| e.id() == eid)
+        else {
+            // Shapes and images hold no words; saying so beats a mode that
+            // silently does nothing.
+            return EventResult::Ignored;
+        };
+        // A box still holding its prompt starts empty; one the user has
+        // written in starts with what they wrote, because editing is usually
+        // an edit and retyping it is not.
+        let seed = if Self::PLACEHOLDER_TEXT.contains(&text.as_str()) {
+            String::new()
+        } else {
+            text.clone()
+        };
+        self.editing = Some((EditTarget::Element(eid), seed));
+        EventResult::Consumed
+    }
+
+    /// Begin naming the deck.
+    ///
+    /// The name is not decoration: it is the window bar, and `export_as`
+    /// builds the filename from it -- so while it could not be changed, every
+    /// deck anyone exported was called "Untitled Presentation".
+    fn begin_deck_title(&mut self) -> EventResult {
+        let seed = if self.title == "Untitled Presentation" {
+            String::new()
+        } else {
+            self.title.clone()
+        };
+        self.editing = Some((EditTarget::DeckTitle, seed));
+        EventResult::Consumed
+    }
+
+    /// Keys while a text box is being typed into.
+    fn handle_editing_key(&mut self, key: &KeyEvent) -> EventResult {
+        let Some((target, mut buf)) = self.editing.clone() else {
+            return EventResult::Ignored;
+        };
+        match key.key {
+            // Leaving keeps the words, on either key. Losing what was typed
+            // because the exit key was the cancelling one is the worst thing
+            // an editor can do, and `Escape` is how anyone leaves a box.
+            Key::Escape | Key::Enter if !key.modifiers.shift => {
+                self.commit_editing(target, &buf);
+                self.editing = None;
+                EventResult::Consumed
+            }
+            // Shift+Enter is the second line.
+            Key::Enter => {
+                buf.push('\n');
+                self.editing = Some((target, buf));
+                EventResult::Consumed
+            }
+            Key::Backspace => {
+                buf.pop();
+                self.editing = Some((target, buf));
+                EventResult::Consumed
+            }
+            _ => {
+                if key.text.is_empty() || key.modifiers.ctrl {
+                    return EventResult::Ignored;
+                }
+                buf.push_str(&key.text);
+                self.editing = Some((target, buf));
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Write the typed words where they were being typed.
+    fn commit_editing(&mut self, target: EditTarget, buf: &str) {
+        match target {
+            EditTarget::DeckTitle => {
+                // An empty name would leave the window bar blank and every
+                // export called ".pptx"; refusing keeps whatever it had.
+                if !buf.trim().is_empty() {
+                    self.title = buf.trim().to_owned();
+                }
+            }
+            EditTarget::Element(eid) => {
+                self.undo_mgr.save(&self.slides, self.current_index);
+                let Some(slide) = self.slides.get_mut(self.current_index) else {
+                    return;
+                };
+                if let Some(SlideElement::TextBox { text, .. }) = slide.element_by_id_mut(eid) {
+                    *text = buf.to_owned();
+                }
+            }
+        }
+    }
+
+    /// Move to the next theme in the set.
+    ///
+    /// `set_theme` had no caller, so the deck was permanently on Mocha and the
+    /// window's "Theme: Mocha" was a label that could not say anything else.
+    /// `SlideTheme::light` and `SlideTheme::vibrant` existed and nothing could
+    /// ask for them.
+    pub fn cycle_theme(&mut self) {
+        let next = match self.theme.name.as_str() {
+            "Mocha" => SlideTheme::light(),
+            "Light" => SlideTheme::vibrant(),
+            _ => SlideTheme::mocha(&self.palette),
+        };
+        self.set_theme(next);
+    }
+
+    /// Move the current slide to the next transition.
+    ///
+    /// `set_current_transition` had no caller either, while the window drew
+    /// "Transition: ..." twice -- once on the slide and once in the property
+    /// panel. A value printed in a property panel is an offer, not a status.
+    pub fn cycle_transition(&mut self) {
+        let next = match self.current_transition() {
+            Transition::None => Transition::Fade,
+            Transition::Fade => Transition::SlideLeft,
+            Transition::SlideLeft => Transition::SlideRight,
+            Transition::SlideRight => Transition::Wipe,
+            Transition::Wipe => Transition::Dissolve,
+            Transition::Dissolve => Transition::None,
+        };
+        self.set_current_transition(next);
+    }
+
+    /// The transition the current slide uses.
+    fn current_transition(&self) -> Transition {
+        self.slides
+            .get(self.current_index)
+            .map_or(Transition::None, |s| s.transition)
+    }
+
     pub fn set_theme(&mut self, theme: SlideTheme) {
         self.undo_mgr.save(&self.slides, self.current_index);
         self.theme = theme;
@@ -1409,6 +1629,12 @@ impl SlidesApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
+        // Typing into a box takes every key while it is up, or a title
+        // containing `s` would drop a rectangle on the slide behind it.
+        if self.editing.is_some() {
+            return self.handle_editing_key(key);
+        }
+
         let ctrl = key.modifiers.ctrl;
         match key.key {
             // The one key that lets a deck leave this window.
@@ -1452,6 +1678,16 @@ impl SlidesApp {
                 self.duplicate_current_slide();
                 EventResult::Consumed
             }
+            // `Delete` removes the selected element if there is one, and the
+            // slide otherwise. `delete_selected_element` had no caller, so the
+            // only way to remove a shape or a textbox was to delete the slide
+            // around it -- and erring towards the element is the safe half of
+            // the ambiguity, since re-adding an element is cheap and re-making
+            // a slide is not. `Shift+Delete` always means the slide.
+            Key::Delete if self.selected_element.is_some() && !key.modifiers.shift => {
+                self.delete_selected_element();
+                EventResult::Consumed
+            }
             Key::Delete => {
                 if self.slides.len() < 2 {
                     // Refusing to delete the last slide rather than leaving an
@@ -1475,12 +1711,76 @@ impl SlidesApp {
                     EventResult::Consumed
                 }
             }
+            // Before the unguarded `Key::T` below, which would otherwise
+            // take Ctrl+T and add a textbox. The deck's look and the slide's
+            // transition are both already printed in the window.
+            // Before the theme arm, which has no shift guard and would
+            // otherwise take this and cycle the theme instead.
+            Key::T if ctrl && key.modifiers.shift => self.begin_deck_title(),
+            Key::T if ctrl => {
+                self.cycle_theme();
+                EventResult::Consumed
+            }
+            Key::R if ctrl => {
+                self.cycle_transition();
+                EventResult::Consumed
+            }
             Key::T => {
                 self.add_textbox();
                 EventResult::Consumed
             }
+            // Writing in the selected box. `F2` is the conventional rename
+            // key and `Enter` is what opens a thing; both are free here.
+            Key::Enter | Key::F2 => self.begin_editing(),
+            // The rest of what a slide can hold. `add_shape` and
+            // `add_image_placeholder` had no callers, so `T` was the only
+            // thing that could put anything on a slide: this program made
+            // decks of textboxes.
+            //
+            // A key per shape rather than a mode with an armed kind: there are
+            // four, they are all mnemonic, and a mode would need its own label
+            // on screen to say which kind the next `S` would produce.
+            Key::S => {
+                self.add_shape(ShapeKind::Rectangle);
+                EventResult::Consumed
+            }
+            Key::O => {
+                self.add_shape(ShapeKind::Ellipse);
+                EventResult::Consumed
+            }
+            Key::L => {
+                self.add_shape(ShapeKind::Line);
+                EventResult::Consumed
+            }
+            Key::A => {
+                self.add_shape(ShapeKind::Arrow);
+                EventResult::Consumed
+            }
+            Key::I => {
+                self.add_image_placeholder();
+                EventResult::Consumed
+            }
             Key::B => {
                 self.show_notes = !self.show_notes;
+                EventResult::Consumed
+            }
+            // `?`, which is Shift and the slash key. Escape closes it, because
+            // that is what Escape means over anything laid on top.
+            // The shortcut list. `F1` raises it in every app in this tree,
+            // including `apps/spreadsheet`, where `?` is a character the
+            // program has to be able to type into a cell -- so somebody who
+            // has learned one key is never stuck. `?` as well, wherever the
+            // program is not obliged to type one.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Key::Slash if key.modifiers.shift => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Key::Escape if self.show_help => {
+                self.show_help = false;
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -1547,11 +1847,24 @@ impl SlidesApp {
             ViewMode::Sorter => self.render_sorter_mode(&mut cmds),
         }
 
-        // The picker last, so it draws over the slide rather than under it.
+        // The picker over the slide rather than under it.
         cmds.extend(
             self.picker
                 .render(&self.palette, self.window_width, self.window_height),
         );
+
+        // And the shortcut list over everything, because it is the one thing
+        // a reader asked for explicitly.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.window_width, self.window_height),
+                TOOLBAR_HEIGHT,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
 
         cmds
     }
@@ -1648,7 +1961,7 @@ impl SlidesApp {
         cmds.push(RenderCommand::Text {
             x: 740.0,
             y: 12.0,
-            text: format!("Theme: {}", self.theme.name),
+            text: format!("Theme: {} (Ctrl+T)", self.theme.name),
             color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
@@ -1711,11 +2024,23 @@ impl SlidesApp {
         });
 
         // Slide position and transition info.
-        let slide_pos = format!(
-            "Slide {} of {}",
-            self.current_index.saturating_add(1),
-            self.slides.len(),
-        );
+        // While typing, this line says so instead of counting slides. The
+        // count is still in the window bar; the mode is nowhere else, and the
+        // shape keys are captured in here -- so somebody pressing `S` for a
+        // rectangle gets an "S" in their text with nothing to explain it.
+        let slide_pos = match &self.editing {
+            Some((EditTarget::DeckTitle, _)) => {
+                String::from("Naming the deck -- Enter or Esc to finish")
+            }
+            Some((EditTarget::Element(_), _)) => {
+                String::from("Typing -- Shift+Enter for a new line, Esc to finish")
+            }
+            None => format!(
+                "Slide {} of {}",
+                self.current_index.saturating_add(1),
+                self.slides.len(),
+            ),
+        };
         cmds.push(RenderCommand::Text {
             x: 12.0,
             y: y + 5.0,
@@ -1728,7 +2053,7 @@ impl SlidesApp {
         });
 
         if let Some(slide) = self.slides.get(self.current_index) {
-            let trans = format!("Transition: {}", slide.transition.label());
+            let trans = format!("Transition: {} (Ctrl+R)", slide.transition.label());
             cmds.push(RenderCommand::Text {
                 x: 200.0,
                 y: y + 5.0,
@@ -1998,6 +2323,7 @@ impl SlidesApp {
     ) {
         match elem {
             SlideElement::TextBox {
+                id,
                 x,
                 y,
                 width,
@@ -2022,10 +2348,19 @@ impl SlidesApp {
                 let text_x = if *centered { fx + fw * 0.1 } else { fx };
                 let text_max = if *centered { Some(fw * 0.8) } else { Some(fw) };
 
+                // While this box is being typed into, draw the buffer and not
+                // the element: the commit happens when the mode is left, so
+                // the element still holds the old words until then, and
+                // drawing those would leave the user typing at a slide that
+                // never changes.
+                let live = match &self.editing {
+                    Some((EditTarget::Element(eid), buf)) if eid == id => buf.clone(),
+                    _ => text.clone(),
+                };
                 cmds.push(RenderCommand::Text {
                     x: text_x,
                     y: fy,
-                    text: text.clone(),
+                    text: live,
                     color: *color,
                     font_size: fs,
                     font_weight: weight,
@@ -2259,7 +2594,14 @@ impl SlidesApp {
             y += 22.0;
 
             // Transition.
-            self.render_property_row(cmds, lx, y, val_w, "Transition", slide.transition.label());
+            self.render_property_row(
+                cmds,
+                lx,
+                y,
+                val_w,
+                "Transition (Ctrl+R)",
+                slide.transition.label(),
+            );
             y += 22.0;
 
             // Background.
@@ -2887,6 +3229,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     use guitk::event::Modifiers;
+    use guitk::shortcut::keystrokes;
 
     fn seeded() -> SlidesApp {
         let mut app = SlidesApp::new(1280.0, 720.0);
@@ -2903,6 +3246,301 @@ mod tests {
         })
     }
 
+    fn press_ctrl_shift(k: Key) -> Event {
+        let mut modifiers = Modifiers::ctrl();
+        modifiers.shift = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// The status bar says the app is typing, and how to stop.
+    ///
+    /// The shape keys are captured while typing, so somebody pressing `S` for
+    /// a rectangle gets an "S" in their text. A mode with no indicator is one
+    /// the user cannot tell they are in.
+    #[test]
+    fn the_status_bar_says_it_is_typing() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::T));
+        app.handle_event(&press(Key::Enter));
+
+        let shown: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            shown.iter().any(|t| t.contains("Esc to finish")),
+            "nothing on screen says the app is typing or how to stop"
+        );
+    }
+
+    /// The deck can be named, and the window bar says so.
+    ///
+    /// `title` had no writer, so every deck was "Untitled Presentation" --
+    /// in the window bar, and in the filename `export_as` builds.
+    #[test]
+    fn ctrl_shift_t_names_the_deck() {
+        let mut app = seeded();
+        assert_eq!(app.title, "Untitled Presentation", "control: the default");
+
+        app.handle_event(&press_ctrl_shift(Key::T));
+        for c in ["Q", "3"] {
+            app.handle_event(&types(c));
+        }
+        app.handle_event(&press(Key::Enter));
+
+        assert_eq!(app.title, "Q3", "the deck was not renamed");
+        assert!(
+            app.title().starts_with("Q3"),
+            "the window bar still says {:?}",
+            app.title()
+        );
+    }
+
+    /// Ctrl+Shift+T does not cycle the theme.
+    ///
+    /// `Key::T if ctrl` has no shift guard and sits in the same match, so an
+    /// arm order that put it first would have changed the theme and left the
+    /// name alone -- indistinguishable from a rename key that does nothing.
+    #[test]
+    fn ctrl_shift_t_does_not_cycle_the_theme() {
+        let mut app = seeded();
+        let theme = app.theme.name.clone();
+
+        app.handle_event(&press_ctrl_shift(Key::T));
+
+        assert_eq!(app.theme.name, theme, "Ctrl+Shift+T changed the theme");
+        assert!(app.editing.is_some(), "and did not start the rename");
+    }
+
+    /// An empty name is refused rather than blanking the window bar.
+    #[test]
+    fn an_empty_deck_name_is_refused() {
+        let mut app = seeded();
+        app.handle_event(&press_ctrl_shift(Key::T));
+        app.handle_event(&press(Key::Enter));
+
+        assert_eq!(
+            app.title, "Untitled Presentation",
+            "an empty name blanked the deck's name"
+        );
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// `apps/rssreader` shipped an overlay of twenty-one shortcuts of which
+    /// about four worked, and three named operations that existed nowhere in
+    /// the crate. A list and a handler are two things that must agree, and
+    /// nothing keeps them agreeing except a test that reads both.
+    ///
+    /// Two things this test deliberately does *not* do.
+    ///
+    /// The event is built from the row's own key text by `guitk::shortcut`,
+    /// rather than looked up in a parallel table of events. A second table
+    /// would be a second list to keep in step -- the defect this test exists
+    /// to prevent, rebuilt inside the test. It started as exactly that table,
+    /// forty lines of `"Left" => Key::Left`, and `apps/mixer` turned out to
+    /// have written the same forty lines already.
+    ///
+    /// And the claim checked is "some reachable state answers this key", not
+    /// "this key is taken right now". Several of these decline on purpose:
+    /// `Left` at the first slide, `1` when the edit view is already up, `Ctrl+V`
+    /// with nothing copied. Declining from its own arm *is* answering -- the
+    /// defect is a row that falls through to the catch-all in every state. So
+    /// each key is offered to three decks and has to be taken by one.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (row, what) in SHORTCUTS {
+            for stroke in keystrokes(row).unwrap_or_else(|e| panic!("{e}")) {
+                let event = Event::Key(stroke.clone());
+                let taken = states()
+                    .iter_mut()
+                    .any(|app| app.handle_event(&event) == EventResult::Consumed);
+                assert!(
+                    taken,
+                    "the list advertises {row:?} for {what:?}, and no state answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Three decks, chosen so that between them every advertised key has
+    /// something it could do. A key no one of them takes is a key nothing acts
+    /// on.
+    fn states() -> Vec<SlidesApp> {
+        let plain = seeded();
+
+        // The other view, so `1` has somewhere to return from.
+        let mut sorter = seeded();
+        sorter.handle_event(&press(Key::Tab));
+
+        // Mid-deck, holding a copied slide and a selected text box: what the
+        // paging, paste and element keys each need before they will act.
+        let mut working = seeded();
+        working.handle_event(&press_ctrl(Key::N));
+        working.handle_event(&press(Key::Home));
+        working.handle_event(&press(Key::Right));
+        working.handle_event(&press_ctrl(Key::C));
+        working.handle_event(&press(Key::T));
+
+        vec![plain, sorter, working]
+    }
+
+    /// **The shortcut list reaches the window.**
+    ///
+    /// `every_advertised_key_does_something` reads the list and the handler;
+    /// this reads the list and the *screen*. They are different questions, and
+    /// `apps/netscan`'s `wol_note` is why both get asked: it was written by the
+    /// model and drawn by nothing for three commits, and every model-level test
+    /// passed throughout. A help overlay that never draws is the same defect
+    /// with the same green suite.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = seeded();
+        let quiet = drawn_text(&app);
+        assert!(
+            !quiet.contains("? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press_shift(Key::Slash));
+        let shown = drawn_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !drawn_text(&app).contains("? closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn drawn_text(app: &SlidesApp) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// A key with Shift held, which is how `?` is typed.
+    fn press_shift(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.shift = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn types(text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: text.to_owned(),
+        })
+    }
+
+    /// A user can put words on a slide.
+    ///
+    /// This program could not: zero assignments to `.text` anywhere in the
+    /// crate, tests included, and zero `key.text` sites, so every box said
+    /// "New Text" forever and a deck was always somebody else's placeholder.
+    ///
+    /// End-to-end on purpose. Every piece of this existed -- the element, the
+    /// accessor, the renderer -- and the program still could not be used, so
+    /// the assertion has to be that the words come out.
+    #[test]
+    fn a_user_can_put_words_on_a_slide() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::T));
+        let eid = app.selected_element.expect("adding a text box selects it");
+
+        app.handle_event(&press(Key::Enter));
+        assert!(app.editing.is_some(), "Enter did not begin typing");
+        for c in ["H", "i"] {
+            app.handle_event(&types(c));
+        }
+        app.handle_event(&press(Key::Escape));
+
+        assert!(app.editing.is_none(), "the mode did not close");
+        let slide = app.slides.get(app.current_index).expect("a slide");
+        let elem = slide
+            .elements
+            .iter()
+            .find(|e| e.id() == eid)
+            .expect("the box");
+        assert!(
+            format!("{elem:?}").contains("\"Hi\""),
+            "the words are not in the element: {elem:?}"
+        );
+    }
+
+    /// The slide shows the words as they are typed.
+    #[test]
+    fn the_slide_shows_the_words_as_they_are_typed() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::T));
+        app.handle_event(&press(Key::Enter));
+        for c in ["H", "i"] {
+            app.handle_event(&types(c));
+        }
+
+        let shown: Vec<String> = app
+            .render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            shown.iter().any(|t| t == "Hi"),
+            "what is being typed is nowhere on the slide"
+        );
+    }
+
+    /// Typing a letter does not also drop a shape on the slide.
+    ///
+    /// `S`, `O`, `L`, `A` and `I` add shapes outside this mode; a title
+    /// containing any of them would otherwise litter the slide while being
+    /// written.
+    #[test]
+    fn typing_does_not_fire_the_shape_keys() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::T));
+        let before = element_count(&app);
+
+        app.handle_event(&press(Key::Enter));
+        for c in ["S", "a", "l", "e", "s"] {
+            app.handle_event(&types(c));
+        }
+
+        assert_eq!(
+            element_count(&app),
+            before,
+            "typing added elements to the slide"
+        );
+    }
+
     fn press_ctrl(k: Key) -> Event {
         Event::Key(KeyEvent {
             key: k,
@@ -2910,6 +3548,162 @@ mod tests {
             modifiers: Modifiers::ctrl(),
             text: String::new(),
         })
+    }
+
+    /// The element count of the slide now showing.
+    fn element_count(app: &SlidesApp) -> usize {
+        app.slides
+            .get(app.current_index)
+            .map_or(0, |s| s.elements.len())
+    }
+
+    /// `S`, `O`, `L` and `A` put the four shapes on a slide.
+    ///
+    /// `add_shape` had no caller, so `T` was the only thing that could put
+    /// anything on a slide: this program made decks of textboxes.
+    #[test]
+    fn the_four_shape_keys_each_add_their_shape() {
+        for (key, kind) in [
+            (Key::S, ShapeKind::Rectangle),
+            (Key::O, ShapeKind::Ellipse),
+            (Key::L, ShapeKind::Line),
+            (Key::A, ShapeKind::Arrow),
+        ] {
+            let mut app = seeded();
+            let before = element_count(&app);
+
+            assert_eq!(app.handle_event(&press(key)), EventResult::Consumed);
+
+            assert_eq!(
+                element_count(&app),
+                before + 1,
+                "{key:?} added nothing to the slide"
+            );
+            let added = app
+                .slides
+                .get(app.current_index)
+                .and_then(|s| s.elements.last())
+                .expect("the element just added");
+            assert!(
+                format!("{added:?}").contains(&format!("{kind:?}")),
+                "{key:?} added something that is not a {kind:?}: {added:?}"
+            );
+        }
+    }
+
+    /// `I` adds an image placeholder.
+    #[test]
+    fn i_adds_an_image_placeholder() {
+        let mut app = seeded();
+        let before = element_count(&app);
+
+        assert_eq!(app.handle_event(&press(Key::I)), EventResult::Consumed);
+
+        assert_eq!(element_count(&app), before + 1, "I added nothing");
+    }
+
+    /// Delete removes the selected element rather than the slide around it.
+    ///
+    /// `delete_selected_element` had no caller, so removing a shape meant
+    /// deleting the whole slide it was on.
+    #[test]
+    fn delete_removes_the_selected_element_not_the_slide() {
+        let mut app = seeded();
+        let slides_before = app.slides.len();
+        app.handle_event(&press(Key::S));
+        let elements_before = element_count(&app);
+        assert!(
+            app.selected_element.is_some(),
+            "control: adding a shape selects it"
+        );
+
+        app.handle_event(&press(Key::Delete));
+
+        assert_eq!(app.slides.len(), slides_before, "it deleted the slide");
+        assert_eq!(
+            element_count(&app),
+            elements_before - 1,
+            "the element is still there"
+        );
+    }
+
+    /// Shift+Delete still means the slide, even with an element selected.
+    #[test]
+    fn shift_delete_still_removes_the_slide() {
+        let mut app = seeded();
+        app.handle_event(&press(Key::S));
+        let slides_before = app.slides.len();
+        assert!(slides_before > 1, "control: needs two slides to delete one");
+
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Delete,
+            pressed: true,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        }));
+
+        assert_eq!(
+            app.slides.len(),
+            slides_before - 1,
+            "Shift+Delete did not remove the slide"
+        );
+    }
+
+    /// Ctrl+T moves through the themes, which the window prints.
+    ///
+    /// `set_theme` had no caller, so "Theme: Mocha" could not say anything
+    /// else though `light()` and `vibrant()` both existed.
+    #[test]
+    fn ctrl_t_cycles_the_theme() {
+        let mut app = seeded();
+        let first = app.theme.name.clone();
+
+        app.handle_event(&press_ctrl(Key::T));
+        let second = app.theme.name.clone();
+        assert_ne!(second, first, "Ctrl+T did not change the theme");
+
+        app.handle_event(&press_ctrl(Key::T));
+        app.handle_event(&press_ctrl(Key::T));
+        assert_eq!(app.theme.name, first, "the themes do not come back round");
+    }
+
+    /// Ctrl+T does not also add a textbox.
+    ///
+    /// `Key::T` is unguarded and appears in the same match, so an arm order
+    /// that put it first would have taken Ctrl+T and added a textbox while
+    /// leaving the theme alone -- which looks exactly like a theme key that
+    /// does nothing.
+    #[test]
+    fn ctrl_t_does_not_add_a_textbox() {
+        let mut app = seeded();
+        let before = element_count(&app);
+
+        app.handle_event(&press_ctrl(Key::T));
+
+        assert_eq!(element_count(&app), before, "Ctrl+T added a textbox");
+    }
+
+    /// Ctrl+R moves the current slide through the transitions.
+    #[test]
+    fn ctrl_r_cycles_the_transition() {
+        let mut app = seeded();
+        let before = app
+            .slides
+            .get(app.current_index)
+            .map(|s| s.transition)
+            .expect("a slide");
+
+        app.handle_event(&press_ctrl(Key::R));
+
+        let after = app
+            .slides
+            .get(app.current_index)
+            .map(|s| s.transition)
+            .expect("a slide");
+        assert_ne!(after, before, "Ctrl+R did not change the transition");
     }
 
     #[test]

@@ -1,0 +1,165 @@
+# Fields this survey reports that have already been looked at and answered.
+#
+# Fields: crate<TAB>field<TAB>reason
+#
+# WHY THIS FILE EXISTS. The survey finds fields that are read and never
+# written. Some of those are not defects, and no scanner can tell which: a
+# measurement computed once and correctly never changed, a setting whose
+# feature deliberately does not exist yet and says so on screen, a decision
+# already put to the operator. Without somewhere to record that, every run
+# re-offers the same rows and the same investigation happens again -- which
+# it has, twice.
+#
+# This is NOT a suppression list for inconvenient findings. Two rules:
+#
+#   * Every line carries a reason, and the reason has to say what *makes* it
+#     not a defect -- not that it is known.
+#   * A line naming a field the survey no longer reports is an error, not a
+#     no-op. The tool says so. An answer that has rotted is worse than no
+#     answer, because it reads as a decision somebody made about the code as
+#     it is now.
+#
+# Run `python scripts/frozen-flag-survey.py --answered` to see these rows
+# with their reasons instead of hiding them.
+
+# --- measurements, correctly immutable after construction -----------------
+passwordgen	has_digits	a measurement of a password, computed at construction
+passwordgen	has_lowercase	ditto
+passwordgen	has_uppercase	ditto
+passwordgen	has_symbols	ditto
+passwordgen	is_common	ditto
+passwordgen	rating	the strength score computed from the four above
+
+# --- a feature that deliberately does not exist, and says so on screen ----
+# `SETTINGS_NOT_APPLIED` is drawn in the panel: "Not applied: nothing reads
+# these except this panel." There is no converter in this tree yet. Giving
+# these keys would be the worse defect -- a control that moves and changes
+# nothing is a claim, where a frozen one beside an honest note is a gap.
+#
+# `mediaconvert`'s six codec and quality fields were listed here and are not
+# any more: `self.video_settings = VideoSettings::from_preset(preset)`
+# replaces the whole struct, so they were never frozen and this file was
+# answering a question the survey had got wrong. They are still not
+# *applied*, which is what SETTINGS_NOT_APPLIED says and is a separate
+# statement. The stale-line check is what surfaced the difference.
+videoplayer	format	screenshot config, drawn beside NO_SCREENSHOTS
+videoplayer	include_subtitles	ditto
+videoplayer	container	metadata of the loaded file, not a setting
+
+# --- with the operator ----------------------------------------------------
+passwordgen	disallow_common	C-Q26: a policy wants a settings file, not a key
+passwordgen	require_digit	C-Q26
+passwordgen	require_lowercase	C-Q26
+passwordgen	require_symbol	C-Q26
+passwordgen	require_uppercase	C-Q26
+lockscreen	show_clock_seconds	C-Q26: must persist across a restart to mean anything
+lockscreen	show_date	C-Q26
+markdowneditor	autosave_enabled	C-Q26
+
+# `CANNOT_TRANSFER_LINES` says the client cannot download or upload, and the
+# settings panel now says "Not applied: nothing reads these except this
+# panel -- there is no network stack." Keys for a network stack that does not
+# exist would be the worse defect.
+torrent	dht_enabled	drawn beside SETTINGS_NOT_APPLIED; no network stack exists
+torrent	pex_enabled	ditto
+torrent	enable_utp	ditto
+torrent	encryption_mode	ditto
+torrent	pre_allocate_storage	ditto
+torrent	proxy_type	ditto
+
+# `CANNOT_RECORD_LINES` is drawn unconditionally at the top level -- "there is
+# no state in which this program can capture a frame, so a condition here
+# would be one that is always true" -- so unlike `torrent`'s case, the note
+# already reaches every panel including these. Settings for a capture that
+# cannot happen, and annotations drawn during a recording that cannot start.
+screenrecorder	capture_cursor	under the always-drawn CANNOT_RECORD note; no frame source
+screenrecorder	click_highlight	ditto
+screenrecorder	active_annotation_tool	annotations are drawn during recording; there is none
+screenrecorder	annotation_toolbar_visible	ditto
+
+# Per-datum, or a symptom of something larger that is filed on its own.
+archivemanager	encrypted	a property of the archive, read from the file by the parser
+archivemanager	purpose	set when the pending choice is created; a fact about that choice
+archivemanager	format	TD-C-THE-ARCHIVE-CREATION-OPTIONS-ARE-A-STRUCT-NOBODY-CALLS
+
+# A snapshot you created by hand is Manual by definition. The create form
+# draws no type selector because there is no choice to make: `Automatic`,
+# `PreUpdate`, `PreInstall` and `Scheduled` describe who took the snapshot,
+# and the answer here is always "you did". Not a setting.
+systemrestore	form_type	what `Manual` means; the form has no choice to offer
+
+# `SETTINGS_NOT_CARRIED` is drawn directly under the first value in the
+# settings panel -- "the numbers above are what read as confirmation" --
+# because nothing carries these to the toolkit and the preview renders at its
+# own fixed sizes. Both ends of that loop are open and neither is in this
+# crate, so a key here would change a number and nothing else.
+fontmanager	antialiasing	drawn beside SETTINGS_NOT_CARRIED; nothing carries it to the toolkit
+fontmanager	hinting	ditto
+fontmanager	subpixel_order	ditto
+
+# `CANNOT_CONNECT_LINES` is drawn on every frame: "Not connected: this
+# program has no network access." `tls` only picks `ircs://` over `irc://` in
+# the string a command would have sent, so it describes a connection that
+# does not happen.
+ircclient	tls	shapes the URL of a connection CANNOT_CONNECT_LINES says is not made
+
+# The draft's MIME headers. `build_message` is called once, to check the
+# draft and refuse it, and `CANNOT_FETCH_LINES` says so on every frame --
+# "This client cannot send or receive mail." A Priority header on a message
+# that is assembled, checked and discarded is not a setting a user is missing.
+email	is_html	a header of a message CANNOT_FETCH_LINES says is never sent
+email	priority	ditto
+
+# `ClipboardState::mode` gates `sync_clipboard`, which is about a session
+# that cannot exist: `CANNOT_CONNECT_LINES` is drawn where the session list
+# would be -- "no host has been contacted and no session exists". The
+# per-profile `clipboard_mode` beside it is a different field and is set.
+remotedesktop	mode	gates clipboard sync for a session CANNOT_CONNECT_LINES says never starts
+
+# Settings for a capture that cannot happen. `CANNOT_CAPTURE` is drawn on
+# every view now -- before this it was a notification you had to provoke, and
+# it faded after six seconds.
+screenshot	default_action	what to do after a capture CANNOT_CAPTURE says never happens
+screenshot	show_notification	whether to announce a save that never occurs
+
+# `ExportOptions::format`. The module doc says it outright: "Nothing is
+# exported. `ExportOptions` records a format, a quality and a size, has a
+# `Default` and a test, and is read by nothing." A format picker is built
+# when something obeys it.
+photomanager	format	export options for an export the module doc says does not exist
+
+# `discovery_method` is read by exactly one thing: the settings line printing
+# its own name. The panel reads the value in order to draw the value, and the
+# module doc says outright that this program has no network access. That line
+# now ends "not applied: no network access", so a key would change a word on a
+# line that says the word means nothing. `phase` is a field of `ScanProgress`
+# -- where a scan has got to, not a setting.
+netscan	discovery_method	read only to print itself, on a line that says it is not applied
+netscan	phase	how far a scan has got; a progress reading, not a setting
+
+# --- readings and per-datum facts, each checked at the use site ------------
+# Not settings: a value the program measures, parses or is handed, which is
+# read-only by nature. Every line here was confirmed by reading what sets it
+# rather than by the struct's name, after `explorer.ctrl` turned out to live
+# in a drag-modifier record and not in the app at all.
+weather	condition	a reading on `CurrentWeather` and the forecast rows
+weather	wind_dir	ditto
+dbviewer	is_error	a property of a `QueryResult`, set by the constructor that made it
+explorer	ctrl	a field of `dropzone`'s drag modifiers, taken from the event
+pinball	side	which side a `Flipper` is, fixed when the table is built
+tetris	kind	which piece an `ActivePiece` is, fixed when it spawns
+vpnmanager	purpose	what an open `Picker` was opened for, passed to `open_picker`
+
+# `battery_charging` is read inside `if let Some(pct) =
+# self.system_info.battery_percent`, and nothing in live code ever sets
+# `battery_percent` -- `Some(72)` appears once, in a test. So the battery
+# block never draws, and the field is read by a branch production cannot
+# enter. Nothing is claimed on screen, which is the right state for a reading
+# this system has no source for; if `/proc` ever grows one, the block is
+# already written.
+sysmonitor	battery_charging	read only inside a battery block that never draws
+
+# `mediaconvert`'s panel draws SETTINGS_NOT_APPLIED -- "nothing reads these
+# except this panel" -- and there is no converter in this tree. `output_naming`
+# picks how a converted file would be named.
+mediaconvert	output_naming	names an output of a conversion that cannot happen

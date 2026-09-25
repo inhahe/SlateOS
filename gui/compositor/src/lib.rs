@@ -633,6 +633,20 @@ const fn mouse_key_button(action: a11ykeys::MouseKeyAction) -> Option<MouseButto
     }
 }
 
+/// One window's claim on the session going idle.
+#[derive(Clone, Copy, Debug)]
+struct IdleWatch {
+    /// How long without input before this watcher is told.
+    after: Duration,
+    /// Whether it has been told since the last input.
+    ///
+    /// Without this the watcher is told on every frame once the deadline
+    /// passes -- sixty times a second for as long as the user stays away --
+    /// which is a notification that the session *is* idle rather than that it
+    /// *went* idle. The lock screen wants the second one.
+    fired: bool,
+}
+
 /// Input event received from the input subsystem.
 #[derive(Clone, Debug)]
 pub enum InputEvent {
@@ -3152,6 +3166,10 @@ pub enum CompositorRequest {
     /// `notifications.yaml` and holds nothing from it. The shell is the reader.
     /// See [`guiremote::control::RequestBody::ReloadNotifications`].
     ReloadNotifications,
+    /// Announce that the session settings changed.
+    ///
+    /// See [`guiremote::control::RequestBody::ReloadSession`].
+    ReloadSession,
     /// Begin a remote draw-command stream session (returns a stream id).
     StreamStart,
     /// Capture the current scene for a stream session as an encoded wire frame.
@@ -3248,6 +3266,15 @@ pub enum CompositorRequest {
     /// [`GrabKey`](Self::GrabKey), and a separate request from it because it
     /// is a separate predicate — see
     /// [`guiremote::control::RequestBody::GrabModifierChord`].
+    /// Ask to be told when the session has been idle this long.
+    ///
+    /// A delay of nought stops the watch, which is how a client withdraws
+    /// without a second message: the state is "how long, or not at all", and
+    /// two requests for one setting is a way for them to disagree.
+    WatchIdle {
+        window_id: WindowId,
+        after: Duration,
+    },
     GrabModifierChord {
         window_id: WindowId,
         modifiers: Modifiers,
@@ -3362,6 +3389,11 @@ pub enum EventNotification {
     /// variant exists to avoid — a client reading that could not tell the
     /// gesture from an ordinary Shift release during Alt+Shift+Tab, which is
     /// the precise confusion that left the layout switcher unbound.
+    /// The session has been quiet for as long as this window asked.
+    ///
+    /// Addressed to the claimant, like [`Self::ModifierChord`]. A window that
+    /// never called [`Compositor::watch_idle`] is never sent one.
+    SessionIdle { window_id: WindowId },
     ModifierChord {
         window_id: WindowId,
         /// Every modifier that was held. Sides are already collapsed: holding
@@ -3385,6 +3417,7 @@ impl EventNotification {
             | Self::WindowResized { window_id, .. }
             | Self::FocusGained { window_id }
             | Self::FocusLost { window_id } => *window_id,
+            Self::SessionIdle { window_id } => *window_id,
             Self::SettingsChanged { window_id, .. } | Self::ModifierChord { window_id, .. } => {
                 *window_id
             }
@@ -3455,6 +3488,9 @@ fn wire_event(n: EventNotification) -> guiremote::InputEvent {
         }
         EventNotification::SettingsChanged { window_id, group } => {
             guiremote::InputEvent::new(window_id.0, ClientEvent::SettingsChanged { group })
+        }
+        EventNotification::SessionIdle { window_id } => {
+            guiremote::InputEvent::new(window_id.0, ClientEvent::SessionIdle)
         }
         EventNotification::ModifierChord {
             window_id,
@@ -4918,6 +4954,20 @@ pub struct Compositor {
     /// clock adjusted underneath them would silence a key for the length of
     /// the adjustment.
     started_at: Instant,
+    /// When input was last seen, for an idle watch.
+    ///
+    /// Here and not in the shell because this is the only place that sees
+    /// *every* input event. A shell measuring its own idleness would be
+    /// counting the time since it was last typed at, not since the user was
+    /// last active, and would lock the screen out from under somebody working
+    /// in a terminal.
+    ///
+    /// Starts at `started_at`: a session nobody has touched yet has been idle
+    /// since it began, which is the answer a lock timeout wants. `None` would
+    /// mean "no reading", and there is one -- see
+    /// `gui/desktop/src/widgets.rs`, where a meter that had never been sampled
+    /// had to stop reporting zero for the same reason.
+    last_input: Instant,
     cursor_x: i32,
     /// Current mouse cursor position.
     cursor_y: i32,
@@ -5161,6 +5211,19 @@ pub struct Compositor {
     /// claims and the side does not matter: the user who holds the right-hand
     /// Alt means the same thing as the user who holds the left.
     modifier_chord_grabs: HashMap<Modifiers, WindowId>,
+    /// Windows that asked to be told when the session goes idle.
+    ///
+    /// A claim, exactly as a modifier chord is: a client asks through the
+    /// request channel and thereafter receives an event it otherwise would
+    /// not, delivered to it alone. There is no privileged shell to address --
+    /// what looks like shell privilege here is per-grab and first-come -- so a
+    /// claim is the only way to say "this window, not the others".
+    ///
+    /// A map rather than one slot, unlike a chord grab. Two clients cannot
+    /// both meaningfully receive one keystroke, but several can want to know
+    /// the session went quiet: a lock screen, a display that dims, a daemon
+    /// that suspends. Each carries its own delay and fires on its own.
+    idle_watches: HashMap<WindowId, IdleWatch>,
     /// The stretch of time with at least one modifier held, and whether
     /// anything has happened during it that rules out a chord.
     ///
@@ -5235,6 +5298,7 @@ impl Compositor {
             damage: DamageRegion::new(),
             frame_stats: FrameStats::new(frame_interval),
             started_at: Instant::now(),
+            last_input: Instant::now(),
             cursor_x: width as i32 / 2,
             cursor_y: height as i32 / 2,
             cursor_shape: CursorShape::Arrow,
@@ -5267,6 +5331,7 @@ impl Compositor {
             full_recomposite: true,
             occlusion_cull: true,
             scanout: Scanout::Composited,
+            idle_watches: HashMap::new(),
             stream_sessions: BTreeMap::new(),
             next_stream_id: 1,
             current_workspace: 0,
@@ -5302,6 +5367,32 @@ impl Compositor {
             return;
         }
         self.appearance = settings;
+        // The user's chosen families, installed into *this* cache.
+        //
+        // Not `FontSettings::apply`, which is what every other process calls:
+        // that sets the toolkit's process-global choice, and this process does
+        // not draw from it. The render engine's `fonts` is this process's own
+        // `FontCache`, kept because it draws every process's text and
+        // measures none of it, and
+        // installing into the wrong one of the two is precisely how a system
+        // comes to measure in one face and draw in another -- the failure
+        // `install_ui_faces`' own documentation exists to prevent.
+        //
+        // A family this machine does not have leaves the previous, working
+        // face in place, which is the right answer and not something a
+        // compositor can improve on; hence the discarded results.
+        let ui = self.appearance.fonts.ui_font.clone();
+        if !ui.is_empty() {
+            let _ = guitk::text::install_family(&mut self.render_engine.fonts, &ui);
+        }
+        let mono = self.appearance.fonts.mono_font.clone();
+        if !mono.is_empty() {
+            let _ = guitk::text::install_family_as(
+                &mut self.render_engine.fonts,
+                FontFamily::Mono,
+                &mono,
+            );
+        }
         // Resolved once here rather than per frame: the packing is arithmetic
         // on eleven colours, and they change only when this is called.
         // One resolve, then everything derived from it. Two lines that each
@@ -7016,8 +7107,114 @@ impl Compositor {
     // Input routing
     // -----------------------------------------------------------------------
 
+    /// When input was last seen.
+    ///
+    /// The reading an idle watch is built on. Exposed as the instant rather
+    /// than as a duration so a caller can compare it against its own deadline
+    /// without this type having to know what the deadline is -- and so a test
+    /// can assert on it by comparison instead of by sleeping, which is what
+    /// design-decisions 855 asks for: count the thing if you can, and time it
+    /// only when you cannot.
+    #[must_use]
+    pub const fn last_input(&self) -> Instant {
+        self.last_input
+    }
+
+    /// Ask to be told when the session has been idle for `after`.
+    ///
+    /// The same shape as [`grab_modifier_chord`](Self::grab_modifier_chord):
+    /// the window claims something and thereafter receives an event it would
+    /// not otherwise get. Unlike a chord, the claim is not exclusive -- see
+    /// [`IdleWatch`].
+    ///
+    /// Calling again for the same window replaces the delay, and arms it
+    /// afresh: a caller that has just been told "five minutes" should not have
+    /// its next notification suppressed because the old claim had already
+    /// fired.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist.
+    pub fn watch_idle(&mut self, window_id: WindowId, after: Duration) -> CompositorResult<()> {
+        if self.window_index(window_id).is_none() {
+            return Err(CompositorError::WindowNotFound(window_id));
+        }
+        self.idle_watches.insert(
+            window_id,
+            IdleWatch {
+                after,
+                fired: false,
+            },
+        );
+        Ok(())
+    }
+
+    /// Stop telling this window about idleness.
+    ///
+    /// Silent when the window holds no claim, for `ungrab_modifier_chord`'s
+    /// reason: releasing something nobody holds is a caller tidying up, not an
+    /// error worth reporting.
+    pub fn unwatch_idle(&mut self, window_id: WindowId) {
+        self.idle_watches.remove(&window_id);
+    }
+
+    /// The windows whose idle deadline has just passed, each reported once.
+    ///
+    /// Takes `now` rather than reading the clock, so a test can drive it
+    /// across a deadline without sleeping -- design-decisions 855 again: count
+    /// the thing when you can.
+    ///
+    /// Marks each as told before returning it. A watcher is armed again by the
+    /// next input, which is what makes this "the session went idle" rather
+    /// than "the session is idle".
+    pub fn idle_deadlines_passed(&mut self, now: Instant) -> Vec<WindowId> {
+        let since = now.saturating_duration_since(self.last_input);
+        let mut due: Vec<WindowId> = self
+            .idle_watches
+            .iter_mut()
+            .filter(|(_, watch)| !watch.fired && since >= watch.after)
+            .map(|(window, watch)| {
+                watch.fired = true;
+                *window
+            })
+            .collect();
+        // Sorted, because a `HashMap` does not promise an order and two
+        // watchers due in the same pass should be told in the same order every
+        // run. An arbitrary order here is the kind of thing that makes a test
+        // pass on one machine and fail on another.
+        // By the inner id: `WindowId` is deliberately not `Ord` -- window
+        // ids have no meaningful order -- but a stable report does need one.
+        due.sort_unstable_by_key(|w| w.raw());
+        due
+    }
+
+    /// Queue a notification for every idle deadline that has just passed.
+    ///
+    /// Called once a tick. The check is a subtraction against one `Instant`
+    /// and a walk of however many watchers there are -- which is nought or one
+    /// on any machine anybody has -- so it does not need scheduling: the
+    /// server is already running a frame loop, and design-decisions 812's
+    /// objection is to waking an *idle desktop* to poll, not to a running
+    /// compositor answering a question it already has the answer to.
+    pub fn queue_idle_notifications(&mut self, now: Instant) {
+        for window_id in self.idle_deadlines_passed(now) {
+            self.pending_notifications
+                .push_back(EventNotification::SessionIdle { window_id });
+        }
+    }
+
     /// Process an input event and route it to the appropriate window.
     pub fn handle_input(&mut self, event: InputEvent) {
+        // Every input event passes through here, which is why the reading is
+        // taken here rather than in each of the handlers below: a new event
+        // kind cannot forget to be counted as activity.
+        self.last_input = Instant::now();
+        // Re-arm every watcher: the session is active again, so the next quiet
+        // stretch is a fresh one to be told about.
+        for watch in self.idle_watches.values_mut() {
+            watch.fired = false;
+        }
+
         // Hit testing derives from `frame_insets`, which is scaled, so input
         // needs the same refresh compositing does — and needs it more often.
         // A drag delivers pointer motion far faster than frames are composed,
@@ -9365,6 +9562,13 @@ impl Compositor {
                 self.announce_settings_change(SettingsGroup::Notifications);
                 CompositorResponse::Ok
             }
+            CompositorRequest::ReloadSession => {
+                // Announcing, not adopting -- as with the notification rules,
+                // this compositor keeps no copy of the lock delay. The shell
+                // holds the idle claim and is the only thing that acts on it.
+                self.announce_settings_change(SettingsGroup::Session);
+                CompositorResponse::Ok
+            }
             CompositorRequest::ReloadInput => {
                 self.reload_input();
                 self.announce_settings_change(SettingsGroup::Input);
@@ -9497,6 +9701,19 @@ impl Compositor {
                     message: e.to_string(),
                 },
             },
+            CompositorRequest::WatchIdle { window_id, after } => {
+                if after.is_zero() {
+                    self.unwatch_idle(window_id);
+                    CompositorResponse::Ok
+                } else {
+                    match self.watch_idle(window_id, after) {
+                        Ok(()) => CompositorResponse::Ok,
+                        Err(e) => CompositorResponse::Error {
+                            message: e.to_string(),
+                        },
+                    }
+                }
+            }
             CompositorRequest::GrabModifierChord {
                 window_id,
                 modifiers,
@@ -21893,6 +22110,164 @@ mod tests {
             "the edge behind a blurring surface is as sharp as it was \
              ({before} distinct colours before, {after} after) -- the pass did \
              not reach the framebuffer"
+        );
+    }
+
+    /// A watcher is told once when the session goes quiet, and again only
+    /// after the user comes back.
+    ///
+    /// The "once" is the point. Without the fired flag the watcher is told on
+    /// every frame past the deadline -- sixty times a second while the user is
+    /// away -- which reports that the session *is* idle rather than that it
+    /// *went* idle, and a lock screen driven by that would re-lock itself over
+    /// whatever the user was doing on their return.
+    #[test]
+    fn an_idle_watcher_is_told_once_per_quiet_stretch() {
+        let mut c = Compositor::new(160, 120, 60).expect("a software compositor");
+        let w = c.create_window("watcher".to_string(), 100, 100, 1);
+        c.watch_idle(w, Duration::from_mins(1))
+            .expect("a real window");
+
+        let start = c.last_input();
+        // Before the deadline: nothing.
+        assert!(
+            c.idle_deadlines_passed(start + Duration::from_secs(59))
+                .is_empty(),
+            "told before the delay had elapsed"
+        );
+        // After it: once.
+        assert_eq!(
+            c.idle_deadlines_passed(start + Duration::from_mins(1)),
+            vec![w],
+            "not told when the delay elapsed"
+        );
+        // And not again, however long it stays quiet.
+        assert!(
+            c.idle_deadlines_passed(start + Duration::from_mins(10))
+                .is_empty(),
+            "told twice for one quiet stretch"
+        );
+
+        // The user comes back, and the next quiet stretch is a new one.
+        c.handle_input(InputEvent::MouseMove { x: 1, y: 1 });
+        let resumed = c.last_input();
+        assert_eq!(
+            c.idle_deadlines_passed(resumed + Duration::from_mins(1)),
+            vec![w],
+            "input did not re-arm the watcher"
+        );
+    }
+
+    /// Each watcher keeps its own delay, and the report is ordered.
+    #[test]
+    fn watchers_fire_on_their_own_delays_in_a_stable_order() {
+        let mut c = Compositor::new(160, 120, 60).expect("a software compositor");
+        let soon = c.create_window("soon".to_string(), 10, 10, 1);
+        let later = c.create_window("later".to_string(), 10, 10, 2);
+        c.watch_idle(soon, Duration::from_secs(30))
+            .expect("a real window");
+        c.watch_idle(later, Duration::from_secs(90))
+            .expect("a real window");
+
+        let start = c.last_input();
+        assert_eq!(
+            c.idle_deadlines_passed(start + Duration::from_secs(30)),
+            vec![soon],
+            "the shorter delay did not fire alone"
+        );
+        assert_eq!(
+            c.idle_deadlines_passed(start + Duration::from_secs(90)),
+            vec![later],
+            "the longer delay did not fire on its own schedule"
+        );
+    }
+
+    /// A claim on a window that does not exist is refused, not recorded.
+    #[test]
+    fn an_idle_watch_needs_a_real_window() {
+        let mut c = Compositor::new(160, 120, 60).expect("a software compositor");
+        let w = c.create_window("gone".to_string(), 10, 10, 1);
+        c.destroy_window(w)
+            .expect("the window exists until it does not");
+        assert!(
+            c.watch_idle(w, Duration::from_secs(1)).is_err(),
+            "a closed window was allowed to claim the idle watch"
+        );
+        let start = c.last_input();
+        assert!(
+            c.idle_deadlines_passed(start + Duration::from_mins(10))
+                .is_empty(),
+            "a refused claim was recorded anyway"
+        );
+    }
+
+    /// Re-claiming replaces the delay and arms it again.
+    #[test]
+    fn claiming_again_rearms_the_watcher() {
+        let mut c = Compositor::new(160, 120, 60).expect("a software compositor");
+        let w = c.create_window("again".to_string(), 10, 10, 1);
+        c.watch_idle(w, Duration::from_secs(10))
+            .expect("a real window");
+
+        let start = c.last_input();
+        assert_eq!(
+            c.idle_deadlines_passed(start + Duration::from_secs(10)),
+            vec![w]
+        );
+        // Already fired. A caller that asks again has just said what it wants
+        // to be told, and suppressing that would make the second request do
+        // nothing visible.
+        c.watch_idle(w, Duration::from_secs(5))
+            .expect("a real window");
+        assert_eq!(
+            c.idle_deadlines_passed(start + Duration::from_secs(11)),
+            vec![w],
+            "re-claiming did not arm the watcher again"
+        );
+    }
+
+    /// Input moves the idle reading; anything else leaves it alone.
+    ///
+    /// The second half is the control, and it is the half that makes the first
+    /// mean something: an implementation that stamped `last_input` from a
+    /// timer, or on every pass of the loop, would satisfy "it advanced after a
+    /// click" and report a session as active while nobody touched it -- which
+    /// is the failure a lock timeout exists to avoid.
+    ///
+    /// Compared rather than timed. A test that slept and asserted on the
+    /// elapsed duration would fail on a busy machine and pass on a broken
+    /// implementation that stamped the field constantly.
+    #[test]
+    fn input_moves_the_idle_reading_and_nothing_else_does() {
+        let mut c = Compositor::new(160, 120, 60).expect("a software compositor");
+
+        let before = c.last_input();
+        c.handle_input(InputEvent::MouseMove { x: 4, y: 4 });
+        let after_move = c.last_input();
+        // Strictly greater, not `>=`: `>=` holds when the field is never
+        // touched at all, so it would pass against an implementation that
+        // recorded nothing. `Instant` here is QPC-backed and two readings
+        // either side of a call differ.
+        assert!(
+            after_move > before,
+            "input did not move the idle reading forward"
+        );
+
+        // A repaint is not activity.
+        c.set_appearance(appearance::AppearanceSettings::default());
+        assert_eq!(
+            c.last_input(),
+            after_move,
+            "something that is not input was counted as activity"
+        );
+
+        c.handle_input(InputEvent::KeyDown {
+            scancode: 30,
+            character: Some('a'),
+        });
+        assert!(
+            c.last_input() > after_move,
+            "a key press did not count as activity"
         );
     }
 

@@ -128,25 +128,43 @@ const SOLVE_STEP_MS: u64 = 320;
 const TICK_MS: u64 = 16;
 
 const HELP_TITLE: &str = "How to play";
-const HELP_ROWS: [(&str, &str); 9] = [
+/// The two sentences that explain the puzzle, and the one that explains the
+/// mouse. Drawn above [`SHORTCUTS`] on the help sheet.
+///
+/// Deliberately a *separate* list from the keystrokes below, rather than three
+/// more rows of one. `Goal`, `Rule` and `Mouse` are not keys, and
+/// `every_advertised_key_does_something` parses the first column of the list
+/// it guards -- `guitk::shortcut::keystrokes` refuses what it cannot read
+/// rather than skipping it, precisely so a dead key cannot hide behind a label
+/// nobody taught it. Splitting is the honest way to satisfy both: the rows
+/// that name keys are checked, and the rows that explain the game are not
+/// pretending to.
+const RULES: [(&str, &str); 3] = [
     ("Goal", "Move every disk to peg 3, largest at the bottom"),
     (
         "Rule",
         "One disk at a time, never a bigger one onto a smaller",
     ),
+    ("Mouse", "Click a peg to lift from it, or drop onto it"),
+];
+
+/// The keys this game answers, drawn on the help sheet below [`RULES`].
+///
+/// `N` was missing from the old combined list -- it has always started a new
+/// game and the sheet never said so.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Left / Right", "Choose a peg"),
+    ("1-3", "Jump straight to a peg"),
     (
-        "Left/Right",
-        "Choose a peg; 1, 2 and 3 jump straight to one",
+        "Enter / Space",
+        "Lift the top disk, or drop the one you hold",
     ),
-    (
-        "Enter",
-        "Lift the top disk, or drop the one you are holding",
-    ),
-    ("Click", "The same, on the peg you click"),
     ("Esc", "Put the disk you are holding back"),
     ("Z", "Take back a move"),
+    ("N", "Start a new game"),
     ("A / S", "One best move / solve it and watch"),
-    ("Up/Down", "More or fewer disks, before you start"),
+    ("Up / Down", "More or fewer disks, before you start"),
+    ("F1 / ? / H", "This sheet"),
 ];
 
 // ── Layout ─────────────────────────────────────────────────────────────────
@@ -1588,9 +1606,13 @@ fn draw_help(f: &mut Frame, l: &Layout) {
     // past its own foot however short the window is.
     let top = p.y + pad + title_h + pad / 2.0;
     let room = (p.bottom() - pad - top).max(0.0);
-    let step = room / HELP_ROWS.len() as f32;
+    // Both lists share the sheet, so the step is over their total. They are two
+    // consts for the reason `RULES` gives and one panel because a reader wants
+    // one panel.
+    let rows = RULES.len().saturating_add(SHORTCUTS.len());
+    let step = room / rows as f32;
     let key_span = (inner * 0.26).min(96.0);
-    for (i, (k, v)) in HELP_ROWS.iter().enumerate() {
+    for (i, (k, v)) in RULES.iter().chain(SHORTCUTS.iter()).enumerate() {
         let y = top + i as f32 * step;
         if y + l.small > p.bottom() - pad {
             break;
@@ -1642,9 +1664,18 @@ impl Towers {
         if self.show_help {
             // The sheet is modal: it takes every key, and a few of them close
             // it. Letting the rest through would mean playing blind.
-            if matches!(ev.key, Key::H | Key::Escape | Key::Enter | Key::Space) {
+            if matches!(
+                ev.key,
+                Key::H | Key::F1 | Key::Escape | Key::Enter | Key::Space
+            ) || (ev.key == Key::Slash && m.shift)
+            {
                 self.apply(Action::ToggleHelp);
             }
+            return EventResult::Consumed;
+        }
+
+        if ev.key == Key::Slash && m.shift {
+            self.apply(Action::ToggleHelp);
             return EventResult::Consumed;
         }
 
@@ -1666,7 +1697,13 @@ impl Towers {
             Key::Down => Some(Action::SetDisks(self.disks.saturating_sub(1))),
             Key::A => Some(Action::Step),
             Key::S => Some(Action::ToggleSolve),
-            Key::H => Some(Action::ToggleHelp),
+            // `F1` and `?` as well as `H`, per design-decisions 863: `F1` is the
+            // key that works in every app in this suite, so "press F1 to see
+            // the keys" is true of all of them; `?` is free here because
+            // nothing in this game takes typed text. `H` stays because it is
+            // what this game has always answered and taking it away would
+            // break a key someone already knows.
+            Key::H | Key::F1 => Some(Action::ToggleHelp),
             _ => None,
         };
 
@@ -1896,6 +1933,114 @@ mod tests {
     /// Click a raw point, as the compositor reports it.
     fn poke(g: &mut Towers, x: f32, y: f32, size: (f32, f32)) -> EventResult {
         g.click_at(x, y, MouseButton::Left, size)
+    }
+
+    /// Games chosen so that between them every advertised key has work.
+    ///
+    /// `Esc` puts back a disk you are holding and correctly does nothing when
+    /// your hands are empty, so one of these is mid-move. `Z` takes back a
+    /// move and there has to be one to take back.
+    fn help_states() -> Vec<Towers> {
+        let fresh = Towers::new();
+
+        // Holding a disk: Esc has something to put back.
+        let mut holding = Towers::new();
+        probe::key(&mut holding, &probe::press(Key::Enter));
+
+        // A move already made: Z has something to undo.
+        let mut moved = Towers::new();
+        for key in [Key::Enter, Key::Right, Key::Enter] {
+            probe::key(&mut moved, &probe::press(key));
+        }
+
+        vec![fresh, holding, moved]
+    }
+
+    /// **Every key the sheet advertises is one this game answers.**
+    ///
+    /// The sheet and the handler are two copies of one fact and they drift.
+    /// This sheet had drifted twice before this test existed: `N` started a
+    /// new game and was not on it, and the row that named `Left/Right`
+    /// mentioned `1`, `2` and `3` only inside its description, where nothing
+    /// could check them.
+    ///
+    /// Only `SHORTCUTS` is parsed. `RULES` names no keys -- `Goal`, `Rule`,
+    /// `Mouse` -- and is a separate const for exactly that reason, rather than
+    /// this test being taught to skip rows it cannot read. A guard that skips
+    /// what it does not understand is how a dead key hides.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|g| probe::key(g, &stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the sheet advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The help sheet reaches the window.**
+    ///
+    /// `HELP_ROWS` was drawn and no test named it, so nothing tied what the
+    /// sheet claims to what the game does or to what the window shows.
+    #[test]
+    fn the_help_sheet_reaches_the_window() {
+        let mut g = Towers::new();
+        assert!(
+            !says(&g, "Take back a move"),
+            "the sheet is up before anybody asked for it"
+        );
+
+        probe::key(&mut g, &probe::press(Key::F1));
+        let drawn = texts(&g, g.width(), g.height()).join(" | ");
+        for (keys, what) in RULES.iter().chain(SHORTCUTS.iter()) {
+            assert!(drawn.contains(keys), "{keys:?} never reached the window");
+            assert!(drawn.contains(what), "{what:?} never reached the window");
+        }
+
+        probe::key(&mut g, &probe::press(Key::Escape));
+        assert!(!says(&g, "Take back a move"), "Escape did not close it");
+    }
+
+    /// **`F1`, `?` and `H` all raise the sheet, and all three close it.**
+    ///
+    /// The sheet is modal, so a key that opens it and cannot close it traps
+    /// the reader -- which is why the closing set is asserted rather than
+    /// assumed. `?` is Shift and the slash key and is read from the modifier,
+    /// so a plain `/` is checked too: without that, this would pass on any
+    /// slash and the sheet would advertise a key nobody pressed.
+    #[test]
+    fn every_key_that_raises_the_sheet_also_closes_it() {
+        for label in ["F1", "?", "H"] {
+            let mut g = Towers::new();
+            let strokes = guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}"));
+            for stroke in &strokes {
+                probe::key(&mut g, stroke);
+            }
+            assert!(
+                says(&g, "Take back a move"),
+                "{label} did not raise the sheet"
+            );
+            for stroke in &strokes {
+                probe::key(&mut g, stroke);
+            }
+            assert!(
+                !says(&g, "Take back a move"),
+                "{label} did not close it again"
+            );
+        }
+
+        let mut plain = Towers::new();
+        probe::key(&mut plain, &probe::press(Key::Slash));
+        assert!(
+            !says(&plain, "Take back a move"),
+            "a plain / raised the sheet, so the Shift in ? is not being read"
+        );
     }
 
     /// Every string the frame draws at a given size.

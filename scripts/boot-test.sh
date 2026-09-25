@@ -729,7 +729,7 @@ check_rootfs_freshness() {
 # $FASTPY_SLATEOS_SYSROOT first and otherwise falls back to a *sibling* `os`
 # checkout -- `<fastpy>/../os/toolchain/sysroot/lib`, which is the integration
 # worktree, never the lane worktree the build ran from.  Nothing in
-# ctest-fixtures.py sets that variable, so from os-lane-{a,b,c} the fallback is
+# ctest-fixtures.py sets that variable, so from any os-lane-* the fallback is
 # what fires and the fixtures link a libc.a from a different checkout than the
 # one every check in this script reasons about.  Observed 2026-08-31: all three
 # lanes sharing one 11-day-old copy.
@@ -823,7 +823,7 @@ check_sysroot_identity() {
         # missing or unidentifiable libc -- and that is not what happened.  Ours
         # is present and named on the next line (the early return above proves
         # it exists).  What failed is fastpy's *search*: its last candidate is a
-        # sibling checkout literally named `os`, so from `os-lane-{a,b,c}` it
+        # sibling checkout literally named `os`, so from any `os-lane-*` it
         # looks only at the integration worktree and never at the tree being
         # tested.  Misnaming a search defect as a missing file sends the reader
         # to rebuild a sysroot that is already there.
@@ -3548,7 +3548,42 @@ check_lane_signals
 # another lane, and charging that to the gates would make a contended host look
 # like an expensive checker.  It shows up in `script_seconds` minus the three
 # phases, which is where an unexplained wait belongs.
+# --- build-contention notice (advisory only; never blocks) ----------------
+#
+# Three lanes share one 12-core box. The boot lock serialises QEMU between
+# them but NOT compilation, so another lane's `cargo test --workspace` runs
+# straight through this script's gates. On 2026-09-18 that, plus my own
+# concurrent builds, took the gate phase from a 2701s reference to 5326s and
+# the run died at its timeout with the kernel still compiling.
+#
+# This does not prevent any of that. It makes it legible, which is the
+# actual injury -- a slow phase with no explanation costs hours of
+# investigation, and one printed line turns it into a fact.
+#
+# It deliberately does NOT try to say whose processes they are. `ps -W`
+# reports an exe path and no working directory, so a cargo process cannot be
+# attributed to a lane, and a confident wrong attribution is worse than an
+# honest count. It does not need to: this is called only at instants when
+# THIS run owns no cargo -- before its first gate, and after the build has
+# exited -- so a non-zero count is somebody else by construction.
+contention_notice() {
+    _when="$1"
+    _n=$(ps -W 2>/dev/null | grep -ciE 'cargo\.exe|rustc\.exe' || true)
+    # `grep -c` exits 1 on zero matches, which under `set -e` would abort a
+    # boot over an idle machine. `|| true` is load-bearing, not defensive.
+    case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
+    if [ "$_n" -gt 0 ]; then
+        echo "=== NOTE: $_n cargo/rustc process(es) running at $_when ==="
+        echo "    This run owns none at this point, so they belong to another"
+        echo "    lane. Expect this phase to take longer than the reference"
+        echo "    timings; it is contention, not a regression. (Advisory only.)"
+    else
+        echo "=== box quiet at $_when: no other lane is building ==="
+    fi
+}
+
 GATES_START_EPOCH="$(date +%s)"
+contention_notice "the start of the gate phase"
 
 # Per-gate wall-clock, appended by `run_checker` (scripts/run-checker.sh) as one
 # `<label>\t<seconds>\t<exit>` row per gate.  Read back at the end of the phase.
@@ -3700,6 +3735,149 @@ check_eol() {
 }
 
 check_eol
+
+# Lane B's manifest-producer gate.  Every entry in
+# `rootfs-bin-manifest.txt` must have something in the tree that produces
+# it, with aliases resolved to their producer.
+#
+# It was written after a near-miss worth repeating: `awk` appeared to have
+# no producer anywhere, git history showed a 3,726-line implementation
+# deleted five days earlier, and three further checks agreed.  Every one of
+# them was a form of `look for a file named awk*.rs`, so they were not three
+# witnesses but one -- `awk` is at `userspace/coreutils/src/bin/awk/`,
+# cargo's DIRECTORY form.  The gate enumerates four producer sources for
+# exactly that reason, and its author's note on the asymmetry is why it is
+# self-tested first: a scan that UNDER-reports producers makes every entry a
+# false positive, which is loud and self-correcting, while one that
+# OVER-reports turns a real defect into silence, which is not.
+check_manifest_producers() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== manifest-producer check: skipped (no python) ===" >&2
+        return 0
+    fi
+    echo "=== Checking the manifest-producer gate against the tree it grades ==="
+    if ! run_checker check-manifest-producers-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-manifest-producers.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The manifest-producer gate fails its" >&2
+        echo "own cases, so its verdict on the manifest means nothing.  Its" >&2
+        echo "dangerous direction is over-reporting producers, which turns a" >&2
+        echo "missing binary into silence rather than into a finding." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that every manifest entry has a producer ==="
+    if run_checker check-manifest-producers "$py" \
+            "$PROJECT_ROOT/scripts/check-manifest-producers.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each manifest entry above names a binary" >&2
+    echo "nothing in this tree produces, so create-ext4-rootfs.sh will stage" >&2
+    echo "a /bin entry that does not exist -- or silently skip it, which is" >&2
+    echo "worse, because the manifest then lists a command the image lacks." >&2
+    echo "" >&2
+    echo "Check cargo's DIRECTORY form before concluding a producer is gone:" >&2
+    echo "src/bin/<name>/ is a multi-file binary and matches no *.rs glob." >&2
+    exit 1
+}
+
+check_manifest_producers
+
+# Lane B's NUL gate.  A NUL-only difference between two files must be
+# visible through whatever capture the comparison runs through, and two
+# identical trees must still compare equal.  Both halves matter: a capture
+# that drops NULs reports a difference as agreement, and one that mangles
+# every byte reports agreement as a difference.
+check_cp_diff_sees_nul() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== NUL-visibility check: skipped (no python) ===" >&2
+        return 0
+    fi
+    echo "=== Checking the NUL-visibility gate against itself ==="
+    if ! run_checker check-cp-diff-sees-nul-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-cp-diff-sees-nul.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The NUL-visibility gate fails its own" >&2
+        echo "cases.  Its subject is a difference the obvious instrument cannot" >&2
+        echo "see, so a broken version of it is indistinguishable from a clean" >&2
+        echo "tree by construction." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that a NUL-only difference is visible ==="
+    if run_checker check-cp-diff-sees-nul "$py" \
+            "$PROJECT_ROOT/scripts/check-cp-diff-sees-nul.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A NUL-only difference is not visible" >&2
+    echo "through the capture this tree's comparisons use, so two files that" >&2
+    echo "differ only in NUL bytes will be reported as identical." >&2
+    exit 1
+}
+
+check_cp_diff_sees_nul
+
+# Exports with no caller anywhere in the tree.
+#
+# Its own report is careful about what it means, and the care is the
+# point: an export with no caller YET is ordinary in a tree this size.
+# What it catches is the case where a doc comment names a caller that does
+# not exist -- a promise nothing keeps. That is design-decisions 946 seen
+# from the other end: 946 is a publisher whose subscriber is missing, and
+# this is a publisher whose documentation invented one.
+check_unused_exports() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== unused-exports check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the unused-exports gate against itself ==="
+    if ! run_checker check-unused-exports-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-unused-exports.py" --selftest; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The unused-exports gate fails its own" >&2
+        echo "cases, so its verdict on the tree means nothing.  Its failure" >&2
+        echo "mode is an empty finding list, which reads exactly like a clean" >&2
+        echo "tree." >&2
+        exit 1
+    fi
+
+    echo "=== Checking for exports whose documented caller does not exist ==="
+    if run_checker check-unused-exports "$py" \
+            "$PROJECT_ROOT/scripts/check-unused-exports.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each export above is named as having a" >&2
+    echo "caller by its own documentation, and that caller does not exist." >&2
+    echo "" >&2
+    echo "An export with no caller yet is ordinary and is NOT what this" >&2
+    echo "reports.  A doc comment that names one is a promise nothing keeps," >&2
+    echo "and the next reader will believe it." >&2
+    exit 1
+}
+
+check_unused_exports
 
 # `check_eol` above catches the *consequence* -- a file declared `text eol=lf`
 # sitting CRLF on disk.  This one catches the cause, immediately after it, on
@@ -6946,9 +7124,15 @@ check_python_suites() {
         # would cost is this loop's readable shape: it echoes everything a
         # checker prints, and forty-odd suites' full output in place of the
         # one-line-per-suite table below is a worse log, not a better one.
+        # Per-suite wall clock. Two boots died inside this phase at their
+        # timeout with nothing here reporting a duration, so the only
+        # evidence available afterwards was how far the alphabet got. One
+        # number per suite turns that into an attribution.
+        suite_start=$(date +%s)
         out="$(PYTHONIOENCODING=:replace "$py" -u "$f" 2>&1)" && rc=0 || rc=$?
+        suite_secs=$(( $(date +%s) - suite_start ))
         if [ "$rc" -eq 0 ]; then
-            printf '    %-32s %s\n' "$(basename "$f")" "$(printf '%s\n' "$out" | tail -1)"
+            printf '    %-32s %5ss  %s\n' "$(basename "$f")" "$suite_secs" "$(printf '%s\n' "$out" | tail -1)"
             # A passing suite is reported by its LAST LINE ONLY, so a suite that
             # drops a group and still ends with "all N passed" reports a skip
             # that nothing above this line can see.  That is not hypothetical:
@@ -8569,6 +8753,7 @@ fi
 # --- END BOOT-LOCK-REGION ---
 
 # Step 4: Boot QEMU
+contention_notice "the moment before QEMU"
 echo "=== Booting QEMU (timeout: ${TIMEOUT}s, cpu: $QEMU_CPU) ==="
 rm -f "$SERIAL_FILE"
 # Removed together with the serial log, and for the identical reason: both are

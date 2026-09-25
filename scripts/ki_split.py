@@ -67,7 +67,7 @@ HEDGED = re.compile(
 
 # The leading token of a heading, past any `[A]` lane tag, bold markers or
 # backticks. Used only to ask whether the heading opens with an entry *id*.
-_LEAD_TOKEN = re.compile(r"^[\s*`\[]*(?:\[?[A-C]\]\s*)?[\s*`]*([A-Za-z0-9][A-Za-z0-9-]*)")
+_LEAD_TOKEN = re.compile(r"^[\s*`\[]*(?:\[?[A-F]\]\s*)?[\s*`]*([A-Za-z0-9][A-Za-z0-9-]*)")
 
 
 def opens_with_entry_id(title: str) -> bool:
@@ -130,7 +130,7 @@ class Entry:
         first, but a *bare* leading letter must not be — that would eat the `B`
         of `BUG-OILS-…`.
         """
-        title = re.sub(r"^\[[A-C]\]\s*", "", self.title)
+        title = re.sub(r"^\[[A-F]\]\s*", "", self.title)
         m = re.match(r"([A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)", title)
         return m.group(1) if m else ""
 
@@ -171,7 +171,7 @@ class Entry:
         a status word. A heading with no em dash at all yields "" — i.e. reads
         as open — which is the safe direction.
         """
-        title = re.sub(r"^\[[A-C]\]\s*", "", self.title)
+        title = re.sub(r"^\[[A-F]\]\s*", "", self.title)
         body = title[len(self.entry_id) :]
         segs = re.split(r"\s+—\s+", body)
         tail = ""

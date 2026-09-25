@@ -984,8 +984,8 @@ fn a_start_menu_row_comes_out_as_a_program_to_start() {
     let launched = session.take_launches();
     assert_eq!(launched.len(), 1, "expected one program, got {launched:?}");
     assert!(
-        launched[0].starts_with("/"),
-        "a launch should be a path, not {:?}",
+        launched[0].program.starts_with("/"),
+        "a launch should name a path, not {:?}",
         launched[0]
     );
     assert!(
@@ -1325,7 +1325,7 @@ fn a_wallpaper_chosen_while_running_is_adopted_without_a_restart() {
 
         assert_eq!(
             session.wallpaper_mut().current_image_path(),
-            Some(picture.as_str()),
+            Some(picture.as_path()),
             "the desktop did not adopt the picture until a restart"
         );
     });
@@ -2681,7 +2681,7 @@ fn a_wallpaper_named_in_the_settings_is_adopted() {
 
     assert_eq!(
         session.wallpaper_mut().current_image_path(),
-        Some(picture.as_str()),
+        Some(picture.as_path()),
         "the desktop is not showing the picture the settings name"
     );
 }
@@ -2729,11 +2729,11 @@ fn an_unrelated_settings_change_does_not_reload_the_picture() {
     );
 }
 
-fn fixture(name: &str) -> String {
-    format!(
+fn fixture(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!(
         "{}/../imagecodec/tests/data/{name}.png",
         env!("CARGO_MANIFEST_DIR")
-    )
+    ))
 }
 
 /// The directory this process's scratch files live in, created once.
@@ -2765,10 +2765,10 @@ fn scratch_dir() -> &'static std::path::Path {
 }
 
 /// A file with contents of our choosing, for the cases no valid fixture covers.
-fn scratch(name: &str, bytes: &[u8]) -> String {
+fn scratch(name: &str, bytes: &[u8]) -> std::path::PathBuf {
     let path = scratch_dir().join(name);
     std::fs::write(&path, bytes).expect("the temp directory is not writable");
-    path.to_string_lossy().into_owned()
+    path
 }
 
 /// Every image upload the session sent, as `(window, image_id, width, height,
@@ -2903,7 +2903,9 @@ fn a_slideshow_step_releases_the_old_picture_before_uploading_the_new_one() {
     // wallpaper would refuse every slide after the first.
     let (mut session, desktop, _turn) = session();
     let background = session.background().window();
-    session.wallpaper_mut().set_slideshow("/pics", 60, false);
+    session
+        .wallpaper_mut()
+        .set_slideshow(std::path::Path::new("/pics"), 60, false);
     session
         .wallpaper_mut()
         .populate_slideshow_paths(vec![fixture("rgb8"), fixture("gray8")]);
@@ -2954,9 +2956,10 @@ fn a_wallpaper_that_is_not_there_costs_a_picture_and_not_a_desktop() {
     // run of the same test in another process.
     let _ = std::fs::remove_file(&missing);
     let (mut session, desktop, _turn) = session();
-    session
-        .wallpaper_mut()
-        .set_image(&missing, crate::wallpaper::ImageFit::Fill);
+    session.wallpaper_mut().set_image(
+        std::path::Path::new(&missing),
+        crate::wallpaper::ImageFit::Fill,
+    );
     let before = desktop.borrow_mut().drawn().len();
 
     session
@@ -2980,9 +2983,10 @@ fn a_wallpaper_that_is_not_there_costs_a_picture_and_not_a_desktop() {
 fn a_corrupt_wallpaper_is_attempted_once_and_not_on_every_repaint() {
     let (mut session, desktop, _turn) = session();
     let path = scratch("corrupt.png", b"\x89PNG\r\n\x1a\nand then nonsense");
-    session
-        .wallpaper_mut()
-        .set_image(&path, crate::wallpaper::ImageFit::Fill);
+    session.wallpaper_mut().set_image(
+        std::path::Path::new(&path),
+        crate::wallpaper::ImageFit::Fill,
+    );
 
     session
         .paint_background()
@@ -3088,9 +3092,10 @@ fn posted(session: &Session) -> Vec<(String, String)> {
 fn a_wallpaper_that_will_not_decode_says_so_where_the_user_can_read_it() {
     let (mut session, _desktop, _turn) = session();
     let path = scratch("says-so.png", b"\x89PNG\r\n\x1a\nand then nonsense");
-    session
-        .wallpaper_mut()
-        .set_image(&path, crate::wallpaper::ImageFit::Fill);
+    session.wallpaper_mut().set_image(
+        std::path::Path::new(&path),
+        crate::wallpaper::ImageFit::Fill,
+    );
 
     session.paint_background().expect("the harness refused");
 
@@ -3121,9 +3126,10 @@ fn a_failure_is_reported_once_and_not_once_per_repaint() {
     // corrupt file stayed selected.
     let (mut session, _desktop, _turn) = session();
     let path = scratch("once-only.png", b"\x89PNG\r\n\x1a\nand then nonsense");
-    session
-        .wallpaper_mut()
-        .set_image(&path, crate::wallpaper::ImageFit::Fill);
+    session.wallpaper_mut().set_image(
+        std::path::Path::new(&path),
+        crate::wallpaper::ImageFit::Fill,
+    );
 
     for _ in 0..5 {
         session.paint_background().expect("the harness refused");
@@ -3268,13 +3274,32 @@ fn closing_the_pane_slides_it_out_and_it_stays_out() {
         session.step_frame(16).expect("a frame should not fail");
     }
 
+    // Drain whatever tick is due before asking for the close.
+    //
+    // `Event::Tick` carries *real* elapsed time -- `EventLoop` computes it as
+    // `now - since` for the window -- and `step_frame` deliberately saturates a
+    // long one to the end of every animation, "which is where a user returning
+    // after 49 days expects to find them". Both are right. Together they mean
+    // the delta this close is measured against is however long the 200
+    // iterations above took in wall-clock time, which under a full workspace
+    // run is long enough to finish the slide in one step. This test then failed
+    // with "the close snapped instead of sliding" while nothing was wrong.
+    //
+    // Draining first resets `since`, so the pump below carries a fresh tick
+    // rather than an accumulated one.
+    session.pump().expect("the harness refused");
+
     desktop
         .borrow_mut()
         .send_input(&[InputEvent::new(panel, super_n())]);
     session.pump().expect("the harness refused");
     assert!(
-        session.shell().notifications.pane_state().is_visible(),
-        "the close snapped instead of sliding"
+        matches!(
+            session.shell().notifications.pane_state(),
+            crate::notif_pane::PaneState::SlideOut(_)
+        ),
+        "the close snapped instead of sliding: {:?}",
+        session.shell().notifications.pane_state()
     );
 
     for _ in 0..200 {
@@ -3669,7 +3694,11 @@ fn a_command_confirmed_with_enter_reaches_the_launcher() {
     session.pump().expect("pump");
 
     assert_eq!(
-        session.take_launches(),
+        session
+            .take_launches()
+            .into_iter()
+            .map(|l| l.program)
+            .collect::<Vec<_>>(),
         [std::path::PathBuf::from("terminal")]
     );
     assert!(
@@ -3706,6 +3735,144 @@ fn a_press_beside_the_box_closes_it_without_starting_anything() {
     assert!(session.take_launches().is_empty());
 }
 
+// ---- the greeter's background ----
+//
+// `design.txt` line 1247: "login screen background image - easy way to make
+// the two the same". The easy way is `SameAsDesktop`, and what makes it easy
+// is that it names no file: it asks the wallpaper what is up at the moment it
+// paints, so it keeps step with a rotation folder for free.
+//
+// Images belong to the window that uploaded them, so this is a second upload
+// of the same picture rather than one picture shown twice. That is why these
+// tests watch the greeter's own id rather than the desktop's.
+
+/// **The greeter shows the picture the desktop is showing.**
+///
+/// The claim the setting makes, asserted where it can be seen: an id on the
+/// greeter, and an `Image` command in what the greeter draws. `LoginBackground`
+/// could name a picture from the day the greeter was written; nothing ever
+/// read a file for it, so every choice but a colour drew the bare theme.
+#[test]
+fn the_greeter_shows_the_picture_the_desktop_is_showing() {
+    let (mut session, _desktop, _dir, _turn) = session_with_login();
+    assert!(session.login().is_some(), "the fixture has no greeter");
+
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.shell_mut().appearance.login_background = appearance::LoginBackground::SameAsDesktop;
+    session.sync_wallpaper();
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+
+    let screen = session.login().expect("the greeter went away");
+    assert_ne!(
+        screen.background_image(),
+        0,
+        "the greeter is following the desktop and has no picture: {:?}",
+        session.login_background_error()
+    );
+    assert_eq!(session.login_background_error(), None);
+}
+
+/// A picture the desktop changes to is the picture the greeter changes to.
+///
+/// This is what `SameAsDesktop` carrying no path buys. A rotation folder
+/// advances the wallpaper every `wallpaper.interval_secs`; a background that
+/// had recorded the file chosen at the time would show that one for ever while
+/// still calling itself "same as desktop".
+#[test]
+fn the_greeter_follows_the_desktop_when_the_desktop_changes() {
+    let (mut session, _desktop, _dir, _turn) = session_with_login();
+
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.shell_mut().appearance.login_background = appearance::LoginBackground::SameAsDesktop;
+    session.sync_wallpaper();
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+    let first = session.login().expect("greeter").background_image();
+    assert_ne!(first, 0, "no picture to begin with");
+
+    // What a rotation does, without waiting for one.
+    session.shell_mut().appearance.wallpaper = Some(fixture("gray8"));
+    session.sync_wallpaper();
+    session.repaint().expect("repaint");
+
+    let second = session.login().expect("greeter").background_image();
+    assert_ne!(
+        second, 0,
+        "the greeter lost its picture when the desktop moved"
+    );
+    assert_ne!(
+        first, second,
+        "the greeter is still showing the first picture; `SameAsDesktop` is \
+         following a snapshot rather than the desktop"
+    );
+}
+
+/// A picture that cannot be read costs the picture, not the machine.
+///
+/// The greeter is the one screen where failing closed locks the user out of
+/// their own computer. A deleted wallpaper must leave a plain, usable login
+/// screen -- and must still say why, rather than swallowing it.
+#[test]
+fn a_greeter_picture_that_cannot_be_read_still_leaves_a_usable_greeter() {
+    let (mut session, _desktop, _dir, _turn) = session_with_login();
+
+    session.shell_mut().appearance.login_background = appearance::LoginBackground::CustomImage(
+        std::path::PathBuf::from("/no/such/picture/at/all.png"),
+    );
+    session.sync_login_background();
+    session
+        .repaint()
+        .expect("a missing picture must not cost the repaint");
+
+    let screen = session
+        .login()
+        .expect("the greeter went away over a missing file");
+    assert_eq!(
+        screen.background_image(),
+        0,
+        "a file that does not exist got an id"
+    );
+    assert!(
+        session.login_background_error().is_some(),
+        "the reason was swallowed"
+    );
+    // And the greeter is still a greeter: it draws, and what it draws is more
+    // than the one background rectangle.
+    let palette = appearance::Palette::for_mode(false);
+    assert!(
+        screen.render(&palette).len() > 1,
+        "the greeter stopped drawing because a picture was missing"
+    );
+}
+
+/// A background that wants no picture holds no picture.
+///
+/// Switching back to the theme has to give the id back: an upload nothing will
+/// ever draw still costs the link's image budget, which is the same argument
+/// `refresh_wallpaper_image` makes for releasing before it re-reads.
+#[test]
+fn going_back_to_the_theme_gives_the_picture_back() {
+    let (mut session, _desktop, _dir, _turn) = session_with_login();
+
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.shell_mut().appearance.login_background = appearance::LoginBackground::SameAsDesktop;
+    session.sync_wallpaper();
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+    assert_ne!(session.login().expect("greeter").background_image(), 0);
+
+    session.shell_mut().appearance.login_background = appearance::LoginBackground::Theme;
+    session.sync_login_background();
+    session.repaint().expect("repaint");
+
+    assert_eq!(
+        session.login().expect("greeter").background_image(),
+        0,
+        "the greeter kept a picture it no longer draws"
+    );
+}
+
 // ---- the login screen ----
 
 /// A session over an account database of our own, with one account whose
@@ -3714,7 +3881,20 @@ fn a_press_beside_the_box_closes_it_without_starting_anything() {
 /// The hash is *computed*, not pasted: a literal `$6$…` copied from somewhere
 /// is a test that keeps passing after the hasher it was copied from has
 /// changed. Same reason `apps/lockscreen`'s end-to-end test computes one.
-fn session_with_login() -> (Session, Desktop, scratchdir::ScratchDir) {
+/// Holds a [`settingsfile::testing::ConfigTurn`] for `session()`'s reason, and
+/// since 2026-09-16 it needs it more: `ShellSession::start` also reads the
+/// screen-lock delay now, so this helper builds a session that reads the
+/// configuration directory three times before a test touches it. This file
+/// calls `with_scratch_config` 28 times, and `cargo test` runs them as threads
+/// of one process, so without the turn a login built here can read a scratch
+/// directory a neighbouring test installed.
+fn session_with_login() -> (
+    Session,
+    Desktop,
+    scratchdir::ScratchDir,
+    settingsfile::testing::ConfigTurn,
+) {
+    let turn = settingsfile::testing::config_turn();
     let dir = scratchdir::ScratchDir::new("shell-login");
     let path = dir.path("users.yaml");
     let mut setting_buf = posix::crypt::buf();
@@ -3741,7 +3921,7 @@ fn session_with_login() -> (Session, Desktop, scratchdir::ScratchDir) {
     let (events, desktop) = wired();
     let session =
         ShellSession::start_with_stores(events, &path).expect("the harness refused a surface");
-    (session, desktop, dir)
+    (session, desktop, dir, turn)
 }
 
 /// A login screen backed by an account with **no** password.
@@ -3749,7 +3929,20 @@ fn session_with_login() -> (Session, Desktop, scratchdir::ScratchDir) {
 /// The other half of `session_with_login`: same shape, no `password_hash`
 /// line, which is what an administrator leaving an account open looks like on
 /// disk.
-fn session_with_passwordless_login() -> (Session, Desktop, scratchdir::ScratchDir) {
+/// Holds a [`settingsfile::testing::ConfigTurn`] for `session()`'s reason, and
+/// since 2026-09-16 it needs it more: `ShellSession::start` also reads the
+/// screen-lock delay now, so this helper builds a session that reads the
+/// configuration directory three times before a test touches it. This file
+/// calls `with_scratch_config` 28 times, and `cargo test` runs them as threads
+/// of one process, so without the turn a login built here can read a scratch
+/// directory a neighbouring test installed.
+fn session_with_passwordless_login() -> (
+    Session,
+    Desktop,
+    scratchdir::ScratchDir,
+    settingsfile::testing::ConfigTurn,
+) {
+    let turn = settingsfile::testing::config_turn();
     let dir = scratchdir::ScratchDir::new("shell-login-open");
     let path = dir.path("users.yaml");
     std::fs::write(
@@ -3764,7 +3957,7 @@ fn session_with_passwordless_login() -> (Session, Desktop, scratchdir::ScratchDi
     let (events, desktop) = wired();
     let session =
         ShellSession::start_with_stores(events, &path).expect("the harness refused a surface");
-    (session, desktop, dir)
+    (session, desktop, dir, turn)
 }
 
 /// 818: an account with no password is never locked.
@@ -3778,7 +3971,7 @@ fn session_with_passwordless_login() -> (Session, Desktop, scratchdir::ScratchDi
 /// standing at the machine that it is protected.
 #[test]
 fn a_session_with_no_password_does_not_lock() {
-    let (mut session, desktop, _dir) = session_with_passwordless_login();
+    let (mut session, desktop, _dir, _turn) = session_with_passwordless_login();
     // Enter on an account with no password: `authlib` answers `NoPassword`,
     // the screen opens, and the session records that this one cannot lock.
     type_password(&desktop, &mut session, "");
@@ -3791,6 +3984,64 @@ fn a_session_with_no_password_does_not_lock() {
     );
 }
 
+/// The idle watch locks the screen, the same way the shortcut does.
+///
+/// The compositor says the session has been quiet for the configured delay;
+/// this asserts the shell turns that into the same launch a lock shortcut
+/// produces. Without it the whole chain -- claim, deadline, notification,
+/// routing -- ends in a handler that does nothing, and every test beneath it
+/// still passes.
+#[test]
+fn an_idle_session_locks_itself() {
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    type_password(&desktop, &mut session, "password");
+    assert!(session.login().is_none(), "the desktop should be open");
+    drop(session.take_launches());
+
+    send_session_idle(&desktop, &mut session);
+    assert_eq!(
+        session
+            .take_launches()
+            .into_iter()
+            .map(|l| l.program)
+            .collect::<Vec<_>>(),
+        [std::path::PathBuf::from(crate::hotkeys::LOCK_COMMAND)],
+        "an idle session did not ask for the lock screen"
+    );
+}
+
+/// 818 holds for the idle watch too, not only for the shortcut.
+///
+/// The rule lives in `queue_launches`, so routing the idle lock through that
+/// function is what makes this true rather than a second copy of the check --
+/// and this is the test that would notice if a later trigger pushed onto
+/// `launches` directly. A new way to lock that skips the rule is precisely how
+/// a passwordless session would come to show a lock screen anybody can clear,
+/// which tells the person standing at the machine it is protected.
+#[test]
+fn an_idle_session_with_no_password_does_not_lock() {
+    let (mut session, desktop, _dir, _turn) = session_with_passwordless_login();
+    type_password(&desktop, &mut session, "");
+    assert!(session.login().is_none(), "the desktop should be open");
+    drop(session.take_launches());
+
+    send_session_idle(&desktop, &mut session);
+    assert!(
+        session.take_launches().is_empty(),
+        "818: an idle session with no password must not ask for the lock screen"
+    );
+}
+
+/// Deliver the notification the compositor sends a window that claimed an
+/// idle watch.
+fn send_session_idle(desktop: &Desktop, session: &mut Session) {
+    let window = session.panel().window();
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(window, guitk::event::Event::SessionIdle)]);
+    session.pump().expect("pump");
+}
+
 /// And the same shortcut on an account that *has* one still locks.
 ///
 /// The negative control, and it is the half that makes the test above mean
@@ -3798,14 +4049,14 @@ fn a_session_with_no_password_does_not_lock() {
 /// pass.
 #[test]
 fn a_session_with_a_password_still_locks() {
-    let (mut session, desktop, _dir) = session_with_login();
+    let (mut session, desktop, _dir, _turn) = session_with_login();
     type_password(&desktop, &mut session, "password");
     assert!(session.login().is_none(), "the desktop should be open");
 
     press_lock_shortcut(&desktop, &mut session);
     let launched = session.take_launches();
     assert_eq!(
-        launched,
+        launched.into_iter().map(|l| l.program).collect::<Vec<_>>(),
         vec![std::path::PathBuf::from("/usr/bin/lockscreen")],
         "an account with a password locks as it always did"
     );
@@ -3858,7 +4109,7 @@ fn type_password(desktop: &Desktop, session: &mut Session, password: &str) {
 /// you are, not showing you the desktop.
 #[test]
 fn a_machine_with_accounts_comes_up_locked() {
-    let (session, _desktop, _dir) = session_with_login();
+    let (session, _desktop, _dir, _turn) = session_with_login();
     assert!(session.is_locked());
     assert_eq!(
         session.login().unwrap().current_user().unwrap().username,
@@ -3873,6 +4124,7 @@ fn a_machine_with_accounts_comes_up_locked() {
 /// See design-decisions.md 824.
 #[test]
 fn a_machine_with_no_account_database_comes_up_unlocked() {
+    let _turn = settingsfile::testing::config_turn();
     let dir = scratchdir::ScratchDir::new("shell-nologin");
     let (events, _desktop) = wired();
     let session = ShellSession::start_with_stores(events, &dir.path("absent.yaml"))
@@ -3884,7 +4136,7 @@ fn a_machine_with_no_account_database_comes_up_unlocked() {
 /// password opens the machine.
 #[test]
 fn the_right_password_unlocks_the_desktop() {
-    let (mut session, desktop, _dir) = session_with_login();
+    let (mut session, desktop, _dir, _turn) = session_with_login();
     type_password(&desktop, &mut session, "password");
     assert!(
         !session.is_locked(),
@@ -3895,7 +4147,7 @@ fn the_right_password_unlocks_the_desktop() {
 /// The wrong one does not, and says so without saying *which* part was wrong.
 #[test]
 fn the_wrong_password_is_refused_and_the_machine_stays_locked() {
-    let (mut session, desktop, _dir) = session_with_login();
+    let (mut session, desktop, _dir, _turn) = session_with_login();
     type_password(&desktop, &mut session, "wrong");
     assert!(session.is_locked());
     let screen = session.login().unwrap();
@@ -3913,7 +4165,7 @@ fn the_wrong_password_is_refused_and_the_machine_stays_locked() {
 /// switch windows for somebody who has not logged in.
 #[test]
 fn the_desktops_shortcuts_do_nothing_while_the_machine_is_locked() {
-    let (mut session, desktop, _dir) = session_with_login();
+    let (mut session, desktop, _dir, _turn) = session_with_login();
     // Two windows, because Alt+Tab with fewer is consumed *without* opening
     // the switcher — so a version of this test with an empty desktop passes
     // whether or not the login screen gates anything, which is a test that
@@ -3964,7 +4216,7 @@ fn the_desktops_shortcuts_do_nothing_while_the_machine_is_locked() {
 /// `Layer::Overlay` the only thing that says so is creation order.
 #[test]
 fn the_login_surface_is_created_last_and_accepts_the_mouse() {
-    let (_session, desktop, _dir) = session_with_login();
+    let (_session, desktop, _dir, _turn) = session_with_login();
     let specs = created(&desktop);
     let login = specs.last().expect("five surfaces");
     assert_eq!(login.title, "Login");
@@ -3980,7 +4232,7 @@ fn the_login_surface_is_created_last_and_accepts_the_mouse() {
 /// `take_launches` follows.
 #[test]
 fn a_power_choice_is_reported_rather_than_acted_on() {
-    let (mut session, desktop, _dir) = session_with_login();
+    let (mut session, desktop, _dir, _turn) = session_with_login();
     let (button, row) = {
         let screen = session.login().expect("locked");
         (screen.power_button_rect(), screen.power_menu_row_rect(0))
@@ -3999,4 +4251,36 @@ fn a_power_choice_is_reported_rather_than_acted_on() {
         Some(crate::login_screen::LoginPowerAction::Shutdown)
     );
     assert_eq!(session.take_login_power(), None, "draining it empties it");
+}
+
+/// An exclusion pattern keeps a picture out of the rotation.
+///
+/// Matched against the file name, which is what a user writing `*.gif` into
+/// the settings file means.
+#[test]
+fn an_exclusion_pattern_removes_a_picture_from_the_rotation() {
+    let dir = scratch_dir().join("rotation-exclude");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    for name in ["keep.png", "skip.gif", "draft-one.png", "final.png"] {
+        std::fs::write(dir.join(name), b"x").expect("write");
+    }
+
+    let all = Session::pictures_in(&dir, &[]);
+    assert_eq!(
+        all.len(),
+        4,
+        "the folder should hold four pictures: {all:?}"
+    );
+
+    let filtered = Session::pictures_in(&dir, &["*.gif".to_string(), "draft-*".to_string()]);
+    let names: Vec<String> = filtered
+        .iter()
+        .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        names,
+        ["final.png", "keep.png"],
+        "the wrong pictures survived the filter"
+    );
 }

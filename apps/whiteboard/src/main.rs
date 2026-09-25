@@ -732,6 +732,35 @@ pub enum DragState {
 // ============================================================================
 
 /// The whiteboard application.
+/// The keys this board answers that are not a tool letter.
+///
+/// The tool letters are not here on purpose: they live in `Tool::shortcut`,
+/// which is what dispatches them, and `shortcut_rows` appends them to this
+/// list when the card is drawn. Copying the nine into a second table is the
+/// arrangement dd-866 exists to refuse -- two tables that agree until one is
+/// edited.
+///
+/// **No `?` row.** An unmodified character picks a tool or zooms, so `?`
+/// would have to be taken away from `handle_typed` to give it here. Fifth app
+/// where `?` was not free.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Ctrl+Z", "Undo"),
+    ("Ctrl+Shift+Z", "Redo"),
+    ("Ctrl+Y", "Redo"),
+    ("Ctrl+A", "Select everything on the page"),
+    ("Ctrl+S", "Save the board as an SVG picture"),
+    ("Ctrl+L", "Show or hide the layers panel"),
+    ("Arrows", "Nudge the selection"),
+    ("Delete", "Delete the selection"),
+    ("Esc", "Drop the selection"),
+    ("+", "Zoom in"),
+    ("-", "Zoom out"),
+    ("0", "Zoom so the whole page fits"),
+    ("G", "Grid on or off"),
+    ("#", "Snap to the grid"),
+];
+
 pub struct WhiteboardApp {
     // Window dimensions
     /// The save picker.
@@ -766,6 +795,8 @@ pub struct WhiteboardApp {
     pub drag: DragState,
 
     // Grid
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub show_grid: bool,
     pub snap_to_grid: bool,
 
@@ -801,15 +832,27 @@ pub struct WhiteboardApp {
     palette: Palette,
 }
 
-/// What the window says about what it cannot do.
+/// What the window says about what it can and cannot do.
 ///
-/// Nothing in this crate is invented, which is why the fixture scanner
-/// never looked at it. This is the other half of the same discipline,
-/// found by `scripts/find-silent-incapacity.py`: a program that reaches
-/// nothing outside its own process and never says so.
-const NOTHING_KEPT_LINES: [&str; 2] = [
-    "Whiteboards cannot be saved or opened.",
-    "Nothing is saved -- this app has no filesystem access, so your work is gone when the window closes.",
+/// Added by `scripts/find-silent-incapacity.py` when the answer was "neither":
+/// a program that reached nothing outside its own process and never said so.
+/// A save door was built afterwards and this text was not revisited, so for a
+/// while the window told people "your work is gone when the window closes"
+/// while Ctrl+S was writing an SVG — found by
+/// `scripts/find-stale-admissions.py`, which looks for exactly that, a
+/// standing sentence denying a capability the crate holds.
+///
+/// It is the worse direction of the two to get wrong. A program that
+/// overstates itself is caught the first time someone tries the feature; one
+/// that understates itself is believed, and nobody tries. Anyone who read the
+/// old text closed the window and lost a drawing they could have kept.
+///
+/// Both halves are stated because only one changed: writing works, reading
+/// does not exist, and a picture you cannot reopen is a different thing from
+/// a document.
+const SAVE_IS_ONE_WAY_LINES: [&str; 2] = [
+    "Ctrl+S saves this board as an SVG picture.",
+    "Nothing here opens one back, so a saved board can be viewed elsewhere but never returned to and edited.",
 ];
 
 impl WhiteboardApp {
@@ -833,6 +876,7 @@ impl WhiteboardApp {
             sticky_color_index: 0,
             selection: Selection::default(),
             drag: DragState::None,
+            show_help: false,
             show_grid: true,
             snap_to_grid: false,
             undo_stack: VecDeque::new(),
@@ -2127,6 +2171,21 @@ impl WhiteboardApp {
         // record of it is the modifier on whichever event arrives next.
         self.shift_held = event.modifiers.shift;
 
+        // Above the Ctrl branch, which returns for every chord, and above the
+        // typed-character path, which claims every unmodified letter.
+        if event.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return true;
+        }
+        if self.show_help {
+            // Modal. Delete removes the selection and a letter changes tool,
+            // and neither should happen behind a list somebody is reading.
+            if matches!(event.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return true;
+        }
+
         if event.modifiers.ctrl {
             return match event.key {
                 Key::Z => {
@@ -2187,8 +2246,14 @@ impl WhiteboardApp {
             return false;
         };
         // Single letters pick a tool, the way every drawing program binds
-        // them. `Tool::from_shortcut` is the one table both this and the
-        // toolbar's tooltips can read.
+        // them. `Tool::from_shortcut` is the one table that dispatches them
+        // and the one the shortcut card draws from.
+        //
+        // This comment used to say "both this and the toolbar's tooltips can
+        // read". There are no tooltips: the word appeared exactly once in
+        // this crate, here, describing a reader that was never built. So the
+        // nine tool letters were dispatched and drawn nowhere, and the
+        // comment was the reason nobody looked.
         if let Some(tool) = Tool::from_shortcut(ch) {
             self.current_tool = tool;
             return true;
@@ -2216,6 +2281,22 @@ impl WhiteboardApp {
             }
             _ => false,
         }
+    }
+
+    /// The card's tool rows, read from the table that dispatches them.
+    ///
+    /// Owned strings because the letters come out of `Tool::shortcut` as
+    /// `char`. The label is the same abbreviation the toolbar button shows,
+    /// deliberately: a reader matching a card row to a button wants the two
+    /// to say the same word.
+    fn tool_rows() -> Vec<(String, String)> {
+        Tool::all()
+            .iter()
+            .filter_map(|tool| {
+                tool.shortcut()
+                    .map(|ch| (ch.to_string(), format!("{} tool", tool.label())))
+            })
+            .collect()
     }
 
     /// Select every shape on the current page.
@@ -2258,7 +2339,7 @@ impl WhiteboardApp {
         );
 
         // After the background, or it would be painted over.
-        for (i, line) in NOTHING_KEPT_LINES.iter().enumerate() {
+        for (i, line) in SAVE_IS_ONE_WAY_LINES.iter().enumerate() {
             #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
             let ty = 1.0 + i as f32 * 11.0;
             let avail = (self.win_width - 16.0).max(0.0);
@@ -2293,6 +2374,20 @@ impl WhiteboardApp {
             self.render_layers_panel(&mut cmds);
         }
         self.render_status_bar(&mut cmds);
+
+        if self.show_help {
+            let tools = Self::tool_rows();
+            let mut rows: Vec<(&str, &str)> = SHORTCUTS.to_vec();
+            rows.extend(tools.iter().map(|(k, w)| (k.as_str(), w.as_str())));
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.win_width, self.win_height),
+                0.0,
+                &rows,
+                "F1 closes this",
+            );
+        }
 
         // The picker last, so it draws over the canvas rather than under it.
         cmds.extend(
@@ -3452,16 +3547,16 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for line in NOTHING_KEPT_LINES {
+        for line in SAVE_IS_ONE_WAY_LINES {
             assert!(
                 texts.iter().any(|t| t == line),
                 "the window never said {line:?}"
             );
         }
         assert!(
-            NOTHING_KEPT_LINES
+            SAVE_IS_ONE_WAY_LINES
                 .iter()
-                .any(|l| l.contains("gone when the window closes")),
+                .any(|l| l.contains("never returned to and edited")),
             "the message states a mechanism but not its consequence",
         );
     }
@@ -5161,6 +5256,132 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    /// **Every tool letter is on the card and picks its tool.**
+    ///
+    /// Both halves read `Tool::shortcut`, which is also what dispatches them,
+    /// so there is nothing here that can drift out of step with the app. Nine
+    /// letters -- P, L, R, O, A, T, E, S, N -- were dispatched and drawn
+    /// nowhere until this card; the comment above `from_shortcut` said the
+    /// toolbar's tooltips read them, and the word "tooltip" appeared exactly
+    /// once in this crate, in that sentence.
+    #[test]
+    fn every_tool_letter_is_on_the_card_and_picks_its_tool() {
+        let mut app = board();
+        app.handle_event(&press_with(Key::F1, Modifiers::NONE));
+        let shown = drawn_text(&app);
+
+        let mut letters = 0;
+        for tool in Tool::all() {
+            let Some(ch) = tool.shortcut() else { continue };
+            letters += 1;
+            // `Vec::contains`, which compares whole elements -- not
+            // `str::contains`, which asks about substrings. The two share a
+            // name and do not share a meaning, and the substring one is what
+            // this test had.
+            // `render_card` draws each row's keys as their own `Text`
+            // command, and a one-character `contains` is satisfied by any
+            // word holding that letter -- "N" is in "Nudge the selection", so
+            // the first draft of this test passed with the Note tool deleted
+            // from the card. That is the same defect `names_the_key` exists
+            // to fix in the survey, written again here by the person who
+            // fixed it there.
+            assert!(
+                shown.contains(&ch.to_string()),
+                "the card never shows {ch:?} for the {} tool",
+                tool.label()
+            );
+            let row = format!("{} tool", tool.label());
+            assert!(
+                shown.contains(&row),
+                "the card never names the {} tool",
+                tool.label()
+            );
+
+            let mut pressing = board();
+            pressing.current_tool = Tool::Select;
+            // Lowercase and with `text` set, which is how a keyboard sends a
+            // letter: `typed()` reads the text a layout produced and nothing
+            // else, so a synthetic event with an empty string reaches no
+            // character handler at all.
+            pressing.handle_event(&typed(Key::A, ch.to_ascii_lowercase()));
+            assert_eq!(
+                pressing.current_tool,
+                *tool,
+                "{ch:?} is on the card and does not pick the {} tool",
+                tool.label()
+            );
+        }
+        assert_eq!(
+            letters, 9,
+            "the tool table changed size; the card follows it"
+        );
+    }
+
+    /// **Every other key the card advertises is answered.**
+    ///
+    /// Split from the tool letters because these arrive as *keys* and those
+    /// arrive as *text*. `keystrokes` builds a `KeyEvent` with an empty
+    /// string, which is right for `Ctrl+S` and useless for `g`.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            if matches!(*label, "+" | "-" | "0" | "G" | "#") {
+                continue; // typed characters; covered below
+            }
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|with_selection| {
+                    let mut app = board();
+                    if with_selection {
+                        let id = app.add_shape(ShapeKind::Rectangle {
+                            bounds: Rect::new(0.0, 0.0, 40.0, 40.0),
+                        });
+                        app.selection.shape_ids = vec![id];
+                    }
+                    app.handle_event(&Event::Key(stroke.clone()))
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The typed-character rows do what the card says.**
+    ///
+    /// These never reach `handle_typed` as a `Key`, so they are pressed the
+    /// way a keyboard sends them, with the character in `text`.
+    #[test]
+    fn every_typed_row_on_the_card_does_something() {
+        for (label, ch) in [("+", '+'), ("-", '-'), ("0", '0'), ("G", 'g'), ("#", '#')] {
+            assert!(
+                SHORTCUTS.iter().any(|(k, _w)| *k == label),
+                "{label:?} is tested here and is not on the card"
+            );
+            let mut app = board();
+            assert!(
+                app.handle_event(&typed(Key::A, ch)),
+                "the card advertises {label:?} and nothing answers it"
+            );
+        }
+    }
+
+    /// Every string this window draws, kept apart rather than joined.
+    ///
+    /// Joined into one haystack, `contains` answers a question nobody asked:
+    /// whether the letter appears *anywhere*, including inside another row's
+    /// description.
+    fn drawn_text(app: &WhiteboardApp) -> Vec<String> {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn press_with(k: Key, modifiers: Modifiers) -> Event {

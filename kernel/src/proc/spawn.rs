@@ -84,6 +84,28 @@ fn pathz_skip(rung: core::fmt::Arguments<'_>, missing: &str) {
     );
 }
 
+/// Skip a rung because a prerequisite is present but cannot be used.
+///
+/// The third of these on purpose. [`pathz_skip`] says *prerequisite
+/// missing* and [`pathz_skip_unknown`] says *could not tell*; neither
+/// describes a file that is there and will not load. Part 61 reused
+/// `pathz_skip` for a 22.5 MB binary the buddy allocator could not find a
+/// 32 MiB contiguous block for, and the boot log then told a reader that
+/// `/mnt/bin/cmake` was missing when it was present -- which sends them to
+/// the rootfs instead of to the allocator.
+///
+/// Counted into the same `PATHZ_SKIPPED` tally, because the coverage is
+/// lost either way and an uncounted skip is the failure dd-942 is about.
+fn pathz_skip_unusable(rung: core::fmt::Arguments<'_>, path: &str, why: &str) {
+    PATHZ_SKIPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    serial_println!(
+        "[spawn]   SKIP: {} — {} is present but unusable here: {}",
+        rung,
+        path,
+        why
+    );
+}
+
 /// Skip a rung because the VFS could not say whether a prerequisite is there.
 ///
 /// Distinct from [`pathz_skip`] on purpose. Both gates below used to ask
@@ -1184,6 +1206,8 @@ fn spawn_process_inner(
     // argument rather than a `SpawnOptions` field: see [`CapInherit`].
     cap_inherit: CapInherit<'_>,
 ) -> KernelResult<SpawnResult> {
+    // Start of the span recorded into binfmt on success below.
+    let elf_load_start_ns = crate::hrtimer::now_ns();
     // This function OWNS the `linux_fd_redirects` handles (see
     // `spawn_process_with_redirects`): on success each is *moved* into the
     // child's fd table (released by the child's exit teardown); on any error it
@@ -1244,6 +1268,15 @@ fn spawn_process_inner(
             return Err(KernelError::InvalidExecutable);
         }
     };
+    // dd-946: binfmt is a statistics module and nothing reported to it,
+    // so /proc/binfmt read zero for the life of the machine. Recorded at
+    // BOTH ELF success sites -- spawn and exec -- because recording one
+    // would under-count by the path a running system uses most (dd-947,
+    // subset coverage).
+    let _ = crate::fs::binfmt::record_load(
+        crate::fs::binfmt::BinFormat::Elf64,
+        crate::hrtimer::now_ns().saturating_sub(elf_load_start_ns),
+    );
     serial_println!(
         "[spawn] ELF validated: {} segment(s), entry={:#x} (raw {:#x}, bias {:#x}), pie={}",
         segment_count,
@@ -2006,6 +2039,8 @@ pub fn exec_process(
     envp: &[&[u8]],
     exe_path: Option<&[u8]>,
 ) -> KernelResult<ExecResult> {
+    // Start of the span recorded into binfmt on success below.
+    let elf_load_start_ns = crate::hrtimer::now_ns();
     // Step 1: Parse and validate the ELF binary BEFORE tearing down
     // the old address space.  If the ELF is bad, the process keeps
     // running its old code.
@@ -2028,6 +2063,15 @@ pub fn exec_process(
         serial_println!("[exec] executable entry point overflowed load bias");
         KernelError::InvalidExecutable
     })?;
+    // dd-946: binfmt is a statistics module and nothing reported to it,
+    // so /proc/binfmt read zero for the life of the machine. Recorded at
+    // BOTH ELF success sites -- spawn and exec -- because recording one
+    // would under-count by the path a running system uses most (dd-947,
+    // subset coverage).
+    let _ = crate::fs::binfmt::record_load(
+        crate::fs::binfmt::BinFormat::Elf64,
+        crate::hrtimer::now_ns().saturating_sub(elf_load_start_ns),
+    );
     serial_println!(
         "[exec] ELF validated for exec: {} segment(s), entry={:#x} (raw {:#x}, bias {:#x}), pie={}",
         segment_count,
@@ -8469,6 +8513,642 @@ pub fn self_test_cfortify() -> KernelResult<()> {
 ///
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-pgroup/main.c`).
+/// Set the console keyboard layout from ring 3 and confirm through /proc.
+///
+/// The granted half of `SYS_KEYLAYOUT_SET`. The kernel-side dispatch probe
+/// only ever gets *refused*, so it cannot tell "the gate refuses everyone"
+/// from "the gate works"; this supplies the other arm, now that
+/// `Rights::INIT_PROCESS` carries `SET_KEYLAYOUT` and a descendant can hold
+/// it.
+///
+/// **It confirms through `/proc/keylayout`, not through a getter**, and that
+/// only works because 1074 deliberately has none. Asking the setter whether
+/// the setter worked is the `localectl`/`vconsole.conf` defect this syscall
+/// was added to fix -- see design-decisions 946.
+///
+/// A refusal that still moved something is worse than an acceptance, so the
+/// fixture checks both that an unregistered name is refused AND that the
+/// active layout did not change. Exit 42 on success.
+pub fn self_test_ctest_keylayout() -> KernelResult<()> {
+    let Some(ctest_elf) = pathz_test_elf("ctest-keylayout", "ctest-keylayout")? else {
+        return Ok(());
+    };
+
+    serial_println!(
+        "[spawn] Running keyboard-layout set + /proc confirmation (ring 3, C, \
+         native ABI) integration test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// Every check passed.
+    const EXPECTED: i32 = 42;
+
+    // The fixture was previously spawned with `capabilities: &[]`, which made
+    // its exit 1 ("cannot open /proc/keylayout") a fact about this rung rather
+    // than about procfs: with no `(File, READ)` it cannot open anything.
+    //
+    // Modelled on `self_test_ctest_hostname`, whose docstring says it exists to
+    // make a grant exist -- the same reason as here. Until something is spawned
+    // holding the right, "the gate refuses everyone" and "the gate works" are
+    // indistinguishable, and the kernel-side dispatch probe only ever gets
+    // refused.
+    //
+    // `resource_id` 0 is class-wide, which is what the check reads:
+    // `has_capability_type` takes no id at all.
+    let caps = [
+        (ResourceType::File, 0u64, Rights::READ),
+        (ResourceType::Process, 0u64, Rights::SET_KEYLAYOUT),
+    ];
+
+    let argv: &[&[u8]] = &[b"ctest-keylayout"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "ctest-keylayout",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-keylayout spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Three syscalls and a few /proc reads: no exec, no fork, so pgroup's
+    // budget is ample.
+    let mut became_zombie = false;
+    for _ in 0..6000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-keylayout (ring 3) did not finish -- state {:?}",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code == Some(3) {
+        // NOT a failure of the syscall. Reported as unrunnable, which is the
+        // distinction 942 keeps arriving at: a check that could not run must
+        // not report the same thing as one that ran and passed.
+        serial_println!(
+            "[spawn]   ctest-keylayout: UNRUNNABLE -- fewer than two layouts are \
+             registered, so there is nothing to switch to. This proves nothing \
+             about SYS_KEYLAYOUT_SET either way"
+        );
+        return Ok(());
+    }
+
+    if exit_code != Some(EXPECTED) {
+        let meaning = match exit_code {
+            Some(1) => "cannot open /proc/keylayout -- the node is absent or unreadable",
+            Some(2) => "/proc/keylayout has no `Active:` line -- the format changed",
+            Some(4) => {
+                concat!(
+                    "set of a VALID registered layout was REFUSED. The ",
+                    "capability is the first suspect: INIT_PROCESS carries ",
+                    "SET_KEYLAYOUT, and fork clones the table, so a descendant ",
+                    "should hold it"
+                )
+            }
+            Some(5) => {
+                concat!(
+                    "set reported SUCCESS and /proc/keylayout still shows the ",
+                    "old layout -- accepted-and-dropped, the exact defect ",
+                    "confirming through the publisher exists to catch"
+                )
+            }
+            Some(6) => {
+                "set of an UNREGISTERED name SUCCEEDED -- keylayout::set_active \
+                 validates, so the gate is not being reached"
+            }
+            Some(7) => {
+                "the unregistered name was refused but the active layout changed \
+                 ANYWAY -- a refusal that still moved something"
+            }
+            Some(8) => "restoring the original layout was refused",
+            Some(9) => "restore reported success and the layout did not come back",
+            Some(10) => "a read of /proc/keylayout failed partway",
+            _ => "an unexpected code; see the legend in services/ctest-keylayout/main.c",
+        };
+        serial_println!(
+            "[spawn]   FAIL: ctest-keylayout (ring 3) exit code was {:?}, expected \
+             {}: {}",
+            exit_code,
+            EXPECTED,
+            meaning
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   keyboard layout set from ring 3, confirmed through \
+         /proc/keylayout, an unregistered name refused without moving the active \
+         layout, and the original restored: OK"
+    );
+    Ok(())
+}
+
+/// Run CPython interactively on SlateOS: does the REPL actually evaluate?
+///
+/// The roadmap's remaining CPython work, stated there as "nobody has ever run
+/// it interactively". `self_test_cpython_on_slateos_libc` proves startup and
+/// byte-exact output with stdout on a *pipe*; between that and a REPL lie
+/// `isatty` answering true on a pty slave, CPython taking its interactive
+/// branch, the line discipline assembling a typed line and delivering it on
+/// ENTER, and prompt traffic coming back.
+///
+/// **The expression is `6*7`, and that is the whole design.** A pty echoes
+/// what is typed, so with `print(1+1)` the answer `2` appears inside the echo
+/// and a scan for it passes without the interpreter evaluating anything --
+/// reading back your own writes, in the fixture written to avoid exactly that.
+/// `6*7` does not contain `42`. Any replacement must keep that property.
+///
+/// **Expect this to fail while `ctest-pty` does.** It `forkpty`s, so if the
+/// pty path is broken this exits 3 (no output at all) for the same reason
+/// ctest-pty exits 45, and the two are one finding rather than two. Do not
+/// bisect it twice.
+pub fn self_test_ctest_python_repl() -> KernelResult<()> {
+    let Some(ctest_elf) = pathz_test_elf("ctest-python-repl", "ctest-python-repl")? else {
+        return Ok(());
+    };
+
+    serial_println!(
+        "[spawn] Running CPython interactive REPL over a pty (ring 3, C, native \
+         ABI) integration test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The interpreter evaluated the expression and returned the answer.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-python-repl"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "ctest-python-repl",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-python-repl spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // An 11 MiB interpreter reading a 20 MiB zip, then a REPL round trip.
+    // The largest budget in this suite by a wide margin, and deliberately so:
+    // the gap before the first byte is nothing like the gap between two bytes
+    // of one line, which is why the fixture itself keeps two budgets.
+    let mut became_zombie = false;
+    for _ in 0..200_000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-python-repl (ring 3) did not finish -- state \
+             {:?}. A hang here is most likely interpreter startup rather than the \
+             REPL round trip; check whether any prompt bytes appeared at all",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        let meaning = match exit_code {
+            Some(1) => "forkpty() failed -- the fixture's own plumbing",
+            Some(2) => "writing the expression to the master failed",
+            Some(3) => {
+                concat!(
+                    "the interpreter produced NO OUTPUT AT ALL -- it never ",
+                    "started. Loader or staging, not the REPL. If ctest-pty is ",
+                    "also red this is the SAME finding, not a second one"
+                )
+            }
+            Some(4) => {
+                concat!(
+                    "output appeared but the answer never did -- THE ACTUAL ",
+                    "SUBJECT. The interpreter started and the REPL did not ",
+                    "evaluate, or the typed line never reached it"
+                )
+            }
+            Some(5) => "waitpid() failed or returned the wrong pid -- plumbing",
+            Some(6) => "the interpreter exited non-zero after being asked to quit",
+            Some(7) => "writing the quit command failed",
+            Some(8) => {
+                // Lane B added 8 because 2 was standing for it: the child
+                // execs /bin/python3 and _exit(127)s, and the parent then
+                // wrote to a master whose slave was already closed, so a
+                // failed exec surfaced as a failed write.
+                //
+                // Its wording says "missing from the image or not
+                // executable" and BOTH halves are false here: debugfs
+                // reports inode 80, mode 0755, 10,468,016 bytes. So this is
+                // the same defect as ctest-coreutils-runs' exit 11 --
+                // libc's execl passes a NULL path to execve and the kernel
+                // correctly returns EFAULT. Two independent fixtures, both
+                // files present, both execs failing.
+                concat!(
+                    "8: /bin/python3 could not be EXEC'd -- but it IS on the ",
+                    "image (inode 80, mode 0755). Do not go looking at the ",
+                    "image: this is libc's execl passing a NULL path to ",
+                    "execve, the same defect as ctest-coreutils-runs' exit ",
+                    "11. See requests/a-b-libc-execl-passes-a-null-path-to-",
+                    "execve.md"
+                )
+            }
+            _ => "an unexpected code; see services/ctest-python-repl/main.c",
+        };
+        serial_println!(
+            "[spawn]   FAIL: ctest-python-repl (ring 3) exit code was {:?}, \
+             expected {}: {}",
+            exit_code,
+            EXPECTED,
+            meaning
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   CPython ran interactively on SlateOS: isatty true on the pty \
+         slave, the interactive branch taken, a typed line assembled and \
+         delivered, and 6*7 evaluated to 42: OK"
+    );
+    Ok(())
+}
+
+/// Does ANY of our Rust userland execute on SlateOS?
+///
+/// `create-ext4-rootfs.sh` puts 71 binaries from `userspace/coreutils` into
+/// `/bin`. Before this rung, not one had ever been executed under SlateOS by
+/// anything. Compiling, linking, being staged and *running* are four separate
+/// claims and only the first three had evidence -- so "SlateOS has 89
+/// commands" meant "89 files are present".
+///
+/// **This runs before every other ring-3 rung**, and the reason is a property
+/// of the tests rather than a ranking of their subjects: a rung that can
+/// invalidate its siblings goes first. If `/bin/true` cannot exec then
+/// `ctest-pty`, `ctest-zombiewait` and `ctest-keylayout` were never testing
+/// what their names say; they would be exercising the same broken loader from
+/// further away, and passing would be worse than failing because it would
+/// look like evidence.
+///
+/// Four subjects, each adding one capability to the one before:
+///
+/// | | proves |
+/// |---|---|
+/// | `/bin/true` | exec, run, exit 0 |
+/// | `/bin/false` | the same, exiting 1 -- with `true`, that the exit status is *carried* |
+/// | `/bin/echo hi` | argv reaches the program, stdout reaches a pipe |
+/// | `/bin/basename /usr/lib/x.so` | the first that computes |
+///
+/// The `true`/`false` pair is the part worth understanding. `true` alone
+/// passes against a `wait()` that always reports 0, and every shell script in
+/// the system reads that value. Two shipped programs differing in exactly one
+/// bit of observable behaviour is a positive-and-negative control pair that
+/// cost nobody a fixture to write -- the negative control is a program whose
+/// entire specification is "fail", so there is nothing to misconstruct.
+/// Cheap controls get used; expensive ones get skipped.
+///
+/// Exit 42 means all four ran and answered correctly. Codes 1, 2, 9 and 10
+/// are the fixture's OWN plumbing (`pipe`, `fork`, `wait`, `read`) and are
+/// deliberately disjoint from 3-8, which are findings about the utilities: a
+/// broken pipe here must never read as a broken userland.
+pub fn self_test_coreutils_runs() -> KernelResult<()> {
+    let Some(ctest_elf) = pathz_test_elf("ctest-coreutils-runs", "ctest-coreutils-runs")? else {
+        return Ok(());
+    };
+
+    serial_println!(
+        "[spawn] Running /bin/true,false,echo,basename (ring 3, C, native ABI) \
+         integration test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only when all four ran and answered.
+    const EXPECTED: i32 = 42;
+
+    // This rung held NOTHING, and that is the second of two independent
+    // faults that had to be fixed before it could answer its question. The
+    // first was the path: it asked for /bin/true when the image mounts at
+    // /mnt. With that fixed it still returned 11, and the control is in the
+    // same boot -- `ctest-keylayout`, which holds (File, READ), opened and
+    // read /proc/keylayout from ring 3 successfully, while this one, holding
+    // nothing, could not open /mnt/bin/true to exec it.
+    //
+    // Two arms, one difference. That is a measured comparison rather than the
+    // capability theory I reached for and dropped earlier: there is no
+    // (File, EXECUTE) gate on exec itself, but exec must OPEN the file to
+    // read its ELF, and the open is what a process with no capability cannot
+    // do.
+    //
+    // EXECUTE is granted alongside READ because executing is what this does,
+    // even though nothing checks it today -- so a future gate that does check
+    // it finds the grant already correct rather than this rung breaking.
+    let caps = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ.union(Rights::EXECUTE),
+    )];
+
+    let argv: &[&[u8]] = &[b"ctest-coreutils-runs"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "ctest-coreutils-runs",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: ctest-coreutils-runs spawn returned {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+
+    // Four fork+exec+wait cycles, each needing its child scheduled through a
+    // full exec and an exit, so quadruple ctest-zombiewait's budget rather
+    // than reusing it: that one reaps two children and execs nothing.
+    let mut became_zombie = false;
+    for _ in 0..48000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-coreutils-runs (ring 3) did not finish -- state \
+             {:?}. It execs four /bin programs in sequence; a hang here is most \
+             likely the FIRST exec rather than the fourth, so look for whether any \
+             /bin/* output appeared at all. Nothing else in this suite is \
+             interpretable until this rung completes",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        // The two halves of the legend say different things to the reader, and
+        // conflating them is what this fixture's author specifically avoided.
+        let meaning = match exit_code {
+            Some(1) => "pipe() failed -- THIS FIXTURE'S OWN PLUMBING, not a finding",
+            Some(2) => "fork() failed -- this fixture's own plumbing",
+            Some(11) => {
+                // Added by lane B after exit 3 cost a boot: `execl` failing
+                // sends the child to `_exit(127)`, which used to arrive as an
+                // ordinary status and fall through step 1's `rc != 0`. Now
+                // separated, and reported as a fact about the IMAGE rather
+                // than a verdict about the program.
+                concat!(
+                    "11: a program could not be EXEC'd at all -- missing from ",
+                    "the image or not executable. NOT a finding about the Rust ",
+                    "userland: check that create-ext4-rootfs.sh staged the ",
+                    "manifest binaries, and that all five producing crates ",
+                    "(coreutils, ar, kill, logger, logrotate) were built for ",
+                    "the slateos target. The serial names the path."
+                )
+            }
+            Some(3) => {
+                // DO NOT read this as a loader fault. The fixture's check is
+                // `rc != 0`, and a failed exec makes the child `_exit(127)`, so
+                // 127 arrives here as 3: `could not exec` is indistinguishable
+                // from `ran and failed`.
+                //
+                // Observed 2026-09-16, the rung's first run: the serial showed
+                // the fork succeeding and NO `ELF validated` line, so nothing
+                // was loaded -- and create-ext4-rootfs.sh had already reported,
+                // in plain words, that userspace/coreutils builds for the HOST
+                // by default, was never built for the slateos target, and that
+                // 72 manifest names were skipped as a result. The previous
+                // wording here asserted our ELFs do not exec or exit cleanly,
+                // which would have sent the next reader to the loader.
+                concat!(
+                    "/bin/true did not exit 0 -- and this code CANNOT tell ",
+                    "`could not exec` from `ran and failed`, because the ",
+                    "fixture folds the child's 127 into it. Read the ",
+                    "create-ext4-rootfs.sh log for skipped manifest names, and ",
+                    "check that userspace/coreutils was built for the slateos ",
+                    "target at all, BEFORE suspecting the loader: a missing ",
+                    "/bin/true looks exactly like a broken one."
+                )
+            }
+            Some(4) => {
+                "/bin/false did not exit 1 -- THE EXIT STATUS IS NOT BEING CARRIED. \
+                 `true` passed and `false` did not, so exec and run work and the \
+                 status is lost between _exit and wait. Every shell script in the \
+                 system reads that value"
+            }
+            Some(5) => "/bin/echo printed something other than \"hi\" -- argv or stdout",
+            Some(6) => "/bin/echo did not exit 0",
+            Some(7) => "/bin/basename computed the wrong answer -- the first real computation",
+            Some(8) => "/bin/basename did not exit 0",
+            Some(9) => {
+                "a wait() failed or returned the wrong pid -- this fixture's own \
+                 plumbing, NOT a finding about the utilities"
+            }
+            Some(10) => {
+                "a read of a child's output failed or never finished -- this \
+                 fixture's own plumbing"
+            }
+            Some(127) => {
+                // Not one of the eight verdicts, and deliberately outside
+                // their range. 127 is the shell's convention for a failed
+                // exec, chosen because it collides with nothing the fixture
+                // returns -- but that only helps if this arm refuses to fold
+                // it into "some other failure".
+                concat!(
+                    "127: a child could NOT EXEC. /bin/true is missing from ",
+                    "the image or is not executable, which is a ",
+                    "create-ext4-rootfs.sh STAGING problem and not a finding ",
+                    "about the utility. Nothing about exec, wait or the ",
+                    "utilities is proven or disproven."
+                )
+            }
+            _ => "an unexpected code; see the legend at the top of main.c",
+        };
+        serial_println!(
+            "[spawn]   FAIL: ctest-coreutils-runs (ring 3) exit code was {:?}, \
+             expected {}: {}",
+            exit_code,
+            EXPECTED,
+            meaning
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   /bin/true, /bin/false, /bin/echo and /bin/basename all ran \
+         under SlateOS (ring 3, native ABI): exec works, the exit status is \
+         carried, argv and stdout reach the program, and it computes: OK"
+    );
+    Ok(())
+}
+
+/// Reach zombie-with-a-waiter twice, to split B-FORKEXEC-BOOT-HANG in half.
+///
+/// The hang tracked in `known-issues.md` as `B-FORKEXEC-BOOT-HANG` has been
+/// seen on `forkexec` and on `dash-statpath`, which share no code but do share
+/// a state: a process going zombie while something waits for it. This fixture
+/// reaches that state twice and does nothing else -- no exec, no loader, no
+/// shell -- so a hang here says the fault is in reap or wakeup, and a hang
+/// only in the larger tests says it is not.
+///
+/// **A hang is the finding.** The yield budget expiring is a result, not a
+/// malfunction of this rung, and the serial markers are what make it useful:
+/// each `[zw]` line is emitted BEFORE the work it names, so the last one is
+/// the segment that did not finish.
+///
+/// Exit 42 means both orderings reaped; any other code names the first failed
+/// check (legend at the top of `services/ctest-zombiewait/main.c`).
+pub fn self_test_zombiewait() -> KernelResult<()> {
+    let Some(ctest_elf) = pathz_test_elf("ctest-zombiewait", "ctest-zombiewait")? else {
+        return Ok(());
+    };
+
+    serial_println!(
+        "[spawn] Running zombie-with-a-waiter, both orderings (ring 3, C, native ABI) \
+         integration test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only after both orderings reap.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-zombiewait"];
+    let envp: &[&[u8]] = &[];
+    // No capabilities: it forks, writes markers to fd 1, and reaps. Spawning
+    // with `parent: 0` keeps the expectations exact, as ctest-pgroup does.
+    let options = SpawnOptions {
+        name: "ctest-zombiewait",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-zombiewait spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Two fork-and-reap cycles, each needing the child scheduled at least
+    // twice, so double ctest-pgroup's headroom rather than reusing it.
+    let mut became_zombie = false;
+    for _ in 0..12000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-zombiewait (ring 3) did not finish -- state {:?}. THIS IS \
+             THE HANG, and the last `[zw]` line above names the segment that did not \
+             complete, because each marker is emitted BEFORE its work. If it is `B wait`, \
+             check whether `B child released` appeared: present means the child ran and \
+             exited so a corpse exists and no wakeup was delivered; absent means the child \
+             never returned from its pipe read, so reaping is exonerated and the fault is \
+             in the pipe or the scheduler. See known-issues B-FORKEXEC-BOOT-HANG",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-zombiewait (ring 3) reached Zombie but exit code was \
+             {:?}, expected {}. It exits non-42 only when a check FAILED rather than \
+             hung, so this is a wrong answer and not a lost wakeup -- the code names the \
+             first failed check, legend at the top of services/ctest-zombiewait/main.c",
+            exit_code,
+            EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   zombie-with-a-waiter (ring 3, native ABI: a corpse reaped after the \
+         fact, and a waiter already blocked when the child exits) -- both orderings \
+         reaped, no exec and no loader involved: OK"
+    );
+    Ok(())
+}
+
 pub fn self_test_cpgroup() -> KernelResult<()> {
     let Some(ctest_elf) = pathz_test_elf("ctest-pgroup", "ctest-pgroup")? else {
         return Ok(());
@@ -9679,12 +10359,21 @@ pub fn self_test_ctest_hostname() -> KernelResult<()> {
 /// completion without its `SIGINT` handler firing, meaning the line discipline
 /// did not turn `0x03` into a signal that reached the foreground group.
 ///
-/// The fixture contains no `alarm`/`setitimer` calls (those are known-broken:
-/// `B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING`).  Every read is non-blocking
-/// with a bounded spin, so it can fail but cannot hang.
-// Wired into main.rs but currently commented-out while Lane B routes
-// PtySlave reads through 872/873.
-#[allow(dead_code)]
+/// The fixture contains no `alarm`/`setitimer` calls. That was once because
+/// they were broken; `B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING` is stamped
+/// **FIXED 2026-09-12** and `SIGALRM` arrives. They stay out for a better
+/// reason than the original one: a pty test whose bounds depend on the timer
+/// subsystem reports a timer regression as a pty failure and sends the reader
+/// to the wrong subsystem. Every read is non-blocking with a bounded spin, so
+/// it can fail but cannot hang.
+///
+/// No disable note here on purpose. This function used to carry one saying the
+/// rung was off while lane B routed PtySlave reads through 872/873 -- which
+/// landed 2026-09-09 and was four disable cycles out of date, while the live
+/// reason sat at the call site in main.rs. A teammate read this copy, believed
+/// it, and nearly filed a request against code that was not the problem. If
+/// this rung is ever switched off again, the reason goes at the call site,
+/// because the call site is what stopped running. See design-decisions.md 944.
 pub fn self_test_ctest_pty() -> KernelResult<()> {
     let Some(ctest_elf) = pathz_test_elf("ctest-pty", "ctest-pty")? else {
         return Ok(());
@@ -29114,8 +29803,25 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
     }
 }
 
-/// Path Z Part 34: run an **unmodified, prebuilt GNU `make`** that builds a
-/// trivial target whose recipe forks a real glibc child.
+/// Path Z Part 34: run **our own cross-compiled GNU `make`** on target,
+/// building a trivial target whose recipe forks a child.
+///
+/// **Renamed 2026-09-16.** It was `self_test_linux_real_glibc_make` and it
+/// has never run a glibc binary. `create-ext4-rootfs.sh` stages our
+/// `make-slateos.elf` at `/bin/make` and skips the host copy, which its log
+/// now says in as many words: *"using our own build (staged below); host
+/// make not copied"* and *"staged GNU make 4.4.1 (linked against our
+/// libc.a)"*. Found by lane B, confirmed here by reading that log rather
+/// than by trusting the name.
+///
+/// The corroboration was in this rung's own failure the whole time: it once
+/// died inside `posix_spawn_file_actions_init`, which is in **our** posix
+/// crate. A real glibc `make` calls glibc's `posix_spawn` and could never
+/// have reached it.
+///
+/// Kept rather than repointed at a real glibc make, on lane B's reasoning:
+/// this is the only thing that executes our cross-compiled `make` on target,
+/// which makes it more valuable than its old name claimed, not less.
 ///
 /// This is the first rung of the operator-decided "GCC/CMake/Make toolchain"
 /// initiative (design-decisions §9 / §12, Path Z).  Every prior Path-Z test
@@ -29135,7 +29841,32 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
 /// # Which `make` this actually runs, and why the capability grant matters
 ///
 /// This test was written against the Debian glibc `make` that
-/// `create-ext4-rootfs.sh` stages first, and its name still says so.  The
+/// `create-ext4-rootfs.sh` used to stage first. Its name said so until
+/// 2026-09-16 and no longer does.
+///
+/// **SETTLED 2026-09-16, and the answer is the opposite of what I assumed.**
+/// This rung stages `/mnt/lib64/ld-linux-x86-64.so.2` and
+/// `/mnt/lib/x86_64-linux-gnu/libc.so.6`, and I had flagged that as probably
+/// vestigial -- a static `libc.a`-linked make needs neither, and I read their
+/// presence as part of what made the old "glibc" name believable.
+///
+/// **They are required, by `/bin/sh`.** The recipe contains a shell
+/// metacharacter, so make dispatches it through `/bin/sh -c`, and the staged
+/// shell is the host's dash: `ELF 64-bit LSB pie executable, dynamically
+/// linked, interpreter /lib64/ld-linux-x86-64.so.2` -- checked with `debugfs`
+/// against `rootfs.ext4` rather than inferred. `create-ext4-rootfs.sh` logs it
+/// as "staged real shell: /bin/dash (+ /bin/sh)", in contrast to bash, which
+/// it logs as "linked against our libc.a".
+///
+/// So the staging is correct and load-bearing, and **removing it would break
+/// this rung**. Recorded rather than deleted because the wrong version of
+/// this note was live for several hours and the next reader may have seen it.
+///
+/// Worth keeping as a caution: I treated evidence of a real requirement as
+/// evidence of a lie, because it sat next to a name that *was* a lie. Fixing
+/// the name did not make everything beside it suspect. Deferring the removal
+/// to its own commit and boot is what stopped that assumption becoming a
+/// breakage.  The
 /// script then **overwrites** `/bin//make` with `build/spike/make-slateos.elf`
 /// — GNU make 4.4.1 linked against our own `libc.a` — so the binary that runs
 /// here is static, non-PIE, and speaks the **native** syscall ABI, not the
@@ -29164,7 +29895,7 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
 /// Returns [`KernelError::InternalError`] if make fails to reach `Zombie`,
 /// exits non-zero, or the recipe's output file does not match; propagates
 /// spawn failure.
-pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
+pub fn self_test_linux_slateos_make() -> KernelResult<()> {
     const EXPECT_EXIT: i32 = 0;
     // /bin/emit writes exactly this 16-byte payload (incl. trailing newline).
     const EXPECT_OUT: &[u8] = b"SLATE_PIPE_BODY\n";
@@ -29305,7 +30036,7 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
     match out {
         Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
             serial_println!(
-                "[spawn]   REAL GNU make (ring 3: ld.so loaded make+libc, make parsed the \
+                "[spawn]   REAL GNU make (ring 3: ld.so loaded /bin/sh+libc, make itself is \
                  Makefile and dispatched its recipe via /bin/sh, which fork/exec'd /bin/emit with \
                  a `>` redirect; read back {} bytes == expected, exit {}): OK",
                 bytes.len(),
@@ -30698,7 +31429,7 @@ fn assert_relocatable_elf(obj: &[u8], path: &str, label: &str) -> KernelResult<(
 /// Returns [`KernelError::InternalError`] if make does not reach `Zombie`, exits
 /// non-zero, fails to produce a dynamic ELF at `/cap-prog`, or the built program
 /// does not print the expected line.
-pub fn self_test_linux_real_glibc_make_cc() -> KernelResult<()> {
+pub fn self_test_linux_slateos_make_cc() -> KernelResult<()> {
     const EXPECT_EXIT: i32 = 0;
     // make + tcc×3 is the heaviest multi-process glibc chain in the suite, so it
     // gets a budget well above the single-tcc compile budget (4_194_304).
@@ -30803,7 +31534,7 @@ int main(void){\n\
     // --- run make: it builds /cap-prog by invoking tcc per the Makefile ----
     let argv: &[&[u8]] = &[b"make", b"-f", b"/cap.mk", b"all"];
     let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C", b"SHELL=/bin/sh"];
-    // METADATA, for the same reason as `self_test_linux_real_glibc_make` — see
+    // METADATA, for the same reason as `self_test_linux_slateos_make` — see
     // the ABI note in that function's doc comment.  `/bin/make` is not the
     // Debian glibc binary this test's name implies: `create-ext4-rootfs.sh`
     // overwrites it with `build/spike/make-slateos.elf`, which speaks the
@@ -33840,6 +34571,392 @@ fn test_spawn_ex_args_layout() -> KernelResult<()> {
         "[spawn]   SpawnExArgs layout (size={}, align={}): OK",
         size,
         align
+    );
+    Ok(())
+}
+
+/// Invoke `/mnt/bin/cmake -P <script>` once, capturing stdout AND stderr.
+///
+/// Both streams are captured to files because `message()` in `-P` script mode
+/// writes to stderr: a rung that watched only stdout would see nothing at all,
+/// pass or fail. Case 03 asserts on the stderr text specifically.
+fn cmake_invoke(
+    exe_elf: &[u8],
+    script_path: &str,
+    out_path: &str,
+    err_path: &str,
+    work_dir: &str,
+) -> KernelResult<(Option<i32>, alloc::vec::Vec<u8>, alloc::vec::Vec<u8>)> {
+    use crate::fs::handle;
+
+    // cmake reads hundreds of module files during startup before it evaluates a
+    // single line of the script, so its budget is far larger than the shell
+    // rungs'. Named rather than inlined so a hang says which limit was reached.
+    const MAX_YIELDS: usize = 4_194_304;
+
+    // Fresh capture files per invocation: a read-back can then only succeed on
+    // bytes THIS run wrote, and cannot be satisfied by a previous case's output
+    // still sitting there.
+    let _ = crate::fs::Vfs::remove(out_path);
+    let _ = crate::fs::Vfs::remove(err_path);
+    let flags = handle::OpenFlags::WRITE
+        .union(handle::OpenFlags::CREATE)
+        .union(handle::OpenFlags::TRUNCATE);
+    let out_handle = handle::open(out_path, flags)?;
+    let err_handle = handle::open(err_path, flags)?;
+
+    // argv[0] is the path cmake derives its module-tree prefix from, so it must
+    // be the /mnt path and not a bare "cmake". See the rung's doc comment.
+    let argv: &[&[u8]] = &[b"/mnt/bin/cmake", b"-P", script_path.as_bytes()];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+
+    // Console handles are virtual and identified by the fd number itself, which
+    // is why 0 appears as its own handle value. fd 2 is a FILE here and not a
+    // CONSOLE as in `pkgconf_invoke`, because this rung has to READ stderr.
+    let fd_map = [
+        (0_i32, fd_handle_type::CONSOLE, 0_u64),
+        (1_i32, fd_handle_type::FILE, out_handle),
+        (2_i32, fd_handle_type::FILE, err_handle),
+    ];
+
+    // METADATA is not decoration. cmake stats and walks directories constantly
+    // -- `file(GLOB)` in case 05 is nothing but that -- and `SYS_FS_STAT` gates
+    // on `(File, METADATA)`, a different right from READ. Omitting it does not
+    // produce a permission error; it produces a cmake that cannot see its own
+    // module tree, which reads as a cmake bug. Same trap as pkgconf's `lstat`.
+    let caps = [(
+        ResourceType::File,
+        1u64,
+        Rights::READ | Rights::WRITE | Rights::METADATA,
+    )];
+    let options = SpawnOptions {
+        name: "spawn-test-cmake",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &fd_map,
+        argv,
+        envp,
+        // Set alongside argv[0] so the prefix resolves whichever of the two
+        // cmake consults; measured to be argv[0], but this costs nothing.
+        exe_path: Some(b"/mnt/bin/cmake"),
+        cwd: Some(work_dir.as_bytes()),
+        uid_gid: None,
+    };
+
+    let result = spawn_process(exe_elf, &options)?;
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let out = crate::fs::Vfs::read_file(out_path).unwrap_or_default();
+    let err = crate::fs::Vfs::read_file(err_path).unwrap_or_default();
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: cmake did not exit within {} yields (state={:?}); startup, the \
+             module tree at /mnt/share/cmake-4.4, or script evaluation likely hung",
+            MAX_YIELDS,
+            state
+        );
+        return Err(KernelError::TimedOut);
+    }
+
+    Ok((exit_code, out, err))
+}
+
+/// Path Z Part 61: run **our own cross-compiled CMake** on target, driving the
+/// five `-P` script fixtures lane B staged in `/usr/share/cmake-selftest`.
+///
+/// Answers `requests/b-a-cmake-needs-a-ring-3-rung-like-the-other-three.md`.
+/// cmake was the last of the roadmap's four toolchain ports (`pkgconf`, `make`,
+/// `cmake`, `gcc`) whose "shipped is not run" caveat was still true, and it is
+/// the one worth proving most: pkgconf parses text files and make spawns
+/// `/bin/sh`, while cmake does both and also walks directory trees.
+///
+/// # Nothing is staged into `/`, and that is the deliberate difference
+///
+/// Every other Path-Z rung copies its fixtures out of `/mnt` into `/` first.
+/// This one runs the binary **in place** from `/mnt/bin/cmake`, because the
+/// alternative is copying a 6 MB module tree into the VFS on every boot:
+///
+/// * `CMAKE_DATA_DIR` is compiled in as `/share/cmake-4.4`, resolved against a
+///   prefix derived from the program's own path. A cmake at `/mnt/bin/cmake`
+///   therefore looks in `/mnt/share/cmake-4.4`, which the rootfs already has.
+/// * The `CMAKE_ROOT` environment variable is **not** an escape hatch.
+///   Measured against a real cmake 3.28.3: an isolated binary with no module
+///   tree fails `Could not find CMAKE_ROOT !!!`, and `CMAKE_ROOT=<real tree>`
+///   does **not** fix it.
+/// * `argv[0]` governs the derivation, not `/proc/self/exe`. Measured with the
+///   discriminator that separates the two: a binary at `B/bin/cmake` with no
+///   `B/share`, invoked as `exec -a A/bin/cmake B/bin/cmake --version`, found
+///   A's tree and printed its version. Both `argv[0]` and `exe_path` are set
+///   below regardless, since agreeing costs nothing.
+///
+/// # stdout is empty, so every assertion is on a file
+///
+/// `message()` in `-P` mode writes to **stderr**; stdout is empty for all five
+/// fixtures. A rung modelled on [`self_test_linux_slateos_make`], which
+/// asserts on stdout, would fail forever against a working cmake -- lane B
+/// measured this and led their request with it. Each fixture states its result
+/// by writing a file and the assertion is that artifact's exact bytes.
+///
+/// Case 03 is the negative one and is the reason the set is worth having: it
+/// asserts a non-zero exit, `slateos-deliberate-failure` on stderr, **and**
+/// that the file written after the `FATAL_ERROR` never appears. Without it the
+/// rung would pass against a cmake that cannot report a failure at all.
+pub fn self_test_linux_slateos_cmake() -> KernelResult<()> {
+    /// One fixture: what to run, and what must be true afterwards.
+    struct Case {
+        label: &'static str,
+        script: &'static str,
+        artifact: &'static str,
+        expect: &'static [u8],
+        expect_exit: i32,
+        stderr_needle: Option<&'static [u8]>,
+        /// When true the artifact must be ABSENT, and `expect` is unused.
+        artifact_absent: bool,
+    }
+
+    const CMAKE: &str = "/mnt/bin/cmake";
+    /// A real file inside the module tree rather than the directory itself: the
+    /// tree being present is the prerequisite, and `Modules/` existing while
+    /// empty would satisfy a directory check and fail every case.
+    const MODULE_PROBE: &str = "/mnt/share/cmake-4.4/Modules/CMakeDetermineCCompiler.cmake";
+    const FIX_DIR: &str = "/mnt/usr/share/cmake-selftest";
+    const WORK: &str = "/cmake-test";
+    const OUT: &str = "/cmake-test/.stdout";
+    const ERR: &str = "/cmake-test/.stderr";
+    const RUNG: &str = "CMake 4.4.3 linked against OUR libc.a (ring 3)";
+
+    const CASES: &[Case] = &[
+        Case {
+            label: "01 a script runs and writes a file",
+            script: "01-script.cmake",
+            artifact: "script-ran.txt",
+            expect: b"slateos-cmake-ok\n",
+            expect_exit: 0,
+            stderr_needle: None,
+            artifact_absent: false,
+        },
+        Case {
+            label: "02 the language is evaluated, not merely parsed",
+            script: "02-vars.cmake",
+            artifact: "vars.txt",
+            expect: b"SLATEOS/7/len-ok\n",
+            expect_exit: 0,
+            stderr_needle: None,
+            artifact_absent: false,
+        },
+        Case {
+            label: "03 FATAL_ERROR exits non-zero and stops the script",
+            script: "03-fatal.cmake",
+            artifact: "must-not-exist.txt",
+            expect: b"",
+            expect_exit: 1,
+            stderr_needle: Some(b"slateos-deliberate-failure"),
+            artifact_absent: true,
+        },
+        Case {
+            label: "04 file(READ) reads a staged file through our VFS",
+            script: "04-read.cmake",
+            artifact: "read.txt",
+            expect: b"SLATEOS-INPUT-PAYLOAD\n",
+            expect_exit: 0,
+            stderr_needle: None,
+            artifact_absent: false,
+        },
+        Case {
+            label: "05 file(GLOB) enumerates a directory, sorted",
+            script: "05-glob.cmake",
+            artifact: "glob.txt",
+            expect: b"3:a.txt,b.txt,c.txt,\n",
+            expect_exit: 0,
+            stderr_needle: None,
+            artifact_absent: false,
+        },
+    ];
+
+    // The fixtures are as much a prerequisite as the binary: with cmake present
+    // and the scripts absent, every case below would fail and the rung would
+    // report a cmake bug that is really a missing rootfs.
+    let mut required: alloc::vec::Vec<&str> = alloc::vec::Vec::with_capacity(8);
+    required.push(CMAKE);
+    required.push(MODULE_PROBE);
+    required.push(FIX_DIR);
+    if pathz_missing(RUNG, &required) {
+        return Ok(());
+    }
+
+    serial_println!("[spawn] Running {} test...", RUNG);
+
+    if let Err(e) = crate::fs::Vfs::mkdir_all(WORK) {
+        serial_println!("[spawn]   FAIL: cmake: mkdir {} failed: {:?}", WORK, e);
+        return Err(KernelError::InternalError);
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(CMAKE) {
+        Ok(b) => {
+            serial_println!("[spawn]   cmake: {} is {} bytes", CMAKE, b.len());
+            b
+        }
+        // An OutOfMemory here is an ENVIRONMENT fact, not a cmake defect,
+        // and the split matches `pathz_fixtures_missing`'s: absent source
+        // skips, present-but-broken fails. This binary is 22.5 MB, and the
+        // buddy allocator rounds a request to a power-of-two frame count,
+        // so loading it needs a 32 MiB CONTIGUOUS block. A 20.5 MB file is
+        // the same order and loads fine -- whether the block exists depends
+        // on fragmentation at this point in the boot, not on the file.
+        //
+        // So this skips rather than reds the boot, and it skips through
+        // `pathz_skip` so the lost coverage is COUNTED. A rung that
+        // silently returned Ok here would be the Path-Z verdict problem
+        // recorded on 2026-09-18: "complete -- 0 rungs skipped" over a rung
+        // that quietly did nothing.
+        Err(crate::error::KernelError::OutOfMemory) => {
+            pathz_skip_unusable(
+                format_args!("{RUNG}"),
+                CMAKE,
+                "no 32 MiB contiguous block (the buddy allocator rounds a \
+                 22.5 MB request up to 2048 frames); fragmentation at this \
+                 point in the boot, not a missing file",
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: cmake: reading {} failed: {:?}", CMAKE, e);
+            return Err(KernelError::InternalError);
+        }
+    };
+
+    for case in CASES {
+        // Build the absolute paths this case needs. `alloc::format!` rather
+        // than a fixed buffer because the fixture directory is a constant and
+        // the names are short.
+        let script = alloc::format!("{}/{}", FIX_DIR, case.script);
+        let artifact = alloc::format!("{}/{}", WORK, case.artifact);
+
+        // Remove the artifact first, so "present with the right bytes" cannot
+        // be satisfied by an earlier case or an earlier boot. This matters most
+        // for case 03, whose whole assertion is that the file is NOT created.
+        let _ = crate::fs::Vfs::remove(&artifact);
+
+        let (exit_code, out, err) = cmake_invoke(&exe_elf, &script, OUT, ERR, WORK)?;
+
+        if exit_code != Some(case.expect_exit) {
+            serial_println!(
+                "[spawn]   FAIL: cmake {} -- exit={:?}, expected {}; stderr={:?}",
+                case.label,
+                exit_code,
+                case.expect_exit,
+                err.as_slice()
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        if let Some(needle) = case.stderr_needle {
+            if !err.windows(needle.len()).any(|w| w == needle) {
+                serial_println!(
+                    "[spawn]   FAIL: cmake {} -- stderr lacks {:?}; got {} bytes {:?}",
+                    case.label,
+                    needle,
+                    err.len(),
+                    err.as_slice()
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        if case.artifact_absent {
+            match crate::fs::Vfs::exists_or_err(&artifact) {
+                Ok(false) => {}
+                Ok(true) => {
+                    serial_println!(
+                        "[spawn]   FAIL: cmake {} -- {} EXISTS; execution continued past a \
+                         FATAL_ERROR",
+                        case.label,
+                        artifact
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                Err(e) => {
+                    serial_println!(
+                        "[spawn]   FAIL: cmake {} -- probing {} failed: {:?}",
+                        case.label,
+                        artifact,
+                        e
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            serial_println!(
+                "[spawn]   cmake {}: OK (exit {}, stderr names the failure, {} absent)",
+                case.label,
+                case.expect_exit,
+                case.artifact
+            );
+            continue;
+        }
+
+        match crate::fs::Vfs::read_file(&artifact) {
+            Ok(bytes) if bytes.as_slice() == case.expect => {
+                serial_println!(
+                    "[spawn]   cmake {}: OK ({} = {} bytes as expected)",
+                    case.label,
+                    case.artifact,
+                    bytes.len()
+                );
+            }
+            Ok(bytes) => {
+                serial_println!(
+                    "[spawn]   FAIL: cmake {} -- {} holds {} bytes {:?}, expected {} bytes {:?}",
+                    case.label,
+                    artifact,
+                    bytes.len(),
+                    bytes.as_slice(),
+                    case.expect.len(),
+                    case.expect
+                );
+                return Err(KernelError::InternalError);
+            }
+            Err(e) => {
+                // stdout is reported here even though it should be empty: if it
+                // is NOT empty, that is itself the finding, because it means
+                // this cmake writes where lane B measured that it does not.
+                serial_println!(
+                    "[spawn]   FAIL: cmake {} -- reading {} back failed: {:?}; stdout={} bytes, \
+                     stderr={:?}",
+                    case.label,
+                    artifact,
+                    e,
+                    out.len(),
+                    err.as_slice()
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    let _ = crate::fs::Vfs::remove(OUT);
+    let _ = crate::fs::Vfs::remove(ERR);
+
+    serial_println!(
+        "[spawn]   {} (ring 3: all {} `-P` fixtures passed -- script ran, language evaluated, \
+         FATAL_ERROR refused with the file after it unwritten, file(READ) through our VFS, \
+         file(GLOB) enumerated a directory sorted): OK",
+        RUNG,
+        CASES.len()
     );
     Ok(())
 }

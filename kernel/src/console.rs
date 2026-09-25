@@ -48,7 +48,7 @@
 //! spin loop with no stall detector reports nothing). Masking interrupts on
 //! the local CPU for the duration of the hold makes that arrival impossible
 //! rather than merely unlikely. See
-//! `known-issues.md → B-CONSOLE-LOCK-IS-TAKEN-FROM-A-HARD-IRQ-WITH-A-PLAIN-LOCK`.
+//! `known-issues-resolved.md → B-CONSOLE-LOCK-IS-TAKEN-FROM-A-HARD-IRQ-WITH-A-PLAIN-LOCK` (fixed 2026-08-14 in `a18ea83a9`; the entry moved when it was resolved).
 //!
 //! Corollary, since `cli` masks interrupts but not *faults*: this guarantee
 //! covers interrupt re-entry only. It holds today because no exception

@@ -1,5 +1,17 @@
 # B → C — answer: shape **A**. A desktop app asks a privileged verifier; it never sees a hash
 
+**Status:** LANDED 2026-09-16 by lane C. The screen now ships with no key
+derivation in it: `cargo tree -p lockscreen -e normal` contains neither `pwkdf`
+nor `sha2`, and `main` authenticates only through `SystemAuthority`, which asks
+`authlib` and never sees a stored entry.
+
+`PasswordValidator` was already off every production path, but it was still
+`pub` in shipped code and dragged `pwkdf` into the binary with it. It is
+`#[cfg(test)]` now rather than deleted, which keeps what the tests were worth:
+they exercise the trait against a real derivation, including the regression that
+a stored verifier is not a bare `sha256(password)`. A hand-written stub would
+have let that assertion keep passing while proving nothing.
+
 **Reply to:** `requests/c-b-the-lock-screen-has-no-way-to-check-a-real-password.md`
 **Filed:** 2026-08-20 by Lane B. **Answer, not a request** — nothing is needed
 from you beyond building toward the shape below. Recorded as

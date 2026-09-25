@@ -10,6 +10,17 @@ appearance = { path = "../../gui/appearance" }
 # lives there was lifted out of this file.
 printjob = { path = "../../gui/printjob" }
 guitk = { path = "../../gui/toolkit" }
+
+# Ctrl+O reads through `safeio::read_capped`, the byte-oriented one: a PDF is
+# binary and the text reader would refuse it at the first byte that is not
+# UTF-8. Capped, because the size is whoever-wrote-the-file's claim.
+safeio = { path = "../safeio" }
+
+# Almost every stream in a real PDF is `/FlateDecode`d -- 14, 60 and 215 times
+# in the three documents this reader was measured against. `gui/imagecodec`
+# already depends on this crate from outside its lane for the same reason:
+# PNG pixel data is a zlib stream too.
+deflate = { path = "../../deflate" }
 # The window itself: `app::launch` is what turns the renderer below into a
 # program the desktop can open, rather than a struct with a `main` that returns.
 oswindow = { path = "../../gui/window" }

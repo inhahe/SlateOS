@@ -5,7 +5,9 @@
 //! - Notebook organization with nesting
 //! - Tagging system with tag-based filtering
 //! - Full-text search across all notes
-//! - Wiki-style `[[Note Title]]` linking between notes
+//! - Wiki-style `[[Note Title]]` syntax -- stored and displayed as text.
+//!   `resolve_links` and `build_backlinks` are written and tested and have
+//!   no caller, so a link never becomes a link
 //! - Version history with snapshot restore
 //! - Predefined templates (Meeting Notes, To-Do List, Journal, Code Snippet, etc.)
 //! - Export to plain text, Markdown, or HTML
@@ -13,6 +15,26 @@
 //! - Sort options: date modified, date created, title, notebook
 //! - Multi-panel UI: notebook sidebar, note list, editor/preview
 //! - Word count and reading time statistics
+//!
+//! # What the pointer reaches
+//!
+//! Until 2026-09-17 this application received no mouse event of any kind: it
+//! drew three panels and a version history and every one of them ignored a
+//! click. Nine operations had neither a shortcut nor a clickable control, so
+//! they could not be reached at all -- see
+//! `TD-C-NOTES-CANNOT-TAG-OR-DELETE-A-NOTE`.
+//!
+//! The version panel and the note list answer a click: clicking a version
+//! restores it, clicking a note selects it, and right-clicking one offers to
+//! tag it, delete it, or move it to another notebook. The sidebar answers one
+//! too: a notebook selects, a tag filters by itself -- clicked again, it
+//! clears -- and right-clicking a notebook offers to rename or delete it.
+//!
+//! **All four panels take a pointer now.** What is left is not a panel but
+//! particular controls, listed in `TD-C-NOTES-CANNOT-TAG-OR-DELETE-A-NOTE`.
+//! Every hit test here reads the same function the renderer walks --
+//! `notebook_rows`, `tag_chips`, `note_rows`, `version_rows` -- so a thing
+//! that is not drawn cannot be clicked.
 //!
 //! Uses the guitk library for UI rendering.
 
@@ -35,7 +57,8 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::dialog::{FilePicker, Picked};
-use guitk::event::{Event, EventResult, Key, KeyEvent};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::menu::{ContextMenu, MenuItem};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -55,10 +78,16 @@ use std::collections::HashMap;
 
 /// What the window says before anything has been written.
 ///
+/// The first line names the key, because until 2026-09-18 this app could not
+/// make a note at all and "No notes yet." was read as "you have not made one"
+/// -- which was not the reason. Now that it can, the empty state is where
+/// somebody is looking when they want to start, so it is where the key
+/// belongs.
+///
 /// The second line is the one that matters for a notes app and it is not
 /// about the fabrication: nothing here survives the window closing.
 const NOTHING_YET_LINES: [&str; 2] = [
-    "No notes yet.",
+    "No notes yet -- Ctrl+N makes one.",
     "Notebooks are not kept between runs, but Ctrl+S writes the selected note to a file.",
 ];
 
@@ -72,8 +101,94 @@ const SIDEBAR_WIDTH: f32 = 200.0;
 const NOTE_LIST_WIDTH: f32 = 260.0;
 const TOOLBAR_HEIGHT: f32 = 36.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
+
+/// What the keyboard is typing into, when it is typing into something.
+///
+/// One field rather than a `bool` per box. There was one -- `searching` --
+/// and a tag would have made two, each needing to clear the other at every
+/// place that takes focus. `apps/photomanager` reached three before that was
+/// collected; this is the same collection, done at two.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextEntry {
+    /// The search box. Filters as it is typed, so its text is `search_query`.
+    Search,
+    /// A tag for the note the menu was raised on, applied when committed.
+    Tag(String),
+    /// A new name for the notebook the menu was raised on.
+    NotebookName(String),
+    /// A title for a note that does not exist yet.
+    ///
+    /// The title is asked for first because `create_note` takes one and a
+    /// note with no title cannot be picked out of the list afterwards.
+    NewNote(String),
+    /// A name for a notebook that does not exist yet.
+    NewNotebook(String),
+    /// The body of a note, committed when the mode is left.
+    ///
+    /// `Enter` inserts a newline here rather than committing, because a note
+    /// is more than one line and `Enter` is how you get the second one. That
+    /// is why this carries the note's id: the commit has to know which note
+    /// it is writing even though the selection may have moved.
+    NoteBody(NoteId, String),
+}
+
+/// What an open menu is about.
+///
+/// One field rather than an `Option` per menu. Two of them could both be set,
+/// which is a state with no meaning, and the second one is where that starts
+/// -- the same accumulation that cost this file a refactor of `searching` an
+/// hour ago.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuTarget {
+    /// A note in the list.
+    Note(NoteId),
+    /// A notebook in the sidebar.
+    Notebook(NotebookId),
+}
+
+/// The notebook menu's id for "Rename notebook...".
+const MENU_RENAME_NOTEBOOK: u64 = u64::MAX - 2;
+
+/// The notebook menu's id for "Delete notebook".
+const MENU_DELETE_NOTEBOOK: u64 = u64::MAX - 3;
+
+/// The note menu's id for "Add tag...", which is not a notebook either.
+const MENU_ADD_TAG: u64 = u64::MAX - 1;
+
+/// The note menu's id for "Delete note", which is not a notebook.
+///
+/// The top of the `u64` range: the other ids in that menu are notebook ids
+/// from an `IdGen` counting up, so this is unreachable by construction rather
+/// than merely unused so far.
+const MENU_DELETE_NOTE: u64 = u64::MAX;
+
+/// How tall one row of the note list is.
+///
+/// Was a local `item_h` inside the renderer, which is where a number has to
+/// stop living once a click has to agree with it.
+const NOTE_ROW_H: f32 = 52.0;
+
+/// How wide the version-history panel down the editor's right edge is.
+const VERSION_PANEL_W: f32 = 160.0;
+
+/// How tall one version row is.
+///
+/// **One constant where there were two.** The panel decided how many rows
+/// fitted with `(height - 30.0) / 24.0` and then advanced by `28.0` per row,
+/// so on a 740-pixel panel it drew 29 rows into 812 pixels and the last few
+/// landed past its own bottom edge. A row's height is one fact.
+const VERSION_ROW_H: f32 = 28.0;
+
+/// The panel's heading, above the first row.
+const VERSION_HEADER_H: f32 = 28.0;
 const ITEM_HEIGHT: f32 = 28.0;
 const HEADER_HEIGHT: f32 = 32.0;
+/// From the last notebook row to the first tag chip.
+///
+/// A gap, a separator rule, another gap, and the "Tags" heading -- written as
+/// its parts so it stays checkable against the renderer that draws them.
+const TAG_CLOUD_TOP_GAP: f32 = 8.0 + 8.0 + 20.0;
+
 const TAG_HEIGHT: f32 = 20.0;
 const TAG_PADDING: f32 = 8.0;
 const EDITOR_PADDING: f32 = 12.0;
@@ -1302,6 +1417,34 @@ fn sanitise_filename(title: &str) -> String {
     }
 }
 
+/// The keys this window answers, as a reader sees them.
+///
+/// Three were spelled nowhere -- `B`, `V` and `Ctrl+F` -- and two of those
+/// change what the list contains rather than what it shows: `B` hides every
+/// note that is not a favourite, which looks exactly like losing them.
+///
+/// **No `?` row, and this one is not about typing.** `Key::Slash` here has no
+/// Shift check, so `?` already opens the search box. Binding it to this card
+/// would take a key the program answers and give it a second meaning --
+/// the same arm `apps/ebook` has, and the second time this exact shape has
+/// decided the question.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Tab", "Next panel"),
+    ("Up / Down", "Move through the notes"),
+    ("Enter", "Write in the selected note"),
+    ("Ctrl+N", "New note"),
+    ("Ctrl+Shift+N", "New notebook"),
+    ("Ctrl+F", "Search the notes"),
+    ("/", "Search, without the Ctrl"),
+    ("Ctrl+S", "Save to a file"),
+    ("S", "Change the sort order"),
+    ("P", "Pin the selected note"),
+    ("V", "Mark the selected note a favourite"),
+    ("B", "Show only favourites"),
+    ("Esc", "Clear the search and the tag filter"),
+];
+
 pub struct NotesApp {
     pub notebooks: Vec<Notebook>,
     pub notes: Vec<Note>,
@@ -1310,18 +1453,27 @@ pub struct NotesApp {
     pub search_query: String,
     pub active_tag_filter: Option<String>,
     pub sort_order: SortOrder,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub active_panel: ActivePanel,
     pub show_favorites_only: bool,
     /// Whether typing goes to the search box rather than to the shortcuts.
     ///
     /// Without it, typing "s" to search would re-sort the list under the box.
     /// The app had no input at all, so nothing had needed the distinction.
-    pub searching: bool,
+    /// What the keyboard is typing into, if anything.
+    pub text_entry: Option<TextEntry>,
     /// The open or save picker. Holds the dialog, the saving flag and
     /// the routing eleven applications used to write out by hand.
     pub picker: FilePicker,
     /// What the last save attempt did, for the status line.
     pub last_save: Option<String>,
+    /// The note menu, while it is open. Rebuilt on each opening, because its
+    /// rows are the notebooks and those change underneath it.
+    note_menu: Option<ContextMenu>,
+    /// The note the open menu is about, so nothing can move the answer while
+    /// it is up.
+    menu_target: Option<MenuTarget>,
     pub window_width: f32,
     pub window_height: f32,
     note_id_gen: IdGen,
@@ -1353,11 +1505,14 @@ impl NotesApp {
             search_query: String::new(),
             active_tag_filter: None,
             sort_order: SortOrder::DateModified,
+            show_help: false,
             active_panel: ActivePanel::NoteList,
             show_favorites_only: false,
-            searching: false,
+            text_entry: None,
             picker: FilePicker::new(),
             last_save: None,
+            note_menu: None,
+            menu_target: None,
             window_width: 1280.0,
             window_height: 800.0,
             note_id_gen: IdGen::new(1),
@@ -1495,6 +1650,320 @@ impl NotesApp {
     }
 
     /// Find a note by ID.
+    /// Every notebook row the sidebar shows, as `(id, y, depth)`.
+    ///
+    /// Depth-first, and a notebook's children only when it is expanded --
+    /// which is what the renderer did inline, with a `&mut f32` threaded
+    /// through the recursion. It is a list now because three things need it:
+    /// the drawing, the click, and the tag cloud below, whose first row
+    /// starts wherever this ends.
+    fn notebook_rows(&self) -> Vec<(NotebookId, f32, u32)> {
+        let mut rows = Vec::new();
+        let mut y = TOOLBAR_HEIGHT + HEADER_HEIGHT + 4.0;
+        for nb in self.root_notebooks() {
+            self.collect_notebook_rows(nb, 0, &mut y, &mut rows);
+        }
+        rows
+    }
+
+    fn collect_notebook_rows(
+        &self,
+        nb: &Notebook,
+        depth: u32,
+        y: &mut f32,
+        out: &mut Vec<(NotebookId, f32, u32)>,
+    ) {
+        out.push((nb.id, *y, depth));
+        *y += ITEM_HEIGHT;
+        if nb.expanded {
+            for child in self.child_notebooks(nb.id) {
+                self.collect_notebook_rows(child, depth.saturating_add(1), y, out);
+            }
+        }
+    }
+
+    /// Which notebook a point is on, if it is on one.
+    pub fn notebook_at(&self, x: f32, y: f32) -> Option<NotebookId> {
+        if x < 0.0 || x >= SIDEBAR_WIDTH {
+            return None;
+        }
+        self.notebook_rows()
+            .into_iter()
+            .find(|(_, row_y, _)| y >= *row_y && y < row_y + ITEM_HEIGHT)
+            .map(|(id, _, _)| id)
+    }
+
+    /// Every tag chip in the sidebar's cloud, as `(tag, x, y, width)`.
+    ///
+    /// The cloud wraps, so a chip's place depends on every chip before it and
+    /// on where the notebook tree ended. That is exactly the arithmetic that
+    /// must not exist twice: the renderer walks this and so does the click.
+    fn tag_chips(&self) -> Vec<(String, f32, f32, f32)> {
+        let tags = self.all_tags();
+        if tags.is_empty() {
+            return Vec::new();
+        }
+        // Where the tree ended, plus the gap and the separator the renderer
+        // draws before the first chip.
+        let mut y = self
+            .notebook_rows()
+            .last()
+            .map_or(TOOLBAR_HEIGHT + HEADER_HEIGHT + 4.0, |(_, row_y, _)| {
+                row_y + ITEM_HEIGHT
+            })
+            + TAG_CLOUD_TOP_GAP;
+        let mut tag_x: f32 = 8.0;
+        let mut out = Vec::new();
+        for tag in tags {
+            let tag_w = text::padded_width(&tag, TAG_PADDING, 10.0, FontWeightHint::Regular);
+            if tag_x + tag_w > SIDEBAR_WIDTH - 4.0 {
+                tag_x = 8.0;
+                y += TAG_HEIGHT + 4.0;
+            }
+            out.push((tag, tag_x, y, tag_w));
+            tag_x += tag_w + 4.0;
+        }
+        out
+    }
+
+    /// Which tag a point is on, if it is on one.
+    pub fn tag_at(&self, x: f32, y: f32) -> Option<String> {
+        self.tag_chips()
+            .into_iter()
+            .find(|(_, cx, cy, cw)| x >= *cx && x < cx + cw && y >= *cy && y < cy + TAG_HEIGHT)
+            .map(|(tag, _, _, _)| tag)
+    }
+
+    /// The note rows the list can show, as `(id, the y it is drawn at)`.
+    ///
+    /// The renderer walks this and so does the click. The list stops where it
+    /// runs out of panel rather than drawing past the bottom, and because both
+    /// read the same function, a row that is not drawn cannot be clicked
+    /// either.
+    fn note_rows(&self) -> Vec<(NoteId, f32)> {
+        let content_y = TOOLBAR_HEIGHT;
+        let content_h = self.window_height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT;
+        let mut iy = content_y + HEADER_HEIGHT + 2.0;
+        let mut rows = Vec::new();
+        for nid in self.visible_notes() {
+            if iy + NOTE_ROW_H > content_y + content_h {
+                break;
+            }
+            rows.push((nid, iy));
+            iy += NOTE_ROW_H;
+        }
+        rows
+    }
+
+    /// Raise the note menu over a note.
+    fn open_note_menu(&mut self, id: NoteId, x: f32, y: f32) {
+        let mut items = vec![
+            MenuItem::Action {
+                id: MENU_ADD_TAG,
+                label: "Add tag...".to_owned(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            },
+            MenuItem::Action {
+                id: MENU_DELETE_NOTE,
+                label: "Delete note".to_owned(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            },
+        ];
+        // Moving somewhere it already is would be a no-op dressed as a
+        // choice, so the notebook it is in is offered ticked and disabled.
+        let current = self.find_note(id).map(|n| n.notebook_id);
+        if !self.notebooks.is_empty() {
+            items.push(MenuItem::Separator);
+            items.push(MenuItem::Submenu {
+                id: 0,
+                label: "Move to".to_owned(),
+                icon: None,
+                enabled: true,
+                children: self
+                    .notebooks
+                    .iter()
+                    .map(|nb| MenuItem::Action {
+                        id: nb.id,
+                        label: nb.name.clone(),
+                        shortcut: None,
+                        icon: None,
+                        enabled: current != Some(nb.id),
+                        checked: Some(current == Some(nb.id)),
+                    })
+                    .collect(),
+            });
+        }
+        let mut menu = ContextMenu::new(items);
+        menu.show(x, y, (self.window_width, self.window_height));
+        self.note_menu = Some(menu);
+        self.menu_target = Some(MenuTarget::Note(id));
+    }
+
+    /// Raise the notebook menu over a notebook.
+    fn open_notebook_menu(&mut self, id: NotebookId, x: f32, y: f32) {
+        let items = vec![
+            MenuItem::Action {
+                id: MENU_RENAME_NOTEBOOK,
+                label: "Rename notebook...".to_owned(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            },
+            MenuItem::Action {
+                id: MENU_DELETE_NOTEBOOK,
+                label: "Delete notebook".to_owned(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            },
+        ];
+        let mut menu = ContextMenu::new(items);
+        menu.show(x, y, (self.window_width, self.window_height));
+        self.note_menu = Some(menu);
+        self.menu_target = Some(MenuTarget::Notebook(id));
+    }
+
+    /// Act on a row of the notebook menu.
+    fn choose_for_notebook(&mut self, chosen: u64, id: NotebookId) -> bool {
+        if chosen == MENU_RENAME_NOTEBOOK {
+            // Seeded with the current name, because a rename is usually an
+            // edit of what is there rather than a fresh answer.
+            let current = self
+                .find_notebook(id)
+                .map_or_else(String::new, |nb| nb.name.clone());
+            self.text_entry = Some(TextEntry::NotebookName(current));
+            return true;
+        }
+        if chosen == MENU_DELETE_NOTEBOOK {
+            return self.delete_notebook(id);
+        }
+        false
+    }
+
+    /// Give the notebook the menu was raised on its new name.
+    ///
+    /// An empty name cancels: a notebook called nothing is not what somebody
+    /// clearing the field meant to ask for.
+    fn commit_notebook_name(&mut self, typed: &str) {
+        let name = typed.trim().to_owned();
+        if name.is_empty() {
+            return;
+        }
+        if let Some(MenuTarget::Notebook(id)) = self.menu_target {
+            self.rename_notebook(id, &name);
+        }
+    }
+
+    /// Act on whatever row of an open menu was chosen.
+    ///
+    /// One entry point for both menus: the id says which row, and the target
+    /// says which menu it came from, so a caller never has to know before
+    /// asking.
+    pub fn choose_from_note_menu(&mut self, chosen: u64) -> bool {
+        match self.menu_target {
+            Some(MenuTarget::Notebook(id)) => return self.choose_for_notebook(chosen, id),
+            Some(MenuTarget::Note(_)) | None => {}
+        }
+        let Some(MenuTarget::Note(id)) = self.menu_target else {
+            return false;
+        };
+        if chosen == MENU_ADD_TAG {
+            self.text_entry = Some(TextEntry::Tag(String::new()));
+            return true;
+        }
+        if chosen == MENU_DELETE_NOTE {
+            return self.delete_note(id);
+        }
+        self.move_note(id, chosen)
+    }
+
+    /// Which note a point is on, if it is on one.
+    pub fn note_at(&self, x: f32, y: f32) -> Option<NoteId> {
+        if x < SIDEBAR_WIDTH || x >= SIDEBAR_WIDTH + NOTE_LIST_WIDTH {
+            return None;
+        }
+        self.note_rows()
+            .into_iter()
+            .find(|(_, row_y)| y >= *row_y && y < row_y + NOTE_ROW_H)
+            .map(|(id, _)| id)
+    }
+
+    /// Where the version panel is drawn, whether or not anything is in it.
+    ///
+    /// The renderer and the click read this same function. The editor's own
+    /// rectangle is derived from the layout constants and the window size, and
+    /// the panel sits at its right edge -- so this is that arithmetic, once,
+    /// rather than once in `render_commands` and again in a hit test that has
+    /// to agree with it.
+    fn version_panel_bounds(&self) -> (f32, f32, f32, f32) {
+        (
+            self.window_width - VERSION_PANEL_W,
+            TOOLBAR_HEIGHT,
+            VERSION_PANEL_W,
+            self.window_height - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT,
+        )
+    }
+
+    /// The versions the panel can show, as `(index, the y it is drawn at)`.
+    ///
+    /// The list is trimmed from the *front* when it does not fit, because the
+    /// newest versions are the ones somebody is looking for.
+    fn version_rows(note: &Note, panel_y: f32, panel_h: f32) -> Vec<(usize, f32)> {
+        let usable = (panel_h - VERSION_HEADER_H).max(0.0);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a row count from a window height is small and positive"
+        )]
+        let max_display = (usable / VERSION_ROW_H) as usize;
+        let start = note.versions.len().saturating_sub(max_display);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a row index is far below f32's integer-exact range"
+        )]
+        (start..note.versions.len())
+            .enumerate()
+            .map(|(n, i)| (i, panel_y + VERSION_HEADER_H + n as f32 * VERSION_ROW_H))
+            .collect()
+    }
+
+    /// Which version a point is on, if it is on one.
+    pub fn version_at(&self, x: f32, y: f32) -> Option<usize> {
+        let note = self.find_note(self.selected_note?)?;
+        if note.versions.is_empty() {
+            return None;
+        }
+        let (px, py, pw, ph) = self.version_panel_bounds();
+        if x < px || x >= px + pw || y < py || y >= py + ph {
+            return None;
+        }
+        Self::version_rows(note, py, ph)
+            .into_iter()
+            .find(|(_, row_y)| y >= *row_y && y < row_y + VERSION_ROW_H)
+            .map(|(index, _)| index)
+    }
+
+    /// Put the selected note back to one of its earlier versions.
+    ///
+    /// `Note::restore_version` has existed, tested, with no caller: the panel
+    /// listed versions and nothing could act on one.
+    pub fn restore_selected_version(&mut self, version_idx: usize) -> bool {
+        let timestamp = self.tick();
+        let Some(id) = self.selected_note else {
+            return false;
+        };
+        self.find_note_mut(id)
+            .is_some_and(|note| note.restore_version(version_idx, timestamp))
+    }
+
     pub fn find_note(&self, id: NoteId) -> Option<&Note> {
         self.notes.iter().find(|n| n.id == id)
     }
@@ -1887,6 +2356,7 @@ impl NotesApp {
         }
         match event {
             Event::Key(key_ev) => self.handle_key(key_ev),
+            Event::Mouse(mouse_ev) => self.handle_mouse(mouse_ev),
             Event::Resize { width, height } => {
                 #[allow(
                     clippy::cast_precision_loss,
@@ -1952,12 +2422,96 @@ impl NotesApp {
         }
     }
 
+    /// The first pointer input this application has ever taken.
+    ///
+    /// It drew three panels and a version history and received no mouse event
+    /// of any kind, so everything it could do had to be a keyboard shortcut
+    /// and most of it had none. This is one panel's worth; the note list and
+    /// the sidebar's notebooks and tags answer one too.
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        // An open menu takes the press before anything under it, and consumes
+        // it either way: a click that dismisses a menu must not also land on
+        // whatever was behind it.
+        if self.note_menu.is_some() {
+            if let MouseEventKind::Press(_) = event.kind {
+                let chosen = self
+                    .note_menu
+                    .as_mut()
+                    .and_then(|m| m.handle_click(event.x, event.y));
+                self.note_menu = None;
+                if let Some(row) = chosen {
+                    self.choose_from_note_menu(row);
+                }
+                return EventResult::Consumed;
+            }
+        }
+        if matches!(event.kind, MouseEventKind::Press(MouseButton::Right)) {
+            if let Some(id) = self.note_at(event.x, event.y) {
+                self.selected_note = Some(id);
+                self.open_note_menu(id, event.x, event.y);
+                return EventResult::Consumed;
+            }
+            if let Some(id) = self.notebook_at(event.x, event.y) {
+                self.selected_notebook = Some(id);
+                self.open_notebook_menu(id, event.x, event.y);
+                return EventResult::Consumed;
+            }
+        }
+        if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
+            return EventResult::Ignored;
+        }
+        if let Some(tag) = self.tag_at(event.x, event.y) {
+            // Clicking the active one clears it. The chip is already drawn
+            // highlighted when it is active, so this is the gesture that
+            // picture implies -- and without it there would be no way back to
+            // the unfiltered list at all.
+            if self.active_tag_filter.as_deref() == Some(tag.as_str()) {
+                self.set_tag_filter(None);
+            } else {
+                self.set_tag_filter(Some(&tag));
+            }
+            self.reanchor_selection();
+            return EventResult::Consumed;
+        }
+        if let Some(id) = self.notebook_at(event.x, event.y) {
+            self.selected_notebook = Some(id);
+            self.reanchor_selection();
+            return EventResult::Consumed;
+        }
+        if let Some(id) = self.note_at(event.x, event.y) {
+            self.selected_note = Some(id);
+            return EventResult::Consumed;
+        }
+        if let Some(index) = self.version_at(event.x, event.y)
+            && self.restore_selected_version(index)
+        {
+            // No message: the editor's text changes under the cursor, which is
+            // the feedback, and a line in the status bar saying so would be
+            // quieter than the thing it described.
+            return EventResult::Consumed;
+        }
+        EventResult::Ignored
+    }
+
     pub fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
         if !key.pressed {
             return EventResult::Ignored;
         }
-        if self.searching {
-            return self.handle_key_search(key);
+        // Above the text-entry branch, which takes the keyboard and returns.
+        // Placed after it, the card could be raised from the list and then
+        // not dismissed while a note was being written.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+        if self.text_entry.is_some() {
+            return self.handle_text_entry_key(key);
         }
         let ctrl = key.modifiers.ctrl;
         match key.key {
@@ -1972,6 +2526,22 @@ impl NotesApp {
                 self.active_panel = next;
                 EventResult::Consumed
             }
+            // Making things. This app could not create a note at all:
+            // `create_note`, `update_note_title` and `update_note_content`
+            // were written, tested and callerless, both `notes.push` sites
+            // were inside the two unreachable creators, and there is no
+            // import -- so it exported notes it could not create.
+            Key::N if ctrl && key.modifiers.shift => {
+                self.text_entry = Some(TextEntry::NewNotebook(String::new()));
+                EventResult::Consumed
+            }
+            Key::N if ctrl => {
+                self.text_entry = Some(TextEntry::NewNote(String::new()));
+                EventResult::Consumed
+            }
+            // Writing in the selected note. `Enter` because that is what
+            // opens a thing, and the body mode leaves on `Escape`.
+            Key::Enter => self.begin_note_body(),
             // Selection within whichever panel has focus.
             Key::Up => self.step_selection(-1),
             Key::Down => self.step_selection(1),
@@ -1980,11 +2550,11 @@ impl NotesApp {
             // plain `/` require Ctrl as well, and the search box could not be
             // opened the way every other program opens it.
             Key::Slash => {
-                self.searching = true;
+                self.text_entry = Some(TextEntry::Search);
                 EventResult::Consumed
             }
             Key::F if ctrl => {
-                self.searching = true;
+                self.text_entry = Some(TextEntry::Search);
                 EventResult::Consumed
             }
             Key::S if ctrl => {
@@ -2019,27 +2589,177 @@ impl NotesApp {
     ///
     /// It comes first in `handle_key` because otherwise typing "s" to search
     /// for something would re-sort the list under the search box.
-    fn handle_key_search(&mut self, key: &KeyEvent) -> EventResult {
+    /// The notebook a new note should go in.
+    ///
+    /// Creates one when there are none, because this app starts with no
+    /// notebooks at all and `create_note` needs an id: without this the first
+    /// note a user ever tries to make would have nowhere to go, and refusing
+    /// it would be indistinguishable from the defect this replaces.
+    fn notebook_for_new_note(&mut self) -> NotebookId {
+        if let Some(id) = self.selected_notebook {
+            return id;
+        }
+        if let Some(nb) = self.notebooks.first() {
+            return nb.id;
+        }
+        let id = self.create_notebook("Notes");
+        self.selected_notebook = Some(id);
+        id
+    }
+
+    /// Make the note the title was typed for, and select it.
+    ///
+    /// Selected rather than merely created: a note that appears somewhere in
+    /// the list without the selection following it is one the user has to go
+    /// and find, and the next thing they want is to type in it.
+    fn commit_new_note(&mut self, title: &str) {
+        let title = title.trim();
+        if title.is_empty() {
+            return;
+        }
+        let notebook = self.notebook_for_new_note();
+        let id = self.create_note(title, notebook);
+        self.selected_note = Some(id);
+        self.active_panel = ActivePanel::Editor;
+    }
+
+    /// Make the notebook the name was typed for, and select it.
+    fn commit_new_notebook(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let id = self.create_notebook(name);
+        self.selected_notebook = Some(id);
+    }
+
+    /// Begin writing in the selected note, seeded with what it already says.
+    ///
+    /// Seeded because editing a note is usually adding to it, and a blank box
+    /// would make the existing text something the user has to retype.
+    fn begin_note_body(&mut self) -> EventResult {
+        let Some(id) = self.selected_note else {
+            return EventResult::Ignored;
+        };
+        let Some(note) = self.notes.iter().find(|n| n.id == id) else {
+            return EventResult::Ignored;
+        };
+        let body = note.content.clone();
+        self.text_entry = Some(TextEntry::NoteBody(id, body));
+        self.active_panel = ActivePanel::Editor;
+        EventResult::Consumed
+    }
+
+    fn handle_text_entry_key(&mut self, key: &KeyEvent) -> EventResult {
+        let Some(entry) = self.text_entry.clone() else {
+            return EventResult::Ignored;
+        };
         match key.key {
+            // A newline in the body, before the arm that would commit on it.
+            Key::Enter if matches!(entry, TextEntry::NoteBody(..)) => {
+                if let TextEntry::NoteBody(id, mut body) = entry {
+                    body.push('\n');
+                    self.text_entry = Some(TextEntry::NoteBody(id, body));
+                }
+                EventResult::Consumed
+            }
             Key::Escape | Key::Enter => {
-                self.searching = false;
+                self.text_entry = None;
+                // The body commits on the way out either way: Escape is how
+                // you leave a multi-line box, and losing what was typed
+                // because the exit key was the cancelling one is the worst
+                // thing a text editor can do.
+                if let TextEntry::NoteBody(id, body) = &entry {
+                    self.update_note_content(*id, body);
+                    return EventResult::Consumed;
+                }
+                if key.key == Key::Enter {
+                    match entry {
+                        TextEntry::Tag(tag) => self.commit_tag(&tag),
+                        TextEntry::NotebookName(name) => self.commit_notebook_name(&name),
+                        TextEntry::NewNote(title) => self.commit_new_note(&title),
+                        TextEntry::NewNotebook(name) => self.commit_new_notebook(&name),
+                        TextEntry::Search | TextEntry::NoteBody(..) => {}
+                    }
+                }
                 EventResult::Consumed
             }
             Key::Backspace => {
-                if self.search_query.pop().is_none() {
-                    return EventResult::Ignored;
+                match entry {
+                    TextEntry::Search => {
+                        if self.search_query.pop().is_none() {
+                            return EventResult::Ignored;
+                        }
+                        self.reanchor_selection();
+                    }
+                    TextEntry::Tag(mut tag) => {
+                        tag.pop();
+                        self.text_entry = Some(TextEntry::Tag(tag));
+                    }
+                    TextEntry::NotebookName(mut name) => {
+                        name.pop();
+                        self.text_entry = Some(TextEntry::NotebookName(name));
+                    }
+                    TextEntry::NewNote(mut title) => {
+                        title.pop();
+                        self.text_entry = Some(TextEntry::NewNote(title));
+                    }
+                    TextEntry::NewNotebook(mut name) => {
+                        name.pop();
+                        self.text_entry = Some(TextEntry::NewNotebook(name));
+                    }
+                    TextEntry::NoteBody(id, mut body) => {
+                        body.pop();
+                        self.text_entry = Some(TextEntry::NoteBody(id, body));
+                    }
                 }
-                self.reanchor_selection();
                 EventResult::Consumed
             }
             _ => {
                 if key.text.is_empty() || key.modifiers.ctrl {
                     return EventResult::Ignored;
                 }
-                self.search_query.push_str(&key.text);
-                self.reanchor_selection();
+                match entry {
+                    TextEntry::Search => {
+                        self.search_query.push_str(&key.text);
+                        self.reanchor_selection();
+                    }
+                    TextEntry::Tag(mut tag) => {
+                        tag.push_str(&key.text);
+                        self.text_entry = Some(TextEntry::Tag(tag));
+                    }
+                    TextEntry::NotebookName(mut name) => {
+                        name.push_str(&key.text);
+                        self.text_entry = Some(TextEntry::NotebookName(name));
+                    }
+                    TextEntry::NewNote(mut title) => {
+                        title.push_str(&key.text);
+                        self.text_entry = Some(TextEntry::NewNote(title));
+                    }
+                    TextEntry::NewNotebook(mut name) => {
+                        name.push_str(&key.text);
+                        self.text_entry = Some(TextEntry::NewNotebook(name));
+                    }
+                    TextEntry::NoteBody(id, mut body) => {
+                        body.push_str(&key.text);
+                        self.text_entry = Some(TextEntry::NoteBody(id, body));
+                    }
+                }
                 EventResult::Consumed
             }
+        }
+    }
+
+    /// Put the typed tag on the note the menu was raised over.
+    ///
+    /// An empty tag cancels rather than adding one called nothing.
+    fn commit_tag(&mut self, typed: &str) {
+        let tag = typed.trim().to_owned();
+        if tag.is_empty() {
+            return;
+        }
+        if let Some(MenuTarget::Note(id)) = self.menu_target {
+            self.add_tag_to_note(id, &tag);
         }
     }
 
@@ -2174,10 +2894,44 @@ impl NotesApp {
         let editor_w = width - editor_x;
         self.render_editor_area(&mut cmds, editor_x, content_y, editor_w, content_h);
 
+        // A tag being typed, where the save line goes and outranking it: this
+        // entry has no box of its own, so without somewhere to show the
+        // characters the user is typing into nothing they can see.
+        let prompt = match &self.text_entry {
+            Some(TextEntry::Tag(typed)) => Some(format!("Tag: {typed}|")),
+            Some(TextEntry::NotebookName(typed)) => Some(format!("Notebook name: {typed}|")),
+            Some(TextEntry::NewNote(typed)) => Some(format!("New note: {typed}|  (Enter)")),
+            Some(TextEntry::NewNotebook(typed)) => Some(format!("New notebook: {typed}|  (Enter)")),
+            // The body has the editor panel to show its text in; this line
+            // says how to leave, which is the part a multi-line box has to
+            // state because Enter no longer means "done".
+            Some(TextEntry::NoteBody(..)) => {
+                Some("Writing -- Enter for a new line, Esc to finish".to_owned())
+            }
+            // The search box has a box of its own to show its text in.
+            Some(TextEntry::Search) | None => None,
+        };
+        if let Some(prompt) = prompt {
+            cmds.push(RenderCommand::Text {
+                x: 8.0,
+                y: 24.0,
+                text: prompt,
+                color: self.palette.ink(self.palette.blue),
+                font_size: 9.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((width - 16.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
         // What the last save did, where the empty-state banner sits. This is
         // the one place the user's work leaves the process, so a save that
         // reports nothing is a save they cannot rely on.
-        if let Some(note) = &self.last_save {
+        if let Some(note) = self
+            .last_save
+            .as_ref()
+            .filter(|_| self.text_entry.is_none())
+        {
             let avail = (width - 16.0).max(0.0);
             if avail > 0.0 {
                 cmds.push(RenderCommand::Text {
@@ -2199,7 +2953,24 @@ impl NotesApp {
 
         // Last, so it is above everything -- the same order in which
         // `handle_event` gives it the keystroke.
+        // Over the window, under the picker: the picker is modal, and a menu
+        // raised before it opened has no business on top of it.
+        if let Some(menu) = &self.note_menu {
+            cmds.extend(menu.render(&self.palette));
+        }
+
         cmds.extend(self.picker.render(&self.palette, width, height));
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
 
         cmds
     }
@@ -2484,11 +3255,20 @@ impl NotesApp {
         });
 
         // Render notebook tree
-        let mut y = content_y + HEADER_HEIGHT + 4.0;
-        let root_nbs = self.root_notebooks();
-        for nb in &root_nbs {
-            self.render_notebook_item(cmds, nb, 0, &mut y);
+        // Walked from `notebook_rows`, which the click reads too. It used to
+        // be a recursion threading a `&mut f32`, which meant the only way to
+        // know where a row was drawn was to draw it.
+        let rows = self.notebook_rows();
+        for (id, row_y, depth) in &rows {
+            if let Some(nb) = self.find_notebook(*id) {
+                self.render_notebook_item(cmds, nb, *depth, *row_y);
+            }
         }
+        let mut y = rows
+            .last()
+            .map_or(content_y + HEADER_HEIGHT + 4.0, |(_, row_y, _)| {
+                row_y + ITEM_HEIGHT
+            });
 
         // Tags section
         let tags = self.all_tags();
@@ -2513,15 +3293,15 @@ impl NotesApp {
                 max_width: Some(SIDEBAR_WIDTH - 20.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            y += 20.0;
-
-            let mut tag_x: f32 = 8.0;
-            for tag in &tags {
-                let tag_w = text::padded_width(tag, TAG_PADDING, 10.0, FontWeightHint::Regular);
-                if tag_x + tag_w > SIDEBAR_WIDTH - 4.0 {
-                    tag_x = 8.0;
-                    y += TAG_HEIGHT + 4.0;
-                }
+            // No advance past the heading: its height is the last term of
+            // `TAG_CLOUD_TOP_GAP`, and the chips below are placed from there.
+            //
+            // Placed by `tag_chips`, which wraps them and which the click
+            // reads. The first chip's y agrees with the `y` above by way of
+            // `TAG_CLOUD_TOP_GAP`, which is that arithmetic written down.
+            for (tag, tag_x, tag_y, tag_w) in self.tag_chips() {
+                let tag = &tag;
+                let y = tag_y;
                 let is_active = self.active_tag_filter.as_deref() == Some(tag.as_str());
                 let bg = if is_active {
                     self.palette.blue
@@ -2551,7 +3331,6 @@ impl NotesApp {
                     max_width: Some(tag_w - TAG_PADDING),
                     overflow: TextOverflow::Ellipsis,
                 });
-                tag_x += tag_w + 4.0;
             }
         }
 
@@ -2566,12 +3345,16 @@ impl NotesApp {
         });
     }
 
+    /// Draw one notebook row at the place `notebook_rows` put it.
+    ///
+    /// Takes its `y` rather than advancing one: where a row goes is decided
+    /// once, by `notebook_rows`, and this only draws.
     fn render_notebook_item(
         &self,
         cmds: &mut Vec<RenderCommand>,
         nb: &Notebook,
         depth: u32,
-        y: &mut f32,
+        y: f32,
     ) {
         let indent = depth.saturating_mul(16) as f32;
         let is_selected = self.selected_notebook == Some(nb.id);
@@ -2580,7 +3363,7 @@ impl NotesApp {
         if is_selected {
             cmds.push(RenderCommand::FillRect {
                 x: 0.0,
-                y: *y,
+                y,
                 width: SIDEBAR_WIDTH,
                 height: ITEM_HEIGHT,
                 color: self.palette.surface0,
@@ -2594,7 +3377,7 @@ impl NotesApp {
             let arrow = if nb.expanded { "v" } else { ">" };
             cmds.push(RenderCommand::Text {
                 x: 4.0 + indent,
-                y: *y + 7.0,
+                y: y + 7.0,
                 text: arrow.to_owned(),
                 color: self.palette.subtext0,
                 font_size: 10.0,
@@ -2613,7 +3396,7 @@ impl NotesApp {
         let note_count = self.notes.iter().filter(|n| n.notebook_id == nb.id).count();
         cmds.push(RenderCommand::Text {
             x: 18.0 + indent,
-            y: *y + 7.0,
+            y: y + 7.0,
             text: format!("{} ({})", nb.name, note_count),
             color: name_color,
             font_size: 12.0,
@@ -2626,15 +3409,8 @@ impl NotesApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        *y += ITEM_HEIGHT;
-
-        // Render children if expanded
-        if nb.expanded && has_children {
-            let children = self.child_notebooks(nb.id);
-            for child in children {
-                self.render_notebook_item(cmds, child, depth.saturating_add(1), y);
-            }
-        }
+        // No advance and no recursion: `notebook_rows` decided where every
+        // row goes, including the children, and this draws one of them.
     }
 
     fn render_note_list(
@@ -2686,15 +3462,15 @@ impl NotesApp {
         });
 
         // Note items
-        let visible = self.visible_notes();
-        let mut iy = content_y + HEADER_HEIGHT + 2.0;
-        let item_h = 52.0; // taller items to show subtitle
-
-        for nid in &visible {
-            if iy + item_h > content_y + content_h {
-                break;
-            }
-            if let Some(note) = self.find_note(*nid) {
+        // The rows come from `note_rows`, which the click reads too: a row the
+        // renderer decides not to draw is a row the click must not find.
+        let item_h = NOTE_ROW_H;
+        for (nid, iy) in self.note_rows() {
+            let nid = &nid;
+            {
+                let Some(note) = self.find_note(*nid) else {
+                    continue;
+                };
                 let is_selected = self.selected_note == Some(*nid);
 
                 // Background for selected
@@ -2826,8 +3602,6 @@ impl NotesApp {
                     color: self.palette.surface0,
                     width: 1.0,
                 });
-
-                iy += item_h;
             }
         }
 
@@ -2867,7 +3641,7 @@ impl NotesApp {
             cmds.push(RenderCommand::Text {
                 x: x + width / 2.0 - 80.0,
                 y: y + height / 2.0 - 10.0,
-                text: "Select a note to edit".to_owned(),
+                text: "Select a note, then Enter to write in it".to_owned(),
                 color: self.palette.subtext0,
                 font_size: 16.0,
                 font_weight: FontWeightHint::Light,
@@ -2978,7 +3752,13 @@ impl NotesApp {
 
         // Version history panel on the right edge
         if !note.versions.is_empty() {
-            self.render_version_sidebar(cmds, note, x + width - 160.0, editor_y, 160.0, editor_h);
+            // The rectangle comes from `version_panel_bounds`, which the click
+            // reads too. It used to be derived here from the editor's own
+            // rectangle, which happened to agree -- `editor_x + editor_w` is
+            // the window width -- and would have stopped agreeing the first
+            // time either was adjusted.
+            let (px, py, pw, ph) = self.version_panel_bounds();
+            self.render_version_sidebar(cmds, note, px, py, pw, ph);
         }
     }
 
@@ -2992,7 +3772,17 @@ impl NotesApp {
         _height: f32,
     ) {
         let mut ly = y + EDITOR_PADDING;
-        for line in note.content.lines() {
+        // While the body is being typed, show the buffer rather than the
+        // stored note. The commit happens on the way out -- `set_content`
+        // snapshots a version on every call, so committing per keystroke
+        // would file one version per character -- and until then the note
+        // still holds the old text. Drawing that would leave the user typing
+        // into a panel that never changes.
+        let live = match &self.text_entry {
+            Some(TextEntry::NoteBody(id, buf)) if *id == note.id => buf.as_str(),
+            _ => note.content.as_str(),
+        };
+        for line in live.lines() {
             cmds.push(RenderCommand::Text {
                 x: x + EDITOR_PADDING,
                 y: ly,
@@ -3375,10 +4165,10 @@ impl NotesApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        let mut vy = y + 28.0;
-        let max_display = ((height - 30.0) / 24.0) as usize;
-        let start = note.versions.len().saturating_sub(max_display);
-        for (i, ver) in note.versions.iter().enumerate().skip(start) {
+        for (i, vy) in Self::version_rows(note, y, height) {
+            let Some(ver) = note.versions.get(i) else {
+                continue;
+            };
             let label = format!("v{} ({})", i.saturating_add(1), ver.timestamp);
             cmds.push(RenderCommand::Text {
                 x: x + 8.0,
@@ -3402,7 +4192,6 @@ impl NotesApp {
                 max_width: Some(width - 16.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            vy += 28.0;
         }
     }
 }
@@ -3517,6 +4306,103 @@ mod tests {
         app
     }
 
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Two states. `P` and `V` act on the selected note and report `Ignored`
+    /// with nothing selected; `Esc` is answered only when there is a search
+    /// or a tag filter to clear, and correctly propagates otherwise. An
+    /// empty-app guard would have called three rows broken and been wrong
+    /// about all three.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = [false, true].into_iter().any(|moved| {
+                    // Both states carry notes, and one has the selection off
+                    // the top. Neither is arbitrary:
+                    //
+                    // An empty app answers none of the keys that move through
+                    // what is in it, so a state with no notes tests nothing
+                    // and reports a defect.
+                    //
+                    // `Up` on the first note returns `Ignored`, which in a
+                    // top-level app means "nothing to redraw" rather than
+                    // "not my key" -- `handle_event` maps it to
+                    // `Response::Idle` and there is no parent above it. So
+                    // `Consumed` here asks whether the key *did* something,
+                    // not whether the window owns it, and a key at the end of
+                    // its travel does nothing. That is why the second state
+                    // moves the selection first.
+                    let mut app = seeded();
+                    if moved {
+                        app.search_query = "a".to_string();
+                        app.handle_key(&key_of(Key::Down, Modifiers::NONE));
+                    }
+                    app.handle_key(&stroke) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the last third: `B` behind the card must not hide every
+    /// note that is not a favourite, and must do it with the card down.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &NotesApp| -> String {
+            app.render_commands(1200.0, 800.0)
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+
+        let mut app = seeded();
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE));
+        let shown = drawn(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        let favourites_only = app.show_favorites_only;
+        app.handle_key(&key_of(Key::B, Modifiers::NONE));
+        assert_eq!(
+            app.show_favorites_only, favourites_only,
+            "B filtered the list through the shortcut card"
+        );
+
+        app.handle_key(&key_of(Key::F1, Modifiers::NONE));
+        app.handle_key(&key_of(Key::B, Modifiers::NONE));
+        assert_ne!(
+            app.show_favorites_only, favourites_only,
+            "control: B does nothing even with the card down"
+        );
+    }
+
+    fn key_of(key: Key, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }
+    }
+
     fn press(k: Key) -> Event {
         Event::Key(KeyEvent {
             key: k,
@@ -3622,13 +4508,13 @@ mod tests {
         let mut app = seeded();
         let order = app.sort_order;
         assert_eq!(app.handle_event(&press(Key::Slash)), EventResult::Consumed);
-        assert!(app.searching);
+        assert_eq!(app.text_entry, Some(TextEntry::Search));
         app.handle_event(&typed('s'));
         app.handle_event(&typed('p'));
         assert_eq!(app.search_query, "sp");
         assert_eq!(app.sort_order, order, "the sort order changed while typing");
         app.handle_event(&press(Key::Enter));
-        assert!(!app.searching);
+        assert_eq!(app.text_entry, None);
         // And now the same key sorts again.
         app.handle_event(&press(Key::S));
         assert_ne!(app.sort_order, order);
@@ -4177,6 +5063,772 @@ mod tests {
         let note = app.find_note(nid).unwrap();
         assert_eq!(note.content, "Version 3");
         assert_eq!(note.versions.len(), 2); // v1 and v2 saved
+    }
+
+    /// A note with two earlier versions, selected, in a sized window.
+    fn app_with_versions() -> (NotesApp, NoteId) {
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("NB");
+        let nid = app.create_note("Note", nb);
+        app.update_note_content(nid, "Original content");
+        app.update_note_content(nid, "Modified content");
+        app.selected_note = Some(nid);
+        app.window_width = 1280.0;
+        app.window_height = 800.0;
+        (app, nid)
+    }
+
+    fn click_at(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// Clicking a tag filters by it, and clicking it again clears the filter.
+    ///
+    /// `set_tag_filter` is written and tested and had no caller, while the
+    /// sidebar already drew each tag highlighted when it was the active
+    /// filter: a filter control with no way to set the filter.
+    #[test]
+    fn clicking_a_tag_filters_and_clicking_it_again_clears() {
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        app.menu_target = Some(MenuTarget::Note(nid));
+        app.add_tag_to_note(nid, "pier");
+        let chips = app.tag_chips();
+        let (tag, cx, cy, _) = chips.first().cloned().expect("a tag chip");
+        assert_eq!(tag, "pier", "the control failed: {chips:?}");
+
+        app.handle_event(&click_at(cx + 2.0, cy + 2.0));
+        assert_eq!(
+            app.active_tag_filter.as_deref(),
+            Some("pier"),
+            "the click did not filter"
+        );
+
+        app.handle_event(&click_at(cx + 2.0, cy + 2.0));
+        assert_eq!(
+            app.active_tag_filter, None,
+            "clicking the active tag did not clear it"
+        );
+    }
+
+    /// Clicking a notebook selects it.
+    #[test]
+    fn clicking_a_notebook_selects_it() {
+        let (mut app, _, home, work) = app_with_two_notebooks();
+        app.selected_notebook = Some(home);
+        let rows = app.notebook_rows();
+        let (_, row_y, _) = *rows
+            .iter()
+            .find(|(id, _, _)| *id == work)
+            .expect("a row for the other notebook");
+
+        app.handle_event(&click_at(20.0, row_y + 2.0));
+
+        assert_eq!(
+            app.selected_notebook,
+            Some(work),
+            "the click selected nothing"
+        );
+    }
+
+    /// Every tag chip is inside the sidebar.
+    ///
+    /// The cloud wraps, and a chip whose width pushed it past the edge would
+    /// be drawn off the panel and be unclickable -- which, since both read
+    /// `tag_chips`, cannot happen without the drawing showing it too.
+    #[test]
+    fn every_tag_chip_is_inside_the_sidebar() {
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        for i in 0..30 {
+            app.add_tag_to_note(nid, &format!("tag{i}"));
+        }
+        let chips = app.tag_chips();
+
+        assert!(chips.len() > 5, "the control failed: {} chips", chips.len());
+        for (tag, cx, _, cw) in &chips {
+            assert!(
+                cx + cw <= SIDEBAR_WIDTH,
+                "chip {tag} runs to {} past the sidebar's {SIDEBAR_WIDTH}",
+                cx + cw
+            );
+        }
+    }
+
+    /// The tree's rows and the cloud's chips do not overlap.
+    ///
+    /// The cloud starts where the tree ends plus `TAG_CLOUD_TOP_GAP`; if that
+    /// constant stopped matching what the renderer draws between them, this is
+    /// where it would show.
+    #[test]
+    fn the_tag_cloud_starts_below_the_notebook_tree() {
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        app.add_tag_to_note(nid, "pier");
+        let last_row = app
+            .notebook_rows()
+            .last()
+            .map(|(_, y, _)| *y + ITEM_HEIGHT)
+            .expect("a notebook row");
+        let (_, _, first_chip_y, _) = app.tag_chips().first().cloned().expect("a chip");
+
+        assert!(
+            first_chip_y >= last_row,
+            "the first chip at {first_chip_y} is above the last notebook row ending at {last_row}"
+        );
+    }
+
+    /// The notebook name being typed, if that is what has the keyboard.
+    fn naming_notebook(app: &NotesApp) -> Option<&str> {
+        match &app.text_entry {
+            Some(TextEntry::NotebookName(text)) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Right-clicking a notebook raises a menu about that notebook.
+    #[test]
+    fn right_clicking_a_notebook_raises_a_menu_about_it() {
+        let (mut app, _, _, work) = app_with_two_notebooks();
+        let (_, row_y, _) = *app
+            .notebook_rows()
+            .iter()
+            .find(|(id, _, _)| *id == work)
+            .expect("a row");
+
+        let consumed = app.handle_event(&right_click_at(20.0, row_y + 2.0));
+
+        assert_eq!(consumed, EventResult::Consumed);
+        assert_eq!(app.menu_target, Some(MenuTarget::Notebook(work)));
+    }
+
+    /// Renaming seeds the field with the current name and applies the edit.
+    ///
+    /// `rename_notebook` is written and tested and had no caller.
+    #[test]
+    fn a_notebook_can_be_renamed() {
+        let (mut app, _, _, work) = app_with_two_notebooks();
+        let (_, row_y, _) = *app
+            .notebook_rows()
+            .iter()
+            .find(|(id, _, _)| *id == work)
+            .expect("a row");
+        app.handle_event(&right_click_at(20.0, row_y + 2.0));
+
+        assert!(
+            app.choose_from_note_menu(MENU_RENAME_NOTEBOOK),
+            "rename refused"
+        );
+        assert_eq!(
+            naming_notebook(&app),
+            Some("Work"),
+            "the field was not seeded with the current name"
+        );
+
+        // "Work" -> backspace -> "Wor" -> "s" -> "Wors". Both halves matter:
+        // the seed is editable, not just replaceable.
+        app.handle_event(&plain_key(Key::Backspace));
+        app.handle_event(&typed_key("s"));
+        app.handle_event(&plain_key(Key::Enter));
+
+        assert_eq!(
+            app.find_notebook(work).expect("the notebook").name,
+            "Wors",
+            "the rename did not apply"
+        );
+    }
+
+    /// Deleting a notebook deletes it.
+    #[test]
+    fn a_notebook_can_be_deleted() {
+        let (mut app, _, _, work) = app_with_two_notebooks();
+        let (_, row_y, _) = *app
+            .notebook_rows()
+            .iter()
+            .find(|(id, _, _)| *id == work)
+            .expect("a row");
+        app.handle_event(&right_click_at(20.0, row_y + 2.0));
+
+        assert!(
+            app.choose_from_note_menu(MENU_DELETE_NOTEBOOK),
+            "delete refused"
+        );
+
+        assert!(
+            app.find_notebook(work).is_none(),
+            "the notebook is still there"
+        );
+    }
+
+    /// An empty name leaves the notebook as it was.
+    #[test]
+    fn an_empty_notebook_name_is_refused() {
+        let (mut app, _, _, work) = app_with_two_notebooks();
+        app.menu_target = Some(MenuTarget::Notebook(work));
+        app.text_entry = Some(TextEntry::NotebookName(String::new()));
+
+        app.handle_event(&plain_key(Key::Enter));
+
+        assert_eq!(
+            app.find_notebook(work).expect("the notebook").name,
+            "Work",
+            "an empty name was applied"
+        );
+    }
+
+    /// The name being typed is on screen.
+    #[test]
+    fn the_notebook_name_being_typed_is_shown() {
+        let (mut app, _, _, work) = app_with_two_notebooks();
+        app.menu_target = Some(MenuTarget::Notebook(work));
+        app.text_entry = Some(TextEntry::NotebookName("Wor".to_owned()));
+
+        let tree = app.render(app.window_width, app.window_height);
+
+        let shown = tree.commands.iter().any(|c| {
+            matches!(c, RenderCommand::Text { text, .. } if text.contains("Notebook name: Wor"))
+        });
+        assert!(shown, "the name being typed is nowhere on screen");
+    }
+
+    /// The tag being typed, if that is what has the keyboard.
+    fn tagging(app: &NotesApp) -> Option<&str> {
+        match &app.text_entry {
+            Some(TextEntry::Tag(text)) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The menu offers a tag, and typing one puts it on the note.
+    ///
+    /// `add_tag_to_note` is written and tested and had no caller: there was no
+    /// pointer, and no keyboard shortcut for it either.
+    #[test]
+    fn a_tag_typed_from_the_menu_reaches_the_note() {
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        let (_, row_y) = *app.note_rows().first().expect("a row");
+        app.handle_event(&right_click_at(SIDEBAR_WIDTH + 20.0, row_y + 4.0));
+
+        assert!(app.choose_from_note_menu(MENU_ADD_TAG), "the menu refused");
+        assert_eq!(tagging(&app), Some(""), "no tag entry was started");
+
+        for ch in ["p", "i", "e", "r"] {
+            app.handle_event(&typed_key(ch));
+        }
+        app.handle_event(&plain_key(Key::Enter));
+
+        assert_eq!(
+            app.find_note(nid).expect("the note").tags,
+            vec!["pier".to_owned()],
+            "the tag never reached the note"
+        );
+        assert!(tagging(&app).is_none(), "still taking typing");
+    }
+
+    /// The tag being typed is on screen.
+    #[test]
+    fn the_tag_being_typed_is_shown() {
+        let (mut app, _, _, _) = app_with_two_notebooks();
+        app.text_entry = Some(TextEntry::Tag("pi".to_owned()));
+
+        let tree = app.render(app.window_width, app.window_height);
+
+        let shown = tree
+            .commands
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Tag: pi")));
+        assert!(shown, "the tag being typed is nowhere on screen");
+    }
+
+    /// Escape abandons the tag without adding it.
+    #[test]
+    fn escape_abandons_the_tag() {
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        app.menu_target = Some(MenuTarget::Note(nid));
+        app.text_entry = Some(TextEntry::Tag("half".to_owned()));
+
+        app.handle_event(&plain_key(Key::Escape));
+
+        assert!(tagging(&app).is_none(), "still taking typing");
+        assert!(
+            app.find_note(nid).expect("the note").tags.is_empty(),
+            "escape added the tag anyway"
+        );
+    }
+
+    /// An empty tag adds nothing.
+    #[test]
+    fn enter_on_an_empty_tag_adds_nothing() {
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        app.menu_target = Some(MenuTarget::Note(nid));
+        app.text_entry = Some(TextEntry::Tag(String::new()));
+
+        app.handle_event(&plain_key(Key::Enter));
+
+        assert!(
+            app.find_note(nid).expect("the note").tags.is_empty(),
+            "an empty tag was added"
+        );
+    }
+
+    /// Searching still works, which the entry refactor could have broken.
+    #[test]
+    fn the_search_box_still_takes_typing() {
+        let (mut app, _, _, _) = app_with_two_notebooks();
+        app.handle_event(&plain_key(Key::Slash));
+        assert_eq!(
+            app.text_entry,
+            Some(TextEntry::Search),
+            "slash did not open search"
+        );
+
+        app.handle_event(&typed_key("a"));
+
+        assert_eq!(app.search_query, "a", "the search box lost its typing");
+    }
+
+    fn ctrl_key(k: Key, shift: bool) -> Event {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = true;
+        modifiers.shift = shift;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// A user can make a note and write in it, from an empty app.
+    ///
+    /// This is the whole point of the program and it could not be done:
+    /// `create_note`, `update_note_title` and `update_note_content` were
+    /// written, tested and callerless, both `notes.push` sites were inside
+    /// the two unreachable creators, and there is no import -- so this app
+    /// exported notes it could not create.
+    ///
+    /// Deliberately end-to-end rather than "the key sets the field": every
+    /// piece of this existed already and the program still could not be used,
+    /// so the assertion has to be that the artifact comes out.
+    #[test]
+    fn a_user_can_make_a_note_and_write_in_it() {
+        let mut app = NotesApp::new();
+        assert!(
+            app.notes.is_empty(),
+            "control: the app starts with no notes"
+        );
+        assert!(
+            app.notebooks.is_empty(),
+            "control: and with no notebook to put one in"
+        );
+
+        // Make it.
+        app.handle_event(&ctrl_key(Key::N, false));
+        for c in ["S", "h", "o", "p"] {
+            app.handle_event(&typed_key(c));
+        }
+        app.handle_event(&plain_key(Key::Enter));
+
+        assert_eq!(app.notes.len(), 1, "no note was created");
+        let id = app.notes[0].id;
+        assert_eq!(app.notes[0].title, "Shop", "the title never arrived");
+        assert_eq!(app.selected_note, Some(id), "the new note was not selected");
+        assert_eq!(
+            app.notebooks.len(),
+            1,
+            "a notebook should have been made to hold it"
+        );
+
+        // Write in it.
+        app.handle_event(&plain_key(Key::Enter));
+        assert!(app.text_entry.is_some(), "Enter did not begin writing");
+        for c in ["m", "i", "l", "k"] {
+            app.handle_event(&typed_key(c));
+        }
+        app.handle_event(&plain_key(Key::Enter));
+        for c in ["e", "g", "g", "s"] {
+            app.handle_event(&typed_key(c));
+        }
+        app.handle_event(&plain_key(Key::Escape));
+
+        // Read it back.
+        let note = app.notes.iter().find(|n| n.id == id).expect("the note");
+        assert_eq!(
+            note.content, "milk\neggs",
+            "what was typed is not what the note holds"
+        );
+    }
+
+    /// While writing, the editor shows what is being typed.
+    ///
+    /// The commit happens on the way out, so the note still holds the old
+    /// text until then; drawing that would leave the user typing into a panel
+    /// that never changes.
+    #[test]
+    fn the_editor_shows_the_body_as_it_is_typed() {
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("NB");
+        let id = app.create_note("Note", nb);
+        app.selected_note = Some(id);
+
+        app.handle_event(&plain_key(Key::Enter));
+        for c in ["h", "i"] {
+            app.handle_event(&typed_key(c));
+        }
+
+        let shown: Vec<String> = app
+            .render(1200.0, 800.0)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            shown.iter().any(|t| t == "hi"),
+            "the text being typed is nowhere on screen: {shown:?}"
+        );
+    }
+
+    /// Escape keeps what was typed rather than discarding it.
+    ///
+    /// Escape is how you leave a multi-line box, and losing the work because
+    /// the exit key was the cancelling one is the worst thing a text editor
+    /// can do.
+    #[test]
+    fn leaving_the_body_keeps_what_was_typed() {
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("NB");
+        let id = app.create_note("Note", nb);
+        app.selected_note = Some(id);
+
+        app.handle_event(&plain_key(Key::Enter));
+        app.handle_event(&typed_key("x"));
+        app.handle_event(&plain_key(Key::Escape));
+
+        let note = app.notes.iter().find(|n| n.id == id).expect("the note");
+        assert_eq!(note.content, "x", "Escape threw the writing away");
+    }
+
+    /// Ctrl+Shift+N makes a notebook.
+    #[test]
+    fn ctrl_shift_n_makes_a_notebook() {
+        let mut app = NotesApp::new();
+
+        app.handle_event(&ctrl_key(Key::N, true));
+        for c in ["W", "o", "r", "k"] {
+            app.handle_event(&typed_key(c));
+        }
+        app.handle_event(&plain_key(Key::Enter));
+
+        assert_eq!(app.notebooks.len(), 1, "no notebook was created");
+        assert_eq!(app.notebooks[0].name, "Work", "the name never arrived");
+    }
+
+    fn plain_key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn typed_key(text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: text.to_owned(),
+        })
+    }
+
+    fn right_click_at(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        })
+    }
+
+    /// A note with two notebooks, so "Move to" has somewhere to offer.
+    fn app_with_two_notebooks() -> (NotesApp, NoteId, NotebookId, NotebookId) {
+        let mut app = NotesApp::new();
+        let home = app.create_notebook("Home");
+        let work = app.create_notebook("Work");
+        let nid = app.create_note("A note", home);
+        app.window_width = 1280.0;
+        app.window_height = 800.0;
+        app.selected_note = Some(nid);
+        (app, nid, home, work)
+    }
+
+    /// Right-clicking a note raises a menu about that note.
+    #[test]
+    fn right_clicking_a_note_raises_a_menu_about_it() {
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        let (_, row_y) = *app.note_rows().first().expect("a row");
+
+        let consumed = app.handle_event(&right_click_at(SIDEBAR_WIDTH + 20.0, row_y + 4.0));
+
+        assert_eq!(consumed, EventResult::Consumed);
+        assert!(app.note_menu.is_some(), "no menu appeared");
+        assert_eq!(
+            app.menu_target,
+            Some(MenuTarget::Note(nid)),
+            "the menu is about the wrong note"
+        );
+    }
+
+    /// Choosing Delete deletes the note.
+    ///
+    /// `delete_note` has been written and tested since the crate existed and
+    /// had no caller: there was no pointer and it has no keyboard shortcut.
+    #[test]
+    fn choosing_delete_deletes_the_note() {
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        let (_, row_y) = *app.note_rows().first().expect("a row");
+        app.handle_event(&right_click_at(SIDEBAR_WIDTH + 20.0, row_y + 4.0));
+
+        assert!(
+            app.choose_from_note_menu(MENU_DELETE_NOTE),
+            "delete refused"
+        );
+
+        assert!(app.find_note(nid).is_none(), "the note is still there");
+    }
+
+    /// Choosing a notebook moves the note into it.
+    #[test]
+    fn choosing_a_notebook_moves_the_note() {
+        let (mut app, nid, home, work) = app_with_two_notebooks();
+        assert_eq!(
+            app.find_note(nid).expect("the note").notebook_id,
+            home,
+            "the control failed"
+        );
+        let (_, row_y) = *app.note_rows().first().expect("a row");
+        app.handle_event(&right_click_at(SIDEBAR_WIDTH + 20.0, row_y + 4.0));
+
+        assert!(app.choose_from_note_menu(work), "move refused");
+
+        assert_eq!(
+            app.find_note(nid).expect("the note").notebook_id,
+            work,
+            "the note did not move"
+        );
+    }
+
+    /// A click while the menu is up dismisses it and does not fall through.
+    #[test]
+    fn a_click_dismisses_the_note_menu_without_falling_through() {
+        let (mut app, nid, _, _) = app_with_two_notebooks();
+        let other = app.create_note("Another", app.notebooks.first().expect("a notebook").id);
+        let rows = app.note_rows();
+        assert_eq!(rows.len(), 2, "the control failed");
+        let (_, first_y) = *rows.first().expect("a row");
+        app.handle_event(&right_click_at(SIDEBAR_WIDTH + 20.0, first_y + 4.0));
+        app.selected_note = Some(nid);
+
+        // Genuinely outside the menu. The menu is drawn *at* the point it was
+        // raised from and extends right and down, so the row below is inside
+        // it -- an earlier version of this test clicked there, and when a row
+        // was added to the menu the item under that point became Delete and
+        // the click deleted the note it was meant to miss.
+        let (_, first_row_y) = *rows.first().expect("a row");
+        let consumed = app.handle_event(&click_at(20.0, first_row_y + 4.0));
+
+        assert_eq!(consumed, EventResult::Consumed);
+        assert!(app.note_menu.is_none(), "the menu is still up");
+        assert_eq!(
+            app.selected_note,
+            Some(nid),
+            "the dismissing click also selected the note behind it"
+        );
+        assert!(app.find_note(other).is_some(), "the other note vanished");
+    }
+
+    /// The notebook a note is already in is offered, disabled, not hidden.
+    ///
+    /// Hiding it would make the menu's contents depend on where the note is,
+    /// so the same gesture would put a different row under the cursor.
+    #[test]
+    fn the_current_notebook_is_offered_but_refused() {
+        let (mut app, nid, home, _) = app_with_two_notebooks();
+        let (_, row_y) = *app.note_rows().first().expect("a row");
+        app.handle_event(&right_click_at(SIDEBAR_WIDTH + 20.0, row_y + 4.0));
+
+        // Choosing it is a no-op rather than an error, and leaves it put.
+        app.choose_from_note_menu(home);
+
+        assert_eq!(app.find_note(nid).expect("the note").notebook_id, home);
+    }
+
+    /// Clicking a note in the list selects it.
+    #[test]
+    fn clicking_a_note_selects_it() {
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("NB");
+        let first = app.create_note("First", nb);
+        let second = app.create_note("Second", nb);
+        app.window_width = 1280.0;
+        app.window_height = 800.0;
+        app.selected_note = Some(first);
+
+        let rows = app.note_rows();
+        assert_eq!(rows.len(), 2, "the control failed: {rows:?}");
+        let (wanted, row_y) = *rows
+            .iter()
+            .find(|(id, _)| *id != first)
+            .expect("a row for the other note");
+        assert_eq!(wanted, second);
+
+        let consumed = app.handle_event(&click_at(SIDEBAR_WIDTH + 20.0, row_y + 4.0));
+
+        assert_eq!(consumed, EventResult::Consumed);
+        assert_eq!(
+            app.selected_note,
+            Some(second),
+            "the click selected nothing"
+        );
+    }
+
+    /// A click left of the note list is not a note click.
+    ///
+    /// This asserted the click was `Ignored`, which was true only while the
+    /// sidebar did nothing at all -- it encoded the absence of a feature, so
+    /// it broke the moment the sidebar answered a click. What it was actually
+    /// for is that the note list's hit test does not reach left of its own
+    /// panel, and that is what it checks now.
+    #[test]
+    fn a_click_in_the_sidebar_is_not_a_note_click() {
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("NB");
+        let first = app.create_note("First", nb);
+        app.window_width = 1280.0;
+        app.window_height = 800.0;
+        app.selected_note = Some(first);
+        let (_, row_y) = *app.note_rows().first().expect("a row");
+        let before = app.selected_note;
+
+        app.handle_event(&click_at(SIDEBAR_WIDTH - 20.0, row_y + 4.0));
+
+        assert_eq!(
+            app.note_at(SIDEBAR_WIDTH - 20.0, row_y + 4.0),
+            None,
+            "the note list's hit test reaches into the sidebar"
+        );
+        assert_eq!(app.selected_note, before, "a sidebar click selected a note");
+    }
+
+    /// A row the list does not draw cannot be clicked.
+    ///
+    /// Both read `note_rows`, so this holds by construction rather than by two
+    /// bounds checks agreeing. The window is made short enough that most of
+    /// the notes have nowhere to go.
+    #[test]
+    fn a_row_past_the_bottom_of_the_list_is_not_clickable() {
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("NB");
+        for i in 0..40 {
+            app.create_note(&format!("Note {i}"), nb);
+        }
+        app.window_width = 1280.0;
+        app.window_height = 300.0;
+
+        let rows = app.note_rows();
+        assert!(
+            rows.len() < 40,
+            "the control failed: every note fitted, so nothing was cut"
+        );
+        let content_bottom = app.window_height - STATUS_BAR_HEIGHT;
+        for (id, row_y) in &rows {
+            assert!(
+                row_y + NOTE_ROW_H <= content_bottom,
+                "row for {id:?} is drawn past the bottom of the list"
+            );
+        }
+        // A point below the last drawn row is on no note.
+        let (_, last_y) = *rows.last().expect("a row");
+        assert_eq!(
+            app.note_at(SIDEBAR_WIDTH + 20.0, last_y + NOTE_ROW_H + 4.0),
+            None,
+            "a click below the drawn rows found a note"
+        );
+    }
+
+    /// Clicking a version restores it.
+    ///
+    /// `Note::restore_version` was written and tested and had no caller, and
+    /// the application received no mouse event of any kind -- so the panel
+    /// listed versions that nothing could act on.
+    #[test]
+    fn clicking_a_version_restores_it() {
+        let (mut app, nid) = app_with_versions();
+        assert_eq!(
+            app.find_note(nid).expect("the note").content,
+            "Modified content",
+            "the control failed"
+        );
+        let (px, py, _, ph) = app.version_panel_bounds();
+        let rows = NotesApp::version_rows(app.find_note(nid).expect("the note"), py, ph);
+        let (index, row_y) = *rows.first().expect("a version row");
+
+        let consumed = app.handle_event(&click_at(px + 8.0, row_y + 4.0));
+
+        assert_eq!(consumed, EventResult::Consumed, "the click did nothing");
+        // Only two versions, so none is trimmed and the first row is index 0.
+        assert_eq!(index, 0, "the first row is not the first version");
+        assert_eq!(
+            app.find_note(nid).expect("the note").content,
+            "Original content",
+            "the version was not restored"
+        );
+    }
+
+    /// A click outside the panel restores nothing.
+    #[test]
+    fn a_click_outside_the_version_panel_restores_nothing() {
+        let (mut app, nid) = app_with_versions();
+        let (px, py, _, _) = app.version_panel_bounds();
+
+        // Well to the left of the panel: over the editor.
+        let consumed = app.handle_event(&click_at(px - 40.0, py + 40.0));
+
+        assert_eq!(consumed, EventResult::Ignored);
+        assert_eq!(
+            app.find_note(nid).expect("the note").content,
+            "Modified content",
+            "a click over the editor restored a version"
+        );
+    }
+
+    /// Every row the panel offers is inside the panel.
+    ///
+    /// It used to decide how many rows fitted with one number and advance by
+    /// another -- `(height - 30.0) / 24.0` rows, drawn 28 apart -- so the last
+    /// few were drawn past its own bottom edge. A click could never reach
+    /// those, which is how a hit test finds a drawing bug.
+    #[test]
+    fn every_version_row_is_inside_the_panel() {
+        let (mut app, nid) = app_with_versions();
+        // Many versions, so the list is longer than the panel is tall.
+        for i in 0..200 {
+            app.update_note_content(nid, &format!("edit {i}"));
+        }
+        let (_, py, _, ph) = app.version_panel_bounds();
+        let rows = NotesApp::version_rows(app.find_note(nid).expect("the note"), py, ph);
+
+        assert!(!rows.is_empty(), "the control failed: no rows at all");
+        for (index, row_y) in rows {
+            assert!(
+                row_y + VERSION_ROW_H <= py + ph,
+                "row {index} is drawn at {row_y}, past the panel's bottom at {}",
+                py + ph
+            );
+        }
     }
 
     #[test]

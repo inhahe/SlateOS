@@ -162,6 +162,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -966,6 +967,47 @@ def _marker_report(userspace: Path) -> int:
     return 0
 
 
+def measured_at() -> str:
+    """The commit this run measured, for the report to carry.
+
+    A gate that fails without saying which tree it read is indistinguishable
+    from a gate that is wrong. On 2026-09-18 this script was reported red on
+    `main`, blocking every lane's pre-boot, with two hits and a careful
+    diagnosis of both. It was green on `main`; the reporter's checkout
+    predated the two commits that exonerate exactly those two crates. An hour
+    of two lanes' time went into a difference that one line of provenance
+    would have shown -- and the same shape had run the other way an hour
+    earlier, with me describing an invariant as unenforced by a gate I had
+    written and forgotten.
+
+    Best effort: a tool that cannot find git still has to produce its verdict.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown tree"
+    head = out.stdout.strip()
+    if out.returncode != 0 or not head:
+        return "unknown tree"
+    dirty = subprocess.run(
+        ["git", "-C", str(ROOT), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    # Uncommitted work is exactly when a checkout stops being the commit it
+    # names, so a bare sha would be the misleading half of the truth.
+    suffix = "+dirty" if dirty.stdout.strip() else ""
+    return f"{head}{suffix}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--list", action="store_true", help="print every hit")
@@ -1061,11 +1103,16 @@ def main() -> int:
         sys.stdout.flush()
         if new or stale:
             print(f"audit-cli-fabrication: FAILED ({len(new)} new, "
-                  f"{len(stale)} stale) -- design-decisions.md 1006: a command "
-                  f"that does not work is deleted, not stubbed", file=sys.stderr)
+                  f"{len(stale)} stale) at {measured_at()} -- "
+                  f"design-decisions.md 1006: a command that does not work is "
+                  f"deleted, not stubbed", file=sys.stderr)
+            print(f"  If this is unexpected, compare trees before code: "
+                  f"`git fetch origin && git merge origin/main`, then re-run. "
+                  f"A hit the current script exonerates is a stale checkout, "
+                  f"not a finding.", file=sys.stderr)
             return 1
         print(f"audit-cli-fabrication: OK ({len(current)} pinned, "
-              f"{total} crate(s) scanned)")
+              f"{total} crate(s) scanned at {measured_at()})")
         return 0
 
     if args.markers:

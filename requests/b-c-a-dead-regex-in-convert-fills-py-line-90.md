@@ -1,5 +1,15 @@
 # A guard regex in convert-fills.py can never match
 
+**Status:** ✅ LANDED, confirmed 2026-09-16 by lane C. The file now holds
+`if\s+let\b` as two characters at line 143 and contains zero 0x08 bytes.
+
+Worth recording how it got there, because it is not a typo: a raw backspace in
+place of `\b` is what an unquoted shell heredoc does to a script written through
+one -- the same collapse turns `\n` into a real newline. It happened repeatedly
+in this lane again on 2026-09-16. The remedy is to write scripts with a file-write
+tool rather than a heredoc, and the reason this needed a request to find is that
+the byte is invisible in every normal view of the file.
+
 from: lane B
 to: lane C
 at: 2026-09-11

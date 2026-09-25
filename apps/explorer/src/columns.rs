@@ -27,11 +27,8 @@
 //! | [`CodeColumns`] | rs, c, cpp, py, js, ts, ... | Line Count, Language |
 //! | [`ArchiveColumns`] | zip, tar, gz | Compressed Size, Compression Ratio, File Count Inside |
 
-#![allow(dead_code)]
-
 use appearance::Palette;
 use guitk::color::Color;
-use guitk::filetypes::FileCategory;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -176,6 +173,15 @@ impl ColumnCategory {
 #[derive(Clone, Debug)]
 pub struct ColumnDef {
     pub id: ColumnId,
+    /// Stable name for this column on disk. Never shown, never renumbered.
+    ///
+    /// Saved column preferences name columns by this and by nothing else.
+    /// `id` is a position in a hand-numbered list, so writing integers would
+    /// mean a renumbering silently repointed every saved preference at a
+    /// different column; `label` is display text, and the table below leaves
+    /// it empty because it is filled at runtime. Neither survives being
+    /// written to a file and read back a release later.
+    pub key: &'static str,
     /// Header text displayed in the column header row.
     pub label: String,
     /// How the column's width is determined.
@@ -336,14 +342,6 @@ pub trait ColumnProvider {
 }
 
 // ============================================================================
-// File info — lightweight struct passed to auto_detect_columns
-// ============================================================================
-
-/// Minimal file info needed for column auto-detection.
-pub struct FileInfo<'a> {
-    pub path: &'a str,
-    pub extension: &'a str,
-}
 
 // ============================================================================
 // Column manager
@@ -386,12 +384,14 @@ impl ColumnManager {
         mgr.register_provider(Box::new(ArchiveColumns));
 
         // Activate standard columns by default.
-        mgr.active_columns = vec![
-            ColumnId::NAME,
-            ColumnId::SIZE,
-            ColumnId::DATE_MODIFIED,
-            ColumnId::TYPE,
-        ];
+        // Exactly the three `roadmap-detailed.md` §4.1 calls the
+        // out-of-the-box set: "fixed and minimal -- name, size, datetime
+        // modified -- independent of what's in any directory. The user expands
+        // from there." Type was here as a fourth until 2026-09-16, when the
+        // column picker made "expands from there" something a user can
+        // actually do; before that, trimming this would have taken away a
+        // column nobody could put back.
+        mgr.active_columns = vec![ColumnId::NAME, ColumnId::SIZE, ColumnId::DATE_MODIFIED];
         mgr
     }
 
@@ -433,6 +433,50 @@ impl ColumnManager {
     /// Whether a column is currently visible.
     pub fn is_visible(&self, id: ColumnId) -> bool {
         self.active_columns.contains(&id)
+    }
+
+    /// The visible columns named the way a saved preference names them.
+    ///
+    /// Order is the display order, because a preference records the columns
+    /// *and* their arrangement -- restoring the set but not the order would
+    /// give the user back a view they did not save.
+    #[must_use]
+    pub fn visible_keys(&self) -> Vec<&'static str> {
+        self.active_columns
+            .iter()
+            .filter_map(|id| self.column_def(*id).map(|d| d.key))
+            .collect()
+    }
+
+    /// Show exactly the columns `keys` names, in that order.
+    ///
+    /// Returns the keys it did not recognise. **They are skipped, never
+    /// guessed at**: a preference saved by a later version, or naming a column
+    /// since removed, loses that one column and keeps the rest. Filling the
+    /// gap positionally would silently hand the user a different column than
+    /// the one they chose, which is worse than a missing one because it looks
+    /// deliberate.
+    ///
+    /// A set naming nothing recognisable is refused entirely -- the caller
+    /// keeps what it had, rather than showing an empty row of headers.
+    pub fn apply_keys(&mut self, keys: &[String]) -> Vec<String> {
+        let mut wanted = Vec::new();
+        let mut unknown = Vec::new();
+        for key in keys {
+            match self
+                .all_column_defs()
+                .iter()
+                .find(|d| d.key == key.as_str())
+                .map(|d| d.id)
+            {
+                Some(id) => wanted.push(id),
+                None => unknown.push(key.clone()),
+            }
+        }
+        if !wanted.is_empty() {
+            self.active_columns = wanted;
+        }
+        unknown
     }
 
     /// The currently active (visible) columns in display order.
@@ -578,62 +622,6 @@ impl ColumnManager {
     }
 
     // ------------------------------------------------------------------
-    // Auto-detection
-    // ------------------------------------------------------------------
-
-    /// Examine the files in view and automatically enable relevant
-    /// category columns.  For example, if the directory contains .png
-    /// and .jpg files, the Image columns become active.
-    pub fn auto_detect_columns(&mut self, files: &[FileInfo<'_>]) {
-        // Always keep standard columns.
-        let mut detected: Vec<ColumnId> = vec![
-            ColumnId::NAME,
-            ColumnId::SIZE,
-            ColumnId::DATE_MODIFIED,
-            ColumnId::TYPE,
-        ];
-
-        let mut has_image = false;
-        let mut has_audio = false;
-        let mut has_code = false;
-        let mut has_archive = false;
-
-        for file in files {
-            // The registry, not a fourth extension list. This one was narrower
-            // than the other three and disagreed with them: `.webp` was an
-            // image to the file list and nothing at all here, so a folder of
-            // them suggested no image columns.
-            match guitk::filetypes::category_from_extension(file.extension) {
-                FileCategory::Image => has_image = true,
-                FileCategory::Audio => has_audio = true,
-                FileCategory::Code | FileCategory::Config | FileCategory::Data => has_code = true,
-                FileCategory::Archive | FileCategory::Package | FileCategory::DiskImage => {
-                    has_archive = true;
-                }
-                _ => {}
-            }
-        }
-
-        if has_image {
-            detected.push(ColumnId::DIMENSIONS);
-        }
-        if has_audio {
-            detected.push(ColumnId::DURATION);
-            detected.push(ColumnId::ARTIST);
-        }
-        if has_code {
-            detected.push(ColumnId::LINE_COUNT);
-            detected.push(ColumnId::LANGUAGE);
-        }
-        if has_archive {
-            detected.push(ColumnId::COMPRESSED_SIZE);
-            detected.push(ColumnId::FILE_COUNT_INSIDE);
-        }
-
-        self.active_columns = detected;
-    }
-
-    // ------------------------------------------------------------------
     // Column chooser data
     // ------------------------------------------------------------------
 
@@ -672,6 +660,7 @@ impl StandardColumns {
     const DEFS: &'static [ColumnDef] = &[
         ColumnDef {
             id: ColumnId::NAME,
+            key: "name",
             label: String::new(), // replaced at runtime
             width: ColumnWidth::Flexible {
                 min: 120.0,
@@ -685,6 +674,7 @@ impl StandardColumns {
         },
         ColumnDef {
             id: ColumnId::SIZE,
+            key: "size",
             label: String::new(),
             width: ColumnWidth::Fixed(90.0),
             alignment: Alignment::Right,
@@ -695,6 +685,7 @@ impl StandardColumns {
         },
         ColumnDef {
             id: ColumnId::DATE_MODIFIED,
+            key: "date_modified",
             label: String::new(),
             width: ColumnWidth::Fixed(140.0),
             alignment: Alignment::Left,
@@ -705,6 +696,7 @@ impl StandardColumns {
         },
         ColumnDef {
             id: ColumnId::TYPE,
+            key: "type",
             label: String::new(),
             width: ColumnWidth::Fixed(80.0),
             alignment: Alignment::Left,
@@ -715,6 +707,7 @@ impl StandardColumns {
         },
         ColumnDef {
             id: ColumnId::DATE_CREATED,
+            key: "date_created",
             label: String::new(),
             width: ColumnWidth::Fixed(140.0),
             alignment: Alignment::Left,
@@ -725,6 +718,7 @@ impl StandardColumns {
         },
         ColumnDef {
             id: ColumnId::ATTRIBUTES,
+            key: "attributes",
             label: String::new(),
             width: ColumnWidth::Fixed(80.0),
             alignment: Alignment::Left,
@@ -849,6 +843,7 @@ impl ImageColumns {
         vec![
             ColumnDef {
                 id: ColumnId::DIMENSIONS,
+                key: "dimensions",
                 label: "Dimensions".to_string(),
                 width: ColumnWidth::Fixed(110.0),
                 alignment: Alignment::Right,
@@ -859,6 +854,7 @@ impl ImageColumns {
             },
             ColumnDef {
                 id: ColumnId::COLOR_DEPTH,
+                key: "color_depth",
                 label: "Color Depth".to_string(),
                 width: ColumnWidth::Fixed(80.0),
                 alignment: Alignment::Right,
@@ -869,6 +865,7 @@ impl ImageColumns {
             },
             ColumnDef {
                 id: ColumnId::ASPECT_RATIO,
+                key: "aspect_ratio",
                 label: "Aspect Ratio".to_string(),
                 width: ColumnWidth::Fixed(90.0),
                 alignment: Alignment::Right,
@@ -919,6 +916,7 @@ impl AudioColumns {
         vec![
             ColumnDef {
                 id: ColumnId::DURATION,
+                key: "duration",
                 label: "Duration".to_string(),
                 width: ColumnWidth::Fixed(70.0),
                 alignment: Alignment::Right,
@@ -929,6 +927,7 @@ impl AudioColumns {
             },
             ColumnDef {
                 id: ColumnId::BITRATE,
+                key: "bitrate",
                 label: "Bitrate".to_string(),
                 width: ColumnWidth::Fixed(80.0),
                 alignment: Alignment::Right,
@@ -939,6 +938,7 @@ impl AudioColumns {
             },
             ColumnDef {
                 id: ColumnId::SAMPLE_RATE,
+                key: "sample_rate",
                 label: "Sample Rate".to_string(),
                 width: ColumnWidth::Fixed(90.0),
                 alignment: Alignment::Right,
@@ -949,6 +949,7 @@ impl AudioColumns {
             },
             ColumnDef {
                 id: ColumnId::ARTIST,
+                key: "artist",
                 label: "Artist".to_string(),
                 width: ColumnWidth::Flexible {
                     min: 80.0,
@@ -962,6 +963,7 @@ impl AudioColumns {
             },
             ColumnDef {
                 id: ColumnId::ALBUM,
+                key: "album",
                 label: "Album".to_string(),
                 width: ColumnWidth::Flexible {
                     min: 80.0,
@@ -975,6 +977,7 @@ impl AudioColumns {
             },
             ColumnDef {
                 id: ColumnId::TITLE,
+                key: "title",
                 label: "Title".to_string(),
                 width: ColumnWidth::Flexible {
                     min: 80.0,
@@ -1032,6 +1035,7 @@ impl CodeColumns {
         vec![
             ColumnDef {
                 id: ColumnId::LINE_COUNT,
+                key: "line_count",
                 label: "Lines".to_string(),
                 width: ColumnWidth::Fixed(70.0),
                 alignment: Alignment::Right,
@@ -1042,6 +1046,7 @@ impl CodeColumns {
             },
             ColumnDef {
                 id: ColumnId::LANGUAGE,
+                key: "language",
                 label: "Language".to_string(),
                 width: ColumnWidth::Fixed(90.0),
                 alignment: Alignment::Left,
@@ -1115,6 +1120,7 @@ impl ArchiveColumns {
         vec![
             ColumnDef {
                 id: ColumnId::COMPRESSED_SIZE,
+                key: "compressed_size",
                 label: "Compressed".to_string(),
                 width: ColumnWidth::Fixed(90.0),
                 alignment: Alignment::Right,
@@ -1125,6 +1131,7 @@ impl ArchiveColumns {
             },
             ColumnDef {
                 id: ColumnId::COMPRESSION_RATIO,
+                key: "compression_ratio",
                 label: "Ratio".to_string(),
                 width: ColumnWidth::Fixed(60.0),
                 alignment: Alignment::Right,
@@ -1135,6 +1142,7 @@ impl ArchiveColumns {
             },
             ColumnDef {
                 id: ColumnId::FILE_COUNT_INSIDE,
+                key: "file_count_inside",
                 label: "Files Inside".to_string(),
                 width: ColumnWidth::Fixed(80.0),
                 alignment: Alignment::Right,
@@ -1192,11 +1200,6 @@ struct ColumnColors {
     cell_text: Color,
     cell_dim: Color,
     separator: Color,
-    chooser_bg: Color,
-    chooser_border: Color,
-    chooser_hover: Color,
-    check_on: Color,
-    check_off: Color,
 }
 
 impl ColumnColors {
@@ -1208,22 +1211,13 @@ impl ColumnColors {
             cell_text: p.text,
             cell_dim: p.subtext0,
             separator: p.surface1,
-            chooser_bg: p.base,
-            chooser_border: p.surface1,
-            chooser_hover: p.surface0,
-            check_on: p.accent,
-            check_off: p.overlay0,
         }
     }
 }
 
 const HEADER_HEIGHT: f32 = 22.0;
-const ROW_HEIGHT: f32 = 22.0;
 const HEADER_FONT_SIZE: f32 = 11.0;
 const CELL_FONT_SIZE: f32 = 11.0;
-const CHOOSER_ROW_HEIGHT: f32 = 24.0;
-const CHOOSER_FONT_SIZE: f32 = 12.0;
-const CHOOSER_PAD: f32 = 4.0;
 
 /// Render the column header row.
 ///
@@ -1329,25 +1323,15 @@ pub fn render_column_header(
 
 /// Render one row of column values for a file.
 ///
-/// `y` is the top of the row.  Returns render commands for each cell.
-///
-/// Every cell is resolved through [`ColumnManager::get_value`], which walks
-/// the provider list and — for the standard Size and Date columns — stats the
-/// file. That is fine for a caller that has nothing but a path, but a caller
-/// rendering a directory listing already knows those facts and would be
-/// paying a syscall per cell per frame to be told them again. Such callers
-/// should build the values themselves and call [`render_column_values_from`].
-pub fn render_column_values(
-    manager: &ColumnManager,
-    path: &str,
-    y: f32,
-    total_width: f32,
-    p: &Palette,
-) -> Vec<RenderCommand> {
-    render_column_values_from(manager, &manager.row_values(path), y, total_width, None, p)
-}
-
 /// Render one row from values the caller already has.
+///
+/// **Why the caller brings the values.** Resolving each cell through
+/// [`ColumnManager::get_value`] walks the provider list and, for the standard
+/// Size and Date columns, stats the file — fine for a caller holding nothing
+/// but a path, and a syscall per cell per frame for one rendering a directory
+/// listing, which already knows those facts. A wrapper that took a path and
+/// did the fetching lived here until 2026-09-16 and had no callers: the view
+/// always has the values, because it read them to sort by them.
 ///
 /// `values` is parallel to [`ColumnManager::active_columns`]: element `i` is
 /// the cell for active column `i`. A short slice is not an error — the
@@ -1431,122 +1415,6 @@ pub fn render_column_values_from(
         }
 
         x += w;
-    }
-
-    cmds
-}
-
-/// Render a column chooser dropdown menu.
-///
-/// Shows all known columns with checkboxes indicating visibility.
-/// `x`, `y` is the top-left corner of the dropdown.
-pub fn render_column_chooser(
-    manager: &ColumnManager,
-    x: f32,
-    y: f32,
-    p: &Palette,
-) -> Vec<RenderCommand> {
-    let c = ColumnColors::new(p);
-    let mut cmds = Vec::new();
-
-    let all_defs = {
-        let mut defs: Vec<&ColumnDef> = manager.all_column_defs();
-        defs.sort_by_key(|d| d.id);
-        defs
-    };
-
-    let row_count = all_defs.len();
-    let menu_w = 200.0_f32;
-    let menu_h = row_count as f32 * CHOOSER_ROW_HEIGHT + CHOOSER_PAD * 2.0;
-
-    // Background + border.
-    cmds.push(RenderCommand::FillRect {
-        x,
-        y,
-        width: menu_w,
-        height: menu_h,
-        color: c.chooser_bg,
-        corner_radii: CornerRadii::all(4.0),
-    });
-    cmds.push(RenderCommand::StrokeRect {
-        x,
-        y,
-        width: menu_w,
-        height: menu_h,
-        color: c.chooser_border,
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(4.0),
-    });
-
-    // Shadow.
-    cmds.push(RenderCommand::BoxShadow {
-        x,
-        y,
-        width: menu_w,
-        height: menu_h,
-        offset_x: 0.0,
-        offset_y: 2.0,
-        blur: 6.0,
-        spread: 0.0,
-        color: Color::rgba(0, 0, 0, 40),
-        corner_radii: CornerRadii::all(4.0),
-    });
-
-    let mut row_y = y + CHOOSER_PAD;
-    for def in &all_defs {
-        let is_active = manager.is_visible(def.id);
-
-        // Checkbox.
-        let cb_x = x + 8.0;
-        let cb_y = row_y + 4.0;
-        let cb_size = 14.0;
-        cmds.push(RenderCommand::StrokeRect {
-            x: cb_x,
-            y: cb_y,
-            width: cb_size,
-            height: cb_size,
-            color: if is_active { c.check_on } else { c.check_off },
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(2.0),
-        });
-        if is_active {
-            // Fill checkbox.
-            cmds.push(RenderCommand::FillRect {
-                x: cb_x + 2.0,
-                y: cb_y + 2.0,
-                width: cb_size - 4.0,
-                height: cb_size - 4.0,
-                color: c.check_on,
-                corner_radii: CornerRadii::all(1.0),
-            });
-        }
-
-        // Label.
-        cmds.push(RenderCommand::Text {
-            x: cb_x + cb_size + 8.0,
-            y: row_y + 5.0,
-            text: def.label.clone(),
-            color: c.header_text,
-            font_size: CHOOSER_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(menu_w - 40.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Category badge (dim, right-aligned).
-        let cat_text = def.category.label();
-        cmds.push(RenderCommand::Text {
-            x: text::right_x(cat_text, x + menu_w - 8.0, 9.0, FontWeightHint::Regular),
-            y: row_y + 7.0,
-            text: cat_text.to_string(),
-            color: c.cell_dim,
-            font_size: 9.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        row_y += CHOOSER_ROW_HEIGHT;
     }
 
     cmds
@@ -2110,120 +1978,6 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Auto-detect columns
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn test_auto_detect_images() {
-        let mut mgr = ColumnManager::with_defaults();
-        let files = [
-            FileInfo {
-                path: "photo.png",
-                extension: "png",
-            },
-            FileInfo {
-                path: "readme.txt",
-                extension: "txt",
-            },
-        ];
-        mgr.auto_detect_columns(&files);
-        assert!(mgr.is_visible(ColumnId::DIMENSIONS));
-        assert!(!mgr.is_visible(ColumnId::DURATION));
-    }
-
-    #[test]
-    fn test_auto_detect_audio() {
-        let mut mgr = ColumnManager::with_defaults();
-        let files = [FileInfo {
-            path: "song.mp3",
-            extension: "mp3",
-        }];
-        mgr.auto_detect_columns(&files);
-        assert!(mgr.is_visible(ColumnId::DURATION));
-        assert!(mgr.is_visible(ColumnId::ARTIST));
-        assert!(!mgr.is_visible(ColumnId::DIMENSIONS));
-    }
-
-    #[test]
-    fn test_auto_detect_code() {
-        let mut mgr = ColumnManager::with_defaults();
-        let files = [
-            FileInfo {
-                path: "main.rs",
-                extension: "rs",
-            },
-            FileInfo {
-                path: "lib.py",
-                extension: "py",
-            },
-        ];
-        mgr.auto_detect_columns(&files);
-        assert!(mgr.is_visible(ColumnId::LINE_COUNT));
-        assert!(mgr.is_visible(ColumnId::LANGUAGE));
-    }
-
-    #[test]
-    fn test_auto_detect_archives() {
-        let mut mgr = ColumnManager::with_defaults();
-        let files = [FileInfo {
-            path: "backup.zip",
-            extension: "zip",
-        }];
-        mgr.auto_detect_columns(&files);
-        assert!(mgr.is_visible(ColumnId::COMPRESSED_SIZE));
-        assert!(mgr.is_visible(ColumnId::FILE_COUNT_INSIDE));
-    }
-
-    #[test]
-    fn test_auto_detect_mixed() {
-        let mut mgr = ColumnManager::with_defaults();
-        let files = [
-            FileInfo {
-                path: "photo.png",
-                extension: "png",
-            },
-            FileInfo {
-                path: "song.mp3",
-                extension: "mp3",
-            },
-            FileInfo {
-                path: "main.rs",
-                extension: "rs",
-            },
-            FileInfo {
-                path: "backup.zip",
-                extension: "zip",
-            },
-        ];
-        mgr.auto_detect_columns(&files);
-        assert!(mgr.is_visible(ColumnId::DIMENSIONS));
-        assert!(mgr.is_visible(ColumnId::DURATION));
-        assert!(mgr.is_visible(ColumnId::LINE_COUNT));
-        assert!(mgr.is_visible(ColumnId::COMPRESSED_SIZE));
-    }
-
-    #[test]
-    fn test_auto_detect_no_special() {
-        let mut mgr = ColumnManager::with_defaults();
-        let files = [
-            FileInfo {
-                path: "readme.txt",
-                extension: "txt",
-            },
-            FileInfo {
-                path: "notes.doc",
-                extension: "doc",
-            },
-        ];
-        mgr.auto_detect_columns(&files);
-        // Only standard columns.
-        assert!(mgr.is_visible(ColumnId::NAME));
-        assert!(mgr.is_visible(ColumnId::SIZE));
-        assert!(!mgr.is_visible(ColumnId::DIMENSIONS));
-        assert!(!mgr.is_visible(ColumnId::DURATION));
-    }
-
-    // ------------------------------------------------------------------
     // Sort
     // ------------------------------------------------------------------
 
@@ -2301,9 +2055,25 @@ mod tests {
     #[test]
     fn test_remove_column() {
         let mut mgr = ColumnManager::with_defaults();
+        // Added first rather than assumed visible: this test is about
+        // `remove_column`, and pinning it to whichever columns happen to be
+        // on by default made it fail when the default set changed for an
+        // unrelated reason.
+        mgr.add_column(ColumnId::TYPE);
         assert!(mgr.is_visible(ColumnId::TYPE));
         mgr.remove_column(ColumnId::TYPE);
         assert!(!mgr.is_visible(ColumnId::TYPE));
+    }
+
+    /// The out-of-the-box set is the three the spec names, and no more.
+    ///
+    /// Pinned because it is a rule about restraint, and restraint is what
+    /// erodes: every column here is defensible on its own, which is how a
+    /// "minimal" default grows a fourth and then a fifth.
+    #[test]
+    fn the_out_of_the_box_columns_are_the_three_the_spec_names() {
+        let mgr = ColumnManager::with_defaults();
+        assert_eq!(mgr.visible_keys(), vec!["name", "size", "date_modified"]);
     }
 
     #[test]
@@ -2334,6 +2104,16 @@ mod tests {
     #[test]
     fn test_reorder_move_backward() {
         let mut mgr = ColumnManager::with_defaults();
+        // The set is stated here rather than inherited from the defaults. This
+        // read `reorder(3, 0)` and expected Type at the front, which was true
+        // only while Type happened to be the fourth default column; the test
+        // is about moving an item backwards, not about what ships visible.
+        mgr.set_columns(vec![
+            ColumnId::NAME,
+            ColumnId::SIZE,
+            ColumnId::DATE_MODIFIED,
+            ColumnId::TYPE,
+        ]);
         mgr.reorder(3, 0);
         let active = mgr.active_columns();
         assert_eq!(active[0], ColumnId::TYPE);
@@ -2473,19 +2253,6 @@ mod tests {
         assert!(!cmds.is_empty(), "header should produce render commands");
     }
 
-    #[test]
-    fn test_render_column_values_nonempty() {
-        let mgr = ColumnManager::with_defaults();
-        let cmds = render_column_values(
-            &mgr,
-            "/test/file.txt",
-            0.0,
-            800.0,
-            &Palette::for_mode(false),
-        );
-        assert!(!cmds.is_empty(), "row should produce render commands");
-    }
-
     /// `render_column_values` and `render_column_values_from` are one
     /// renderer, so the path-based wrapper must not drift from the
     /// values-based one it delegates to.
@@ -2495,25 +2262,6 @@ mod tests {
     /// putting that operator on the type.
     fn same_commands(a: &[RenderCommand], b: &[RenderCommand]) -> bool {
         format!("{a:?}") == format!("{b:?}")
-    }
-
-    #[test]
-    fn the_two_row_renderers_agree() {
-        let mgr = ColumnManager::with_defaults();
-        let path = "/test/file.txt";
-        let via_path = render_column_values(&mgr, path, 0.0, 800.0, &Palette::for_mode(false));
-        let via_values = render_column_values_from(
-            &mgr,
-            &mgr.row_values(path),
-            0.0,
-            800.0,
-            None,
-            &Palette::for_mode(false),
-        );
-        assert!(
-            same_commands(&via_path, &via_values),
-            "the path wrapper must draw exactly what it delegates to"
-        );
     }
 
     #[test]
@@ -2608,7 +2356,7 @@ mod tests {
     /// is not a provider.
     #[test]
     fn the_standard_provider_reports_a_real_size_and_date() {
-        let scratch = scratchdir::ScratchDir::new("explorer_standard_columns");
+        let scratch = crate::guarded_scratch("explorer_standard_columns");
         let file = scratch.dir().join("payload.bin");
         std::fs::write(&file, [0u8; 1234]).expect("write fixture");
         let path = file.to_str().expect("scratch paths are ASCII");
@@ -2632,7 +2380,7 @@ mod tests {
     /// contents.
     #[test]
     fn the_standard_provider_leaves_a_directory_size_blank() {
-        let scratch = scratchdir::ScratchDir::new("explorer_standard_dir_size");
+        let scratch = crate::guarded_scratch("explorer_standard_dir_size");
         let path = scratch.dir().to_str().expect("scratch paths are ASCII");
         assert_eq!(
             StandardColumns.value(path, ColumnId::SIZE),
@@ -2694,13 +2442,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_render_column_chooser_nonempty() {
-        let mgr = ColumnManager::with_defaults();
-        let cmds = render_column_chooser(&mgr, 10.0, 30.0, &Palette::for_mode(false));
-        assert!(!cmds.is_empty(), "chooser should produce render commands");
-    }
-
     // ------------------------------------------------------------------
     // path_extension helper
     // ------------------------------------------------------------------
@@ -2738,5 +2479,89 @@ mod tests {
         assert!(by_cat.contains_key(&ColumnCategory::Audio));
         assert!(by_cat.contains_key(&ColumnCategory::Code));
         assert!(by_cat.contains_key(&ColumnCategory::Archive));
+    }
+
+    /// What is shown round-trips through the names a preference uses.
+    #[test]
+    fn the_visible_set_round_trips_through_its_keys() {
+        let mut mgr = ColumnManager::with_defaults();
+        let before = mgr.visible_keys();
+        assert!(before.contains(&"name"), "keys: {before:?}");
+
+        let saved: Vec<String> = before.iter().map(|k| (*k).to_string()).collect();
+        mgr.set_columns(vec![ColumnId::NAME]);
+        assert_eq!(mgr.visible_keys(), vec!["name"]);
+
+        let unknown = mgr.apply_keys(&saved);
+        assert!(
+            unknown.is_empty(),
+            "known keys reported unknown: {unknown:?}"
+        );
+        assert_eq!(
+            mgr.visible_keys(),
+            before,
+            "the saved view did not come back"
+        );
+    }
+
+    /// Order is part of what a preference saved, so it comes back too.
+    #[test]
+    fn applying_keys_restores_their_order() {
+        let mut mgr = ColumnManager::with_defaults();
+        let wanted = vec![String::from("size"), String::from("name")];
+        assert!(mgr.apply_keys(&wanted).is_empty());
+        assert_eq!(mgr.visible_keys(), vec!["size", "name"]);
+    }
+
+    /// An unrecognised name loses its column and nothing else.
+    ///
+    /// The case a later version's preference file produces. Filling the gap
+    /// positionally would hand back a different column than the one chosen,
+    /// which is worse than a missing one because it looks deliberate.
+    #[test]
+    fn an_unknown_key_is_skipped_and_named() {
+        let mut mgr = ColumnManager::with_defaults();
+        let wanted = vec![
+            String::from("name"),
+            String::from("column_from_the_future"),
+            String::from("size"),
+        ];
+        let unknown = mgr.apply_keys(&wanted);
+        assert_eq!(unknown, vec![String::from("column_from_the_future")]);
+        assert_eq!(
+            mgr.visible_keys(),
+            vec!["name", "size"],
+            "the unknown key shifted the others"
+        );
+    }
+
+    /// A preference naming nothing we know leaves the view alone.
+    #[test]
+    fn a_wholly_unknown_set_does_not_empty_the_header_row() {
+        let mut mgr = ColumnManager::with_defaults();
+        let before = mgr.visible_keys();
+        let unknown = mgr.apply_keys(&[String::from("nothing_we_have")]);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(mgr.visible_keys(), before, "the header row was emptied");
+    }
+
+    /// Every column's saved name is unique and non-empty.
+    ///
+    /// Two columns sharing a key would make a saved preference ambiguous, and
+    /// `apply_keys` would resolve it to whichever the table lists first.
+    #[test]
+    fn every_column_key_is_unique_and_not_empty() {
+        let mgr = ColumnManager::with_defaults();
+        let mut seen: Vec<&str> = Vec::new();
+        for def in mgr.all_column_defs() {
+            assert!(!def.key.is_empty(), "{:?} has no key", def.id);
+            assert!(
+                !seen.contains(&def.key),
+                "two columns share the key {:?}",
+                def.key
+            );
+            seen.push(def.key);
+        }
+        assert!(seen.len() >= 20, "only {} columns have keys", seen.len());
     }
 }

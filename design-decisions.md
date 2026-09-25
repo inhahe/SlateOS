@@ -54,6 +54,9 @@ than silently believing there are no bands.
 | §800–§899 | **lane C** | **open** | immediately after §579; C's own run ascends |
 | §900–§999 | **lane A** | **open** | immediately after §679; A's own run ascends |
 | §1000–§1099 | **lane B** | **open** | the tail — B alone still appends at EOF |
+| §1100–§1199 | **lane D** | **open** | immediately after §360, the end of lane B's first band; D's own run ascends from there |
+| §1200–§1299 | **lane E** | **open** | immediately after §498, the end of lane C's first band; E's own run ascends from there |
+| §1300–§1399 | **lane F** | **open** | immediately after §127, the end of the single-agent history; F's own run ascends from there |
 
 Bands 200–499 are closed but **not free**: every number in them is spent, and
 spent numbers are never reissued (see §217–§220 and §626 below). A new entry
@@ -210,6 +213,25 @@ later edit that had no reason to think about it. Its metadata block now sits
 *above* the banner, which is where the rule wants it and where a reader
 resolving a band question would look. Worth knowing if you add a banner to an
 entry of your own: the window is measured from the heading, not from the prose.
+
+**Lanes D, E and F opened §1100–§1199, §1200–§1299 and §1300–§1399 on
+2026-09-22,** when the lanes went from three to six (§1100). A new lane has no
+earlier entry, so the rule that anchored every previous band — continue from
+your own previous band's tail — gives it nothing to follow, and the natural
+guess, end of file, is lane B's insertion point. So each new band's row names
+its anchor: D starts immediately after §360, E after §498, F after §127. All
+three are the ends of bands nobody can write in any more, and each is followed
+by another such band's heading, so no other lane will ever insert beside them —
+the property every band anchor has to have. The gate reads the anchor from the
+row (the words "after §N" in its region column) and prints the exact line to
+insert after, as it does for every other band; a row naming a section that does
+not exist is an error. No band closed, so nothing was grandfathered.
+
+**Two cautions for whoever writes the next band row**, both learned while
+adding these: the gate reads the status words anywhere in the row, so a region
+column that mentions a "closed" band beside an "**open**" status makes the row
+contradict itself and fails the gate; and an anchor must carry the section
+sign, so prose such as "after C's 500s" is deliberately not read as one.
 
 **The gate landed 2026-08-29: `scripts/check-design-decisions-bands.py`,** run
 by `scripts/boot-test.sh` before it builds anything. It requires each *new*
@@ -18041,6 +18063,38 @@ throughout, which fights `ShapedGlyph`'s own model, where `advance` and
 reader must not take that as a regression. That is what this section and the
 `known-issues.md` entry are for; if the number moves, or a string that is not
 in the ignorable set appears in that list, something real broke.
+
+**Update 2026-09-21 — the number moved, to 1, and nothing broke.** This
+paragraph asked a future reader to investigate that, so: host sweep, 556
+faces × 111 strings, `agree 60490`, `reordered 0`, `differ 0`,
+`misplaced 1`.
+
+The 169 went because **the kern-charging difference this section describes no
+longer exists.** On this section's own worked example — `a` CGJ `b` in Arial
+Rounded — both shapers now report `1203;0;0, 0;0;0, 1267;-13;0`: the kern is
+charged to the right-hand glyph as an x offset, which is what HarfBuzz was
+said here to do and we were said not to. The prose above is a record of what
+was true in August and is left standing as that; it is no longer a
+description of the code.
+
+**The one that survives is a different mechanism with the same conclusion.**
+`a` CGJ `b` in `SegUIVar.ttf`, whose `GPOS` attaches U+034F to its base as a
+mark. HarfBuzz keeps that attachment through hiding and reports the blank at
+x_offset −1042 — minus the *base's* advance, so it sits back on the `a`.
+`hide_ignorables` zeroes the offset, so ours sits at the pen, 1042. No kern
+is involved: `a`'s advance is 1042 and `b` starts there in both. Glyph 2's own
+advance is 561, so this is not HarfBuzz's `adjust_mark_offsets` either — it is
+mark-to-base attachment, kept rather than discarded.
+
+Ours is still kept, on this section's own argument: the x of an invisible
+zero-advance glyph is good for placing a caret on that character's cluster,
+and the pen is where the next glyph starts. But the *cost* is now one case,
+not 170, and a reader who finds `misplaced` above 1 should look at mark
+attachment before kerning.
+
+Corrected with it: `hide_ignorables` carried "The x offset goes for the same
+reason HarfBuzz zeroes it". HarfBuzz does not zero it. The comment now says
+what HarfBuzz measurably does and why we differ.
 
 **Measured.** Host sweep, 556 faces × 60 strings: `differ` on `f\u200di` from
 76 faces to 0, `misplaced` from 331 to 170. Khmer probe: 45/45 before and
@@ -36519,6 +36573,160 @@ it is why the old value was a bug.
 something does, the cheap answer is that it almost certainly wants `GNU/Linux`,
 in which case this is a one-constant change. Recorded as a Claude decision
 precisely so it stays cheap to reverse.
+
+---
+
+## 1100. Six lanes, two per account: where the tree is cut, and how a session knows which lane it is
+
+**Date:** 2026-09-22
+**Lane:** D
+**Decided by:** Claude (operator-approved scope) — the operator decided six
+lanes, two sessions per Claude account, named "Lane A" … "Lane F"; Claude drew
+the split and made every call below it, and the operator may overrule any of
+them.
+
+**In short:** the project now runs six agents at once instead of three, two on
+each Claude account. Each agent owns part of the source tree, so that no two of
+them ever edit the same file. The operator chose the number and the names. This
+entry records how the tree was divided six ways, how an agent now works out
+which lane it is — the old way stopped working — and the handful of mechanical
+changes that had to follow. It is numbered as lane D's first entry only because
+it was written on `main` before any lane-D session existed, which made D's band
+the one place no other lane could be writing at the same moment.
+
+### The split
+
+| Lane | Name | Owns |
+|---|---|---|
+| A | Kernel, Core & Networking | `kernel/**`, `bench/**`, the boot test — and now `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `net80211/**`, `aes/**`, `hmac/**`, `services/netstack/**` |
+| B | Userland | `userspace/**`, `init/**` |
+| C | Desktop & Toolkit | `gui/**` except F's crates |
+| D | POSIX, libc & Toolchain | `posix/**`, `services/**` except `netstack`, `toolchain/stubs/**`, `build-sysroot.ps1`, `create-ext4-rootfs.sh` |
+| E | Applications | `apps/**`, `randrange/**` |
+| F | Graphics Stack | `gui/compositor`, `gui/window`, `gui/remote`, `gui/font`, `gui/imagecodec`, `gui/vulkan` |
+
+Each old lane had one part with a deep backlog and one part coupled tightly to a
+*different* lane, and the cuts follow those seams:
+
+- **Networking went to the kernel lane.** The kernel links `netipc` and
+  `netring`; `services/netstack` is a thin daemon over the same crates; and the
+  WiFi work had been a request-and-reply loop between lanes A and C for weeks.
+  Every open networking item needed lane A already. Lane A was also the lane
+  with spare capacity — its own roadmap table said on 2026-09-14 and again on
+  2026-09-17 that it was down to operator-gated items.
+- **Lane B split at the libc boundary.** `posix/`, the sysroot, the C test
+  fixtures and the rootfs recipe are one pipeline with one owner, and the large
+  ports that stand on libc (gcc, CPython, fastpy self-hosting, the Rust
+  toolchain, WINE — B-Q18's list) belong with it. The userspace programs stayed
+  with lane B, which is where B's recent commits and nearly all of its open
+  questions were; so B-Q8 … B-Q21 still mean what they say.
+- **Lane C split three ways.** `apps/` (142 crates) was as busy as all of
+  `userspace/` — 572 commits in the 14 days before the split against 580 — and
+  became lane E. `gui/` divides at the display protocol: the compositor, the
+  protocol (`gui/remote`) and the window library every application links
+  (`gui/window`) stay together in lane F, so a protocol change never needs a
+  handshake, and F also takes text rendering, image decoding, the Vulkan loader
+  and the GPU ports that were C's deepest backlog. The desktop shell, toolkit,
+  appearance and desktop services stayed lane C.
+
+**Alternatives considered for the split:**
+
+- *Halve each old lane (A→A+D, B→B+E, C→C+F).* Symmetric and easy to remember.
+  Rejected: lane A was already short of unblocked work, so halving it makes two
+  idle lanes; and the kernel has no seam that avoids shared files (the syscall
+  tables, `main.rs`, the capability code), so kernel-core against kernel-drivers
+  would have been a constant stream of requests.
+- *Networking as a lane of its own.* Rejected: about 40 files and 8 commits in
+  the 14 days before the split, and every open item needs the kernel side — a
+  lane that would mostly have filed requests to lane A.
+- *A lane for `scripts/`.* It is the busiest directory by far (989 commits in
+  those 14 days), but lanes write gates for their own code, and a central owner
+  would turn every new gate into a request. Who owns `scripts/` is also
+  `open-questions.md` A-Q11, still with the operator; this split does not
+  answer it and does not assign `scripts/`.
+- *Split `apps/` or `userspace/` alphabetically.* Balanced by construction, but
+  the halves share nothing except a letter, so every sweep and every
+  cross-application change would span two lanes.
+
+### How a session knows its lane
+
+Under three lanes each Claude account ran one session, and
+`scripts/which-lane.py` read nothing but `CLAUDE_CONFIG_DIR`. With two sessions
+per account that names two lanes, so it now identifies nothing and is only
+printed. The lane comes from the **agent name** (`--agent-name`, or
+`SLATEOS_LANE` / `ORCH2_AGENT_NAME` in the environment) and from the
+**worktree** the script lives in (`os-lane-<x>`, with `lane-<x>` actually
+checked out, read from `.git` rather than by running git). Every source present
+must agree.
+
+- *Why not the worktree alone:* the operator's launcher starts all six sessions
+  in `os`, so for an agent's first command the worktree often says nothing.
+- *Why not the name alone:* orchestrator2 does not export the name to child
+  processes, so a script cannot see it unless it is passed or the launcher sets
+  it; the worktree covers every script an agent runs inside its own tree.
+- *Why refuse a disagreement instead of preferring one source:* a session named
+  Lane D running a script from `os-lane-a` is operating in lane A's tree, and
+  the one thing this arrangement exists to prevent is exactly that.
+
+The same file became the **single ownership table** (longest matching prefix
+wins, which is how `gui/compositor/` → F carves out of `gui/` → C), and the
+scripts that kept their own copies now import it. Two of those copies had
+already drifted from it — `merge-readiness.py` gave lane A all of `toolchain/`
+and `pre-boot.py` gave lane C a `pkg/` that has never existed — which is the
+usual fate of a mirror.
+
+### What else had to change
+
+1. **Deferred questions were renamed `D-Q<n>` → `DQ<n>`.** `D-` is lane D's
+   question prefix now, and the gates that parse question ids would have read
+   D-Q2 (install clang and enable CFI) as a lane-D question. DQ1 and DQ2 carry
+   their old names in their headings, and **lane D's own numbering starts at
+   D-Q3**, so D-Q1 and D-Q2 are never reissued — the rule the section numbers in
+   this file already follow. Old citations in `requests/` and in the entries of
+   this file were left as written; the live documents use the new names.
+2. **Empty bands take their anchor from the band row** (`check-design-decisions-
+   bands.py`): see the header of this file.
+3. **Every gate that parses a lane letter accepts A–F**, and
+   `scripts/open-requests.py` now parses requests addressed to several lanes
+   (`a-bc-…`) — twenty such files had been skipped by the three-lane parser.
+4. **The publish step follows §538.** The operator decided on 2026-08-21 that
+   lanes publish with a fast-forward `git push origin <sha>:main` from their
+   own worktree, but `CLAUDE.md` still told agents to merge inside `os`, and
+   agents may not edit `CLAUDE.md`. This rewrite was the operator's instruction
+   to edit it, and six lanes publishing make fifteen pairs that can race in the
+   shared checkout where three made three, so both documents now say §538.
+5. **Retagging.** Open roadmap items were retagged to their new owner; finished
+   items keep the letter of the lane that finished them, and prose inside an
+   item that names a lane is history.
+6. **Three worktrees** — `os-lane-d`, `os-lane-e`, `os-lane-f`, on branches
+   `lane-d`, `lane-e`, `lane-f` — were created from `main` at this change.
+7. **`CLAUDE.md`'s phantom `pkg/**` is gone**, which settles C-Q27 without a
+   decision: lane C had asked leave to delete it from a file only the operator
+   may edit, and the operator's instruction to rewrite the lane section covered
+   it. The new table was written from `scripts/which-lane.py`'s, which was
+   already right.
+
+### Left open, deliberately
+
+- **A-Q11** (who may edit `scripts/` and the small top-level library crates)
+  and **A-Q18** (every lane appends at the end of `known-issues.md`, which
+  conflicted eleven times in one day under three lanes) both get worse with six
+  lanes, and both are the operator's to answer.
+- orchestrator2 refuses a space in an agent name, so "Lane A" registers as
+  `Lane-A` unless orchestrator2 changes; the scripts accept both spellings.
+- `E:` had 312 GB free for six lanes' build caches. `roadmap.md` Step 0.6 says
+  so, but the constraint is physical, not procedural.
+
+**Where it lives:** `scripts/which-lane.py` (`OWNERSHIP`, `LANES`,
+`detect_lane`, `owner_of`); `roadmap.md` → "Six-Agent Parallel Execution";
+`CLAUDE.md` → "Six Sessions"; the band rows at the top of this file;
+`backups/three-lanes/`.
+
+**How to reverse:** `backups/three-lanes/README.md` describes going back to
+three lanes, including what must not be copied back wholesale. Changing the
+split without going back is one commit: edit `OWNERSHIP` in
+`scripts/which-lane.py` and the table in `roadmap.md` together, and retag the
+open items that move. The gates need nothing, because they accept A–F.
 
 ---
 
@@ -67964,6 +68172,133 @@ not better checks -- it is making every check say what it looked at.
 | wrong tree | the same gate's `ROOT` was the absolute path to lane C's worktree | `ok`, about `os-lane-c`, whoever ran it |
 | unreachable arm | `boot-test.sh` mounts no FAT root, so `openat2`'s mode stamp could not fail | the case passed, honestly, on `memfs` |
 | predicate miss | lane C's `find-stale-admissions` matched `cannot save`, not `cannot be saved` | named the right crate, for the wrong reason |
+| **result lookup** | lane C's sabotage harness searched for a named test result; the name was mistyped | `STAYED GREEN` -- absence rendered as clean |
+| **missing instrument** | I probed an ELF with `strings`, `nm` and `readelf`; none is installed here, and I had silenced their stderr | three `0`s, indistinguishable from "the symbol is absent" |
+| **vacuous comparison** | lane C's damage-tracking test compared a partial frame against a full one; a broken fixture rendered nothing in either | `0 <= 0` holds, so the assertion passed on a fixture that drew nothing |
+| **tautological check** | lane B's `for cmd in MUTATING { assert!(armed(cmd)) }` asserted that every member of a list is in that list | deleting an entry left all 195 tests green, because the corpus shrank instead of the assertion failing |
+| **degenerate oracle** | lane B measured GNU `date -d` to learn the weekday rule; GNU reads the host clock, and on six days in seven `Wednesday` and `next Wednesday` agree | the wrong rule gets encoded in a correctly-anchored test that then discriminates perfectly, in its favour, forever |
+
+**The sixth is lane C's and is the worst of the set, because it is downstream
+of the others.** Their harness asked "did test X go red?", the name did not
+exist, and *not found* was indistinguishable from *did not fail*. I produced
+the same defect the same day by a different route: my nine-check post-merge
+sweep was a routine typed from memory, I typed six of the nine, and the result
+was green over the six and silent about the three -- one of which was the check
+for the gate that then failed a boot.
+
+Why it is worse than the corpus cases: those can be caught by printing a count,
+and a count is at least a number somebody can question. **A lookup that finds
+nothing has no count to print.** There is no small number to notice, because
+the thing that would have been counted was never enumerated.
+
+Two remedies, one per route. For a lookup: print the set that actually
+matched beside the verdict, so "nothing failed" and "I found nothing" stop
+rendering alike -- lane C's fix, which immediately caught a second defect
+(a sabotage they predicted one test would catch was caught by a different one,
+and the test they expected was vacuous). For a routine: make it a script, so
+the set cannot be typed short. `build/sweep.sh` exists because three boots
+were spent proving that a routine typed from memory gets typed partially.
+
+**Found by failing at it once more.** Checking whether I had actually added
+this entry, I ran `grep -c` for its phrases over the whole file, got 17, and
+labelled that as proof it was present. The 17 were elsewhere; inside 942 the
+count was 0. A count is not coverage -- established in this entry, and
+re-learned inside the check for whether this entry existed.
+
+**A seventh entry, same shape, added an hour later.** Asked to confirm that a
+fixture binary contained a symbol, I ran five instruments over it and printed
+a labelled table. Four of the five -- `strings`, `nm`, `readelf`, `objdump` --
+are not installed in this environment, and I had written `2>/dev/null` on
+three of them myself. They printed `0`. A `0` under the label "nm" is a claim
+that the symbol table was read and the symbol was not in it; what actually
+happened is that nothing was read at all. The one instrument that exists
+(`grep -abo` over the raw bytes) found it twice.
+
+So the sixth shape is wider than a mistyped name. **Any lookup whose failure
+mode is empty output can report the absence of its own instrument as the
+absence of the thing.** Silencing stderr destroys the one signal that would
+have told them apart. The rule that follows is narrow and worth obeying:
+*never send stderr to /dev/null on a command whose output you are about to
+interpret as evidence* -- the discarded line is usually the one saying the
+measurement never happened.
+
+**The eighth is lane C's and sits beside the first five rather than under
+them.** Their compositor test asserted that redrawing one window costs a
+fraction of redrawing the desktop. If the fixture is broken and the *full*
+recomposite also draws nothing, both sides of the comparison go to zero, the
+relation holds, and the test reports a pass having established nothing. The
+distinction from the five corpus shapes is worth stating precisely, because
+it is why this is an eighth and not a variant of `empty corpus`: **the corpus
+is not empty -- the comparison is.** Two measurements were really taken; they
+just both degenerated, and a relation between two degenerate values is true
+for free.
+
+Their fix is the one this document keeps arriving at from different
+directions: **a control that fails if the fixture is not in the state the
+test claims to be about.** A full recomposite must re-render at least eight
+windows before the ratio means anything. Note what the control is *not* --
+it is not a tighter threshold, and no threshold would have helped, because
+the defect was on both sides of the comparison at once.
+
+**The ninth is lane B's, and is the only one where damage makes the check
+*greener*.** They looped over a `MUTATING` list asserting each of its
+members was armed -- a predicate derived from the corpus it quantifies
+over, so it cannot fail for any input at all. Deleting an entry did not
+fail the assertion; it removed the case that would have tested it, and all
+195 tests stayed green. That is the distinction from the eighth: lane C's
+comparison degenerates on both sides *for a particular input*, whereas this
+one is unfalsifiable for *every* input.
+
+**A check that responds to damage by testing less is worse than one that
+responds by passing**, because the count going down reads as progress. The
+remedy is the general form of every fix in this entry: the corpus and the
+expectation must come from different places, or the check is a mirror. Lane
+B restated the expected set independently as `EXPECTED_MUTATING` and loops
+over that, so the same sabotage now fails. Found by sabotage rather than by
+reading -- their words: they would have shipped it.
+
+**The tenth is lane B's and is the only row where the verdict is
+confidently WRONG rather than empty.** Every other row describes a check
+that proved nothing; this one describes a check that proves something false.
+The defect is not in the check at all -- it is upstream, in how the check's
+*expectation* was derived.
+
+They were implementing `date -d`'s relative weekday forms, using GNU as the
+oracle. GNU reads the host clock. A bare `Wednesday` means today and `next
+Wednesday` means +7 -- but those two agree on **six days in seven**, so a
+measurement taken on any other day teaches that they are synonyms. Encode
+that, write a test, anchor the test properly to a fixed reference date, and
+it will discriminate cleanly and pass forever in favour of the wrong rule.
+It happened to be a Wednesday.
+
+**Anchoring the test does not help, and that is the whole point.** Their
+committed tests *are* anchored -- `TEST_NOW` is a fixed Tuesday, and the
+pinning assertions use three distinct Tuesday values so the discriminating
+pair is exercised on every run. The non-discriminating `next Wednesday ==
+Wednesday` case is present deliberately and labelled as such. None of that
+would have rescued a rule learned on a Thursday: anchoring the test cannot
+fix an expectation the oracle got wrong.
+
+Lane B's statement of the general form is the one to keep: **when an oracle
+reads the environment, the environment is part of the experiment.** So the
+thing to anchor is the *oracle*, not the test -- which here means either
+waiting for a day on which the distinction is observable, or finding an
+operand that forces it. They got the first by luck and said so.
+
+**Why it is worse than a day-dependent test**, which is where I first filed
+it and was corrected. A test that only discriminates one run in seven has an
+uncovered branch, and an uncovered branch is a gap somebody eventually
+notices -- it is at least *consistently* weak. A day-dependent measurement
+leaves no gap at all: the resulting test is well-formed, fully covered, and
+wrong, and nothing downstream can tell. It is the same family as `6*7` and as
+`capabilities: &[]` -- a value silently supplied by the surroundings -- except
+that here the surroundings supply the *answer*.
+
+Generalised, the ten rows share one instruction. **Print, or assert, the
+thing the verdict was computed from** -- the corpus size, the tree that was
+read, the set that matched, the instrument that ran, the magnitude of each
+side. Every shape here is a verdict that survived the disappearance of its
+own evidence.
 
 **The retroactive consequence, which is the part that changes behaviour.** Lane
 B kept the `__file__`-derived `ROOT` fix over their own on this ground: a gate
@@ -67995,6 +68330,934 @@ the `openat2` control file. Each exists to make a green result say something.
 **Related:** 937 (a check that cannot see a defect; this is its output-side
 twin, where the check works and the corpus is wrong), 938 (an artifact true when
 written), 932 (two witnesses, and the third failure -- shared inputs).
+
+## 943. A dependency chain that agrees with itself and disagrees with its source is silent
+
+**Date:** 2026-09-15 · **Decided by:** Claude (autonomous) · **Lane:** A ·
+**Observed and diagnosed by lane B**, numbered here because 938 and 942 are in
+this band and this is their generalisation
+
+**In short:** the sysroot's `libc.a` was 13 posix sources out of date. Every
+artifact built from it -- 74 test fixtures, 5 spike binaries, 72 userspace
+programs, the ext4 image -- was equally out of date, so they all agreed with
+each other and every gate was green. Rebuilding the libc made the tree *less*
+consistent and a check went red. That red was the first true statement anyone
+had made about it in days.
+
+**938 is the singular case**: one artifact that was true when written does not
+say when it stopped being true. **This is the plural**: when everything
+downstream of a stale input is regenerated from that input, the whole chain is
+uniformly wrong and *internally consistent*. Consistency is what the checks
+look for, so a uniformly stale tree passes everything.
+
+| state | what the gates say | what is true |
+|---|---|---|
+| uniformly stale | all green | every artifact describes a tree that no longer exists |
+| partially rebuilt | `image-check` RED | the red names exactly what is behind |
+| fully rebuilt | all green | the green means something |
+
+**The middle row is the one to understand.** It looks like a regression and is
+not: it is the moment a check finally has something to disagree with. Anyone
+arriving mid-rebuild sees a red tree that was green an hour ago and may
+"restore" it by reverting the rebuild, which returns to row one -- green, and
+wrong. Lane B passed through that window today and said so explicitly rather
+than leaving it to be misread.
+
+**Nothing in the chain announces its dependents**, which is lane B's
+contribution and the operational half. You find wave N+1 only by fixing wave N
+and re-running the check: the libc rebuild revealed the fixtures, the fixtures
+revealed the spikes, one spike (`cmake`) refused and needed a separate
+invocation, and the userspace sweep then reported *72 of 72 staged binaries
+older than the libc*. Nobody could have listed those four waves up front. So
+the rule is to **re-run the check after each wave, not at the end** -- stopping
+when the first check goes green leaves the tree in row two believing it is row
+three.
+
+**Why this is worth a number rather than a note.** The failure has no symptom.
+There is no wrong output, no failing test and no error message; there is a set
+of artifacts that answer questions about a tree that has moved on. The only
+thing that detects it is a check that compares an artifact to its *inputs*
+rather than to its siblings -- `sysroot-check`'s recorded content stamps here.
+A project without such a check cannot discover this state at all, which is a
+stronger reason to keep them than any individual bug they have caught.
+
+**Related:** 938 (the singular), 942 (a verdict is only as good as its corpus;
+here the corpus is *time*), and the `image-check`/`sysroot-check` pair, which
+are the two halves -- one compares the image to the tree, the other compares
+the libc to its sources, and neither alone would have seen this.
+
+## 944. A disable reason is a control, not a description, so it has to be executable
+
+**Date:** 2026-09-15 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; **Found by lane B**, whose `check-stale-blockers.py` pass
+put the population in front of a reader for the first time
+
+**In short:** several self-tests in this kernel are switched off, and each one
+has a comment saying why. That comment is the only thing keeping it off. One
+of mine had been wrong for six days -- it named a change another lane had
+already landed, while the real reason had moved on three times and was written
+down 7000 lines away in a different file. A teammate read the wrong copy,
+believed it, and almost sent me a confidently incorrect request. Nothing
+catches this, because a comment is never run.
+
+### Why this is not just another 938
+
+938 and 943 are about stale **descriptions**: a reader forms a wrong belief,
+and the artifact itself is inert. This is a stale **control**. The sentence is
+not describing why the rung is off -- it *is* why the rung is off. Three
+things follow that the description cases do not have:
+
+1. **The cost is a test that does not run**, and it accrues daily rather than
+   at the moment somebody misreads it.
+2. **It is self-sealing.** The rung is off, so the subsystem it covers
+   accumulates no evidence, so nothing ever contradicts the sentence. A stale
+   description can at least be caught by the thing it describes misbehaving.
+3. **It resists the usual remedy.** `known-issues.md` entries get stamped
+   `FIXED` on the day they are fixed, and ours are. A comment cannot be
+   stamped, because nothing indexes it.
+
+### The evidence, all measured today
+
+| Site | Says | Actually |
+|---|---|---|
+| `spawn.rs:9683` | ctest-pty is off while lane B routes PtySlave reads through 872/873 | that landed 2026-09-09 in `f83bcb2ed`; four disable cycles ago |
+| `main.rs:2710` | the live reason, accurate and current | correct -- and 7000 lines away from the other copy |
+| `spawn.rs:9682` | the fixture avoids `alarm`/`setitimer`, known-broken | first half true; `B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING` is stamped **FIXED 2026-09-12** |
+
+The sharp observation is lane B's. Five copies of the timer fact exist outside
+`known-issues.md`, and **only the copies rotted**. The entry itself was
+stamped correctly and on time. Discipline worked exactly where there was an
+index and failed everywhere there was not. So the remedy is not more diligence
+about updating copies; it is not having copies. A load-bearing fact gets one
+home, and every other site points at it rather than restating it.
+
+### A date is not a content check
+
+My own re-enable condition read: *re-enable when `sysroot-check` passes AND
+`services/ctest-pty/ctest-pty.elf` is newer than `6e19f88a1`*. Lane B declined
+to settle it that way, and was right twice over. The ELF is gitignored, so it
+is a per-worktree build artifact with no canonical instance -- there is no
+"the" ELF, and their timestamp said nothing about mine. And a rebuild
+refreshes a timestamp whether or not the source changed, which is precisely
+how the stale binary came to look staged in the first place. They grepped both
+binaries for the `child_verdict` symbol instead. **A condition phrased over
+provenance can pass for the wrong reason; phrase it over content.**
+
+They also declined to claim more than the instrument supports: the two builds
+are not byte-identical despite identical size and identical source, so the
+fixture is not reproducible and "same size, same symbol" is the strongest
+available claim. That is the right shape for a verdict -- say what you
+measured, not what you would like it to mean.
+
+### What this changes
+
+- Re-enable conditions stop being prose. Where one can be expressed as a
+  command, it is written as a command a check can run.
+- A disable reason lives at the call site, because the call site is what
+  stopped running. The definition gets a pointer, not a second copy of the
+  reason. (Lane B's own gate caught them collapsing those two into one
+  finding; they are two, and that pairing is what made this findable at all.)
+- The population of switched-off tests is printed on every push by lane B's
+  pass, which deliberately does **not** judge whether a reason still holds --
+  that needs prose understanding. Putting the list in front of a human each
+  time is the whole mechanism, and it was enough: it found this in one run.
+
+### Rejected: expire the comments automatically
+
+Tempting to make every disable reason carry a date and go red after N days. It
+would have caught all three of these. Rejected because it converts a correct
+long-lived reason into recurring noise, and the failure mode of noise on this
+project is documented one section up: lane B's first version of the same pass
+printed 41 unchanging lines, which is how the five real findings underneath
+get skipped.
+
+### Amended the same day: executable is necessary, not sufficient
+
+Lane B fixed the staging gap, and the fix uncovered a second layer that
+changes what this entry asks for. The harness's synthetic repositories had
+been skipping gate 42 on this line:
+
+```sh
+[ -f "$toi" ] || skip_toi=1
+```
+
+That is precisely what this entry asks for. It is a disable condition that
+is *executed* rather than written in prose, re-evaluated every run, and
+incapable of going stale. **And it hid the gate anyway, because it disabled
+silently.**
+
+Lane B sharpened the diagnosis after reading the above, and the sharpening
+is the point: **the condition was never wrong for a moment.** `[ -f ]` is
+correct and was correct on every run. So the failure is not staleness at
+all -- it is that **a skip produces the same output as a pass**. The
+distinction was in fact recorded, by `note_gate test-order "$skip_toi"`,
+into a channel nobody reads at verdict time. Which makes this 942 one level
+up: the information existed, and the verdict did not carry it.
+
+So executable is necessary and not sufficient. The qualifier: **an
+executable skip must announce itself where the verdict is read.** 942 is a
+check that ran and proved nothing; this is a check that never ran and said
+nothing. Both render green.
+
+The detail worth keeping is that **supplying a missing file activated a
+gate**. Staging one dependency turned a skip into a run, and the run then
+failed for the *tree* rather than for the checker. The fixtures had been
+passing gate 42 by not having it -- and so would any tree missing that
+file. It is the cleanest case in this document of a green verdict
+describing an absence.
+
+Lane B's two refusals are recorded because the reasoning generalises. They
+declined to key the replacement guard on the graded crates existing (the
+fixture creates `posix/`, so the condition is true there and does not
+discriminate) and on *one graded crate missing* -- which would have silently
+disabled the gate on the day somebody deleted a graded crate, which is
+exactly when it should be loudest. **A guard that weakens precisely when the
+thing it guards is damaged is worse than no guard**, because it converts a
+loud failure into a quiet pass.
+
+## 945. A simulated action is disclosed where the result is read, not where the code is written
+
+**Date:** 2026-09-15 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; follows the operator's own precedent in Q21
+
+**In short:** the kernel's firmware command told the operator *"Firmware
+update applied for device 1. Reboot required."* No firmware was written.
+There is no firmware writer in this kernel and there never has been. The
+function's doc comment said `(simulated)` and had said so since the day it
+was written -- so the disclosure existed, in the one place the operator
+never looks.
+
+### A fabricated action is not a fabricated fact
+
+Three things found earlier the same day were fabricated **facts**: three
+block devices, three installed drivers, a website. This is a fabricated
+**action**, and it is a different category in a way that matters:
+
+| | fabricated fact | fabricated action |
+|---|---|---|
+| what it claims | something *is* | something *happened* |
+| how it is corrected | delete the value | cannot be un-said; the reader may already have acted |
+| worst case here | `/proc` overstates the hardware | the operator reboots to complete a flash that never began |
+
+`PendingReboot` is not a description, it is an **instruction**. That is the
+whole of the difference. A wrong fact misinforms; a wrong instruction
+recruits the reader into acting on it.
+
+### Lane B's addition: a fabricated action has a sign, and one sign is worse
+
+Their instance, found the same day: `upowerd` printed `CRITICAL: battery at
+3% -- executing PowerOff` and contains no power action of any kind. No
+syscall, no libcall, no spawned `powerctl`. "Executing" is present tense, so
+the one person who ever reads that line -- somebody watching a laptop at 3%
+-- was told the machine was powering itself down.
+
+Put beside the firmware case it exposes a distinction neither of us had
+alone. **A fabricated action is most dangerous when the action it fabricates
+is one that relieves the reader of a duty.**
+
+| | fabricated action | what the reader is told | correct response to the lie | cost |
+|---|---|---|---|---|
+| firmware | a flash completed | *you must reboot* | reboot | a wasted reboot -- the lie **created** work |
+| battery | a shutdown is running | *nothing is required of you* | do nothing | the unsaved work on the disk -- the lie **removed** work |
+
+Same lie, opposite sign. And the removing kind is the one nobody notices in
+review, because a line that tells the reader to do nothing produces no
+follow-up action whose absence anyone could observe. A false instruction to
+*act* gets caught by the act failing; a false assurance that something is
+already handled is only caught by the loss it was supposed to prevent.
+
+So when auditing for this shape, the priority order is not by subsystem
+stakes. It is: **first the claims that say a protective action is already
+under way**, then the claims that demand one, then the claims that merely
+describe. Lane B's wording for the whole family is the one to keep -- both
+are "instructions wearing the clothes of descriptions".
+
+### What the attention failure looked like
+
+The call site already carried a careful, correct comment about the danger
+of applying an update to the *wrong* device -- `fwupdate apply 1O` once
+parsed as device 0 -- ending *"firmware is also the one thing here that a
+reboot does not undo."* Somebody thought hard about this code, reached the
+right conclusion about the stakes, and fixed the argument parsing. **Nobody
+asked whether it wrote firmware at all.** The question that was asked was
+"which device does this flash", and the answer to "does this flash" was
+never in the frame. A sharp question can occupy the space where a blunter
+one belonged.
+
+### The decision, and the precedent it follows
+
+Keep the simulation; disclose it where the result is read. This is not a
+fresh call -- the operator decided this exact tradeoff on 2026-07-14 as
+**Q21**, for lane B's `nft`/`iptables`, which now print *"parsed, NOT
+applied -- use `fw`"*. The same answer applies for the same reason: the
+parse (here, the bookkeeping) is real work worth keeping, and the harm was
+never the simulation but the claim about it.
+
+Lane C's test from triaging ten apps the same day sharpens where the notice
+goes: the question is not *is there a disclaimer* but *does it cover what
+the value would need in order to be true*. A doc comment cannot, because
+the value's reader is not reading the source.
+
+### Rejected: make `apply_update` return `NotSupported`
+
+Tempting, and it is the most honest single line available. Rejected
+because it deletes the module's only behaviour and its entire test surface
+in exchange for a truth the notice already tells, and because the
+bookkeeping is what a real implementation will hang off. §941 is the
+governing precedent: a known limitation is **declared and checked**, not
+removed or left to fail silently.
+
+### Rejected: rename `UpdateRecord::success`
+
+It means *the record was written*, not *the flash succeeded*, and the name
+is genuinely misleading. Left alone and documented instead, because the
+field is the history API's contract and renaming it is a change to a
+published shape for a problem the doc comment now states at the point of
+confusion. Recorded here so the next reader knows it was considered rather
+than missed.
+
+## 946. A publisher with no subscriber is indistinguishable from a working feature
+
+**Date:** 2026-09-16 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; **Found by lane B, in my code**, an hour after I wrote it
+and a day into both of us auditing everyone else's. Numbered here at their
+request, because a series split across bands for attribution is worse than a
+series.
+
+**In short:** I added a syscall that sets the console keyboard layout. It is
+capability-gated behind its own right, validates its argument, refuses an
+unknown layout, has exactly one publisher, is published read-only through
+`/proc/keylayout`, and has a ring-3 fixture confirming the round trip. **No
+key types differently.** Nothing in the keystroke path reads the value. Every
+check passes and the feature does nothing.
+
+### The mirror of 942
+
+942 is a **verdict with no corpus** -- a check that ran over nothing and
+reported green. This is a **value with no reader** -- a write path that
+completed correctly and changed nothing. They are the same defect seen from
+opposite ends, and the reason this needs its own number is that every
+instrument built for 942 looks at the *writer*:
+
+| what we built | what it proves | passes on a value nothing reads |
+|---|---|---|
+| capability bit + gate ordering | an unprivileged caller is refused first | yes |
+| dispatch probe | the syscall number is registered | yes |
+| `/proc` round trip | the kernel stored what was sent | yes |
+| link of the libc stub | the symbol exists and the prototype matches | yes |
+| ring-3 fixture | userspace can set it and read it back | yes |
+
+Five checks, five green, nothing typed differently. **From the publisher's
+side a missing subscriber is invisible by construction**, because every
+question the publisher can ask is about publishing.
+
+### The tell existed. It could not have discriminated.
+
+Lane B's observation, and it is a good one: `keylayout.rs:28` carries
+`#![allow(dead_code)]` -- a module saying *nothing calls this* in the one
+place the compiler would otherwise say it out loud. They had spent the
+previous hour building a gate that reports exactly that shape and did not
+point it at the thing they were wiring.
+
+**But it would not have helped, and the reason matters more than the tell.**
+**514 of this kernel's modules carry the same attribute.** A signal present
+in 514 places discriminates in none of them. That is 942's noise lesson at
+scale -- lane B's first switched-off-test pass printed 41 unchanging lines and
+buried five real findings underneath; this is the same defect with an order of
+magnitude more hay. So `#![allow(dead_code)]` is not a detector for this. It
+is a detector that has been saturated, and a saturated detector reads exactly
+like a quiet one.
+
+### What would have caught it
+
+One question, asked of the value rather than of the code that writes it:
+**who reads this, and can I name the function?** Not "is it published" --
+publishing was never in doubt. The answer for the layout was `kbl translate`,
+a diagnostic that asks what a key *would* map to, and nothing else.
+`keyboard.rs` mentions `keylayout` zero times; `scancode_to_ascii` is a
+hardcoded scan-code-set-1 table; the compositor takes its layout from a third
+mechanism entirely.
+
+The rule generalises past syscalls: for any state the kernel accepts from
+outside, the acceptance path and the *consumption* path are two separate
+things to verify, and only one of them is fun to build.
+
+### Why the fixture still passes, and why that is correct
+
+`ctest-keylayout` confirms through `/proc/keylayout`, which is real kernel
+state, so it goes green on a layout nothing translates through. That is not a
+defect in the fixture -- it is honest about testing the publisher, and it
+confirms through the publisher rather than the setter precisely because 1074
+has no getter. **A green result there must not be read as "the keyboard
+works."** Lane B put that sentence in `localectl`'s output rather than leaving
+it implied, which is the right place for it: in front of the person who would
+otherwise conclude it.
+
+### The consumer is not a one-line fix, and that is why this entry exists
+
+The obvious wiring -- one `keylayout::translate` lookup in front of the
+existing table -- **deadlocks the keyboard**. `ioapic.rs:739` calls
+`keyboard::handle_scancode()`; that is the IRQ 1 handler, and it reaches
+`scancode_to_ascii` synchronously in interrupt context. `translate` takes
+`STATE.lock()`. A task inside `set_active` holding that lock plus a keyboard
+interrupt on the same CPU is an unrecoverable lockup, with the keyboard as the
+thing that stops responding.
+
+`keyboard.rs`'s own docs already say this about its echo path -- *"a softirq
+... cannot block on a lock that task might already hold"* -- and §940 is this
+lane's own entry on the identical shape, from the writeback softirq re-entering
+the block registry. Both were written before today and neither stopped me
+reaching for the obvious fix; what stopped me was tracing the call chain
+*upward*, which is where I had stopped looking three times in the same session.
+
+So the consumer follows §940: **the IRQ backs off rather than the registry
+becoming IRQ-safe.** `translate_try` with `try_lock`, and on contention the
+scancode passes through untranslated -- a keystroke racing a layout change uses
+the old mapping, which is a sentence a user can understand.
+
+**The caveat gets stated where the feature is defined, not only here:**
+`disable_key` becomes best-effort under race, so a disabled key can get
+through. That is fine for someone disabling CapsLock and is exactly the kind of
+small caveat that becomes a hole the day somebody reads "disable" as a security
+primitive. Its doc comment says, in the negative, that it is ergonomics and not
+a control.
+
+### Closed 2026-09-17: the subscriber exists
+
+`scancode_to_ascii` now consults the active layout, so a key types
+differently and the feature this entry was written about is real.
+
+Built as the entry prescribed rather than as the obvious lookup:
+`translate_try` uses `try_lock` and returns three outcomes, because the
+caller is IRQ 1's handler and each case needs a different action there --
+`Contended` passes the raw scancode through (a keystroke racing a layout
+edit gets the old mapping, which is the documented degradation and not an
+error), `Disabled` produces no character, `Mapped` is used, falling back to
+the physical key if a layout maps to an extended keycode with no
+scan-code-set-1 byte rather than dropping the keystroke silently.
+
+Two details worth keeping. **No translation layer was needed**, because
+`keylayout`'s `KeyCode` space *is* scan-code set 1 -- `keys::ESCAPE` is
+`0x01`, `keys::KEY_1` is `0x02` -- which the entry had noted and which made
+the consumer a lookup in front of the existing table rather than a mapping
+exercise. And **the default path is unchanged**: with no active layout,
+`translate_try` returns the key it was given, so a tree that never calls
+1074 behaves exactly as before.
+
+The `disable_key` caveat is now stated at that function's own signature, not
+only here. The reader who would misread it as a security control is reading
+the signature.
+
+### The closure was not finished: the subscriber had no guard
+
+Recorded the same day, from lane C's work rather than my own. When I wrote
+the closure above I had built the consumer and *not* built anything that
+would notice if it went away. `translate_try` could be reverted to return
+`Mapped(key)` unconditionally and every signal would stay green:
+`keylayout::self_test`'s seven cases exercise `translate`, which is the pure
+function and was always correct, and `ctest-keylayout` confirms the setting
+and its publication through `/proc`. Neither touches
+`keyboard::scancode_to_ascii`, which is private and, until now, called only
+from the two real input paths and from no test at all.
+
+So this entry was one step short of its own point. It says a publisher with
+no subscriber is indistinguishable from a working feature; a subscriber with
+no guard is indistinguishable from a working feature *the day after someone
+simplifies it*.
+
+Lane C hit the identical shape the same day and stated the rule better than
+I had
+(`known-issues.md` -> `TD-C-A-PURE-FUNCTIONS-TESTS-SAY-NOTHING-ABOUT-ITS-CALLER`):
+`compute_image_rect` was correct and had six passing unit tests, its one
+production caller passed the display size where the image size belonged, and
+under that single wrong argument all six wallpaper fit modes collapse to the
+same rectangle. Six ways to fit a picture, all drawing the same thing,
+feature marked done.
+
+> A unit test of a pure function proves the function. It says nothing
+> whatever about whether anybody calls it correctly.
+
+And their prescription, which is what a closure of this entry actually
+requires: drive the setting **two different ways through the real entry
+point** and assert the results differ.
+
+`keyboard::layout_consumer_self_test` now does that -- baseline types `a`,
+an A->B remap types `b`, a disabled key types nothing. Two details are
+deliberate. It asserts the *difference* rather than only the expected value,
+because an implementation that always returned `b` would satisfy
+`== Some(b'b')` while being exactly as broken as one that always returned
+`a`. And it checks `u16::from(0x1E) == keys::KEY_A` rather than trusting the
+paragraph above where this entry asserts the two spaces coincide: if they
+ever diverge, the guard would silently test a different key than the one it
+remaps, and would keep passing.
+
+
+
+## 947. A probe needs identity and coverage, and they fail independently
+
+**Date:** 2026-09-16 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; paid for over eleven rounds of one investigation
+
+**In short:** finding out why a `^C` never reached a test program took eleven
+boot cycles. The bug was small and the kernel was innocent. Every wrong turn
+was one of exactly two mistakes in how the *instruments* were built, and they
+are independent -- fixing one does not protect against the other. This
+records both, because the next long investigation will offer the same two
+opportunities.
+
+### The two errors
+
+**Subset coverage.** A probe placed on some of the paths a thing can take,
+whose silence is then read as absence. Four instances in one investigation:
+
+| probe | coverage | what the silence seemed to mean |
+|---|---|---|
+| `sig_for` | 2 of 4 `ConsoleRead::Signal` sites | the discipline never saw the byte |
+| `linux_exec_common` | wrapped, but the failure was upstream in `linux_execve` | exec never failed |
+| `master_write` | 1 of 2 master-write paths | the byte never reached the ring |
+| `slave_read_input_blocking` | 1 of 3 readers of `input.read_byte()` | the child never read |
+
+**No identity.** A probe that fires, but for a different subject, and is read
+as being about the one under test. One instance, and it was the expensive
+one: a VINTR sighting with no tty id in its output. The three hits were the
+kernel's own `tty`/`pty` self-tests at serial lines 46834-46842; the fixture
+under test ran at 3316-3337. **43,000 lines apart, and indistinguishable by
+`grep -c`.**
+
+### Why they need separating
+
+They are orthogonal, and each was paid for on its own:
+
+* a probe that names its subject can still miss the path that subject takes;
+* a probe on every path can still be attributed to the wrong subject.
+
+Round 9 added identity to three probes and the very next round still lost a
+day to coverage -- `master_write` was one of two. Fixing identity felt like
+fixing the class, and it was not.
+
+**They also differ in cost, and the cheaper-looking one is worse.** A
+subset's silence *stalls* an investigation: it produces no claim, you notice
+nothing happened, and you look again. A misattributed hit *ends* one: it
+produces a positive, the positive is consistent with the hypothesis, and the
+search moves downstream of a step that never happened. Rounds 1, 4 and 8 cost
+boots. Round 3 cost a conclusion, and two further rounds built on it.
+
+### The rules, which are cheap
+
+1. **Print the identity of the subject** -- tty id, pid, handle, path,
+   inode. A probe whose output cannot name what it is about cannot be
+   correlated, only counted.
+2. **Correlate by position, not by count.** `grep -c` answers *how many*,
+   never *whose*. Get the subject's line range first, then read hits inside
+   it. This is one extra command and it is what finally made the trail
+   legible.
+3. **Enumerate the paths mechanically before choosing where to probe.**
+   `grep -n "input.read_byte()"` found three callers in one command, after
+   three rounds of *reasoning* about which one the fixture "should" use. The
+   same command earlier would have found two `master_*write` paths and four
+   `ConsoleRead::Signal` sites. **Reasoning about which path is taken is how
+   all four subset errors happened; enumerating is how none of them
+   survived.**
+4. **Prefer a wrapper to per-site probes** where one exists. A wrapper cannot
+   miss a path, including one added later. But check what the wrapper
+   actually encloses -- `linux_exec_common` was wrapped correctly and the
+   failure was upstream of it, so the wrapper was honest and useless.
+5. **Ask what else could produce this line.** Round 7's trampoline fired for
+   the right pid and was `SIGHUP`, post-mortem, not the `SIGINT` under test.
+   The disproof was three lines above it in the same log.
+
+### What actually resolved it
+
+Not any probe. `main.rs` already contained both the `O_NONBLOCK` routing that
+round 10 needed and the starvation mechanism that explained the whole thing,
+written by whoever investigated the mirror case earlier. **The answer was in
+the tree before the investigation started.** That is the second time in one
+day -- lane B's notice naming `/mnt` was three days old and addressed to this
+lane.
+
+So a sixth rule, and on this evidence the highest-yield one: **before
+instrumenting, grep the tree for prose about the thing.** Comments, notices
+and known-issues entries are cheaper to read than a boot is to run, and on
+this project they are frequently already correct.
+
+## 948. A rule that only an interrupt can break needs a check only an interrupt can trip
+
+**Date:** 2026-09-17 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; the deferral's own trigger, fired twice
+
+**In short:** if a lock can be grabbed by an interrupt handler, every other
+place that grabs it has to switch interrupts off first. Otherwise an interrupt
+can arrive while an ordinary task holds the lock, and the handler spins
+forever for something only that task can release. The machine stops with no
+message at all. That rule was written in comments and called load-bearing, and
+the code broke it three times in five weeks anyway. This makes it a check.
+
+### Why now
+
+The deferral in `todo.txt` set its own trigger: *a second deadlock of this
+shape*. There have been two more since it was written.
+
+| date | path | outcome |
+|---|---|---|
+| 2026-08-14 | keyboard ISR echoes through `CONSOLE.lock()` | fixed, `a18ea83a9` |
+| 2026-09-15 | writeback softirq re-enters blkdev's registry lock | fixed with `try_with_device`; wrote the deferral |
+| 2026-09-17 | `scancode_to_ascii` reaching `keylayout::translate` from IRQ 1 | avoided at design time (946) |
+
+The third is the one that decided it. It was avoided only because I happened
+to read `keyboard.rs`'s docs and remember 940. That is not a control; it is
+luck with a good memory, and it does not survive the next session.
+
+### Runtime, not the static walker the deferral proposed
+
+The deferral wanted a call-graph walk from the interrupt entry points, and
+said the baseline was the hard part. It is: there are **5,954** blocking
+`lock()` sites in `kernel/src`, and a walk outward from four entry points
+reaches a large, mostly-legitimate fraction of them. A gate is only worth
+having if it can tell a new reachable lock from the existing set, and that
+baseline would need curating forever.
+
+Checking the runtime property instead deletes the baseline problem, because
+the honest expected count is **zero**: any lock genuinely acquired in both
+contexts is already a live deadlock waiting on timing.
+
+The trade, stated plainly: **static has coverage and no identity; runtime has
+identity and only the coverage of the boot.** A walk sees every path and
+cannot tell which are real; the runtime check knows every report is real and
+sees only the paths this boot took. 947 is the entry about those two failing
+independently, and this is the same pair again. Runtime is the better first
+move because its false-positive rate is zero and its cost is one predictable
+branch on a path that already calls into lockdep. The static walk stays worth
+doing later, for the arms a boot never enters.
+
+### The invariant is not "no blocking locks in interrupt context"
+
+That was my first formulation and it is wrong: it would flag `console`, which
+is *correct code*. `console` is reached from IRQ 1 on every keystroke, and all
+45 of its acquisitions go through `lock_irqsave`. The rule it satisfies is:
+
+> for any lock ever acquired in interrupt context, **every** acquisition of it
+> must have interrupts disabled.
+
+So the check records, per lock class, which contexts it has been acquired in,
+and reports a class seen in two that cannot overlap. `lock_irqsave` callers
+are deliberately *not* recorded at all: task-context-with-interrupts-masked is
+the safe case and the entire point of the pattern.
+
+### Three buckets, because interrupt context is not one thing
+
+The marker is set in `dispatch_vector`, and that window includes
+`softirq::process_pending`, which re-enables interrupts on purpose. A lock
+taken there is taken by something that *can* be preempted by a hard IRQ; one
+taken with IF clear cannot be. Collapsing them would report the softirq/task
+overlap with the same confidence as the hard-IRQ/task overlap, and only the
+second is a certain deadlock. So:
+
+- `HARDIRQ_OFF` + `TASK_IRQS_ON` -> **violation**. Deadlock by construction.
+- `HARDIRQ_ON` + `TASK_IRQS_ON` -> **suspect**. Not a deadlock by itself; it
+  becomes one the day a hard IRQ takes the same lock. This is precisely the
+  2026-09-15 writeback shape, so it is worth naming rather than hiding.
+
+Reporting a suspect as a violation would have been the easier code and would
+have made the gate untrustworthy the first time somebody checked one.
+
+### Where the marker lives, and why not the counter that already existed
+
+`cputime::irq_depth()` looks like the same number and is not: it is bumped in
+`handle_timer_irq` and `handle_device_irq` only -- **two of the five arms** of
+`dispatch_vector`'s match. Vectors 251, 252 and 255 never touch it, nor does
+the `_` arm. Those three handlers are lock-free today, so this is latent
+rather than live.
+
+I first wrote that the gap also breaks the nesting cap at `apic.rs:1006`,
+where `irq_depth() > 1` stops timer-on-timer nesting overflowing the IRQ
+stack. That was wrong, and checking beat reasoning: a nest can only form
+inside a handler that re-enables interrupts, none of these three does, and
+the two that do both bump the counter. What remains is CPU-time attribution,
+plus the latent case -- the day one of them grows a softirq tail, the cap
+loses coverage silently.
+
+The new marker is maintained in `dispatch_vector` itself, for the reason that
+function *already gives* for counting there rather than in the handlers:
+*the five-call-site version is correct exactly as long as everyone remembers
+it, which is the property that failed for 33-56 already.* The file had learned
+this for counting and had not applied it to context.
+
+It cannot be derived from the interrupt flag alone. An IDT interrupt gate
+clears IF on entry, so inside a handler `interrupts_enabled()` is false --
+indistinguishable from a task that used `lock_irqsave`. Telling those two
+apart is the whole job.
+
+It is held by an RAII guard rather than a matched pair of calls, so a return
+path added to some future arm cannot leak an increment. A leaked increment
+would mark the CPU as permanently in interrupt context and silence the check
+for the rest of the boot -- a gate that fails open and says nothing.
+
+### Both controls are in the self-test, and that is the point
+
+944's amendment says an executable control is necessary and not sufficient,
+because a skip produces the same output as a pass. So the self-test provokes
+the violation deliberately and requires it to fire; requires it to fire
+*once*, since these sit on the hottest paths; and requires it to stay silent
+on a lock only ever taken with interrupts masked -- without that last arm the
+check could report everything and still pass.
+
+The provoked reports go to their own tally, for the same reason
+`SELF_TEST_VIOLATIONS` exists: the live counter answers "has this kernel ever
+done this", and a planted one is not an answer. Without the split, the only
+way to keep the number meaningful would be to never test the gate.
+
+The precondition is asserted rather than assumed: the task half needs
+interrupts genuinely enabled, and with them masked the test would record
+nothing, report nothing, and pass -- vacuously. That is 942's own row, and it
+would have been easy to write by accident.
+
+
+### Amended the same day: a `try_lock` in interrupt context is not the hazard
+
+The invariant above is stated over *acquisitions*, and that is one word too
+broad. `lockdep::lock_acquire` fires for a **successful `try_lock`** too,
+with `Acquire::Try`, and such a caller would have walked away had the lock
+been held -- so it can never spin on a holder it preempted. Only a blocking
+acquire from interrupt context is the hazard.
+
+This was not hypothetical for a single run. On the check's first real boot
+it reported four violations, and **three were this bug**: `sysctl-reg`,
+`SWAP` and `CGROUP`. In all three the try_lock path exists precisely because
+a blocking acquire from an ISR was a known hazard -- `sysctl::try_get` was
+added after B-SYSCTL-IRQ-DEADLOCK wedged a boot -- so the check's first act
+was to report three deliberate fixes as the defect they fix.
+
+The task side still records both kinds, and that asymmetry is deliberate:
+the danger there is *holding* the lock with interrupts enabled, and how the
+holder acquired it makes no difference to an interrupt that lands mid-hold.
+
+**What the run says about the method.** I predicted zero violations and
+wrote the prediction down before looking, reasoning from `grep
+lock_irqsave` and dd-70's ISR list. The check found 8 classes acquired in
+interrupt context, several of which I had no idea were reachable from one.
+Both halves of that are the point: the runtime check's coverage beat my
+static reasoning, which is the trade recorded above landing the way the
+entry said it would, and its precision was worse than I assumed, which is
+why the corpus number is printed next to the verdict.
+
+## 949. A claim that justifies skipping a check is itself a check
+
+**Date:** 2026-09-17 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; the premise behind 489 opt-outs
+
+**In short:** one of the two kinds of lock in this kernel skips the
+deadlock detector, and the reason it is allowed to is that nothing is ever
+locked *inside* it. That reason is written in a comment and is true of 489
+separate places only if every author of every one of them got it right. The
+one time it was wrong, the machine froze for twenty minutes and printed
+nothing about a lock. This makes the reason checkable.
+
+### The claim, and what rests on it
+
+70 chose `PreemptSpinMutex` for **true leaf** locks -- "locks that never
+nest another lock inside their critical section, so lockdep ordering checks
+add no value" -- and that sentence is the entire justification for the type
+not registering with lockdep. 944's rule applies directly: a claim that
+justifies skipping a control is a control, and controls have to be
+executable. This one was asserted per call site across 489 instances in ~370
+files and checked by nothing.
+
+### It has already been paid for once, in the same shape
+
+`sync.rs`'s own post-mortem, worth quoting because it names the mechanism
+better than I would: `fs::encrypt` shipped
+`STATE.lock().x = STATE.lock().x.saturating_add(1)` on a `PreemptSpinMutex`,
+the first boot that called it froze for 20 minutes and printed **nothing**
+about a lock, and the reason lockdep missed it was that the type
+
+> is documented as the no-tracking sibling for leaf locks ... Ordering checks
+> genuinely add nothing for a leaf lock -- but *recursion* detection is not
+> an ordering check, and opting out of one silently opted out of the other.
+
+`fail_if_recursive` closed that hole, and only that hole: it compares a lock
+against *itself*. Nesting a **different** lock inside a leaf critical section
+is still invisible to every detector -- lockdep cannot see the type at all,
+and the recursion check is looking at one lock.
+
+### Report-only, on today's evidence
+
+Ships as a counter and at most eight reports, not as a gate. The
+lock-context check (948) produced five findings on its first real boot and
+**all five were false**, three of them on locks whose `try_lock` path is the
+documented fix for the very hazard being checked. A second new lock-
+instrument gating a boot on its first run would be an unforced error.
+
+### Two choices that are not obvious
+
+**The report is filtered by `in_hardirq()`; the depth counter is not.**
+`PreemptSpinMutex` disables preemption but not interrupts, so a task can
+hold leaf A when an IRQ lands, and leaf B taken by that handler shares only
+a CPU with A, not a critical section. Reporting that is a false positive. But
+filtering the *enter* while leaving the *exit* would let the handler's
+release decrement the interrupted task's depth and corrupt it, so both sides
+of the counter stay unfiltered and only the report is suppressed.
+
+**The outer lock's name is carried in two per-CPU words.** A report that
+names only the inner lock is not actionable, which the same day's `?`
+investigation settled: `sync::Mutex::new` defaults the name to `b"?"` and 563
+instances answer to it. Two words rather than a formatted string because this
+is the hottest acquire path in the kernel, and stored only on the 0 -> 1
+transition.
+
+### The gap, stated here and at the code
+
+`in_hardirq()` is set in `dispatch_vector`, which handles the IRQ vectors. CPU
+**exceptions** reach `isr_stub_*` -> `handle_*` without passing through it, so
+a fault handler taking one of these while a task holds one still reports.
+`proc/exception.rs` uses the type, so that is reachable rather than
+theoretical -- and demand paging inside a critical section is ordinary kernel
+behaviour, not a defect. Any report whose site is a fault path has to be read
+that way. Filtering exceptions too would mean coupling this counter to every
+exception stub, which a first measurement does not earn.
+
+## 950. A pile of dead state is the negative image of one missing consumer, not a pile of mistakes
+
+**Date:** 2026-09-17 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; two lanes, two corpora, the same day
+
+**In short:** when a scan finds dozens of variables that get filled in and
+never used, the instinct is to delete them as clutter. That is usually
+wrong. They are normally the outline of a single thing that was never
+connected -- and the outline is the most useful description of the missing
+work anyone has. Deleting them throws away a design and leaves the gap
+invisible again.
+
+### The two measurements
+
+Lane C pointed a field scanner at `gui/` and `apps/` and found 347
+candidates. Grouping `apps/`'s 210 by crate and asking what each crate can
+actually *do*:
+
+| crate | fields | cannot |
+|---|---|---|
+| `torrent` | 23 | reach a network -- no socket at all |
+| `email` | 21 | reach a network |
+| `videoplayer` | 14 | open a file |
+| `pdfviewer` | 10 | open a PDF |
+
+Six of those crates depend on exactly `appearance`, `guitk` and `oswindow`,
+with zero references to `std::fs` and zero to any socket. And the fields are
+precisely what the absent I/O would have filled: `email`'s are an IMAP
+account and IMAP message flags; `torrent`'s are announce bookkeeping and
+peer stats. None of it can be populated by a program that never connects.
+
+Independently, and from the other end of the tree: the same scanner pointed
+at `kernel/` for the first time flagged `devpower.rs`'s `target_state`. That
+one field led to a module whose doc describes a PCI power manager, which
+contains **zero** hardware accesses, whose four stated integrations are all
+absent, and which publishes device power states through `/proc` that no
+device was ever put into. `target_state` is dead for exactly one reason:
+the asynchronous PMCSR transition it exists to track is not implemented.
+
+### The rule
+
+> Before asking *which of these should I delete*, ask **what single thing,
+> if it were wired, would read all of them.** A cluster of unread state
+> almost always has one answer, and that answer is the finding.
+
+The count is a symptom whose magnitude is meaningless on its own: 23 dead
+fields in `torrent` is one missing socket, not 23 defects. Lane C's
+phrasing, which is better than mine: *they are unwired, not
+unimplementable, so deleting them discards a design rather than dead
+weight.*
+
+### What follows from it
+
+**Keep the scaffolding, track the gap.** `devpower`'s `target_state` stays,
+because removing it would delete the shape of the real fix. What was
+actually wrong there was that a knowingly incomplete subsystem appeared in
+neither `todo.txt` nor `known-issues.md`, and that `/proc` published its
+modelled states with no disclosure (945). Both fixed; the field untouched.
+
+**The corollary for this lane's 130.** `kernel/`'s scan produced 169 hits,
+39 of them `repr(C)`-family structures where "written and never read by
+Rust" is the entire point -- the reader is a DMA engine, an assembly stub,
+or userspace across a copy. Of the remaining 130, the first sampled traced
+to an absent subsystem. So "130 presumptively dead" was the wrong frame for
+that number the moment it was written, and a flat deletion pass over it
+would have been actively destructive.
+
+### Why this is an entry rather than two notes
+
+Two lanes reached it the same day, on corpora with nothing in common -- one
+GUI applications, one kernel power management -- from scanners built for
+different purposes. Neither was looking for it. That is the strongest
+evidence this project gets for a rule being about the *shape* of the problem
+rather than about one subsystem, and the failure it prevents is silent:
+a tidy-up commit that removes 23 fields, closes the trail to the missing
+socket, and leaves a crate that still cannot reach a network with nothing
+left to say so.
+
+## 951. A baseline is safe where the signal it relaxes has one reader, and dangerous where it has three
+
+**Date:** 2026-09-17 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; lane C proposed the overreach and then named the rule
+
+**In short:** when a check has been failing for a known reason for a long
+time, the usual fix is a *baseline* -- a list of the known failures, so the
+check goes red only when something NEW breaks. This tree does that in 22
+places and it works. The trap is that a baseline changes what a word means,
+and if two other systems are reading that word, you have quietly changed
+their answers too.
+
+### The case that produced it
+
+The release-staleness gate had been red for a day: it requires a
+release-profile boot that PASSED, three lane-B ring-3 fixtures fail every
+boot, so every push went out with `ALLOW_STALE_RELEASE=1`. Lane C's
+diagnosis of the real loss is better than the one I had written down: *a flag
+you set on every push is not a bypass any more, it is the default path with a
+ritual attached* -- and the flag's presence in the history stops carrying any
+information, so nobody can tell a routine bypass from a genuine wave-through.
+
+Their proposed fix was to baseline the three fixtures inside `boot-test.sh`'s
+verdict, so a boot failing only those counts as clean. That is the version
+that looks obviously right and is wrong: `boot-test.sh`'s verdict sets
+`clean` in `bench/boot-history.jsonl`, and `merge-readiness.py`'s
+`last_green_boot()` reads that. Three lanes read those numbers. Relaxing the
+gate that way would have redefined "clean boot" for the whole project to fix
+one lane's gate.
+
+**The consumer count was the whole decision.** Enumerated rather than
+assumed:
+
+| signal | read by |
+|---|---|
+| `bench/last-release-boot.json` | `check-release-staleness.py`, `scripts/hooks/pre-push` |
+| `clean` in `bench/boot-history.jsonl` | `merge-readiness.py`, the streak counter, every lane's judgement of the tree |
+
+So the baseline belongs in the marker, which has two readers and whose own
+note already says so -- *"the automated ratchet stays strict, while this
+curated marker can carry a reasoned judgement with its evidence"*. A sentence
+I had read twice today while concluding the opposite, which is the other
+lesson here: the field's purpose was written down by whoever built it, and I
+took only the precedent from its example and not the permission from its
+text.
+
+### The rule
+
+> Before adding a baseline, enumerate the consumers of the signal it relaxes.
+> One reader: the baseline is a local decision. Several: you are redefining a
+> shared word, and that is a different change requiring different consent.
+
+Lane C's own application of it, which is the evidence it generalises:
+`lossy-decode-baseline` and `fields-written-never-read-baseline` are both
+single-reader, "which is presumably why they've been quiet".
+
+### The second half: a baseline needs to prune itself
+
+`boot-test.sh` line 4657 already carries the hazard -- *a baseline nobody
+prunes cannot rot into a description of a tree that moved on* -- and most of
+this tree's 22 baselines have no mechanism against it. Two properties fix it,
+and they are cheap:
+
+- **A retirement condition per entry**, not per file. Tying each name to the
+  request whose closure retires it gives a stale entry an owner; without that
+  it becomes everyone's background noise, which is nobody's.
+- **Fail when a listed entry starts passing.** That is what makes it
+  self-pruning rather than merely documented, and it is the property the
+  existing baselines mostly lack.
+
+The second one is worth stating as a general shape: a list of known failures
+that does not complain when a failure disappears is a list that grows
+monotonically and describes the past.
 
 ## 758. `/proc` gets a crate of its own, and its readers return "not exported" and "could not read" as two different answers
 
@@ -75483,3 +76746,1211 @@ VPN and WiFi — and each gets the same question asked of it before it is built.
 The one that will most likely pass next is Fonts, whose consumer is the text
 renderer, and the one that will most likely fail is Power, whose brightness
 control has setters and no door.
+
+## 857. A default-application category is a view over the file associations, or it is not offered
+
+**Date:** 2026-09-16
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** the desktop has a half-built screen for picking your default web
+browser, music player, and so on. Nothing it offers has any effect: it saves
+nothing and nothing asks it what you chose. Meanwhile the File Associations
+program keeps a real list of "files ending in `.mp3` open with this program",
+and the file manager genuinely obeys that list. So the categories become a
+friendlier way of writing that same list -- picking a music player sets the
+music file types -- rather than a second list nobody reads. And "web browser"
+is dropped, because this operating system does not have a web browser yet, and
+a row offering to choose one would be promising something that cannot happen.
+
+**The two vocabularies.** `apps/fileassoc` stores exactly one thing:
+`["associations", <extension>] -> an executable path`. `apps/explorer` reads it
+on every open, so an extension is a claim with a consumer behind it. The
+shell's `default_apps.rs` speaks in categories instead -- browser, email,
+music, video, image, documents -- and stores nothing at all: no
+`settingsfile::` call, no write, and no reference anywhere but the `pub mod`
+line that declares it. Two vocabularies for one idea, one of which is obeyed.
+
+**The decision.** A category is defined as the set of extensions it covers, and
+choosing a program for a category writes that program to each of those
+extensions. The category is then real in the only sense 856 accepts: the thing
+that obeys it is `apps/explorer`, which was already obeying it under a
+different name.
+
+**Where that write may happen, which is narrower than it looks.**
+`apps/fileassoc` is the sole writer of this file *by design*. Its `write_into`
+removes every entry its own registry no longer holds -- correct, because a
+cleared association must otherwise reappear at the next start -- and the
+consequence is that anything else writing an association directly into the
+document has it deleted at the next save, with no error raised anywhere. So a
+category-wide write lives inside that program, expressed over its registry.
+
+This was very nearly got wrong here. The shared crate was written with a
+`set_category(&mut Document, ...)`, which compiled, had a passing test against
+a document, and would have lost the user's choice the first time the File
+Associations window saved. It is deleted, and the reason is recorded on
+`CATEGORIES` where the next person will look for the missing function. What
+the crate offers a writer instead is `Category::extensions()`; the writing is
+the owner's business. The general rule: **a second writer of a file with a
+pruning owner is not a feature with a bug in it, it is a feature that cannot
+work.**
+
+**Why not the other way round** -- store categories and teach explorer to
+resolve an extension through them? It adds a lookup hop and a second file to
+keep in step, and it makes the association list, which is the thing that
+actually works today, the derived copy. The rule that decided it: when one of
+two models has a consumer and the other does not, the one with the consumer is
+the real one.
+
+**Why "web browser" and "email" are omitted rather than shown greyed out.**
+Both are *protocol* categories -- a browser answers `http:`, a mail client
+answers `mailto:` -- and this rule is defined over extensions, so neither can
+be expressed by it. That is not the reason to drop them, though; it is the
+symptom. The reason is that neither has a consumer: there is no browser in
+`apps/` at all, and the only two places in the tree that mention `mailto` are
+the dead module itself and `apps/qrcode`, which *encodes* the string into a QR
+image rather than dispatching it to anything. A row that cannot be satisfied is
+the fabrication 856 is about, and a disabled row is the same fabrication
+relocated to a label. When a browser exists, or when something resolves a
+protocol the way `apps/explorer` resolves an extension, the category costs one
+table entry and a second resolver.
+
+**So the shipped set is three:** Music, Video and Images.
+
+"Documents" is dropped for a different reason than the other two, and it is the
+sharper one. Its programs exist and its subjects have extensions, so it passes
+both tests above -- but its members are not one kind. A `.txt` opens with the
+editor and a `.pdf` with `pdfviewer`, and both are documents. A category is
+defined here as a set of extensions that share one program, so a Documents row
+would not express a preference, it would *impose* a wrong association on half
+its members the moment it was used. The other two omissions drop a row that can
+do nothing; this one drops a row that can do harm.
+
+**What this settles.** `gui/desktop/src/default_apps.rs` -- 2,325 lines --
+goes, under 815's "screens you open move to the Settings app and the shell's
+copies go", on 853's precedent that a shell panel with no consumer is deleted
+rather than finished. Its category *knowledge* survives as the extension table
+this decision defines, which is the part of it that was worth keeping.
+## 858. A wallpaper history records what the user chose, not what a timer did
+
+**Date:** 2026-09-17
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** the desktop keeps a short list of recent wallpapers so that a
+"previous wallpaper" command can exist. A running slideshow was adding an entry
+every time it changed picture on its own, which filled the list with pictures
+nobody had chosen and pushed the user's own choices out of it. Only deliberate
+acts are recorded now.
+
+**Context.** `WallpaperHistory` holds twenty entries and exists to support
+`go_back` / `go_forward`, which are implemented and tested and have never had a
+caller. Nine places recorded into it. Seven were user actions -- picking a
+colour, picking a picture, choosing the theme colour, switching to the
+time-of-day gradient, stepping a slideshow forwards or backwards by hand,
+asking for a random wallpaper. Two were not: `tick_slideshow`, the timer, and
+`populate_slideshow_paths`, which is a directory listing arriving.
+
+**What that cost, in numbers rather than in principle.** The default slideshow
+interval is thirty seconds and the buffer is twenty entries, so a slideshow
+left running replaced the entire history in **ten minutes**. A user who chose a
+picture, started a slideshow and came back after lunch would find "previous
+wallpaper" offering slideshow frames and nothing they had picked. That is not a
+history with a bug in it; it is a different feature wearing the name.
+
+**Options.**
+
+1. **Record everything, and let the caller filter.** Honest about what
+   happened, and the navigation could skip non-choices. But every caller would
+   need the same filter, and the twenty-entry budget is still spent on frames
+   -- a user's choice is evicted whether or not anyone skips it.
+2. **Record only user actions** -- the timer and the directory listing stay
+   out. The list means one thing, the budget is spent on choices, and no caller
+   needs to know the difference.
+3. **Two lists**, one of choices and one of everything. Nothing needs the
+   second.
+
+**Decision: (2).** The line is between *the user acting* and *the clock
+acting*, not between kinds of wallpaper: stepping a slideshow by hand is
+recorded, the same slideshow advancing by itself is not.
+
+**Reasoning.**
+
+- *A history is a record of decisions.* The question it answers is "take me
+  back to what I had", and the user never had the frame the timer chose --
+  they had "a slideshow".
+- *The budget is the argument.* Twenty entries is generous for choices and
+  meaningless for frames. Option 1 keeps the pollution and only hides it.
+- *It makes the unbuilt feature buildable.* The navigation could not sensibly
+  be wired while the list was mostly frames, which is a plausible reason nobody
+  ever wired it.
+
+**Cost accepted.** Someone who wants to return to a particular slideshow frame
+cannot, unless they stepped to it by hand. That is the right trade: the
+slideshow itself is the mechanism for moving between frames.
+
+**Pinned by** `a_timed_advance_does_not_enter_the_history` and
+`stepping_by_hand_does_enter_the_history` in `gui/desktop/src/wallpaper.rs`.
+The first was written because removing the timer's push broke **no** test --
+the old behaviour was unpinned, so the obvious "fix" of putting it back would
+have gone unnoticed.
+
+
+## 859. "Same as my desktop" stores no filename
+
+**In short:** the login screen can use the same background picture as the
+desktop. The obvious way to build that is to copy the desktop's current
+picture into the login setting when the user ticks the box. We do not: we store
+only the fact that it should follow, and ask the desktop what it is showing at
+the moment the screen is painted. If we stored the filename, the machine would
+keep showing whichever picture happened to be up when the box was ticked, for
+ever, while still calling itself "same as my desktop".
+
+**Date:** 2026-09-17. **Lane:** C. **Decided by:** Claude (autonomous).
+
+**The setting.** `appearance.yaml` gains `login.background`, one of `theme`,
+`color`, `desktop`, `image`, `gradient`. `desktop` is
+`LoginBackground::SameAsDesktop`, and the variant carries no payload at all.
+
+**Why the payload would be wrong.** The desktop's picture is not a constant.
+A rotation folder (landed the same day) replaces it every
+`wallpaper.interval_secs`; the time-of-day gradient changes it continuously.
+A `SameAsDesktop(PathBuf)` would be a snapshot taken at the instant the user
+chose the mode, and would go stale on the first rotation — a setting whose name
+says "same as" while showing something else. Holding nothing is what makes
+the name true.
+
+**What it costs.** One indirection at paint time: the session asks
+`WallpaperManager::current_image_path()` rather than reading a stored field.
+That is also the mechanism by which a rotation reaches the greeter for free:
+there is no separate code watching for the wallpaper to change, because
+nothing was cached to invalidate.
+
+**A second upload, not a second reference.** Uploaded images belong to the
+window that uploaded them (`Window::images` in the compositor), and the
+greeter has its own surface. So "the same picture" is decoded and uploaded
+twice, once per surface, and the two carry different ids. This is not
+duplication that could be optimised away by sharing an id: an id is only
+meaningful to the window that registered it.
+
+**The alternative considered, and rejected.** Store the resolved path and
+refresh it whenever the wallpaper changes. It needs a notification path from
+the wallpaper to the greeter that does not otherwise exist, and it has a
+failure mode the chosen design cannot have: if the notification is ever
+missed, the greeter shows a stale picture and nothing detects it. Asking at
+paint time cannot be missed, because there is nothing to miss.
+
+**Where it bites.** `gui/appearance/src/lib.rs` (`LoginBackground`, which
+lives there rather than in the greeter so that the setting and the drawing are
+one type — see 857), `gui/desktop/src/session.rs`
+(`refresh_login_image`, `sync_login_background`), and
+`gui/desktop/src/login_screen.rs` (`render_background`).
+
+
+## 860. A deleted keyboard shortcut is written down as deleted
+
+**In short:** the shortcuts file is merged onto the shipped defaults rather
+than replacing them, so that a shortcut added in a later version still reaches
+somebody who has customised theirs. That merge has a consequence: deleting a
+shortcut cannot be expressed by leaving it out of the file, because leaving it
+out is exactly what a file that has never heard of it looks like — and the
+default would come back at the next login. A deletion is therefore written
+down, as a line reading `none=<action>`.
+
+**Date:** 2026-09-17. **Lane:** C. **Decided by:** Claude (autonomous).
+
+**The two ways to do it.**
+
+| | *What changes* |
+|---|---|
+| **A. The file is authoritative** (replace the defaults) | Deleting works with no new syntax. A shortcut added in SlateOS 2 never appears for anybody who has ever changed a shortcut in SlateOS 1, because their file predates it and now outranks it. |
+| **B. Merge, and record deletions** (chosen) | New defaults keep arriving. The format grows one spelling, `none=<action>`, and a reader that has never heard of it must not mistake it for a chord. |
+
+**Why B.** The people most likely to have customised a shortcut are the
+people most likely to care about a new one, and A silently freezes exactly
+them. The cost of B is one reserved word on the left-hand side and the
+discipline of writing tombstones on every save — which
+`HotkeyConfig::from_registry` does by comparing the registry against
+`defaults()`, so a save is truthful without anyone having to remember.
+
+**The trap, and the test that names it.** A deletion that only dropped the
+line passes every assertion made against the running session: the registry
+really has forgotten the binding. It comes back at the next login. So the
+test is `a_deleted_shortcut_is_still_deleted_in_a_fresh_shell`, which builds
+a second `DesktopShell` from the defaults, asserts the default *is* there
+(or the test proves nothing), loads the file, and asserts it is gone. With
+tombstones ignored on load it fails with "the deleted shortcut came back at
+the next login".
+
+**`none` only counts as the whole left-hand side.** `none` is a word a chord
+could plausibly start with, and a parser that matched a prefix would unbind
+something a user had bound. `only_a_bare_none_is_a_tombstone` holds that line.
+
+**A bug this uncovered, which predates it.** Writing
+`deleting_one_shortcut_keeps_the_rest` failed with "deleting one shortcut took
+Start Menu with it", against code that had nothing to do with deleting.
+`load_shortcuts` unregistered every *other* chord bound to an action as it
+applied each binding — so an action with two chords had them delete each
+other, and only the last survived. The defaults put the Start Menu on both
+Super keys on purpose (one answers a driver that sets the Super bit, one a
+driver that does not), so after any save and reload one of the two Super keys
+silently stopped working. Fixed here, with
+`an_action_on_two_chords_keeps_both` guarding it by name.
+
+## 861. The photograph on screen has one image id; the grid will need a pool
+
+**In short:** the compositor stores pictures under numbers the application
+picks. Photo manager's single-photo view shows exactly one photograph at a
+time, so it always uses the number 1 and overwrites it whenever the selection
+moves. The alternative -- a number per photograph -- reads better until you
+ask who hands the numbers back when a photograph scrolls out of sight. Nobody
+in this application is watching for that yet. The thumbnail grid will have to
+be, and that is where the machinery belongs.
+
+**Date:** 2026-09-17. **Lane:** C. **Decided by:** Claude (autonomous).
+
+**The two ways to do it.**
+
+| | *What changes* |
+|---|---|
+| **A. One id per photograph** | Returning to a photograph shows it without decoding it again. Every id must be released when its photograph leaves the screen, or the compositor keeps every picture the user has clicked -- a 24-megapixel photograph is about 96 MB in this form, so an afternoon's browsing is measured in gigabytes. |
+| **B. One fixed id** (chosen) | Selecting the same photograph twice decodes it twice. Nothing can accumulate: there is only ever one picture, and the next upload replaces it. |
+
+**Why B.** The cost of A is not the memory, it is the lifecycle. A pool of ids
+needs a rule for when a photograph is no longer visible, an owner for that
+rule, and a test that the rule fires -- and the failure it prevents is
+invisible until a long session runs out of memory, which is the worst possible
+time to discover the rule was never wired. B cannot fail that way by
+construction.
+
+**B is not free, and the figure is known.** Decoding is not cheap: a
+21-megapixel JPEG measured 669 ms in release (and 7.6 s in debug, which is
+why that measurement is stated in release). Flipping between two photographs
+therefore re-decodes each time, where A would not. That is a real cost and it
+is the reason this is a decision rather than an obvious choice -- it is
+accepted because the single-photo view is driven by a human moving a
+selection, so the decode happens at the speed of clicks, not of frames.
+
+**What makes B safe rather than merely simple** is that the upload's owner is
+recorded beside it. `ShownPicture` carries the `PhotoId` it was decoded from,
+and the view draws the picture only when that id matches the current
+selection. Without it, the upload -- which outlives a change of selection by
+the one frame it takes to replace it -- would be drawn for a single frame
+under the *new* photograph's name: the wrong photograph on screen, briefly,
+which is worse than a placeholder.
+
+**When this gets revisited.** When the grid decodes thumbnails. At that point
+a pool with release exists because the grid cannot work without one, and the
+single-photo view should draw from it rather than keep a private number. The
+sequencing is deliberate: build the lifecycle where it is forced, not where it
+can be avoided.
+
+**FOLLOW-UP, same day: the grid needed no pool, and the reasoning above was
+half wrong.** The thumbnails landed within hours, on `gui/thumbs` (extracted
+from `apps/explorer`, which had solved this long before I asked the question).
+Ids there are **derived, not allocated**: `thumbs::image_id` hashes the file's
+path, modification time and size. There is no free list, no allocator and
+nothing to hand a number back to.
+
+So of the two halves of "the lifecycle":
+
+| Half | Predicted | Actual |
+|---|---|---|
+| **Allocation** | a pool to draw ids from | none exists; an id is a hash of the file's identity |
+| **Release** | a rule for when a photograph is off screen | real, and the cache owns it -- eviction reports the ids the compositor must be told to drop |
+
+The release half was genuine and is exactly as load-bearing as claimed; what
+made it tractable is that an LRU already knows when something has left, so
+nobody had to invent "no longer visible". The allocation half I worried about
+does not exist as a problem.
+
+**The decision stands; the reasoning that produced it does not.** One fixed id
+for the single-photo view is still right -- that view holds a full decode
+rather than a `Thumbnail`, it is not in the cache, and giving it a derived id
+would mean inventing a cache entry to derive it from. But it was chosen by
+weighing a cost that was never going to be paid.
+
+**What I would do differently.** Ask whether the tree already solves it before
+reasoning about what solving it would cost. `apps/explorer` had a working
+thumbnail cache with an id scheme, an eviction rule and the
+drops-before-uploads ordering at the time this entry was written, and I did
+not look. An hour of careful argument about a hypothetical allocator was
+answered by one `grep` for `ImageChange::Drop`.
+
+## 862. An app that *cannot* get data says so; an app that merely *has* none stays quiet
+
+**Date:** 2026-09-18
+**Lane:** C
+**Decided by:** Claude (autonomous) — writing down a rule that thirteen apps
+already follow, after nearly filing one of them as broken for following it.
+
+**In short:** Several of our apps can't do their job yet, because the thing
+they depend on — a network, a disk, a hardware list — isn't built. Those apps
+put a sentence on screen saying so, instead of showing an empty list. The
+difference matters because an empty list is not silent: a weather app with no
+alerts looks like "no storms coming", and a partition tool with no disks looks
+like "this computer has no drives". Both are claims about the world that
+nothing actually checked. The rule is that an app which *cannot* look must say
+it cannot; an app which looked and found nothing may simply show nothing.
+
+**The rule.** At the top of the render path, before drawing any panel:
+
+- **If the app has no route to its data at all** — no transport, no device, no
+  permission — draw a short statement of that inability *instead of* the
+  normal view, and return. `apps/weather` does this in `render_cannot_fetch`;
+  `apps/partmanager` in its `disks.is_empty()` branch.
+- **If the app can obtain data and currently has none**, draw the ordinary
+  empty view. `apps/reminders`, `apps/calendar` and `apps/filesearch` are
+  correct to stay quiet: you can add a reminder, add an event and run a search,
+  so "empty" honestly means "you haven't yet".
+
+  **Correction, 2026-09-18 (same day): `apps/notes` was named here and does
+  not belong.** It cannot create a note -- `create_note`,
+  `update_note_title` and `update_note_content` all have no production caller,
+  and there is no import -- so its "No notes yet." falls in the *first* group
+  and should say it cannot. The premise was checked against its `TextEntry`,
+  which does handle typing, but only for search terms, tags and notebook
+  names. **The check this rule needs is not "does the app accept text" but
+  "can the user produce the thing the app is a list of"**, which is a question
+  about one specific object and cannot be answered by looking for an input
+  box. See `known-issues.md` -> `TD-C-NOTES-CANNOT-MAKE-A-NOTE`.
+
+**Deny the inference, not just the data.** The best of these lines do not stop
+at "no data"; they refuse the conclusion the blank space invites:
+
+| App | The line |
+|---|---|
+| `weather` | "It cannot deliver severe-weather alerts either. **Silence here is not an all-clear.**" |
+| `partmanager` | "No disks can be listed … **This is not a finding that you have none.**" |
+| `devicemanager` | "This program cannot see the machine's hardware." |
+| `netmanager`, `email`, `podcast`, `rssreader`, `torrent`, `videoplayer`, `mediaconvert`, `startupmanager`, `vpnmanager`, `renamer` | the same shape |
+
+**Alternatives considered.**
+
+- *Show sample data instead.* This is what the apps originally did —
+  `weather` opened on invented forecasts for New York, London and Tokyo;
+  `partmanager` listed a Samsung 970 EVO Plus down to a serial number. It was
+  removed deliberately: invented data about the user's own machine or sky is a
+  confident lie, and it is worse than emptiness precisely because it is
+  legible.
+- *Show an empty view everywhere and let the user infer.* Rejected above: the
+  inference is wrong and sometimes dangerous.
+- *Hide the app until its dependency exists.* Rejected — the layouts are real
+  and tested, and hiding them loses the only signal that the work is waiting
+  on a prerequisite rather than undone.
+
+**Why this is written down now.** Thirteen apps had converged on it
+independently and nothing made it binding on the fourteenth. It also cost me
+a false finding: I reported `weather` as drawing a dashboard over an empty
+model, having checked its constructor, its fields and its callers but never
+its render path — where the early return lives. **A model check tells you what
+an app has; only the draw tells you what an app claims**, and the two differ
+exactly when the app is handling emptiness well. The check to run when asking
+"can this app show anything" is therefore on the render entry point, not the
+struct. See `known-issues.md` →
+`TD-C-WEATHER-CAN-ONLY-EVER-BE-EMPTY` (withdrawn).
+
+
+## 863. `F1` raises the shortcut list everywhere; `?` also, where it can
+
+**Date:** 2026-09-18
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** Seven apps now show a list of their keys when asked. The question
+was which key asks. `?` reads well and is what a terminal user reaches for, but
+`apps/spreadsheet` has to be able to put a `?` in a cell, so `?` cannot mean
+"help" there -- and a help key that works in six apps out of seven is a key
+nobody can rely on. `F1` works in all seven; `?` works as well in the six that
+are not obliged to type one.
+
+**The options.**
+
+| | *What changes* | Against |
+|---|---|---|
+| `?` only | one key, the one a terminal user tries | in `apps/spreadsheet`, `?` puts a `?` in the cell and no help appears -- a dead end reached by pressing the very key you learned |
+| `F1` only | one key, the desktop convention, works everywhere | `?` does nothing in six apps where it easily could, and `?` is what somebody coming from a terminal or a web page tries first |
+| **`F1` always, `?` as well where free** (chosen) | pressing `F1` shows the keys in every app; pressing `?` does too, except in the spreadsheet, where it types a `?` | two keys to document per app, and one app where they differ |
+
+**Why the third.** The failure worth avoiding is *learning a key that then does
+not work*, which is worse than not knowing a key at all -- it teaches the user
+that the feature is absent. `F1` is the key that never fails, so the sentence
+"press F1 to see the keys" is true of the whole suite. `?` costs one extra
+match arm where it is free and saves a user who tries it first.
+
+**Why `?` is not simply dropped from the six.** It is what a reader of a
+terminal program, a web page or a text editor tries, and in an app with no text
+entry there is nothing for it to collide with. Removing it would make the suite
+uniform by taking away something that works.
+
+**What this does not settle.** `apps/minesweeper`, `apps/mixer` and
+`apps/wordsearch` print their keys in a permanent footer rather than behind a
+key, and neither `F1` nor `?` does anything in them. That is not an
+inconsistency to fix: a list already on screen needs no key to raise it, and
+adding one would mean drawing the same list twice.
+
+**How it is held.** Each app's `SHORTCUTS` row reads `"F1 / ?"`, and
+`every_advertised_key_does_something` presses *both* keys named in a row -- so
+the binding cannot be dropped from one app without that app's own test saying
+so. See `known-issues.md` -> `TD-C-A-PRINTED-KEY-LIST-IS-A-SECOND-COPY`.
+## 864. `check-fields-written-never-read.py` stays off `kernel/`, because a gate that is wrong 39 times is one nobody reads
+
+**Date:** 2026-09-21 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** lane A measured what this lane's dead-field gate would find in
+the kernel and asked lane C to decide whether to point it there. It would
+find 169 fields, of which 39 are correct code the gate cannot recognise as
+correct. The gate stays scoped to lane C's own roots. The *survey* is
+available to anyone who wants it, because `--roots=kernel` already works and
+the measurement is worth having; what is declined is making it a gate that
+can turn another lane's tree red.
+
+**Why the decision was lane C's at all.** `boot-test.sh`'s wiring comment
+says it: running a gate can fail on the owning lane's tree, and these two
+read lane C's roots only, so neither can red lane A or lane B. Widening the
+scope is therefore a decision about whether *this lane's* gate may stop
+*another lane's* build. It is not lane A's to take, and they did not take
+it — they measured and asked, which is the right shape.
+
+**The measurement, theirs, and the part that decides it.** 169 fields in
+`kernel/`: 39 whose struct carries `repr(C)`/`repr(packed)`/`repr(transparent)`,
+130 ordinary Rust structs. The 39 are the problem, and two were checked
+rather than assumed:
+
+* `nvme.rs`'s `nsid`, `prp1`, `prp2`, `cdw10..12` on `NvmeSqe`,
+  `#[repr(C, align(64))]` — an NVMe Submission Queue Entry. The driver fills
+  them and the *controller* reads them over DMA.
+* `syscall/entry.rs`'s `kernel_rsp` on `PerCpuData`, documented `[gs:0] =
+  kernel RSP`, read by assembly through the GS base.
+
+In kernel code, "written and never read by Rust" is frequently the entire
+point: there are three consumers neither the compiler nor the scanner can
+see — DMA engines, assembly, and userspace across a copy.
+
+**The rule this project already has, applied.** `check-variant-lists.py`'s
+docstring settles an identical question and is quoted rather than
+re-derived: *"Checking those against the variant count would report four
+non-problems, and a gate that cries wolf four times is a gate nobody
+reads."* Thirty-nine is not four. A `repr(C)` discriminator would remove the
+bulk, and lane A says plainly it is not sufficient — a `repr(Rust)` struct
+handed to `copy_to_user` still slips through — so the residue would be
+false findings of unknown size in somebody else's tree.
+
+**What is not being claimed.** The 130 are probably real; lane A sampled one
+(`initproc.rs`'s `shutdown_requested_ns`, assigned at 654 and read nowhere)
+and it is this lane's `tree_expanded` shape exactly. Declining to make it a
+gate is not a claim that the kernel has no dead fields. It is a claim about
+who may red whose build, and about the cost of a finding a reader must
+re-clear every run.
+
+**The alternative, for the record.** Widen the gate with a `repr(C)` rule
+and hand lane A 130 findings plus an unknown number of false ones. The
+argument for it is that dead fields are dead wherever they live and a lane
+should not be shielded from a true finding. It loses to the cry-wolf rule
+and to lane ownership: a finding delivered as a red build is a finding
+delivered as an interruption, and lane A can run the survey themselves in
+one command whenever they want it.
+
+**Where:** `requests/a-c-your-field-gate-has-never-seen-kernel-and-would-need-a-repr-c-rule.md`
+carries the answer and lane A's full measurement.
+
+
+## 865. A parser that knows where the frame ends hands that back; it does not make the caller rebuild it
+
+**Date:** 2026-09-21 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** verifying a Wi-Fi handshake message means re-hashing exactly the
+octets the sender hashed, and those are "the header plus however many octets
+the header says" — not "the whole buffer the driver handed you", which is
+longer because network cards pad short packets out to a minimum size. Working
+that range out was left to each caller, and both of the two callers that exist
+got it wrong at least once. `KeyFrame::parse_frame` now returns that range
+alongside the parsed message, so nobody computes it twice.
+
+**What was wrong with the old shape.** `KeyFrame::parse` took a *body* — the
+frame with its four-octet header already stripped. A caller therefore had to
+hold two slices of the same buffer at once (the body it parsed, and the frame
+it hashed), and derive the second from the first by hand:
+
+```rust
+let body = eapol::body(frame)?;
+let key = eapol::KeyFrame::parse(body, mic_len)?;
+let frame_len = eapol::HEADER_LEN.checked_add(body.len())?;
+let hashed = frame.get(..frame_len)?;      // the MIC-covered octets
+```
+
+Four steps, and in this lane a fourteen-line comment underneath explaining
+which slice was which. The kernel lane had the same four steps in its
+authenticator. That is one quantity computed independently in two trees, and
+the failure mode is silent: getting it wrong yields a MIC mismatch, which is
+indistinguishable from a wrong passphrase.
+
+**The decision.** `parse_frame(frame, mic_len) -> Option<ParsedFrame>` where
+`ParsedFrame { key, hashed }`, and `hashed` is derived from the same read of
+the header that produced the body — in fact the body is now a sub-slice of
+`hashed`, so there is no arithmetic left that could make them disagree.
+
+**Struct or tuple.** Lane A proposed the shape and had no preference between
+`(KeyFrame, &[u8])` and a named struct. The struct was chosen because a tuple
+names the dangerous quantity only where it is destructured, and the place the
+mistake gets made is the `verify_mic` call some lines later. `parsed.hashed`
+carries the name to that line; `.1` does not. The cost is a second public type
+for a two-field pairing, which is real but small.
+
+**Why `parse` was kept rather than replaced.** Its one remaining caller is in
+`kernel/`, which this lane must not write. Deleting it here would have made the
+next merge to `main` red for all three lanes to save one line of ceremony.
+Lane A offered it either way; the version with no red window was taken. The
+deletion is the second half of an agreed two-step and is theirs to trigger.
+
+**The Packet Type check, and the limit of it.** `parse_frame` also refuses a
+header whose Packet Type is not `KEY`. Lane A suggested this partly to catch a
+*body* mistakenly passed to a frame parser, on the grounds that the octet a
+body puts where the Packet Type lives is always `0x00`. That is not so, and
+this crate's own frames are the counterexample: message 4 and group message 2
+carry `KEY_MIC | SECURE`, whose high byte is `0x03` — which *is*
+`packet_type::KEY`. The check was still taken, because it rejects a genuine EAPOL-Start or
+EAPOL-Logoff outright, which is its own justification. But it closes four of
+six shapes, not six, and the other two are still caught only by the length
+overrun. The doc comment says which, and a test named for the gap pins it, so
+that a future reader tightening this function knows which check is actually
+load-bearing.
+
+**The alternative not taken** was a version check to close the rest. Rejected:
+a body's first octet is the Key Descriptor Type, `2` for RSN, which is also a
+*valid* EAPOL version — so it would not catch an RSN body anyway — and
+refusing unknown versions outright trades a real interoperability rule for a
+partial confusion check. Only a type distinction between a frame and a body
+closes it properly, which `&[u8]` cannot express.
+
+**How the error in the justification was found,** because the method
+generalises: the check was deliberately deleted to see which tests noticed.
+One of the two tests written for it passed without it — its name said
+"refused by the packet_type check" and the length overrun was doing the work.
+Explaining why only one test depended on the check required working out what
+the octet really holds, which is what produced the counterexample. The test
+was renamed to what its assertions can see. This is dd-855's relative for
+controls: **a test named after a mechanism should fail when that mechanism is
+removed, and the cheapest way to find out is to remove it.**
+
+## 866. One table that both draws and dispatches beats two copies and a test that compares them
+
+**Date:** 2026-09-21 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** when a program shows you a list of its keyboard shortcuts, that
+list and the code that answers the keys are usually two separate things, and
+they drift apart -- the list ends up promising keys that do nothing. The usual
+answer here has been to write a test that compares them. `apps/videoplayer`
+does something better: it keeps *one* table that is both the thing drawn on
+screen and the thing the key handler looks the key up in, so there is nothing
+to compare and nothing to drift.
+
+**What the two shapes look like.**
+
+*Two copies, guarded* -- the common shape in this tree, and what
+design-decisions 863 describes:
+
+```rust
+const SHORTCUTS: &[(&str, &str)] = &[("Ctrl+S", "Save")];   // drawn
+match key { Key::S if ctrl => self.save(), .. }             // dispatched
+#[test] fn every_advertised_key_does_something() { .. }     // compared
+```
+
+*One table* -- `apps/videoplayer`:
+
+```rust
+pub struct Shortcut {
+    pub keys: &'static str,      // as the help panel prints it
+    pub action: &'static str,    // as the help panel prints it
+    pub press: Press,            // the keystroke that runs it
+    pub command: Command,        // what running it does
+}
+Shortcuts::list().iter().find(|sc| sc.press.matches(event))
+```
+
+The panel draws `keys` and `action`; the handler finds the row by `press` and
+runs `command`. Adding a row to the panel *is* adding the binding.
+
+**Why this is the better one, stated as a property rather than a preference.**
+The guarded shape detects drift; the single table makes drift unrepresentable.
+That difference is not academic here. `apps/paint`'s list was unguarded and 8
+of its 33 rows were dead -- two for a Save and an Open no code path reached,
+six for keys whose character never arrived. `apps/rssreader` shipped 21 rows of
+which about four worked. `apps/towers` advertised no key for `N` while `N`
+started a new game. In the single-table shape none of those is expressible: a
+row with no working key is a row with no `command`, which does not compile.
+
+`apps/videoplayer` also shows what the shape does *for* you. Its `list()` doc
+comment records that `Ctrl+O` and `Ctrl+S` were removed because the tree has
+neither a file chooser nor a framebuffer read-back -- the identical defect
+`apps/paint` shipped, noticed and fixed here as a matter of course, because
+deleting the row and deleting the binding are the same edit.
+
+**So why is this not simply mandated everywhere?** Because the cost is not
+uniform. The single table needs a `Command` enum and a table-driven dispatcher.
+For a program that already has one -- a media player, an editor, anything with
+an undo stack or a command palette -- that is free or nearly so. For a small
+game whose handler is a dozen-arm `match` on `Key`, introducing a command enum
+to hold nine rows is a larger change than the problem, and one with its own
+risk: a mechanical rewrite of a working handler to satisfy a pattern.
+
+**The rule adopted.** Prefer the single table when the app already has a
+command type, or when its key handling is being restructured anyway. Otherwise
+use `SHORTCUTS` plus the two guards from 863, which is cheap and catches the
+same defects one step later. **Do not rewrite a working handler solely to adopt
+the table** -- and when the guarded shape is chosen, say in the list's doc
+comment that it is two copies, so the next reader knows the test is load-
+bearing rather than decorative.
+
+**What this does not change.** 863 stands: `F1` always, `?` where free. This is
+about where the list *lives*, not which key raises it.
+
+**A note on how it was found,** because it is the third time today this shape
+has come up. `apps/videoplayer` appears in the survey of apps that "bind keys
+and carry no list" -- 31 keys, no list. It has the best key documentation in
+the suite. The survey looks for a `const` of `(&str, &str)`, and this table is
+a `&'static [Shortcut]`, so it was invisible to it. The survey is right to
+report candidates rather than verdicts, and this is the third app off that
+queue that turned out to need nothing -- after `apps/sokoban`, which prints its
+keys in a footer, and `apps/minesweeper`, which was counted unguarded because
+its guard has a different name.
+
+## 867. An instance-level extension command gets a fan-out policy per command, and `VK_EXT_debug_utils` gets "everyone, all or nothing"
+
+**Date:** 2026-09-22 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** A computer can have more than one graphics driver installed. Our
+Vulkan loader hides that: a program asks for one "connection to the graphics
+system" and gets a single handle that secretly stands for one connection per
+driver. That works until the program calls a function through that handle,
+because then somebody has to decide *which driver actually does the work*. For
+most functions there is no single right answer, and it differs per function.
+This records the answer for the first such function pair we implement — the one
+that subscribes a program to warning messages from the drivers — and, more
+importantly, records that "which driver answers" is a decision to be made once
+per function rather than a rule that can be written once for all of them.
+
+### What forced the decision
+
+§803 forwards extension commands the loader has never heard of, in three
+instructions of assembly, with no knowledge of their signatures. That works for
+a command whose first argument is a `VkPhysicalDevice` — one GPU, therefore one
+driver, therefore one right answer and no decision to make. Overwrite argument
+0 with the driver's own handle and jump.
+
+It cannot work for a command whose first argument is a `VkInstance`. That handle
+is the loader's own object standing in front of *several* driver instances at
+once, so there is no single driver to substitute. The question "who answers?"
+has to be answered, and the answer is different for different commands:
+
+| shape of command | plausible policies |
+|---|---|
+| a subscription (`vkCreateDebugUtilsMessengerEXT`) | everyone, so no driver's diagnostics go missing |
+| a surface (`vkCreateXlibSurfaceKHR`) | the loader owns one object every driver understands |
+| a query | first driver that answers, or a merge |
+
+No mechanism can pick between those, which is why §803's trampoline pool stops
+where it does. The roadmap and `known-issues.md` both described this as "a
+policy, not a forwarding rule", and this entry is the first policy.
+
+### The policy chosen for the messenger pair
+
+**Every driver that offers the command gets one, and the loader's handle stands
+for the whole set.** A debug messenger is a *subscription*: the program is
+asking to be told about anything any driver finds noteworthy, so leaving a
+driver out would silently narrow what it hears.
+
+Two rules give the policy its edges, and they are deliberately not the same
+rule:
+
+* **A driver that does not offer the command is not a failure.** It simply does
+  not implement `VK_EXT_debug_utils`, which is a legitimate thing for a driver
+  to be. It contributes nothing, exactly as a driver with no GPUs contributes
+  nothing to `vkEnumeratePhysicalDevices`.
+* **A driver that offers the command and then fails, fails the whole call.**
+  Everything already built is destroyed and the driver's own error is returned.
+
+### The alternative, and why it lost
+
+The obvious alternative was to reuse `instance::outcome`, the rule the loader
+already applies to `vkCreateInstance`: *any driver succeeding is a success*.
+Reusing it would have been one line and would have kept one policy in the crate
+instead of two.
+
+It is the wrong rule here, and the difference is what the command means. For
+`vkCreateInstance`, a driver that cannot participate is a driver the program was
+never going to use — dropping it loses nothing the program can observe. For a
+messenger, a driver that cannot participate is **a source of warnings going
+quiet**, and the C API gives the program no way to find out: it receives one
+handle and a success code, with no count and no list. It would be subscribed to
+a subset of its drivers, believe it was subscribed to all of them, and have no
+way to ask. That is the "instrument that fails toward clean" shape recorded as
+known-issues.md shape 23 — under-reporting that deletes its own evidence.
+
+Rolling back also matches what Vulkan already promises for a create command: on
+failure the program's handle is untouched and nothing is left allocated, which
+is what lets a caller keep a previous messenger in the same variable.
+
+The cost of the choice is real and worth stating: **a machine with one broken
+driver among three now gets no messenger at all, where the lenient rule would
+have given it two working ones.** That is the right trade only because the
+failure is loud — the program is handed an error code it must handle — whereas
+the lenient rule's failure is silent. A loud failure can be diagnosed; a quiet
+subscription cannot.
+
+### Two smaller calls that came with it
+
+**The loader answers null when no driver implements the extension.** It would
+have been simpler to always hand back a function pointer and let the call fail.
+But a non-null answer from `vkGetInstanceProcAddr` *is* the claim that the
+command exists, and null is what the C API already means by "no such entry
+point". Handing out a pointer that can only fail would be a new instance of the
+exact defect this whole line of work exists to close — advertising an extension
+whose entry points answer null.
+
+**§802's "declare no Vulkan structures" survives this command.** The
+create-info pointer is passed to each driver untouched; the loader never reads
+a field, so it needs no declaration of
+`VkDebugUtilsMessengerCreateInfoEXT`. This is worth recording because it is
+*not* generally true of what remains: a surface-creation command is one the
+loader has to read to know which platform it is for, and that is the command
+that will finally force the structure declarations. The messenger pair being
+free of them is a property of this command, not a reprieve.
+
+### What this does not settle
+
+The surface family is still open, and it is now clear that it is blocked on
+more than a policy. See `known-issues.md`
+`C-VKLOADER-ADVERTISES-EXTENSIONS-WHOSE-ENTRY-POINTS-IT-ANSWERS-NULL-FOR`.
+
+## 952. A measurement the host can distort needs a repeat, not a wider bound
+
+**Date:** 2026-09-18 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; prompted by a red boot whose kernel delta was comment text
+
+**In short:** a start-up check confirms that a 20-millisecond sleep really
+takes about 20 milliseconds. Once, it took 988, and the check killed the
+boot. The machine was busy compiling at the time, and the check has no way
+to tell a busy machine from a broken timer. The obvious repair is to accept
+a longer sleep; instead the check now measures three times and complains
+only if every attempt is slow, because a busy moment passes and a broken
+timer does not.
+
+**The situation.** `sched::test_sleep_ns` asserts a 20ms sleep lands in
+5ms..500ms. On boot `a17b8e0fa` it measured 988ms and panicked. The kernel
+diff from the previous green boot was 4 files, 50 insertions, **all of it
+`//!` comment text** -- which cannot change runtime timing. Across the 19
+prior boots that logged the figure it ran 20.768ms..32.826ms, median
+22.083ms, so 988ms was 30x the observed maximum; two `cargo` processes were
+running while QEMU booted; and `boot-test.sh` passes neither `-icount` nor
+`-rtc clock=vm`, so the guest clock follows host wall time and a host stall
+inflates this number directly.
+
+**The decision.** Retry up to 3 times, pass on the first attempt under the
+ceiling, panic only if all overshoot, and print every measurement.
+
+| option | for | against |
+|---|---|---|
+| raise the ceiling to ~2s | one line; never flakes again | the ceiling is the *only* reader of this signal, so widening it spends the entire detection budget of the test. dd-951 is the rule: enumerate a signal's readers before relaxing it, and here there is exactly one |
+| drop the upper bound | no false boot failures | "the timer never fired" becomes undetectable, and that is the failure the test was written for |
+| **retry, then panic (chosen)** | a host stall does not repeat; a dead timer overshoots every attempt, so detection survives intact | up to 3 task spawns; and a *genuinely intermittent* timer bug at <1-in-3 frequency is now silently retried rather than reported |
+| pin the guest clock (`-rtc clock=vm`) | removes the host's influence at the source | changes what every other timing measurement in the boot means, including the benchmark scorecard. Far too wide a blast radius for one assertion |
+
+**The cost, stated plainly, because it is the reason this is a decision and
+not a fix.** An intermittent timer stall that happens less than one time in
+three now produces a passing boot. That is a real loss of sensitivity, and
+it is bought deliberately: a boot-killing assertion that fires on host load
+trains its reader to disbelieve it, and a disbelieved assertion has less
+detection power than a retried one. The mitigation is that the retry is not
+silent -- each overshoot prints its measurement, so the frequency becomes
+visible in the logs rather than being converted into a boot failure. If
+those lines start appearing without a panic, that IS the intermittent-bug
+report, and it arrives without costing a boot.
+
+**A second defect, found only because two assertions disagreed.** The wait
+budget was `apic::tick_count() + 50` while the panic on it read *"did not
+complete within 500ms"* -- the same quantity in two units, equal only if a
+tick is exactly 10ms. On this boot the tick budget outlasted the 988ms
+overshoot, so the guard never fired and a downstream assertion caught the
+problem instead. It was visible only because `done != 0` passed while
+elapsed reported 988ms, which is impossible if both bounds are 500ms.
+
+The general form, which is the part worth keeping: **a bound stated in units
+it does not measure is a bound that lies exactly when it is needed.** The
+wait is now bounded by `hrtimer::now_ns()`, which reads the HPET or the TSC
+-- both free-running, so the deadline still expires when the APIC timer is
+the broken thing. That property is why the real-time bound is safe here and
+would not have been if the clock were timer-driven.
+
+**What this does not settle.** Whether that 988ms was contention or a latent
+stall is still unknown; the retry makes the boot survive the ambiguity and
+makes the evidence legible, not the cause known. The boot lock serialises
+QEMU across lanes but does not stop another lane *compiling* during a boot,
+so the contention path remains open and is recorded in `known-issues.md`.
+
+## 953. A cheap signal standing in for a direct one is a proxy, and a proxy has to be named as one
+
+**Date:** 2026-09-18 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; three instances mine in one day, a fourth contributed by lane C
+
+**In short:** four times in one day I answered a question by looking at
+something *near* the answer instead of the answer, and did not notice I had
+substituted. None of them were careless in the moment -- each was a true
+observation about the wrong thing. The rule this produces is not "be more
+careful": it is that when a cheap signal stands in for a direct one, say so
+where the conclusion is written, because the substitution is invisible
+afterwards.
+
+**The four, which have nothing in common but their shape.**
+
+| I looked at | I concluded about | what was actually true |
+|---|---|---|
+| a variable's **declaration** (`SLATE_ZIG=$SLATE_SPIKE/zig/zig`) | where zig lives | `slate_ensure_zig` reassigns it; it resolved to the shared cache, and `build/spike/zig` does not exist |
+| a module's **name** (`binfmt`) plus its signatures | what it is for | line 1 says *statistics*; I called it a registry |
+| a gate's note about the **default** invocation ("`cargo clippy` runs for a Windows target") | what any invocation can reach | `x86_64-unknown-linux-gnu` is installed; the check takes one flag |
+| a **search returning nothing** (lane C's: `grep cannot`) | what the program admits | it says `Cannot`; there were five |
+| a **wall of 2114 compile errors** (lane C's) | a font crate being broken | `--target` was omitted, so cargo built for the bare-metal default and every `std` import failed |
+
+Declaration vs call site. Name vs line 1. Default vs possible. Silence vs
+absence. **Volume vs evidence** -- lane C's sharpest: *a wall of errors is as
+unconditional as a label.* All 2114 of their messages were true, and
+together they said only that the question had been misconfigured; nobody
+doubts 2114 errors, which is exactly what makes the count persuasive and
+uninformative at once. The same family as an output line that states its
+conclusion regardless of the data -- I wrote `count; echo "(0 = torn
+down)"` three times in one day and it printed its claim over a count of 4.
+The silence row is also lane C's, from their
+`TD-C-SEVEN-WAYS-A-SEARCH-SAYS-NOTHING-AND-MEANS-NOTHING`, which has seven
+more of the family that I did not have.
+
+**Why this is a decision and not just a list of mistakes.** Because the
+proxy is usually the *right* thing to reach for. Reading a declaration is
+how you find a variable; grepping is how you find code; a module's name is
+how you find the module. Banning the cheap signal would mean never
+navigating at all. What went wrong each time was not the lookup, it was
+writing the *conclusion* in terms the lookup could not support -- and by
+then the proxy is gone from the sentence and only the claim remains.
+
+So the practice is: **when the conclusion is load-bearing, take the direct
+observation, and when you keep the proxy, name it in the artifact.** "No
+caller found by grep" and "not called" are different sentences and only one
+of them is defensible. Concretely, for each row above the direct observation
+was cheap and available: run the function and see where the file landed; read
+line 1; run `rustup target list --installed`; grep case-insensitively, or
+better, compile.
+
+**The corollary that cost the least and taught the most.** Earlier the same
+day I nearly recorded that the kernel's file-immutability protection did not
+work, having established by call-graph that its only caller was a test. The
+thing that settled it in one command was *does the test pass* --
+`[ext4] immutable: write, truncate and unlink are all refused ... OK` on
+every boot. A call-site search is evidence about one route to a behaviour; a
+passing behavioural test is evidence about the behaviour. Same substitution,
+pointed the other way, and it would have told a reader not to rely on
+something they can rely on.
+
+**The test that makes a negative claim defensible, contributed by lane C
+after reading the above:** *"no caller" and "nothing writes it" are
+different sentences, and only the second survives a second implementation
+path.*
+
+That is exactly why the immutability case broke. "`is_writable` has one
+caller and it is a test" is a claim about **one predicate**, and there were
+three other paths -- `write_file`, `truncate`, `unlink` -- each refusing on
+its own. A claim about *the data* rather than about an entry point would
+have held: nothing writes it by any route is not defeated by finding
+another route.
+
+Lane C re-ran their own two newest findings against this and both survive,
+for that reason rather than by luck:
+
+| finding | the defensible form |
+|---|---|
+| slides "cannot type" | not "`set_text` has no caller" -- there is no `set_text`. Zero assignments to `.text` anywhere in the crate, tests included |
+| notes "cannot make one" | not "`create_note` has no caller" -- both `notes.push` sites are *inside* the two unreachable creators. The mutation was checked, not the entry point |
+
+So the call graph is fine for finding candidates and indefensible in the
+conclusion -- the same split as the four rows above, stated as a usable
+test rather than as a warning.
+
+**Lane C also hit this corollary in the worse direction the same day**, which
+is worth recording because it is the direction that costs a reader something.
+They filed `apps/weather` as drawing a dashboard over an empty model --
+constructor checked, fields checked, every writer of `current` checked, all
+true -- corrected it once, still wrong, and withdrew it: `render_commands`
+returns through `render_cannot_fetch` and prints four lines saying it cannot
+fetch, ending *"Silence here is not an all-clear."* The app was handling
+emptiness better than the proposed fix would have. They had answered "can
+this show anything" from the model when only the draw can answer it.
+
+Both of us landed on the same one-command version in different domains:
+**stop asking where the call site is; ask what the program does when it
+runs.** For the kernel that is a boot line; for an app it is the render tree.
+
+**The same substitution applied to a FIX rather than to a claim, contributed
+by lane C 2026-09-18:** *a remedy applied where the failure was seen does not
+reach the places it was not.*
+
+Their case is unusually complete, which is what makes it worth recording.
+An intermittent failure in `gui/desktop` turned out to be a race on the
+process environment: `populate_defaults` reads `HOME`, `settingsfile::testing`
+*removes* `HOME` for the duration of a scratch-config turn, and four tests
+take those turns. Process-global environment, tests as threads, so the
+reader saw `HOME` mid-deletion and built two icons instead of four.
+
+Everything needed to prevent it was already in the tree:
+
+| already present | evidence |
+|---|---|
+| the diagnosis | an entry named `TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS` |
+| the tool | `config_turn()`, built for exactly this |
+| the precedent | 23 of 27 `oswindow` tests converted, and four sites in the *same crate's* `session/tests.rs` |
+
+`icons.rs` simply was not among them. The knowledge, the mechanism and the
+worked example were all in the building, and the bug survived anyway --
+because the population a fix is applied to is *the sites where it was seen
+to fail*, and the population at risk is *the sites that can fail*. Those are
+different sets, and nothing in a green tree distinguishes them. It is the
+corpus problem of dd-942 pointed at a remedy instead of at a verdict.
+
+**And their second observation is the volume costume again, wearing green.**
+2,843 tests passed after the fix -- and 2,843 passed *before* it, four times
+the same night. They are claiming the fix structurally (the reader now takes
+the lock the writers take) and explicitly **not** on the strength of the
+pass, because a flake that reproduces once in five runs is not disproved by
+one green run. A large passing count is exactly as unconditional as 2,114
+failing ones: both are impressive numbers that answer a question nobody
+asked.
+
+**Lane C's one-line statement of the whole entry, which is better than its
+title:** *the outcome carries no information about the mechanism, and we
+keep reading outcomes as if it did.* 2,114 errors, 2,843 passes, a green
+run over an unfixed race, and -- the one that stung -- a fix of mine that
+satisfied a rule I had never read. **A test that passes for the wrong reason
+is indistinguishable from one that passes for the right one, right up until
+the reason matters.** Passing by accident is worse than failing, because
+failing would have sent me to the rule.
+
+**And the timing refinement has two forms, because the good fix is not
+always available.** Where a second clock exists, compare against it: two
+clocks stall together, so no host pause can separate them. Where it does
+not -- lane C's `rssreader` parser test measures its own work, with nothing
+running alongside it to compare to -- rule 1 is unavailable and the ceiling
+simply has to clear the largest stall the host has been observed to take.
+They raised theirs from 1s to 30s on that reasoning, which still catches the
+non-termination the test exists for.
+
+Their instance is worth recording for how it was justified: the 1-second
+ceiling carried a comment calling it *"orders of magnitude of slack over the
+closed form"* -- the ratio argument, stated confidently, in the one place
+the ratio argument does not hold.
+
+**Two more from lane C, both operational rather than epistemic.**
+
+*Rewrite the call sites before adding the definition.* They inserted a
+guarded helper and then textually rewrote the calls it was meant to
+replace -- so the rewrite caught the helper's own body and made it recurse
+into itself. `warning: function cannot return without recursing` found it in
+a minute. **To a textual replace, a definition added first is
+indistinguishable from a call site**, which is the same tool-operates-on-text /
+question-is-about-structure shape as everything above. Checked my own staged
+applier against it rather than assuming: `build/add-contention-notice.py`
+inserts a shell helper and then patches two call sites, and its anchors
+(`GATES_START_EPOCH=...`, the QEMU echo) appear nowhere in the helper text,
+so insert-then-patch is safe *here* -- verified by simulating both steps
+and counting matches, not by reasoning about it.
+
+**The eleventh costume has no tool in it, and it sharpens with experience.**
+Reading a four-line failure cluster, I took the last line -- *"persistent
+userspace netstack startup failed"* -- for the cause, when the first line
+(`listen failed`) was the cause and the last was the report of the cascade.
+The log was correct, complete and in causal order. **The error was entirely
+in the reading**, and the thing that produced it -- a prior model of how
+these failures usually go -- is the same asset that makes someone able to
+read a 45,000-line log at all. Lane C's observation, which is why this is
+its own row rather than folded in: every other costume is a *tool*
+answering a different question than the one asked; this one has no tool,
+and **a novice with no expectations would have read line one first.**
+
+The mitigation is mechanical rather than attitudinal, which is the only
+kind that survives being tired: read a failure log in timestamp order and
+state the first anomaly before reading the rest, because a summary line is
+the *last* thing that happened and reads like a conclusion. Built into
+`build/scan-guest-output.py` rather than resolved to remember.
+
+And building it produced the same error immediately: the first version
+printed the globally-earliest hit as "read this before anything below",
+which implied a netstack cascade was downstream of a `getcwd` error 24,000
+lines earlier. It now clusters by proximity and implies nothing across
+clusters -- and its docstring states that it cannot see kernel-prefixed
+lines at all, so "first of the cluster" means first of what it can see.
+
+**A Python escape warning is evidence about the escapes Python does not
+recognise, and about nothing else.** Lane C's, and it is a new mechanism
+rather than a fifth costume, which is why it is here after I stopped adding
+instances. Their heredoc collapsed a backslash and produced two damaged
+escapes at once:
+
+| escape | Python's view | outcome |
+|---|---|---|
+| the invalid one (`w`) | unrecognised | **SyntaxWarning, naming it precisely** |
+| the valid one (`a`) | recognised | **silently became BEL, naming nothing** |
+
+So the diagnostic named the harmless one *because* it is the one Python
+cannot handle, and said nothing about the one that put a control byte in a
+tracked file. A clean run -- or a warning about some other escape -- is not
+evidence that the escapes you cared about survived.
+
+**I had one, in the comment explaining a filter that did not work.**
+`build/scan-guest-output.py` held a literal 0x08 where `fail` followed by
+backslash-b was meant, the regex word boundary I was documenting. The
+collapse corrupted the sentence describing the collapse -- the third time in
+one day that a paragraph about a byte acquired the byte (my NUL, lane C's
+CRLF, lane C's BEL).
+
+**And the way I found it is the part worth keeping.** My detection loop
+searched for the two-character sequence backslash-b, written in a heredoc as
+an escaped backslash -- which collapsed, so it searched for the *byte* and
+found the byte. Had the heredoc behaved, the search would have found nothing
+and reported the file clean. **The bug in the detector is the only reason
+the detector worked**, which is as clear a statement as I will get of why a
+green result from an instrument is not evidence about the thing until the
+instrument is evidence about itself.
+
+Practical rules, both cheap: build a replacement from `chr()` rather than
+from an escape when the subject *is* an escape; and assert the absence of
+**all** control bytes after an edit rather than the one you were thinking
+about, because the collapse that produced one can produce another you did
+not look for. All six tracked shared documents were verified clean by
+byte-class scan, not by eye -- a control byte is invisible in every viewer,
+which is the whole reason the check has to be a count.
+
+**Check whether the remedy already exists, before proposing one.** Three
+times on 2026-09-18 the thing I was about to build or file was already
+there:
+
+| I was about to | it already existed as |
+|---|---|
+| file a kshell UTF-8 limitation as untracked | `TD-KSHELL-LINE-EDITOR-IS-UTF8`, logged 2026-08-13 |
+| add a bounded retry to `submit_and_reap` as a new idea | the same loop, stated with its rationale eight times elsewhere in that file |
+| suggest lane C assert `ALL.len() == variant_count` | `scripts/check-variant-lists.py`, **which lane C wrote**, already checking 81 lists across `apps`/`gui`/`net*`/`pkg` |
+
+The third is the instructive one, and it is a new wrinkle rather than more
+of the same: **the person who described the problem as unenforced was the
+person who had enforced it.** Lane C asked how to stop `Command::ALL`
+drifting from its enum; their own script had already checked it that morning
+and reported it in step, including the variant they had just added. So
+"does a gate exist" is not answered by asking the author.
+
+It also killed my proposed fallback on evidence I would not have found
+otherwise. `assert!(Foo::ALL.len() == core::mem::variant_count::<Foo>())`
+is `error[E0658]: use of unstable library feature 'variant_count'` on this
+toolchain -- measured and dated in that script's docstring, which exists
+*because* the in-language assertion could not be written. A suggestion
+refuted by the very artefact that replaced it.
+
+And the script carries the third-copy problem in its own scope: it checks
+only lists **named** `ALL`, `ALL_*` or `EVERY_*`, so a list that should be
+total and is called `PRIMARY_COMMANDS` is invisible to it and nothing says
+so. The gate's population is defined by what the author called the thing.
+
+**The filter kept the wrong end.** Lane C gated a merge on
+`cargo test --workspace ... | grep -E "FAILED|^error|test result: ok" | tail -40`.
+It printed forty `test result: ok` lines and no failures, and it **could not
+have printed a failure**: a 420-crate workspace emits hundreds of `ok` lines
+after any early one, so `tail -40` is guaranteed to show the clean end. The
+count was reassuring and unrelated to the question, and the pipe discarded
+cargo's exit status on top -- so the evidence and the verdict were both gone.
+The fix is not a wider filter: it is `cargo test > log 2>&1; RC=$?` on its
+own line, then search the file.
+
+My version of it was `cargo clippy | grep ... | head -20`, where `head -20`
+could have cut a real error and the grep's `error:` pattern matched
+`crate::error::KernelResult`. Audited the committed tooling afterwards rather
+than assuming: `build/chain.sh` and `build/sweep.sh` put no filter between a
+command and its verdict -- full output appended, `RC` captured on its own
+line, the gate a `grep -q "^..._RC=0"` against that line. The convention
+held, which I know because I looked.
+
+**Never infer a verdict from a log's emptiness; infer it only from a line the
+run wrote on purpose.** Lane C's sharpening of the boot-log fix below, after
+they read a 0-byte task output as "still running" and happened to be right.
+Truncating at start is what makes emptiness *safe* -- absence rather than a
+stale wrong answer -- but emptiness is still not evidence. The positive
+signal is the `BOOT_RC=` line the chain writes deliberately.
+
+**And the sh/Python boundary, which is not symmetric.** `sh` reads a script
+incrementally and keeps a byte offset, so inserting lines above the current
+position shifts everything below it and the shell resumes mid-token -- which
+is why editing `chain.sh` while it ran was luck rather than safety. Python
+compiles a whole module before executing any of it, so editing a running
+`.py` cannot affect the run in progress. So "put the change in a script"
+buys safety in Python that it does not buy in `sh`, and for shell the rule
+has to be the stronger one: **never edit a script that is executing; put the
+change in a new file.**
+
+**The checker is a third copy** -- lane C's, and the strongest of the
+operational ones. Five of their apps print a list of their keyboard
+shortcuts on screen. That printed list and the key handler are **two copies
+of one fact**, and they drift: `apps/rssreader` shipped an overlay of
+twenty-one shortcuts of which about four worked. The cure is a test that
+reads both -- but four of the five apps that *had* such a test wrote it by
+naming the keys itself, **a third list**, drifting from the other two and
+catching neither. Each of the four had independently written the same forty
+lines of `"Left" => Key::Left`.
+
+So the rule is: if the list can be derived, derive it; if it cannot, make
+the test read **the artifact**, never a list beside it. A checker that
+restates the fact it is checking has joined the population it was meant to
+police.
+
+They also corrected a weaker fallback I had proposed for the same problem
+(asserting `ALL.len() == variant count`): it catches a *missing* variant and
+not a duplicated or wrong one, so `[A, B, B, D]` passes at length four. Worth
+recording because it is a guard that looks total and is not -- the same
+genus as a ratio bound that assumes proportional noise.
+
+**And the mention-versus-use trap has a favourite disguise: the comment you
+wrote explaining the fix.** My freeze-fix guard counted occurrences of
+`1_000_000_000` and fired because the replacement's own comment quotes the
+old constant. Lane C did it twice: documenting in a source file that
+`Command::new`/`spawn(`/`exec(` *"appear zero times"* made that file match a
+search for all three, and they reintroduced a lone CRLF into
+`known-issues.md` **inside the paragraph documenting the CRLF bug**. The
+structural defence is to assert the count *before* replacing and abort
+rather than write, which is what their
+`def sub(t, old, new, n=1): assert t.count(old) == n; ...` does -- it stopped
+three wrong edits in one evening, one where an anchor matched three times and
+a plain `str.replace` would have silently edited the wrong one.
+
+*(Audited my own 58 appliers against that: 54 pair every `.replace` with a
+count assertion. The four that do not are `.replace("_", "")` on a string,
+`replace(microsecond=0)` on a datetime, `.replace(b"\x00", b"")` stripping
+NULs, and one already-applied script -- none of them anchored edits. The
+convention held, which I only know because I checked it rather than
+assuming I had followed it.)*
+
+*A partial fix must say it is partial.* They swept five crates for the
+environment race and deliberately left `apps/explorer` half done: the path
+that actually reproduced now holds the lock, while 35 further sites in five
+modules bypass that helper and remain exposed. Rather than either doing a
+38-site mechanical change in the minutes before a merge, or quietly
+shipping the narrow fix, the entry says **"partly fixed"** and lists the
+five files. That is the direct antidote to the fix-coverage row above: a
+sweep that stops is fine, and a sweep that stops *silently* leaves a
+silence which reads as completion.
+
+A footnote of theirs worth keeping for operational reasons: the bug was
+diagnosable at all only because the log was still on disk. The earlier
+instance of the same failure is recorded as *unidentified* because that log
+was deleted before it was read.
+
+**And the one control that detects the whole family.** Probing how cmake
+finds its module tree, my first experiment returned three clean passes and
+was entirely invalid: `mktemp -d` had not captured, so every path collapsed
+onto the real `/usr/bin/cmake` with its real module tree. Nothing in the
+output looked wrong. **The only thing that revealed it was the
+expect-failure case passing.** Lane C put it better than I did: the
+expect-failure control is the only part of a suite that can tell you the
+suite is wired up at all. That is dd-942's rule turned into a construction
+rule rather than a warning -- a corpus you cannot see is checked by
+including one member whose verdict you already know, and checking it is the
+one you expected.

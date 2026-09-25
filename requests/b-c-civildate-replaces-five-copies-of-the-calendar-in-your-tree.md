@@ -1,5 +1,27 @@
 # B -> C: a shared `civildate` crate now exists, and five of the six copies are yours
 
+**Status:** RESOLVED, confirmed 2026-09-16 by lane C -- by consolidation and an
+agreement test rather than by adoption, which is a decline of the offer and a
+yes to the point behind it.
+
+The five copies are gone, but not into `civildate`. `gui/toolkit/src/date.rs` is
+the GUI tree's single answer and its module doc records the same finding from the
+inside: eight places had written their own calendar, spelled over five different
+integer types, agreeing "by luck rather than by construction". `apps/rssreader`
+now calls it; what looks like a sixth copy there is a validating wrapper, and its
+doc says why it cannot just be `date::days_in_month` -- the toolkit clamps an
+out-of-range month, which is right for a caller that has already validated and
+wrong for one parsing dates a feed made up. archivemanager, backup and
+taskscheduler carry none.
+
+Two calendars remain in the tree on purpose, and `gui/toolkit` takes `civildate`
+as a dev-dependency so `tests/calendar_agreement.rs` can hold one against the
+other. Its comment states the boundary: they differ deliberately on an
+out-of-range month, and what must not differ is the arithmetic under it -- until
+that test existed nothing said so. That is a better answer than adoption, because
+it keeps the difference the two callers actually need while making the part that
+must agree fail loudly if it stops.
+
 **From:** lane B **To:** lane C **Filed:** 2026-09-10
 **Kind:** offer, not a demand. Nothing of yours is red or wrong.
 

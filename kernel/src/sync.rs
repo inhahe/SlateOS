@@ -42,7 +42,7 @@
 
 use crate::lockdep;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // Spinlock stall detector (software hard-lockup diagnostic)
@@ -443,6 +443,11 @@ impl<T> Mutex<T> {
         // `MutexGuard::drop`.  Done before spinning so the holder can't be
         // preempted while contended either.
         crate::sched::preempt_disable();
+        // Before lockdep, because lockdep cannot see this: a
+        // `PreemptSpinMutex` does not register, so an ordering edge from it
+        // to this lock does not exist in the graph. That opt-out is dd-70's
+        // and is right for ordering; it is why this check is separate.
+        note_leaf_nesting(self.name);
         lockdep::lock_acquire(addr, self.name, lockdep::Acquire::Blocking);
 
         if tracking_enabled() {
@@ -558,6 +563,10 @@ impl<T> Mutex<T> {
         // still pushed onto the held stack, because a blocking acquire nested
         // inside this critical section can deadlock in the ordinary way.
         lockdep::lock_acquire(addr, self.name, lockdep::Acquire::Try);
+        // Success only: a `try_lock` that returned `None` acquired nothing
+        // and so nested nothing. The comment above says the same thing
+        // about ordering edges.
+        note_leaf_nesting(self.name);
         if tracking_enabled() {
             self.stats.record_uncontended();
         }
@@ -1068,6 +1077,369 @@ fn spin_with_stall_threshold<G>(
 // PreemptSpinMutex — preempt-aware spinlock without lockdep/contention tracking
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Leaf-claim check: nothing may be acquired inside a PreemptSpinMutex
+// ---------------------------------------------------------------------------
+
+/// Per-CPU count of [`PreemptSpinMutex`] guards currently held.
+///
+/// Non-zero means this CPU is inside a critical section whose lock type
+/// *claims* to be a leaf. Acquiring anything else there falsifies the claim
+/// that justified opting out of lockdep (dd-70), which is why this exists:
+/// dd-944, a control has to be executable, not asserted per call site across
+/// 489 instances.
+static LEAF_DEPTH: [AtomicU64; crate::smp::MAX_CPUS] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; crate::smp::MAX_CPUS]
+};
+
+/// Name of the outermost leaf lock this CPU holds, as pointer and length.
+///
+/// Stored only on the 0 -> 1 transition. Two words rather than a formatted
+/// string because this runs on the hottest acquire path in the kernel -- and
+/// carried at all because a report naming only the INNER lock is not
+/// actionable. `?` taught that lesson this morning: 563 locks share the
+/// default name, so a report has to say which critical section it was in.
+static LEAF_NAME_PTR: [AtomicUsize; crate::smp::MAX_CPUS] = {
+    const ZERO: AtomicUsize = AtomicUsize::new(0);
+    [ZERO; crate::smp::MAX_CPUS]
+};
+/// Where the outermost leaf lock this CPU holds was acquired.
+///
+/// The name alone cannot identify it: `PreemptSpinMutex::new` defaults to
+/// `b"?"` and 563 locks in this kernel answer to that. The first real boot
+/// of this check reported `"?" acquired while "?" is held`, which names
+/// exactly one of the two locks involved -- the inner one, by its site. This
+/// gives the outer one the same treatment.
+static LEAF_SITE: [AtomicPtr<core::panic::Location<'static>>; crate::smp::MAX_CPUS] = {
+    const NULL: AtomicPtr<core::panic::Location<'static>> = AtomicPtr::new(core::ptr::null_mut());
+    [NULL; crate::smp::MAX_CPUS]
+};
+
+static LEAF_NAME_LEN: [AtomicUsize; crate::smp::MAX_CPUS] = {
+    const ZERO: AtomicUsize = AtomicUsize::new(0);
+    [ZERO; crate::smp::MAX_CPUS]
+};
+
+/// Set for the duration of the leaf-claim control, routing its provoked
+/// nestings to the tally below.
+///
+/// The lock-context check needed exactly this and got it first; this one did
+/// not, in the same file. Without the split, the control's own nesting would
+/// be indistinguishable from a real one in `LEAF_NESTINGS`, and the live
+/// figure would be permanently one too high.
+static LEAF_IN_SELFTEST: AtomicBool = AtomicBool::new(false);
+
+/// Nestings provoked on purpose by [`self_test_leaf_claim`].
+static LEAF_SELFTEST_NESTINGS: AtomicU64 = AtomicU64::new(0);
+
+/// Total nestings observed inside a leaf critical section.
+static LEAF_NESTINGS: AtomicU64 = AtomicU64::new(0);
+
+/// How many distinct site pairs can be *counted*.
+///
+/// Separate from how many get printed, because the two answer different
+/// questions and 24 was serving both. The live tree saturates 24, so the
+/// reported figure was a floor wearing the clothes of a count -- and
+/// saturation also hid whether the self-test control was consuming a slot,
+/// since a table at its cap reports the same number either way. 256 pairs is
+/// 4 KiB of statics and the scan only runs on a violation.
+const MAX_LEAF_PAIRS: usize = 256;
+
+/// How many distinct pairs get a serial line. The rest are counted and
+/// silent: a hundred lines of the same shape is not more informative than
+/// twenty-four, but the *number* of them is.
+const MAX_LEAF_PRINTED: u64 = 24;
+
+/// Distinct pairs printed so far, so the printing cap is independent of the
+/// table's occupancy.
+static LEAF_PRINTED: AtomicU64 = AtomicU64::new(0);
+
+/// Site pairs already reported, so each distinct nesting is named once.
+///
+/// The first version capped raw occurrences instead, and the second real
+/// boot showed why that is wrong: `bookmarks::init` and `templates::init`
+/// both hold an `INITIALIZED` guard across the store they initialise, which
+/// is a common idiom, benign here, and repeats. Eight occurrences of two
+/// idioms crowded out everything else, so the cap was spending itself on
+/// the least interesting finding.
+///
+/// The lock-context check already reports once per class
+/// (`CLASS_CTX_REPORTED`) for exactly this reason. Not carrying that across
+/// was the same rule applied in one of the two places it belongs.
+static LEAF_SEEN: [(AtomicUsize, AtomicUsize); MAX_LEAF_PAIRS] = {
+    const ZERO: (AtomicUsize, AtomicUsize) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    [ZERO; MAX_LEAF_PAIRS]
+};
+
+/// Claim a slot for this (outer, inner) site pair, or report it as already
+/// seen. Linear over 24 entries, and only ever reached on a violation.
+fn leaf_pair_is_new(outer: usize, inner: usize) -> bool {
+    for slot in &LEAF_SEEN {
+        let o = slot.0.load(Ordering::Relaxed);
+        if o == outer && slot.1.load(Ordering::Relaxed) == inner {
+            return false;
+        }
+        if o == 0
+            && slot
+                .0
+                .compare_exchange(0, outer, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        {
+            slot.1.store(inner, Ordering::Release);
+            return true;
+        }
+    }
+    false
+}
+
+/// Where this CPU's outermost leaf lock was acquired, if any.
+fn leaf_site() -> Option<&'static core::panic::Location<'static>> {
+    let cpu = crate::smp::current_cpu_index();
+    let p = LEAF_SITE.get(cpu)?.load(Ordering::Relaxed);
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: stored from a `&'static Location` handed back by
+    // `Location::caller()`, which points into read-only data that lives for
+    // the whole program, so the reference is valid for `'static`.
+    Some(unsafe { &*p })
+}
+
+/// Is this CPU inside a lock that claims to be a leaf?
+fn leaf_held() -> Option<&'static [u8]> {
+    let cpu = crate::smp::current_cpu_index();
+    if LEAF_DEPTH.get(cpu)?.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    let ptr = LEAF_NAME_PTR.get(cpu)?.load(Ordering::Relaxed);
+    let len = LEAF_NAME_LEN.get(cpu)?.load(Ordering::Relaxed);
+    if ptr == 0 || len == 0 {
+        return Some(b"<unnamed>");
+    }
+    // SAFETY: `ptr`/`len` were stored from a `&'static [u8]` held by a
+    // `PreemptSpinMutex` that is still locked on this CPU, so the slice is
+    // live and immutable for `'static`. Only this CPU writes these slots,
+    // and only on the 0 -> 1 transition, so they cannot change underneath.
+    Some(unsafe { core::slice::from_raw_parts(ptr as *const u8, len) })
+}
+
+/// Note that this CPU has entered a leaf critical section.
+///
+/// `#[track_caller]` so the stored site is the acquiring code, not this
+/// line. Without it every outer lock would be reported as taken here, which
+/// is the failure `Mutex::lock`'s own comment says site recording exists to
+/// avoid.
+#[track_caller]
+fn leaf_enter(name: &'static [u8]) {
+    let cpu = crate::smp::current_cpu_index();
+    let Some(slot) = LEAF_DEPTH.get(cpu) else {
+        return;
+    };
+    if slot.fetch_add(1, Ordering::Relaxed) == 0 {
+        if let Some(p) = LEAF_SITE.get(cpu) {
+            let site: &'static core::panic::Location<'static> = core::panic::Location::caller();
+            p.store(
+                core::ptr::from_ref::<core::panic::Location<'static>>(site).cast_mut(),
+                Ordering::Relaxed,
+            );
+        }
+        if let Some(p) = LEAF_NAME_PTR.get(cpu) {
+            p.store(name.as_ptr() as usize, Ordering::Relaxed);
+        }
+        if let Some(l) = LEAF_NAME_LEN.get(cpu) {
+            l.store(name.len(), Ordering::Relaxed);
+        }
+    }
+}
+
+/// Note that this CPU has left a leaf critical section.
+fn leaf_exit() {
+    let cpu = crate::smp::current_cpu_index();
+    let Some(slot) = LEAF_DEPTH.get(cpu) else {
+        return;
+    };
+    // Saturating: an unbalanced exit must not wrap to u64::MAX and pin this
+    // CPU as permanently inside a leaf, which would turn the check into a
+    // flood and then into noise nobody reads.
+    let _ = slot.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| {
+        Some(d.saturating_sub(1))
+    });
+}
+
+/// Report a lock acquired inside a critical section that claims to be a leaf.
+#[track_caller]
+fn note_leaf_nesting(inner: &'static [u8]) {
+    // An interrupt handler did not nest inside the lock its victim was
+    // holding. `PreemptSpinMutex` disables preemption but not interrupts, so
+    // a task can hold leaf A when an IRQ lands; leaf B taken by that handler
+    // shares only a CPU with A, not a critical section.
+    //
+    // Gap, stated rather than left to be discovered: `in_hardirq()` is set in
+    // `dispatch_vector`, which sees the IRQ vectors. CPU *exceptions* reach
+    // `isr_stub_*` -> `handle_*` without passing through it, so a fault
+    // handler taking one of these while a task holds one still reports.
+    // `proc/exception.rs` uses the type, so that is reachable -- and demand
+    // paging inside a critical section is ordinary, not a defect. Read any
+    // report whose site is a fault path with that in mind.
+    if crate::idt::in_hardirq() {
+        return;
+    }
+    let Some(outer) = leaf_held() else { return };
+    // Split before anything else, so a provoked nesting never lands in the
+    // live figure. dd-942: the verdict and the corpus both have to exclude
+    // the controls, and splitting only the verdict is how
+    // `context_irq_class_count` came to report two synthetic classes as a
+    // clean population of two.
+    if LEAF_IN_SELFTEST.load(Ordering::Relaxed) {
+        LEAF_SELFTEST_NESTINGS.fetch_add(1, Ordering::Relaxed);
+        // Return before claiming a LEAF_SEEN slot. The dedup table is the
+        // corpus `report_leaf_claims` counts as "distinct site pair(s)", and
+        // a control that occupies a slot is a fixture counted as a finding --
+        // which is precisely how `context_irq_class_count` came to report
+        // `over 2 class(es) -- clean` when both were its own controls and the
+        // real corpus was zero. Splitting the counter and not the corpus is
+        // the half-applied version of this fix, and I wrote it that way first.
+        //
+        // The cost is honest and small: the control exercises the detection
+        // and the counting, not the dedup or the report text. Those are
+        // exercised by the live tree, which reports 24 distinct pairs.
+        return;
+    }
+    LEAF_NESTINGS.fetch_add(1, Ordering::Relaxed);
+    // Once per distinct site pair. `Location::caller()` returns a pointer
+    // into read-only data, so its address identifies the site.
+    let inner_site = core::ptr::from_ref(core::panic::Location::caller()) as usize;
+    let outer_site = leaf_site().map_or(0, |l| core::ptr::from_ref(l) as usize);
+    if !leaf_pair_is_new(outer_site, inner_site) {
+        return;
+    }
+    // Counted above by claiming a slot; printed only for the first
+    // MAX_LEAF_PRINTED of them. Before this split, a full table stopped the
+    // counting and the printing together, so the figure could not exceed the
+    // cap and there was no way to tell a tree with 24 distinct nestings from
+    // one with 240.
+    if LEAF_PRINTED.fetch_add(1, Ordering::Relaxed) >= MAX_LEAF_PRINTED {
+        return;
+    }
+    crate::serial_println!(
+        concat!(
+            "[sync] LEAF CLAIM BROKEN: {:?} acquired while {:?} is held, at ",
+            "{}, while the outer one was taken at {}:{}. {:?} is a ",
+            "PreemptSpinMutex, whose whole justification for ",
+            "skipping lockdep is that nothing nests inside it (dd-70). ",
+            "Either it is not a leaf and should be crate::sync::Mutex, or ",
+            "this acquire does not belong in its critical section."
+        ),
+        core::str::from_utf8(inner).unwrap_or("<utf8>"),
+        core::str::from_utf8(outer).unwrap_or("<utf8>"),
+        core::panic::Location::caller(),
+        // File and line as two args: `Location`'s own Display would also
+        // carry the column, and the first boot showed the file alone is not
+        // enough to find the acquire in a 700-line module.
+        leaf_site().map_or("<unrecorded>", |l| l.file()),
+        leaf_site().map_or(0, |l| l.line()),
+        core::str::from_utf8(outer).unwrap_or("<utf8>")
+    );
+}
+
+/// Total lock acquisitions seen inside a leaf critical section.
+pub fn leaf_nesting_count() -> u64 {
+    LEAF_NESTINGS.load(Ordering::Relaxed)
+}
+
+/// Controls for the leaf-claim check: provoke a nesting, and require that a
+/// leaf held alone does not report.
+///
+/// # Errors
+///
+/// Never returns `Err`: every check is an assertion, so a failure is a panic
+/// naming the reason. The `KernelResult` is for the dispatcher.
+pub fn self_test_leaf_claim() -> crate::error::KernelResult<()> {
+    crate::serial_println!("[sync] Running leaf-claim control...");
+
+    static OUTER: PreemptSpinMutex<u64> = PreemptSpinMutex::named(0, b"leaf-ctl-out");
+    static INNER: Mutex<u64> = Mutex::named(0, b"leaf-ctl-in");
+
+    LEAF_IN_SELFTEST.store(true, Ordering::Relaxed);
+    let before = LEAF_SELFTEST_NESTINGS.load(Ordering::Relaxed);
+
+    // Negative control FIRST, so a positive result cannot be an artefact of
+    // the positive case having already run: a leaf held with nothing nested
+    // inside must not report.
+    {
+        let _g = OUTER.lock();
+    }
+    assert_eq!(
+        LEAF_SELFTEST_NESTINGS.load(Ordering::Relaxed),
+        before,
+        "a PreemptSpinMutex held with nothing nested inside reported a nesting"
+    );
+
+    // Positive control: a lock acquired inside a leaf critical section.
+    {
+        let _outer = OUTER.lock();
+        let _inner = INNER.lock();
+    }
+    assert_eq!(
+        LEAF_SELFTEST_NESTINGS.load(Ordering::Relaxed),
+        before.wrapping_add(1),
+        "a lock acquired inside a PreemptSpinMutex did not report a nesting"
+    );
+
+    // And the live figure must be untouched by either.
+    let live_after = LEAF_NESTINGS.load(Ordering::Relaxed);
+    LEAF_IN_SELFTEST.store(false, Ordering::Relaxed);
+
+    crate::serial_println!(
+        concat!(
+            "[sync]   leaf-claim control: silent on a lone leaf, fires on a ",
+            "nested acquire, live total untouched at {}: OK"
+        ),
+        live_after
+    );
+    Ok(())
+}
+
+/// Print the leaf-claim check's total and how many distinct pairs it named.
+///
+/// It had no caller at all until this was written, which is dd-946 in the
+/// same file as the check it belongs to: the reports fire on their own, so
+/// the *total* was accumulating where nothing would ever read it. The two
+/// numbers differ for a reason worth seeing -- the reports are deduped by
+/// site pair, so a large total against a small pair count means one idiom
+/// repeating, not many distinct defects.
+pub fn report_leaf_claims() {
+    // Through the accessor, not a second direct load of the same atomic.
+    // Two readers of one counter drift; and removing that function's
+    // `#[allow(dead_code)]` was a claim that it had a caller, which it did
+    // not until this line.
+    let total = leaf_nesting_count();
+    let named = LEAF_SEEN
+        .iter()
+        .filter(|s| s.0.load(Ordering::Relaxed) != 0)
+        .count();
+    if total == 0 {
+        crate::serial_println!(
+            "[sync] leaf-claim check: no lock was acquired inside a PreemptSpinMutex"
+        );
+        return;
+    }
+    crate::serial_println!(
+        concat!(
+            "[sync] leaf-claim check: {} acquisition(s) inside a ",
+            "PreemptSpinMutex, {} distinct site pair(s) named above",
+            "{}"
+        ),
+        total,
+        named,
+        if named >= MAX_LEAF_PAIRS {
+            " (PAIR TABLE FULL -- the count is a floor, not a total)"
+        } else {
+            ""
+        }
+    );
+}
 /// A preempt-disabling spinlock for **hot leaf locks**.
 ///
 /// This is the lightweight sibling of [`Mutex`]. Like `Mutex`, it disables
@@ -1146,11 +1518,21 @@ impl<T> PreemptSpinMutex<T> {
     /// guard's `Drop`.
     #[inline]
     #[allow(dead_code)]
+    // `#[track_caller]` for the reason [`Mutex::lock`] gives at its own: the
+    // leaf report records `Location::caller()`, and without this every
+    // report would name this line in `sync.rs` -- the same place for every
+    // lock, which is precisely the answer the site recording exists to avoid.
+    #[track_caller]
     pub fn lock(&self) -> PreemptSpinGuard<'_, T> {
         // Disable involuntary preemption for the whole hold. Paired with
         // `preempt_enable()` in `PreemptSpinGuard::drop`. Done before spinning
         // so the holder can't be preempted while contended either.
         crate::sched::preempt_disable();
+        // Report BEFORE entering, or this lock would see itself as the leaf
+        // it is nested inside. A leaf inside a leaf is still a broken claim:
+        // dd-70's definition is that nothing nests inside one.
+        note_leaf_nesting(self.name);
+        leaf_enter(self.name);
         let guard = match self.inner.try_lock() {
             Some(g) => g,
             None => spin_with_stall(self.name, self.addr(), &self.owner, || {
@@ -1169,10 +1551,13 @@ impl<T> PreemptSpinMutex<T> {
     /// preemption) if the lock is already held.
     #[inline]
     #[allow(dead_code)]
+    #[track_caller]
     pub fn try_lock(&self) -> Option<PreemptSpinGuard<'_, T>> {
         crate::sched::preempt_disable();
         match self.inner.try_lock() {
             Some(guard) => {
+                note_leaf_nesting(self.name);
+                leaf_enter(self.name);
                 self.owner
                     .store(crate::sched::current_task_id(), Ordering::Relaxed);
                 Some(PreemptSpinGuard {
@@ -1244,6 +1629,10 @@ impl<T> DerefMut for PreemptSpinGuard<'_, T> {
 impl<T> Drop for PreemptSpinGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
+        // The single release path for all three acquisition paths:
+        // `lock_irqsave` delegates to `lock()`, and `PreemptSpinIrqGuard`
+        // holds this guard in `ManuallyDrop`, so it releases through here.
+        leaf_exit();
         // Clear the diagnostic owner stamp before the physical unlock so a
         // stall reporter can never observe a freed lock still naming us.
         self.owner.store(OWNER_NONE, Ordering::Relaxed);

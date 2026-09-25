@@ -7,7 +7,12 @@
 //! - Find & replace (with regex support)
 //! - Undo/redo (unlimited history)
 //! - Word wrap or horizontal scroll
-//! - Status bar (line, column, encoding, line ending)
+//! - Status bar (line, column, language, line ending, line count)
+//!
+//!   This listed "encoding" until 2026-09-16 and there is none to show: a
+//!   `Document` has no encoding field, and nothing detects one. The rest of
+//!   the old list was accurate -- the line ending really is drawn -- and the
+//!   language and line count were missing from it.
 //! - Menu bar (File / Edit / Search) reaching the same commands with a pointer
 //! - Keyboard shortcuts (Ctrl+S save, Ctrl+Z undo, Ctrl+F find, etc.)
 //! - Auto-indent
@@ -371,6 +376,29 @@ impl Document {
             lines
         };
 
+        // Which way this file indents, decided by the file rather than by a
+        // default -- the same move as `line_ending` above, and for the same
+        // reason: it is a property of the document, not a preference of the
+        // program.
+        //
+        // `use_spaces` had no production writer at all until now, so every
+        // file was treated as space-indented and a typed Tab inserted spaces.
+        // **That silently corrupts a Makefile**, where a literal tab is the
+        // syntax rather than a style, and the corruption is invisible in the
+        // editor that caused it.
+        //
+        // The first indented line decides. A file that mixes both is already
+        // inconsistent and there is no answer that serves it; following the
+        // first is what an editor can defend.
+        let use_spaces = lines
+            .iter()
+            .find_map(|line| match line.as_bytes().first() {
+                Some(b'\t') => Some(false),
+                Some(b' ') => Some(true),
+                _ => None,
+            })
+            .unwrap_or(true);
+
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -386,6 +414,7 @@ impl Document {
 
         Ok(Self {
             lines,
+            use_spaces,
             path: Some(path.to_path_buf()),
             name,
             modified: false,
@@ -400,7 +429,6 @@ impl Document {
             redo_stack: VecDeque::new(),
             line_ending,
             tab_width: 4,
-            use_spaces: true,
             language,
             sync,
             hl_entry: RefCell::new(Vec::new()),
@@ -1349,7 +1377,13 @@ pub struct FindState {
     pub query: String,
     pub replace_text: String,
     pub case_sensitive: bool,
-    pub use_regex: bool,
+    // `use_regex` was here and is deleted. `Ctrl+E` toggled it, no search
+    // code ever read it, and the find bar drew no indicator -- so the key did
+    // nothing and said nothing, which is worse than not having it. Regex
+    // searching is still wanted: `apps/regextester` holds a working
+    // `RegexCompiler`, and wiring it here means first extracting that engine
+    // out of an app binary into something two apps can depend on. Tracked in
+    // `known-issues.md` -> `TD-C-FIVE-TOGGLES-THAT-READ-ONLY-THEMSELVES`.
     pub matches: Vec<(usize, usize, usize)>, // (line, start_col, end_col)
     pub current_match: usize,
 }
@@ -1366,7 +1400,6 @@ impl FindState {
             query: String::new(),
             replace_text: String::new(),
             case_sensitive: false,
-            use_regex: false,
             matches: Vec::new(),
             current_match: 0,
         }
@@ -2433,6 +2466,20 @@ impl EditorState {
             11.0,
         );
 
+        // Indentation mode. The document already knows both halves --
+        // `use_spaces` and `tab_width` are set when a file is read -- and
+        // `roadmap-detailed.md` §4.4 asks for it in this bar; it was simply
+        // never drawn.
+        // The key is named here because this is the only place the value is
+        // shown, and a setting nobody can find is barely reachable -- the
+        // same argument as the key hints in `passwordgen` and `metronome`.
+        let indent = if doc.use_spaces {
+            format!("Spaces: {} (Ctrl+T)", doc.tab_width)
+        } else {
+            format!("Tab width: {} (Ctrl+T)", doc.tab_width)
+        };
+        tree.text(450.0, bar_y + 5.0, &indent, self.palette.subtext0, 11.0);
+
         // Line count
         let lc = format!("{} lines", doc.line_count());
         tree.text(w - 100.0, bar_y + 5.0, &lc, self.palette.subtext0, 11.0);
@@ -2501,6 +2548,24 @@ impl EditorState {
         );
 
         // Match count
+        // The case-sensitivity state and the key that changes it. Both were
+        // missing: `Ctrl+I` toggled `case_sensitive`, the panel drew no
+        // indicator, and the only way to tell which mode you were in was that
+        // the match count moved. A toggle whose state is invisible is a
+        // setting the user cannot check.
+        let case_info = if self.find.case_sensitive {
+            "Aa on  (Ctrl+I)"
+        } else {
+            "Aa off (Ctrl+I)"
+        };
+        tree.text(
+            panel_x + 200.0,
+            panel_y + 64.0,
+            case_info,
+            self.palette.subtext0,
+            11.0,
+        );
+
         let match_info = format!("{} match(es)", self.find.matches.len());
         tree.text(
             panel_x + 8.0,
@@ -2554,16 +2619,35 @@ impl EditorState {
         tree.text(dx + 12.0, dy + 9.0, title, self.palette.yellow, 13.0);
         tree.text(dx + 12.0, dy + 44.0, &body, self.palette.text, 11.0);
 
-        // Option buttons, stacked. For a deletion, merge/review don't apply.
+        // The options, stacked. For a deletion, merge/review don't apply.
+        //
+        // **Each one leads with the key that chooses it, and that is not
+        // decoration.** This prompt is modal: `handle_mouse` excludes the menu
+        // bar while it is up and these rectangles register no hit target, so
+        // `K`, `R`, `M` and `V` are the *only* way to answer it. Until
+        // 2026-09-21 none of them appeared on screen anywhere, which left a
+        // user whose file had changed underneath them looking at four choices
+        // and no way to make one.
         let deleted = matches!(prompt.change, DiskChange::Deleted);
         let mut options: Vec<(&str, &str)> = vec![
-            ("Keep current", "keep your buffer; overwrites disk on save"),
-            ("Reload from disk", "discard local edits, load disk version"),
+            (
+                "K — Keep current",
+                "keep your buffer; overwrites disk on save",
+            ),
+            (
+                "R — Reload from disk",
+                "discard local edits, load disk version",
+            ),
         ];
         if !deleted {
-            options.push(("Merge", "auto-combine both; mark conflicts inline"));
-            options.push(("Review merge…", "resolve conflicts side-by-side"));
+            options.push(("M — Merge", "auto-combine both; mark conflicts inline"));
+            options.push(("V — Review merge…", "resolve conflicts side-by-side"));
         }
+
+        options.push((
+            "Esc — Not now",
+            "asked again when you next focus the window",
+        ));
 
         let mut by = dy + 74.0;
         for (label, hint) in options {
@@ -5072,6 +5156,61 @@ mod external_merge_tests {
         assert_eq!(d.disk_changed(), DiskChange::Unchanged);
     }
 
+    /// A tab-indented file is opened as a tab-indented file.
+    ///
+    /// `use_spaces` had no production writer, so every document was
+    /// space-indented whatever it contained, and a typed Tab inserted spaces.
+    /// **That silently corrupts a Makefile**, where a literal tab is the
+    /// syntax rather than a style.
+    #[test]
+    fn a_tab_indented_file_is_read_as_tab_indented() {
+        let (_scratch, path) = temp_path("indent_tabs");
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp");
+            f.write_all(b"all:\t\n\techo hi\n").expect("write");
+        }
+
+        let doc = Document::from_file(&path).expect("load");
+
+        assert!(
+            !doc.use_spaces,
+            "a file whose first indented line begins with a tab was read as \
+             space-indented"
+        );
+    }
+
+    /// A space-indented file is opened as a space-indented file.
+    #[test]
+    fn a_space_indented_file_is_read_as_space_indented() {
+        let (_scratch, path) = temp_path("indent_spaces");
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp");
+            f.write_all(b"fn main() {\n    let x = 1;\n}\n")
+                .expect("write");
+        }
+
+        let doc = Document::from_file(&path).expect("load");
+
+        assert!(doc.use_spaces, "a space-indented file was read as tabbed");
+    }
+
+    /// A file with no indentation at all still opens, defaulting to spaces.
+    #[test]
+    fn an_unindented_file_defaults_to_spaces() {
+        let (_scratch, path) = temp_path("indent_none");
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp");
+            f.write_all(b"one\ntwo\n").expect("write");
+        }
+
+        let doc = Document::from_file(&path).expect("load");
+
+        assert!(
+            doc.use_spaces,
+            "an unindented file should default to spaces"
+        );
+    }
+
     #[test]
     fn disk_changed_detects_modification_and_deletion() {
         let (_scratch, path) = temp_path("detect");
@@ -5196,6 +5335,156 @@ mod external_merge_tests {
         assert_eq!(editor.active_document().buffer_text(), "local");
     }
 
+    /// **The disk-change prompt names every key that answers it.**
+    ///
+    /// This prompt is modal and its options are not buttons: `handle_mouse`
+    /// excludes the menu bar while it is up and the option rectangles register
+    /// no hit target, so the keys are the *only* way out. Until 2026-09-21 the
+    /// sheet drew "Keep current", "Reload from disk", "Merge" and
+    /// "Review merge..." and named none of `K`, `R`, `M`, `V` or `Esc` -- four
+    /// choices and no visible way to make one.
+    ///
+    /// Each key is pressed as well as looked for, so a row cannot name a key
+    /// the prompt does not answer.
+    #[test]
+    fn the_disk_change_prompt_names_the_keys_that_answer_it() {
+        let drawn = |editor: &EditorState| {
+            editor
+                .render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+
+        let raise = || {
+            let (scratch, path) = temp_path("promptkeys");
+            std::fs::write(
+                &path, b"base
+",
+            )
+            .expect("write");
+            let mut editor = EditorState::new();
+            editor.open_file(&path).expect("open");
+            editor.active_document_mut().lines = vec!["local".to_string()];
+            editor.active_document_mut().modified = true;
+            std::fs::write(
+                &path, b"remote
+",
+            )
+            .expect("rewrite");
+            assert!(
+                editor.check_external_change(),
+                "the fixture raised no prompt"
+            );
+            (scratch, editor)
+        };
+
+        let (_scratch, editor) = raise();
+        let shown = drawn(&editor);
+        for key in [
+            "K — Keep current",
+            "R — Reload from disk",
+            "M — Merge",
+            "Esc — Not now",
+        ] {
+            assert!(shown.contains(key), "the prompt never draws {key:?}");
+        }
+
+        // And each one is answered. `V` opens the review rather than closing
+        // the prompt, so it is checked by what it opens.
+        for key in [
+            guitk::event::Key::K,
+            guitk::event::Key::R,
+            guitk::event::Key::M,
+            guitk::event::Key::Escape,
+        ] {
+            let (_s, mut e) = raise();
+            e.handle_event(&Event::Key(guitk::event::KeyEvent {
+                key,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: String::new(),
+            }));
+            assert!(
+                e.external_prompt.is_none(),
+                "{key:?} did not answer the prompt"
+            );
+        }
+
+        let (_s, mut reviewing) = raise();
+        reviewing.handle_event(&Event::Key(guitk::event::KeyEvent {
+            key: guitk::event::Key::V,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        }));
+        assert!(
+            reviewing
+                .external_prompt
+                .as_ref()
+                .is_some_and(|p| p.review.is_some()),
+            "V did not open the merge review"
+        );
+    }
+
+    /// **The find panel shows whether case matters, and names the key.**
+    ///
+    /// `Ctrl+I` toggled `case_sensitive` and the panel drew no indicator, so
+    /// the only way to tell which mode you were in was that the match count
+    /// moved. A toggle whose state is invisible is a setting the user cannot
+    /// check. The key is pressed here as well as looked for, so the label
+    /// cannot name a key that does nothing.
+    #[test]
+    fn the_find_panel_shows_case_sensitivity_and_names_its_key() {
+        let drawn = |editor: &EditorState| {
+            editor
+                .render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+
+        let (_scratch, path) = temp_path("casekey");
+        std::fs::write(
+            &path,
+            b"hello Hello
+",
+        )
+        .expect("write");
+        let mut editor = EditorState::new();
+        editor.open_file(&path).expect("open");
+        editor.find_visible = true;
+        assert!(
+            drawn(&editor).contains("Aa off (Ctrl+I)"),
+            "the panel never says case is off"
+        );
+
+        editor.handle_event(&Event::Key(guitk::event::KeyEvent {
+            key: guitk::event::Key::I,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
+        }));
+        assert!(
+            editor.find.case_sensitive,
+            "Ctrl+I did not turn case sensitivity on"
+        );
+        assert!(
+            drawn(&editor).contains("Aa on  (Ctrl+I)"),
+            "the panel never says case is on"
+        );
+    }
+
     #[test]
     fn reload_choice_discards_local_edits() {
         let (_scratch, path) = temp_path("reload");
@@ -5285,6 +5574,41 @@ mod tab_tests {
         tabs.close_active();
         assert_eq!(names(&tabs), ["Untitled", "c"]);
         assert_eq!(tabs.active().name, "c");
+    }
+
+    /// The status bar names the indentation the document is actually using.
+    ///
+    /// Both halves come from the document rather than from a default, so a
+    /// file read as tab-indented does not get told it is using spaces. The
+    /// fields existed before this was drawn; nothing showed them.
+    #[test]
+    fn the_status_bar_names_the_indentation_in_force() {
+        let mut app = EditorState::new();
+        {
+            let doc = app.active_document_mut();
+            doc.use_spaces = true;
+            doc.tab_width = 2;
+        }
+        let drawn = format!("{:?}", app.render_tree());
+        assert!(
+            drawn.contains("Spaces: 2"),
+            "spaces not named: {drawn:.400}"
+        );
+
+        {
+            let doc = app.active_document_mut();
+            doc.use_spaces = false;
+            doc.tab_width = 8;
+        }
+        let drawn = format!("{:?}", app.render_tree());
+        assert!(
+            drawn.contains("Tab width: 8"),
+            "a tab-indented file was not named: {drawn:.400}"
+        );
+        assert!(
+            !drawn.contains("Spaces:"),
+            "the bar claims spaces for a tab-indented file"
+        );
     }
 
     #[test]

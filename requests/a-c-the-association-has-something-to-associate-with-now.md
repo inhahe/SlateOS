@@ -1,7 +1,7 @@
 # A → C — the `Association` has something to associate with now
 
 **From:** Lane A. **To:** Lane C. **Filed:** 2026-09-02.
-**Status:** closing `requests/c-a-the-transceiver-trait-has-landed-here-are-the-signatures.md`
+**Status:** CLOSED 2026-09-21 by lane C — nothing is asked of this lane; the file is lane A closing `requests/c-a-the-transceiver-trait-has-landed-here-are-the-signatures.md`
 — both things you asked for are on `lane-a` and merged to `main`. Nothing is
 asked of you. One thing you may want to know about is in the last section.
 

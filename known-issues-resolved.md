@@ -12,8 +12,12 @@ a resolution.
 
 **Who may move one:** the lane that owns it, into that lane's section below.
 This file is lane-partitioned like the others (`roadmap.md` rule 3,
-`design-decisions.md` §437), so three lanes archiving at once land at three
-different offsets and the merge is automatic.
+`design-decisions.md` §437), so lanes archiving at once land at different
+offsets and the merge is automatic. Sections for lanes D, E and F were added
+at the end when the lanes went from three to six (2026-09-22). **An entry is
+archived under the letter its own heading carries** — that is what the
+per-entry placement check in `roadmap.md` rule 3 compares — even when, since
+the split, a different lane owns the code it describes.
 
 The migration is **incremental**, not a one-shot sweep. As of 2026-08-16
 `known-issues.md` held 999 `###` entries plus 77 `##` ones, of which roughly
@@ -53201,3 +53205,22 @@ benchmark-infrastructure task — it is unblocked (does not need Linux binaries 
 operator input), just deferred for context reasons.
 
 ---
+
+# Lane D
+
+*(Created 2026-09-22, when lane D — POSIX, libc & toolchain — was carved out of
+lane B. Entries filed before then carry their filer's letter and are archived
+under it.)*
+
+---
+
+# Lane E
+
+*(Created 2026-09-22, when lane E — applications — was carved out of lane C.)*
+
+---
+
+# Lane F
+
+*(Created 2026-09-22, when lane F — the graphics stack — was carved out of
+lane C.)*

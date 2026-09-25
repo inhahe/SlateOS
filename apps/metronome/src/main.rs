@@ -38,6 +38,18 @@ use oswindow::app::{App, Response};
 // Constants
 // ---------------------------------------------------------------------------
 
+/// Smallest and largest speed-up practice mode will apply.
+///
+/// One is the smallest increment that is still an increment; fifty is a third
+/// of the usable tempo range, past which "practice" is just a different tempo.
+const MIN_PRACTICE_INCREMENT: u32 = 1;
+/// See `MIN_PRACTICE_INCREMENT`.
+const MAX_PRACTICE_INCREMENT: u32 = 50;
+/// Fewest and most measures practice mode will wait before speeding up.
+const MIN_PRACTICE_MEASURES: u32 = 1;
+/// See `MIN_PRACTICE_MEASURES`.
+const MAX_PRACTICE_MEASURES: u32 = 9;
+
 const MIN_BPM: u32 = 20;
 const MAX_BPM: u32 = 300;
 const TAP_HISTORY_SIZE: usize = 8;
@@ -556,6 +568,51 @@ impl MetronomeApp {
             Key::Down if self.practice_mode => {
                 self.practice_target_bpm = self.practice_target_bpm.saturating_sub(10).max(MIN_BPM);
             }
+            // How much faster, and how often. Both were drawn in this panel --
+            // "Practice Increment: +10 BPM", "Practice Measures: 4" -- directly
+            // under a line that advertises its own keys, and neither had a
+            // writer anywhere: practice mode always sped up by ten every four
+            // measures. Being laid out as a group with the adjustable target
+            // is what made them read as settings rather than as a description.
+            Key::Right if self.practice_mode => {
+                self.practice_increment = self
+                    .practice_increment
+                    .saturating_add(1)
+                    .min(MAX_PRACTICE_INCREMENT);
+            }
+            Key::Left if self.practice_mode => {
+                self.practice_increment = self
+                    .practice_increment
+                    .saturating_sub(1)
+                    .max(MIN_PRACTICE_INCREMENT);
+            }
+            Key::Num1
+            | Key::Num2
+            | Key::Num3
+            | Key::Num4
+            | Key::Num5
+            | Key::Num6
+            | Key::Num7
+            | Key::Num8
+            | Key::Num9
+                if self.practice_mode =>
+            {
+                // A digit names the count outright. Stepping to nine with an
+                // arrow is eight keypresses for a number the user already
+                // knows.
+                let n = match event.key {
+                    Key::Num1 => 1,
+                    Key::Num2 => 2,
+                    Key::Num3 => 3,
+                    Key::Num4 => 4,
+                    Key::Num5 => 5,
+                    Key::Num6 => 6,
+                    Key::Num7 => 7,
+                    Key::Num8 => 8,
+                    _ => 9,
+                };
+                self.practice_measures = n.clamp(MIN_PRACTICE_MEASURES, MAX_PRACTICE_MEASURES);
+            }
             _ => {}
         }
     }
@@ -872,11 +929,14 @@ impl MetronomeApp {
                 self.palette.teal,
             ),
             (
-                format!("Practice Increment: +{} BPM", self.practice_increment),
+                format!(
+                    "Practice Increment: +{} BPM (left/right)",
+                    self.practice_increment
+                ),
                 self.palette.teal,
             ),
             (
-                format!("Practice Measures: {}", self.practice_measures),
+                format!("Practice Measures: {} (1-9)", self.practice_measures),
                 self.palette.teal,
             ),
         ];
@@ -1027,6 +1087,102 @@ mod tests {
     }
 
     // --- Time signature ---
+
+    /// An app in practice mode with the settings panel open.
+    fn practising() -> MetronomeApp {
+        let mut app = MetronomeApp::new();
+        app.handle_key(&make_key(Key::P));
+        app.handle_key(&make_key(Key::Enter));
+        assert!(app.practice_mode, "control: P turns practice mode on");
+        assert!(app.show_settings, "control: Enter opens the settings panel");
+        app
+    }
+
+    /// Right raises the speed-up practice mode applies.
+    ///
+    /// `practice_increment` had no writer anywhere, so practice mode always
+    /// sped up by ten -- while the panel drew "Practice Increment: +10 BPM"
+    /// directly beneath a line that advertises its own keys.
+    #[test]
+    fn right_raises_the_practice_increment() {
+        let mut app = practising();
+        let before = app.practice_increment;
+
+        app.handle_key(&make_key(Key::Right));
+
+        assert_eq!(
+            app.practice_increment,
+            before + 1,
+            "Right did not raise the increment"
+        );
+    }
+
+    /// Left lowers it, and stops rather than wrapping to a huge number.
+    #[test]
+    fn left_lowers_the_increment_and_stops_at_the_bottom() {
+        let mut app = practising();
+
+        for _ in 0..40 {
+            app.handle_key(&make_key(Key::Left));
+        }
+
+        assert_eq!(
+            app.practice_increment, MIN_PRACTICE_INCREMENT,
+            "the increment ran past its floor"
+        );
+    }
+
+    /// A digit names the number of measures outright.
+    ///
+    /// `practice_measures` had no writer either, so practice mode always sped
+    /// up every four measures.
+    #[test]
+    fn a_digit_sets_the_practice_measures() {
+        let mut app = practising();
+        assert_ne!(app.practice_measures, 7, "control: 7 is not the default");
+
+        app.handle_key(&make_key(Key::Num7));
+
+        assert_eq!(app.practice_measures, 7, "the digit did not set the count");
+    }
+
+    /// Outside practice mode these keys are not taken.
+    #[test]
+    fn the_practice_keys_do_nothing_when_practice_mode_is_off() {
+        let mut app = MetronomeApp::new();
+        app.handle_key(&make_key(Key::Enter));
+        assert!(app.show_settings, "control: the panel is open");
+        assert!(!app.practice_mode, "control: practice mode is off");
+        let before = app.practice_increment;
+
+        app.handle_key(&make_key(Key::Right));
+
+        assert_eq!(
+            app.practice_increment, before,
+            "the increment changed with practice mode off"
+        );
+    }
+
+    /// The panel says which keys change each of the three settings.
+    #[test]
+    fn the_practice_panel_names_its_keys() {
+        let app = practising();
+        let text: Vec<String> = app
+            .render_commands(600.0, 800.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        for hint in ["(left/right)", "(1-9)"] {
+            assert!(
+                text.iter().any(|t| t.contains(hint)),
+                "the panel never says {hint}: {text:?}"
+            );
+        }
+    }
 
     #[test]
     fn time_signature_display() {

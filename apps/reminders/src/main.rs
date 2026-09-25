@@ -6,7 +6,13 @@
 //! - Recurring reminders: daily, weekly, monthly, yearly, custom interval
 //! - Categories: work, personal, health, finance, shopping, custom with colors
 //! - Multiple views: today, upcoming (7 days), all, by category, overdue, completed
-//! - Snooze support: 5min, 15min, 30min, 1hr, custom
+//! - Subtasks exist on the model and cannot be reached: `add_subtask`,
+//!   `remove_subtask` and `toggle_subtask` are written, tested, and have
+//!   no production caller, so every task has none
+//! - Snooze support: Z offers 5min, 15min, 30min and 1hr. `SnoozeDuration`
+//!   also has a `Custom { minutes }`, which nothing can reach: there is
+//!   nowhere to type a number, and the four fixed durations are the four
+//!   the prompt offers.
 //! - Smart sorting: by priority, due date, creation date, alphabetical
 //! - Search and filter across titles and descriptions
 //! - Visual notification banners when reminders are due
@@ -91,6 +97,25 @@ const NO_TASKS_LINES: [&str; 3] = [
 pub const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 
 const WINDOW_WIDTH: f32 = 1100.0;
+
+/// Every key this program answers, and what it does.
+///
+/// **Each row is a key this program actually answers**, checked by
+/// `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("1 / 2 / 3", "Today / upcoming / all"),
+    ("4 / 5", "Overdue / completed"),
+    ("Up / Down", "Move the selection"),
+    ("Space / Enter", "Mark this reminder done, or not"),
+    ("S", "Next sort order"),
+    ("Z", "Snooze this reminder"),
+    ("B", "Show or hide the sidebar"),
+    ("D", "Show or hide the detail panel"),
+    ("C", "Show or hide completed subtasks"),
+    ("Escape", "Dismiss the notifications"),
+    ("Ctrl+O / Ctrl+S", "Open / save"),
+    ("F1 / ?", "This list"),
+];
 const WINDOW_HEIGHT: f32 = 720.0;
 const SIDEBAR_WIDTH: f32 = 220.0;
 const DETAIL_PANEL_WIDTH: f32 = 300.0;
@@ -1628,6 +1653,13 @@ pub struct RemindersApp {
     /// The open or save picker. Holds the dialog, the saving flag and the
     /// routing that ten applications used to write out by hand.
     pub picker: FilePicker,
+    /// Whether the next keypress picks a snooze duration.
+    ///
+    /// A mode rather than four more shortcuts, because `Num1`-`Num5` are
+    /// already the view filters: without a mode there are no digits left to
+    /// mean "15 minutes", and a reminder app whose snooze needs a chord is
+    /// one nobody snoozes with.
+    pub choosing_snooze: bool,
     /// What the last open or save did, for the banner line.
     pub last_file_action: Option<String>,
     pub width: f32,
@@ -1641,6 +1673,8 @@ pub struct RemindersApp {
     pub selected_task_id: Option<u64>,
     pub notifications: Vec<Notification>,
     pub sidebar_visible: bool,
+    /// Whether the shortcut list is up.
+    pub show_help: bool,
     pub detail_visible: bool,
     pub show_completed_subtasks: bool,
     /// The user's colours, replaced whenever the theme changes.
@@ -1654,8 +1688,10 @@ pub struct RemindersApp {
 impl RemindersApp {
     pub fn new(width: f32, height: f32, now: DateTime) -> Self {
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             picker: FilePicker::new(),
+            choosing_snooze: false,
             last_file_action: None,
             width,
             height,
@@ -1917,6 +1953,13 @@ impl RemindersApp {
         if !key.pressed {
             return EventResult::Ignored;
         }
+        // The mode takes every key while it is up, including the ones it
+        // ignores: `Num1` means "5 minutes" here and "show Today" outside,
+        // and a digit that quietly changed the view instead of snoozing would
+        // be indistinguishable from a snooze that silently failed.
+        if self.choosing_snooze {
+            return self.handle_snooze_key(key);
+        }
         match key.key {
             Key::Num1 => self.set_view(ViewFilter::Today),
             Key::Num2 => self.set_view(ViewFilter::Upcoming),
@@ -1939,6 +1982,7 @@ impl RemindersApp {
                 self.cycle_sort();
                 EventResult::Consumed
             }
+            Key::Z => self.begin_snooze(),
             Key::Up => self.step_selection(-1),
             Key::Down => self.step_selection(1),
             // Space is the near-universal "toggle the selected thing", and
@@ -1959,6 +2003,26 @@ impl RemindersApp {
             }
             Key::D => {
                 self.detail_visible = !self.detail_visible;
+                EventResult::Consumed
+            }
+            // The third member of the group `B` and `D` are in.
+            // `show_completed_subtasks` was `true` at construction with no
+            // writer anywhere, so a finished subtask could never be put out of
+            // the way. Found by `scripts/frozen-flag-survey.py`, which has now
+            // turned up this same shape -- a display-toggle group with a
+            // member nobody wired -- in logviewer, diagram and here.
+            Key::C => {
+                self.show_completed_subtasks = !self.show_completed_subtasks;
+                EventResult::Consumed
+            }
+            // The shortcut list. Nothing in this program turns a keystroke
+            // into text, so `?` is free as well as `F1`.
+            Key::F1 => {
+                self.show_help = !self.show_help;
+                EventResult::Consumed
+            }
+            Key::Slash if key.modifiers.shift => {
+                self.show_help = !self.show_help;
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -2031,6 +2095,40 @@ impl RemindersApp {
     }
 
     /// Complete or un-complete whatever is selected.
+    /// Offer the snooze durations, if something is selected to snooze.
+    fn begin_snooze(&mut self) -> EventResult {
+        if self.selected_task_id.is_none() {
+            return EventResult::Ignored;
+        }
+        self.choosing_snooze = true;
+        EventResult::Consumed
+    }
+
+    /// Answering the snooze prompt.
+    fn handle_snooze_key(&mut self, key: &KeyEvent) -> EventResult {
+        let duration = match key.key {
+            Key::Num1 => Some(SnoozeDuration::Minutes5),
+            Key::Num2 => Some(SnoozeDuration::Minutes15),
+            Key::Num3 => Some(SnoozeDuration::Minutes30),
+            Key::Num4 => Some(SnoozeDuration::Hour1),
+            _ => None,
+        };
+        // Any other key leaves the prompt, so it cannot be got stuck in.
+        self.choosing_snooze = false;
+        let Some(duration) = duration else {
+            return EventResult::Consumed;
+        };
+        let Some(id) = self.selected_task_id else {
+            return EventResult::Consumed;
+        };
+        let now = self.now;
+        if let Some(task) = self.store.get_mut(id) {
+            task.snooze(now, duration);
+            self.last_file_action = Some(format!("Snoozed for {}", duration.label()));
+        }
+        EventResult::Consumed
+    }
+
     fn toggle_selected_complete(&mut self) -> EventResult {
         let Some(id) = self.selected_task_id else {
             return EventResult::Ignored;
@@ -2134,8 +2232,58 @@ impl RemindersApp {
         // Main task list
         self.render_task_list(&mut cmds, main_x, content_y, main_w, content_h);
 
+        // What the last open or save did.
+        //
+        // `last_file_action` was written on every open and save and read by
+        // nothing, so a save that failed said so to no one -- in the one place
+        // this application's data leaves the process. Its own doc comment
+        // said "for the banner line"; the banner line was never written.
+        //
+        // Neither instrument caught it: `dead_code` is silent on it even with
+        // the field private, and `check-fields-written-never-read` reports
+        // only fields a *test* reads, deliberately leaving "read by nothing"
+        // to `dead_code`. It fell in the seam between the two.
+        // The snooze prompt outranks the banner: it is a question waiting for
+        // an answer, and the line it shares is the only place either appears.
+        if self.choosing_snooze {
+            cmds.push(RenderCommand::Text {
+                x: 12.0,
+                y: self.height - 18.0,
+                text: "Snooze:  1) 5 min   2) 15 min   3) 30 min   4) 1 hour   (any other key cancels)"
+                    .to_owned(),
+                color: self.palette.ink(self.palette.blue),
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((self.width - 24.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        } else if let Some(action) = &self.last_file_action {
+            cmds.push(RenderCommand::Text {
+                x: 12.0,
+                y: self.height - 18.0,
+                text: action.clone(),
+                color: self.palette.ink(self.palette.subtext0),
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((self.width - 24.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
         // Last, so it is above everything.
         cmds.extend(self.picker.render(&self.palette, self.width, self.height));
+
+        // And the shortcut list over even that.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.width, self.height),
+                0.0,
+                SHORTCUTS,
+                "F1 or ? closes this",
+            );
+        }
 
         cmds
     }
@@ -3704,6 +3852,120 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::new(),
         })
+    }
+
+    /// **Every key the shortcut list advertises is one this program answers.**
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table beside it here, which would be a third copy of the same fact.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states().iter_mut().any(|app| {
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Lists chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<RemindersApp> {
+        let plain = populated();
+
+        // Parked in Upcoming, which is none of the other four, so every
+        // other digit has a view to come *from*: setting the view already in
+        // force is declined, and the guard needs one state per digit that is
+        // not that digit's own view.
+        let mut elsewhere = populated();
+        elsewhere.handle_event(&press(Key::Num2));
+
+        // With the selection moved, so the keys that go back have somewhere.
+        let mut moved = populated();
+        moved.handle_event(&press(Key::Down));
+
+        // With notifications up, the one state `Escape` can act in: it
+        // dismisses them and does nothing else, which is what the list says
+        // now -- the first version of that row claimed it cleared the
+        // selection too, and this guard is what caught the claim.
+        let mut notified = populated();
+        notified.notifications.push(Notification {
+            task_id: 1,
+            message: String::from("Reminder: something"),
+            triggered_at: notified.now,
+            dismissed: false,
+        });
+
+        vec![plain, elsewhere, moved, notified]
+    }
+
+    /// **Completed subtasks can be put out of the way.**
+    ///
+    /// `show_completed_subtasks` was `true` at construction with no writer
+    /// anywhere -- the third member of the group `B` (sidebar) and `D` (detail
+    /// panel) are already in. Asserts the effect, and that neither neighbour
+    /// moved with it, because `Consumed` alone cannot tell a toggle from a
+    /// fall-through.
+    #[test]
+    fn completed_subtasks_can_be_hidden() {
+        let mut app = populated();
+        let before = (
+            app.show_completed_subtasks,
+            app.sidebar_visible,
+            app.detail_visible,
+        );
+
+        app.handle_event(&press(Key::C));
+
+        assert_ne!(
+            app.show_completed_subtasks, before.0,
+            "C did not move the subtask filter"
+        );
+        assert_eq!(
+            (app.sidebar_visible, app.detail_visible),
+            (before.1, before.2),
+            "C moved one of its neighbours in the same group"
+        );
+    }
+
+    /// **The shortcut list reaches the window.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = populated();
+        assert!(
+            !drawn_help_text(&app).contains("F1 or ? closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = drawn_help_text(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(*keys), "{keys:?} never reached the window");
+            assert!(shown.contains(*what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&press(Key::F1));
+        assert!(
+            !drawn_help_text(&app).contains("F1 or ? closes this"),
+            "F1 did not close it again"
+        );
+    }
+
+    /// Every string the window is drawing, joined.
+    fn drawn_help_text(app: &RemindersApp) -> String {
+        app.render_commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     fn populated() -> RemindersApp {
@@ -5844,6 +6106,132 @@ mod tests {
     ///
     /// Asserted on the rectangles emitted, not on the `palette` field: a field
     /// that was assigned proves nothing a user would see.
+    /// Z then a digit snoozes the selected reminder.
+    ///
+    /// `Task::snooze` was written and tested and the only production writer of
+    /// `snoozed_until` besides it was the JSON loader: a snooze could be read
+    /// from a file and never made. The module doc claimed snooze support
+    /// throughout.
+    #[test]
+    fn z_then_a_digit_snoozes_the_selected_reminder() {
+        let now = make_now();
+        let mut app = RemindersApp::new(1200.0, 800.0, now);
+        let id = 1;
+        app.store.add(Task::new(id, "Water the plants", now));
+        app.selected_task_id = Some(id);
+        assert!(
+            app.store.get(id).expect("the task").snoozed_until.is_none(),
+            "the control failed"
+        );
+
+        assert_eq!(app.handle_event(&press(Key::Z)), EventResult::Consumed);
+        assert!(app.choosing_snooze, "Z did not offer the durations");
+        assert_eq!(app.handle_event(&press(Key::Num2)), EventResult::Consumed);
+
+        assert!(!app.choosing_snooze, "the prompt is still up");
+        assert!(
+            app.store.get(id).expect("the task").snoozed_until.is_some(),
+            "the reminder was not snoozed"
+        );
+    }
+
+    /// While the prompt is up, a digit does not change the view.
+    ///
+    /// `Num1`-`Num5` are the view filters outside the prompt. A digit that
+    /// quietly switched view instead of snoozing would look exactly like a
+    /// snooze that silently failed.
+    #[test]
+    fn a_digit_answering_the_snooze_prompt_does_not_change_the_view() {
+        let now = make_now();
+        let mut app = RemindersApp::new(1200.0, 800.0, now);
+        let id = 1;
+        app.store.add(Task::new(id, "Water the plants", now));
+        app.selected_task_id = Some(id);
+        app.set_view(ViewFilter::All);
+        let before = app.view;
+
+        // Control: outside the prompt, the same key really does switch view.
+        app.handle_event(&press(Key::Num1));
+        assert_eq!(app.view, ViewFilter::Today, "the control failed");
+        app.set_view(before);
+
+        app.handle_event(&press(Key::Z));
+        app.handle_event(&press(Key::Num1));
+
+        assert_eq!(app.view, before, "answering the prompt changed the view");
+        assert!(
+            app.store.get(id).expect("the task").snoozed_until.is_some(),
+            "and it did not snooze either"
+        );
+    }
+
+    /// Any other key leaves the prompt, so it cannot be got stuck in.
+    #[test]
+    fn another_key_cancels_the_snooze_prompt() {
+        let now = make_now();
+        let mut app = RemindersApp::new(1200.0, 800.0, now);
+        let id = 1;
+        app.store.add(Task::new(id, "Water the plants", now));
+        app.selected_task_id = Some(id);
+        app.handle_event(&press(Key::Z));
+
+        app.handle_event(&press(Key::Escape));
+
+        assert!(!app.choosing_snooze, "the prompt is still up");
+        assert!(
+            app.store.get(id).expect("the task").snoozed_until.is_none(),
+            "cancelling snoozed it anyway"
+        );
+    }
+
+    /// With nothing selected there is nothing to snooze.
+    #[test]
+    fn z_with_nothing_selected_does_nothing() {
+        let now = make_now();
+        let mut app = RemindersApp::new(1200.0, 800.0, now);
+        app.selected_task_id = None;
+
+        assert_eq!(app.handle_event(&press(Key::Z)), EventResult::Ignored);
+        assert!(!app.choosing_snooze, "a prompt with no subject was offered");
+    }
+
+    /// The durations are on screen while the prompt is up.
+    #[test]
+    fn the_snooze_durations_are_shown() {
+        let now = make_now();
+        let mut app = RemindersApp::new(1200.0, 800.0, now);
+        let id = 1;
+        app.store.add(Task::new(id, "Water the plants", now));
+        app.selected_task_id = Some(id);
+        app.handle_event(&press(Key::Z));
+
+        let tree = app.render(app.width, app.height);
+
+        let shown = tree
+            .commands
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("15 min")));
+        assert!(shown, "the durations are nowhere on screen");
+    }
+
+    /// What a save or an open did reaches the screen.
+    ///
+    /// `last_file_action` was written on every one and read by nothing, so a
+    /// failed save reported itself to no one. Asserting the field is set
+    /// would reproduce the bug; this asserts the words are drawn.
+    #[test]
+    fn the_last_file_action_is_shown() {
+        let mut app = RemindersApp::new(1200.0, 800.0, make_now());
+        app.last_file_action = Some("Saved 3 reminders".to_owned());
+
+        let tree = app.render(app.width, app.height);
+
+        let shown = tree.commands.iter().any(
+            |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Saved 3 reminders")),
+        );
+        assert!(shown, "the save result is nowhere on screen");
+    }
+
     #[test]
     fn the_window_draws_in_the_theme_it_is_given() {
         fn theme(

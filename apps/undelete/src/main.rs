@@ -2143,10 +2143,26 @@ impl SortDirection {
     }
 }
 
+/// The keys this window answers, as a reader sees them.
+///
+/// `Ctrl+A` ticks every recoverable file and `Ctrl+D` unticks them. Neither
+/// was named, and the second exists because a select-all used to be a
+/// decision with no way back short of clicking every row again.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("F1", "This list"),
+    ("Up / Down", "Move through the files"),
+    ("Tab", "Next field or panel"),
+    ("Enter", "Use the selected control"),
+    ("Ctrl+A", "Tick every file found"),
+    ("Ctrl+D", "Untick every file"),
+];
+
 /// The main application state.
 pub struct UndeleteApp {
     pub width: f32,
     pub height: f32,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     pub screen: UiScreen,
     pub engine: RecoveryEngine,
     pub partitions: Vec<Partition>,
@@ -2175,6 +2191,7 @@ impl UndeleteApp {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
+            show_help: false,
             screen: UiScreen::ScanSetup,
             engine: RecoveryEngine::new(),
             // Empty: nothing here can enumerate a disk. The screen says
@@ -2268,6 +2285,16 @@ impl UndeleteApp {
 
     /// Handle a key press.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            if matches!(key.key, Key::Escape | Key::Enter) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         if key.modifiers.ctrl {
             return match key.key {
                 Key::A => {
@@ -2788,6 +2815,17 @@ impl UndeleteApp {
             UiScreen::Scanning => self.render_scanning(&mut cmds),
             UiScreen::Results => self.render_results(&mut cmds),
             UiScreen::Recovering => self.render_recovering(&mut cmds),
+        }
+
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (self.width, self.height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
         }
 
         cmds
@@ -4579,6 +4617,77 @@ mod tests {
             .unwrap_or_else(|| panic!("{wanted:?} is not drawn on this screen"))
             .0;
         app.handle_event(&click(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0));
+    }
+
+    fn ctrl_key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers {
+                ctrl: true,
+                ..guitk::event::Modifiers::NONE
+            },
+            text: String::new(),
+        })
+    }
+
+    /// **Every key the card advertises is answered by this window.**
+    ///
+    /// Against a completed scan, because the select-all keys act on files
+    /// that have been found and the navigation keys move through them.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut app = scanned();
+                assert_eq!(
+                    app.handle_event(&Event::Key(stroke.clone())),
+                    EventResult::Consumed,
+                    "the card advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The card reaches the window, and nothing is ticked behind it.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let drawn = |app: &UndeleteApp| -> Vec<String> {
+            app.render_commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut app = scanned();
+        assert!(
+            !drawn(&app).iter().any(|t| t.contains("F1 closes this")),
+            "the card is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let missing = guitk::shortcut::missing_rows(&drawn(&app), SHORTCUTS);
+        assert!(missing.is_empty(), "{missing:?}");
+
+        let ticked = app.engine.selected_count();
+        app.handle_event(&ctrl_key(Key::A));
+        assert_eq!(
+            app.engine.selected_count(),
+            ticked,
+            "Ctrl+A ticked every file through the shortcut card"
+        );
+
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&ctrl_key(Key::A));
+        assert_ne!(
+            app.engine.selected_count(),
+            ticked,
+            "control: Ctrl+A does nothing even with the card down"
+        );
     }
 
     fn scanned() -> UndeleteApp {

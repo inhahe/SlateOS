@@ -15,6 +15,15 @@
 //! - Signature management
 //! - Rules/filters for automatic sorting
 //! - Multi-panel UI: folder sidebar, message list, reading pane
+//!
+//! **This client cannot send or receive mail, and the window says so.** It has
+//! no network access, so no account is connected and no server has been
+//! contacted. The line that matters most is the one about silence:
+//! *"An empty mailbox here does not mean no new mail -- nothing was ever
+//! fetched."* An empty inbox is otherwise read as a report about the mail that
+//! exists, which is a claim about the world.
+//!
+//! The list above is what the layouts draw when something supplies a model.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
@@ -1785,6 +1794,40 @@ pub enum Panel {
     Settings,
 }
 
+/// Stepping and naming for [`SortOrder`].
+impl SortOrder {
+    /// Every order, in the order `Ctrl+S` steps through them.
+    ///
+    /// The same order the comparator is written in, so the two cannot drift.
+    pub const ALL: [Self; 5] = [
+        Self::DateDesc,
+        Self::DateAsc,
+        Self::SenderAsc,
+        Self::SubjectAsc,
+        Self::SizeDesc,
+    ];
+
+    /// What the window calls this order.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DateDesc => "newest first",
+            Self::DateAsc => "oldest first",
+            Self::SenderAsc => "sender",
+            Self::SubjectAsc => "subject",
+            Self::SizeDesc => "largest first",
+        }
+    }
+
+    /// The next order round the ring.
+    #[must_use]
+    pub fn next(self) -> Self {
+        let at = Self::ALL.iter().position(|o| *o == self).unwrap_or(0);
+        let ahead = at.saturating_add(1);
+        let wrapped = if ahead >= Self::ALL.len() { 0 } else { ahead };
+        Self::ALL.get(wrapped).copied().unwrap_or(Self::DateDesc)
+    }
+}
+
 /// Sort order for message list
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SortOrder {
@@ -1796,6 +1839,30 @@ pub enum SortOrder {
 }
 
 /// Main email application
+/// The keys this program answers, raised by `F1`.
+///
+/// `?` is not a second way in: the search box and the compose form both take
+/// typed text, so a `?` has somewhere to go -- the `apps/spreadsheet` case in
+/// design-decisions 863.
+///
+/// The app named none of these before the list existed. The survey reported
+/// six of them and there were more, because it matched a key name as a
+/// substring: any capital `S` in any string counted as naming `S`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Up / Down", "Move through the messages"),
+    ("Left / Right", "Previous / next mailbox"),
+    ("R", "Reply to this message"),
+    ("F", "Forward it"),
+    ("U", "Mark it unread"),
+    ("S", "Flag it"),
+    ("Delete", "Delete it"),
+    ("Ctrl+N", "Compose"),
+    ("Ctrl+F", "Search"),
+    ("Ctrl+S", "Change the sort order"),
+    ("Ctrl+P", "Move the reading pane"),
+    ("F1", "This list"),
+];
+
 pub struct EmailApp {
     pub accounts: Vec<EmailAccount>,
     pub mailboxes: Vec<Mailbox>,
@@ -1830,6 +1897,8 @@ pub struct EmailApp {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// Whether the shortcut card is up.
+    show_help: bool,
 }
 
 /// A field of the compose form.
@@ -1842,6 +1911,21 @@ pub enum ComposeField {
     Subject,
     /// The message itself.
     Body,
+}
+
+/// Stepping for [`ReadingPanePosition`].
+impl ReadingPanePosition {
+    /// Every position, in the order `Ctrl+P` steps through them.
+    pub const ALL: [Self; 3] = [Self::Right, Self::Bottom, Self::Off];
+
+    /// The next position round the ring.
+    #[must_use]
+    pub fn next(self) -> Self {
+        let at = Self::ALL.iter().position(|p| *p == self).unwrap_or(0);
+        let ahead = at.saturating_add(1);
+        let wrapped = if ahead >= Self::ALL.len() { 0 } else { ahead };
+        Self::ALL.get(wrapped).copied().unwrap_or(Self::Right)
+    }
 }
 
 /// Reading pane position
@@ -1862,6 +1946,7 @@ impl EmailApp {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             accounts: Vec::new(),
             mailboxes: Vec::new(),
@@ -2100,6 +2185,21 @@ impl EmailApp {
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
         // The compose window takes every key while it is open, or typing a
         // subject containing `d` would delete the message behind it.
+        // Above the compose form and the search box, because `F1` is not text
+        // and a reader may want the keys from either.
+        if key.key == Key::F1 {
+            self.show_help = !self.show_help;
+            return EventResult::Consumed;
+        }
+        if self.show_help {
+            // Modal: letting keys through would mean deleting a message you
+            // cannot see.
+            if matches!(key.key, Key::Escape | Key::Enter | Key::F1) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+
         if self.active_panel == Panel::Compose {
             return self.handle_compose_key(key);
         }
@@ -2112,6 +2212,19 @@ impl EmailApp {
                 Key::N => {
                     self.compose_new();
                     EventResult::Consumed
+                }
+                // The sort order and the reading pane, both drawn from
+                // and neither changeable: `sort_order` was `DateDesc` with no
+                // writer and five comparator arms, `reading_pane_position` was
+                // `Right` with no writer and decides the layout. Found by
+                // `scripts/frozen-flag-survey.py`.
+                Key::S => {
+                    self.sort_order = self.sort_order.next();
+                    return EventResult::Consumed;
+                }
+                Key::P => {
+                    self.reading_pane_position = self.reading_pane_position.next();
+                    return EventResult::Consumed;
                 }
                 Key::F => {
                     self.searching = true;
@@ -2830,6 +2943,18 @@ impl EmailApp {
             overflow: TextOverflow::Ellipsis,
         });
 
+        // Over the reading pane and the compose form both.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut cmds,
+                &self.palette,
+                (width, height),
+                0.0,
+                SHORTCUTS,
+                "F1 closes this",
+            );
+        }
+
         cmds
     }
 
@@ -3495,6 +3620,73 @@ mod tests {
     // with no socket to write to, and the rest are the client's own verbs.
     // ------------------------------------------------------------------
 
+    /// **The message list can be re-sorted, and the order follows.**
+    ///
+    /// `sort_order` was `DateDesc` at construction with no writer anywhere, so
+    /// the comparator's five arms were one reachable arm and four dead ones.
+    ///
+    /// Asserts the order of the listed messages, not the field: a key that
+    /// sets the enum while the comparator ignores it would pass the weaker
+    /// version.
+    #[test]
+    fn the_message_list_can_be_re_sorted() {
+        let mut app = seeded();
+        let subjects = |app: &EmailApp| -> Vec<String> {
+            app.current_messages()
+                .iter()
+                .map(|m| m.subject.clone())
+                .collect()
+        };
+        let by_date = subjects(&app);
+        assert!(by_date.len() > 1, "the fixture needs at least two messages");
+
+        // Step to "subject", which orders alphabetically rather than by time.
+        let mut guard = 0;
+        while app.sort_order != SortOrder::SubjectAsc && guard < SortOrder::ALL.len() {
+            assert_eq!(
+                app.handle_event(&key_ev(Key::S, true)),
+                EventResult::Consumed,
+                "Ctrl+S was not answered"
+            );
+            guard += 1;
+        }
+        assert_eq!(app.sort_order, SortOrder::SubjectAsc);
+
+        let by_subject = subjects(&app);
+        assert_ne!(by_subject, by_date, "re-sorting changed nothing");
+        let mut sorted = by_subject.clone();
+        sorted.sort();
+        assert_eq!(by_subject, sorted, "the subject order is not alphabetical");
+    }
+
+    /// **The reading pane can be moved and switched off.**
+    ///
+    /// `reading_pane_position` was `Right` with no writer, and it decides the
+    /// list's width and whether the pane is drawn at all -- so two of its
+    /// three positions were unreachable.
+    #[test]
+    fn the_reading_pane_can_be_moved_and_switched_off() {
+        let mut app = seeded();
+        assert_eq!(app.reading_pane_position, ReadingPanePosition::Right);
+
+        assert_eq!(
+            app.handle_event(&key_ev(Key::P, true)),
+            EventResult::Consumed,
+            "Ctrl+P was not answered"
+        );
+        assert_eq!(app.reading_pane_position, ReadingPanePosition::Bottom);
+
+        app.handle_event(&key_ev(Key::P, true));
+        assert_eq!(app.reading_pane_position, ReadingPanePosition::Off);
+
+        app.handle_event(&key_ev(Key::P, true));
+        assert_eq!(
+            app.reading_pane_position,
+            ReadingPanePosition::Right,
+            "the cycle did not come back round"
+        );
+    }
+
     fn key_ev(key: Key, ctrl: bool) -> Event {
         let mut modifiers = guitk::event::Modifiers::NONE;
         modifiers.ctrl = ctrl;
@@ -3523,6 +3715,105 @@ mod tests {
         let mut app = EmailApp::new();
         app.seed_sample_mail();
         app
+    }
+
+    /// Every string the window draws, joined.
+    fn drawn(app: &EmailApp) -> String {
+        app.render_commands(1200.0, 800.0)
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// A message has to be selected for `R`, `F`, `U`, `S` and `Delete` to
+    /// have work -- all five act on the selection and are correctly refused
+    /// without one, which is not the same as being unbound.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut app = seeded();
+                app.handle_event(&press(Key::Down));
+                assert_eq!(
+                    app.handle_event(&Event::Key(stroke.clone())),
+                    EventResult::Consumed,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window.**
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut app = seeded();
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        app.handle_event(&press(Key::F1));
+        let shown = drawn(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        app.handle_event(&press(Key::Escape));
+        assert!(
+            !drawn(&app).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+    }
+
+    /// **A key pressed behind the card does not act.**
+    ///
+    /// This one matters more here than in most apps: `Delete` behind the card
+    /// would destroy a message the reader cannot see. The control presses the
+    /// same key with the card down, so the test cannot pass on an app that has
+    /// lost `Delete` altogether.
+    #[test]
+    fn a_key_behind_the_card_does_not_act() {
+        // `delete_message` moves to Trash and only *removes* a message that is
+        // already there, so the observable is the mailbox and not the count.
+        // The first version of this test watched `messages.len()`, and its
+        // control caught that: the card-down case changed nothing either.
+        let mailbox_of = |app: &EmailApp, id: u64| {
+            app.messages
+                .iter()
+                .find(|m| m.id == id)
+                .map(|m| m.mailbox.clone())
+                .unwrap_or_default()
+        };
+
+        let mut app = seeded();
+        app.handle_event(&press(Key::Down));
+        let id = app.selected_message.expect("a message is selected");
+        let before = mailbox_of(&app, id);
+        assert_ne!(before, "Trash", "the fixture must not start in Trash");
+
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(
+            mailbox_of(&app, id),
+            before,
+            "Delete moved a message through the shortcut card"
+        );
+
+        app.handle_event(&press(Key::F1));
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(
+            mailbox_of(&app, id),
+            "Trash",
+            "control: Delete does nothing even with the card down"
+        );
     }
 
     /// A test cannot call `main`, so the mail the window opens on lives in a

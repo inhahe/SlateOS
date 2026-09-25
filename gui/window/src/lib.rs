@@ -1174,6 +1174,18 @@ impl<T: Transport> EventLoop<T> {
         self.conn.grab_modifier_chord(window, modifiers)
     }
 
+    /// Ask to be told when the session has been idle for `after`.
+    ///
+    /// Like a chord grab, this takes nothing away from anyone: it is a claim
+    /// on a notification, not on input. A delay of nought withdraws.
+    ///
+    /// # Errors
+    ///
+    /// As [`grab_modifier_chord`](Self::grab_modifier_chord).
+    pub fn watch_idle(&mut self, window: u64, after: std::time::Duration) -> Result<(), Error<T>> {
+        self.conn.watch_idle(window, after)
+    }
+
     /// Give a claimed modifier chord back.
     ///
     /// # Errors
@@ -1247,6 +1259,19 @@ impl<T: Transport> EventLoop<T> {
     /// As [`Connection::confirm`].
     pub fn notifications_changed(&mut self) -> Result<(), Error<T>> {
         self.conn.confirm(RequestBody::ReloadNotifications)
+    }
+
+    /// Tell everyone the session settings changed.
+    ///
+    /// The desktop shell answers by re-reading the screen-lock delay and
+    /// re-claiming its idle watch. Without this a delay the user just chose
+    /// takes effect at the next sign-in.
+    ///
+    /// # Errors
+    ///
+    /// As [`notifications_changed`](Self::notifications_changed).
+    pub fn session_changed(&mut self) -> Result<(), Error<T>> {
+        self.conn.confirm(RequestBody::ReloadSession)
     }
 
     /// Every window on the desktop, bottom-to-top, as of the last update.
@@ -1985,6 +2010,8 @@ pub mod testing {
         fn name_of(body: &RequestBody) -> &'static str {
             match body {
                 RequestBody::CreateWindow(_) => "CreateWindow",
+                RequestBody::WatchIdle { .. } => "WatchIdle",
+                RequestBody::ReloadSession => "ReloadSession",
                 RequestBody::DestroyWindow { .. } => "DestroyWindow",
                 RequestBody::SetTitle { .. } => "SetTitle",
                 RequestBody::Move { .. } => "Move",

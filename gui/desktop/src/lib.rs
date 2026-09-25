@@ -78,13 +78,11 @@
 
 pub mod about;
 pub mod animations;
-pub mod backup_settings;
 pub mod bluetooth;
 pub mod calendar;
 pub mod clipboard_viewer;
 pub mod context_ext;
 pub mod datetime_settings;
-pub mod default_apps;
 pub mod device_settings;
 /// The sweep that proves a module draws nothing that is immediately erased.
 ///
@@ -96,6 +94,7 @@ pub mod file_drop;
 pub mod focus_assist;
 pub mod hotkeys;
 pub mod icons;
+pub mod idle_lock;
 pub mod input_method;
 pub mod language_settings;
 pub mod launcher;
@@ -195,38 +194,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// The file the pinned applications live in.
 const TASKBAR_CONFIG_NAME: &str = "taskbar";
 
-/// An axis-aligned rectangle in screen pixels.
-///
-/// Every clickable part of the shell is described by exactly one `*_rect`
-/// accessor, which both the renderer and the mouse handler call. The
-/// alternative — a literal in the draw call and a matching literal in the hit
-/// test — produces a button that is clickable somewhere other than where it is
-/// drawn as soon as one of the two is edited, and nothing about the code makes
-/// the second one obviously wrong.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
-
-impl Rect {
-    #[must_use]
-    pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
-        Self { x, y, w, h }
-    }
-
-    /// Whether a point is inside.
-    ///
-    /// The left and top edges count as inside and the right and bottom edges as
-    /// outside, so two rectangles that share an edge cannot both claim the same
-    /// pixel — which is how a row of adjacent buttons must behave.
-    #[must_use]
-    pub fn contains(&self, px: f32, py: f32) -> bool {
-        px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
-    }
-}
+/// The toolkit's rectangle, re-exported so the shell and its widgets share
+/// one. This crate declared an identical copy -- same four floats, same
+/// half-open `contains`, documented with the same reasoning -- until
+/// 2026-09-17. See `known-issues.md`
+/// `TD-C-TEN-RECTANGLE-TYPES-IN-THREE-SPELLINGS`.
+pub use guitk::frame::Rect;
 
 /// Paint a rectangle. A thin wrapper so a rect can be passed as one value
 /// rather than unpacked into four arguments at every call site.
@@ -945,7 +918,7 @@ pub struct HotkeyOutcome {
     /// A `Vec` rather than an `Option` to match `requests` above: both are
     /// unordered, independent asks, and a caller that can already loop over one
     /// should not need a second shape for the other.
-    pub launches: Vec<PathBuf>,
+    pub launches: Vec<hotkeys::Launch>,
 }
 
 impl HotkeyOutcome {
@@ -981,7 +954,7 @@ impl HotkeyOutcome {
     }
 
     /// The shell claimed the key and wants these programs started.
-    fn start(launches: Vec<PathBuf>) -> Self {
+    fn start(launches: Vec<hotkeys::Launch>) -> Self {
         Self {
             consumed: true,
             launches,
@@ -1201,9 +1174,10 @@ pub struct DesktopShell {
     /// The icons on the desktop, and where the user left them.
     ///
     /// `design-decisions.md` 933 (open-questions A-Q8) makes this layer the
-    /// layout authority: icon positions are not a kernel concern, and
-    /// `fs::deskicons` / `/proc/deskicons` are deleted once this reads and
-    /// writes them. It is populated and its saved positions applied in
+    /// layout authority: icon positions are not a kernel concern. Lane A
+    /// deleted `fs::deskicons` and `/proc/deskicons` once this read and wrote
+    /// them, which it has -- checked 2026-09-16, neither exists. It is
+    /// populated and its saved positions applied in
     /// [`new`](Self::new), so the first frame draws them where they were left
     /// rather than where the defaults put them and then jumping.
     pub icons: icons::DesktopIconLayer,
@@ -4624,7 +4598,7 @@ impl DesktopShell {
             | HotkeyAction::ScreenLock
             | HotkeyAction::Screenshot
             | HotkeyAction::ScreenshotRegion => {
-                HotkeyOutcome::start(action.command().map(PathBuf::from).into_iter().collect())
+                HotkeyOutcome::start(action.launch().into_iter().collect())
             }
             // Nothing can carry these out: there is no backlight channel out of
             // the shell, and inventing one would mean a request the compositor
@@ -4683,7 +4657,21 @@ impl DesktopShell {
         // a press the dialog had no meaning for is still not the desktop's while
         // the dialog is up.
         let _ = self.run_dialog.handle_key_event(key);
-        HotkeyOutcome::start(self.drain_run_dialog())
+        // Wrapped with no arguments, because that is what this box produces:
+        // what the user typed is taken as the whole name of one program.
+        // Splitting it would need a quoting rule, and inventing one silently
+        // would make `my program` two words to the shell and one to the
+        // filesystem. Whether the Run box should accept arguments at all is a
+        // real question and a separate one; it is not settled by a conversion.
+        HotkeyOutcome::start(
+            self.drain_run_dialog()
+                .into_iter()
+                .map(|program| hotkeys::Launch {
+                    program,
+                    args: Vec::new(),
+                })
+                .collect(),
+        )
     }
 
     /// Answer whatever the Run box has asked for since it was last emptied, and
@@ -6401,8 +6389,46 @@ impl DesktopShell {
                 self.shortcut_message = None;
                 Some(HotkeyOutcome::ignored())
             }
+            Key::Delete => {
+                if rows == 0 {
+                    return Some(HotkeyOutcome::ignored());
+                }
+                self.delete_shortcut_row(self.shortcut_selected.min(rows.saturating_sub(1)));
+                Some(HotkeyOutcome::ignored())
+            }
             _ => None,
         }
+    }
+
+    /// Unbind the action on row `row`, and remember that it was unbound.
+    ///
+    /// Remembering is the whole of it. `load_shortcuts` merges the saved file
+    /// onto the shipped defaults — so that a shortcut added in a later
+    /// version reaches a user who has customised theirs — which means a
+    /// deletion that only removed a line would be undone by the very next
+    /// login, silently, with the registry looking correct in between.
+    /// `HotkeyConfig::from_registry` writes a `none=` line for every default
+    /// this registry no longer holds, and that line is what survives.
+    fn delete_shortcut_row(&mut self, row: usize) {
+        let Some((chord, action)) = self
+            .hotkeys
+            .all_bindings()
+            .nth(row)
+            .map(|(h, a)| (*h, a.clone()))
+        else {
+            self.shortcut_message = Some("That row is gone".to_string());
+            return;
+        };
+
+        self.hotkeys.unregister(&chord);
+        let label = action.display_label();
+        self.shortcut_message = Some(match self.save_shortcuts() {
+            Ok(()) => format!("{label} is no longer on any keys"),
+            // Said rather than swallowed, and said precisely: the shortcut is
+            // gone from this session either way, and the part that failed is
+            // the part that would have made it stay gone.
+            Err(e) => format!("{label} is unbound, but could not be saved: {e}"),
+        });
     }
 
     /// Read one keystroke as the new chord for the row being recorded.
@@ -6975,16 +7001,46 @@ impl DesktopShell {
         };
 
         for (chord, action) in saved.bindings() {
+            // Every chord the file gives this action, not just this one. An
+            // action can legitimately have two -- the defaults put the Start
+            // Menu on both Super keys, so that a driver which sets the Super
+            // bit and one which does not are both answered -- and the earlier
+            // version of this filter, `*h != chord`, unregistered each of them
+            // while processing the other. Whichever came last was the only one
+            // left, so the Start Menu quietly stopped answering one of the two
+            // Super keys after any save and reload.
+            let keeps: Vec<_> = saved
+                .bindings()
+                .iter()
+                .filter(|(_, a)| a == action)
+                .map(|(h, _)| *h)
+                .collect();
             let stale: Vec<_> = self
                 .hotkeys
                 .all_bindings()
-                .filter(|(h, a)| *a == action && *h != chord)
+                .filter(|(h, a)| *a == action && !keeps.contains(h))
                 .map(|(h, _)| *h)
                 .collect();
             for old in stale {
                 self.hotkeys.unregister(&old);
             }
             drop(self.hotkeys.register(*chord, action.clone()));
+        }
+
+        // Then the deletions. After the bindings, so that a file which both
+        // rebinds and unbinds the same action ends with it unbound -- the last
+        // thing the user did to it is the thing that stands, and a file cannot
+        // say both about one action unless it was hand-edited.
+        for action in saved.unbound() {
+            let bound: Vec<_> = self
+                .hotkeys
+                .all_bindings()
+                .filter(|(_, a)| *a == action)
+                .map(|(h, _)| *h)
+                .collect();
+            for chord in bound {
+                self.hotkeys.unregister(&chord);
+            }
         }
     }
 
@@ -7224,7 +7280,11 @@ impl DesktopShell {
         }
         match self.icons.handle_double_click(x, y) {
             icons::IconEvent::Activate(_, icons::IconAction::OpenPath(path)) => {
-                ShellAction::Launch(PathBuf::from(path))
+                // Launched as the path the icon holds. This was
+                // `PathBuf::from(path)` over a `String`, which re-parsed text
+                // that had already lost any byte the home directory's name
+                // could not spell.
+                ShellAction::Launch(path)
             }
             // `LaunchSystem` and `Custom` name a thing this shell has no way to
             // start yet: there is no registry mapping "recycle-bin" to anything
@@ -12592,7 +12652,73 @@ mod run_box_wiring_tests {
         for ch in command.chars() {
             launches.extend(s.handle_hotkey(&typed(ch)).launches);
         }
-        launches
+        programs(&launches)
+    }
+
+    /// The programs a batch of launches names, without their arguments.
+    ///
+    /// Most of these tests are about *which program* was named -- several
+    /// about naming it byte-exactly -- and the Run box passes no arguments, so
+    /// asserting on the program keeps them saying what they were written to
+    /// say. The arguments have tests of their own; see
+    /// `the_screenshot_shortcut_passes_its_mode_as_an_argument`.
+    fn programs(launches: &[crate::hotkeys::Launch]) -> Vec<PathBuf> {
+        launches.iter().map(|l| l.program.clone()).collect()
+    }
+
+    /// **A screenshot shortcut asks for a program, and tells it which mode.**
+    ///
+    /// The two screenshot actions are one program invoked two ways, and until
+    /// 2026-09-17 the difference was carried inside the path:
+    /// `SCREENSHOT_COMMAND` was `"/usr/bin/screenshot --fullscreen"`, turned
+    /// into one `PathBuf` and handed to `Command::new`. That asks the system
+    /// for a file with a space and two dashes in its name, so **both
+    /// screenshot shortcuts failed at every press** -- and failed by printing
+    /// "cannot start", which reads like a program that is not installed rather
+    /// than a request that was never well formed.
+    ///
+    /// Asserted on the argument and not merely on the program: with the
+    /// argument dropped the two actions become the same launch, which is the
+    /// other way to get this wrong.
+    #[test]
+    fn the_screenshot_shortcut_passes_its_mode_as_an_argument() {
+        let full = crate::hotkeys::HotkeyAction::Screenshot
+            .launch()
+            .expect("the screenshot action starts a program");
+        let region = crate::hotkeys::HotkeyAction::ScreenshotRegion
+            .launch()
+            .expect("the region action starts a program");
+
+        assert_eq!(
+            full.program,
+            PathBuf::from("/usr/bin/screenshot"),
+            "the program is not a file name any filesystem could hold"
+        );
+        assert_eq!(full.program, region.program, "two programs, not two modes");
+        assert_eq!(full.args, [std::ffi::OsString::from("--fullscreen")]);
+        assert_eq!(region.args, [std::ffi::OsString::from("--region")]);
+        assert_ne!(
+            full, region,
+            "the two shortcuts became the same launch, so one of them is unreachable"
+        );
+    }
+
+    /// A program named with no arguments is launched with none.
+    ///
+    /// The start menu and the Run box name programs rather than invocations,
+    /// and an empty `args` is what says so. A default of "whatever was last
+    /// set" would be the kind of leak that only shows up on the second press.
+    #[test]
+    fn an_action_that_names_only_a_program_carries_no_arguments() {
+        let lock = crate::hotkeys::HotkeyAction::ScreenLock
+            .launch()
+            .expect("the lock action starts a program");
+        assert_eq!(lock.program, PathBuf::from(crate::hotkeys::LOCK_COMMAND));
+        assert!(
+            lock.args.is_empty(),
+            "arguments appeared for an action that names none: {:?}",
+            lock.args
+        );
     }
 
     fn press(s: &mut DesktopShell, x: f32, y: f32) -> ShellAction {
@@ -12845,7 +12971,7 @@ mod run_box_wiring_tests {
         );
 
         let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
-        assert_eq!(outcome.launches, [PathBuf::from("terminal")]);
+        assert_eq!(programs(&outcome.launches), [PathBuf::from("terminal")]);
         assert!(
             !s.run_dialog.is_visible(),
             "the box stayed up after starting the command"
@@ -13025,7 +13151,7 @@ mod run_box_wiring_tests {
         expected.push(&name);
         let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
         assert_eq!(
-            outcome.launches,
+            programs(&outcome.launches),
             [PathBuf::from(&expected)],
             "the launch named a lossy rendering rather than the file that was picked"
         );
@@ -13051,8 +13177,10 @@ mod run_box_wiring_tests {
         let _ = s.handle_hotkey(&chord(Key::Down, Modifiers::NONE));
         let _ = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
         assert_eq!(
-            s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
-                .launches,
+            programs(
+                &s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
+                    .launches
+            ),
             [PathBuf::from(&expected)]
         );
 
@@ -13061,8 +13189,10 @@ mod run_box_wiring_tests {
         assert!(s.run_dialog.is_visible(), "the box did not reopen");
         assert!(s.handle_hotkey(&chord(Key::Up, Modifiers::NONE)).consumed);
         assert_eq!(
-            s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
-                .launches,
+            programs(
+                &s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
+                    .launches
+            ),
             [PathBuf::from(&expected)],
             "the recalled command named a lossy rendering rather than the file that ran"
         );
@@ -13088,7 +13218,7 @@ mod run_box_wiring_tests {
 
         let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
         assert_eq!(
-            outcome.launches,
+            programs(&outcome.launches),
             [PathBuf::from("terminal")],
             "cancelling the chooser edited the command that was already typed"
         );
@@ -13111,7 +13241,7 @@ mod run_box_wiring_tests {
 
         let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
         assert_eq!(
-            outcome.launches,
+            programs(&outcome.launches),
             [PathBuf::from("term")],
             "a key aimed at the chooser was typed into the box behind it"
         );
@@ -13446,6 +13576,145 @@ mod run_box_wiring_tests {
                     );
                 }
             },
+        );
+    }
+
+    /// **A deleted shortcut is still deleted in a fresh shell.**
+    ///
+    /// The test this feature exists to pass, and the one a naive
+    /// implementation fails. `load_shortcuts` merges the saved file onto the
+    /// shipped defaults rather than replacing them -- on purpose, so that a
+    /// shortcut added in a later version reaches a user who has customised
+    /// theirs. A deletion that only dropped the line from the file would
+    /// therefore be undone at the next login, while every in-memory assertion
+    /// went on passing. Only a fresh shell can see it.
+    #[test]
+    fn a_deleted_shortcut_is_still_deleted_in_a_fresh_shell() {
+        settingsfile::testing::with_scratch_config("hk-delete", |_root| {
+            let mut shell = card_shell();
+            let (chord, action) = shell
+                .hotkeys
+                .all_bindings()
+                .next()
+                .map(|(h, a)| (*h, a.clone()))
+                .expect("a binding to delete");
+
+            shell.delete_shortcut_row(0);
+            assert_eq!(
+                shell.hotkeys.conflicts_with(&chord),
+                None,
+                "the shortcut is still bound in the session that deleted it"
+            );
+
+            let mut fresh = DesktopShell::new(1920, 1080);
+            assert_eq!(
+                fresh.hotkeys.conflicts_with(&chord),
+                Some(&action),
+                "the defaults must still have it, or this proves nothing"
+            );
+            fresh.load_shortcuts();
+
+            assert_eq!(
+                fresh.hotkeys.conflicts_with(&chord),
+                None,
+                "the deleted shortcut came back at the next login"
+            );
+            assert!(
+                fresh.hotkeys.all_bindings().all(|(_, a)| *a != action),
+                "the action returned on some other chord"
+            );
+        });
+    }
+
+    /// **An action on two chords keeps both across a save and reload.**
+    ///
+    /// The defaults put the Start Menu on both Super keys on purpose: one
+    /// entry answers a driver that sets the Super bit for the Super key
+    /// itself, the other a driver that does not. `load_shortcuts` used to
+    /// unregister every *other* chord bound to an action as it applied each
+    /// binding, so the two entries deleted each other and whichever was
+    /// processed last was the only survivor -- after any save and reload, one
+    /// of the two Super keys silently stopped opening the menu.
+    ///
+    /// Found by `deleting_one_shortcut_keeps_the_rest`, which failed with
+    /// "deleting one shortcut took Start Menu with it" against code that had
+    /// nothing to do with deleting.
+    #[test]
+    fn an_action_on_two_chords_keeps_both() {
+        settingsfile::testing::with_scratch_config("hk-two-chords", |_root| {
+            let shell = card_shell();
+            let doubled: Vec<_> = shell
+                .hotkeys
+                .all_bindings()
+                .filter(|(_, a)| **a == crate::hotkeys::HotkeyAction::ToggleStartMenu)
+                .map(|(h, _)| *h)
+                .collect();
+            assert_eq!(
+                doubled.len(),
+                2,
+                "the fixture no longer binds one action to two chords, so this proves nothing"
+            );
+            shell.save_shortcuts().expect("save");
+
+            let mut fresh = DesktopShell::new(1920, 1080);
+            fresh.load_shortcuts();
+            for chord in doubled {
+                assert_eq!(
+                    fresh.hotkeys.conflicts_with(&chord),
+                    Some(&crate::hotkeys::HotkeyAction::ToggleStartMenu),
+                    "{} lost its binding on reload",
+                    chord.display_name()
+                );
+            }
+        });
+    }
+
+    /// Deleting one shortcut leaves the others alone.
+    ///
+    /// A tombstone names an action, and the merge that applies it walks every
+    /// binding; an over-eager unregister would take the neighbours with it.
+    #[test]
+    fn deleting_one_shortcut_keeps_the_rest() {
+        settingsfile::testing::with_scratch_config("hk-delete-one", |_root| {
+            let mut shell = card_shell();
+            let before: Vec<_> = shell
+                .hotkeys
+                .all_bindings()
+                .map(|(h, a)| (*h, a.clone()))
+                .collect();
+            assert!(before.len() > 2, "fixture too small to prove anything");
+
+            shell.delete_shortcut_row(0);
+
+            let mut fresh = DesktopShell::new(1920, 1080);
+            fresh.load_shortcuts();
+            for (chord, action) in before.iter().skip(1) {
+                assert_eq!(
+                    fresh.hotkeys.conflicts_with(chord),
+                    Some(action),
+                    "deleting one shortcut took {} with it",
+                    action.display_label()
+                );
+            }
+        });
+    }
+
+    /// A shortcut this build has never heard of is not a parse error.
+    ///
+    /// `none=` is a new spelling on the left-hand side, so a file written by
+    /// this version is read by an older one as a chord named "none". That is
+    /// already handled -- an unparseable file is left alone rather than
+    /// rewritten -- but the reverse must hold too: `none` is only a tombstone
+    /// when it is the whole left-hand side, or a chord whose name merely
+    /// starts with those letters would be silently unbound instead of bound.
+    #[test]
+    fn only_a_bare_none_is_a_tombstone() {
+        let cfg = crate::hotkeys::HotkeyConfig::load("none=screenshot\n")
+            .expect("a tombstone should parse");
+        assert_eq!(cfg.unbound().len(), 1, "the tombstone was not recognised");
+        assert!(
+            cfg.bindings().is_empty(),
+            "a tombstone was also stored as a binding"
         );
     }
 

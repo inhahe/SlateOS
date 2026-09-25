@@ -54,16 +54,26 @@ const FALLBACK_SEED: u64 = 0x4D55_5349_4350_4C52;
 // Layout Constants
 // ============================================================================
 
-/// What the window says instead of a library.
+/// What the window says while the library is empty.
 ///
 /// Three lines. The third names the distinction the old comment here already
 /// identified and then resolved the wrong way: **an empty library reads as a
 /// broken player rather than an unimplemented one.** That is exactly right,
 /// and the remedy is to say which of the two it is -- not to fill the library
 /// so the question never comes up.
-const CANNOT_SCAN_LINES: [&str; 3] = [
+///
+/// The second line used to say "it has no filesystem access, so nothing has
+/// been scanned and no track can be opened or played", which stopped being
+/// true when `Ctrl+O` and `Ctrl+S` landed — the two keys the handler's own
+/// comment calls the ones that "make this a playlist editor rather than a
+/// viewer". Only half of that sentence had gone stale, which is why it is now
+/// two clauses: a playlist really can be opened and saved, and a track really
+/// cannot be played, because nothing here decodes audio. Collapsing either
+/// way would be wrong — claiming the player works, or denying the one
+/// thing it does. Found by `scripts/find-stale-admissions.py`.
+const CANNOT_PLAY_LINES: [&str; 3] = [
     "This player has no music library.",
-    "It has no filesystem access, so nothing has been scanned and no track can be opened or played.",
+    "Ctrl+O opens an M3U playlist and Ctrl+S saves one, but nothing here decodes audio, so a track can be listed and never played.",
     "The library is empty because this is unfinished, not because the player is broken.",
 ];
 
@@ -672,9 +682,35 @@ const PLAYING_TICK_MS: u64 = 33;
 const NO_AUDIO: &str =
     "No audio output on this system -- this window edits playlists, it does not play them";
 
+/// The keys this program answers, raised by `F1`.
+///
+/// `?` is not a second way in: `Ctrl+F` opens a search box that takes typed
+/// text, so a `?` has somewhere to go -- the `apps/spreadsheet` case in
+/// design-decisions 863.
+///
+/// The app named none of these before the list existed.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Space", "Play or pause"),
+    ("N / P", "Next / previous track"),
+    ("Left / Right", "Seek back or on"),
+    ("Up / Down", "Move through the list"),
+    ("M", "Mute"),
+    ("= / 0", "Louder"),
+    ("-", "Quieter"),
+    ("S", "Shuffle"),
+    ("R", "Repeat: off, all, one"),
+    ("1-3", "Now playing, library, playlists"),
+    ("Ctrl+O", "Open a file"),
+    ("Ctrl+S", "Save the playlist"),
+    ("Ctrl+F", "Search the library"),
+    ("F1", "This list"),
+];
+
 pub struct PlayerState {
     /// The user's colours, handed over by the framework (§822).
     pub palette: Palette,
+    /// Whether the shortcut card is up.
+    pub show_help: bool,
     // Playback
     pub current_track_index: Option<usize>,
     pub position_secs: f32,
@@ -774,6 +810,7 @@ impl PlayerState {
 
     fn with_rng(rng: SeededRng) -> Self {
         Self {
+            show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             shuffle_played: Vec::new(),
             status_message: String::from(NO_AUDIO),
@@ -1319,7 +1356,7 @@ pub fn render(state: &PlayerState) -> RenderTree {
     // After the background, or it would be painted over. Keyed on the library
     // being empty so it retires itself when a scanner lands.
     if state.library.is_empty() {
-        for (i, line) in CANNOT_SCAN_LINES.iter().enumerate() {
+        for (i, line) in CANNOT_PLAY_LINES.iter().enumerate() {
             tree.push(RenderCommand::Text {
                 x: 10.0,
                 #[expect(clippy::cast_precision_loss, reason = "three lines; index is 0..3")]
@@ -1369,6 +1406,17 @@ pub fn render(state: &PlayerState) -> RenderTree {
             .picker
             .render(&state.palette, state.width, state.height),
     );
+
+    if state.show_help {
+        guitk::shortcut::render_card(
+            &mut tree,
+            &state.palette,
+            (state.width, state.height),
+            0.0,
+            SHORTCUTS,
+            "F1 closes this",
+        );
+    }
 
     tree
 }
@@ -2370,6 +2418,21 @@ pub fn handle_event(state: &mut PlayerState, event: &Event) -> bool {
 
 /// Handle keyboard input.
 fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
+    // Ahead of the search box below: `F1` is not a character, and a reader
+    // half-way through a query still wants the keys.
+    if key_event.key == Key::F1 {
+        state.show_help = !state.show_help;
+        return true;
+    }
+    if state.show_help {
+        // Modal. Letting keys through would mean skipping a track the reader
+        // cannot see.
+        if matches!(key_event.key, Key::Escape | Key::Enter | Key::F1) {
+            state.show_help = false;
+        }
+        return true;
+    }
+
     if !key_event.pressed {
         return false;
     }
@@ -2913,7 +2976,7 @@ fn main() -> ExitCode {
 /// identified precisely the question the user cannot answer, it answered it
 /// by removing the evidence.
 ///
-/// The remedy is to say which of the two it is. See `CANNOT_SCAN_LINES`.
+/// The remedy is to say which of the two it is. See `CANNOT_PLAY_LINES`.
 #[cfg(test)]
 fn load_demo_library(state: &mut PlayerState) {
     // Add some demo tracks to show the UI populated
@@ -3062,14 +3125,14 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for line in CANNOT_SCAN_LINES {
+        for line in CANNOT_PLAY_LINES {
             assert!(
                 texts.iter().any(|t| t == line),
                 "the window never said {line:?}"
             );
         }
         assert!(
-            CANNOT_SCAN_LINES
+            CANNOT_PLAY_LINES
                 .iter()
                 .any(|l| l.contains("unfinished, not because the player is broken")),
             "nothing distinguishes an unimplemented player from a broken one",
@@ -3083,6 +3146,97 @@ mod tests {
     /// rather than a fixture -- and a fixture nothing uses is not a fixture.
     /// The library view was previously only ever exercised against the demo
     /// data by way of the shipping path, which is to say never on purpose.
+    /// Every string the window draws, joined.
+    fn drawn(state: &PlayerState) -> String {
+        render(state)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    fn pressed(key: Key, ctrl: bool) -> KeyEvent {
+        let mut modifiers = guitk::event::Modifiers::NONE;
+        modifiers.ctrl = ctrl;
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }
+    }
+
+    /// **Every key the list advertises is one this program answers.**
+    ///
+    /// A library loaded and a track selected, because `Up`, `Down`, `Space`,
+    /// `N`, `P` and the seek keys all act on a selection or a current track
+    /// and are correctly refused without one.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let mut state = PlayerState::new();
+                load_demo_library(&mut state);
+                state.active_tab = Tab::Library;
+                state.selected_index = Some(1);
+                assert!(
+                    handle_key(&mut state, &stroke),
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// **The shortcut list reaches the window, and nothing acts behind it.**
+    ///
+    /// The control is the half that matters: `Space` behind the card must not
+    /// start the music, and asserting only that it does not would pass on a
+    /// player that had lost `Space` altogether.
+    #[test]
+    fn the_shortcut_list_reaches_the_window() {
+        let mut state = PlayerState::new();
+        load_demo_library(&mut state);
+        assert!(
+            !drawn(&state).contains("F1 closes this"),
+            "the list is up before anybody asked for it"
+        );
+
+        handle_key(&mut state, &pressed(Key::F1, false));
+        let shown = drawn(&state);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+
+        // The observable is the status line, not a `playing` flag. There is
+        // no audio backend, so `toggle_play` never sets `playing` -- it writes
+        // NO_AUDIO and says so. Watching `playing` would have compared `false`
+        // with `false` and passed on a player that had lost `Space`.
+        state.status_message.clear();
+        handle_key(&mut state, &pressed(Key::Space, false));
+        assert!(
+            state.status_message.is_empty(),
+            "Space reached the player through the shortcut card"
+        );
+
+        handle_key(&mut state, &pressed(Key::Escape, false));
+        assert!(
+            !drawn(&state).contains("F1 closes this"),
+            "Escape did not close it"
+        );
+
+        handle_key(&mut state, &pressed(Key::Space, false));
+        assert!(
+            !state.status_message.is_empty(),
+            "control: Space does nothing even with the card down"
+        );
+    }
+
     #[test]
     fn the_library_view_draws_the_tracks_it_is_given() {
         let mut state = PlayerState::new();
@@ -3105,7 +3259,7 @@ mod tests {
         );
         // And the banner is gone, because the library is no longer empty.
         assert!(
-            !texts.iter().any(|t| t == CANNOT_SCAN_LINES[0]),
+            !texts.iter().any(|t| t == CANNOT_PLAY_LINES[0]),
             "the empty-library banner survived a library",
         );
     }

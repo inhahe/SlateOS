@@ -459,6 +459,7 @@
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
 
 pub mod backup;
+pub mod basenc;
 mod bignat;
 pub mod canon;
 pub mod cfmt;

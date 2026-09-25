@@ -17,6 +17,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/audit-rustfmt-drift.py` | Report every tracked .rs file that rustfmt would reformat. |
 | `scripts/awk-diff.sh` | Differential test: our awk against GNU awk, both run inside WSL. |
 | `scripts/backfill-lane-fields.py` | Add the missing ``**Lane:**`` field to old ``design-decisions.md`` entries. |
+| `scripts/basenc-diff.sh` | basenc-diff.sh — compare our `base64`, `base32` and `basenc` against GNU's, |
 | `scripts/bash-spike/checksyms.sh` | Confirm the three functions the spike originally had to shim are now real |
 | `scripts/bash-spike/cross2.sh` | Cross-compile bash 5.2 -> x86_64-linux-musl (the ABI SlateOS's libc.a targets). |
 | `scripts/bash-spike/cross3.sh` | Continue the cross build after the strtoimax collision. |
@@ -409,4 +410,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_399 scripts._
+_400 scripts._

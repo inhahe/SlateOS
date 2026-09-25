@@ -1,10 +1,15 @@
-//! Slate OS base64/base32/uuencode/uudecode — encoding/decoding tools
+//! Slate OS base64/uuencode/uudecode — encoding/decoding tools
 //!
 //! Multi-personality binary detected via argv[0]:
 //! - `base64`: RFC 4648 Base64 encode/decode
-//! - `base32`: RFC 4648 Base32 encode/decode
 //! - `uuencode`: Traditional uuencoding
 //! - `uudecode`: Traditional uudecoding
+//!
+//! `base32` was a fourth personality, which no link ever reached. It is
+//! `userspace/coreutils`'s own bin since 2026-09-25, a port of GNU's checked
+//! against it, and a name belongs to the one program that does the job
+//! (design-decisions.md §1005). `base64` follows it there once `uuencode`
+//! and `uudecode`, which share this crate, have homes of their own.
 
 use quoting::quoteaf_os;
 use std::env;
@@ -17,7 +22,6 @@ use std::process;
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Mode {
     Base64,
-    Base32,
     Uuencode,
     Uudecode,
 }
@@ -27,7 +31,6 @@ fn detect_mode(argv0: &str) -> Mode {
     let name = name.strip_suffix(".exe").unwrap_or(name);
     let lower = name.to_ascii_lowercase();
     match lower.as_str() {
-        "base32" => Mode::Base32,
         "uuencode" => Mode::Uuencode,
         "uudecode" => Mode::Uudecode,
         _ => Mode::Base64,
@@ -132,123 +135,6 @@ fn b64_decode(input: &str, alphabet: &[u8; 64]) -> Result<Vec<u8>, String> {
             bits -= 8;
             buf.push((accum >> bits) as u8);
             accum &= (1 << bits) - 1;
-        }
-    }
-    Ok(buf)
-}
-
-// ── Base32 encoding/decoding (RFC 4648) ────────────────────────────
-
-const B32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-const B32_HEX_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
-
-fn b32_encode(data: &[u8], alphabet: &[u8; 32], wrap: usize, pad: bool) -> String {
-    let mut out = String::with_capacity(data.len().div_ceil(5) * 8 + data.len() / 40 + 2);
-    let mut col = 0usize;
-
-    // Process 5 bytes at a time -> 8 base32 chars
-    let mut i = 0;
-    while i + 4 < data.len() {
-        let b0 = data[i] as u64;
-        let b1 = data[i + 1] as u64;
-        let b2 = data[i + 2] as u64;
-        let b3 = data[i + 3] as u64;
-        let b4 = data[i + 4] as u64;
-        let quint = (b0 << 32) | (b1 << 24) | (b2 << 16) | (b3 << 8) | b4;
-        out.push(alphabet[((quint >> 35) & 0x1F) as usize] as char);
-        out.push(alphabet[((quint >> 30) & 0x1F) as usize] as char);
-        out.push(alphabet[((quint >> 25) & 0x1F) as usize] as char);
-        out.push(alphabet[((quint >> 20) & 0x1F) as usize] as char);
-        out.push(alphabet[((quint >> 15) & 0x1F) as usize] as char);
-        out.push(alphabet[((quint >> 10) & 0x1F) as usize] as char);
-        out.push(alphabet[((quint >> 5) & 0x1F) as usize] as char);
-        out.push(alphabet[(quint & 0x1F) as usize] as char);
-        col += 8;
-        if wrap > 0 && col >= wrap {
-            out.push('\n');
-            col = 0;
-        }
-        i += 5;
-    }
-
-    let rem = data.len() - i;
-    if rem > 0 {
-        // Pad remaining bytes to 5 with zeros
-        let mut block = [0u8; 5];
-        block[..rem].copy_from_slice(&data[i..i + rem]);
-        let b0 = block[0] as u64;
-        let b1 = block[1] as u64;
-        let b2 = block[2] as u64;
-        let b3 = block[3] as u64;
-        let b4 = block[4] as u64;
-        let quint = (b0 << 32) | (b1 << 24) | (b2 << 16) | (b3 << 8) | b4;
-
-        // Number of base32 chars to output: ceil(rem*8/5)
-        let chars_out = match rem {
-            1 => 2, // 8 bits -> 2 chars
-            2 => 4, // 16 bits -> 4 chars
-            3 => 5, // 24 bits -> 5 chars
-            4 => 7, // 32 bits -> 7 chars
-            _ => 0,
-        };
-        let pad_chars = 8 - chars_out;
-
-        for j in 0..chars_out {
-            let shift = 35 - j * 5;
-            out.push(alphabet[((quint >> shift) & 0x1F) as usize] as char);
-        }
-        if pad {
-            for _ in 0..pad_chars {
-                out.push('=');
-            }
-        }
-    }
-
-    if wrap > 0 && col > 0 {
-        out.push('\n');
-    }
-    out
-}
-
-fn b32_decode_table(alphabet: &[u8; 32]) -> [u8; 256] {
-    let mut table = [0xFFu8; 256];
-    for (i, &ch) in alphabet.iter().enumerate() {
-        table[ch as usize] = i as u8;
-        // Also accept lowercase for standard base32
-        if ch.is_ascii_uppercase() {
-            table[(ch + 32) as usize] = i as u8;
-        }
-    }
-    table
-}
-
-fn b32_decode(input: &str, alphabet: &[u8; 32]) -> Result<Vec<u8>, String> {
-    let table = b32_decode_table(alphabet);
-    let mut buf = Vec::with_capacity(input.len() * 5 / 8);
-    let mut accum: u64 = 0;
-    let mut bits: u32 = 0;
-
-    for (pos, ch) in input.chars().enumerate() {
-        if ch == '\n' || ch == '\r' || ch == ' ' || ch == '\t' || ch == '=' {
-            continue;
-        }
-        let val = if (ch as u32) < 256 {
-            table[ch as usize]
-        } else {
-            0xFF
-        };
-        if val == 0xFF {
-            return Err(format!(
-                "invalid character {} at position {pos}",
-                quoteaf_os(ch.to_string())
-            ));
-        }
-        accum = (accum << 5) | val as u64;
-        bits += 5;
-        if bits >= 8 {
-            bits -= 8;
-            buf.push((accum >> bits) as u8);
-            accum &= (1u64 << bits) - 1;
         }
     }
     Ok(buf)
@@ -361,7 +247,6 @@ struct Args {
     wrap: usize,
     ignore_garbage: bool,
     url_safe: bool, // base64 URL-safe alphabet
-    hex: bool,      // base32 hex alphabet
     no_pad: bool,   // omit padding
     input_files: Vec<String>,
     // uuencode specific
@@ -379,7 +264,6 @@ impl Default for Args {
             wrap: 76,
             ignore_garbage: false,
             url_safe: false,
-            hex: false,
             no_pad: false,
             input_files: Vec::new(),
             uu_filename: None,
@@ -399,7 +283,6 @@ fn parse_args(mode: Mode) -> Args {
     // Set default wrap by mode
     args.wrap = match mode {
         Mode::Base64 => 76,
-        Mode::Base32 => 76,
         Mode::Uuencode | Mode::Uudecode => 0,
     };
 
@@ -416,7 +299,6 @@ fn parse_args(mode: Mode) -> Args {
                     "{} (Slate OS) 0.1.0",
                     match mode {
                         Mode::Base64 => "base64",
-                        Mode::Base32 => "base32",
                         Mode::Uuencode => "uuencode",
                         Mode::Uudecode => "uudecode",
                     }
@@ -444,7 +326,6 @@ fn parse_args(mode: Mode) -> Args {
                 });
             }
             "--url" | "--url-safe" => args.url_safe = true,
-            "--hex" => args.hex = true,
             "--no-pad" => args.no_pad = true,
             "-o" | "--output" => {
                 i += 1;
@@ -506,17 +387,6 @@ fn print_usage(mode: Mode) {
             eprintln!("  -i, --ignore-garbage  ignore non-alphabet characters");
             eprintln!("  -w, --wrap=COLS    wrap lines at COLS (0 = no wrap, default 76)");
             eprintln!("  --url-safe         use URL-safe alphabet (- and _ instead of + and /)");
-            eprintln!("  --no-pad           omit padding characters");
-            eprintln!("  -h, --help         display this help");
-        }
-        Mode::Base32 => {
-            eprintln!("Usage: base32 [OPTION]... [FILE]");
-            eprintln!("Base32 encode or decode FILE, or stdin.");
-            eprintln!();
-            eprintln!("  -d, --decode       decode data");
-            eprintln!("  -i, --ignore-garbage  ignore non-alphabet characters");
-            eprintln!("  -w, --wrap=COLS    wrap lines at COLS (0 = no wrap, default 76)");
-            eprintln!("  --hex              use base32hex alphabet (0-9, A-V)");
             eprintln!("  --no-pad           omit padding characters");
             eprintln!("  -h, --help         display this help");
         }
@@ -618,44 +488,6 @@ fn run() -> Result<(), String> {
                 write_output(&out, args.output_file.as_deref())?;
             }
         }
-        Mode::Base32 => {
-            let alphabet = if args.hex {
-                B32_HEX_ALPHABET
-            } else {
-                B32_ALPHABET
-            };
-
-            if args.decode {
-                let input = read_input(&args.input_files)?;
-                let text =
-                    String::from_utf8(input).map_err(|_| "input is not valid text".to_string())?;
-
-                let cleaned = if args.ignore_garbage {
-                    let table = b32_decode_table(alphabet);
-                    text.chars()
-                        .filter(|&c| {
-                            c == '='
-                                || c == '\n'
-                                || c == '\r'
-                                || ((c as u32) < 256 && table[c as usize] != 0xFF)
-                        })
-                        .collect::<String>()
-                } else {
-                    text
-                };
-
-                let decoded = b32_decode(&cleaned, alphabet)?;
-                write_output(&decoded, args.output_file.as_deref())?;
-            } else {
-                let data = read_input(&args.input_files)?;
-                let encoded = b32_encode(&data, alphabet, args.wrap, !args.no_pad);
-                let mut out = encoded.as_bytes().to_vec();
-                if !out.is_empty() && out[out.len() - 1] != b'\n' {
-                    out.push(b'\n');
-                }
-                write_output(&out, args.output_file.as_deref())?;
-            }
-        }
         Mode::Uuencode => {
             let data = read_input(&args.input_files)?;
             let filename = args.uu_filename.as_deref().unwrap_or("/dev/stdout");
@@ -704,11 +536,12 @@ mod tests {
         assert_eq!(detect_mode("base64.exe"), Mode::Base64);
     }
 
+
+    /// `base32` is coreutils' bin now; this binary no longer answers to it,
+    /// so the name falls to the default like any other it does not know.
     #[test]
-    fn test_detect_base32() {
-        assert_eq!(detect_mode("base32"), Mode::Base32);
-        assert_eq!(detect_mode("/usr/bin/base32"), Mode::Base32);
-        assert_eq!(detect_mode("C:\\bin\\base32.exe"), Mode::Base32);
+    fn base32_is_not_a_personality_here() {
+        assert_eq!(detect_mode("base32"), Mode::Base64);
     }
 
     #[test]
@@ -857,92 +690,17 @@ mod tests {
         assert_eq!(&decoded, data);
     }
 
-    // ── Base32 encode ──
 
-    #[test]
-    fn test_b32_encode_empty() {
-        assert_eq!(b32_encode(b"", B32_ALPHABET, 0, true), "");
-    }
 
-    #[test]
-    fn test_b32_encode_rfc4648_vectors() {
-        assert_eq!(b32_encode(b"", B32_ALPHABET, 0, true), "");
-        assert_eq!(b32_encode(b"f", B32_ALPHABET, 0, true), "MY======");
-        assert_eq!(b32_encode(b"fo", B32_ALPHABET, 0, true), "MZXQ====");
-        assert_eq!(b32_encode(b"foo", B32_ALPHABET, 0, true), "MZXW6===");
-        assert_eq!(b32_encode(b"foob", B32_ALPHABET, 0, true), "MZXW6YQ=");
-        assert_eq!(b32_encode(b"fooba", B32_ALPHABET, 0, true), "MZXW6YTB");
-        assert_eq!(
-            b32_encode(b"foobar", B32_ALPHABET, 0, true),
-            "MZXW6YTBOI======"
-        );
-    }
 
-    #[test]
-    fn test_b32_encode_no_padding() {
-        assert_eq!(b32_encode(b"f", B32_ALPHABET, 0, false), "MY");
-        assert_eq!(b32_encode(b"fo", B32_ALPHABET, 0, false), "MZXQ");
-    }
 
-    #[test]
-    fn test_b32_hex_encode() {
-        // base32hex uses 0-9, A-V
-        assert_eq!(b32_encode(b"f", B32_HEX_ALPHABET, 0, true), "CO======");
-        assert_eq!(
-            b32_encode(b"foobar", B32_HEX_ALPHABET, 0, true),
-            "CPNMUOJ1E8======"
-        );
-    }
 
-    // ── Base32 decode ──
 
-    #[test]
-    fn test_b32_decode_rfc4648_vectors() {
-        assert_eq!(b32_decode("", B32_ALPHABET).unwrap(), b"");
-        assert_eq!(b32_decode("MY======", B32_ALPHABET).unwrap(), b"f");
-        assert_eq!(b32_decode("MZXQ====", B32_ALPHABET).unwrap(), b"fo");
-        assert_eq!(b32_decode("MZXW6===", B32_ALPHABET).unwrap(), b"foo");
-        assert_eq!(b32_decode("MZXW6YQ=", B32_ALPHABET).unwrap(), b"foob");
-        assert_eq!(b32_decode("MZXW6YTB", B32_ALPHABET).unwrap(), b"fooba");
-        assert_eq!(
-            b32_decode("MZXW6YTBOI======", B32_ALPHABET).unwrap(),
-            b"foobar"
-        );
-    }
 
-    #[test]
-    fn test_b32_decode_lowercase() {
-        assert_eq!(b32_decode("mzxw6===", B32_ALPHABET).unwrap(), b"foo");
-    }
 
-    #[test]
-    fn test_b32_decode_invalid() {
-        assert!(b32_decode("1234====", B32_ALPHABET).is_err());
-    }
 
-    #[test]
-    fn test_b32_roundtrip() {
-        let data = b"Hello, World!";
-        let encoded = b32_encode(data, B32_ALPHABET, 0, true);
-        let decoded = b32_decode(&encoded, B32_ALPHABET).unwrap();
-        assert_eq!(&decoded, data);
-    }
 
-    #[test]
-    fn test_b32_roundtrip_binary() {
-        let data: Vec<u8> = (0..=255).collect();
-        let encoded = b32_encode(&data, B32_ALPHABET, 0, true);
-        let decoded = b32_decode(&encoded, B32_ALPHABET).unwrap();
-        assert_eq!(decoded, data);
-    }
 
-    #[test]
-    fn test_b32_hex_roundtrip() {
-        let data = b"test data";
-        let encoded = b32_encode(data, B32_HEX_ALPHABET, 0, true);
-        let decoded = b32_decode(&encoded, B32_HEX_ALPHABET).unwrap();
-        assert_eq!(&decoded, data);
-    }
 
     // ── UU encode/decode ──
 
@@ -1022,13 +780,6 @@ mod tests {
         assert_eq!(decoded, data);
     }
 
-    #[test]
-    fn test_b32_all_zeros() {
-        let data = vec![0u8; 10];
-        let encoded = b32_encode(&data, B32_ALPHABET, 0, true);
-        let decoded = b32_decode(&encoded, B32_ALPHABET).unwrap();
-        assert_eq!(decoded, data);
-    }
 
     #[test]
     fn test_b64_wrap_zero() {
@@ -1054,15 +805,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_b32_single_byte_values() {
-        for byte in 0..=255u8 {
-            let data = [byte];
-            let encoded = b32_encode(&data, B32_ALPHABET, 0, true);
-            let decoded = b32_decode(&encoded, B32_ALPHABET).unwrap();
-            assert_eq!(decoded, data, "roundtrip failed for byte {byte}");
-        }
-    }
 
     #[test]
     fn test_uu_encode_mode_octal() {
@@ -1082,11 +824,4 @@ mod tests {
         assert_eq!(table[b'@' as usize], 0xFF);
     }
 
-    #[test]
-    fn test_b32_decode_table_coverage() {
-        let table = b32_decode_table(B32_ALPHABET);
-        for (i, &ch) in B32_ALPHABET.iter().enumerate() {
-            assert_eq!(table[ch as usize], i as u8);
-        }
-    }
 }

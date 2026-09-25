@@ -40,7 +40,7 @@ use super::uapi::{
     ModeGetConnector, ModeGetEncoder, ModeMapDumb, ModeModeinfo,
 };
 use super::{
-    DrmScanout, HeadInfo, MonitorInfo, Present, ScanoutError, Viewport, blit, open_display,
+    DrmScanout, Frame, HeadInfo, MonitorInfo, Present, ScanoutError, Viewport, blit, open_display,
 };
 
 /// Invalid argument, which is what the kernel says to a malformed request.
@@ -1108,7 +1108,7 @@ fn a_composed_frame_reaches_the_display_in_the_byte_order_xr24_means() {
     let mut scanout = DrmScanout::new(card).unwrap();
     let (w, h) = scanout.size();
     let frame = vec![0xFF35_79BD_u32; (w * h) as usize];
-    scanout.show(&frame, w, h);
+    scanout.show(&Frame::new(&frame, w, h));
     let bytes = scanout.scanned_out();
     assert_eq!(&bytes[..4], &[0xBD, 0x79, 0x35, 0xFF]);
 }
@@ -1131,7 +1131,7 @@ fn each_row_is_written_at_the_drivers_pitch_and_not_at_width_times_four() {
             frame[y * w as usize + x] = 0xFF00_0000 | y as u32;
         }
     }
-    scanout.show(&frame, w, h);
+    scanout.show(&Frame::new(&frame, w, h));
     let bytes = scanout.scanned_out();
     for y in [0usize, 1, 2, 767] {
         let at = y * pitch;
@@ -1151,7 +1151,7 @@ fn the_padding_between_rows_is_left_alone() {
     let mut scanout = DrmScanout::new(card).unwrap();
     let (w, h) = scanout.size();
     let pitch = scanout.pitch() as usize;
-    scanout.show(&vec![0xFFFF_FFFF_u32; (w * h) as usize], w, h);
+    scanout.show(&Frame::new(&vec![0xFFFF_FFFF_u32; (w * h) as usize], w, h));
     let bytes = scanout.scanned_out();
     let row_bytes = (w * 4) as usize;
     assert_eq!(
@@ -1169,9 +1169,9 @@ fn successive_frames_alternate_between_the_two_buffers() {
     let mut scanout = DrmScanout::new(card.clone()).unwrap();
     let (w, h) = scanout.size();
     let frame = vec![0u32; (w * h) as usize];
-    scanout.show(&frame, w, h);
-    scanout.show(&frame, w, h);
-    scanout.show(&frame, w, h);
+    scanout.show(&Frame::new(&frame, w, h));
+    scanout.show(&Frame::new(&frame, w, h));
+    scanout.show(&Frame::new(&frame, w, h));
     card.read(|s| {
         let ids: Vec<u32> = s.flips.iter().map(|&(_, fb)| fb).collect();
         assert_eq!(ids, vec![1, 2, 1, 2], "setup, then three frames");
@@ -1184,7 +1184,7 @@ fn a_frame_smaller_than_the_screen_is_drawn_in_the_corner_and_touches_nothing_el
     let card = FakeCard::desktop();
     let mut scanout = DrmScanout::new(card).unwrap();
     let pitch = scanout.pitch() as usize;
-    scanout.show(&[0xFFAA_BBCC; 4], 2, 2);
+    scanout.show(&Frame::new(&[0xFFAA_BBCC; 4], 2, 2));
     let bytes = scanout.scanned_out();
     assert_eq!(u32::from_le_bytes(fixed(&bytes[..4])), 0xFFAA_BBCC);
     assert_eq!(
@@ -1210,7 +1210,7 @@ fn a_frame_larger_than_the_screen_is_clipped_rather_than_overrunning_the_buffer(
     let mut scanout = DrmScanout::new(card).unwrap();
     let (w, h) = scanout.size();
     let big = vec![0xFF11_2233_u32; ((w + 100) * (h + 100)) as usize];
-    scanout.show(&big, w + 100, h + 100);
+    scanout.show(&Frame::new(&big, w + 100, h + 100));
     let pitch = scanout.pitch() as usize;
     let bytes = scanout.scanned_out();
     assert_eq!(u32::from_le_bytes(fixed(&bytes[..4])), 0xFF11_2233);
@@ -1228,7 +1228,7 @@ fn a_frame_shorter_than_it_claims_to_be_does_not_take_the_display_server_down() 
     let card = FakeCard::desktop();
     let mut scanout = DrmScanout::new(card).unwrap();
     let (w, h) = scanout.size();
-    scanout.show(&[0xFFFF_FFFF; 3], w, h);
+    scanout.show(&Frame::new(&[0xFFFF_FFFF; 3], w, h));
     assert!(scanout.is_open(), "a bad frame is not a broken display");
 }
 
@@ -1243,13 +1243,13 @@ fn a_flip_that_is_merely_early_drops_the_frame_and_keeps_the_display() {
     let mut scanout = DrmScanout::new(card.clone()).unwrap();
     let (w, h) = scanout.size();
     card.edit(|s| s.fail.push((uapi::PAGE_FLIP, EBUSY)));
-    scanout.show(&vec![0xFF00_FF00_u32; (w * h) as usize], w, h);
+    scanout.show(&Frame::new(&vec![0xFF00_FF00_u32; (w * h) as usize], w, h));
     assert!(scanout.is_open());
     card.read(|s| assert_eq!(s.flips.len(), 1, "only the setup flip landed"));
 
     // And the dropped frame's buffer is reused, rather than the pair getting
     // out of step and every subsequent frame going to the visible buffer.
-    scanout.show(&vec![0xFF00_00FF_u32; (w * h) as usize], w, h);
+    scanout.show(&Frame::new(&vec![0xFF00_00FF_u32; (w * h) as usize], w, h));
     card.read(|s| {
         assert_eq!(
             s.flips.iter().map(|&(_, fb)| fb).collect::<Vec<_>>(),
@@ -1272,7 +1272,7 @@ fn a_flip_that_fails_for_a_real_reason_closes_the_display() {
     let mut scanout = DrmScanout::new(card.clone()).unwrap();
     let (w, h) = scanout.size();
     card.edit(|s| s.fail.push((uapi::PAGE_FLIP, ENODEV)));
-    scanout.show(&vec![0u32; (w * h) as usize], w, h);
+    scanout.show(&Frame::new(&vec![0u32; (w * h) as usize], w, h));
     assert!(!scanout.is_open());
 }
 
@@ -1282,9 +1282,9 @@ fn a_closed_display_stops_being_written_to() {
     let mut scanout = DrmScanout::new(card.clone()).unwrap();
     let (w, h) = scanout.size();
     card.edit(|s| s.fail.push((uapi::PAGE_FLIP, ENODEV)));
-    scanout.show(&vec![0u32; (w * h) as usize], w, h);
+    scanout.show(&Frame::new(&vec![0u32; (w * h) as usize], w, h));
     let before = card.read(|s| s.log.len());
-    scanout.show(&vec![0u32; (w * h) as usize], w, h);
+    scanout.show(&Frame::new(&vec![0u32; (w * h) as usize], w, h));
     assert_eq!(
         card.read(|s| s.log.len()),
         before,
@@ -1680,7 +1680,7 @@ fn a_second_monitor_scans_out_its_own_part_of_the_frame() {
             frame[row * w as usize + col] = 0xFF00_00FF;
         }
     }
-    scanout.show(&frame, w, h);
+    scanout.show(&Frame::new(&frame, w, h));
 
     let left = u32::from_le_bytes(fixed(&scanout.scanned_out_for(30)[..4]));
     assert_eq!(
@@ -1705,7 +1705,7 @@ fn a_second_monitors_last_row_is_reached_through_its_own_padded_pitch() {
     let mut scanout = DrmScanout::new(card).unwrap();
     let (w, h) = scanout.size();
     let frame = vec![0xFF12_3456_u32; (w * h) as usize];
-    scanout.show(&frame, w, h);
+    scanout.show(&Frame::new(&frame, w, h));
 
     let pitch = scanout.pitch_for(31) as usize;
     assert_eq!(pitch, 5504, "the fake pads to 64 bytes, as real drivers do");
@@ -1784,7 +1784,7 @@ fn a_monitor_that_dies_mid_session_does_not_take_the_others_with_it() {
     let mut scanout = DrmScanout::new(card.clone()).unwrap();
     let (w, h) = scanout.size();
     card.edit(|s| s.fail.push((uapi::PAGE_FLIP, ENODEV)));
-    scanout.show(&vec![0xFF00_FF00_u32; (w * h) as usize], w, h);
+    scanout.show(&Frame::new(&vec![0xFF00_FF00_u32; (w * h) as usize], w, h));
 
     assert!(
         scanout.is_open(),
@@ -1798,7 +1798,7 @@ fn a_monitor_that_dies_mid_session_does_not_take_the_others_with_it() {
 
     // The survivor keeps taking frames, and the dead head is not flipped again.
     let before = card.read(|s| s.flips.len());
-    scanout.show(&vec![0xFF00_00FF_u32; (w * h) as usize], w, h);
+    scanout.show(&Frame::new(&vec![0xFF00_00FF_u32; (w * h) as usize], w, h));
     card.read(|s| {
         assert_eq!(
             s.flips.len(),
@@ -1822,7 +1822,7 @@ fn the_single_head_accessors_name_a_monitor_that_is_still_there() {
     let (w, h) = scanout.size();
     // Kill head 0 — connector 30 on CRTC 1, the one `first()` would find.
     card.edit(|s| s.fail.push((uapi::PAGE_FLIP, ENODEV)));
-    scanout.show(&vec![0xFF44_5566_u32; (w * h) as usize], w, h);
+    scanout.show(&Frame::new(&vec![0xFF44_5566_u32; (w * h) as usize], w, h));
 
     assert_eq!(scanout.connector_id(), 31, "the survivor, not the corpse");
     assert_eq!(scanout.crtc_id(), 2, "and the CRTC still being flipped");
@@ -1848,7 +1848,7 @@ fn a_dead_heads_buffers_are_not_reachable_through_its_connector() {
     let mut scanout = DrmScanout::new(card.clone()).unwrap();
     let (w, h) = scanout.size();
     card.edit(|s| s.fail.push((uapi::PAGE_FLIP, ENODEV)));
-    scanout.show(&vec![0xFF44_5566_u32; (w * h) as usize], w, h);
+    scanout.show(&Frame::new(&vec![0xFF44_5566_u32; (w * h) as usize], w, h));
 
     assert_eq!(scanout.pitch_for(30), 0, "connector 30 is gone");
     assert!(scanout.scanned_out_for(30).is_empty());
@@ -2274,4 +2274,207 @@ fn a_viewport_wider_than_what_is_left_of_the_frame_copies_what_there_is() {
     assert_eq!(u32::from_le_bytes(fixed(&dst[..4])), 3);
     assert_eq!(u32::from_le_bytes(fixed(&dst[4..8])), 0, "and no more");
     assert_eq!(u32::from_le_bytes(fixed(&dst[16..20])), 6, "the second row");
+}
+
+// ----------------------------------------------------------------- pointer --
+
+/// A pointer sprite with its hot spot at `(x, y)`.
+fn arrow_at(x: i32, y: i32) -> crate::PointerSprite {
+    crate::CursorCache::new()
+        .sprite(&crate::PointerState {
+            shape: crate::CursorShape::Arrow,
+            x,
+            y,
+            style: crate::CursorStyle {
+                size_px: 32,
+                fill: 0xFFFF_FFFF,
+                outline: 0xFF00_0000,
+            },
+        })
+        .expect("an arrow")
+}
+
+/// What a head showing `picture` with `pointer` over it should hold, as XR24
+/// pixels read back at the head's pitch.
+fn expected_head(picture: &[u32], w: u32, h: u32, pointer: &crate::PointerSprite) -> Vec<u32> {
+    let mut want = picture.to_vec();
+    pointer.blend_over(&mut want, w, h);
+    want.iter().map(|p| p | 0xFF00_0000).collect()
+}
+
+/// The pixels of the buffer on screen, one `u32` per pixel, padding dropped.
+fn on_screen(scanout: &mut DrmScanout<FakeCard>, w: u32, h: u32) -> Vec<u32> {
+    let pitch = scanout.pitch() as usize;
+    let bytes = scanout.scanned_out().to_vec();
+    let mut out = Vec::with_capacity((w * h) as usize);
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let at = y * pitch + x * 4;
+            out.push(u32::from_le_bytes(fixed(&bytes[at..at + 4])));
+        }
+    }
+    out
+}
+
+/// The pointer is drawn over the picture, where the sprite says, on the
+/// buffer that reaches the screen.
+#[test]
+fn the_pointer_is_drawn_over_the_picture() {
+    let mut scanout = DrmScanout::new(FakeCard::desktop()).unwrap();
+    let (w, h) = scanout.size();
+    let picture = vec![0xFF10_2030_u32; (w * h) as usize];
+    let pointer = arrow_at(200, 150);
+    scanout.show(
+        &Frame::new(&picture, w, h)
+            .with_serial(1)
+            .with_pointer(Some(&pointer)),
+    );
+    assert_eq!(
+        on_screen(&mut scanout, w, h),
+        expected_head(&picture, w, h, &pointer)
+    );
+}
+
+/// When only the pointer moves, each buffer puts back what the pointer
+/// covered and draws it where it is — however many flips ago that buffer
+/// last saw it.
+#[test]
+fn a_pointer_moving_over_a_still_picture_leaves_nothing_behind() {
+    let mut scanout = DrmScanout::new(FakeCard::desktop()).unwrap();
+    let (w, h) = scanout.size();
+    let picture: Vec<u32> = (0..w * h)
+        .map(|i| 0xFF00_0000 | (i.wrapping_mul(2_654_435_761) >> 8))
+        .collect();
+    for (step, (x, y)) in [(100, 100), (300, 200), (500, 300), (510, 305), (20, 700)]
+        .into_iter()
+        .enumerate()
+    {
+        let pointer = arrow_at(x, y);
+        scanout.show(
+            &Frame::new(&picture, w, h)
+                .with_serial(7)
+                .with_pointer(Some(&pointer)),
+        );
+        assert_eq!(
+            on_screen(&mut scanout, w, h),
+            expected_head(&picture, w, h, &pointer),
+            "step {step}: the screen is not the picture with the pointer at ({x}, {y})"
+        );
+    }
+}
+
+/// The cheap path really is cheap: a frame that says it carries the same
+/// picture gets only the pointer's old and new rectangles rewritten. A caller
+/// that lied — same serial, different pixels — shows it: everything outside
+/// those rectangles keeps the picture the buffer already had.
+#[test]
+fn a_frame_with_an_unchanged_picture_rewrites_only_where_the_pointer_was_and_is() {
+    let mut scanout = DrmScanout::new(FakeCard::desktop()).unwrap();
+    let (w, h) = scanout.size();
+    let first = vec![0xFF11_1111_u32; (w * h) as usize];
+    let second = vec![0xFF22_2222_u32; (w * h) as usize];
+    let (a, b, c) = (arrow_at(100, 100), arrow_at(400, 300), arrow_at(700, 500));
+    // Two flips to fill both buffers with the first picture...
+    scanout.show(
+        &Frame::new(&first, w, h)
+            .with_serial(1)
+            .with_pointer(Some(&a)),
+    );
+    scanout.show(
+        &Frame::new(&first, w, h)
+            .with_serial(1)
+            .with_pointer(Some(&b)),
+    );
+    // ...then a frame claiming the same picture while passing another. This
+    // lands in the buffer that holds `a`, so `a`'s rectangle is restored from
+    // the frame's pixels and `c` is drawn; nothing else is copied.
+    scanout.show(
+        &Frame::new(&second, w, h)
+            .with_serial(1)
+            .with_pointer(Some(&c)),
+    );
+    let shown = on_screen(&mut scanout, w, h);
+    let at = |x: u32, y: u32| shown[(y * w + x) as usize];
+    assert_eq!(
+        at(1000, 50),
+        0xFF11_1111,
+        "the whole picture was copied again"
+    );
+    let restored = a.rect();
+    let inside_a = (
+        restored.x as u32 + restored.width - 2,
+        restored.y as u32 + 1,
+    );
+    assert_eq!(
+        at(inside_a.0, inside_a.1),
+        0xFF22_2222,
+        "the old pointer was not put back from the frame"
+    );
+}
+
+/// A new picture is always copied whole, pointer or no pointer.
+#[test]
+fn a_new_picture_replaces_the_old_one_under_the_pointer() {
+    let mut scanout = DrmScanout::new(FakeCard::desktop()).unwrap();
+    let (w, h) = scanout.size();
+    let pointer = arrow_at(50, 50);
+    for (serial, colour) in [(1u64, 0xFF33_3333_u32), (2, 0xFF44_4444), (3, 0xFF55_5555)] {
+        let picture = vec![colour; (w * h) as usize];
+        scanout.show(
+            &Frame::new(&picture, w, h)
+                .with_serial(serial)
+                .with_pointer(Some(&pointer)),
+        );
+        assert_eq!(
+            on_screen(&mut scanout, w, h),
+            expected_head(&picture, w, h, &pointer)
+        );
+    }
+}
+
+/// A pointer straddling the seam between two monitors is drawn on both, each
+/// head drawing its own part from its own origin.
+#[test]
+fn a_pointer_on_the_seam_is_drawn_on_both_monitors() {
+    let mut scanout = DrmScanout::new(FakeCard::two_monitors()).unwrap();
+    let heads = scanout.heads();
+    assert_eq!(heads.len(), 2, "the fixture has two monitors");
+    let width = heads.iter().map(|h| h.width).sum::<u32>();
+    let height = heads.iter().map(|h| h.height).max().unwrap();
+    let picture = vec![0xFF20_2020_u32; (width * height) as usize];
+    let seam = heads[1].x as i32;
+    let pointer = arrow_at(seam - 4, 100);
+    scanout.show(
+        &Frame::new(&picture, width, height)
+            .with_serial(1)
+            .with_pointer(Some(&pointer)),
+    );
+
+    let mut want = picture.clone();
+    pointer.blend_over(&mut want, width, height);
+    for head in &heads {
+        let pitch = scanout.pitch_for(head.connector_id) as usize;
+        let bytes = scanout.scanned_out_for(head.connector_id).to_vec();
+        for y in 90..130u32 {
+            for x in 0..head.width.min(40) {
+                let fx = if head.x == 0 {
+                    seam as u32 - 20 + x
+                } else {
+                    head.x + x
+                };
+                if fx >= head.x + head.width {
+                    continue;
+                }
+                let local = fx - head.x;
+                let at = y as usize * pitch + local as usize * 4;
+                let got = u32::from_le_bytes(fixed(&bytes[at..at + 4]));
+                assert_eq!(
+                    got,
+                    want[(y * width + fx) as usize] | 0xFF00_0000,
+                    "monitor at x={} pixel ({fx}, {y})",
+                    head.x
+                );
+            }
+        }
+    }
 }

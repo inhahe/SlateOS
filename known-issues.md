@@ -23741,6 +23741,7 @@ wire; expect blocked more often than not.**
 
 
 ## TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER
+**Status:** OPEN — 2026-09-24 (lane F): the pointer is drawn now (design-decisions §1301), so `cursor_size` and `cursor_scheme` have a reader waiting — and it reads the defaults, per this entry's proper fix, until the models are one. Of the four this entry counts, the two in `gui/desktop` have since been deleted (`9dde7ab85`, `9ddb46bae`), and `apps/settings` holds one more it never saves. Asked which survives: `requests/f-ce-the-pointer-is-drawn-now-which-cursor-size-setting-survives.md`.
 
 **In short:** Open Settings, choose "Slow" animations, and the setting is
 saved, survives a restart, and changes nothing — because nothing in the system
@@ -165016,3 +165017,31 @@ release, green) and one small test per fault.
 implementations of one function, and nothing compared them. The comparison is a
 dozen lines once both exist — and this time it also caught the oracle being
 wrong, which is what an oracle that is merely *trusted* never does.
+
+### [F] The compositor never tells a window the pointer has left it, so hover highlights stay lit -- 2026-09-24
+
+**Status:** OPEN — found by lane F building the pointer; being fixed next.
+
+**In short:** move the mouse over a button in one window, then onto another
+window, and the first button can stay highlighted as if the mouse were still on
+it. The window is told every time the mouse moves *over* it and never told that
+it has gone.
+
+**Where.** `Compositor::handle_mouse_move` (`gui/compositor/src/lib.rs`) routes a
+`MouseEvent { kind: Move }` to the window under the pointer and to no other. The
+toolkit's vocabulary has `MouseEventKind::Enter` and `Leave`
+(`gui/toolkit/src/event.rs`), the display protocol encodes both
+(`gui/remote/src/input.rs`, `MOUSE_ENTER`/`MOUSE_LEAVE`), and a dozen places in
+`gui/window`, `gui/toolkit` and `apps/` consume them — and the compositor emits
+neither. So every hover state in every application is cleared only by a later
+`Move` inside the same window, which a pointer that has left never sends.
+
+**How to see it.** Two windows side by side, a button near the shared edge of
+the left one; hover it, then move straight into the right window.
+
+**The proper fix.** Track the window under the pointer — its *client area*, since
+that is what a client's coordinates cover — and on every pointer event that
+changes it send `Leave` to the old one and `Enter` to the new one, ahead of the
+`Move`. `InputEvent::PointerLeft` (the pointer leaving the output) sends `Leave`
+to whichever window had it. A grab (a drag in progress) keeps the pointer
+"inside" the grabbing window until release, as every windowing system does.

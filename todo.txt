@@ -58706,3 +58706,24 @@ where a `ScanResult` is appended, and its test has to push entries *through
 that path* rather than through a call that refuses. The shape to avoid is the
 one just removed: a bound asserted over a collection that nothing fills is a
 test of the fixture, not of the bound.
+
+## Lane F — graphics stack
+
+### Judgment Calls
+
+- **The pointer is drawn over fullscreen direct-scanout frames**
+  (`POINTER_OVER_DIRECT_SCANOUT = true`, `gui/compositor/src/server.rs`;
+  design-decisions §1301). C-Q18 put the fullscreen case to the operator as a
+  trade between the fullscreen shortcut and the pointer; drawing the pointer as
+  a presentation-time layer removed the cost on every presenter that exists, so
+  it is shown (the outcome options A and C share). Set the constant to `false`
+  for option B. Asked lane C to defer C-Q18 to the trigger "a presenter scans a
+  client buffer out without copying it":
+  `requests/f-c-c-q18s-premise-changed-the-pointer-is-drawn-over-fullscreen-at-no-cost.md`.
+- **The pointer ignores the user's size and scheme for now**
+  (`Compositor::pointer_preferences` returns the defaults). Three rival
+  cursor-size settings exist and lane C's `known-issues.md` entry asks that none
+  be wired before they are one. When lane C names the survivor, make
+  `pointer_preferences` read it and update
+  `the_pointer_does_not_read_a_rival_copy_of_its_settings`:
+  `requests/f-ce-the-pointer-is-drawn-now-which-cursor-size-setting-survives.md`.

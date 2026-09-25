@@ -56,9 +56,32 @@ use inputsettings::InputSettings;
 
 use appearance::ColorFilter;
 
-use crate::present::{Headless, Present};
+use crate::present::{Frame, Headless, Present};
 use crate::wire::ClientLink;
-use crate::{Compositor, Display, WindowId};
+use crate::{Compositor, CursorCache, Display, PointerSprite, PointerState, WindowId};
+
+/// What a shown frame's pixels were made from: the compositor's picture (by
+/// its frame count), and the colour filter and night-light gains applied on
+/// the way out. Two frames with the same key show the same pixels.
+type ShownKey = (u64, ColorFilter, Option<(f32, f32, f32)>);
+
+/// Whether the pointer is drawn over a fullscreen window being scanned out
+/// directly.
+///
+/// `open-questions.md` C-Q18 asked the operator to choose between losing the
+/// fullscreen shortcut, hiding the pointer over fullscreen, and a hardware
+/// cursor, because a pointer painted *into* the frame cannot appear on a frame
+/// that is never composited. The pointer is a layer drawn at presentation
+/// instead (`crate::cursor`), and every presenter that exists already copies a
+/// fullscreen window's pixels to the screen, so drawing it there costs nothing:
+/// it is shown, which is what options A and C both give the user. A game that
+/// wants no pointer asks for `CursorShape::Hidden` over its window.
+///
+/// `false` is C-Q18's option B. The choice returns in earnest when a presenter
+/// scans a client's buffer out without copying it; see
+/// `requests/f-c-c-q18s-premise-changed-the-pointer-is-drawn-over-fullscreen-at-no-cost.md`
+/// and design-decisions §1301.
+const POINTER_OVER_DIRECT_SCANOUT: bool = true;
 
 /// How many connections one tick will accept.
 ///
@@ -241,6 +264,24 @@ pub struct Server {
     /// until a filter is first switched on, so a user who never uses one
     /// never pays for it.
     filtered: Vec<u32>,
+    /// What [`Self::filtered`] currently holds, so a frame that shows the same
+    /// picture through the same filter reuses it. That is every frame in which
+    /// only the pointer moved, and re-filtering eight megabytes for a pointer
+    /// would cost more than drawing the pointer does.
+    filtered_for: Option<ShownKey>,
+    /// The rasterized pointers.
+    ///
+    /// Here rather than in the compositor, which only says *which* pointer is
+    /// up ([`Compositor::pointer`]): what it looks like is decided on the way to
+    /// the display, which is the step a hardware cursor plane would take over.
+    cursors: CursorCache,
+    /// The pointer the display was last shown, so the loop can tell that a
+    /// frame is owed even though nothing was composed: the pointer moved.
+    shown_pointer: Option<PointerState>,
+    /// What the last frame shown was made from, and the serial it was given.
+    /// The serial advances exactly when the key changes, which is what lets a
+    /// presenter that keeps a copy of the picture skip re-copying it.
+    shown: Option<(ShownKey, u64)>,
     /// How long the loop is currently waiting between ticks.
     ///
     /// On the server rather than local to [`Self::run_with`] so that the whole
@@ -288,6 +329,10 @@ impl Server {
             listener,
             clients: Vec::new(),
             filtered: Vec::new(),
+            filtered_for: None,
+            cursors: CursorCache::new(),
+            shown_pointer: None,
+            shown: None,
             backoff: IdleBackoff::new(),
             // Zero is left free as "no client", matching the convention the
             // rest of the compositor uses for ids that may be absent.
@@ -561,20 +606,40 @@ impl Server {
     ///
     /// When no filter is set -- nearly always -- the frame is handed over
     /// untouched and nothing is copied.
+    ///
+    /// The pointer goes with it, as a layer over the picture rather than part
+    /// of it ([`crate::cursor`]); it is filtered too, since a pointer that
+    /// stayed cold white on a warmed screen would be the one thing the setting
+    /// missed.
     pub fn show<P: Present>(&mut self, compositor: &Compositor, present: &mut P) {
         let (width, height) = compositor.frame_size();
         let pixels = compositor.present_pixels();
         let filter = compositor.color_filter();
-
         let warmth = compositor.night_light_gains();
 
+        let pointer = Self::pointer_to_show(compositor);
+        self.shown_pointer = pointer;
+        let sprite = pointer.and_then(|state| self.cursors.sprite(&state));
+
+        // The compositor's own count of the frames it has produced names the
+        // picture, so the serial is right however `compose_frame` was reached.
+        let key: ShownKey = (compositor.frame_stats().frames_composited, filter, warmth);
+        let serial = match self.shown {
+            Some((shown_key, serial)) if shown_key == key => serial,
+            Some((_, serial)) => serial.wrapping_add(1),
+            None => 0,
+        };
+        self.shown = Some((key, serial));
+
         if matches!(filter, ColorFilter::None) && warmth.is_none() {
-            present.show(pixels, width, height);
+            present.show(
+                &Frame::new(pixels, width, height)
+                    .with_serial(serial)
+                    .with_pointer(sprite.as_ref()),
+            );
             return;
         }
 
-        self.filtered.clear();
-        self.filtered.reserve(pixels.len());
         // The accessibility filter first, then the warmth. The order is a
         // claim about what each one is: a colour-vision filter transforms the
         // *content*, so it should see the colours the application chose, while
@@ -583,14 +648,48 @@ impl Server {
         // would have a protanopia filter correcting for a tint the user added
         // on purpose, and hand back a screen that is neither warm nor
         // corrected.
-        self.filtered.extend(pixels.iter().map(|p| {
-            let shown = filter.apply_argb(*p);
+        let shade = |p: u32| {
+            let shown = filter.apply_argb(p);
             match warmth {
                 Some(gains) => appearance::warm_argb(shown, gains),
                 None => shown,
             }
-        }));
-        present.show(&self.filtered, width, height);
+        };
+        if self.filtered_for != Some(key) || self.filtered.len() != pixels.len() {
+            self.filtered.clear();
+            self.filtered.reserve(pixels.len());
+            self.filtered.extend(pixels.iter().map(|p| shade(*p)));
+            self.filtered_for = Some(key);
+        }
+        let sprite = sprite.map(|sprite| PointerSprite {
+            image: std::sync::Arc::new(sprite.image.filtered(shade)),
+            ..sprite
+        });
+        present.show(
+            &Frame::new(&self.filtered, width, height)
+                .with_serial(serial)
+                .with_pointer(sprite.as_ref()),
+        );
+    }
+
+    /// Whether the display owes a frame even though nothing was composed:
+    /// the pointer has moved, changed shape, or come or gone since the last
+    /// frame shown.
+    #[must_use]
+    pub fn pointer_changed(&self, compositor: &Compositor) -> bool {
+        Self::pointer_to_show(compositor) != self.shown_pointer
+    }
+
+    /// The pointer the next frame should carry: the compositor's, unless the
+    /// frame is a direct scanout and [`POINTER_OVER_DIRECT_SCANOUT`] says not
+    /// to draw one there. One function for both [`Self::show`] and
+    /// [`Self::pointer_changed`], so the two cannot disagree about whether a
+    /// frame is owed.
+    fn pointer_to_show(compositor: &Compositor) -> Option<PointerState> {
+        if !POINTER_OVER_DIRECT_SCANOUT && compositor.is_scanout_bypassed() {
+            return None;
+        }
+        compositor.pointer()
     }
 
     /// Serve clients and composite for ever, at the display's refresh rate.
@@ -775,7 +874,10 @@ impl Server {
             let delivered = compositor.poll_deferred_key();
             self.tick(compositor)?;
             let composed = self.compose(compositor);
-            if composed {
+            // A pointer that moved over a still desktop is a frame too: the
+            // picture is unchanged, and the presenter repaints only where the
+            // pointer was and is.
+            if composed || self.pointer_changed(compositor) {
                 self.show(compositor, present);
             }
 
@@ -1420,7 +1522,7 @@ mod tests {
     }
 
     impl Present for Listening {
-        fn show(&mut self, _pixels: &[u32], _width: u32, _height: u32) {}
+        fn show(&mut self, _frame: &Frame<'_>) {}
 
         fn input(&mut self) -> Vec<InputEvent> {
             self.ticks = self.ticks.saturating_add(1);
@@ -1945,5 +2047,99 @@ mod tests {
             server.filtered.is_empty(),
             "a user with no filter must not pay for one"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // The pointer
+    // ------------------------------------------------------------------
+
+    /// A pointer moving over a still desktop is shown without anything being
+    /// composed: the same picture, under a pointer that moved.
+    #[test]
+    fn a_pointer_moving_over_a_still_desktop_is_shown_without_composing() {
+        let (mut server, mut compositor, _addr) = server();
+        let mut display = Recording::new();
+        assert!(server.compose(&mut compositor));
+        server.show(&compositor, &mut display);
+        let serial = display.last_serial();
+        assert!(serial.is_some(), "the server does not stamp its frames");
+        assert!(!server.pointer_changed(&compositor), "nothing moved yet");
+
+        compositor.handle_input(InputEvent::MouseMove { x: 100, y: 120 });
+        assert!(
+            !server.compose(&mut compositor),
+            "a pointer move is not damage"
+        );
+        assert!(
+            server.pointer_changed(&compositor),
+            "and yet a frame is owed"
+        );
+        server.show(&compositor, &mut display);
+
+        assert_eq!(display.last_serial(), serial, "the picture did not change");
+        let pointer = display.last_pointer().expect("a pointer");
+        let hot = (
+            pointer.x + i32::try_from(pointer.image.hot_x).unwrap(),
+            pointer.y + i32::try_from(pointer.image.hot_y).unwrap(),
+        );
+        assert_eq!(
+            hot,
+            (100, 120),
+            "the pointer's hot spot is not where the mouse is"
+        );
+        assert!(
+            !server.pointer_changed(&compositor),
+            "the frame owed was paid"
+        );
+    }
+
+    /// The same through the real loop: a tick in which only the mouse moved
+    /// still puts a frame on the display, and an idle tick does not.
+    #[test]
+    fn the_loop_shows_a_frame_when_only_the_pointer_moved() {
+        let (mut server, mut compositor, _addr) = server();
+        let mut display = Recording::closing_after(4);
+        display.feed(Vec::new());
+        display.feed(vec![InputEvent::MouseMove { x: 30, y: 40 }]);
+        display.feed(Vec::new());
+        display.feed(Vec::new());
+        server
+            .run_with(&mut compositor, &mut display)
+            .expect("the loop");
+        assert_eq!(
+            display.shown(),
+            2,
+            "the first frame, then one for the pointer, and none for idle ticks"
+        );
+        let pointer = display.last_pointer().expect("a pointer");
+        assert_eq!(
+            pointer.x + i32::try_from(pointer.image.hot_x).unwrap(),
+            30,
+            "the frame shown was not the one with the pointer moved"
+        );
+    }
+
+    /// Night light warms the pointer too: a white arrow on a warmed screen
+    /// would be the one cold thing on it.
+    #[test]
+    fn a_filter_reaches_the_pointer_as_well_as_the_picture() {
+        let (mut server, mut compositor, _addr) = server();
+        compositor.set_appearance(AppearanceSettings {
+            night_light: true,
+            night_light_strength: 1.0,
+            ..AppearanceSettings::default()
+        });
+        let mut display = Recording::new();
+        server.compose(&mut compositor);
+        server.show(&compositor, &mut display);
+        let pointer = display.last_pointer().expect("a pointer");
+        // Somewhere in the white body of the arrow, just below its tip.
+        let (hx, hy) = (pointer.image.hot_x, pointer.image.hot_y);
+        let px = pointer
+            .image
+            .pixel(hx + 2, hy + 8)
+            .expect("inside the image");
+        let (r, b) = ((px >> 16) & 0xFF, px & 0xFF);
+        assert!(r > 0 && b < r, "the pointer was not warmed: {px:#010x}");
     }
 }

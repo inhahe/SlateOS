@@ -3,7 +3,7 @@
 //!
 //! Everything else in this crate was real up to the last step and then stopped:
 //! [`Compositor::compose_frame`](crate::Compositor::compose_frame) blends every
-//! window, the cursor and the desktop furniture into a buffer, and
+//! window and the desktop furniture into a buffer, and
 //! [`front_buffer`](crate::Compositor::front_buffer) hands out finished ARGB
 //! pixels that nothing looked at. In the other direction,
 //! [`handle_input`](crate::Compositor::handle_input) routes keys and clicks
@@ -13,11 +13,22 @@
 //!
 //! ## The trait
 //!
-//! [`Present`] is deliberately tiny: show a rectangle of pixels, hand back
-//! whatever input has arrived, and say whether the display still exists. That
-//! is the whole of what a compositor needs from a screen, and keeping it to
-//! three methods is what lets a SlateOS framebuffer, a host window and a
-//! deliberate no-op all be the same thing to `Server::run_with`.
+//! [`Present`] is deliberately tiny: show a [`Frame`], hand back whatever input
+//! has arrived, and say whether the display still exists. That is the whole of
+//! what a compositor needs from a screen, and keeping it to three methods is
+//! what lets a SlateOS framebuffer, a host window and a deliberate no-op all be
+//! the same thing to `Server::run_with`.
+//!
+//! ## The pointer is a layer, and every presenter draws it
+//!
+//! A [`Frame`] is the composited picture *and* the pointer to draw over it,
+//! kept apart the way a display controller keeps its cursor plane apart from
+//! the primary one ([`crate::cursor`] says why). So a pointer that moves over a
+//! still desktop is a new frame with an unchanged picture: [`Frame::serial`]
+//! says so, and a presenter that keeps its own copy of the picture repaints
+//! only the few hundred pixels the pointer left and entered. There is no
+//! default for drawing the pointer, on purpose — a default that ignored it
+//! would be one every new presenter inherited silently.
 //!
 //! ## What implements it
 //!
@@ -66,7 +77,61 @@
 
 use inputsettings::InputSettings;
 
-use crate::InputEvent;
+use crate::{InputEvent, PointerSprite};
+
+/// One frame for a [`Present`] to put on the display: the composited picture
+/// and, over it, the pointer.
+#[derive(Clone, Copy, Debug)]
+pub struct Frame<'a> {
+    /// `width * height` values in `0xAARRGGBB`, top row first — exactly what
+    /// [`Compositor::present_pixels`](crate::Compositor::present_pixels)
+    /// returns. A short slice is the caller's bug and an implementation may
+    /// draw what it has rather than panicking; the display server must not be
+    /// brought down by a bad frame.
+    pub pixels: &'a [u32],
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Which picture `pixels` is, when the caller knows.
+    ///
+    /// Two frames with the same `Some` serial carry the same pixels, so a
+    /// presenter holding its own copy of the last picture may skip copying it
+    /// again when all that changed is the pointer. `None` promises nothing and
+    /// the picture must be taken whole — which is what a caller that is not
+    /// keeping count, a test above all, wants by default.
+    pub serial: Option<u64>,
+    /// The pointer, to be drawn over the picture, or `None` for no pointer.
+    pub pointer: Option<&'a PointerSprite>,
+}
+
+impl<'a> Frame<'a> {
+    /// A picture with no pointer and no serial.
+    #[must_use]
+    pub const fn new(pixels: &'a [u32], width: u32, height: u32) -> Self {
+        Self {
+            pixels,
+            width,
+            height,
+            serial: None,
+            pointer: None,
+        }
+    }
+
+    /// The same frame, stamped with which picture it is.
+    #[must_use]
+    pub const fn with_serial(mut self, serial: u64) -> Self {
+        self.serial = Some(serial);
+        self
+    }
+
+    /// The same frame, with `pointer` over it.
+    #[must_use]
+    pub const fn with_pointer(mut self, pointer: Option<&'a PointerSprite>) -> Self {
+        self.pointer = pointer;
+        self
+    }
+}
 
 /// One monitor a [`Present`] is driving.
 ///
@@ -108,14 +173,8 @@ pub struct MonitorInfo {
 /// [`Self::show`] runs once per composited frame and [`Self::input`] once per
 /// tick.
 pub trait Present {
-    /// Put `pixels` on the display.
-    ///
-    /// `pixels` is `width * height` values in `0xAARRGGBB`, top row first —
-    /// exactly what [`Compositor::front_buffer`](crate::Compositor::front_buffer)
-    /// returns. A short slice is the caller's bug and an implementation may
-    /// draw what it has rather than panicking; the display server must not be
-    /// brought down by a bad frame.
-    fn show(&mut self, pixels: &[u32], width: u32, height: u32);
+    /// Put `frame` on the display: its picture, and its pointer over it.
+    fn show(&mut self, frame: &Frame<'_>);
 
     /// Whatever the user has done since the last call.
     ///
@@ -203,7 +262,7 @@ pub trait Present {
 pub struct Headless;
 
 impl Present for Headless {
-    fn show(&mut self, _pixels: &[u32], _width: u32, _height: u32) {}
+    fn show(&mut self, _frame: &Frame<'_>) {}
 }
 
 /// A [`Present`] that keeps the last frame, so a test can look at it.
@@ -216,8 +275,12 @@ impl Present for Headless {
 /// precisely the distinction this module exists to make.
 #[derive(Clone, Debug, Default)]
 pub struct Recording {
-    /// The most recent frame, as `(width, height, pixels)`.
+    /// The most recent frame's picture, as `(width, height, pixels)`.
     last: Option<(u32, u32, Vec<u32>)>,
+    /// The pointer the most recent frame drew over it.
+    pointer: Option<PointerSprite>,
+    /// The serial the most recent frame carried.
+    serial: Option<u64>,
     /// How many frames have been shown.
     shown: u64,
     /// Input to hand back, one batch per call to [`Present::input`].
@@ -256,6 +319,8 @@ impl Recording {
     pub fn new() -> Self {
         Self {
             last: None,
+            pointer: None,
+            serial: None,
             shown: 0,
             script: std::collections::VecDeque::new(),
             ticks: 0,
@@ -274,10 +339,46 @@ impl Recording {
         }
     }
 
-    /// The most recent frame shown, if any.
+    /// The picture of the most recent frame shown, if any — without the
+    /// pointer, which is a layer over it: see [`Self::last_pointer`] and
+    /// [`Self::seen`].
     #[must_use]
     pub fn last_frame(&self) -> Option<(u32, u32, &[u32])> {
         self.last.as_ref().map(|(w, h, p)| (*w, *h, p.as_slice()))
+    }
+
+    /// The pointer the most recent frame drew, if it drew one.
+    #[must_use]
+    pub const fn last_pointer(&self) -> Option<&PointerSprite> {
+        self.pointer.as_ref()
+    }
+
+    /// The serial the most recent frame carried: the same one as the frame
+    /// before it exactly when the picture did not change.
+    #[must_use]
+    pub const fn last_serial(&self) -> Option<u64> {
+        self.serial
+    }
+
+    /// What a person looking at the display sees at `(x, y)`: the picture,
+    /// with the pointer laid over it where the pointer is.
+    #[must_use]
+    pub fn seen(&self, x: u32, y: u32) -> Option<u32> {
+        let below = self.pixel(x, y)?;
+        let Some(pointer) = self.pointer.as_ref() else {
+            return Some(below);
+        };
+        let mut one = [below];
+        let (Ok(px), Ok(py)) = (i32::try_from(x), i32::try_from(y)) else {
+            return Some(below);
+        };
+        let local = PointerSprite {
+            image: std::sync::Arc::clone(&pointer.image),
+            x: pointer.x.saturating_sub(px),
+            y: pointer.y.saturating_sub(py),
+        };
+        local.blend_over(&mut one, 1, 1);
+        Some(one[0])
     }
 
     /// How many frames have reached the display.
@@ -314,8 +415,10 @@ impl Recording {
 }
 
 impl Present for Recording {
-    fn show(&mut self, pixels: &[u32], width: u32, height: u32) {
-        self.last = Some((width, height, pixels.to_vec()));
+    fn show(&mut self, frame: &Frame<'_>) {
+        self.last = Some((frame.width, frame.height, frame.pixels.to_vec()));
+        self.pointer = frame.pointer.cloned();
+        self.serial = frame.serial;
         self.shown = self.shown.saturating_add(1);
     }
 
@@ -382,9 +485,9 @@ pub trait InputSource {
 /// screen, events to the source, and the screen alone decides when the display
 /// is gone — a keyboard being unplugged is not a reason to end the session.
 ///
-/// [`Self::show`] is also where [`InputSource::set_bounds`] is kept current. It
-/// forwards only on a *change*, so the common case is a comparison of two pairs
-/// of integers per frame rather than a call into the pointer.
+/// [`Present::show`] is also where [`InputSource::set_bounds`] is kept current.
+/// It forwards only on a *change*, so the common case is a comparison of two
+/// pairs of integers per frame rather than a call into the pointer.
 #[derive(Clone, Copy, Debug)]
 pub struct Paired<S, I> {
     /// The half that draws.
@@ -424,12 +527,12 @@ impl<S: Present, I: InputSource> Paired<S, I> {
 }
 
 impl<S: Present, I: InputSource> Present for Paired<S, I> {
-    fn show(&mut self, pixels: &[u32], width: u32, height: u32) {
-        if self.bounds != (width, height) {
-            self.bounds = (width, height);
-            self.input.set_bounds(width, height);
+    fn show(&mut self, frame: &Frame<'_>) {
+        if self.bounds != (frame.width, frame.height) {
+            self.bounds = (frame.width, frame.height);
+            self.input.set_bounds(frame.width, frame.height);
         }
-        self.screen.show(pixels, width, height);
+        self.screen.show(frame);
     }
 
     fn input(&mut self) -> Vec<InputEvent> {
@@ -471,13 +574,13 @@ mod tests {
 
     use inputsettings::InputSettings;
 
-    use super::{Headless, InputSource, MonitorInfo, Paired, Present, Recording};
+    use super::{Frame, Headless, InputSource, MonitorInfo, Paired, Present, Recording};
     use crate::InputEvent;
 
     #[test]
     fn a_headless_display_accepts_frames_and_never_closes() {
         let mut headless = Headless;
-        headless.show(&[0xFF00_0000; 4], 2, 2);
+        headless.show(&Frame::new(&[0xFF00_0000; 4], 2, 2));
         assert!(headless.input().is_empty());
         assert!(headless.is_open(), "a display with no screen never breaks");
     }
@@ -489,7 +592,7 @@ mod tests {
 
         // A 3x2 frame, distinct in every cell so a transposed index shows up.
         let frame: Vec<u32> = (0..6).map(|i| 0xFF00_0000 | i).collect();
-        rec.show(&frame, 3, 2);
+        rec.show(&Frame::new(&frame, 3, 2));
 
         assert_eq!(rec.shown(), 1);
         // Row-major, top row first: (2, 1) is the last value.
@@ -499,12 +602,51 @@ mod tests {
         assert_eq!(rec.pixel(2, 1), Some(0xFF00_0005));
     }
 
+    /// The recorder keeps the pointer apart from the picture, as a cursor plane
+    /// is kept apart from the primary one — and can say what the two look like
+    /// together.
+    #[test]
+    fn a_recording_keeps_the_pointer_as_a_layer_over_the_picture() {
+        use crate::{CursorCache, CursorShape, CursorStyle, PointerState};
+        let mut cache = CursorCache::new();
+        let sprite = cache
+            .sprite(&PointerState {
+                shape: CursorShape::Arrow,
+                x: 10,
+                y: 10,
+                style: CursorStyle {
+                    size_px: 24,
+                    fill: 0xFFFF_FFFF,
+                    outline: 0xFF00_0000,
+                },
+            })
+            .expect("an arrow");
+        let picture = vec![0xFF20_4060u32; 64 * 64];
+        let mut rec = Recording::new();
+        rec.show(&Frame::new(&picture, 64, 64).with_pointer(Some(&sprite)));
+
+        let (_, _, shown) = rec.last_frame().expect("a frame");
+        assert!(
+            shown.iter().all(|&p| p == 0xFF20_4060),
+            "the pointer was painted into the picture"
+        );
+        assert_eq!(rec.last_pointer(), Some(&sprite));
+        // At the hot spot the arrow's tip is inked, so what is seen there is
+        // not the picture; far away from it, it is.
+        assert_ne!(
+            rec.seen(10, 10),
+            Some(0xFF20_4060),
+            "the tip is not visible"
+        );
+        assert_eq!(rec.seen(60, 60), Some(0xFF20_4060));
+    }
+
     #[test]
     fn a_pixel_outside_the_frame_is_none_and_not_a_wrapped_neighbour() {
         // The bug this catches: `y * width + x` with no bounds check reads
         // (3, 0) as (0, 1), which is a real pixel and a wrong answer.
         let mut rec = Recording::new();
-        rec.show(&(0..6).collect::<Vec<u32>>(), 3, 2);
+        rec.show(&Frame::new(&(0..6).collect::<Vec<u32>>(), 3, 2));
         assert_eq!(rec.pixel(3, 0), None, "one past the right edge");
         assert_eq!(rec.pixel(0, 2), None, "one below the bottom edge");
     }
@@ -512,8 +654,8 @@ mod tests {
     #[test]
     fn the_newest_frame_replaces_the_one_before_it() {
         let mut rec = Recording::new();
-        rec.show(&[1, 2, 3, 4], 2, 2);
-        rec.show(&[9, 9, 9, 9], 2, 2);
+        rec.show(&Frame::new(&[1, 2, 3, 4], 2, 2));
+        rec.show(&Frame::new(&[9, 9, 9, 9], 2, 2));
         assert_eq!(rec.shown(), 2, "both were counted");
         assert_eq!(rec.pixel(0, 0), Some(9), "and the newest is what is there");
     }
@@ -521,8 +663,8 @@ mod tests {
     #[test]
     fn a_resized_display_is_reported_at_its_new_size() {
         let mut rec = Recording::new();
-        rec.show(&[0; 4], 2, 2);
-        rec.show(&[0; 6], 3, 2);
+        rec.show(&Frame::new(&[0; 4], 2, 2));
+        rec.show(&Frame::new(&[0; 6], 3, 2));
         let (w, h, pixels) = rec.last_frame().unwrap();
         assert_eq!((w, h), (3, 2));
         assert_eq!(pixels.len(), 6);
@@ -627,7 +769,7 @@ mod tests {
             pair.input().as_slice(),
             [InputEvent::MouseMove { x: 7, y: 9 }]
         ));
-        pair.show(&[0xFF00_00AB; 4], 2, 2);
+        pair.show(&Frame::new(&[0xFF00_00AB; 4], 2, 2));
         assert_eq!(pair.screen().pixel(0, 0), Some(0xFF00_00AB));
         // The screen was never asked for input and the source was never asked
         // to draw: each half only does the thing it is.
@@ -652,15 +794,15 @@ mod tests {
         // display that could never happen.
         let big = vec![0u32; 800 * 600];
         let small = vec![0u32; 640 * 480];
-        pair.show(&big, 800, 600);
-        pair.show(&big, 800, 600);
+        pair.show(&Frame::new(&big, 800, 600));
+        pair.show(&Frame::new(&big, 800, 600));
         assert_eq!(
             pair.input.bounds,
             vec![(800, 600)],
             "an unchanged size is two integer comparisons, not a call"
         );
 
-        pair.show(&small, 640, 480);
+        pair.show(&Frame::new(&small, 640, 480));
         assert_eq!(pair.input.bounds, vec![(800, 600), (640, 480)]);
     }
 

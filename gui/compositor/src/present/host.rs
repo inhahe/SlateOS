@@ -8,6 +8,16 @@
 //! shadow drawn on the wrong side. The only fix for that is to draw it on a
 //! screen and look, and the machine this tree is developed on runs Windows.
 //!
+//! ## The pointer
+//!
+//! The pointer on screen is the *compositor's*, drawn over the frame like any
+//! other presenter draws it, and Windows' own arrow is hidden while the mouse
+//! is over the window. Showing Windows' arrow instead would be smoother — it is
+//! a hardware cursor with no frame of latency — and would mean the harness
+//! never showed the pointer SlateOS draws, which is the one thing a person
+//! looking at this window needs to see. When the mouse leaves the window the
+//! compositor is told ([`InputEvent::PointerLeft`]) and stops drawing it.
+//!
 //! It is also the only input source the hosted build has. Without it,
 //! [`Compositor::handle_input`](crate::Compositor::handle_input) is reachable
 //! from a test and from nothing else, so the whole routing path — hit testing,
@@ -56,7 +66,9 @@ use std::thread::ThreadId;
 // translates host messages into [`InputEvent`], which is what
 // `Compositor::handle_input` takes, and the two enums are not the same type
 // even where they name the same buttons.
-use crate::{InputEvent, MouseButton};
+use crate::{InputEvent, MouseButton, Rect};
+
+use super::Frame;
 
 // ---------------------------------------------------------------------------
 // The parts of the Win32 API this needs
@@ -127,6 +139,15 @@ mod ffi {
         pub private: u32,
     }
 
+    /// Ask to be told when the mouse leaves a window.
+    #[repr(C)]
+    pub struct TRACKMOUSEEVENT {
+        pub cb_size: u32,
+        pub dw_flags: u32,
+        pub hwnd_track: HWND,
+        pub dw_hover_time: u32,
+    }
+
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     pub struct BITMAPINFOHEADER {
@@ -165,6 +186,8 @@ mod ffi {
     // Messages.
     pub const WM_DESTROY: u32 = 0x0002;
     pub const WM_CLOSE: u32 = 0x0010;
+    pub const WM_SETCURSOR: u32 = 0x0020;
+    pub const WM_MOUSELEAVE: u32 = 0x02A3;
     pub const WM_QUIT: u32 = 0x0012;
     pub const WM_KEYDOWN: u32 = 0x0100;
     pub const WM_KEYUP: u32 = 0x0101;
@@ -187,6 +210,11 @@ mod ffi {
     pub const WM_MOUSEHWHEEL: u32 = 0x020E;
     pub const XBUTTON1: u16 = 0x0001;
     pub const XBUTTON2: u16 = 0x0002;
+
+    // `WM_SETCURSOR`'s hit-test code for the client area, and the one
+    // `TrackMouseEvent` flag this needs.
+    pub const HTCLIENT: u16 = 1;
+    pub const TME_LEAVE: u32 = 0x0000_0002;
 
     pub const PM_REMOVE: u32 = 0x0001;
     pub const SW_SHOW: i32 = 5;
@@ -211,6 +239,8 @@ mod ffi {
     unsafe extern "system" {
         pub fn RegisterClassW(class: *const WNDCLASSW) -> u16;
         pub fn LoadCursorW(instance: HINSTANCE, name: *const u16) -> HCURSOR;
+        pub fn SetCursor(cursor: HCURSOR) -> HCURSOR;
+        pub fn TrackMouseEvent(track: *mut TRACKMOUSEEVENT) -> i32;
         pub fn CreateWindowExW(
             ex_style: u32,
             class_name: *const u16,
@@ -381,6 +411,9 @@ pub fn event_for_message(message: u32, w_param: usize, l_param: isize) -> Option
             let (x, y) = mouse_point(l_param);
             Some(InputEvent::MouseMove { x, y })
         }
+        // Only ever sent after `TrackMouseEvent` asked for it, which the
+        // window procedure does on the first move into the window.
+        ffi::WM_MOUSELEAVE => Some(InputEvent::PointerLeft),
         ffi::WM_MOUSEWHEEL => {
             // The position in a wheel message is in *screen* coordinates, not
             // client ones, so it is not converted here; the compositor uses the
@@ -436,6 +469,10 @@ pub fn event_for_message(message: u32, w_param: usize, l_param: isize) -> Option
 thread_local! {
     static PENDING: RefCell<Vec<InputEvent>> = const { RefCell::new(Vec::new()) };
     static CLOSED: Cell<bool> = const { Cell::new(false) };
+    // Whether a `WM_MOUSELEAVE` has been asked for and not yet delivered.
+    // `TrackMouseEvent` is one-shot — the request is spent when the leave
+    // arrives — so the next move back into the window has to ask again.
+    static TRACKING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The window procedure.
@@ -465,6 +502,15 @@ unsafe extern "system" fn wnd_proc(
             unsafe { ffi::PostQuitMessage(0) };
             0
         }
+        // Over the client area, show no host pointer: the compositor draws its
+        // own. Anywhere else — the title bar, the frame's resize edges — is the
+        // host's window chrome, and `DefWindowProcW` sets the pointer that
+        // chrome wants.
+        ffi::WM_SETCURSOR if (l_param & 0xFFFF) as u16 == ffi::HTCLIENT => {
+            // SAFETY: a null cursor is documented as "remove the cursor".
+            unsafe { ffi::SetCursor(std::ptr::null_mut()) };
+            1
+        }
         ffi::WM_CHAR => {
             // A character, produced by the *host's* layout. It is attached to
             // the key press that produced it only in the sense of arriving
@@ -486,6 +532,26 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         other => {
+            if other == ffi::WM_MOUSEMOVE && !TRACKING.get() {
+                let mut track = ffi::TRACKMOUSEEVENT {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        reason = "a sixteen-byte struct's size fits in a u32"
+                    )]
+                    cb_size: std::mem::size_of::<ffi::TRACKMOUSEEVENT>() as u32,
+                    dw_flags: ffi::TME_LEAVE,
+                    hwnd_track: hwnd,
+                    dw_hover_time: 0,
+                };
+                // SAFETY: `track` is a fully initialised `TRACKMOUSEEVENT`
+                // naming this window, which the OS only reads.
+                if unsafe { ffi::TrackMouseEvent(&raw mut track) } != 0 {
+                    TRACKING.set(true);
+                }
+            }
+            if other == ffi::WM_MOUSELEAVE {
+                TRACKING.set(false);
+            }
             if let Some(event) = event_for_message(other, w_param, l_param) {
                 PENDING.with(|p| p.borrow_mut().push(event));
                 // Still passed on: `DefWindowProcW` is what makes system keys,
@@ -512,6 +578,9 @@ pub struct Window {
     /// The last size the client area was seen at, so a caller can notice a
     /// resize without asking the OS.
     size: (u32, u32),
+    /// The frame as it goes to the screen: the picture with the pointer over
+    /// it.
+    staging: Staging,
 }
 
 impl Window {
@@ -633,11 +702,13 @@ impl Window {
             return Err(io::Error::other("the window has no device context"));
         }
 
+        TRACKING.set(false);
         Ok(Self {
             hwnd,
             dc,
             owner: std::thread::current().id(),
             size: (width, height),
+            staging: Staging::default(),
         })
     }
 
@@ -704,21 +775,108 @@ impl Window {
     }
 }
 
+/// The frame as it goes to the host window: the picture, with the pointer laid
+/// over a copy of it.
+///
+/// The compositor's pixels are borrowed and must not be drawn on, so the pointer
+/// needs a copy to be drawn onto. The copy is made whole only when the picture
+/// changed; when only the pointer moved — a still desktop under a moving mouse,
+/// the common case — the pixels it covered are put back from the picture and
+/// it is drawn again where it is now.
+///
+/// Split out of [`Window`] because this is the part of the host presenter
+/// that can be wrong without anyone noticing, and it needs no window to test.
+#[derive(Debug, Default)]
+struct Staging {
+    /// The picture with the pointer over it.
+    pixels: Vec<u32>,
+    /// Which picture [`Self::pixels`] holds, as `(serial, width, height)`.
+    picture: Option<(u64, u32, u32)>,
+    /// Where the pointer was laid over [`Self::pixels`], to be put back.
+    pointer_drawn: Option<Rect>,
+}
+
+impl Staging {
+    /// Bring the copy up to date with `frame` and hand it back, or `None` for
+    /// a frame whose pixels are fewer than its size claims — the caller's bug,
+    /// and not one to take the display server down over.
+    fn stage(&mut self, frame: &Frame<'_>) -> Option<&[u32]> {
+        let needed = usize::try_from(frame.width)
+            .ok()?
+            .checked_mul(usize::try_from(frame.height).ok()?)?;
+        if needed == 0 || frame.pixels.len() < needed {
+            return None;
+        }
+        let same_picture = matches!(
+            (frame.serial, self.picture),
+            (Some(serial), Some(held)) if held == (serial, frame.width, frame.height)
+        ) && self.pixels.len() == needed;
+        if same_picture {
+            if let Some(old) = self.pointer_drawn.take() {
+                self.restore(frame.pixels, frame.width, old);
+            }
+        } else {
+            self.pixels.clear();
+            self.pixels
+                .extend_from_slice(frame.pixels.get(..needed).unwrap_or_default());
+            self.pointer_drawn = None;
+        }
+        self.picture = frame
+            .serial
+            .map(|serial| (serial, frame.width, frame.height));
+        if let Some(pointer) = frame.pointer {
+            self.pointer_drawn = pointer.blend_over(&mut self.pixels, frame.width, frame.height);
+        }
+        Some(&self.pixels)
+    }
+
+    /// Copy `rect` of `picture` (rows of `width`) back over the same
+    /// rectangle of the copy, which has the same shape.
+    fn restore(&mut self, picture: &[u32], width: u32, rect: Rect) {
+        let (Ok(stride), Ok(x0), Ok(cols)) = (
+            usize::try_from(width),
+            usize::try_from(rect.x),
+            usize::try_from(rect.width),
+        ) else {
+            return;
+        };
+        for y in rect.y..rect.bottom() {
+            let Ok(row) = usize::try_from(y) else {
+                continue;
+            };
+            let Some(start) = row.checked_mul(stride).and_then(|r| r.checked_add(x0)) else {
+                continue;
+            };
+            let Some(end) = start.checked_add(cols) else {
+                continue;
+            };
+            if let (Some(dst), Some(src)) =
+                (self.pixels.get_mut(start..end), picture.get(start..end))
+            {
+                dst.copy_from_slice(src);
+            }
+        }
+    }
+}
+
 impl super::Present for Window {
-    fn show(&mut self, pixels: &[u32], width: u32, height: u32) {
+    fn show(&mut self, frame: &Frame<'_>) {
         self.pump();
+        let (width, height) = (frame.width, frame.height);
         let (Ok(w), Ok(h)) = (i32::try_from(width), i32::try_from(height)) else {
             return;
         };
-        let Some(needed) = (width as usize).checked_mul(height as usize) else {
+        let (cw, ch) = self.client_size();
+        self.size = (cw, ch);
+        let (Ok(dest_w), Ok(dest_h)) = (i32::try_from(cw), i32::try_from(ch)) else {
             return;
         };
-        if pixels.len() < needed || needed == 0 {
-            // A short buffer is the caller's bug. Drawing part of it would
-            // read past the end inside GDI, so the frame is skipped: a display
-            // server must not be brought down by a bad frame.
+        // A short buffer is the caller's bug. Drawing part of it would read
+        // past the end inside GDI, so the frame is skipped: a display server
+        // must not be brought down by a bad frame.
+        let Some(pixels) = self.staging.stage(frame) else {
             return;
-        }
+        };
 
         let info = ffi::BITMAPINFO {
             header: ffi::BITMAPINFOHEADER {
@@ -746,16 +904,11 @@ impl super::Present for Window {
             colors: [0; 3],
         };
 
-        let (cw, ch) = self.client_size();
-        self.size = (cw, ch);
-        let (Ok(dest_w), Ok(dest_h)) = (i32::try_from(cw), i32::try_from(ch)) else {
-            return;
-        };
-
         // SAFETY: `dc` belongs to this window (`CS_OWNDC`) and is valid for its
         // lifetime; `info` is a fully initialised `BITMAPINFO` describing
-        // exactly `w * h` 32-bit pixels; and `pixels` was checked above to hold
-        // at least that many, so GDI reads only within the slice.
+        // exactly `w * h` 32-bit pixels; and `pixels` is the staging copy, which
+        // `Staging::stage` returns only once it holds exactly `width * height`
+        // of them, so GDI reads only within the slice.
         unsafe {
             ffi::StretchDIBits(
                 self.dc,
@@ -815,9 +968,11 @@ mod tests {
     )]
 
     use super::{
-        button_for, event_for_message, ffi, mouse_point, scancode_from_lparam, wheel_delta, wide,
+        Staging, button_for, event_for_message, ffi, mouse_point, scancode_from_lparam,
+        wheel_delta, wide,
     };
     use crate::keymap::key_for_scancode;
+    use crate::present::Frame;
     use crate::{InputEvent, MouseButton};
     use guitk::event::Key;
 
@@ -1052,5 +1207,135 @@ mod tests {
             "Slate—OS",
             "and the em dash is not mangled on the way"
         );
+    }
+
+    // ----------------------------------------------------------------
+    // The pointer
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn the_mouse_leaving_the_window_is_the_pointer_leaving_the_output() {
+        assert!(matches!(
+            event_for_message(ffi::WM_MOUSELEAVE, 0, 0),
+            Some(InputEvent::PointerLeft)
+        ));
+    }
+
+    /// An arrow with its hot spot at `(x, y)`.
+    fn arrow_at(x: i32, y: i32) -> crate::PointerSprite {
+        crate::CursorCache::new()
+            .sprite(&crate::PointerState {
+                shape: crate::CursorShape::Arrow,
+                x,
+                y,
+                style: crate::CursorStyle {
+                    size_px: 24,
+                    fill: 0xFFFF_FFFF,
+                    outline: 0xFF00_0000,
+                },
+            })
+            .expect("an arrow")
+    }
+
+    /// `picture` with `pointer` laid over it: what the window should show.
+    fn composed(picture: &[u32], w: u32, h: u32, pointer: &crate::PointerSprite) -> Vec<u32> {
+        let mut out = picture.to_vec();
+        pointer.blend_over(&mut out, w, h);
+        out
+    }
+
+    #[test]
+    fn a_pointer_moving_over_a_still_picture_leaves_nothing_behind() {
+        let (w, h) = (120u32, 90u32);
+        let picture: Vec<u32> = (0..w * h).map(|i| 0xFF00_0000 | i).collect();
+        let mut staging = Staging::default();
+        for (x, y) in [(10, 10), (60, 40), (61, 41), (115, 85), (0, 0)] {
+            let pointer = arrow_at(x, y);
+            let frame = Frame::new(&picture, w, h)
+                .with_serial(3)
+                .with_pointer(Some(&pointer));
+            let shown = staging.stage(&frame).expect("a whole frame").to_vec();
+            assert_eq!(
+                shown,
+                composed(&picture, w, h, &pointer),
+                "the pointer at ({x}, {y})"
+            );
+        }
+    }
+
+    /// The cheap path is really taken: a frame claiming the same picture
+    /// rewrites only where the pointer was and is.
+    #[test]
+    fn an_unchanged_picture_is_not_copied_again() {
+        let (w, h) = (100u32, 80u32);
+        let first = vec![0xFF11_1111u32; (w * h) as usize];
+        let lying = vec![0xFF22_2222u32; (w * h) as usize];
+        let mut staging = Staging::default();
+        let a = arrow_at(10, 10);
+        let b = arrow_at(60, 50);
+        let _ = staging.stage(
+            &Frame::new(&first, w, h)
+                .with_serial(1)
+                .with_pointer(Some(&a)),
+        );
+        let shown = staging
+            .stage(
+                &Frame::new(&lying, w, h)
+                    .with_serial(1)
+                    .with_pointer(Some(&b)),
+            )
+            .expect("a whole frame")
+            .to_vec();
+        assert_eq!(
+            shown[(5 * w + 95) as usize],
+            0xFF11_1111,
+            "the picture was copied again"
+        );
+        let old = a.rect();
+        let inside_old = ((old.y as u32 + 1) * w + old.x as u32 + old.width - 2) as usize;
+        assert_eq!(
+            shown[inside_old], 0xFF22_2222,
+            "the old pointer was not put back"
+        );
+    }
+
+    /// A new picture, a picture of a new size, and a frame with no serial are
+    /// each taken whole.
+    #[test]
+    fn a_new_or_unstamped_picture_is_taken_whole() {
+        let (w, h) = (40u32, 30u32);
+        let mut staging = Staging::default();
+        let pointer = arrow_at(5, 5);
+        let red = vec![0xFFFF_0000u32; (w * h) as usize];
+        let blue = vec![0xFF00_00FFu32; (w * h) as usize];
+        let _ = staging.stage(&Frame::new(&red, w, h).with_serial(1));
+        let shown = staging
+            .stage(&Frame::new(&blue, w, h).with_serial(2))
+            .unwrap()
+            .to_vec();
+        assert_eq!(shown, blue, "a new serial kept the old picture");
+        let shown = staging.stage(&Frame::new(&red, w, h)).unwrap().to_vec();
+        assert_eq!(shown, red, "a frame with no serial kept the old picture");
+        let small = vec![0xFF00_FF00u32; 20 * 10];
+        let shown = staging
+            .stage(
+                &Frame::new(&small, 20, 10)
+                    .with_serial(2)
+                    .with_pointer(Some(&pointer)),
+            )
+            .unwrap()
+            .to_vec();
+        assert_eq!(
+            shown,
+            composed(&small, 20, 10, &pointer),
+            "a resize kept the old picture"
+        );
+    }
+
+    #[test]
+    fn a_short_frame_is_skipped_rather_than_drawn() {
+        let mut staging = Staging::default();
+        assert!(staging.stage(&Frame::new(&[0u32; 5], 3, 2)).is_none());
+        assert!(staging.stage(&Frame::new(&[], 0, 0)).is_none());
     }
 }

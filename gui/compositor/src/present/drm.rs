@@ -99,7 +99,8 @@ pub mod uapi;
 
 use std::time::{Duration, Instant};
 
-use super::{MonitorInfo, Present};
+use super::{Frame, MonitorInfo, Present};
+use crate::Rect;
 use sys::{EAGAIN, EBUSY, EINTR, ENOENT, Errno, KmsSys, Mapped, OutArray};
 use uapi::{
     ModeCardRes, ModeCreateDumb, ModeCrtc, ModeCrtcPageFlip, ModeDestroyDumb, ModeFbCmd2,
@@ -274,6 +275,18 @@ struct Framebuffer {
     pitch: u32,
     /// The mapping. Dropping it unmaps.
     map: Box<dyn Mapped>,
+    /// Which picture this buffer holds — the serial of the [`Frame`] last
+    /// copied into it — or `None` when it holds nothing a later frame can
+    /// build on.
+    ///
+    /// Per buffer and not per head, because the two buffers of a head hold
+    /// different frames: after a flip the one drawn into next is the one that
+    /// was on screen *before*, a frame behind.
+    holds: Option<u64>,
+    /// Where, in this head's coordinates, the pointer was drawn into this
+    /// buffer, so that a frame in which only the pointer moved can put back
+    /// what was under it instead of copying the whole picture again.
+    pointer_drawn: Option<Rect>,
 }
 
 /// One monitor being driven: a CRTC, the connector it feeds, its own pair of
@@ -803,7 +816,18 @@ impl<S: KmsSys> DrmScanout<S> {
 }
 
 impl<S: KmsSys> Present for DrmScanout<S> {
-    fn show(&mut self, pixels: &[u32], width: u32, height: u32) {
+    /// Copy each head's rectangle of the picture into its back buffer, lay the
+    /// pointer over it, and flip.
+    ///
+    /// A frame whose picture this buffer already holds — the same
+    /// [`Frame::serial`] — is one where only the pointer moved: the pixels the
+    /// old pointer covered are copied back from the picture and the pointer is
+    /// drawn where it is now, which is a few hundred pixels instead of the
+    /// whole screen. That is what makes a moving pointer cheap on a still
+    /// desktop, and it is also why the pointer costs nothing over a fullscreen
+    /// window being scanned out directly: the copy happens either way.
+    fn show(&mut self, frame: &Frame<'_>) {
+        let (pixels, width, height) = (frame.pixels, frame.width, frame.height);
         for index in 0..self.heads.len() {
             // Read before the mutable borrow below, and per head: a head whose
             // width pads differently from its neighbour's has a different row
@@ -827,8 +851,33 @@ impl<S: KmsSys> Present for DrmScanout<S> {
                 src_x: head.x,
                 src_y: head.y,
             };
+            let (origin_x, origin_y) = (
+                i32::try_from(head.x).unwrap_or(i32::MAX),
+                i32::try_from(head.y).unwrap_or(i32::MAX),
+            );
+            let (head_width, head_height) = (head.width, head.height);
             if let Some(buffer) = head.buffers.get_mut(back) {
-                blit(buffer.map.bytes(), &view, pixels, width, height);
+                let same_picture = frame.serial.is_some() && buffer.holds == frame.serial;
+                if same_picture {
+                    if let Some(old) = buffer.pointer_drawn.take() {
+                        blit_rect(buffer.map.bytes(), &view, pixels, width, height, old);
+                    }
+                } else {
+                    blit(buffer.map.bytes(), &view, pixels, width, height);
+                    buffer.pointer_drawn = None;
+                }
+                buffer.holds = frame.serial;
+                if let Some(pointer) = frame.pointer {
+                    let pitch = usize::try_from(dst_pitch).unwrap_or(0);
+                    buffer.pointer_drawn = pointer.blend_over_xrgb(
+                        buffer.map.bytes(),
+                        pitch,
+                        head_width,
+                        head_height,
+                        origin_x,
+                        origin_y,
+                    );
+                }
             }
             match self.flip_head(index) {
                 Ok(()) => {}
@@ -1340,6 +1389,9 @@ fn make_buffer(sys: &mut dyn KmsSys, width: u32, height: u32) -> Result<Framebuf
         fb_id: fb.fb_id,
         pitch: dumb.pitch,
         map,
+        // A new buffer holds whatever the driver left in it, not a frame.
+        holds: None,
+        pointer_drawn: None,
     })
 }
 
@@ -1417,6 +1469,70 @@ fn blit(dst: &mut [u8], view: &Viewport, src: &[u32], src_width: u32, src_height
         };
         let dst_start = row.saturating_mul(pitch);
         let Some(dst_row) = dst.get_mut(dst_start..dst_start.saturating_add(copy_bytes)) else {
+            return;
+        };
+        for (out, &pixel) in dst_row.chunks_exact_mut(BYTES_PER_PIXEL).zip(src_row) {
+            out.copy_from_slice(&pixel.to_le_bytes());
+        }
+    }
+}
+
+/// [`blit`], confined to `rect` — a rectangle in the view's own coordinates.
+///
+/// What puts the picture back under a pointer that has moved away. The same
+/// two rules apply as for the whole copy: rows go to `row * pitch`, and come
+/// from `(src_y + row) * src_width + src_x`; a rectangle that reaches past
+/// the view or past the frame is clipped rather than read out of bounds.
+fn blit_rect(
+    dst: &mut [u8],
+    view: &Viewport,
+    src: &[u32],
+    src_width: u32,
+    src_height: u32,
+    rect: Rect,
+) {
+    let Some(r) = rect.intersect(&Rect::new(0, 0, view.width, view.height)) else {
+        return;
+    };
+    let pitch = usize::try_from(view.pitch).unwrap_or(0);
+    let src_w = usize::try_from(src_width).unwrap_or(0);
+    let src_h = usize::try_from(src_height).unwrap_or(0);
+    let (Ok(x0), Ok(y0), Ok(cols), Ok(rows)) = (
+        usize::try_from(r.x),
+        usize::try_from(r.y),
+        usize::try_from(r.width),
+        usize::try_from(r.height),
+    ) else {
+        return;
+    };
+    let off_x = usize::try_from(view.src_x).unwrap_or(usize::MAX);
+    let off_y = usize::try_from(view.src_y).unwrap_or(usize::MAX);
+    let Some(sx) = off_x.checked_add(x0) else {
+        return;
+    };
+    // What the frame actually has to the right of the rectangle's left edge.
+    let cols = cols.min(src_w.saturating_sub(sx));
+    if pitch == 0 || cols == 0 {
+        return;
+    }
+    for row in y0..y0.saturating_add(rows) {
+        let Some(sy) = off_y.checked_add(row).filter(|&sy| sy < src_h) else {
+            return;
+        };
+        let Some(src_start) = sy.checked_mul(src_w).and_then(|v| v.checked_add(sx)) else {
+            return;
+        };
+        let Some(src_row) = src.get(src_start..src_start.saturating_add(cols)) else {
+            return;
+        };
+        let Some(dst_start) = row
+            .checked_mul(pitch)
+            .and_then(|v| v.checked_add(x0.checked_mul(BYTES_PER_PIXEL)?))
+        else {
+            return;
+        };
+        let bytes = cols.saturating_mul(BYTES_PER_PIXEL);
+        let Some(dst_row) = dst.get_mut(dst_start..dst_start.saturating_add(bytes)) else {
             return;
         };
         for (out, &pixel) in dst_row.chunks_exact_mut(BYTES_PER_PIXEL).zip(src_row) {

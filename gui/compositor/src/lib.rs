@@ -92,6 +92,10 @@ pub use render::{RenderBackend, RenderTarget};
 // catch up on the frames it missed. See the module docs.
 mod repaint;
 use repaint::{Change, DamageHistory, Region};
+// The mouse pointer: its artwork, and the plane it is drawn on over the frame
+// rather than into it. See the module docs.
+pub mod cursor;
+pub use cursor::{CursorCache, CursorImage, CursorStyle, PointerSprite, PointerState};
 mod keymap;
 pub use keymap::{ModifierState, key_for_scancode};
 // The one piece of keyboard state that spans two events. `keymap` is a pure
@@ -114,7 +118,7 @@ pub use server::{Disconnect, Server, ServerStats};
 // arrived; `present` is the one seam that closes both, because both had the
 // same cause — the compositor owned no device.
 pub mod present;
-pub use present::{Headless, Present, Recording};
+pub use present::{Frame, Headless, Present, Recording};
 // Remote draw-command streaming uses the shared `guiremote` crate's scene
 // protocol (multi-window deltas built on its single-window RenderCommand wire
 // codec), rather than a compositor-local duplicate.
@@ -676,6 +680,14 @@ pub enum InputEvent {
     KeyUp { scancode: u32 },
     /// Text input (after IME processing).
     TextInput { text: String },
+    /// The pointer left the output.
+    ///
+    /// Only a hosted build's window can lose the pointer — the mouse moves on
+    /// to the host's own desktop — and until it comes back nothing on this
+    /// desktop is under it, so no pointer is drawn. Without this the pointer
+    /// would hang at the window's edge, where it was last seen, while the
+    /// real one is somewhere else.
+    PointerLeft,
 }
 
 // ---------------------------------------------------------------------------
@@ -5203,6 +5215,10 @@ pub struct Compositor {
     cursor_y: i32,
     /// Current cursor shape.
     cursor_shape: CursorShape,
+    /// Whether the pointer is over this compositor's output at all — see
+    /// [`InputEvent::PointerLeft`]. True from the start: a real display has
+    /// its pointer on it from the moment it lights, at the centre.
+    pointer_on_output: bool,
     /// Active drag operation (if any).
     drag: Option<DragState>,
     /// Where the window being dragged would land if the user let go now.
@@ -5548,6 +5564,7 @@ impl Compositor {
             cursor_x: width as i32 / 2,
             cursor_y: height as i32 / 2,
             cursor_shape: CursorShape::Arrow,
+            pointer_on_output: true,
             drag: None,
             drag_preview: None,
             last_title_press: None,
@@ -7476,14 +7493,24 @@ impl Compositor {
         self.refresh_window_scales();
 
         match event {
-            InputEvent::MouseMove { x, y } => self.handle_mouse_move(x, y),
+            InputEvent::MouseMove { x, y } => {
+                self.pointer_on_output = true;
+                self.handle_mouse_move(x, y);
+            }
             InputEvent::MouseButton {
                 button,
                 pressed,
                 x,
                 y,
-            } => self.handle_mouse_button(button, pressed, x, y),
-            InputEvent::MouseScroll { dx, dy, x, y } => self.handle_mouse_scroll(dx, dy, x, y),
+            } => {
+                self.pointer_on_output = true;
+                self.handle_mouse_button(button, pressed, x, y);
+            }
+            InputEvent::MouseScroll { dx, dy, x, y } => {
+                self.pointer_on_output = true;
+                self.handle_mouse_scroll(dx, dy, x, y);
+            }
+            InputEvent::PointerLeft => self.pointer_on_output = false,
             InputEvent::KeyDown {
                 scancode,
                 character,
@@ -10534,6 +10561,92 @@ impl Compositor {
     /// Get the current cursor shape.
     pub fn cursor_shape(&self) -> CursorShape {
         self.cursor_shape
+    }
+
+    /// The pointer the display should draw over the frame, or `None` when
+    /// there is none to draw: it has left the output, or the window under it
+    /// asked for [`CursorShape::Hidden`].
+    ///
+    /// A description — shape, hot spot, size and colours — rather than pixels:
+    /// the picture is a presentation concern ([`CursorCache`]), and keeping it
+    /// out of the compositor is what lets a presenter hand the same
+    /// description to a hardware cursor plane instead.
+    ///
+    /// The size is [`pointer_preferences`](Self::pointer_preferences)' size
+    /// times the scale of the display the pointer is on, so a pointer crossing
+    /// onto a 2x monitor doubles as it crosses, exactly as the window
+    /// decorations there do.
+    #[must_use]
+    pub fn pointer(&self) -> Option<PointerState> {
+        if !self.pointer_on_output || self.cursor_shape == CursorShape::Hidden {
+            return None;
+        }
+        let (x, y) = (self.cursor_x, self.cursor_y);
+        let scale = self.display_manager.scale_for(&Rect::new(x, y, 1, 1));
+        let (size, scheme) = Self::pointer_preferences();
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "16 to 48 pixels times a display scale; the rasterizer clamps the result, and a nonsense scale saturates rather than wrapping"
+        )]
+        let size_px = (size.pixels() as f32 * scale).round() as u32;
+        let (fill, outline) = Self::pointer_colors(scheme, self.palette.accent);
+        Some(PointerState {
+            shape: self.cursor_shape,
+            x,
+            y,
+            style: CursorStyle {
+                size_px,
+                fill,
+                outline,
+            },
+        })
+    }
+
+    /// The pointer's size and colour scheme: the defaults, on purpose, until
+    /// the user's choice has one home.
+    ///
+    /// Three settings hold a pointer size — `appearance`'s `cursor_size`,
+    /// `inputsettings`' `mouse.cursor_size`, and the Settings app's own
+    /// `CursorSize`, which it never saves — and no control writes any of them
+    /// where another program can read it. `known-issues.md` →
+    /// `TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-AND-NO-READER`,
+    /// lane C's entry about lane C's models, asks that they be collapsed to one
+    /// before anything reads one: wiring one of several rival copies leaves the
+    /// others silently wrong instead of uniformly inert. The pointer now exists
+    /// to read the survivor, and which one survives is asked in
+    /// `requests/f-ce-the-pointer-is-drawn-now-which-cursor-size-setting-survives.md`.
+    /// When it is answered, this reads it and nothing else changes.
+    const fn pointer_preferences() -> (appearance::CursorSize, appearance::CursorScheme) {
+        (
+            appearance::CursorSize::Normal,
+            appearance::CursorScheme::Default,
+        )
+    }
+
+    /// The pointer's fill and outline for `scheme`, as `0xAARRGGBB`: white
+    /// edged in black, the reverse, or `accent` edged in whichever of black and
+    /// white stands out from it more.
+    fn pointer_colors(scheme: appearance::CursorScheme, accent: Color) -> (u32, u32) {
+        const WHITE: u32 = 0xFFFF_FFFF;
+        const BLACK: u32 = 0xFF00_0000;
+        match scheme {
+            appearance::CursorScheme::Default => (WHITE, BLACK),
+            appearance::CursorScheme::Inverted => (BLACK, WHITE),
+            appearance::CursorScheme::AccentColored => {
+                let edge = if appearance::contrast_ratio(accent, Color::BLACK)
+                    >= appearance::contrast_ratio(accent, Color::WHITE)
+                {
+                    BLACK
+                } else {
+                    WHITE
+                };
+                // Opaque whatever the accent's own alpha: a see-through pointer
+                // is one the user loses.
+                (color_to_argb(&accent) | 0xFF00_0000, edge)
+            }
+        }
     }
 
     /// Where the pointer is, in screen pixels.
@@ -23375,5 +23488,140 @@ mod tests {
             u64::from(extent.width) * u64::from(extent.height),
             "one window's redraw repaints something other than that window"
         );
+    }
+
+    // -- the pointer ---------------------------------------------------------------
+
+    #[test]
+    fn the_pointer_starts_at_the_centre_as_an_arrow() {
+        let comp = Compositor::new(800, 600, 60).expect("compositor");
+        let pointer = comp
+            .pointer()
+            .expect("a real display has a pointer from the start");
+        assert_eq!(
+            (pointer.shape, pointer.x, pointer.y),
+            (CursorShape::Arrow, 400, 300)
+        );
+    }
+
+    #[test]
+    fn a_pointer_that_leaves_the_output_is_not_drawn_until_it_comes_back() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        comp.handle_input(InputEvent::MouseMove { x: 790, y: 10 });
+        assert!(comp.pointer().is_some());
+        comp.handle_input(InputEvent::PointerLeft);
+        assert_eq!(
+            comp.pointer(),
+            None,
+            "the pointer hangs at the edge it left by"
+        );
+        comp.handle_input(InputEvent::MouseMove { x: 5, y: 5 });
+        let back = comp.pointer().expect("the pointer came back");
+        assert_eq!((back.x, back.y), (5, 5));
+    }
+
+    /// A game hides the pointer over its own window, and only there.
+    #[test]
+    fn a_window_that_hides_the_pointer_hides_it_over_itself_only() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let game = comp.create_window_from_spec(
+            &WindowSpec {
+                position: Some((100, 100)),
+                ..WindowSpec::new("game", 300, 200)
+            },
+            1,
+        );
+        comp.set_cursor(game, CursorShape::Hidden)
+            .expect("the window exists");
+        comp.handle_input(InputEvent::MouseMove { x: 200, y: 200 });
+        assert_eq!(
+            comp.pointer(),
+            None,
+            "the pointer shows over a window that hid it"
+        );
+        comp.handle_input(InputEvent::MouseMove { x: 600, y: 500 });
+        assert_eq!(
+            comp.pointer().map(|p| p.shape),
+            Some(CursorShape::Arrow),
+            "the pointer stayed hidden off the window that hid it"
+        );
+    }
+
+    /// The pointer is its size times the display's scale, so it keeps its
+    /// size on the glass as it crosses onto a denser screen.
+    #[test]
+    fn the_pointer_grows_with_the_display_it_is_on() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let normal = comp.pointer().expect("pointer").style.size_px;
+        assert_eq!(normal, appearance::CursorSize::Normal.pixels());
+        if let Some(d) = comp.display_manager.displays.first_mut() {
+            d.scale_factor = 2.0;
+        }
+        assert_eq!(comp.pointer().expect("pointer").style.size_px, normal * 2);
+    }
+
+    /// The user's pointer settings are not read yet, on purpose — see
+    /// `pointer_preferences`. This pins that: a change to one of the rival
+    /// copies must not reach the pointer until the copies are one, or the
+    /// others become silently wrong. It is the test to update, not to delete,
+    /// when the survivor is named.
+    #[test]
+    fn the_pointer_does_not_read_a_rival_copy_of_its_settings() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let before = comp.pointer().expect("pointer").style;
+        comp.set_appearance(AppearanceSettings {
+            cursor_size: appearance::CursorSize::ExtraLarge,
+            cursor_scheme: appearance::CursorScheme::Inverted,
+            ..AppearanceSettings::default()
+        });
+        assert_eq!(comp.pointer().expect("pointer").style, before);
+    }
+
+    #[test]
+    fn each_scheme_colours_the_pointer_as_it_says() {
+        let accent = Color::rgb(0x3A, 0x7B, 0xF2);
+        assert_eq!(
+            Compositor::pointer_colors(appearance::CursorScheme::Default, accent),
+            (0xFFFF_FFFF, 0xFF00_0000)
+        );
+        assert_eq!(
+            Compositor::pointer_colors(appearance::CursorScheme::Inverted, accent),
+            (0xFF00_0000, 0xFFFF_FFFF)
+        );
+        let (fill, edge) =
+            Compositor::pointer_colors(appearance::CursorScheme::AccentColored, accent);
+        assert_eq!(fill, 0xFF3A_7BF2, "the accent scheme is not the accent");
+        assert_eq!(
+            edge, 0xFF00_0000,
+            "a mid blue stands out more against black"
+        );
+        // A dark accent is edged in white, and a translucent one is made opaque.
+        let (fill, edge) = Compositor::pointer_colors(
+            appearance::CursorScheme::AccentColored,
+            Color::rgba(0x10, 0x10, 0x30, 0x80),
+        );
+        assert_eq!((fill, edge), (0xFF10_1030, 0xFFFF_FFFF));
+    }
+
+    /// Moving the pointer is not a change to the scene: over the desktop, over
+    /// a window, across a window's edge, there is nothing to compose.
+    #[test]
+    fn moving_the_pointer_composes_nothing() {
+        let mut comp = Compositor::new(800, 600, 2_000_000).expect("compositor");
+        let _ = comp.create_window_from_spec(
+            &WindowSpec {
+                position: Some((100, 100)),
+                ..WindowSpec::new("w", 300, 200)
+            },
+            1,
+        );
+        assert!(comp.compose_frame());
+        for (x, y) in [(50, 50), (200, 200), (399, 150), (401, 150), (700, 500)] {
+            comp.handle_input(InputEvent::MouseMove { x, y });
+            assert!(
+                !comp.compose_frame(),
+                "moving the pointer to ({x}, {y}) damaged the scene"
+            );
+        }
     }
 }

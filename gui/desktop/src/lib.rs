@@ -3646,7 +3646,7 @@ impl DesktopShell {
         if self.power_menu_open && !matches!(hit, Hit::PowerMenuEntry(_) | Hit::PowerMenuPanel) {
             self.power_menu_open = false;
             if !Self::keeps_start_menu_open(hit) {
-                self.start_menu_open = false;
+                self.close_start_menu();
             }
             return ShellAction::Consumed;
         }
@@ -6240,8 +6240,7 @@ impl DesktopShell {
     /// bar has nowhere to put one.
     fn open_tray_overflow(&mut self) {
         // Opening a popup closes the others, as every other popup here does.
-        self.start_menu_open = false;
-        self.power_menu_open = false;
+        self.close_start_menu();
         self.shortcut_card_open = false;
         self.calendar.set_visible(false);
         self.notifications.hide();
@@ -7144,8 +7143,7 @@ impl DesktopShell {
         }
         // Opening a popup closes the other one: two panels covering the same
         // taskbar at once is a state the user cannot have asked for.
-        self.start_menu_open = false;
-        self.power_menu_open = false;
+        self.close_start_menu();
         self.shortcut_card_open = false;
 
         let now = SystemTime::now()
@@ -7177,8 +7175,7 @@ impl DesktopShell {
         }
         // Same rule the calendar states: two panels over one taskbar at once is
         // a state the user cannot have asked for.
-        self.start_menu_open = false;
-        self.power_menu_open = false;
+        self.close_start_menu();
         self.calendar.set_visible(false);
         // The pane's scrim dims the whole screen behind it, so a card left open
         // under it would be a card the user cannot read.
@@ -7244,8 +7241,7 @@ impl DesktopShell {
             self.shortcut_card_open = false;
             return;
         }
-        self.start_menu_open = false;
-        self.power_menu_open = false;
+        self.close_start_menu();
         self.calendar.set_visible(false);
         self.notifications.hide();
         // Whatever the editor was in the middle of when the card last went
@@ -8566,8 +8562,10 @@ impl DesktopShell {
         let any = self.any_popup_open();
         self.desktop_menu.hide();
         self.tray_overflow_menu = None;
-        self.start_menu_open = false;
-        self.power_menu_open = false;
+        // Through the one exit, which also ends a drag from the menu: Escape
+        // in the middle of carrying a program used to close the menu and
+        // leave the drag to finish on the release.
+        self.close_start_menu();
         self.calendar.set_visible(false);
         // The pane's own Escape handling closes it too; this is the path for a
         // press that dismissed something else at the same time, and for a
@@ -17768,6 +17766,28 @@ mod carry_tests {
             let from = row_centre(&shell, 0);
             carry(&mut shell, from, (1600.0, 400.0));
             assert!(shortcut_to(&shell, &exec).is_some());
+        });
+    }
+
+    /// Escape mid-drag -- which dismisses every popup -- ends the drag too.
+    /// It closed the menu by writing its flag directly and left the drag to
+    /// finish on the release.
+    #[test]
+    fn dismissing_the_popups_ends_a_drag_from_the_menu() {
+        with_scratch_config("carry-row-dismissed", |_root| {
+            let mut shell = shell();
+            shell.toggle_start_menu();
+            let (exec, _) = app(&shell, 0);
+            let from = row_centre(&shell, 0);
+            press(&mut shell, from);
+            move_to(&mut shell, (1200.0, 400.0));
+            assert!(shell.dismiss_popups());
+            assert!(carried(&shell).is_none(), "the label outlived the menu");
+            release(&mut shell, (1200.0, 400.0));
+            assert!(
+                shortcut_to(&shell, &exec).is_none(),
+                "the dismissed drag still dropped"
+            );
         });
     }
 

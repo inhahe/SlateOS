@@ -5438,7 +5438,9 @@ fn tee_transfer_over<P: TeePipes>(pipes: &mut P, len: usize, nonblock: bool) -> 
     while total < len {
         let chunk = len.saturating_sub(total).min(buf.len());
         // Non-destructive copy of up to `chunk` bytes at `offset`.
-        let n = pipes.peek(offset, &mut buf[..chunk]);
+        // `chunk <= buf.len()` by the `min` above; `get_mut` says so without
+        // a slice that could panic.
+        let n = pipes.peek(offset, buf.get_mut(..chunk).unwrap_or(&mut []));
         if n < 0 {
             if total > 0 {
                 break;
@@ -5472,7 +5474,9 @@ fn tee_transfer_over<P: TeePipes>(pipes: &mut P, len: usize, nonblock: bool) -> 
         let to_write = n as usize;
         let mut written: usize = 0;
         while written < to_write {
-            let nw = pipes.write(&buf[written..to_write], nonblock);
+            // `to_write <= chunk <= buf.len()`: `peek` returns at most what
+            // it was given room for.
+            let nw = pipes.write(buf.get(written..to_write).unwrap_or(&[]), nonblock);
             if nw < 0 {
                 // Destination error.  If we've made progress, return it so the
                 // caller sees a short transfer (Linux behaviour on EAGAIN/EPIPE

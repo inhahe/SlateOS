@@ -1176,7 +1176,6 @@ fn kernel_name_len(n: isize, buf: &[u8]) -> Option<usize> {
 /// A `SYS_HOSTNAME` pair is requested in
 /// `requests/b-a-no-native-syscall-reports-the-hostname.md`; when it lands,
 /// this becomes a syscall and the file read goes away.
-
 #[cfg(target_os = "none")]
 fn read_kernel_name(path: &[u8], out: &mut [u8]) -> Option<usize> {
     let fd = crate::file::open(path.as_ptr(), crate::fcntl::O_RDONLY, 0);

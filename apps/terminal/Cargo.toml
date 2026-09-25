@@ -21,6 +21,10 @@ guitk = { path = "../../gui/toolkit" }
 # so the emulator underneath -- CSI parsing, scrollback, alt screen, selection
 # and a whole PTY in `pty.rs` -- had nothing to run in.
 oswindow = { path = "../../gui/window" }
+# The shell's pseudo-terminal: `forkpty` and `TIOCSWINSZ` are the C library's
+# and keep state, so a program reaches them through the C ABI and never by
+# depending on `posix` (design-decisions 768). This is that door.
+libcall = { path = "../../libcall" }
 
 [lints]
 workspace = true

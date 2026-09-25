@@ -163168,6 +163168,7 @@ uses tabs. Without the second, opening a Makefile and typing still corrupts
 it, which is the case the whole finding is about.
 
 ## `TD-C-THE-TERMINAL-ECHOES-AND-RUNS-NOTHING` -- **FIXED 2026-09-18** (lane C)
+**Status:** FIXED again 2026-09-24 by lane E -- the 2026-09-18 fix ran the shell on pipes, which is not a terminal (no prompt, no `^C`, no size, and a dropped stderr pipe that killed it); it now runs on a kernel pseudo-terminal. See `[E] The terminal's shell ran on pipes` at the end of this file.
 
 **In short:** `apps/terminal` has no shell and starts no process. Typing works
 and the characters appear -- the PTY's cooked-mode line discipline echoes them
@@ -164968,3 +164969,97 @@ name, they read identically at the call site, and only one of them answers
 "is this row on the card". This is the same distinction `names_the_key` makes
 in `scripts/key-survey.py`, written to fix this exact defect in the survey --
 by the same hand that then wrote it into thirty-eight tests.
+
+### [E] The terminal's shell ran on pipes, so it was never on a terminal -- 2026-09-24
+**Status:** FIXED 2026-09-24 (lane E)
+
+**In short:** On 2026-09-18 `apps/terminal` started a shell, which closed
+`TD-C-THE-TERMINAL-ECHOES-AND-RUNS-NOTHING` as FIXED. But the shell ran on
+**pipes**, attached by two threads to a model of a terminal that lived inside
+the terminal's own process. A shell on pipes does not know it is talking to a
+person: it prints no prompt, Ctrl+C cannot stop what it is running, it never
+learns the window's size, and full-screen programs refuse to start. Its error
+output also went to a pipe nobody read, which kills it the first time it
+complains. The shell now runs on a real kernel pseudo-terminal.
+
+**What the 2026-09-18 code did** (`apps/terminal/src/main.rs`, `start_shell`,
+deleted here): `Command::new($SHELL or /bin/sh)` with piped stdin, stdout and
+stderr; one thread copying stdout into the model's slave end, one copying the
+model's slave end into stdin. Measured by reading it, each a property of pipes
+rather than a slip in the threads:
+
+| | |
+|---|---|
+| `isatty(0)` in the shell | false: non-interactive, so no prompt and no job control |
+| `^C` | the model turned it into a `PtySignal::Interrupt` value; no process received anything |
+| window size | written into the model's `WinSize`, which no process can ask for |
+| full-screen programs | `vi`, `less`, `top` need a terminal and refuse without one |
+| standard error | `Stdio::piped()`, and the `Child` holding its reading end was dropped when `start_shell` returned -- so the shell's first write to stderr (an error message, such as `command not found`) got `EPIPE`, and with `SIGPIPE` at its default, which `Command` restores in the child, the shell died |
+| the shell's exit | never waited for: a zombie, with no status to report |
+
+**Why nobody saw it.** On the Windows development host, where the suite runs,
+`/bin/sh` does not exist, so the pipe path never ran; the window said "No
+shell" and echoed typing through the model's line discipline. On SlateOS no
+graphical application runs yet. Every test drove the model directly. The
+defect was reachable only on a Unix host with a compositor, which this project
+does not have.
+
+**The fix.** The child is now a `child::Link` (`apps/terminal/src/child.rs`).
+The real link is the user's shell on a kernel pseudo-terminal, started by the
+new `libcall::pty::spawn` (`forkpty` and `execve` in one call, the vectors
+built before the fork) over lane D's existing `posix::pty::forkpty`. A reader
+thread drains the master through a bounded channel, so a flood of output is
+paced by the kernel's buffer rather than by this process's memory; a writer
+thread sends keystrokes, so a child that stops reading cannot freeze the
+window. Resizes go out as `TIOCSWINSZ`. The exit is reported once, after the
+child's last output, with its status or signal. The model (`pty.rs`, 2,054
+lines) is deleted: it was a second line discipline beside the kernel's, in the
+one process that must not have one. Rationale: `design-decisions.md` §1200.
+
+**Verified**, against real pseudo-terminals on a Linux host (glibc's
+`forkpty`, `/bin/sh`), under `cargo test --target x86_64-unknown-linux-gnu`
+in WSL: 10 tests in `libcall` (on a terminal, size and resize, exact
+environment, `^C` through the line discipline, `SIGPIPE` restored, a missing
+program is `ENOENT` with no child, exit statuses and signal deaths, reaped
+once, master close-on-exec) and 4 in `apps/terminal` driving a shell through
+the terminal's own link. All stable over five repeated runs. On the host: 80
+terminal tests; the mutation table, rewritten for the new child, 70 rows, all 70 caught by the tests named for them -- 23 of them the child's, new or rewritten for the link.
+
+**Not verified: SlateOS.** No graphical application runs there yet.
+`todo.txt` → Lane E → "The terminal has never run on SlateOS" lists what to
+check the first time one does.
+
+**Found alongside, and fixed in the same change:** `libcall`'s test
+`a_single_pid_reaches_the_libc_arm` asserts that `kill(1, SIGTERM)` returns
+`ENOSYS`. That is true only on the host build. Built for any Unix target the
+call is real: it sends a terminate request to PID 1 -- init -- and the test
+fails (`EPERM` as an ordinary user, measured on Linux). Run as root it would
+signal init. Nothing ran this crate's tests on a Unix target until this
+change's Linux run found it; the test is now `#[cfg(not(unix))]`.
+
+### [E] The terminal polls for its shell's output, because nothing can wake an application for its own descriptor -- 2026-09-24
+**Status:** OPEN -- blocked on lane F, `requests/e-f-wake-an-application-for-its-own-descriptor.md`
+
+**In short:** The terminal cannot be told that its shell has written
+something; it has to look. It looks every 16 ms while the shell is talking and
+every 50 ms once it has been quiet for two seconds. So a terminal sitting at a
+prompt wakes the machine twenty times a second to find nothing, and the first
+key pressed after a pause waits up to 50 ms for its echo.
+
+**Why.** `oswindow`'s event loop blocks on the compositor's socket and wakes
+an application for two things only: the compositor's events and the clock the
+application asks for (`App::tick_interval`). The shell's output arrives on the
+pseudo-terminal's master, which the loop does not know about. The terminal's
+reader thread drains the master continuously, so the shell is never held up,
+but what it reads reaches the screen only on the next tick.
+
+**Where.** `apps/terminal/src/main.rs`: `ACTIVE_POLL_MS`, `IDLE_POLL_MS`,
+`ACTIVE_WINDOW_MS` and `TerminalState::tick_interval`. The 50 ms echo delay
+has a second cause in `gui/window/src/app.rs` `sync_clock`, which never
+shortens an armed deadline, so switching from the idle to the busy interval
+takes effect only after the idle one fires.
+
+**The proper fix** is lane F's: a waker the reader thread can call (ask 1 of
+the request), or at least letting a shorter interval replace a longer armed
+one (ask 2). Then the terminal stops asking for a clock on the child's behalf,
+and this entry closes.

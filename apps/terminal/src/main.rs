@@ -16,17 +16,26 @@
 //!
 //! All of which used to have nothing to run in. `main` fed a fixed demo string
 //! into the parser, rendered one frame and returned, so the grid was fixed at
-//! eighty by twenty-four whatever the window was, the PTY in [`pty`] was dead
-//! code, and the bell counted down in frames that were never drawn. The
-//! emulator now owns a real [`oswindow`] window: [`Layout`] is solved from the
-//! size the compositor hands [`App::render`] every frame, keystrokes go to a
-//! child through [`pty::PtyMaster`] and its output comes back, and the bell and
-//! cursor blink age in milliseconds off [`Event::Tick`].
+//! eighty by twenty-four whatever the window was and the bell counted down in
+//! frames that were never drawn. The emulator now owns a real [`oswindow`]
+//! window: [`Layout`] is solved from the size the compositor hands
+//! [`App::render`] every frame, and the bell and cursor blink age in
+//! milliseconds off [`Event::Tick`].
+//!
+//! The child is the user's shell on a **kernel** pseudo-terminal, started
+//! through [`child::spawn_shell`]: keystrokes go into the master, the shell's
+//! output comes back out of it, the window's size reaches the shell as
+//! `TIOCSWINSZ`, and `^C` is the kernel's line discipline's business, not
+//! ours. See [`child`] for what this replaced -- a model of a terminal inside
+//! this process, with the shell on pipes beside it.
 //!
 //! Renders via the guitk RenderTree, producing Text and FillRect commands
 //! for each visible cell in the terminal grid.
 
-pub mod pty;
+pub mod child;
+
+use child::{Exit, Link};
+use libcall::pty::WinSize;
 
 use appearance::Palette;
 use guitk::color::Color;
@@ -66,6 +75,36 @@ const BELL_MS: u64 = 100;
 
 /// How long each half of the cursor's blink lasts, in milliseconds.
 const BLINK_MS: u64 = 500;
+
+/// How often a terminal with a child looks for its output while the two are
+/// talking, in milliseconds: one frame, so an echo appears with the keystroke.
+///
+/// A clock at all, rather than a wake-up when output arrives, because the
+/// window library can wake an application for the compositor's events and
+/// for a clock and for nothing else -- see `child`'s module documentation and
+/// `requests/e-f-wake-an-application-for-its-own-descriptor.md`. When that
+/// lands, both of these go.
+const ACTIVE_POLL_MS: u64 = 16;
+
+/// How often a terminal with a quiet child looks for output, in milliseconds.
+///
+/// Slower, because a shell at a prompt can be quiet for hours and a program
+/// that ticks sixty times a second for nothing holds the whole desktop awake.
+/// Not much slower, because the first keystroke after a pause waits out
+/// whatever interval is already armed -- the window library does not shorten
+/// a pending deadline -- so this is also the worst echo delay the user sees.
+const IDLE_POLL_MS: u64 = 50;
+
+/// How long after the last byte either way a child counts as quiet, in
+/// milliseconds.
+const ACTIVE_WINDOW_MS: u64 = 2_000;
+
+/// The most output one drain parses before the frame is drawn.
+///
+/// A child that writes faster than the parser runs -- `cat` of a large file --
+/// must not hold the window for the whole of its output. The rest waits for
+/// the next tick, which comes at [`ACTIVE_POLL_MS`] while output is flowing.
+const MAX_READ_PER_DRAIN: usize = 64 * 1024;
 
 /// What a click can land on.
 ///
@@ -178,6 +217,22 @@ fn u32_f32(n: u32) -> f32 {
 /// reported to the child as four.
 fn u16_of(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
+}
+
+/// A span in pixels as the `u16` a terminal's pixel size is made of.
+///
+/// Rounded down and saturating. A span that is not a positive finite number
+/// becomes zero, which is what `TIOCSWINSZ` means by "unknown" -- the honest
+/// answer for a window that has no size yet.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn pixels_u16(span: f32) -> u16 {
+    if span.is_finite() && span > 0.0 {
+        // In range by the `min`, non-negative by the guard, so the cast only
+        // drops the fraction.
+        span.min(f32::from(u16::MAX)) as u16
+    } else {
+        0
+    }
 }
 
 /// An SGR colour component narrowed to the byte a palette entry is made of.
@@ -575,18 +630,27 @@ pub struct TerminalState {
     /// whether the frame is worth drawing.
     tick_changed: bool,
 
-    /// The pseudo-terminal the child runs on the far side of.
+    /// The program on the other end: the user's shell on a kernel
+    /// pseudo-terminal, once [`Self::attach`] has been given one.
     ///
-    /// `pty.rs` is two thousand lines of working PTY -- master and slave ends,
-    /// a cooked-mode line discipline, back-pressure, window size -- and it was
-    /// behind `#[allow(dead_code)]` with no caller at all: the emulator had no
-    /// child to talk to, so every key it so carefully translated into an escape
-    /// sequence was translated and dropped. `None` only if the pair cannot be
-    /// opened, which leaves a terminal that still draws and still scrolls.
-    pty: Option<pty::PtyPair>,
+    /// `None` when no shell could be started -- on a host with no
+    /// pseudo-terminals, or when the shell named by `$SHELL` does not exist --
+    /// which leaves a terminal that still draws and still scrolls, and says on
+    /// its screen why nothing answers.
+    child: Option<Box<dyn Link>>,
 
-    /// Whether the child has closed its end and been reported as gone.
-    child_finished: bool,
+    /// How the child ended, once it has, and been said so.
+    child_exit: Option<Exit>,
+
+    /// Milliseconds since a byte last went to or came from the child, so the
+    /// clock can slow down while the two are not talking. See
+    /// [`ACTIVE_POLL_MS`].
+    quiet_ms: u64,
+
+    /// Set when the child finished cleanly: the window closes, as it does
+    /// for a user who types `exit`. A shell that failed or was killed leaves
+    /// the window open with the reason on it instead.
+    close_requested: bool,
 
     /// The window size the last frame was drawn at.
     ///
@@ -679,8 +743,10 @@ impl TerminalState {
             csi_private_marker: None,
             osc_string: String::new(),
             title: String::from("Terminal"),
-            pty: pty::PtyPair::open_with_size(u16_of(cols), u16_of(rows)).ok(),
-            child_finished: false,
+            child: None,
+            child_exit: None,
+            quiet_ms: 0,
+            close_requested: false,
             bell_flash_ms: 0,
             blink_ms: 0,
             blink_on: true,
@@ -1137,8 +1203,45 @@ impl TerminalState {
     /// directly, which is the path the compositor does not take.
     fn on_tick(&mut self, elapsed_ms: u64) {
         let aged = self.tick(elapsed_ms);
+        self.quiet_ms = self.quiet_ms.saturating_add(elapsed_ms);
         let read = self.drain_child();
         self.tick_changed = aged || read;
+    }
+
+    /// Connect the terminal to the program it runs.
+    ///
+    /// The child is told the grid's size at once: it was started at whatever
+    /// size the caller guessed, and the window may already have been resized.
+    pub fn attach(&mut self, mut link: Box<dyn Link>) {
+        link.resize(self.win_size());
+        self.child = Some(link);
+        self.child_exit = None;
+        self.close_requested = false;
+        self.quiet_ms = 0;
+    }
+
+    /// Whether a child is attached and has not finished.
+    fn child_is_live(&self) -> bool {
+        self.child.is_some() && self.child_exit.is_none()
+    }
+
+    /// Tell the child its terminal is going away.
+    fn hang_up(&mut self) {
+        if let Some(link) = self.child.as_mut() {
+            link.hang_up();
+        }
+    }
+
+    /// The grid's size as the child's terminal reports it: cells, and the
+    /// pixels those cells cover.
+    fn win_size(&self) -> WinSize {
+        let l = self.layout();
+        WinSize {
+            rows: u16_of(l.rows),
+            cols: u16_of(l.cols),
+            xpixel: pixels_u16(l.grid.w),
+            ypixel: pixels_u16(l.grid.h),
+        }
     }
 
     /// Queue bytes for the child.
@@ -1165,56 +1268,62 @@ impl TerminalState {
         if self.output_buffer.is_empty() {
             return;
         }
-        let Some(pair) = self.pty.as_ref() else {
+        let Some(link) = self.child.as_mut() else {
             // Nothing to take them. They stay queued rather than being dropped:
-            // a terminal whose PTY failed to open should not also silently lose
-            // what was typed into it.
+            // a terminal whose shell failed to start should not also silently
+            // lose what was typed into it.
             return;
         };
-        // A short write is the channel being full, which is the child not
-        // keeping up rather than an error: what was taken leaves the queue and
-        // the rest waits for the next flush, which is the difference between
-        // input arriving late and input arriving truncated.
-        if let Ok(n) = pair.master.write(&self.output_buffer) {
-            let taken = n.min(self.output_buffer.len());
-            self.output_buffer.drain(..taken);
+        // A short send is the child not keeping up rather than an error: what
+        // was taken leaves the queue and the rest waits for the next flush,
+        // which is the difference between input arriving late and input
+        // arriving truncated.
+        let taken = link.send(&self.output_buffer).min(self.output_buffer.len());
+        if taken > 0 {
+            self.quiet_ms = 0;
         }
+        self.output_buffer.drain(..taken);
     }
 
-    /// Take whatever the child has written and feed it to the parser.
+    /// Take whatever the child has written and feed it to the parser, and say
+    /// so once the child has finished.
     ///
-    /// Returns whether anything arrived.
+    /// Returns whether anything changed on screen -- or whether the window is
+    /// about to close, which is a change too.
+    ///
+    /// The output is read *before* the exit is asked about, and the link does
+    /// not report an exit until the child's output has closed, so a program's
+    /// last lines always come before the note that it has gone.
     pub fn drain_child(&mut self) -> bool {
-        let Some(pair) = self.pty.as_ref() else {
+        let Some(link) = self.child.as_mut() else {
             return false;
         };
-        if pair.master.available() == 0 {
-            // Nothing readable. Ask separately whether that is "nothing yet" or
-            // "never again": a shell that has exited leaves a terminal that
-            // must stop waiting for it, and an empty read alone cannot tell the
-            // two apart.
-            if pair.master.child_finished() && !self.child_finished {
-                self.child_finished = true;
-                self.feed(b"\r\n[the child has exited]\r\n");
-                return true;
-            }
-            return false;
-        }
         let mut got = Vec::new();
-        let mut buf = [0_u8; 4096];
-        // Bounded: a child writing faster than the terminal reads must not hold
-        // the frame for the whole of its output.
-        for _ in 0..16 {
-            match pair.master.try_read(&mut buf) {
-                Ok(Some(n)) if n > 0 => got.extend_from_slice(buf.get(..n).unwrap_or_default()),
-                _ => break,
+        link.receive(&mut got, MAX_READ_PER_DRAIN);
+        // Asked every time: the link reports an exit exactly once, so a
+        // finished child answers `None` from then on.
+        let exit = link.poll_exit();
+
+        let mut changed = false;
+        if !got.is_empty() {
+            self.quiet_ms = 0;
+            self.feed(&got);
+            changed = true;
+        }
+        if let Some(exit) = exit {
+            // An empty read cannot tell "nothing yet" from "never again", so a
+            // terminal whose shell has gone otherwise sits at a dead prompt
+            // looking exactly like one waiting for output.
+            self.child_exit = Some(exit);
+            if exit.is_clean() {
+                self.close_requested = true;
+            } else {
+                let note = format!("\r\n\x1b[0;2m[the shell {exit}]\x1b[0m\r\n");
+                self.feed(note.as_bytes());
             }
+            changed = true;
         }
-        if got.is_empty() {
-            return false;
-        }
-        self.feed(&got);
-        true
+        changed
     }
 
     /// Show the cursor solidly again, and restart its blink.
@@ -2890,12 +2999,12 @@ impl TerminalState {
         let l = self.layout();
         if l.cols > 0 && l.rows > 0 && (l.cols != self.cols() || l.rows != self.rows()) {
             self.resize(l.cols, l.rows);
-            // The child is told too. `PtyMaster::resize` is the `TIOCSWINSZ`
-            // of this tree and had no caller either, so a shell running under
-            // this terminal would have kept wrapping its prompt at eighty
-            // columns in a window twice that wide.
-            if let Some(pair) = self.pty.as_ref() {
-                pair.master.resize(u16_of(l.cols), u16_of(l.rows));
+            // The child is told too -- `TIOCSWINSZ`, which raises `SIGWINCH`
+            // for it. Without this a shell under this terminal keeps wrapping
+            // its prompt at eighty columns in a window twice that wide.
+            let size = self.win_size();
+            if let Some(link) = self.child.as_mut() {
+                link.resize(size);
             }
         }
         self.clamp_scroll();
@@ -3087,15 +3196,29 @@ impl App for TerminalState {
         // prompt with a solid cursor has nothing to age, and a program that
         // asks for a clock it does not need holds the whole desktop awake.
         let blinking = self.config.cursor_blink && self.cursor_visible;
-        if blinking || self.bell_flash_ms > 0 {
-            Some(std::time::Duration::from_millis(BLINK_MS / 5))
-        } else {
-            None
-        }
+        let aging = (blinking || self.bell_flash_ms > 0).then_some(BLINK_MS / 5);
+        // A live child is something moving too: its output reaches the screen
+        // only on a tick. Fast while the two are talking, slower once they are
+        // not -- see `ACTIVE_POLL_MS`.
+        let polling = self
+            .child_is_live()
+            .then_some(if self.quiet_ms < ACTIVE_WINDOW_MS {
+                ACTIVE_POLL_MS
+            } else {
+                IDLE_POLL_MS
+            });
+        let ms = match (aging, polling) {
+            (Some(a), Some(p)) => Some(a.min(p)),
+            (a, p) => a.or(p),
+        };
+        ms.map(std::time::Duration::from_millis)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
         if matches!(event, Event::CloseRequested) {
+            // The shell is told its terminal is gone rather than left running
+            // against a master nobody reads.
+            self.hang_up();
             return Response::Exit;
         }
         // Every event goes through the same dispatch, the tick included: the
@@ -3105,6 +3228,11 @@ impl App for TerminalState {
         // already put them in `output_buffer` on their way to the child, and
         // appending the return value as well sent every keystroke twice.
         self.handle_event(event);
+        // The shell exited cleanly -- the user typed `exit` -- so the window
+        // goes with it.
+        if self.close_requested {
+            return Response::Exit;
+        }
         // A tick that changed nothing must not ask for a frame: the cursor
         // blinks five times a second and the loop runs twenty-five, so four
         // ticks in five have nothing to show.
@@ -3153,116 +3281,24 @@ impl Probe for TerminalState {
 // Main entry point
 // ============================================================================
 
-/// Start a shell and bridge its pipes to the slave end of `pty`.
-///
-/// The emulator already knows how to receive: [`TerminalState::drain_child`]
-/// reads the master, feeds the parser, and announces the exit once. What was
-/// missing was anything writing into the slave. This is that, and nothing
-/// more -- two threads that copy bytes, so the seam the tests exercise is
-/// untouched.
-///
-/// Threads rather than polling because `std` offers no portable non-blocking
-/// read of a child's stdout; a read has to block somewhere, and a thread is
-/// the only place it can block without stopping the frame.
-///
-/// Returns the error text on failure rather than logging it, because the
-/// caller puts it on screen: a terminal that silently fails to start a shell
-/// is the defect this whole change is about, and swapping "no shell" for a
-/// blank window would not be an improvement.
-fn start_shell(pty: &pty::PtyPair, program: &std::path::Path) -> Result<(), String> {
-    use std::io::{Read, Write};
-    use std::process::{Command, Stdio};
-
-    let mut child = Command::new(program)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("{}: {e}", program.display()))?;
-
-    let mut stdin = child.stdin.take().ok_or("the shell has no stdin")?;
-    let mut stdout = child.stdout.take().ok_or("the shell has no stdout")?;
-
-    // Child output -> the slave end, which the emulator drains each tick.
-    let to_screen = pty.slave.clone_handle();
-    std::thread::spawn(move || {
-        let mut buf = [0_u8; 4096];
-        loop {
-            match stdout.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if to_screen.write(buf.get(..n).unwrap_or(&[])).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-        // The emulator says so once, and only if it is told.
-        to_screen.close();
-    });
-
-    // Keystrokes -> the child. The slave's read side is what the line
-    // discipline delivers a completed line to, so this is the same path a
-    // cooked-mode line already took; it now has somewhere to go.
-    let from_keyboard = pty.slave.clone_handle();
-    std::thread::spawn(move || {
-        let mut buf = [0_u8; 1024];
-        loop {
-            match from_keyboard.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if stdin.write_all(buf.get(..n).unwrap_or(&[])).is_err() {
-                        break;
-                    }
-                    if stdin.flush().is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-
-    Ok(())
-}
-
-/// The shell to run, from `$SHELL` or the conventional path.
-///
-/// Read rather than hard-coded because the answer differs between this
-/// program's two homes -- a development host and Slate OS -- and neither is
-/// wrong. A missing or unstartable shell is reported on screen rather than
-/// swallowed.
-fn shell_path() -> std::path::PathBuf {
-    std::env::var_os("SHELL").map_or_else(
-        || std::path::PathBuf::from("/bin/sh"),
-        std::path::PathBuf::from,
-    )
-}
-
 fn main() -> ExitCode {
     let mut terminal = TerminalState::new(TerminalConfig::default());
 
-    // Three outcomes, three different things to say. The greeting used to end
-    // in a `$ ` prompt unconditionally -- **a prompt is a claim that a shell
-    // is waiting for a command**, and until this change nothing in the crate
-    // started one. Now one is started, and the window only stays silent in
-    // the case where that worked and the shell will do its own greeting.
-    let program = shell_path();
-    match terminal.pty.as_ref() {
-        None => terminal.feed(
-            b"\x1b[33mNo terminal device.\x1b[0m This program could not open a \
-pty, so nothing can be connected to it.\r\n",
-        ),
-        Some(pair) => match start_shell(pair, &program) {
-            Ok(()) => {}
-            Err(why) => {
-                let msg = format!(
-                    "\x1b[33mNo shell.\x1b[0m {why}\r\nWhat you type is echoed \
-and then goes nowhere. Silence after Enter is not a command that produced no \
-output.\r\n"
-                );
-                terminal.feed(msg.as_bytes());
-            }
-        },
+    // Two outcomes, and the window says which. A started shell greets the user
+    // itself, with its own prompt; a failed one is named, with the reason, on
+    // the screen the user is looking at -- **a terminal with no shell must not
+    // look like a terminal with a quiet one.** Started before the window, and
+    // so before any thread of this process exists: see `libcall::pty` on why a
+    // fork wants as few threads beside it as possible.
+    match child::spawn_shell(terminal.win_size()) {
+        Ok(link) => terminal.attach(link),
+        Err(why) => {
+            let msg = format!(
+                "\x1b[33mNo shell.\x1b[0m {why}\r\nNothing is connected to this \
+window, so what you type goes nowhere.\r\n"
+            );
+            terminal.feed(msg.as_bytes());
+        }
     }
 
     app::launch("terminal", &mut terminal)
@@ -3286,10 +3322,24 @@ mod tests {
     )]
 
     use super::ColorScheme;
+    use super::child::Exit;
+    use super::child::script::{Script, ScriptLink};
     use super::{
-        BAR_W, BELL_MS, BLINK_MS, Color, CursorStyle, Layout, Rect, RenderCommand, Target,
-        TerminalConfig, TerminalState, cells_that_fit, ratio, scale, u32_f32,
+        ACTIVE_POLL_MS, ACTIVE_WINDOW_MS, BAR_W, BELL_MS, BLINK_MS, Color, CursorStyle,
+        IDLE_POLL_MS, Layout, MAX_READ_PER_DRAIN, Rect, RenderCommand, Target, TerminalConfig,
+        TerminalState, cells_that_fit, ratio, scale, u32_f32,
     };
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    impl TerminalState {
+        /// This terminal, attached to a scripted child.
+        fn with_script(mut self) -> (Self, Rc<RefCell<Script>>) {
+            let (link, script) = ScriptLink::new();
+            self.attach(Box::new(link));
+            (self, script)
+        }
+    }
     use appearance::Palette;
     use guitk::event::{Event, Key, MouseButton, MouseEvent, MouseEventKind};
     use guitk::probe::{Probe, press, rect_of_sized, typing};
@@ -4416,58 +4466,79 @@ mod tests {
     // The child on the other end
     // -----------------------------------------------------------------------
 
+    /// A terminal attached to a scripted child, and the handle to script it.
+    ///
+    /// Scripted rather than a real shell because these tests are about the
+    /// emulator -- what it sends for a key, what it draws for a byte, when it
+    /// says the child has gone -- and a process would make every one of them
+    /// depend on a platform and a clock. The real link is tested on its own,
+    /// against a real shell, in `child.rs`.
+    fn scripted() -> (TerminalState, Rc<RefCell<Script>>) {
+        TerminalState::new(TerminalConfig::default()).with_script()
+    }
+
+    /// Everything on screen, row after row.
+    fn screen_text(term: &TerminalState) -> String {
+        (0..term.rows())
+            .filter_map(|r| term.line_at(term.buffer_row_of(r)))
+            .flat_map(|l| l.cells.iter().map(|c| c.ch).collect::<Vec<_>>())
+            .collect()
+    }
+
+    fn first_row(term: &TerminalState) -> String {
+        term.line_at(term.buffer_row_of(0))
+            .expect("the first row")
+            .cells
+            .iter()
+            .map(|c| c.ch)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
     #[test]
     fn a_typed_line_reaches_the_child() {
-        // `pty.rs` was an entire PTY implementation with no caller. A terminal
-        // that translates a key correctly and then drops the bytes on the
-        // floor is a terminal you cannot type into.
+        // A terminal that translates a key correctly and then drops the bytes
+        // on the floor is a terminal you cannot type into.
         //
-        // A *line*, because the PTY starts in cooked mode as a real tty does:
-        // the line discipline holds the characters until the return key, which
-        // is what makes a shell's backspace work before the command is run.
+        // Each key goes as it is typed, and Enter as a carriage return. Holding
+        // the line until Enter, echoing it, and turning the return into the
+        // newline a shell reads are all the kernel's line discipline, which
+        // sits between this terminal and the shell; a terminal that did any of
+        // them itself would have them done twice.
         //
         // Typed as *text* rather than as `Key::H`: a key code is a position on
         // a keyboard and the character it produces is the layout's business,
         // so a terminal that read the code would type `h` on a French one.
-        let mut term = TerminalState::new(TerminalConfig::default());
+        let (mut term, script) = scripted();
         term.handle_event(&Event::Key(typing("h")));
         term.handle_event(&Event::Key(typing("i")));
         term.handle_event(&Event::Key(press(Key::Enter)));
-        let pair = term.pty.as_ref().expect("a PTY was opened");
-        let mut buf = [0_u8; 16];
-        let n = pair.slave.read(&mut buf).expect("the slave side reads");
+        let sent = script.borrow().sent.clone();
         assert_eq!(
-            String::from_utf8_lossy(&buf[..n]),
-            "hi\n",
+            sent,
+            b"hi\r",
             "the child got {:?}",
-            &buf[..n]
+            String::from_utf8_lossy(&sent)
         );
     }
 
     #[test]
     fn a_reply_the_parser_produced_reaches_the_child_too() {
         // The fault the single flush exists to fix. Keystrokes went straight
-        // to the PTY while the parser's own answers -- the cursor position
+        // to the child while the parser's own answers -- the cursor position
         // report here -- were appended to `output_buffer` and sent nowhere, so
         // a full-screen program that asked this terminal where its cursor was
         // waited forever for an answer sitting in a `Vec`.
-        let mut term = TerminalState::new(TerminalConfig::default());
-        {
-            let pair = term.pty.as_ref().expect("a PTY was opened");
-            // Raw mode, as any program that asks this question is in: cooked
-            // mode would hold the reply back for a newline it does not have.
-            pair.slave.set_raw_mode();
-            pair.slave.write(b"\x1b[6n").expect("the child asks");
-        }
+        let (mut term, script) = scripted();
+        script.borrow_mut().pending.extend_from_slice(b"\x1b[6n");
         term.handle_event(&Event::Tick { elapsed_ms: 20 });
-        let pair = term.pty.as_ref().expect("a PTY was opened");
-        let mut buf = [0_u8; 32];
-        let n = pair.slave.read(&mut buf).expect("the slave side reads");
+        let sent = script.borrow().sent.clone();
         assert_eq!(
-            String::from_utf8_lossy(&buf[..n]),
-            "\x1b[1;1R",
+            sent,
+            b"\x1b[1;1R",
             "the child got {:?} instead of a cursor position report",
-            String::from_utf8_lossy(&buf[..n])
+            String::from_utf8_lossy(&sent)
         );
         assert!(
             term.output_buffer.is_empty(),
@@ -4480,63 +4551,52 @@ mod tests {
         // It was sent twice: `handle_event` queued the translated bytes on
         // their way to the child, and `on_event` appended the same bytes it
         // had just been handed back. Every character typed arrived doubled.
-        let mut term = TerminalState::new(TerminalConfig::default());
+        let (mut term, script) = scripted();
         term.on_event(&Event::Key(typing("x")));
         term.on_event(&Event::Key(press(Key::Enter)));
-        let pair = term.pty.as_ref().expect("a PTY was opened");
-        let mut buf = [0_u8; 16];
-        let n = pair.slave.read(&mut buf).expect("the slave side reads");
-        assert_eq!(String::from_utf8_lossy(&buf[..n]), "x\n");
+        assert_eq!(script.borrow().sent, b"x\r");
     }
 
     #[test]
     fn what_the_child_could_not_take_yet_is_kept_rather_than_dropped() {
-        // A write to a child that is not reading is a *short* write, not a
-        // failed one: the channel takes what it has room for and reports how
-        // much. Dropping the rest is how a paste into a busy program loses its
-        // middle -- and nothing else in this suite fills the channel, so the
-        // buffer is never anything but empty after a flush.
-        let mut term = TerminalState::new(TerminalConfig::default());
-        {
-            let pair = term.pty.as_ref().expect("a PTY was opened");
-            // Raw mode: the line discipline would hold an unterminated line in
-            // its own buffer instead of pressing it against a full channel.
-            pair.slave.set_raw_mode();
-        }
-        let flood = vec![b'x'; 100 * 1024];
+        // A child that is not reading takes part of a write, not none of it
+        // and not all of it. Dropping the rest is how a paste into a busy
+        // program loses its middle.
+        let (mut term, script) = scripted();
+        script.borrow_mut().capacity = Some(1000);
+        let flood: Vec<u8> = (0..100 * 1024).map(|i| b'a' + (i % 26) as u8).collect();
         term.to_child(&flood);
         term.flush_to_child();
-        let kept = term.output_buffer.len();
-        assert!(
-            kept > 0,
-            "a 100 KiB write to a child reading nothing was accepted whole"
+        assert_eq!(
+            term.output_buffer.len(),
+            flood.len() - 1000,
+            "the part the child could not take was not kept"
         );
 
-        // Read the child's end empty, which frees the room the rest needs.
-        let mut sink = vec![0_u8; 64 * 1024];
-        let mut taken = 0_usize;
-        {
-            let pair = term.pty.as_ref().expect("a PTY was opened");
-            while let Ok(n) = pair.slave.read(&mut sink) {
-                if n == 0 {
-                    break;
-                }
-                taken = taken.saturating_add(n);
-            }
-        }
+        // The child starts reading again: the rest goes, in order.
+        script.borrow_mut().capacity = None;
         term.flush_to_child();
         assert!(
-            term.output_buffer.len() < kept,
-            "the bytes the channel could not take were never offered again"
+            term.output_buffer.is_empty(),
+            "the bytes the child could not take were never offered again"
         );
-        assert_eq!(
-            taken + term.output_buffer.len() + {
-                let pair = term.pty.as_ref().expect("a PTY was opened");
-                let mut rest = vec![0_u8; 100 * 1024];
-                pair.slave.read(&mut rest).unwrap_or(0)
-            },
-            flood.len(),
-            "bytes went missing between the terminal and the child"
+        assert!(
+            script.borrow().sent == flood,
+            "bytes went missing or out of order between the terminal and the child"
+        );
+    }
+
+    #[test]
+    fn a_terminal_with_no_child_keeps_what_was_typed() {
+        // No shell could be started. What was typed stays queued rather than
+        // vanishing: a terminal that failed to start its shell should not also
+        // silently lose the user's input.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        term.handle_event(&Event::Key(typing("ls")));
+        assert_eq!(term.output_buffer, b"ls");
+        assert!(
+            !term.drain_child(),
+            "a terminal with no child read something"
         );
     }
 
@@ -4544,20 +4604,10 @@ mod tests {
     fn what_the_child_writes_appears_on_the_screen() {
         // The return leg. Without `drain_child` the terminal is write-only:
         // the shell's prompt is produced and never read.
-        let mut term = TerminalState::new(TerminalConfig::default());
-        {
-            let pair = term.pty.as_ref().expect("a PTY was opened");
-            pair.slave.write(b"hello\r\n").expect("the child writes");
-        }
+        let (mut term, script) = scripted();
+        script.borrow_mut().pending.extend_from_slice(b"hello\r\n");
         assert!(term.drain_child(), "nothing was read back");
-        let row: String = term
-            .line_at(term.buffer_row_of(0))
-            .expect("the first row")
-            .cells
-            .iter()
-            .map(|c| c.ch)
-            .collect();
-        assert_eq!(row.trim_end(), "hello");
+        assert_eq!(first_row(&term), "hello");
     }
 
     #[test]
@@ -4565,56 +4615,192 @@ mod tests {
         // The read has to be on the clock rather than on the keyboard: a
         // program that prints without being typed at -- which is most of them
         // -- would otherwise appear only when the user next pressed a key.
-        let mut term = TerminalState::new(TerminalConfig::default());
-        {
-            let pair = term.pty.as_ref().expect("a PTY was opened");
-            pair.slave.write(b"unprompted").expect("the child writes");
-        }
+        let (mut term, script) = scripted();
+        script.borrow_mut().pending.extend_from_slice(b"unprompted");
         term.handle_event(&Event::Tick { elapsed_ms: 20 });
-        let row: String = term
-            .line_at(term.buffer_row_of(0))
-            .expect("the first row")
-            .cells
-            .iter()
-            .map(|c| c.ch)
-            .collect();
-        assert_eq!(row.trim_end(), "unprompted");
+        assert_eq!(first_row(&term), "unprompted");
+    }
+
+    #[test]
+    fn a_flood_of_output_is_parsed_a_bounded_amount_at_a_time() {
+        // A child that writes faster than the parser runs must not hold the
+        // window for the whole of its output: each drain takes a bounded bite
+        // and the rest waits for the next tick, in order and complete.
+        let (mut term, script) = scripted();
+        let total = MAX_READ_PER_DRAIN * 3 + 17;
+        script.borrow_mut().pending = vec![b'.'; total];
+        assert!(term.drain_child());
+        assert_eq!(
+            script.borrow().pending.len(),
+            total - MAX_READ_PER_DRAIN,
+            "one drain took more than its bound"
+        );
+        let mut drains = 1;
+        while term.drain_child() {
+            drains += 1;
+            assert!(drains < 10, "the output never finished draining");
+        }
+        assert!(script.borrow().pending.is_empty(), "output was left behind");
+        assert_eq!(
+            drains, 4,
+            "a bound of {MAX_READ_PER_DRAIN} took {drains} drains for {total}"
+        );
     }
 
     #[test]
     fn the_child_is_told_how_big_the_window_is() {
-        // `PtyMaster::resize` is this tree's `TIOCSWINSZ` and had no caller
-        // either, so a shell under this terminal wrapped its prompt at eighty
-        // columns in a window twice that wide.
-        let mut term = TerminalState::new(TerminalConfig::default());
+        // `TIOCSWINSZ`. Without it a shell under this terminal wraps its
+        // prompt at eighty columns in a window twice that wide, and a
+        // full-screen program draws for a screen it does not have.
+        let (mut term, script) = scripted();
         term.resize_to_window(300.0, 200.0);
         let l = term.layout();
-        let (cols, rows) = term.pty.as_ref().expect("a PTY").slave.get_size();
-        assert_eq!(usize::from(cols), l.cols, "the child's column count");
-        assert_eq!(usize::from(rows), l.rows, "the child's row count");
+        let told = script.borrow().size.expect("the child was told no size");
+        assert_eq!(usize::from(told.cols), l.cols, "the child's column count");
+        assert_eq!(usize::from(told.rows), l.rows, "the child's row count");
         assert!(l.cols < 80, "the fixture did not actually shrink the grid");
+        // The pixels are the cells', not the window's: the bar is not text.
+        assert!((f32::from(told.xpixel) - l.grid.w.floor()).abs() < f32::EPSILON);
+        assert!((f32::from(told.ypixel) - l.grid.h.floor()).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_child_is_told_the_size_the_moment_it_is_attached() {
+        // A shell is started at a guessed size, and the window may have been
+        // resized before the shell was attached to it. Waiting for the next
+        // resize to correct it would leave the shell wrong until the user
+        // happened to drag the window.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        term.resize_to_window(300.0, 200.0);
+        let (term, script) = term.with_script();
+        let told = script
+            .borrow()
+            .size
+            .expect("attaching told the child nothing");
+        assert_eq!(usize::from(told.cols), term.layout().cols);
+        assert_eq!(usize::from(told.rows), term.layout().rows);
     }
 
     #[test]
     fn a_child_that_has_exited_is_said_so_once() {
         // An empty read cannot tell "nothing yet" from "never again", so a
-        // terminal whose shell has exited otherwise sits at a dead prompt
+        // terminal whose shell has gone otherwise sits at a dead prompt
         // looking exactly like one waiting for output.
-        let mut term = TerminalState::new(TerminalConfig::default());
-        {
-            let pair = term.pty.as_ref().expect("a PTY was opened");
-            pair.slave.close();
-        }
+        let (mut term, script) = scripted();
+        script.borrow_mut().exit = Some(Exit::Code(1));
         assert!(term.drain_child(), "the exit was not noticed");
         assert!(!term.drain_child(), "and it was announced twice");
-        let said = (0..term.rows())
-            .filter_map(|r| term.line_at(term.buffer_row_of(r)))
-            .flat_map(|l| l.cells.iter().map(|c| c.ch).collect::<Vec<_>>())
-            .collect::<String>();
         assert!(
-            said.contains("the child has exited"),
-            "nothing on screen says the child is gone"
+            screen_text(&term).contains("the shell exited with status 1"),
+            "the screen does not say the shell is gone, or how: {:?}",
+            screen_text(&term)
         );
+    }
+
+    #[test]
+    fn a_shell_killed_by_a_signal_is_named_and_the_window_stays() {
+        // A crash is the case the user most needs to read about, so the window
+        // does not close on it.
+        let (mut term, script) = scripted();
+        script.borrow_mut().exit = Some(Exit::Signal(9));
+        assert!(matches!(
+            term.on_event(&Event::Tick { elapsed_ms: 20 }),
+            Response::Redraw
+        ));
+        assert!(
+            screen_text(&term).contains("SIGKILL"),
+            "{:?}",
+            screen_text(&term)
+        );
+    }
+
+    #[test]
+    fn a_shell_that_exits_cleanly_takes_the_window_with_it() {
+        // The user typed `exit`. A window left open over a finished shell is a
+        // window the user has to close a second time.
+        let (mut term, script) = scripted();
+        script.borrow_mut().exit = Some(Exit::Code(0));
+        assert!(matches!(
+            term.on_event(&Event::Tick { elapsed_ms: 20 }),
+            Response::Exit
+        ));
+    }
+
+    #[test]
+    fn the_last_output_is_drawn_before_the_exit_is_announced() {
+        // A program's final lines and the note that it has gone arrive in one
+        // drain; the lines must come first or the note interrupts them.
+        let (mut term, script) = scripted();
+        {
+            let mut s = script.borrow_mut();
+            s.pending.extend_from_slice(b"last words");
+            s.exit = Some(Exit::Code(2));
+        }
+        term.drain_child();
+        let text = screen_text(&term);
+        let words = text.find("last words").expect("the output was not drawn");
+        let note = text
+            .find("exited with status 2")
+            .expect("the exit was not said");
+        assert!(
+            words < note,
+            "the exit was announced before the output: {text:?}"
+        );
+    }
+
+    #[test]
+    fn closing_the_window_hangs_up_the_shell() {
+        // A shell left running against a master nobody reads is a process
+        // leaked every time a window closes.
+        let (mut term, script) = scripted();
+        assert!(matches!(
+            term.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+        assert_eq!(script.borrow().hang_ups, 1, "the shell was not told");
+    }
+
+    #[test]
+    fn a_live_child_keeps_the_clock_running_and_quiet_slows_it() {
+        // The child's output reaches the screen only on a tick, so a live
+        // child needs a clock even with a solid cursor -- fast while the two
+        // are talking, slower once they are not, and none once it has gone.
+        let (mut term, script) = TerminalState::new(TerminalConfig {
+            cursor_blink: false,
+            ..TerminalConfig::default()
+        })
+        .with_script();
+        let ms = |t: &TerminalState| t.tick_interval().map(|d| d.as_millis());
+        assert_eq!(ms(&term), Some(u128::from(ACTIVE_POLL_MS)), "a fresh child");
+
+        let quiet_ticks = ACTIVE_WINDOW_MS / 100;
+        for _ in 0..quiet_ticks {
+            term.on_event(&Event::Tick { elapsed_ms: 100 });
+        }
+        assert_eq!(ms(&term), Some(u128::from(IDLE_POLL_MS)), "a quiet child");
+
+        script.borrow_mut().pending.extend_from_slice(b"$ ");
+        term.on_event(&Event::Tick { elapsed_ms: 100 });
+        assert_eq!(
+            ms(&term),
+            Some(u128::from(ACTIVE_POLL_MS)),
+            "output did not wake it"
+        );
+
+        for _ in 0..quiet_ticks {
+            term.on_event(&Event::Tick { elapsed_ms: 100 });
+        }
+        assert_eq!(ms(&term), Some(u128::from(IDLE_POLL_MS)), "quiet again");
+        term.on_event(&Event::Key(typing("l")));
+        assert_eq!(
+            ms(&term),
+            Some(u128::from(ACTIVE_POLL_MS)),
+            "typing did not wake it"
+        );
+
+        script.borrow_mut().exit = Some(Exit::Code(4));
+        term.on_event(&Event::Tick { elapsed_ms: 16 });
+        assert_eq!(ms(&term), None, "a finished child still holds the clock");
     }
 
     // -----------------------------------------------------------------------
@@ -4768,24 +4954,14 @@ mod tests {
         // the dispatch that reads the child ever ran. Under a real window,
         // which is the only place `on_event` is called, the shell's prompt was
         // produced and never collected.
-        let mut term = TerminalState::new(TerminalConfig::default());
-        {
-            let pair = term.pty.as_ref().expect("a PTY was opened");
-            pair.slave.write(b"prompt$ ").expect("the child writes");
-        }
+        let (mut term, script) = scripted();
+        script.borrow_mut().pending.extend_from_slice(b"prompt$ ");
         let response = term.on_event(&Event::Tick { elapsed_ms: 20 });
         assert!(
             matches!(response, Response::Redraw),
             "the child wrote and the window was not asked to redraw"
         );
-        let row: String = term
-            .line_at(term.buffer_row_of(0))
-            .expect("the first row")
-            .cells
-            .iter()
-            .map(|c| c.ch)
-            .collect();
-        assert_eq!(row.trim_end(), "prompt$");
+        assert_eq!(first_row(&term), "prompt$");
     }
 
     #[test]

@@ -58706,3 +58706,47 @@ where a `ScanResult` is appended, and its test has to push entries *through
 that path* rather than through a call that refuses. The shape to avoid is the
 one just removed: a bound asserted over a collection that nothing fills is a
 test of the fixture, not of the bound.
+
+## Lane E — applications (apps/**, randrange/**)
+
+### Judgment Calls
+
+- **A terminal whose shell exits cleanly closes its window; any other ending
+  leaves the window open with the reason on it.** (2026-09-24,
+  `apps/terminal/src/main.rs` -> `TerminalState::drain_child`, the
+  `exit.is_clean()` branch, and `close_requested` in `App::on_event`.)
+  `exit` at a prompt is how a user closes a terminal, and a window left open
+  over a finished shell has to be closed a second time; a shell that crashed
+  or was killed is the case the user most needs to read about, so that window
+  stays and says "the shell was killed by SIGKILL (signal 9)". This is the
+  policy Windows Terminal calls "graceful" and macOS Terminal "close if the
+  shell exited cleanly". The alternatives: always close (xterm, the GNOME and
+  KDE defaults -- loses the crash message), or never close (every `exit` needs
+  a second close). Reversing it is one branch. User-visible, so the operator
+  may want it the other way; nothing else depends on it.
+
+### Deferred, each with the condition that un-defers it
+
+- **The terminal polls for its shell's output** -- 16 ms while the shell is
+  talking, 50 ms once it has been quiet for 2 s -- because `oswindow`'s loop
+  can wake an application only for compositor events and a clock. A terminal
+  at a prompt therefore wakes twenty times a second for nothing, and the first
+  keystroke after a pause waits up to 50 ms for its echo. The proper fix is a
+  waker in the loop: `requests/e-f-wake-an-application-for-its-own-descriptor.md`.
+  **Trigger:** that request lands. Then the reader thread in
+  `apps/terminal/src/child.rs` wakes the loop per chunk, and `ACTIVE_POLL_MS`,
+  `IDLE_POLL_MS`, `ACTIVE_WINDOW_MS` and their test go. Tracked as
+  `known-issues.md` -> `[E] The terminal polls for its shell's output`.
+
+- **The terminal has never run on SlateOS.** Its real child -- `forkpty` plus
+  `execve` through `libcall::pty` -- is tested only on a Linux host against
+  glibc, because no graphical application runs on SlateOS yet (nothing puts a
+  compositor or an app on the rootfs). **Trigger:** the first GUI application
+  runs on SlateOS. Then check, on the real kernel: the prompt appears (the
+  shell sees a terminal); `stty size` follows a window resize (our
+  `TIOCSWINSZ` -> `SYS_PTY_SET_WINSIZE` -> `SIGWINCH`); `^C` interrupts
+  `sleep 30`; `exit 3` is reported as status 3; and closing the window ends
+  the shell. The one behaviour most likely to differ from Linux: what a read
+  of the master returns once the slave is closed (Linux says `EIO`; the reader
+  thread treats `EIO`, any other error and end-of-file alike, so any of them
+  ends the stream).

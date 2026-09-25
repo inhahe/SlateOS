@@ -74,6 +74,17 @@ third whole-frame test supplied a bound the code no longer declared
 (`max_width.unwrap_or_else(measure)`), and one character measured is one cell
 wide, so an unbounded glyph looked bounded.
 
+**2026-09-24, lane E: the pseudo-terminal model is gone.**  `pty.rs` was a
+line discipline running inside the terminal's own process, and the shell was
+attached to it by threads copying bytes to and from the shell's *pipes* -- so
+the shell was never on a terminal: no prompt, no job control, a `^C` that no
+process received, and a size nobody could ask.  The child is now a
+`child::Link`: the user's shell on a kernel pseudo-terminal, through
+`libcall::pty`.  The child rows below were rewritten for it, and grew the rows
+for what came with it: the exit said once and after the last output, a clean
+exit closing the window, closing the window hanging up the shell, and the
+clock a live child keeps.
+
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
 """
@@ -291,10 +302,17 @@ MUTATIONS = [
         ["typing_returns_to_the_live_end"],
     ),
     # -- the child on the other end ------------------------------------------
+    #
+    # The child is a `child::Link`.  These rows mutate what the emulator does
+    # with one, against the scripted link the suite attaches.  The real link --
+    # the user's shell on a kernel pseudo-terminal -- is `cfg(unix)` and is not
+    # compiled by this sweep, which builds for the Windows host; it is covered
+    # by `child.rs`'s `pty_link` tests, run against a real shell on a Linux
+    # host (`cargo test -p terminal --target x86_64-unknown-linux-gnu`).
     (
         "nothing is ever sent to the child",
-        "        if let Ok(n) = pair.master.write(&self.output_buffer) {",
-        "        if let Ok(n) = Ok::<usize, ()>(self.output_buffer.len()) {",
+        "        let taken = link.send(&self.output_buffer).min(self.output_buffer.len());",
+        "        let _ = &link;\n        let taken = self.output_buffer.len();",
         ["a_typed_line_reaches_the_child"],
     ),
     (
@@ -311,25 +329,31 @@ MUTATIONS = [
     ),
     (
         "every keystroke is sent twice",
-        "        self.handle_event(event);\n        // A tick that changed nothing",
-        "        let echoed = self.handle_event(event);\n        self.to_child(&echoed);\n        self.flush_to_child();\n        // A tick that changed nothing",
+        "        self.handle_event(event);\n        // The shell exited cleanly",
+        "        let echoed = self.handle_event(event);\n        self.to_child(&echoed);\n        self.flush_to_child();\n        // The shell exited cleanly",
         ["a_keystroke_is_sent_once"],
     ),
     (
-        "a short write loses the bytes the channel could not take",
-        "            let taken = n.min(self.output_buffer.len());\n            self.output_buffer.drain(..taken);",
-        "            let _ = n;\n            self.output_buffer.clear();",
+        "what the child could not take is dropped rather than kept",
+        "        self.output_buffer.drain(..taken);",
+        "        let _ = taken;\n        self.output_buffer.clear();",
         ["what_the_child_could_not_take_yet_is_kept_rather_than_dropped"],
     ),
     (
         "the child is never read",
-        "        let mut got = Vec::new();",
-        "        return false;\n        #[allow(unreachable_code)]\n        let mut got = Vec::new();",
+        "        link.receive(&mut got, MAX_READ_PER_DRAIN);",
+        "",
         [
             "what_the_child_writes_appears_on_the_screen",
             "a_tick_is_what_reads_the_child",
             "a_tick_is_what_reads_the_child_through_the_window_too",
         ],
+    ),
+    (
+        "the child's output is read without a bound",
+        "        link.receive(&mut got, MAX_READ_PER_DRAIN);",
+        "        link.receive(&mut got, usize::MAX);",
+        ["a_flood_of_output_is_parsed_a_bounded_amount_at_a_time"],
     ),
     (
         "the tick does not read the child, only the direct call does",
@@ -342,27 +366,99 @@ MUTATIONS = [
     ),
     (
         "the window answers the tick itself, so the child is never read under it",
-        "        self.handle_event(event);\n        // A tick that changed nothing",
-        "        if let Event::Tick { elapsed_ms, .. } = event {\n            return if self.tick(*elapsed_ms) {\n                Response::Redraw\n            } else {\n                Response::Idle\n            };\n        }\n        self.handle_event(event);\n        // A tick that changed nothing",
+        "        self.handle_event(event);\n        // The shell exited cleanly",
+        "        if let Event::Tick { elapsed_ms, .. } = event {\n            return if self.tick(*elapsed_ms) {\n                Response::Redraw\n            } else {\n                Response::Idle\n            };\n        }\n        self.handle_event(event);\n        // The shell exited cleanly",
         ["a_tick_is_what_reads_the_child_through_the_window_too"],
     ),
     (
         "the child is not told how big the window is",
-        "            if let Some(pair) = self.pty.as_ref() {\n                pair.master.resize(u16_of(l.cols), u16_of(l.rows));\n            }",
-        "            if let Some(pair) = self.pty.as_ref() {\n                let _ = pair;\n            }",
+        "            if let Some(link) = self.child.as_mut() {\n                link.resize(size);\n            }",
+        "            if let Some(link) = self.child.as_mut() {\n                let _ = (link, size);\n            }",
         ["the_child_is_told_how_big_the_window_is"],
     ),
     (
-        "an exited child is indistinguishable from a quiet one",
-        "            if pair.master.child_finished() && !self.child_finished {",
-        "            if false && !self.child_finished {",
-        ["a_child_that_has_exited_is_said_so_once"],
+        "the child is told the window's pixels rather than the text's",
+        "            xpixel: pixels_u16(l.grid.w),",
+        "            xpixel: pixels_u16(l.window.w),",
+        ["the_child_is_told_how_big_the_window_is"],
     ),
     (
-        "the exit is announced on every tick for ever",
-        "            if pair.master.child_finished() && !self.child_finished {\n                self.child_finished = true;",
-        "            if pair.master.child_finished() {\n                self.child_finished = true;",
-        ["a_child_that_has_exited_is_said_so_once"],
+        "a child attached to a resized window is left at the size it started at",
+        "        link.resize(self.win_size());\n        self.child = Some(link);",
+        "        self.child = Some(link);",
+        ["the_child_is_told_the_size_the_moment_it_is_attached"],
+    ),
+    (
+        "an exited child is indistinguishable from a quiet one",
+        "        let exit = link.poll_exit();",
+        "        let exit: Option<Exit> = None;",
+        [
+            "a_child_that_has_exited_is_said_so_once",
+            "a_shell_that_exits_cleanly_takes_the_window_with_it",
+        ],
+    ),
+    (
+        "a clean exit leaves the window open over a finished shell",
+        "        if self.close_requested {\n            return Response::Exit;\n        }",
+        "        if false {\n            return Response::Exit;\n        }",
+        ["a_shell_that_exits_cleanly_takes_the_window_with_it"],
+    ),
+    (
+        "a crash closes the window and takes the reason with it",
+        "            if exit.is_clean() {",
+        "            if true {",
+        [
+            "a_child_that_has_exited_is_said_so_once",
+            "a_shell_killed_by_a_signal_is_named_and_the_window_stays",
+        ],
+    ),
+    (
+        "the exit is announced before the child's last output",
+        "        if !got.is_empty() {\n            self.quiet_ms = 0;\n            self.feed(&got);",
+        '        if let Some(e) = exit.filter(|e| !e.is_clean()) {\n            self.feed(format!("[the shell {e}]").as_bytes());\n        }\n        if !got.is_empty() {\n            self.quiet_ms = 0;\n            self.feed(&got);',
+        ["the_last_output_is_drawn_before_the_exit_is_announced"],
+    ),
+    (
+        "closing the window leaves the shell running",
+        "            self.hang_up();\n            return Response::Exit;",
+        "            return Response::Exit;",
+        ["closing_the_window_hangs_up_the_shell"],
+    ),
+    (
+        "a live child gets no clock, so its output waits for a keypress",
+        "        let polling = self\n            .child_is_live()",
+        "        let polling = false",
+        ["a_live_child_keeps_the_clock_running_and_quiet_slows_it"],
+    ),
+    (
+        "a quiet child is polled as fast as a busy one, holding the desktop awake",
+        "            .then_some(if self.quiet_ms < ACTIVE_WINDOW_MS {",
+        "            .then_some(if true {",
+        ["a_live_child_keeps_the_clock_running_and_quiet_slows_it"],
+    ),
+    (
+        "quiet time never accumulates, so the clock never slows",
+        "        self.quiet_ms = self.quiet_ms.saturating_add(elapsed_ms);",
+        "        let _ = self.quiet_ms;",
+        ["a_live_child_keeps_the_clock_running_and_quiet_slows_it"],
+    ),
+    (
+        "output does not wake the clock",
+        "            self.quiet_ms = 0;\n            self.feed(&got);",
+        "            self.feed(&got);",
+        ["a_live_child_keeps_the_clock_running_and_quiet_slows_it"],
+    ),
+    (
+        "typing does not wake the clock",
+        "        if taken > 0 {\n            self.quiet_ms = 0;\n        }",
+        "        if taken > 0 {}",
+        ["a_live_child_keeps_the_clock_running_and_quiet_slows_it"],
+    ),
+    (
+        "a finished child goes on holding the clock",
+        "        self.child.is_some() && self.child_exit.is_none()",
+        "        self.child.is_some()",
+        ["a_live_child_keeps_the_clock_running_and_quiet_slows_it"],
     ),
     # -- the clock -----------------------------------------------------------
     (
@@ -418,14 +514,14 @@ MUTATIONS = [
     ),
     (
         "the clock is asked for whether or not anything is moving",
-        "        if blinking || self.bell_flash_ms > 0 {\n            Some(std::time::Duration::from_millis(BLINK_MS / 5))\n        } else {\n            None\n        }",
-        "        let _ = blinking;\n        Some(std::time::Duration::from_millis(BLINK_MS / 5))",
+        "        let aging = (blinking || self.bell_flash_ms > 0).then_some(BLINK_MS / 5);",
+        "        let _ = blinking;\n        let aging = Some(BLINK_MS / 5);",
         ["the_clock_is_asked_for_only_while_something_is_moving"],
     ),
     (
         "the clock is never asked for, so nothing ages",
-        "        if blinking || self.bell_flash_ms > 0 {\n            Some(std::time::Duration::from_millis(BLINK_MS / 5))\n        } else {\n            None\n        }",
-        "        let _ = blinking;\n        None",
+        "        let aging = (blinking || self.bell_flash_ms > 0).then_some(BLINK_MS / 5);",
+        "        let _ = blinking;\n        let aging: Option<u64> = None;",
         ["the_clock_is_asked_for_only_while_something_is_moving"],
     ),
     (
@@ -437,8 +533,8 @@ MUTATIONS = [
     # -- the window the compositor drives ------------------------------------
     (
         "a close request does not close the window",
-        "        if matches!(event, Event::CloseRequested) {\n            return Response::Exit;\n        }",
-        "        if matches!(event, Event::CloseRequested) {\n            return Response::Idle;\n        }",
+        "            self.hang_up();\n            return Response::Exit;\n        }",
+        "            self.hang_up();\n            return Response::Idle;\n        }",
         ["closing_the_window_ends_the_program"],
     ),
     (

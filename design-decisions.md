@@ -11467,6 +11467,14 @@ photograph still costs a fraction of its coefficients; and the upsampling
 filters (§1306), now chosen as libjpeg chooses them, including its refusal of
 sampling ratios that are not whole numbers.
 
+The store is also decoded into the way libjpeg decodes into its coefficient
+array: a progressive AC scan's decoder reads and writes each coefficient
+where it lies (`coef::StoredBlock`), a DC scan moves the DC alone. The port
+first copied every block out and back for every scan, and that copying cost
+a large progressive photograph's thumbnail more than its decoding -- slower
+than the decoder it replaced, until this; a progressive thumbnail now takes
+0.56 s against its 0.70 s.
+
 ### Lossless JPEG
 
 Ported the same day, in `lossless` (`jdlhuff.c`, `jddiffct.c`,

@@ -24,7 +24,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::idct::{self, Target};
-use super::tables::natural;
 
 /// What a nonzero coefficient that is not kept reads as. Nonzero, positive,
 /// and with no bit below 14 set, so a refinement adding or subtracting a
@@ -32,66 +31,96 @@ use super::tables::natural;
 /// asked of it.
 const PLACEHOLDER: i16 = 0x4000;
 
-/// The coefficients a scan's decoder reads and writes, in natural order: a
-/// progressive scan's band, zig-zag `Ss` to `Se`, or all 64 for a
-/// sequential one. A block is loaded from the store and saved back through
-/// its scan's band alone -- nothing outside it is touched, and a DC scan so
-/// moves one coefficient a block rather than sixty-four.
-///
-/// A progressive scan's band is what its decoder can touch, which on a
-/// corrupt stream is more than `Ss` to `Se`: libjpeg's Huffman first AC pass
-/// adds a zero run to its position before it checks it against `Se`, so it
-/// can write up to 15 past it (the natural-order table repeats 63 for the
-/// purpose), and its refinement pass can place a new coefficient one past
-/// `Se`. Those land in libjpeg's coefficient array, so they are loaded and
-/// saved here too.
-///
-/// One decoder reads outside its band: the arithmetic refinement scan looks
-/// for the previous stage's last nonzero coefficient from `Se` down to 1.
-/// What it finds below `Ss` does not matter -- any such position is before
-/// every coefficient the scan decodes, which is all the search is for -- so
-/// whatever the unloaded positions hold changes nothing.
-#[derive(Debug, Clone)]
-pub(super) struct Band {
-    positions: [u8; 64],
-    count: usize,
-    /// The band's positions as bits.
-    mask: u64,
+/// A block's coefficients as the entropy decoders read and write them, by
+/// natural-order position: a block of its own (`[i16; 64]`), or one of a
+/// [`Store`]'s in place ([`StoredBlock`]).
+pub(super) trait Coefficients {
+    /// The coefficient at `position`.
+    fn at(&self, position: usize) -> i16;
+    /// Make the coefficient at `position` `value`.
+    fn set(&mut self, position: usize, value: i16);
 }
 
-impl Band {
-    /// Every coefficient: a sequential scan's decoder writes them all.
-    pub(super) fn all() -> Self {
-        Self::zigzag(0, 63)
+impl Coefficients for [i16; 64] {
+    fn at(&self, position: usize) -> i16 {
+        self.get(position).copied().unwrap_or(0)
     }
 
-    /// Zig-zag coefficients `ss` to `se`. `se` may run past 63, into the
-    /// extra entries of libjpeg's natural-order table, which are all 63.
-    pub(super) fn zigzag(ss: u8, se: u8) -> Self {
-        let mut positions = [0u8; 64];
-        let mut count = 0usize;
-        let mut mask = 0u64;
-        for k in usize::from(ss.min(79))..=usize::from(se.min(79)) {
-            let at = natural(k) & 63;
-            if mask & (1u64 << at) != 0 {
-                continue;
-            }
-            if let Some(slot) = positions.get_mut(count) {
-                // A natural-order position is below 64.
-                *slot = u8::try_from(at).unwrap_or(0);
-                count = count.saturating_add(1);
-                mask |= 1u64 << at;
-            }
+    fn set(&mut self, position: usize, value: i16) {
+        if let Some(cell) = self.get_mut(position) {
+            *cell = value;
         }
-        Self {
-            positions,
-            count,
-            mask,
+    }
+}
+
+/// One block of a [`Store`], read and written where it lies -- as libjpeg's
+/// decoders work on its coefficient array through pointers into it. A
+/// progressive AC pass decodes into one of these, so a coefficient costs
+/// something only when the scan decodes it: copying each block out and
+/// back, as this port first did, cost a thumbnail of a large progressive
+/// photograph more than its decoding.
+pub(super) struct StoredBlock<'s> {
+    store: &'s mut Store,
+    /// The block's index, or `None` for one outside the store, which reads
+    /// as zeros and keeps nothing.
+    index: Option<usize>,
+}
+
+impl Coefficients for StoredBlock<'_> {
+    /// The kept value, or for a coefficient that is not kept, the placeholder
+    /// if it is nonzero -- what [`Store::load`] gives.
+    fn at(&self, position: usize) -> i16 {
+        let Some(index) = self.index else {
+            return 0;
+        };
+        let store = &*self.store;
+        match store.slot.get(position).copied() {
+            Some(slot) if slot != u8::MAX => store
+                .values
+                .get(
+                    index
+                        .saturating_mul(store.kept)
+                        .saturating_add(usize::from(slot)),
+                )
+                .copied()
+                .unwrap_or(0),
+            Some(_) => {
+                let mask = store.masks.get(index).copied().unwrap_or(0);
+                if (mask >> position) & 1 != 0 {
+                    PLACEHOLDER
+                } else {
+                    0
+                }
+            }
+            None => 0,
         }
     }
 
-    fn positions(&self) -> &[u8] {
-        self.positions.get(..self.count).unwrap_or(&[])
+    fn set(&mut self, position: usize, value: i16) {
+        let Some(index) = self.index else {
+            return;
+        };
+        if position >= 64 {
+            return;
+        }
+        let store = &mut *self.store;
+        if let Some(mask) = store.masks.get_mut(index) {
+            if value == 0 {
+                *mask &= !(1u64 << position);
+            } else {
+                *mask |= 1u64 << position;
+            }
+        }
+        if let Some(&slot) = store.slot.get(position) {
+            if slot != u8::MAX {
+                let at = index
+                    .saturating_mul(store.kept)
+                    .saturating_add(usize::from(slot));
+                if let Some(cell) = store.values.get_mut(at) {
+                    *cell = value;
+                }
+            }
+        }
     }
 }
 
@@ -182,70 +211,30 @@ impl Store {
         block
     }
 
-    /// Block `(bx, by)`'s coefficients in `band` into `block`, as [`load`]
-    /// would give them; the rest of `block` is left as it is.
-    ///
-    /// [`load`]: Self::load
-    pub(super) fn load_band(&self, bx: usize, by: usize, band: &Band, block: &mut [i16; 64]) {
-        let Some(index) = self.index(bx, by) else {
-            for &position in band.positions() {
-                if let Some(cell) = block.get_mut(usize::from(position)) {
-                    *cell = 0;
-                }
-            }
-            return;
-        };
-        let mask = self.masks.get(index).copied().unwrap_or(0);
-        let base = index.saturating_mul(self.kept);
-        for &position in band.positions() {
-            let position = usize::from(position);
-            let slot = self.slot.get(position).copied().unwrap_or(u8::MAX);
-            let value = if slot == u8::MAX {
-                if mask & (1u64 << position) != 0 {
-                    PLACEHOLDER
-                } else {
-                    0
-                }
-            } else {
-                self.values
-                    .get(base.saturating_add(usize::from(slot)))
-                    .copied()
-                    .unwrap_or(0)
-            };
-            if let Some(cell) = block.get_mut(position) {
-                *cell = value;
-            }
-        }
+    /// Block `(bx, by)` in place: see [`StoredBlock`].
+    pub(super) fn block(&mut self, bx: usize, by: usize) -> StoredBlock<'_> {
+        let index = self.index(bx, by);
+        StoredBlock { store: self, index }
     }
 
-    /// Block `(bx, by)`'s coefficients in `band` back from `block`; the rest
-    /// of the stored block is left as it is.
-    pub(super) fn save_band(&mut self, bx: usize, by: usize, band: &Band, block: &[i16; 64]) {
-        let Some(index) = self.index(bx, by) else {
-            return;
-        };
-        let mut nonzero = 0u64;
-        let base = index.saturating_mul(self.kept);
-        for &position in band.positions() {
-            let position = usize::from(position);
-            let value = block.get(position).copied().unwrap_or(0);
-            if value != 0 {
-                nonzero |= 1u64 << position;
-            }
-            let slot = self.slot.get(position).copied().unwrap_or(u8::MAX);
-            if slot != u8::MAX {
-                if let Some(cell) = self.values.get_mut(base.saturating_add(usize::from(slot))) {
-                    *cell = value;
-                }
-            }
-        }
-        if let Some(cell) = self.masks.get_mut(index) {
-            *cell = (*cell & !band.mask) | nonzero;
-        }
+    /// Block `(bx, by)`'s DC into `block[0]`, the only coefficient a DC scan
+    /// reads or writes; the rest of `block` is left as it is.
+    pub(super) fn load_dc(&self, bx: usize, by: usize, block: &mut [i16; 64]) {
+        let dc = self.index(bx, by).map_or(0, |index| {
+            self.values
+                .get(index.saturating_mul(self.kept))
+                .copied()
+                .unwrap_or(0)
+        });
+        block[0] = dc;
     }
 
-    /// Store block `(bx, by)` back.
-    #[cfg(test)]
+    /// Block `(bx, by)`'s DC back from `block[0]`.
+    pub(super) fn save_dc(&mut self, bx: usize, by: usize, block: &[i16; 64]) {
+        self.block(bx, by).set(0, block[0]);
+    }
+
+    /// Store block `(bx, by)` back, whole.
     pub(super) fn save(&mut self, bx: usize, by: usize, block: &[i16; 64]) {
         let Some(index) = self.index(bx, by) else {
             return;
@@ -619,31 +608,24 @@ mod tests {
         }
         store.save(1, 1, &block);
         assert_eq!(store.load(1, 1), block);
-        // Through a band, only the band moves.
-        let band = Band::zigzag(3, 20);
-        let mut through = [7i16; 64];
-        store.load_band(1, 1, &band, &mut through);
+        // In place, it reads as `load` gives it, and writes as `save` keeps it.
         let full = store.load(1, 1);
-        for k in 0..64 {
-            let at = natural(k);
-            if (3..=20).contains(&k) {
-                assert_eq!(through[at], full[at], "zig-zag {k}");
-            } else {
-                assert_eq!(through[at], 7, "zig-zag {k} outside the band");
+        {
+            let mut place = store.block(1, 1);
+            for position in 0..64 {
+                assert_eq!(place.at(position), full[position], "position {position}");
             }
+            place.set(5, 0);
+            place.set(6, -9);
         }
         let mut changed = full;
-        for k in 3..=20 {
-            changed[natural(k)] = 0;
-        }
-        changed[natural(2)] = 99; // Outside the band: must not be saved.
-        store.save_band(1, 1, &band, &changed);
-        let after = store.load(1, 1);
-        for k in 0..64 {
-            let at = natural(k);
-            let want = if (3..=20).contains(&k) { 0 } else { full[at] };
-            assert_eq!(after[at], want, "zig-zag {k} after a band save");
-        }
+        changed[5] = 0;
+        changed[6] = -9;
+        assert_eq!(store.load(1, 1), changed);
+        let mut dc = [7i16; 64];
+        store.load_dc(1, 1, &mut dc);
+        assert_eq!(dc[0], changed[0]);
+        assert_eq!(dc[1], 7, "a DC load leaves the rest alone");
         assert_eq!(store.dc(1, 1), -30);
         assert_eq!(store.load(0, 0), [0; 64]);
     }
@@ -660,6 +642,18 @@ mod tests {
         assert_eq!((back[0], back[1]), (5, -3));
         assert_eq!(back[2], PLACEHOLDER);
         assert_eq!(back[4], 0);
+        // In place: the same reading, and a coefficient that is not kept
+        // keeps only whether it is nonzero.
+        {
+            let mut place = store.block(0, 0);
+            assert_eq!((place.at(0), place.at(1)), (5, -3));
+            assert_eq!(place.at(2), PLACEHOLDER);
+            assert_eq!(place.at(4), 0);
+            place.set(4, 7);
+            assert_eq!(place.at(4), PLACEHOLDER);
+            place.set(2, 0);
+            assert_eq!(place.at(2), 0);
+        }
         assert!(Store::bytes(1, 2) < Store::bytes(1, 8));
         assert_eq!(Store::bytes(1, 1), 10);
     }

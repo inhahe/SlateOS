@@ -31,7 +31,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::arith::Arith;
-use super::coef::{self, Band, SAVED, Smoothing, Store};
+use super::coef::{self, Coefficients, SAVED, Smoothing, Store};
 use super::color::{self, ColorSpace, Ycc};
 use super::error::{Error, jerr};
 use super::huffman::{Pass, Progression, Progressive, Sequential};
@@ -62,11 +62,18 @@ enum Entropy {
 }
 
 impl Entropy {
-    /// [`Progressive::skip_untouched`] for the decoders that have it.
-    fn skip_untouched(&mut self, input: &mut Input<'_>, header: &Header) -> bool {
+    /// One MCU of a progressive AC scan into `block`, wherever it lies.
+    fn decode_ac<B: Coefficients>(
+        &mut self,
+        input: &mut Input<'_>,
+        header: &Header,
+        block: &mut B,
+    ) {
         match self {
-            Self::Progressive(d) => d.skip_untouched(input, header),
-            _ => false,
+            Self::Progressive(d) => d.decode_ac(input, header, block),
+            Self::Arith(d) => d.decode_ac(input, header, block),
+            // Never asked: only progressive scans have AC passes.
+            Self::Sequential(_) | Self::Lossless(_) => {}
         }
     }
 
@@ -125,8 +132,6 @@ pub(crate) struct Decompress<'d, 't> {
     mcus_per_row: usize,
     /// For each block of an MCU, its component's position in the scan.
     membership: Vec<usize>,
-    /// The coefficients the current scan's decoder touches.
-    band: Band,
     input_imcu_row: usize,
     mcu_rows_per_imcu_row: usize,
     last_good_imcu_row: usize,
@@ -177,7 +182,6 @@ impl<'d, 't> Decompress<'d, 't> {
             total_imcu_rows: 0,
             mcus_per_row: 0,
             membership: Vec::new(),
-            band: Band::all(),
             input_imcu_row: 0,
             mcu_rows_per_imcu_row: 1,
             last_good_imcu_row: 0,
@@ -644,24 +648,6 @@ impl<'d, 't> Decompress<'d, 't> {
             return Ok(());
         }
         self.latch_quant_tables()?;
-        // A progressive scan touches its band (DC scans only the DC); a
-        // sequential one every coefficient, whatever its header says.
-        self.band = if self.header.progressive {
-            let scan = &self.header.scan;
-            // How far past `Se` the pass can write (see [`Band`]): a DC scan
-            // touches the DC alone, a first AC pass up to 15 further, a
-            // refinement one further.
-            let reach = if scan.ss == 0 {
-                0
-            } else if scan.ah == 0 {
-                15
-            } else {
-                1
-            };
-            Band::zigzag(scan.ss, scan.se.saturating_add(reach))
-        } else {
-            Band::all()
-        };
         let entropy = if self.header.arith {
             let pass = if self.header.progressive {
                 let pass = Pass::of(&self.header)?;
@@ -826,18 +812,65 @@ impl<'d, 't> Decompress<'d, 't> {
             return Ok(());
         }
         let scan = self.header.scan;
+        if self.header.progressive && scan.ss != 0 {
+            self.consume_ac_row();
+        } else {
+            self.consume_mcu_row()?;
+        }
+        self.input_imcu_row += 1;
+        if self.input_imcu_row < self.total_imcu_rows {
+            self.start_imcu_row();
+        } else {
+            self.reading_markers = true;
+        }
+        Ok(())
+    }
+
+    /// A row of MCUs of a progressive AC scan -- one component, one block an
+    /// MCU (`Pass::of` refuses any other) -- decoded in place in the store,
+    /// as libjpeg decodes into its coefficient array.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "frame geometry: dimensions are at most 65500 and sampling factors at most 4"
+    )]
+    fn consume_ac_row(&mut self) {
+        let scan = self.header.scan;
+        let ci = scan.comps.first().copied().unwrap_or(0);
+        let v = self.header.components.get(ci).map_or(1, |c| c.v);
+        for yoffset in 0..self.mcu_rows_per_imcu_row {
+            let by = self.input_imcu_row * v + yoffset;
+            for bx in 0..self.mcus_per_row {
+                let Some(entropy) = self.entropy.as_mut() else {
+                    return;
+                };
+                if !entropy.insufficient() {
+                    self.last_good_imcu_row = self.input_imcu_row;
+                }
+                if let Some(store) = self.stores.get_mut(ci) {
+                    let mut block = store.block(bx, by);
+                    entropy.decode_ac(&mut self.input, &self.header, &mut block);
+                } else {
+                    let mut scratch = [0i16; 64];
+                    entropy.decode_ac(&mut self.input, &self.header, &mut scratch);
+                }
+            }
+        }
+    }
+
+    /// A row of MCUs of any other multi-scan scan: its blocks copied out of
+    /// the stores, decoded, and put back -- the DC alone for a progressive DC
+    /// scan, which touches nothing else.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        reason = "frame geometry: dimensions are at most 65500, sampling factors at most 4 and block sizes at most 8, so every product here is far below usize::MAX"
+    )]
+    fn consume_mcu_row(&mut self) -> Result<(), Error> {
+        let scan = self.header.scan;
+        let dc_only = self.header.progressive;
         let mut blocks = [[0i16; 64]; 10];
         let mut places = [(0usize, 0usize, 0usize); 10];
         for yoffset in 0..self.mcu_rows_per_imcu_row {
             for mcu_col in 0..self.mcus_per_row {
-                if let Some(entropy) = self.entropy.as_mut() {
-                    if !entropy.insufficient() {
-                        self.last_good_imcu_row = self.input_imcu_row;
-                    }
-                    if entropy.skip_untouched(&mut self.input, &self.header) {
-                        continue;
-                    }
-                }
                 let mut count = 0usize;
                 for &ci in scan.components() {
                     let Some(component) = self.header.components.get(ci) else {
@@ -854,7 +887,11 @@ impl<'d, 't> Decompress<'d, 't> {
                             if let (Some(block), Some(place)) =
                                 (blocks.get_mut(count), places.get_mut(count))
                             {
-                                store.load_band(bx, by, &self.band, block);
+                                if dc_only {
+                                    store.load_dc(bx, by, block);
+                                } else {
+                                    *block = store.load(bx, by);
+                                }
                                 *place = (ci, bx, by);
                             }
                             count += 1;
@@ -864,21 +901,22 @@ impl<'d, 't> Decompress<'d, 't> {
                 let Some(entropy) = self.entropy.as_mut() else {
                     return Ok(());
                 };
+                if !entropy.insufficient() {
+                    self.last_good_imcu_row = self.input_imcu_row;
+                }
                 let count = count.min(10);
                 let mcu = blocks.get_mut(..count).unwrap_or_default();
                 entropy.decode_mcu(&mut self.input, &self.header, mcu)?;
                 for (block, &(ci, bx, by)) in blocks.iter().zip(&places).take(count) {
                     if let Some(store) = self.stores.get_mut(ci) {
-                        store.save_band(bx, by, &self.band, block);
+                        if dc_only {
+                            store.save_dc(bx, by, block);
+                        } else {
+                            store.save(bx, by, block);
+                        }
                     }
                 }
             }
-        }
-        self.input_imcu_row += 1;
-        if self.input_imcu_row < self.total_imcu_rows {
-            self.start_imcu_row();
-        } else {
-            self.reading_markers = true;
         }
         Ok(())
     }

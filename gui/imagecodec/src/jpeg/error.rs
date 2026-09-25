@@ -76,7 +76,7 @@ pub(super) mod jerr {
     pub(in crate::jpeg) const IMAGE_TOO_BIG: Error =
         Error::Malformed("JPEG: wider or taller than 65500");
     pub(in crate::jpeg) const BAD_PRECISION: Error =
-        Error::Unsupported("JPEG: sample precision other than 8 bits");
+        Error::Unsupported("JPEG: samples wider than 8 bits, or lossy ones narrower");
     pub(in crate::jpeg) const COMPONENT_COUNT: Error =
         Error::Malformed("JPEG: more components than a frame or scan may have");
     pub(in crate::jpeg) const BAD_SAMPLING: Error =
@@ -99,6 +99,12 @@ pub(super) mod jerr {
         Error::Unsupported("JPEG: a colour conversion libjpeg does not do");
     pub(in crate::jpeg) const FRACT_SAMPLE_NOTIMPL: Error =
         Error::Unsupported("JPEG: sampling factors that are not whole multiples");
+    pub(in crate::jpeg) const BAD_RESTART: Error =
+        Error::Malformed("JPEG: a lossless restart interval not a whole number of MCU rows");
+    pub(in crate::jpeg) const ARITH_NOTIMPL: Error =
+        Error::Unsupported("JPEG: arithmetic-coded lossless (SOF11)");
+    pub(in crate::jpeg) const BAD_VIRTUAL_ACCESS: Error =
+        Error::Malformed("JPEG: a component of a lossless image that no scan carries");
     pub(in crate::jpeg) const TOO_MANY_SCANS: Error =
         Error::Malformed("JPEG: more scans than a decoder should take");
 }

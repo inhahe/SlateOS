@@ -882,6 +882,23 @@ def jpeg_of(img: Image.Image, **options) -> bytes:
     return buf.getvalue()
 
 
+def lossless_jpeg_of(img: Image.Image, psv: int = 1) -> bytes:
+    """`img` as a lossless JPEG, one interleaved scan, by the encoder in
+    `generate_jpeg_lossless.py` (Pillow writes none)."""
+    import generate_jpeg_lossless as ll
+
+    comps = [ll.Component(n + 1, 1, 1, [[band.getpixel((x, y)) for x in range(img.width)]
+                                        for y in range(img.height)])
+             for n, band in enumerate(img.split())]
+    pic = ll.Picture(img.width, img.height, 8, comps)
+    return ll.lossless_jpeg(pic, [{"comps": list(range(len(comps))), "psv": psv, "pt": 0}])
+
+
+def lossless_jpeg_strips(img: Image.Image, rows: int, psv: int = 1) -> list[bytes]:
+    return [lossless_jpeg_of(img.crop((0, y, img.width, min(img.height, y + rows))), psv)
+            for y in range(0, img.height, rows)]
+
+
 def jpeg_strips(img: Image.Image, rows: int, **options) -> list[bytes]:
     """Each band of `rows` rows of `img` as a JPEG of its own."""
     return [jpeg_of(img.crop((0, y, img.width, min(img.height, y + rows))), **options)
@@ -1044,6 +1061,20 @@ def jpeg_fixtures() -> dict[str, bytes]:
     out["jpeg_tables_after_a_scan"] = jpeg_tiff(
         base, 6, [first] + q60_abbreviated[1:], rows=8,
         extra=sub + [(JPEG_TABLES, UNDEFINED, jpeg_of(base, quality=30, subsampling=2, streamtype=1))])
+    # Lossless JPEG strips, which libtiff reads through libjpeg-turbo 3 as it
+    # reads any other: grey, RGB and CMYK kept as they are, planes apart --
+    # and YCbCr, which libjpeg will not convert losslessly, refused.
+    out["jpeg_lossless_grey"] = jpeg_tiff(grey, 1, lossless_jpeg_strips(grey, 8, psv=4), rows=8)
+    out["jpeg_lossless_rgb"] = jpeg_tiff(base, 2, lossless_jpeg_strips(base, 8, psv=7), rows=8)
+    out["jpeg_lossless_cmyk"] = jpeg_tiff(cmyk, 5, lossless_jpeg_strips(cmyk, 8, psv=2), rows=8)
+    lossless_planes = []
+    for band in base.split():
+        lossless_planes += lossless_jpeg_strips(band, 8, psv=6)
+    out["jpeg_lossless_rgb_separate"] = write_tiff(plane_entries + [(PHOTOMETRIC, SHORT, [2])],
+                                                   lossless_planes)
+    out["jpeg_lossless_ycbcr_refused"] = jpeg_tiff(
+        base, 6, lossless_jpeg_strips(base.convert("YCbCr"), 8, psv=1), rows=8,
+        extra=[(YCBCR_SUBSAMPLING, SHORT, [1, 1])])
     # Pillow's writer: libtiff's own encoder, JPEGTables and abbreviated strips.
     for mode in ("RGB", "L", "CMYK"):
         buf = io.BytesIO()

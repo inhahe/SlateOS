@@ -337,6 +337,12 @@ impl<'a> Reader<'a> {
             out.fill(0);
             return Err(fail);
         }
+        // Each scanline goes straight into the strip buffer a line apart, as
+        // libtiff reads it. A scanline is a byte a sample, which only a
+        // lossless JPEG of fewer than 8 bits makes longer than the TIFF's
+        // packed line: then the scanlines overlap, and libtiff's last one runs
+        // past the buffer's end -- a heap overflow there, stopped at the end
+        // here, so the two agree wherever libtiff's run is defined.
         for r in 0..rows {
             let Ok(samples) = stream.read_row() else {
                 out.fill(0);

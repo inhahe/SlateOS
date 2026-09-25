@@ -165397,7 +165397,9 @@ Not a second inflater in `imagecodec`: design-decisions §555.
 
 ### [F] Lossless JPEG is refused though libjpeg-turbo decodes it -- 2026-09-25
 
-**Status:** OPEN — lane F's, next.
+**Status:** FIXED 2026-09-25. `gui/imagecodec/src/jpeg/lossless.rs` ports the
+three files below; 56 fixtures and 20,000 mutants agree with libjpeg-turbo
+(design-decisions §1318, "Lossless JPEG").
 
 **In short:** a JPEG coded losslessly (`SOF3`) -- used by medical imaging and
 some scientific instruments, almost never for photographs -- is refused

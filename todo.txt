@@ -58711,6 +58711,14 @@ test of the fixture, not of the bound.
 
 ### Judgment Calls
 
+- 2026-09-25, lossy WebP (`gui/imagecodec/src/webp/lossy.rs`): where libwebp
+  and RFC 6386's reference decoder disagree -- segmentation with no values
+  (libwebp: absolute zeros; dixie and libvpx: deltas), when the loop-filter
+  level is clamped (libwebp: once; dixie: twice), the colour-space bits
+  (libwebp ignores, dixie refuses) -- this follows libwebp, since that is
+  what browsers show. Only streams no encoder writes are affected. Reversible
+  in `Segmentation::read` and `FilterHeader::strengths`. design-decisions.md
+  §1312.
 - **JPEG colour is blended back to full resolution, not repeated**
   (`gui/imagecodec/src/jpeg/upsample.rs`, design-decisions §1306). This
   reverses the decoder's earlier call that interpolating "would be a better

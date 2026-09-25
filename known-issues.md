@@ -165168,10 +165168,9 @@ either way.
 **How to see it.** Decode a JPEG with `decode_scaled` at a bound that picks half
 scale, and compare it with `simplejpeg.decode_jpeg(data, min_factor=2)`.
 
-### [F] Gate 5 (GNU option tables) is non-deterministic when WSL is sick: a fast WSL failure passes the push unjudged, a hang fails it -- 2026-09-25
+### [F] Gate 5 (GNU option tables) is non-deterministic when WSL is sick: a fast WSL failure passes the push unjudged, a hang fails it -- 2026-09-25 -- **fixed 2026-09-25 by lane A, 54e1c8743**
 
-**Status:** OPEN — found by lane F; the code is `scripts/**`, which no lane
-owns (A-Q11), so it is recorded here for whoever next works on the hooks.
+**Status:** FIXED -- lane A's 54e1c8743: every probe's shell prints a marker first, and no marker, a timeout or a runner that will not start all make the checker exit 3 ("could not run, and why"), which pre-push tallies as a loud skip; the boot's bash-oracle gate declines the same way (d62c2e790). The original report follows.
 
 **In short:** before a push is published, a set of checks ("gates") runs over
 it, and one of them compares the long-option tables of the ported command-line
@@ -165288,3 +165287,61 @@ lossless screenshots and artwork.
 
 **How to see it.** `cargo run --release -p imagecodec --example time_decode --
 <lossless.webp>`, against Pillow's `Image.open(...).load()` on the same file.
+
+### [F] Lossy WebP decodes at about half libwebp's speed -- 2026-09-25
+
+**Status:** OPEN — lane F's; tech debt, not a bug.
+
+**In short:** a large lossy WebP -- the common kind, a photograph -- takes
+about twice as long to open here as in a browser: 181 ms for a 2000x1500
+picture against libwebp's 97, 1.5 s for 4000x5333 against 0.86. The pixels
+are libwebp's to the bit; only the speed is behind.
+
+**Where.** `gui/imagecodec/src/webp/lossy/` -- the conversion to RGB
+(`yuv.rs`), the loop filter (`filter.rs`), the token loop (`lossy.rs`).
+
+**The proper fix,** each measurable on its own against
+`examples/time_decode.rs`, and each held to the fixtures and to a rerun of
+the corrupt-file comparison in design-decisions.md §1312:
+1. Convert a row at a time: upsample each pair of chroma rows once into a
+   row buffer, instead of reading four chroma samples per pixel per channel
+   through bounds-checked lookups.
+2. Filter sixteen samples at a time: load the eight rows (or, for a vertical
+   edge, the transposed columns) across an edge into arrays and filter them
+   lane-wise, which the compiler vectorises, instead of one segment at a time
+   through `Segment::get`.
+3. Keep the token loop's probability rows in a flat, pre-banded table per
+   block type, as libwebp's `bands_ptr` does, so each coefficient costs one
+   indexed load rather than three `get`s.
+
+**How to see it.** `cargo run --release -p imagecodec --example time_decode --
+<lossy.webp>`, against Pillow's `Image.open(...).load()` on the same file.
+
+### [F] A lossless alpha plane cut off mid-symbol can differ from libwebp in its last pixel -- 2026-09-25
+
+**Status:** OPEN — lane F's.
+
+**In short:** on a damaged file only. If a WebP's alpha plane is stored
+compressed, is one libwebp decodes a byte per pixel, and runs out of data in
+the middle of its very last pixel, libwebp still shows the picture -- and so
+does this -- but libwebp fills that one pixel from bits it has already used,
+and this fills it from zeros. One pixel's transparency in one corner of a
+damaged file. Found by comparing 5,200 corrupted files with libwebp
+(design-decisions.md §1312); it was the only difference left.
+
+**Where.** `gui/imagecodec/src/webp/lossless.rs`, `Bits`: past the end of
+the data it yields zeros; libwebp's `VP8LBitReader` wraps its 64-bit window
+(`bit_pos & 63`) once a read starts at its 64th bit, and after `eos` is set it
+resets `bit_pos` to 0 and reads the window from its start.
+
+**The proper fix.** Make `Bits` a port of libwebp's `VP8LBitReader` -- its
+64-bit window, `ShiftBytes` and `DoFillBitWindow`, `PrefetchBits` masking the
+position, `SetBitPos` without checks, `ReadBits` returning 0 once `eos` is
+set -- and call it where libwebp's `vp8l_dec.c` does (`FillBitWindow` before
+each symbol, the second-level lookup re-prefetching), so the stale bits are
+the ones libwebp reads.
+
+**How to see it.** Flip bits in `tests/data/webp_lossy_alpha.webp` with a
+seeded generator (the comparison script is described in §1312) and decode
+each with Pillow and with `imagecodec::decode`: one file in 5,200 differs, in
+its last pixel's alpha.

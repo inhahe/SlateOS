@@ -90,10 +90,10 @@
 //! it does what browsers do, since that is how anyone has seen the file. See
 //! [`gif`].
 //!
-//! WebP lossless (`VP8L`), in the simple and the extended container: every
-//! transform, the colour cache and the meta prefix codes, decoding to exactly
-//! what libwebp does. Lossy and animated WebP are refused by name for now. See
-//! [`webp`].
+//! WebP, lossless (`VP8L`) and lossy (a VP8 key frame, with its `ALPH` plane),
+//! in the simple and the extended container, decoding to exactly the pixels
+//! libwebp -- the decoder in the browsers -- produces, damaged files included.
+//! Animated WebP is refused by name for now. See [`webp`].
 //!
 //! # Picture files for *other* crates' tests
 //!

@@ -8,20 +8,23 @@
 //!
 //! # What this reads
 //!
-//! Lossless pictures in full (`webp/lossless.rs`), in the simple format or the
-//! extended one. Lossy pictures, and animations, are refused by name for now
+//! Still pictures in full, in the simple format or the extended one: lossless
+//! (`webp/lossless.rs`) and lossy (`webp/lossy.rs`), the latter with its alpha
+//! plane (`webp/alpha.rs`). Animations are refused by name for now
 //! ([`ImageError::Unsupported`]) rather than half-read.
 //!
 //! # Hostile input
 //!
 //! Every chunk length is checked against the bytes present before anything is
 //! read through it; a size in a header is checked against [`Limits`] before any
-//! pixel buffer exists; and the lossless decoder bounds everything it
-//! allocates the same way (see its module).
+//! pixel buffer exists; and the decoders bound everything they allocate the
+//! same way (see their modules).
 
 use crate::{Image, ImageError, ImageResult, Limits};
 
+mod alpha;
 mod lossless;
+mod lossy;
 
 /// Whether `bytes` is a RIFF file of type WEBP.
 #[must_use]
@@ -32,7 +35,15 @@ pub fn is_webp(bytes: &[u8]) -> bool {
 /// A chunk: its four-character code and its payload.
 struct Chunk<'a> {
     fourcc: [u8; 4],
+    /// The payload, as long as the chunk's header says.
     payload: &'a [u8],
+    /// The payload with the byte that pads an odd-length one, when the file
+    /// has it. This is what libwebp's demuxer -- the route Pillow and the
+    /// browsers' animation paths take -- hands a picture's decoder, so a
+    /// bitstream that overruns its chunk by a byte reads the padding where
+    /// a stricter reading would call the file truncated. Pictures are decoded
+    /// from this, so that such a file decodes, or fails, as it does there.
+    padded: &'a [u8],
 }
 
 /// The chunks after the file header, in order, each padded to an even length
@@ -45,15 +56,27 @@ fn chunks(bytes: &[u8]) -> impl Iterator<Item = Chunk<'_>> + '_ {
         let size = u32::from_le_bytes(header.get(4..8)?.try_into().ok()?) as usize;
         let start = at.checked_add(8)?;
         let payload = bytes.get(start..start.checked_add(size)?)?;
-        at = start.checked_add(size)?.checked_add(size & 1)?;
-        Some(Chunk { fourcc, payload })
+        let end = start.checked_add(size)?.checked_add(size & 1)?;
+        let padded = bytes.get(start..end).unwrap_or(payload);
+        at = end;
+        Some(Chunk {
+            fourcc,
+            payload,
+            padded,
+        })
     })
 }
 
 /// What the file holds, found by walking its chunks once.
 enum Content<'a> {
     Lossless(&'a [u8]),
-    Lossy,
+    /// A VP8 key frame (padded), the length its chunk declares, and the
+    /// `ALPH` chunk before it if there is one.
+    Lossy {
+        frame: &'a [u8],
+        declared: usize,
+        alpha: Option<&'a [u8]>,
+    },
     Animated,
 }
 
@@ -76,15 +99,19 @@ fn layout(bytes: &[u8]) -> ImageResult<Layout<'_>> {
             Ok(Layout {
                 width,
                 height,
-                content: Content::Lossless(first.payload),
+                content: Content::Lossless(first.padded),
             })
         }
         b"VP8 " => {
-            let (width, height) = lossy_dimensions(first.payload)?;
+            let (width, height) = lossy::dimensions(first.payload)?;
             Ok(Layout {
                 width,
                 height,
-                content: Content::Lossy,
+                content: Content::Lossy {
+                    frame: first.padded,
+                    declared: first.payload.len(),
+                    alpha: None,
+                },
             })
         }
         b"VP8X" => {
@@ -108,8 +135,12 @@ fn layout(bytes: &[u8]) -> ImageResult<Layout<'_>> {
                     content: Content::Animated,
                 });
             }
+            // The alpha plane is the last `ALPH` before the frame, as libwebp
+            // takes it; a lossless frame has its own alpha and ignores one.
+            let mut alpha = None;
             for chunk in chunks {
                 match &chunk.fourcc {
+                    b"ALPH" => alpha = Some(chunk.payload),
                     b"VP8L" => {
                         let own = lossless::dimensions(chunk.payload)?;
                         if own != (width, height) {
@@ -120,14 +151,24 @@ fn layout(bytes: &[u8]) -> ImageResult<Layout<'_>> {
                         return Ok(Layout {
                             width,
                             height,
-                            content: Content::Lossless(chunk.payload),
+                            content: Content::Lossless(chunk.padded),
                         });
                     }
                     b"VP8 " => {
+                        let own = lossy::dimensions(chunk.payload)?;
+                        if own != (width, height) {
+                            return Err(ImageError::Malformed(
+                                "a VP8 picture a different size from its canvas",
+                            ));
+                        }
                         return Ok(Layout {
                             width,
                             height,
-                            content: Content::Lossy,
+                            content: Content::Lossy {
+                                frame: chunk.padded,
+                                declared: chunk.payload.len(),
+                                alpha,
+                            },
                         });
                     }
                     _ => {}
@@ -141,23 +182,6 @@ fn layout(bytes: &[u8]) -> ImageResult<Layout<'_>> {
             "a WebP whose first chunk is not a picture",
         )),
     }
-}
-
-/// A lossy key frame's size, from its frame header (RFC 6386 §9.1): three
-/// bytes of frame tag, the start code `9D 01 2A`, then two 16-bit fields whose
-/// low 14 bits are the width and the height.
-fn lossy_dimensions(payload: &[u8]) -> ImageResult<(u32, u32)> {
-    let header = payload.get(..10).ok_or(ImageError::Truncated)?;
-    if header.get(3..6) != Some(&[0x9D, 0x01, 0x2A]) {
-        return Err(ImageError::Malformed("a VP8 frame without its start code"));
-    }
-    let field = |i: usize| {
-        u32::from(u16::from_le_bytes([
-            header.get(i).copied().unwrap_or(0),
-            header.get(i.saturating_add(1)).copied().unwrap_or(0),
-        ])) & 0x3FFF
-    };
-    Ok((field(6), field(8)))
 }
 
 /// A WebP's canvas size.
@@ -175,7 +199,7 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
 ///
 /// # Errors
 ///
-/// [`ImageError::Unsupported`] for a lossy or animated one, for now;
+/// [`ImageError::Unsupported`] for an animated one, for now;
 /// [`ImageError::TooLarge`] past `limits`; otherwise what the bitstream's
 /// decoder reports.
 pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
@@ -196,7 +220,21 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
                 pixels,
             })
         }
-        Content::Lossy => Err(ImageError::Unsupported("lossy WebP")),
+        Content::Lossy {
+            frame,
+            declared,
+            alpha,
+        } => {
+            let decoded = lossy::decode(frame, declared, limits)?;
+            let plane = alpha
+                .map(|chunk| alpha::decode(chunk, layout.width, layout.height, limits))
+                .transpose()?;
+            Ok(Image {
+                width: layout.width,
+                height: layout.height,
+                pixels: decoded.to_argb(plane.as_deref()),
+            })
+        }
         Content::Animated => Err(ImageError::Unsupported("animated WebP")),
     }
 }

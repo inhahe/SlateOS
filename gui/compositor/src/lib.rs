@@ -3692,6 +3692,8 @@ fn wire_event(n: EventNotification) -> guiremote::InputEvent {
 /// would be guessing at layout the compositor cannot see.
 const fn wire_mouse_kind(kind: MouseEventKind) -> ClientMouseKind {
     match kind {
+        MouseEventKind::Enter => ClientMouseKind::Enter,
+        MouseEventKind::Leave => ClientMouseKind::Leave,
         MouseEventKind::Move => ClientMouseKind::Move,
         MouseEventKind::ButtonPress(b) => ClientMouseKind::Press(wire_button(b)),
         MouseEventKind::ButtonRelease(b) => ClientMouseKind::Release(wire_button(b)),
@@ -3712,10 +3714,18 @@ const fn wire_button(b: MouseButton) -> ClientMouseButton {
 /// Mouse event kind for notifications.
 #[derive(Clone, Copy, Debug)]
 pub enum MouseEventKind {
+    /// The pointer came into the window's client area.
+    Enter,
+    /// The pointer left the window's client area — onto another window, onto
+    /// this one's frame, onto the desktop, or off the output altogether.
+    Leave,
     Move,
     ButtonPress(MouseButton),
     ButtonRelease(MouseButton),
-    Scroll { dx: f32, dy: f32 },
+    Scroll {
+        dx: f32,
+        dy: f32,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -5156,6 +5166,19 @@ impl StackPlan {
     }
 }
 
+/// What the pointer is over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PointerTarget {
+    /// A window's client area — its own pixels, and so its input.
+    Client(WindowId),
+    /// A window's frame: title bar, border, and the resize margin around it.
+    /// The compositor's own furniture, and opaque to input — it hides
+    /// whatever lies beneath it exactly as it hides it from view.
+    Frame(WindowId),
+    /// Nothing but the desktop.
+    Desktop,
+}
+
 /// How the most recently presented frame was produced.
 ///
 /// In the [`Direct`](Scanout::Direct) case the displayed pixels come straight
@@ -5219,6 +5242,21 @@ pub struct Compositor {
     /// [`InputEvent::PointerLeft`]. True from the start: a real display has
     /// its pointer on it from the moment it lights, at the centre.
     pointer_on_output: bool,
+    /// The window whose client area the pointer was last reported inside —
+    /// the one owed a `Leave` when that stops being true. See
+    /// [`track_pointer_window`](Self::track_pointer_window).
+    pointer_window: Option<WindowId>,
+    /// The window a held button was pressed in, and the button.
+    ///
+    /// Until that button is released, pointer motion and the release itself
+    /// go to that window wherever the pointer is — the implicit grab every
+    /// windowing system has, and what lets a slider, a scrollbar or a text
+    /// selection keep following a pointer that has strayed outside the window.
+    /// Motion used to go to whatever window was under the pointer, so a drag
+    /// stopped dead at the window's edge; and the release went to the
+    /// *focused* window, which for a right-click on a window that was not
+    /// focused is a different window from the one that saw the press.
+    pointer_grab: Option<(WindowId, MouseButton)>,
     /// Active drag operation (if any).
     drag: Option<DragState>,
     /// Where the window being dragged would land if the user let go now.
@@ -5565,6 +5603,8 @@ impl Compositor {
             cursor_y: height as i32 / 2,
             cursor_shape: CursorShape::Arrow,
             pointer_on_output: true,
+            pointer_window: None,
+            pointer_grab: None,
             drag: None,
             drag_preview: None,
             last_title_press: None,
@@ -6059,6 +6099,13 @@ impl Compositor {
         // shell keep Alt+Tab for the rest of the session with nothing on screen
         // able to release it.
         self.release_grabs_of(window_id);
+        // A window that is gone cannot hold the pointer or be told it left.
+        if self.pointer_window == Some(window_id) {
+            self.pointer_window = None;
+        }
+        if self.pointer_grab.is_some_and(|(id, _)| id == window_id) {
+            self.pointer_grab = None;
+        }
 
         let closed_layer = self.layer_of(window_id);
         self.windows.remove(idx);
@@ -7510,7 +7557,15 @@ impl Compositor {
                 self.pointer_on_output = true;
                 self.handle_mouse_scroll(dx, dy, x, y);
             }
-            InputEvent::PointerLeft => self.pointer_on_output = false,
+            InputEvent::PointerLeft => {
+                self.pointer_on_output = false;
+                // The release of a held button will never be seen now — on the
+                // host it happens outside the window — so the grab ends here
+                // rather than holding the pointer in a window it has left.
+                self.pointer_grab = None;
+                let (x, y) = (self.cursor_x, self.cursor_y);
+                self.track_pointer_window(x, y);
+            }
             InputEvent::KeyDown {
                 scancode,
                 character,
@@ -7573,19 +7628,16 @@ impl Compositor {
 
         // Update cursor shape based on what's under the cursor.
         self.update_cursor_shape(x, y);
+        self.track_pointer_window(x, y);
 
-        // Route mouse move to the window under the cursor.
-        if let Some(window_id) = self.window_at(x, y)
-            && let Some(win) = self.window_ref(window_id)
-        {
-            let (local_x, local_y) = win.local_point(x, y);
-            self.pending_notifications
-                .push_back(EventNotification::MouseEvent {
-                    window_id,
-                    x: local_x,
-                    y: local_y,
-                    kind: MouseEventKind::Move,
-                });
+        // Motion goes to the window holding the grab, if a button is down, and
+        // otherwise to the client area under the pointer.
+        let target = self
+            .pointer_grab
+            .map(|(window_id, _)| window_id)
+            .or_else(|| self.window_at(x, y));
+        if let Some(window_id) = target {
+            self.notify_pointer(window_id, x, y, MouseEventKind::Move);
         }
     }
 
@@ -7737,28 +7789,29 @@ impl Compositor {
         // the keyboard layout. Shift+click to extend a selection is the common
         // case and would otherwise fire Alt+Shift's neighbour on every use.
         self.modifier_episode.spent |= pressed;
+        self.track_pointer_window(x, y);
 
         // Release ends any active drag.
         if !pressed && button == MouseButton::Left {
             if let Some(drag) = self.drag.take() {
                 self.finish_drag(&drag, x, y);
+                return;
             }
-            return;
         }
 
         if !pressed {
-            // Route release to focused window.
-            if let Some(window_id) = self.focused_window
-                && let Some(win) = self.window_ref(window_id)
+            // The release goes where the press went. A release with no press
+            // this compositor delivered — the press landed on a title bar, or
+            // on the desktop — goes nowhere: a client told about a release it
+            // never saw pressed would take it for the end of a click.
+            if let Some((window_id, held)) = self.pointer_grab
+                && held == button
             {
-                let (local_x, local_y) = win.local_point(x, y);
-                self.pending_notifications
-                    .push_back(EventNotification::MouseEvent {
-                        window_id,
-                        x: local_x,
-                        y: local_y,
-                        kind: MouseEventKind::ButtonRelease(button),
-                    });
+                self.pointer_grab = None;
+                self.notify_pointer(window_id, x, y, MouseEventKind::ButtonRelease(button));
+                // The grab held the pointer inside the window; now it is
+                // wherever it really is.
+                self.track_pointer_window(x, y);
             }
             return;
         }
@@ -7858,46 +7911,40 @@ impl Compositor {
                         });
                         return;
                     }
-                    // Client area click.
-                    let (local_x, local_y) = win.local_point(x, y);
-                    self.pending_notifications
-                        .push_back(EventNotification::MouseEvent {
-                            window_id,
-                            x: local_x,
-                            y: local_y,
-                            kind: MouseEventKind::ButtonPress(button),
-                        });
+                    // Client area click — unless the press landed on a
+                    // resize margin, which `detect_border_drag` declined only
+                    // because the window is not resizable: that is still the
+                    // frame, not the client.
+                    if win.client_rect().contains(x, y) {
+                        self.press_in(window_id, button, x, y);
+                    }
                 }
             }
-        } else {
-            // Non-left button: route to window under cursor.
-            if let Some(window_id) = self.window_at(x, y)
-                && let Some(win) = self.window_ref(window_id)
-            {
-                let (local_x, local_y) = win.local_point(x, y);
-                self.pending_notifications
-                    .push_back(EventNotification::MouseEvent {
-                        window_id,
-                        x: local_x,
-                        y: local_y,
-                        kind: MouseEventKind::ButtonPress(button),
-                    });
-            }
+        } else if let Some(window_id) = self.window_at(x, y) {
+            // Any other button, on a client area.
+            self.press_in(window_id, button, x, y);
+        }
+    }
+
+    /// Deliver a button press to a window's client area, and grab the pointer
+    /// for that window until the button comes back up.
+    fn press_in(&mut self, window_id: WindowId, button: MouseButton, x: i32, y: i32) {
+        self.notify_pointer(window_id, x, y, MouseEventKind::ButtonPress(button));
+        // The first button down owns the grab; a second button pressed during
+        // it goes to the same window without taking the grab over.
+        if self.pointer_grab.is_none() {
+            self.pointer_grab = Some((window_id, button));
         }
     }
 
     fn handle_mouse_scroll(&mut self, dx: f32, dy: f32, x: i32, y: i32) {
-        if let Some(window_id) = self.window_at(x, y)
-            && let Some(win) = self.window_ref(window_id)
-        {
-            let (local_x, local_y) = win.local_point(x, y);
-            self.pending_notifications
-                .push_back(EventNotification::MouseEvent {
-                    window_id,
-                    x: local_x,
-                    y: local_y,
-                    kind: MouseEventKind::Scroll { dx, dy },
-                });
+        self.track_pointer_window(x, y);
+        let target = self
+            .pointer_grab
+            .map(|(window_id, _)| window_id)
+            .or_else(|| self.window_at(x, y));
+        if let Some(window_id) = target {
+            self.notify_pointer(window_id, x, y, MouseEventKind::Scroll { dx, dy });
         }
     }
 
@@ -8639,24 +8686,95 @@ impl Compositor {
     // Hit testing
     // -----------------------------------------------------------------------
 
-    /// Find the topmost window whose client area contains the point.
+    /// What the pointer is over at `(x, y)`: the topmost window whose frame
+    /// or client area contains it, and which of the two.
     ///
     /// A window with [`input_transparent`](Window::input_transparent) set is
     /// skipped rather than returned, so the search continues *past* it to what
     /// is behind — which is the whole point: the click was aimed at the window
     /// under the overlay, not at the overlay.
-    fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
+    ///
+    /// **The frame counts.** This used to look for the topmost *client area*
+    /// containing the point, so a point on one window's title bar fell straight
+    /// through to the client area of whatever window lay beneath it: pointer
+    /// motion, the scroll wheel and a right-click on a title bar all went to a
+    /// window the user could not see there. A frame hides what is beneath it
+    /// from input exactly as it does from view.
+    fn pointer_target(&self, x: i32, y: i32) -> PointerTarget {
         // Iterate z_stack from top to bottom.
         for &window_id in self.z_stack.iter().rev() {
-            if let Some(win) = self.window_ref(window_id)
-                && win.is_showing(self.current_workspace)
-                && !win.input_transparent
-                && win.client_rect().contains(x, y)
-            {
-                return Some(window_id);
+            let Some(win) = self.window_ref(window_id) else {
+                continue;
+            };
+            if !win.is_showing(self.current_workspace) || win.input_transparent {
+                continue;
+            }
+            if win.client_rect().contains(x, y) {
+                return PointerTarget::Client(window_id);
+            }
+            if win.outer_rect().contains(x, y) {
+                return PointerTarget::Frame(window_id);
             }
         }
-        None
+        PointerTarget::Desktop
+    }
+
+    /// The window whose client area is under the point, if the point is on a
+    /// client area at all rather than on a frame or the desktop.
+    fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
+        match self.pointer_target(x, y) {
+            PointerTarget::Client(window_id) => Some(window_id),
+            PointerTarget::Frame(_) | PointerTarget::Desktop => None,
+        }
+    }
+
+    /// Tell a window something about the pointer, at `(x, y)` in its own
+    /// coordinates — which may lie outside it, for a `Leave` or for motion
+    /// during a grab.
+    fn notify_pointer(&mut self, window_id: WindowId, x: i32, y: i32, kind: MouseEventKind) {
+        if let Some(win) = self.window_ref(window_id) {
+            let (local_x, local_y) = win.local_point(x, y);
+            self.pending_notifications
+                .push_back(EventNotification::MouseEvent {
+                    window_id,
+                    x: local_x,
+                    y: local_y,
+                    kind,
+                });
+        }
+    }
+
+    /// Bring [`pointer_window`](Self::pointer_window) up to date with a
+    /// pointer at `(x, y)`: a `Leave` to the window it was in, an `Enter` to
+    /// the one it is in now.
+    ///
+    /// These were never sent, although the protocol carries both and a dozen
+    /// places in the toolkit and the applications act on them. A hover
+    /// highlight is turned off by the pointer *leaving*, so without `Leave` a
+    /// button the pointer had crossed stayed lit after the pointer moved on to
+    /// another window, until it happened to come back.
+    ///
+    /// Held still during a grab: the pointer is inside the grabbing window for
+    /// as long as the button is down, wherever it is on the screen.
+    fn track_pointer_window(&mut self, x: i32, y: i32) {
+        if self.pointer_grab.is_some() {
+            return;
+        }
+        let now = if self.pointer_on_output {
+            self.window_at(x, y)
+        } else {
+            None
+        };
+        if now == self.pointer_window {
+            return;
+        }
+        if let Some(old) = self.pointer_window.take() {
+            self.notify_pointer(old, x, y, MouseEventKind::Leave);
+        }
+        if let Some(new) = now {
+            self.notify_pointer(new, x, y, MouseEventKind::Enter);
+        }
+        self.pointer_window = now;
     }
 
     /// Find the topmost window whose full area (including decorations) contains the point.
@@ -8743,7 +8861,9 @@ impl Compositor {
             let Some(win) = self.window_ref(window_id) else {
                 continue;
             };
-            if !win.is_showing(self.current_workspace) {
+            // A click-through window is skipped here as `pointer_target` skips
+            // it: the pointer should look like what a click would reach.
+            if !win.is_showing(self.current_workspace) || win.input_transparent {
                 continue;
             }
             if let Some(mode) = self.detect_border_drag(win, x, y) {
@@ -23623,5 +23743,269 @@ mod tests {
                 "moving the pointer to ({x}, {y}) damaged the scene"
             );
         }
+    }
+
+    // -- where pointer input goes -----------------------------------------------------
+
+    /// The pointer notifications queued since the last call, as
+    /// `(window, kind)` with the kind spelled as its `Debug` form.
+    fn pointer_news(comp: &mut Compositor) -> Vec<(WindowId, String)> {
+        comp.drain_notifications()
+            .into_iter()
+            .filter_map(|n| match n {
+                EventNotification::MouseEvent {
+                    window_id, kind, ..
+                } => Some((window_id, format!("{kind:?}"))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A decorated window with its client area at `(x, y)`.
+    fn window_at_point(comp: &mut Compositor, x: i32, y: i32, w: u32, h: u32) -> WindowId {
+        comp.create_window_from_spec(
+            &WindowSpec {
+                position: Some((x, y)),
+                ..WindowSpec::new("w", w, h)
+            },
+            1,
+        )
+    }
+
+    fn button_down(comp: &mut Compositor, button: MouseButton, x: i32, y: i32) {
+        comp.handle_input(InputEvent::MouseButton {
+            button,
+            pressed: true,
+            x,
+            y,
+        });
+    }
+
+    fn button_up(comp: &mut Compositor, button: MouseButton, x: i32, y: i32) {
+        comp.handle_input(InputEvent::MouseButton {
+            button,
+            pressed: false,
+            x,
+            y,
+        });
+    }
+
+    fn move_to(comp: &mut Compositor, x: i32, y: i32) {
+        comp.handle_input(InputEvent::MouseMove { x, y });
+    }
+
+    /// A click is a press *and a release*, to the same window.
+    ///
+    /// The release of the left button used to return before reaching any
+    /// window at all, whether or not a window drag had been in progress — so
+    /// no application ever saw one. The toolkit's checkbox toggles on the
+    /// release, and its button stays drawn pressed until one arrives.
+    #[test]
+    fn a_left_click_reaches_the_window_as_a_press_and_a_release() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        move_to(&mut comp, 150, 150);
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        button_up(&mut comp, MouseButton::Left, 150, 150);
+        assert_eq!(
+            pointer_news(&mut comp),
+            vec![
+                (a, "Enter".to_string()),
+                (a, "Move".to_string()),
+                (a, "ButtonPress(Left)".to_string()),
+                (a, "ButtonRelease(Left)".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_pointer_moving_between_windows_leaves_one_and_enters_the_other() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 50, 100, 150, 150);
+        let b = window_at_point(&mut comp, 400, 100, 150, 150);
+        move_to(&mut comp, 100, 150);
+        let _ = pointer_news(&mut comp);
+        move_to(&mut comp, 450, 150);
+        assert_eq!(
+            pointer_news(&mut comp),
+            vec![
+                (a, "Leave".to_string()),
+                (b, "Enter".to_string()),
+                (b, "Move".to_string()),
+            ]
+        );
+        // Out onto the desktop: a Leave, and nothing else.
+        move_to(&mut comp, 700, 500);
+        assert_eq!(pointer_news(&mut comp), vec![(b, "Leave".to_string())]);
+    }
+
+    /// A title bar hides the window beneath it from the pointer, exactly as it
+    /// hides it from view: no motion, no scroll and no right-click reaches the
+    /// lower window through the upper one's frame.
+    #[test]
+    fn a_title_bar_hides_the_window_beneath_it_from_the_pointer() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let lower = window_at_point(&mut comp, 100, 150, 400, 300);
+        // Its title bar sits some 30 px above its client area, well inside the
+        // lower window's.
+        let upper = window_at_point(&mut comp, 200, 260, 200, 100);
+        let bar = comp
+            .window_ref(upper)
+            .expect("upper")
+            .title_bar_rect()
+            .expect("a decorated window has a title bar");
+        let (x, y) = (bar.x + bar.width as i32 / 2, bar.y + bar.height as i32 / 2);
+        assert!(
+            comp.window_ref(lower)
+                .expect("lower")
+                .client_rect()
+                .contains(x, y),
+            "the probe is not over the lower window's client area, so it proves nothing"
+        );
+        move_to(&mut comp, x, y);
+        comp.handle_input(InputEvent::MouseScroll {
+            dx: 0.0,
+            dy: 1.0,
+            x,
+            y,
+        });
+        button_down(&mut comp, MouseButton::Right, x, y);
+        button_up(&mut comp, MouseButton::Right, x, y);
+        let reached_lower: Vec<_> = pointer_news(&mut comp)
+            .into_iter()
+            .filter(|(id, _)| *id == lower)
+            .collect();
+        assert_eq!(
+            reached_lower,
+            Vec::new(),
+            "input on the upper window's title bar reached the window beneath it"
+        );
+    }
+
+    /// While a button is held the pointer belongs to the window it was pressed
+    /// in: a slider dragged past the window's edge keeps following it, and the
+    /// window beneath the pointer is not entered until the button comes up.
+    #[test]
+    fn a_drag_keeps_the_pointer_in_the_window_it_started_in() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 50, 100, 150, 150);
+        let b = window_at_point(&mut comp, 400, 100, 150, 150);
+        move_to(&mut comp, 100, 150);
+        button_down(&mut comp, MouseButton::Left, 100, 150);
+        let _ = pointer_news(&mut comp);
+
+        move_to(&mut comp, 450, 150);
+        assert_eq!(
+            pointer_news(&mut comp),
+            vec![(a, "Move".to_string())],
+            "motion during a drag left the window that holds it"
+        );
+        button_up(&mut comp, MouseButton::Left, 450, 150);
+        assert_eq!(
+            pointer_news(&mut comp),
+            vec![
+                (a, "ButtonRelease(Left)".to_string()),
+                (a, "Leave".to_string()),
+                (b, "Enter".to_string()),
+            ]
+        );
+    }
+
+    /// The release goes where the press went — not to the focused window,
+    /// which a right-click does not change.
+    #[test]
+    fn a_right_click_releases_to_the_window_it_pressed_in() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 50, 100, 150, 150);
+        let b = window_at_point(&mut comp, 400, 100, 150, 150);
+        comp.focus_window(a);
+        button_down(&mut comp, MouseButton::Right, 450, 150);
+        button_up(&mut comp, MouseButton::Right, 450, 150);
+        let news = pointer_news(&mut comp);
+        assert!(
+            news.iter()
+                .any(|n| *n == (b, "ButtonRelease(Right)".to_string())),
+            "the right-click's release did not reach the window it was pressed in: {news:?}"
+        );
+        assert!(
+            news.iter().all(|(id, _)| *id != a),
+            "the focused window heard about a click on another window: {news:?}"
+        );
+    }
+
+    /// A release whose press no window saw goes nowhere, rather than to
+    /// whichever window is focused.
+    #[test]
+    fn a_release_with_no_press_behind_it_goes_nowhere() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        comp.focus_window(a);
+        button_down(&mut comp, MouseButton::Left, 700, 500); // on the desktop
+        move_to(&mut comp, 150, 150);
+        button_up(&mut comp, MouseButton::Left, 150, 150);
+        let news = pointer_news(&mut comp);
+        assert!(
+            news.iter()
+                .all(|(_, kind)| !kind.starts_with("ButtonRelease")),
+            "a window was sent a release for a press it never saw: {news:?}"
+        );
+    }
+
+    #[test]
+    fn the_pointer_leaving_the_output_leaves_the_window_it_was_in() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        move_to(&mut comp, 150, 150);
+        let _ = pointer_news(&mut comp);
+        comp.handle_input(InputEvent::PointerLeft);
+        assert_eq!(pointer_news(&mut comp), vec![(a, "Leave".to_string())]);
+        // And coming back is entering again.
+        move_to(&mut comp, 160, 160);
+        assert_eq!(
+            pointer_news(&mut comp),
+            vec![(a, "Enter".to_string()), (a, "Move".to_string())]
+        );
+    }
+
+    /// A click-through overlay takes neither the pointer nor its shape: both
+    /// come from what a click would reach.
+    #[test]
+    fn a_click_through_window_takes_neither_the_pointer_nor_its_shape() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 300, 200);
+        comp.set_cursor(a, CursorShape::Text).expect("a");
+        let overlay = comp.create_window_from_spec(
+            &WindowSpec {
+                position: Some((150, 150)),
+                input_transparent: true,
+                decorations: false,
+                ..WindowSpec::new("overlay", 100, 100)
+            },
+            1,
+        );
+        move_to(&mut comp, 200, 200);
+        let news = pointer_news(&mut comp);
+        assert!(news.iter().all(|(id, _)| *id != overlay), "{news:?}");
+        assert!(news.contains(&(a, "Enter".to_string())), "{news:?}");
+        assert_eq!(comp.cursor_shape(), CursorShape::Text);
+    }
+
+    /// A closed window drops out of the pointer's bookkeeping: it is not sent a
+    /// `Leave` it cannot receive, and it does not keep a grab.
+    #[test]
+    fn a_closed_window_no_longer_holds_the_pointer() {
+        let mut comp = Compositor::new(800, 600, 60).expect("compositor");
+        let a = window_at_point(&mut comp, 100, 100, 200, 150);
+        let b = window_at_point(&mut comp, 400, 100, 200, 150);
+        move_to(&mut comp, 150, 150);
+        button_down(&mut comp, MouseButton::Left, 150, 150);
+        comp.destroy_window(a).expect("close");
+        let _ = pointer_news(&mut comp);
+        move_to(&mut comp, 450, 150);
+        assert_eq!(
+            pointer_news(&mut comp),
+            vec![(b, "Enter".to_string()), (b, "Move".to_string())],
+            "a closed window still held the pointer"
+        );
     }
 }

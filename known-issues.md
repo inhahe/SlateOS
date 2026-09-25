@@ -149318,7 +149318,23 @@ on a date with no time).
 
 ---
 
-## TD-B-DIFF-SIDE-BY-SIDE-PADS-WITH-SPACES-WHERE-GNU-USES-TABS (lane B, 2026-09-16) — **open**
+## TD-B-DIFF-SIDE-BY-SIDE-PADS-WITH-SPACES-WHERE-GNU-USES-TABS (lane B, 2026-09-16) — **fixed 2026-09-25**
+
+**How it was closed:** as the entry below prescribes -- by reading diffutils
+3.10 rather than sampling it. The column arithmetic is `diff.c`'s (a half and
+its gutter are a whole number of tab stops, the half maximised first), and it
+reproduces every row of the measured table below; the printer is `side.c`'s
+`print_1sdiff_line`, `print_half_line` and `tab_from_to`, transcribed. Reading
+it also turned up what sampling had not: `/` and `\` in the gutter for a pair
+where one line lacks its final newline, `-y` printing identical files in full
+(`no_diff_means_no_output` is false for it), hunks ignored by `-B`/`-I` printed
+as common lines paired off in order with `)` and `(` for the surplus, each
+column showing its own file's copy of a common line under `-i`/`-b`/`-w`, and
+three options the format needs -- `--suppress-common-lines`, `--left-column`,
+`--tabsize` -- which were missing. `-B` now ignores by hunk, as `analyze_hunk`
+does, where it had been applied line by line. `scripts/diff-diff.sh` gains 43
+cases for all of it, a tab after exactly eight columns among them; they wait
+for a WSL run.
 
 **In short:** `diff -y` prints two columns with the differing lines marked
 between them. Ours lines the columns up with spaces; GNU lines them up with

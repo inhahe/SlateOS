@@ -96,7 +96,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 from mutation_harness import sweep  # noqa: E402  (path set above)
 
-SRC = Path(__file__).parent / "src" / "main.rs"
+SRC = Path(__file__).parent / "src" / "lib.rs"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -526,8 +526,8 @@ MUTATIONS = [
     ),
     (
         "a hidden cursor goes on blinking, holding the desktop awake",
-        "        let blinking = self.config.cursor_blink && self.cursor_visible;",
-        "        let blinking = self.config.cursor_blink;",
+        "        let blinking = self.config.cursor_blink && self.cursor_visible && self.focused;",
+        "        let blinking = self.config.cursor_blink && self.focused;",
         ["a_hidden_cursor_needs_no_clock_and_is_not_left_dark"],
     ),
     # -- the window the compositor drives ------------------------------------
@@ -579,6 +579,61 @@ MUTATIONS = [
         "    while n < whole && usize_f32(n.saturating_add(1)) <= target {",
         "    while n < whole && usize_f32(n) < target {",
         ["scaling_by_a_nonsense_fraction_yields_none_of_the_whole"],
+    ),
+    # -- what the multiplexer asks of a terminal (2026-09-25) --
+    (
+        "a pasted line break goes as a line feed",
+        "        let body = text.replace(\"\\r\\n\", \"\\r\").replace('\\n', \"\\r\");",
+        "        let body = text.to_string();",
+        ["a_paste_reaches_the_child_with_its_line_breaks_as_returns"],
+    ),
+    (
+        "bracketed paste is ignored",
+        "        if self.bracketed_paste {\n            let fenced",
+        "        if false {\n            let fenced",
+        ["a_program_that_asked_for_bracketed_paste_gets_its_paste_fenced"],
+    ),
+    (
+        "a pasted escape can close the fence",
+        "            let fenced: String = body.chars().filter(|&c| c != '\\x1b').collect();",
+        "            let fenced: String = body.clone();",
+        ["a_program_that_asked_for_bracketed_paste_gets_its_paste_fenced"],
+    ),
+    (
+        "a paste leaves the view in the scrollback",
+        "        let body = text.replace(\"\\r\\n\", \"\\r\").replace('\\n', \"\\r\");\n        self.scroll_offset = 0;",
+        "        let body = text.replace(\"\\r\\n\", \"\\r\").replace('\\n', \"\\r\");",
+        ["a_paste_reaches_the_child_with_its_line_breaks_as_returns"],
+    ),
+    (
+        "an unfocused cursor is a block",
+        "        if !self.focused {\n            // Where the cursor is",
+        "        if false {\n            // Where the cursor is",
+        ["a_terminal_without_the_keyboard_draws_its_cursor_as_an_outline"],
+    ),
+    (
+        "an unfocused cursor blinks",
+        "        if self.config.cursor_blink && self.cursor_visible && self.focused {",
+        "        if self.config.cursor_blink && self.cursor_visible {",
+        ["a_terminal_without_the_keyboard_draws_its_cursor_as_an_outline"],
+    ),
+    (
+        "the window's focus is not the terminal's",
+        "            Event::FocusIn => {\n                self.set_focused(true);",
+        "            Event::FocusIn => {\n                self.set_focused(false);",
+        ["a_terminal_without_the_keyboard_draws_its_cursor_as_an_outline"],
+    ),
+    (
+        "a started shell is not attached",
+        "            Ok(link) => self.attach(link),",
+        "            Ok(link) => drop(link),",
+        ["a_started_shell_is_born_at_the_size_it_is_drawn_at"],
+    ),
+    (
+        "a shell that cannot start leaves a blank screen",
+        "                self.feed(msg.as_bytes());\n            }\n        }\n    }",
+        "                drop(msg);\n            }\n        }\n    }",
+        ["a_shell_that_cannot_start_is_named_on_the_screen"],
     ),
 ]
 

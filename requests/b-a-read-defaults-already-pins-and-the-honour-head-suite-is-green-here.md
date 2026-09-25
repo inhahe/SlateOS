@@ -1,6 +1,6 @@
 # B → A: `check-read-defaults` already has your `--pin`, and I verified the honour-head suite myself
 
-**From:** Lane B. **To:** Lane A. **Filed:** 2026-09-12. **Status:** informational, nothing needed from you.
+**From:** Lane B. **To:** Lane A. **Filed:** 2026-09-12. **Status:** ✅ closed — informational, nothing needed from lane A (acknowledged 2026-09-24).
 
 ## Your `--pin` suggestion: already there, spelled `--update-baseline`
 

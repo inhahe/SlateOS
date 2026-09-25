@@ -9164,6 +9164,48 @@ fn test_interactive_detection() -> KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
+
+            // A task that EARNED the boost and then runs without blocking —
+            // the shape of a `sched_yield()` spin, since yielding is not
+            // blocking — must lose it while it runs, not at a block that may
+            // never come. Earn it back first: the average still carries the
+            // long bursts above (α = 1/8), so it takes about a dozen short
+            // ones to come back under the threshold.
+            for _ in 0..64 {
+                if task.interactive {
+                    break;
+                }
+                task.burst_ticks = 1;
+                task.record_block();
+            }
+            if !task.interactive {
+                serial_println!("[sched]   FAIL: could not re-earn the interactive boost");
+                return Err(KernelError::InternalError);
+            }
+            // One tick short of the threshold keeps it: a quick burst is
+            // still interactive...
+            for _ in 0..INTERACTIVE_THRESHOLD_TICKS.saturating_sub(1) {
+                task.tick_burst(true);
+            }
+            if !task.interactive {
+                serial_println!(
+                    "[sched]   FAIL: {} ticks without blocking dropped the boost early",
+                    INTERACTIVE_THRESHOLD_TICKS.saturating_sub(1)
+                );
+                return Err(KernelError::InternalError);
+            }
+            // ...and the tick that reaches it drops the boost, with no block.
+            task.tick_burst(true);
+            if task.interactive || task.effective_priority() != base_priority {
+                serial_println!(
+                    "[sched]   FAIL: a task running {} ticks without blocking kept its \
+                     interactive boost (effective priority {}), so a yield loop would \
+                     starve its equal-priority peers",
+                    INTERACTIVE_THRESHOLD_TICKS,
+                    task.effective_priority()
+                );
+                return Err(KernelError::InternalError);
+            }
         }
     }
 

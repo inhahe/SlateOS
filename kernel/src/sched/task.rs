@@ -446,6 +446,12 @@ pub struct Task {
     ///
     /// When true, the task is enqueued at `effective_priority()` which
     /// is `priority - INTERACTIVE_BOOST` (clamped to 0).
+    ///
+    /// Set from the burst average at each block (`record_block`), and
+    /// **cleared early** by `tick_burst` once the current burst reaches
+    /// `INTERACTIVE_THRESHOLD_TICKS`: a task that has been on CPU that long
+    /// without blocking is not interactive now, and one that keeps yielding
+    /// must not keep a boost it earned before it started spinning.
     pub interactive: bool,
 
     /// Priority inherited from higher-priority tasks blocked on a
@@ -759,6 +765,23 @@ impl Task {
             self.user_ticks = self.user_ticks.saturating_add(1);
         } else {
             self.sys_ticks = self.sys_ticks.saturating_add(1);
+        }
+        // A task that has now run for a whole threshold's worth of ticks
+        // without blocking is not behaving interactively, whatever its history
+        // says, so it stops outranking its peers *now* rather than at its next
+        // block. `record_block` recomputes the flag from the average when that
+        // block comes, and this long burst is part of that average.
+        //
+        // Without this the flag only ever changed at a block, so a task that
+        // earned the boost with a few quick blocks and then spun on
+        // `sched_yield()` kept it for as long as it spun: yielding re-enqueues
+        // at the *effective* priority, two levels above its equal-priority
+        // peers, so every yield picked it straight back and they ran only when
+        // the anti-starvation check rescued them, a few times a second. Found
+        // 2026-09-24 with the `ctest-python-repl` parent spinning while its
+        // child, inside a 10 MB read, was boosted 30+ times in five minutes.
+        if self.interactive && self.burst_ticks >= INTERACTIVE_THRESHOLD_TICKS {
+            self.interactive = false;
         }
     }
 

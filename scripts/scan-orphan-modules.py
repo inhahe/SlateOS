@@ -551,6 +551,23 @@ BASELINE_HEADER = """\
 # so that the loop is not duplicated once per driver.  Writing the caller is
 # what paid the line off; pinning it was what let it sit unwritten.
 #
+# A second line was ADDED on 2026-09-24, by lane C: gui/toolkit/src/dirtree.rs,
+# the "function to populate [a tristate checkbox treeview] with a directory"
+# that design.txt asks for, landed with gui/toolkit/src/treeview.rs (which
+# dirtree reaches, so it is not listed).  Before adding it, the note above was
+# taken at its word and a caller was looked for in lane C's own tree, and there
+# is not one to write: the file dialog is deliberately free of I/O -- its host
+# reads directories and hands it the listing -- so a disk-reading tree inside it
+# would undo that design, and nothing else under gui/ chooses folders.  The
+# callers are applications -- the five that hand-roll a tree, and whichever one
+# chooses a set of folders -- and since the six-lane split of 2026-09-22 apps/**
+# is lane E's.  So this is the benign case "the caller is the next commit" with
+# the commit in another lane, and it is tracked where lane E will see it:
+# requests/c-e-the-toolkit-has-a-treeview-now-and-five-apps-draw-their-own.md.
+# The same commit pruned three stale lines (backup_settings.rs, default_apps.rs
+# and textview.rs), so the count still fell.  Delete the line when an
+# application opens a DirectoryTree.
+#
 # THIS HEADER LIVES IN scripts/scan-orphan-modules.py, NOT HERE.  `--pin`
 # rewrites this file from that constant, so anything added directly to the
 # generated file is deleted by the next run -- silently, because the gate

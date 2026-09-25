@@ -260,6 +260,17 @@ IGNORE = (
     ("gui/toolkit/src/dialog.rs",
      "text: entry.name.to_string_lossy().into_owned()",
      "a rendered list row; the entry's own path is what opening it uses"),
+    # --- lane C, 2026-09-24 ---
+    # The first shape above, in the directory tree: a row's label is the name
+    # drawn as text, and the name itself -- the `OsString` key the row is
+    # addressed by -- is what `DirectorySource::path_of` rebuilds a path from.
+    # Nothing derives a path from the label; `dirtree`'s test
+    # `a_name_that_is_not_text_still_names_its_file` opens the real file
+    # through a row whose label shows U+FFFD.
+    ("gui/toolkit/src/dirtree.rs",
+     "let label = entry.name.to_string_lossy().into_owned();",
+     "a tree row's drawn label; the row's key is the exact name, and it is "
+     "the key that `path_of` turns back into a path"),
     ("gui/desktop/src/run_dialog.rs",
      "self.input.set_text(&exact.to_string_lossy())",
      "fills the visible field from the kept bytes; `command_exact` remains "

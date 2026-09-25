@@ -30,6 +30,7 @@ pub mod context_ext;
 pub mod date;
 pub mod datetime;
 pub mod dialog;
+pub mod dirtree;
 pub mod disabled;
 pub mod dnd;
 pub mod event;
@@ -77,6 +78,7 @@ pub mod textedit;
 pub mod textinput;
 pub mod textview;
 pub mod theme;
+pub mod treeview;
 pub mod wheel;
 pub mod widget;
 

@@ -1606,6 +1606,16 @@ live.
   `gui/appearance/tests/resolve_cost.rs` holding the bound. Do not put a
   `powf` back.
 
+- `[C]` **A treeview, and the tristate checkbox treeview** — done 2026-09-24
+  (`design.txt`: "treeview", "tristate checkbox treeview … have function to
+  populate it with a directory"). `guitk::treeview` is the widget and
+  `guitk::dirtree` the directory function; `design-decisions.md` §868 records
+  what a tick on a folder means and why a click that leaves every child alike
+  folds into the parent. **Open, and lane E's:** five applications hand-roll a
+  tree and none has moved onto it yet —
+  `requests/c-e-the-toolkit-has-a-treeview-now-and-five-apps-draw-their-own.md`.
+  Until one does, this is one more toolkit module with tests and no user.
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's

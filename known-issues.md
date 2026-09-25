@@ -145911,6 +145911,20 @@ worth more than one feature:
   10.0` to mean "inside the tab strip" and broke the moment it moved, which is
   the same defect in the tests.
 
+**Addition, 2026-09-24: `treeview` and `dirtree` join the list on the day they
+were written, and the reason is the six-lane split rather than an oversight.**
+They are the toolkit's treeview and `design.txt`'s tristate checkbox treeview
+with its populate-from-a-directory function. Five applications hand-roll a tree
+and are the obvious first consumers -- `archivemanager`, `jsonviewer`,
+`devicemanager`, `dbviewer`, `diskanalyzer` -- but since 2026-09-22 `apps/**` is
+lane E's, so lane C can build the widget and cannot wire it, which is exactly
+how the modules above came to exist without users. Handed over, with a mapping
+per application, in
+`requests/c-e-the-toolkit-has-a-treeview-now-and-five-apps-draw-their-own.md`.
+Nothing in lane C's own tree draws a tree today; the start menu's
+"Applications tree" (roadmap-detailed §3.4) would, once C-Q20 settles which
+list of installed programs is the real one.
+
 ## TD-C-THE-DESKTOP-ICONS-ARE-DRAWN-AND-NOTHING-CAN-CLICK-THEM -- FIXED 2026-09-14
 
 **Date:** 2026-09-14. **Lane:** C. **Created and closed by this lane the same day.**

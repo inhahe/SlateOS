@@ -1846,7 +1846,11 @@ fn extension_of(name: &OsStr) -> OsString {
 /// always done, and what makes `README` and `readme` sort together — and the
 /// raw bytes when it is not. A name that cannot be decoded still has to sort
 /// *somewhere* deterministic, and its own bytes are the only key it has.
-fn sort_key(name: &OsStr) -> Vec<u8> {
+///
+/// Crate-visible so that `dirtree` orders a folder exactly as this dialog
+/// does: a tree beside a file list that sorted the same folder differently
+/// would put `README` in two places in one window.
+pub(crate) fn sort_key(name: &OsStr) -> Vec<u8> {
     name.to_str().map_or_else(
         || name.as_encoded_bytes().to_vec(),
         |s| s.to_lowercase().into_bytes(),

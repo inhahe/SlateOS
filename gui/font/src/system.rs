@@ -480,7 +480,7 @@ impl FontCache {
     /// cannot scale to made [`SystemFont::from_shared`] fail and installed the
     /// coarse 8x16 bitmap fallback under a key that legitimate callers also
     /// use, so a sub-pixel label elsewhere silently measured sixteen times too
-    /// tall for the rest of the process. `round_px` clamps to `1..=512`, which
+    /// tall for the rest of the process. `round_px` clamps to `1..=MAX_PX`, which
     /// every face can scale to, so keying and building agree and the fallback
     /// is reached only when there is genuinely no usable face.
     pub fn get(&mut self, px: f32, weight: Weight, family: Family) -> &mut SystemFont {
@@ -512,6 +512,15 @@ impl FontCache {
     }
 }
 
+/// The largest pixel size [`FontCache::get`] builds a font at. A request for
+/// more draws at this size.
+///
+/// Named because it is a promise other code relies on: a size that crossed a
+/// process boundary can be anything, and a caller — or a test — asking what an
+/// absurd one will draw needs to know the answer is exactly this, not merely
+/// "something smaller".
+pub const MAX_PX: u16 = 512;
+
 /// Normalises a requested pixel size to a cache key.
 ///
 /// Rounded to a whole pixel so 13.9 and 14.0 share one entry rather than
@@ -525,7 +534,7 @@ fn round_px(px: f32) -> u32 {
     }
     // The clamp keeps the cast in range whatever the caller asked for.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let rounded = px.clamp(1.0, 512.0).round() as u32;
+    let rounded = px.clamp(1.0, f32::from(MAX_PX)).round() as u32;
     rounded
 }
 
@@ -536,10 +545,10 @@ fn round_px(px: f32) -> u32 {
 /// so two callers whose requests round together get the same font whichever
 /// asks first.
 fn key_px(key: u32) -> f32 {
-    // `round_px` clamps to `1..=512`; the `min` restates that bound here so
+    // `round_px` clamps to `1..=MAX_PX`; the `min` restates that bound here so
     // the cast stays exact even if the clamp above ever moves.
     #[allow(clippy::cast_precision_loss)]
-    let px = key.min(512) as f32;
+    let px = key.min(u32::from(MAX_PX)) as f32;
     px
 }
 

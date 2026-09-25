@@ -809,13 +809,18 @@ def test_the_real_document_passes_its_own_gate(mod):
     baseline = mod.load_baseline(REAL_BASELINE)
     found, _, info = mod.check(lines, baseline)
     check("the real design-decisions.md passes", found, [])
-    # Counted from the band table rather than written down: this said "three"
-    # until the lanes became six, and from then on it failed every lane's boot
-    # test, which runs this suite before it will build.
+    # One insertion point per open band, counted from the document's own band
+    # table -- the table the gate itself reads -- rather than written down here.
+    # This asserted `len(info) == 3` until 2026-09-25. The six-lane split
+    # (990d832f5, 2026-09-22) opened bands for lanes D-F, the gate reported all
+    # six as it should, and the pinned 3 then refused every lane's boot test at
+    # the tooling-suite gate. A count copied out of a table is a second copy of
+    # the table, and it was the copy that went stale.
     bands, _ = mod.parse_bands(lines)
     open_bands = [b for b in bands if b.is_open]
-    check_true("the real document has open bands at all", len(open_bands) > 0)
-    check("every open band reports an insertion point", len(info), len(open_bands))
+    check_true("the real document has open bands", len(open_bands) > 0)
+    check_true("every open band reports an insertion point",
+               len(info) == len(open_bands))
 
 
 def test_the_real_document_still_uses_both_heading_styles(mod):

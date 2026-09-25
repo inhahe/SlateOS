@@ -111,7 +111,11 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// `SettingsGroup::Session` code `0x04` it announces, by which a changed
 /// screen-lock delay reaches the shell without a sign-in. Incompatible on 2's
 /// terms: an unknown tag stops the decoder.
-pub const CONTROL_VERSION: u8 = 16;
+/// **17** — [`RequestBody::RecoverDisplay`] (tag `0x28`), by which a shell asks
+/// for the desktop's artifact recovery, and the `RPNT` frame
+/// ([`repaint`](crate::repaint)) the compositor then sends every client.
+/// Incompatible on 2's terms: an unknown tag stops the decoder.
+pub const CONTROL_VERSION: u8 = 17;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1196,6 +1200,23 @@ pub enum RequestBody {
     /// The compositor keeps no copy of this setting either -- it announces,
     /// the shell reads. Answered with [`ResponseBody::Ok`].
     ReloadSession,
+    /// Recover the display from whatever has gone wrong with it: the same full
+    /// redraw as the compositor's own Ctrl+Super+R.
+    ///
+    /// The compositor drops every surface no live client owns, forgets
+    /// everything it has cached about what is on screen, resets the display
+    /// hardware's own state, redraws the whole screen from scratch, and asks
+    /// every client to draw its windows whole again (an `RPNT` frame, see
+    /// [`repaint`](crate::repaint)). Normal drawing stays damage-tracked; this
+    /// is the way back when something that tracking missed has left a stray
+    /// patch on screen — and a way to tell whose fault it was, since an
+    /// artifact that survives it is in the compositor's own state.
+    ///
+    /// A shell's request, like [`ShellControl`](Self::ShellControl): it acts on
+    /// every client's windows, not the sender's. Carries no data. Answered with
+    /// [`ResponseBody::Ok`] once the recovery is scheduled; it runs before the
+    /// next frame.
+    RecoverDisplay,
     /// Hand the compositor a block of pixels and give it a name, so that this
     /// window's [`RenderCommand::Image`](guitk::render::RenderCommand::Image)
     /// commands naming that name have something to draw.
@@ -1407,6 +1428,7 @@ enum RequestTag {
     UngrabModifierChord = 0x20,
     WatchIdle = 0x26,
     ReloadSession = 0x27,
+    RecoverDisplay = 0x28,
 }
 
 impl RequestTag {
@@ -1450,6 +1472,7 @@ impl RequestTag {
             0x1F => Self::GrabModifierChord,
             0x26 => Self::WatchIdle,
             0x27 => Self::ReloadSession,
+            0x28 => Self::RecoverDisplay,
             0x20 => Self::UngrabModifierChord,
             _ => return None,
         })
@@ -1767,6 +1790,7 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
         RequestBody::ReloadSession => {
             out.push(RequestTag::ReloadSession as u8);
         }
+        RequestBody::RecoverDisplay => out.push(RequestTag::RecoverDisplay as u8),
         RequestBody::ShellControl { window, action } => {
             out.push(RequestTag::ShellControl as u8);
             write_u64(out, *window);
@@ -2160,6 +2184,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         RequestTag::ReloadInput => RequestBody::ReloadInput,
         RequestTag::ReloadNotifications => RequestBody::ReloadNotifications,
         RequestTag::ReloadSession => RequestBody::ReloadSession,
+        RequestTag::RecoverDisplay => RequestBody::RecoverDisplay,
         RequestTag::ShellControl => {
             let window = r.read_u64()?;
             let b = r.read_u8()?;
@@ -2433,6 +2458,7 @@ mod tests {
             Request::new(15, RequestBody::SubscribeWindowList { subscribe: false }),
             Request::new(16, RequestBody::ReloadAppearance),
             Request::new(17, RequestBody::ReloadInput),
+            Request::new(40, RequestBody::RecoverDisplay),
             // Both formats, for the same reason both polarities of the flag
             // above: the format is one byte and a codec that wrote a constant
             // would round-trip whichever one a sample happened to pick.
@@ -2691,8 +2717,13 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x28),
+            Some(RequestTag::RecoverDisplay),
+            "0x28 was taken by RecoverDisplay in control version 17"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x29),
             None,
-            "0x28 is the next free tag"
+            "0x29 is the next free tag"
         );
     }
 

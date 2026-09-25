@@ -41,6 +41,7 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
+use std::task::Waker;
 use std::time::Duration;
 
 use guitk::event::{Key, Modifiers};
@@ -115,6 +116,31 @@ pub trait Transport {
     /// asked for a bound and did not get one has no way to find out otherwise.
     fn set_wait_timeout(&mut self, _timeout: Option<Duration>) -> Result<(), Self::Error> {
         Ok(())
+    }
+
+    /// A handle any thread can use to make [`Self::wait`] return early, or
+    /// `None` if this transport's wait has nothing to interrupt.
+    ///
+    /// For work done off the thread that drives the loop — a photograph
+    /// decoding on a worker — which has to be able to say "finished, look
+    /// again" to a loop parked with nothing on the wire. Without it the result
+    /// sits unseen until the user happens to move the mouse.
+    ///
+    /// A [`Waker`] because that is the standard handle for exactly this:
+    /// cloneable, `Send`, and understood by anything that already speaks
+    /// async. Every handle a transport gives out wakes the same wait, and a
+    /// wake sent while nobody is waiting is not lost — the next `wait` returns
+    /// at once. What a wake does *not* do is say why: `wait` promises only
+    /// that there may be something to do, as it always has.
+    ///
+    /// The default is `None`, which is right for a transport whose `wait`
+    /// never blocks and wrong for any transport that does.
+    ///
+    /// # Errors
+    ///
+    /// Whatever setting up the wake fails with.
+    fn waker(&mut self) -> Result<Option<Waker>, Self::Error> {
+        Ok(None)
     }
 }
 
@@ -221,6 +247,10 @@ pub struct Connection<T: Transport> {
     /// copy — and, unlike a dirty flag, cannot be lost by two consumers, since
     /// each remembers the number it last acted on.
     window_list_revision: u64,
+    /// Windows the compositor has asked to have drawn whole again, oldest
+    /// first, each named once, until [`Connection::take_repaints`] collects
+    /// them.
+    repaints: Vec<u64>,
     /// Bumped on every tray frame, so a shell can tell "sent again" from
     /// "changed" without comparing lists itself.
     tray_revision: u64,
@@ -242,6 +272,7 @@ impl<T: Transport> Connection<T> {
             misdirected: 0,
             window_list: None,
             window_list_revision: 0,
+            repaints: Vec::new(),
             tray_list: None,
             tray_revision: 0,
         }
@@ -288,6 +319,16 @@ impl<T: Transport> Connection<T> {
         self.transport
             .set_wait_timeout(timeout)
             .map_err(ClientError::Transport)
+    }
+
+    /// A handle another thread can use to end [`Self::wait`] early, if the
+    /// transport can be woken. See [`Transport::waker`].
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Transport`] if the transport cannot set the wake up.
+    pub fn waker(&mut self) -> Result<Option<Waker>, ClientError<T::Error>> {
+        self.transport.waker().map_err(ClientError::Transport)
     }
 
     /// How many replies arrived for a correlation id nobody was waiting on.
@@ -384,6 +425,15 @@ impl<T: Transport> Connection<T> {
                 self.tray_list = Some(list);
                 self.tray_revision = self.tray_revision.saturating_add(1);
             }
+            // Kept until collected, and each window once however many times it
+            // was named: two recoveries in a row still mean one full redraw.
+            Frame::Repaint(repaint) => {
+                for window in repaint.windows {
+                    if !self.repaints.contains(&window) {
+                        self.repaints.push(window);
+                    }
+                }
+            }
             // Everything else travels the other way. A compositor that sends
             // one is misrouting; that is worth being able to see and is not
             // worth killing an application over.
@@ -391,6 +441,18 @@ impl<T: Transport> Connection<T> {
                 self.misdirected = self.misdirected.saturating_add(1);
             }
         }
+    }
+
+    /// Take the windows the compositor has asked to have drawn whole again
+    /// since this was last asked, oldest first.
+    ///
+    /// The compositor sends these during artifact recovery
+    /// ([`RecoverDisplay`](crate::control::RequestBody::RecoverDisplay), or its
+    /// Ctrl+Super+R): it has redrawn everything it holds, and asks each client
+    /// to do the same for what only the client holds — a window it has been
+    /// updating a dirty patch at a time.
+    pub fn take_repaints(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.repaints)
     }
 
     /// The desktop's windows as of the last `WLST` frame, or `None` if none has
@@ -1421,5 +1483,28 @@ mod tests {
         let wrapped = c.send(RequestBody::GetDisplayInfo).unwrap();
         assert_eq!(last, u32::MAX);
         assert_eq!(wrapped, 1, "wraps past 0, not onto it");
+    }
+
+    #[test]
+    fn a_repaint_request_is_collected_once_and_each_window_named_once() {
+        let mut first = crate::repaint::encode_repaint(&crate::Repaint {
+            windows: vec![3, 5],
+        });
+        first.extend(crate::repaint::encode_repaint(&crate::Repaint {
+            windows: vec![5, 9],
+        }));
+        let mut conn = Connection::new(FakeTransport::new(vec![first]));
+        conn.pump().unwrap();
+        assert_eq!(
+            conn.take_repaints(),
+            vec![3, 5, 9],
+            "two recoveries in a row still mean one redraw per window"
+        );
+        assert!(conn.take_repaints().is_empty(), "and they are taken once");
+        assert_eq!(
+            conn.misdirected_frames(),
+            0,
+            "a repaint is traffic a client expects"
+        );
     }
 }

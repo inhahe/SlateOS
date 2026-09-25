@@ -149,6 +149,22 @@ fn normalize(
     Ok(pixels)
 }
 
+/// Whether every one of `pixels` is fully opaque.
+///
+/// Measured rather than read off the format. `Xrgb8888` is opaque by
+/// construction — `normalize` forces its alpha to 0xFF — but an `Argb8888`
+/// buffer whose alpha happens to be 0xFF everywhere is every bit as opaque, and
+/// a video player or a game that renders in ARGB and never uses the alpha
+/// channel is the ordinary case, not the exception. Answering "no" for it was
+/// safe and expensive: such a window was never an occluder for the cull, never
+/// took the opaque memcpy blit, and could never be scanned out directly.
+///
+/// One pass over pixels `normalize` has just written, so they are in cache; it
+/// runs once per import, not once per frame.
+fn all_opaque(format: BufferFormat, pixels: &[u32]) -> bool {
+    matches!(format, BufferFormat::Xrgb8888) || pixels.iter().all(|px| px >> 24 == 0xFF)
+}
+
 /// An imported, validated, client-shared pixel buffer.
 ///
 /// Pixels are stored normalized: exactly `width * height` entries in
@@ -170,6 +186,9 @@ pub struct SharedBuffer {
     src_format: BufferFormat,
     /// Normalized ARGB8888 pixels, row-major, length `width * height`.
     pixels: Vec<u32>,
+    /// Whether every pixel is fully opaque, measured at import — see
+    /// [`all_opaque`].
+    opaque: bool,
     /// Set once the compositor has finished reading this buffer for a frame.
     released: bool,
 }
@@ -196,6 +215,7 @@ impl SharedBuffer {
         bytes: &[u8],
     ) -> CompositorResult<Self> {
         let pixels = normalize(width, height, stride, format, bytes)?;
+        let opaque = all_opaque(format, &pixels);
         Ok(Self {
             handle,
             width,
@@ -203,6 +223,7 @@ impl SharedBuffer {
             src_stride: stride,
             src_format: format,
             pixels,
+            opaque,
             released: false,
         })
     }
@@ -255,11 +276,13 @@ impl SharedBuffer {
         self.pixels.get(start..end)
     }
 
-    /// Whether every pixel is fully opaque. True for `Xrgb8888` (import forces
-    /// alpha to 0xFF), letting the compositor skip per-pixel alpha blending.
+    /// Whether every pixel is fully opaque, letting the compositor skip
+    /// per-pixel alpha blending, treat the window as an occluder, and scan it
+    /// out directly when it is fullscreen. Always true for `Xrgb8888` (import
+    /// forces alpha to 0xFF); true for `Argb8888` when no pixel uses its alpha.
     #[must_use]
     pub const fn is_opaque(&self) -> bool {
-        matches!(self.src_format, BufferFormat::Xrgb8888)
+        self.opaque
     }
 
     /// Bounds-checked single-pixel read in normalized ARGB8888.
@@ -330,10 +353,13 @@ pub struct ImageAsset {
     width: u32,
     /// Height in pixels.
     height: u32,
-    /// Source pixel format, retained for [`Self::is_opaque`].
+    /// Source pixel format the client supplied.
     src_format: BufferFormat,
     /// Normalized ARGB8888 pixels, row-major, length `width * height`.
     pixels: Vec<u32>,
+    /// Whether every pixel is fully opaque, measured at import — see
+    /// [`all_opaque`].
+    opaque: bool,
 }
 
 impl ImageAsset {
@@ -356,11 +382,13 @@ impl ImageAsset {
         bytes: &[u8],
     ) -> CompositorResult<Self> {
         let pixels = normalize(width, height, stride, format, bytes)?;
+        let opaque = all_opaque(format, &pixels);
         Ok(Self {
             width,
             height,
             src_format: format,
             pixels,
+            opaque,
         })
     }
 
@@ -391,7 +419,7 @@ impl ImageAsset {
     /// Whether every pixel is fully opaque, letting a blit skip alpha blending.
     #[must_use]
     pub const fn is_opaque(&self) -> bool {
-        matches!(self.src_format, BufferFormat::Xrgb8888)
+        self.opaque
     }
 
     /// Bounds-checked single-pixel read in normalized ARGB8888.

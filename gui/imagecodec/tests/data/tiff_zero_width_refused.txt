@@ -1,0 +1,1 @@
+REFUSED open: Cannot handle zero scanline size

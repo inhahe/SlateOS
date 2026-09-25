@@ -234,8 +234,8 @@ impl Point {
     #[must_use]
     pub fn midpoint(self, other: Self) -> Self {
         Self {
-            x: (self.x + other.x) * 0.5,
-            y: (self.y + other.y) * 0.5,
+            x: self.x.midpoint(other.x),
+            y: self.y.midpoint(other.y),
         }
     }
 }
@@ -2812,8 +2812,10 @@ fn decode_utf16_be(bytes: &[u8]) -> Option<String> {
         return None;
     }
     let mut units = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
-        units.push(u16::from_be_bytes([*pair.first()?, *pair.get(1)?]));
+    // Even length was checked above, so the remainder is empty.
+    let (pairs, _) = bytes.as_chunks::<2>();
+    for pair in pairs {
+        units.push(u16::from_be_bytes(*pair));
     }
     char::decode_utf16(units)
         .collect::<Result<String, _>>()

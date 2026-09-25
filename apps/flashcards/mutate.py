@@ -147,7 +147,10 @@ MUTATIONS = [
         "the flip button records no hit box",
         "            f.hit(Target::StudyCard, prompt);",
         "",
-        ["the_card_and_its_button_both_turn_it_over", "study_answers_the_pointer"],
+        # Only the test that presses the button by its own box can see this:
+        # `study_answers_the_pointer` presses the topmost `StudyCard`, which
+        # without the button's box is the card -- and the card turns over too.
+        ["the_card_and_its_button_both_turn_it_over"],
     ),
     (
         "a rating records no hit box",
@@ -251,6 +254,9 @@ MUTATIONS = [
     (
         "a deck file's name is not read",
         "                name.get_or_insert_with(|| unescape_field(title));",
+        # The annotation keeps `name`'s type, which the call gave it; without
+        # it the mutant does not compile and so tests nothing.
+        "                let _: &Option<String> = &name;\n"
         "                let _ = title;",
         ["a_deck_file_keeps_its_name_and_description", "decks_and_cards_are_kept_as_they_change"],
     ),

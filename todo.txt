@@ -58757,7 +58757,10 @@ test of the fixture, not of the bound.
   of those three files; `CONFIG_NAME`'s load and store are the only call
   sites here. The same goes for `apps/flashcards`, whose decks and review
   history are a directory of deck files under the settings directory
-  (`library_dir`) -- a record of study, not a preference.
+  (`library_dir`) -- a record of study, not a preference -- and for
+  `apps/finance`, whose ledger is `finance/ledger.txt` there (`ledger_path`;
+  its format is `design-decisions.md` §1202) -- a record of money, and the
+  one of the three a careless "reset my settings" would cost most.
 
 - **A slide deck is a YAML file named `.slides`.** (2026-09-25,
   `apps/slides/src/main.rs` -> `deck_document`, `deck_from_document`,

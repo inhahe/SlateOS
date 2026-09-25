@@ -15,5 +15,16 @@ oswindow = { path = "../../gui/window" }
 # Today's date, in the zone the rest of the desktop uses.
 tzrules = { path = "../../tzrules" }
 
+# The ledger is kept in the user's settings directory (`settingsfile::config_dir`)
+# and written through `safeio::write_str_atomically`, so a crash mid-save
+# leaves the last ledger whole rather than half of a new one.
+safeio = { path = "../safeio" }
+settingsfile = { path = "../../gui/settingsfile" }
+
+[dev-dependencies]
+# `with_scratch_config`, so the tests that keep a ledger keep it in a scratch
+# directory and never in the developer's own.
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+
 [lints]
 workspace = true

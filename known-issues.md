@@ -61638,7 +61638,7 @@ promise to break.
 | `logviewer` | 21 log lines, filterable | any file; its header promises "real-time log tailing" and it draws an auto-scroll toggle | `None`, documented |
 | `sysinfo` | CPU, memory, disks, uptime | any read at all — uptime is the string `"4h 23m 17s"` | `None`, documented |
 | `sysmonitor` | processes, live graphs, alerts | a real process source, but the *clock* is now real | the refresh interval |
-| `finance` | accounts, budgets, transactions | both a source and a way to enter anything; see its own entry | `None`, documented |
+| `finance` | accounts, budgets, transactions | ~~both a source and a way to enter anything; see its own entry~~ -- both, 2026-09-25: forms, and a ledger kept as it changes | until midnight, for today's date |
 | `email` | an inbox, folders, threads, filters | a network. Every IMAP and SMTP command it can build -- `login`, `select`, `fetch`, `ehlo`, `mail_from`, twenty in all -- returns a protocol string with no socket to write it to | `None`, documented |
 | `rssreader` | feeds, folders, articles, search | an HTTP client. Its RSS/Atom parser is real and now runs at startup on one sample feed, but nothing can fetch a second one, so `global_auto_refresh_seconds` has nothing to refresh | `None`, documented |
 | `ebook` | library, pagination, bookmarks, contents, search | a window that can be resized. The reading position is a byte offset precisely so it survives repagination, and nothing ever repaginated because nothing ever changed size | `None` -- nothing in a book advances on its own |
@@ -61721,7 +61721,16 @@ removed on 2026-09-15; the app opens on a notice that it cannot fetch.)
 write-only-fields gate refused them, written, clamped and tested and read by
 nothing but the tests. The interval comes back with the source.
 
-### TD-C-FINANCE-IS-A-VIEWER-OVER-SAMPLE-DATA — 2026-09-04 — OPEN
+### TD-C-FINANCE-IS-A-VIEWER-OVER-SAMPLE-DATA — 2026-09-04 — FIXED 2026-09-25
+
+**Fixed 2026-09-25 (lane E), all three gaps in one change, as this entry
+said they had to be.** Forms enter and change accounts, transactions and
+budgets; the ledger is kept as it changes, in a text file under the settings
+directory (`design-decisions.md` §1202 says why text and not YAML); and
+`current_date` is the clock's, with the view following midnight. The sample
+data stays test-only -- a first run opens on an empty dashboard that says
+why it is empty, where things will be kept, and has the one button that
+begins. The rest of this entry is the history.
 
 **In short.** The finance app now opens a window and responds to the keyboard,
 but there is no way to *put anything into it*: no "new transaction", no "new
@@ -159885,6 +159894,29 @@ the settings directory, opt-in so no test can write the developer's own).
 198 tests; `apps/flashcards/mutate.py` has 38 rows. Twelve examined; nine to
 go.
 
+**`apps/finance`, 2026-09-25 -- a budget tracker nothing could be entered
+into, that kept nothing, and whose today was a constant.** `add_account`,
+`add_transaction` and `set_budget` had no caller outside the tests; the
+notice saying so was drawn at the top of the window and then painted over by
+the sidebar and the header. Nothing was kept. "Today" was 18 May 2026 in
+every run. Nothing answered the pointer. The transaction list showed every
+month in the order things were typed, under a header naming one month whose
+arrows changed nothing in it, and it did not scroll -- rows past the bottom
+were not drawn, and the arrow keys stopped at the last one on screen. The
+budgets screen listed only budgets already set, so none could be set. Ctrl+D
+deleted at once, from any screen, including a transaction chosen on another
+one. Now: forms enter and change accounts, transactions and budgets (typed
+fields, Tab between them, choices stepped by the keys or their arrows, and a
+refusal that says why and keeps what was typed); deletes ask, on the screen
+that shows what goes; the list is the header's month, newest first, and a
+search reaches every month; every list scrolls and keeps its choice in view;
+the sidebar, month arrows, search box, category chip, buttons, rows, fields
+and question all answer the pointer; F1 lists the keys; today and midnight
+come from the clock; and the ledger is kept as it changes (a text file under
+the settings directory, refused whole and left alone if it cannot be read
+whole -- `design-decisions.md` §1202). 105 tests; `apps/finance/mutate.py`
+has 49 rows. Thirteen examined; eight to go.
+
 ## `TD-C-ONE-INTERMITTENT-TEST-FAILURE-IN-THE-WORKSPACE-SUITE` (lane C, 2026-09-17) -- **IDENTIFIED AND FIXED 2026-09-19**
 
 **In short:** a `cargo test --workspace` failed with exactly one failing test,
@@ -165504,7 +165536,8 @@ test that forgets its scratch directory then writes nowhere, and
 `a_tracker_made_with_new_writes_nothing` pins that. It protects the one app
 that does it, not the next one written; the guard above is still the fix.
 `apps/flashcards` does the same since the same day
-(`an_app_made_with_new_keeps_nothing`).
+(`an_app_made_with_new_keeps_nothing`), and `apps/finance`
+(`a_window_made_by_new_keeps_nothing`).
 
 ### [E] The feed reader forgets its subscriptions, folders and marks at exit -- 2026-09-25
 **Status:** OPEN

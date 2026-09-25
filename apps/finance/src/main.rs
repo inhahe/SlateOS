@@ -11,10 +11,12 @@
 //!
 //! Accounts, transactions and budgets are entered through forms (`Form`), and
 //! every control answers the pointer as well as the keys (F1 lists them).
-//! "Today" is the clock's. It could record nothing until 2026-09-25:
-//! `add_account`, `add_transaction` and `set_budget` had no production caller,
-//! and the window said so from under the sidebar and header that painted over
-//! the notice.
+//! Everything is kept as it changes, in a text ledger in the settings
+//! directory (`ledger_path`, `ledger_text`, `parse_ledger`). "Today" is the
+//! clock's. It could record nothing until 2026-09-25: `add_account`,
+//! `add_transaction` and `set_budget` had no production caller, nothing was
+//! kept, and the window said so from under the sidebar and header that painted
+//! over the notice.
 
 use appearance::Palette;
 use appearance::Surface;
@@ -93,6 +95,29 @@ impl Category {
             Self::Investment => "Investment",
             Self::Other => "Other",
         }
+    }
+
+    /// The name the ledger writes: fixed, unlike `label`, which is for people
+    /// and may change.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Food => "food",
+            Self::Housing => "housing",
+            Self::Transportation => "transportation",
+            Self::Utilities => "utilities",
+            Self::Healthcare => "healthcare",
+            Self::Entertainment => "entertainment",
+            Self::Shopping => "shopping",
+            Self::Education => "education",
+            Self::Savings => "savings",
+            Self::Income => "income",
+            Self::Investment => "investment",
+            Self::Other => "other",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.key() == key)
     }
 
     fn icon(self) -> &'static str {
@@ -212,7 +237,7 @@ impl SimpleDate {
 }
 
 // ── Transaction ─────────────────────────────────────────────────────
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Transaction {
     id: u32,
     date: SimpleDate,
@@ -235,7 +260,7 @@ impl Transaction {
 }
 
 // ── Account ─────────────────────────────────────────────────────────
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Account {
     id: u32,
     name: String,
@@ -262,6 +287,21 @@ impl AccountType {
         Self::Investment,
     ];
 
+    /// The name the ledger writes.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Checking => "checking",
+            Self::Savings => "savings",
+            Self::CreditCard => "credit-card",
+            Self::Cash => "cash",
+            Self::Investment => "investment",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.key() == key)
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Checking => "Checking",
@@ -274,7 +314,7 @@ impl AccountType {
 }
 
 // ── Budget ──────────────────────────────────────────────────────────
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Budget {
     category: Category,
     monthly_limit: i64, // cents (positive)
@@ -561,6 +601,13 @@ struct FinanceApp {
     last_hits: Vec<(Target, Rect)>,
     /// The wheel's remainder.
     wheel: wheel::Accumulator,
+    /// Whether changes are kept. Off in `new`, so no test can write the
+    /// user's ledger; `from_settings`, which `main` uses, turns it on.
+    persist: bool,
+    /// Why the ledger is not being kept, drawn for as long as it is true: it
+    /// could not be read (and so is left exactly as it is), or the last save
+    /// failed.
+    ledger_error: Option<String>,
     /// The user's colours, replaced whenever the theme changes.
     ///
     /// Seeded from the defaults so the field is never absent; the framework
@@ -643,6 +690,105 @@ impl FinanceApp {
             hover: None,
             last_hits: Vec::new(),
             wheel: wheel::Accumulator::default(),
+            persist: false,
+            ledger_error: None,
+        }
+    }
+
+    /// The window's finances: the ledger kept last time, and every change
+    /// kept from here on.
+    fn from_settings() -> Self {
+        let mut app = Self::new();
+        app.persist = true;
+        match ledger_path() {
+            Some(path) => app.load_ledger(&path),
+            None => app.ledger_error = Some(String::from(NO_HOME)),
+        }
+        app
+    }
+
+    /// Read the ledger at `path`; with none there yet, this is a first run.
+    ///
+    /// One that cannot be read whole is left exactly as it is: nothing is
+    /// saved over it, and the window says so for as long as it is open. A
+    /// save would write back only what was understood.
+    fn load_ledger(&mut self, path: &std::path::Path) {
+        let refused = |why: String| {
+            format!(
+                "{} was not read ({why}), so nothing is saved over it",
+                path.display()
+            )
+        };
+        let read = match safeio::read_to_string_capped(path, MAX_LEDGER_BYTES) {
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+            Err(err) => {
+                self.persist = false;
+                self.ledger_error = Some(refused(err.to_string()));
+                return;
+            }
+        };
+        if read.truncated {
+            self.persist = false;
+            self.ledger_error = Some(refused(format!(
+                "it is larger than {} MiB",
+                MAX_LEDGER_BYTES / (1024 * 1024)
+            )));
+            return;
+        }
+        match parse_ledger(&read.text) {
+            Ok(ledger) => {
+                self.next_account_id = ledger
+                    .accounts
+                    .iter()
+                    .map(|a| a.id.saturating_add(1))
+                    .max()
+                    .unwrap_or(1);
+                self.next_tx_id = ledger
+                    .transactions
+                    .iter()
+                    .map(|t| t.id.saturating_add(1))
+                    .max()
+                    .unwrap_or(1);
+                self.selected_account = ledger.accounts.first().map(|a| a.id);
+                self.accounts = ledger.accounts;
+                self.budgets = ledger.budgets;
+                self.transactions = ledger.transactions;
+            }
+            Err(why) => {
+                self.persist = false;
+                self.ledger_error = Some(refused(why));
+            }
+        }
+    }
+
+    /// Keep the ledger as it is now, if this window keeps anything.
+    fn save_ledger(&mut self) {
+        if !self.persist {
+            return;
+        }
+        let Some(path) = ledger_path() else {
+            self.ledger_error = Some(String::from(NO_HOME));
+            return;
+        };
+        let text = ledger_text(&self.accounts, &self.budgets, &self.transactions);
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| safeio::write_str_atomically(&path, &text));
+        self.ledger_error = match written {
+            Ok(()) => None,
+            Err(err) => Some(format!("Not saved to {}: {err}", path.display())),
+        };
+    }
+
+    /// Where what is entered goes, for the first-run card.
+    fn keeping_line(&self) -> String {
+        match ledger_path() {
+            Some(path) if self.persist && self.ledger_error.is_none() => {
+                format!("What you enter is kept in {}.", path.display())
+            }
+            _ => String::from("Nothing you enter here is kept."),
         }
     }
 
@@ -1609,9 +1755,11 @@ impl FinanceApp {
         self.after_change();
     }
 
-    /// What every change to the ledger is followed by.
+    /// What every change to the ledger is followed by: it is kept at once,
+    /// so closing the window never loses anything.
     fn after_change(&mut self) {
         self.keep_lists_in_view();
+        self.save_ledger();
     }
 
     // ── The lists ───────────────────────────────────────────────────
@@ -2493,11 +2641,16 @@ impl FinanceApp {
         let card = Rect::new(cx, cy, cw, 128.0);
         self.palette
             .push_surface(f, card.x, card.y, card.w, card.h, 8.0, Surface::Card);
-        for (i, line) in NO_DATA_LINES.iter().enumerate() {
+        let keeping = self.keeping_line();
+        let lines = NO_DATA_LINES
+            .iter()
+            .copied()
+            .chain(std::iter::once(keeping.as_str()));
+        for (i, line) in lines.enumerate() {
             f.push(RenderCommand::Text {
                 x: card.x + 16.0,
                 y: card.y + 14.0 + i as f32 * 22.0,
-                text: (*line).to_string(),
+                text: line.to_string(),
                 color: if i == 0 {
                     self.palette.text
                 } else {
@@ -3342,6 +3495,14 @@ impl FinanceApp {
         let sy = self.height - Self::STATUS_H;
         self.palette
             .push_surface(f, 0.0, sy, self.width, Self::STATUS_H, 0.0, Surface::Card);
+        let room = (self.width - Self::SIDEBAR_W - 16.0).max(0.0);
+        // Why nothing is being kept, beside whatever the last action said:
+        // "Transaction added" is true and incomplete when the save failed.
+        let error_room = if self.ledger_error.is_some() {
+            room * 0.6
+        } else {
+            0.0
+        };
         f.push(RenderCommand::Text {
             x: Self::SIDEBAR_W + 8.0,
             y: sy + 6.0,
@@ -3349,9 +3510,21 @@ impl FinanceApp {
             font_size: 12.0,
             color: self.palette.subtext1,
             font_weight: FontWeightHint::Regular,
-            max_width: Some((self.width - Self::SIDEBAR_W - 16.0).max(0.0)),
+            max_width: Some((room - error_room - 12.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
+        if let Some(error) = &self.ledger_error {
+            f.push(RenderCommand::Text {
+                x: self.width - 8.0 - error_room,
+                y: sy + 6.0,
+                text: error.clone(),
+                font_size: 12.0,
+                color: self.palette.ink(self.palette.red),
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(error_room),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
     }
 
     // ── The form ────────────────────────────────────────────────────
@@ -4003,11 +4176,238 @@ impl App for FinanceApp {
 /// What the dashboard says with no accounts: that the emptiness is correct,
 /// and how to begin. It was drawn at the top of the window before the sidebar
 /// and header, which painted over all of it.
-const NO_DATA_LINES: [&str; 3] = [
+///
+/// A third line, drawn after these, says where what is entered is kept
+/// (`FinanceApp::keeping_line`).
+const NO_DATA_LINES: [&str; 2] = [
     "No accounts yet.",
-    "Start with + Account on the accounts screen (4, then N); then N adds a transaction.",
-    "Nothing here is invented: it opened on a made-up checking account until 2026-09-15.",
+    "Start with + Account (or 4, then N); then N adds a transaction.",
 ];
+
+/// What the window says when there is nowhere to keep anything.
+const NO_HOME: &str = "Nothing is kept: no home directory is set";
+
+// ── Keeping the ledger ──────────────────────────────────────────────
+
+/// The first line of a ledger this version writes, and the only one it reads.
+const LEDGER_HEADER: &str = "# SlateOS finance ledger, format 1";
+
+/// The largest ledger read. Past it nothing is read or written, rather than a
+/// part being taken for the whole; a transaction is a line of about a hundred
+/// bytes, so this is several hundred thousand of them.
+const MAX_LEDGER_BYTES: usize = 64 * 1024 * 1024;
+
+/// Where the ledger is kept: a text file in the user's settings directory,
+/// beside `apps/flashcards`' decks and `apps/habits`' record.
+fn ledger_path() -> Option<std::path::PathBuf> {
+    settingsfile::config_dir().map(|dir| dir.join("finance").join("ledger.txt"))
+}
+
+/// Everything a ledger holds.
+struct Ledger {
+    accounts: Vec<Account>,
+    budgets: Vec<Budget>,
+    transactions: Vec<Transaction>,
+}
+
+/// A text field as written: a backslash, tab, newline or carriage return is
+/// escaped, so no field can split a line or a record, and every string comes
+/// back as it went.
+fn escape_field(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// A text field as read, or `None` for an escape `escape_field` never writes.
+fn unescape_field(text: &str) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        out.push(match chars.next()? {
+            '\\' => '\\',
+            't' => '\t',
+            'n' => '\n',
+            'r' => '\r',
+            _ => return None,
+        });
+    }
+    Some(out)
+}
+
+/// The ledger as text: the header, then a line per account, budget and
+/// transaction, its fields separated by tabs. Money is in whole cents and a
+/// date is `YYYY-MM-DD`, so nothing is rounded on the way through.
+fn ledger_text(accounts: &[Account], budgets: &[Budget], transactions: &[Transaction]) -> String {
+    let mut out = String::from(LEDGER_HEADER);
+    out.push('\n');
+    for a in accounts {
+        out.push_str(&format!(
+            "account\t{}\t{}\t{}\t{}\n",
+            a.id,
+            a.account_type.key(),
+            a.initial_balance,
+            escape_field(&a.name)
+        ));
+    }
+    for b in budgets {
+        out.push_str(&format!(
+            "budget\t{}\t{}\n",
+            b.category.key(),
+            b.monthly_limit
+        ));
+    }
+    for t in transactions {
+        out.push_str(&format!(
+            "tx\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            t.id,
+            t.date.format(),
+            t.amount,
+            t.category.key(),
+            t.account_id,
+            if t.recurring { "y" } else { "n" },
+            escape_field(&t.description),
+            escape_field(&t.notes)
+        ));
+    }
+    out
+}
+
+/// Read a ledger `ledger_text` wrote, or say which line is wrong and how.
+///
+/// All or nothing: a ledger with one line not understood is refused whole,
+/// because the next save would write back only what was read, and the line
+/// not understood would be gone.
+fn parse_ledger(text: &str) -> Result<Ledger, String> {
+    let mut lines = text.lines().enumerate();
+    match lines.next() {
+        Some((_, first)) if first == LEDGER_HEADER => {}
+        Some((_, first)) if first.starts_with("# SlateOS finance ledger") => {
+            return Err(String::from(
+                "it was written by a newer version of this program",
+            ));
+        }
+        _ => {
+            return Err(String::from(
+                "it does not begin with the ledger's first line",
+            ));
+        }
+    }
+    let mut ledger = Ledger {
+        accounts: Vec::new(),
+        budgets: Vec::new(),
+        transactions: Vec::new(),
+    };
+    // Each transaction's line, to name it if its account is missing.
+    let mut tx_lines = Vec::new();
+    for (i, line) in lines {
+        let n = i.saturating_add(1);
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let bad = |why: &str| format!("line {n}: {why}");
+        let fields: Vec<&str> = line.split('\t').collect();
+        match fields.as_slice() {
+            ["account", id, kind, opening, name] => {
+                let id: u32 = id
+                    .parse()
+                    .map_err(|_| bad("an account's number is not one"))?;
+                if ledger.accounts.iter().any(|a| a.id == id) {
+                    return Err(bad("two accounts have one number"));
+                }
+                ledger.accounts.push(Account {
+                    id,
+                    account_type: AccountType::from_key(kind)
+                        .ok_or_else(|| bad("an account is of a kind this program does not know"))?,
+                    initial_balance: opening
+                        .parse()
+                        .map_err(|_| bad("an opening balance is not a whole number of cents"))?,
+                    name: unescape_field(name)
+                        .ok_or_else(|| bad("a name holds an unknown escape"))?,
+                });
+            }
+            ["budget", category, limit] => {
+                let category = Category::from_key(category)
+                    .ok_or_else(|| bad("a budget is for a category this program does not know"))?;
+                if ledger.budgets.iter().any(|b| b.category == category) {
+                    return Err(bad("a category has two budgets"));
+                }
+                let monthly_limit: i64 = limit
+                    .parse()
+                    .map_err(|_| bad("a budget is not a whole number of cents"))?;
+                if monthly_limit <= 0 {
+                    return Err(bad("a budget is not more than nothing"));
+                }
+                ledger.budgets.push(Budget {
+                    category,
+                    monthly_limit,
+                });
+            }
+            [
+                "tx",
+                id,
+                date,
+                amount,
+                category,
+                account,
+                recurring,
+                description,
+                notes,
+            ] => {
+                let id: u32 = id
+                    .parse()
+                    .map_err(|_| bad("a transaction's number is not one"))?;
+                if ledger.transactions.iter().any(|t| t.id == id) {
+                    return Err(bad("two transactions have one number"));
+                }
+                ledger.transactions.push(Transaction {
+                    id,
+                    date: SimpleDate::parse(date).ok_or_else(|| bad("a date is not one"))?,
+                    amount: amount
+                        .parse()
+                        .map_err(|_| bad("an amount is not a whole number of cents"))?,
+                    category: Category::from_key(category)
+                        .ok_or_else(|| bad("a category this program does not know"))?,
+                    account_id: account
+                        .parse()
+                        .map_err(|_| bad("an account's number is not one"))?,
+                    recurring: match *recurring {
+                        "y" => true,
+                        "n" => false,
+                        _ => return Err(bad("recurring is neither y nor n")),
+                    },
+                    description: unescape_field(description)
+                        .ok_or_else(|| bad("a description holds an unknown escape"))?,
+                    notes: unescape_field(notes)
+                        .ok_or_else(|| bad("a note holds an unknown escape"))?,
+                });
+                tx_lines.push(n);
+            }
+            _ => return Err(bad("not a line this program writes")),
+        }
+    }
+    for (tx, n) in ledger.transactions.iter().zip(&tx_lines) {
+        if !ledger.accounts.iter().any(|a| a.id == tx.account_id) {
+            return Err(format!(
+                "line {n}: a transaction is in account {}, which the ledger does not have",
+                tx.account_id
+            ));
+        }
+    }
+    Ok(ledger)
+}
 
 /// Row heights of the three lists.
 const TX_ROW_H: f32 = 36.0;
@@ -4220,8 +4620,7 @@ fn insert_limited(input: &mut TextInput, typed: &str, capacity: usize) {
 }
 
 fn main() -> ExitCode {
-    let mut finance = FinanceApp::new();
-    app::launch("finance", &mut finance)
+    app::launch("finance", &mut FinanceApp::from_settings())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -4290,6 +4689,10 @@ mod tests {
                 "the window never said {line:?}"
             );
         }
+        assert!(
+            drawn.iter().any(|t| t == "Nothing you enter here is kept."),
+            "a window that keeps nothing did not say so"
+        );
         assert!(
             NO_DATA_LINES.iter().any(|l| l.contains("+ Account")),
             "the message does not name the control that begins"
@@ -5302,6 +5705,59 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_amount_is_refused() {
+        let mut app = one_account();
+        app.open_new_transaction();
+        probe::type_str(&mut app, "Nothing");
+        probe::key(&mut app, &probe::press(Key::Tab));
+        probe::type_str(&mut app, "0.00");
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert_eq!(app.form_error.as_deref(), Some("The amount is zero"));
+        assert!(
+            app.transactions.is_empty(),
+            "a transaction of nothing was saved"
+        );
+    }
+
+    /// Outside the question a press keeps what was asked about, and reaches
+    /// nothing behind it.
+    #[test]
+    fn a_press_outside_the_question_keeps_and_reaches_nothing() {
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
+        let ids = app.visible_ids();
+        let (chosen, other) = (ids[0], ids[1]);
+        app.selected_id = Some(chosen);
+        let behind = probe::rect_of(&app, Target::TxRow(other)).unwrap();
+        probe::key(&mut app, &probe::press(Key::Delete));
+        assert_eq!(app.pending_delete, Some(Doomed::Transaction(chosen)));
+        let n = app.transactions.len();
+        let (x, y) = (behind.x + 10.0, behind.y + behind.h / 2.0);
+        assert_eq!(app.frame().hit_test(x, y), Some(Target::QuestionBackdrop));
+        press_at(&mut app, x, y);
+        assert!(
+            app.pending_delete.is_none(),
+            "a press outside left the question up"
+        );
+        assert_eq!(app.transactions.len(), n, "a press outside deleted");
+        assert_eq!(
+            app.selected_id,
+            Some(chosen),
+            "the press reached the row behind"
+        );
+        probe::key(&mut app, &probe::press(Key::Delete));
+        let card = probe::rect_of(&app, Target::QuestionCard).unwrap();
+        assert_eq!(
+            press_at(&mut app, card.x + 4.0, card.y + 4.0),
+            EventResult::Ignored
+        );
+        assert!(
+            app.pending_delete.is_some(),
+            "a press on the card answered it"
+        );
+    }
+
+    #[test]
     fn income_is_money_in() {
         let mut app = one_account();
         app.open_new_transaction();
@@ -5825,6 +6281,15 @@ mod tests {
             EventResult::Consumed
         );
         assert!(app.tx_scroll > 0, "the wheel did not scroll");
+        // Held to the list's own area: the rows ran on under the status bar.
+        for (target, r) in app.frame().hits() {
+            if matches!(target, Target::TxRow(_)) {
+                assert!(
+                    r.bottom() <= app.content_bottom() + 0.5,
+                    "{target:?} reaches under the status bar: {r:?}"
+                );
+            }
+        }
         let first = app.visible_ids()[app.tx_scroll];
         assert!(probe::rect_of(&app, Target::TxRow(first)).is_some());
         let top = app.visible_ids()[0];
@@ -6017,5 +6482,244 @@ mod tests {
         app.view_month = SimpleDate::new(1999, 6, 1);
         app.handle_event(&Event::Tick { elapsed_ms: 1000 });
         assert_eq!(app.view_month, SimpleDate::new(1999, 6, 1));
+    }
+
+    // ── Keeping the ledger ──────────────────────────────────────────
+
+    /// **Nothing was kept**: not a single `fs::` call in the crate, so a
+    /// month of entries was gone when the window closed.
+    #[test]
+    fn what_is_entered_is_there_next_time() {
+        settingsfile::testing::with_scratch_config("finance-kept", |_| {
+            let mut app = FinanceApp::from_settings();
+            assert!(app.ledger_error.is_none(), "{:?}", app.ledger_error);
+            assert!(
+                texts(&app)
+                    .iter()
+                    .any(|t| t.starts_with("What you enter is kept in ")),
+                "the first-run card does not say where things are kept"
+            );
+            probe::click(&mut app, Target::NewAccount);
+            probe::type_str(&mut app, "Everyday");
+            probe::key(&mut app, &probe::press(Key::Enter));
+            app.screen = Screen::Transactions;
+            probe::key(&mut app, &probe::typing("n"));
+            probe::type_str(&mut app, "Caf\u{e9} au lait");
+            probe::key(&mut app, &probe::press(Key::Tab));
+            probe::type_str(&mut app, "3.20");
+            probe::key(&mut app, &probe::press(Key::Enter));
+            app.screen = Screen::Budgets;
+            probe::key(&mut app, &probe::press(Key::Enter));
+            probe::type_str(&mut app, "450");
+            probe::key(&mut app, &probe::press(Key::Enter));
+            assert!(app.form.is_none(), "{:?}", app.form_error);
+            assert!(app.ledger_error.is_none(), "{:?}", app.ledger_error);
+            assert_eq!(
+                (
+                    app.accounts.len(),
+                    app.transactions.len(),
+                    app.budgets.len()
+                ),
+                (1, 1, 1)
+            );
+
+            let mut again = FinanceApp::from_settings();
+            assert!(again.ledger_error.is_none(), "{:?}", again.ledger_error);
+            assert_eq!(again.accounts, app.accounts);
+            assert_eq!(again.transactions, app.transactions);
+            assert_eq!(again.budgets, app.budgets);
+            let (today, account) = (again.current_date, again.accounts[0].id);
+            let id = again.add_transaction(today, "Next", -1, Category::Other, account, "", false);
+            assert!(
+                !app.transactions.iter().any(|t| t.id == id),
+                "a new transaction reused a kept one's number"
+            );
+        });
+    }
+
+    #[test]
+    fn deleting_is_kept_too() {
+        settingsfile::testing::with_scratch_config("finance-deleted", |_| {
+            let mut app = FinanceApp::from_settings();
+            let today = app.current_date;
+            let account = app.add_account("Wallet", AccountType::Cash, 0);
+            let kept =
+                app.add_transaction(today, "Kept", -100, Category::Other, account, "", false);
+            let gone =
+                app.add_transaction(today, "Gone", -200, Category::Other, account, "", false);
+            app.after_change();
+            app.screen = Screen::Transactions;
+            app.selected_id = Some(gone);
+            probe::key(&mut app, &probe::press(Key::Delete));
+            probe::key(&mut app, &probe::typing("y"));
+            let again = FinanceApp::from_settings();
+            let ids: Vec<u32> = again.transactions.iter().map(|t| t.id).collect();
+            assert_eq!(ids, vec![kept]);
+        });
+    }
+
+    #[test]
+    fn a_window_made_by_new_keeps_nothing() {
+        settingsfile::testing::with_scratch_config("finance-quiet", |dir| {
+            let mut app = one_account();
+            app.open_new_transaction();
+            probe::type_str(&mut app, "Test");
+            probe::key(&mut app, &probe::press(Key::Tab));
+            probe::type_str(&mut app, "1");
+            probe::key(&mut app, &probe::press(Key::Enter));
+            assert_eq!(app.transactions.len(), 1, "{:?}", app.form_error);
+            assert!(
+                !dir.join("slateos").join("finance").exists(),
+                "a window made by new() wrote the user's ledger"
+            );
+        });
+    }
+
+    #[test]
+    fn a_ledger_that_cannot_be_read_is_left_as_it_is() {
+        settingsfile::testing::with_scratch_config("finance-broken", |_| {
+            let path = ledger_path().unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let broken = format!(
+                "{LEDGER_HEADER}\naccount\t1\tchecking\t0\tEveryday\ntx\t1\t2026-02-30\t-100\tfood\t1\tn\tLunch\t\n"
+            );
+            std::fs::write(&path, &broken).unwrap();
+            let mut app = FinanceApp::from_settings();
+            let error = app
+                .ledger_error
+                .clone()
+                .expect("an unreadable ledger was taken without a word");
+            assert!(error.contains("line 3"), "{error}");
+            assert!(texts(&app).contains(&error), "the refusal is not on screen");
+            assert!(
+                app.accounts.is_empty(),
+                "half a ledger was taken for the whole"
+            );
+            app.add_account("New", AccountType::Cash, 0);
+            app.after_change();
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                broken,
+                "the unreadable ledger was saved over"
+            );
+        });
+    }
+
+    #[test]
+    fn a_save_that_fails_says_so_and_the_next_one_clears_it() {
+        settingsfile::testing::with_scratch_config("finance-refused", |_| {
+            let mut app = FinanceApp::from_settings();
+            let path = ledger_path().unwrap();
+            // A directory where the file goes, so the write cannot land.
+            std::fs::create_dir_all(&path).unwrap();
+            app.add_account("Wallet", AccountType::Cash, 0);
+            app.after_change();
+            let error = app
+                .ledger_error
+                .clone()
+                .expect("a failed save said nothing");
+            assert!(error.starts_with("Not saved to "), "{error}");
+            assert!(texts(&app).contains(&error), "the failure is not on screen");
+            std::fs::remove_dir(&path).unwrap();
+            app.after_change();
+            assert!(app.ledger_error.is_none(), "{:?}", app.ledger_error);
+            assert!(path.is_file(), "the second save wrote nothing");
+        });
+    }
+
+    #[test]
+    fn the_ledger_reads_back_what_it_wrote_whatever_the_text() {
+        let awkward = [
+            "plain",
+            "tab\there",
+            "new\nline",
+            "back\\slash",
+            "\\t written out",
+            "caf\u{e9} \u{1F4B0}",
+            "",
+            "cr\rhere",
+            "ends in \\",
+        ];
+        let mut app = FinanceApp::new();
+        for (i, name) in awkward.iter().enumerate() {
+            let account = app.add_account(name, AccountType::ALL[i % 5], -1000 * i as i64);
+            app.add_transaction(
+                SimpleDate::new(2026, 9, 25),
+                name,
+                -1 - i as i64,
+                Category::ALL[i % 12],
+                account,
+                name,
+                i % 2 == 0,
+            );
+        }
+        app.set_budget(Category::Food, 12_345);
+        app.set_budget(Category::Other, 1);
+        let text = ledger_text(&app.accounts, &app.budgets, &app.transactions);
+        assert_eq!(
+            text.lines().count(),
+            1 + awkward.len() * 2 + 2,
+            "a field broke a line"
+        );
+        let back = parse_ledger(&text).unwrap();
+        assert_eq!(back.accounts, app.accounts);
+        assert_eq!(back.transactions, app.transactions);
+        assert_eq!(back.budgets, app.budgets);
+    }
+
+    #[test]
+    fn a_ledger_is_refused_whole_and_says_where() {
+        let head = LEDGER_HEADER;
+        let account = "account\t1\tchecking\t0\tA";
+        let cases: [(String, &str); 15] = [
+            (String::new(), "first line"),
+            (format!("{account}\n"), "first line"),
+            (
+                String::from("# SlateOS finance ledger, format 2\n"),
+                "newer",
+            ),
+            (format!("{head}\nwhat\t1\n"), "line 2"),
+            (format!("{head}\naccount\tx\tchecking\t0\tA\n"), "line 2"),
+            (format!("{head}\naccount\t1\tgold\t0\tA\n"), "line 2"),
+            (
+                format!("{head}\n{account}\naccount\t1\tcash\t0\tB\n"),
+                "line 3",
+            ),
+            (format!("{head}\naccount\t1\tchecking\t0\tA\\q\n"), "line 2"),
+            (format!("{head}\naccount\t1\tchecking\t0.5\tA\n"), "line 2"),
+            (format!("{head}\nbudget\tfood\t0\n"), "line 2"),
+            (
+                format!("{head}\nbudget\tfood\t100\nbudget\tfood\t200\n"),
+                "line 3",
+            ),
+            (
+                format!("{head}\ntx\t1\t2026-09-25\t-100\tfood\t9\tn\tLunch\t\n"),
+                "account 9",
+            ),
+            (
+                format!("{head}\n{account}\ntx\t1\t2026-09-25\t-100\tfood\t1\tmaybe\tLunch\t\n"),
+                "line 3",
+            ),
+            (
+                format!("{head}\n{account}\ntx\t1\t2026-09-25\t-1.00\tfood\t1\tn\tLunch\t\n"),
+                "line 3",
+            ),
+            (
+                format!("{head}\n{account}\ntx\t1\t2026-09-25\t-100\tfood\t1\tn\tLunch\n"),
+                "line 3",
+            ),
+        ];
+        for (text, says) in cases {
+            let err = parse_ledger(&text)
+                .err()
+                .unwrap_or_else(|| panic!("{text:?} was read"));
+            assert!(err.contains(says), "{text:?}: {err}");
+        }
+        let fine = parse_ledger(&format!("{head}\n\n# a note\n{account}\n")).unwrap();
+        assert_eq!(
+            fine.accounts.len(),
+            1,
+            "a blank line or a comment was refused"
+        );
     }
 }

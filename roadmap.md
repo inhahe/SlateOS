@@ -1738,6 +1738,24 @@ D's to act on once answered).
   Still open, and not libc's alone: the working directory and umask across
   exec and spawn (`requests/d-a-cwd-and-umask-do-not-survive-exec.md`), and
   spawn attributes (`TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES`).
+  **The heap, the ABI marker and `tcflush` — 2026-09-25 (lane D).**
+    * the heap is dlmalloc, vendored (design-decisions §1101): a small block no
+      longer costs a 16 KiB mapping, two system calls and a console line — for
+      C programs and every Rust `Box`/`Vec`/`String` alike — and `malloc(0)`
+      returns a pointer, as on Linux;
+    * every binary linked against this libc carries the SlateOS ABI note (§33)
+      from crt0, and the five bare-metal services carry their own, so the kernel
+      can tell native from Linux without guessing; a program whose linker
+      script leaves its ELF headers unmapped no longer faults at startup
+      (§1102; `requests/a-bd-coreutils-cannot-start-two-link-faults.md`);
+    * `tcflush`, `ioctl(TCFLSH)` and `tcsetattr(TCSAFLUSH)` empty the terminal's
+      input queue through `SYS_TTY_FLUSH`, on a pty as well as the console.
+    * `fts` has glibc's ABI and BSD's algorithm (§1103): no depth or stream
+      limit, every root walked, `compar`, `fts_children`, `FTS_XDEV`,
+      `FTS_SEEDOT` and `FTS_DC` cycle detection — and glibc's constants, which
+      the old instruction values contradicted.
+  Open from this pass: `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA` (and
+  its deferred question) and `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`.
 
 - `[-]` `[D]` **Pseudo-terminals — scoped 2026-08-21, unblocked 2026-08-23.**
   **Status: the block is cleared; the remaining work is lane B's.** Lane A
@@ -3709,7 +3727,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Wall-clock time (CRITICAL bugfix): clock_gettime(CLOCK_REALTIME)/gettimeofday()/time() all read SYS_CLOCK_MONOTONIC (boot-relative ns), so they returned "seconds since boot" instead of "seconds since 1970" — breaking file mtimes, `date`, logs, `make`, TLS cert validity, cron. The kernel already had timekeeping::clock_realtime() (CMOS RTC + TSC) but no syscall exposed it. Added kernel SYS_CLOCK_REALTIME=14 (handler sys_clock_realtime + dispatch self-test); posix clock_gettime now routes CLOCK_REALTIME/CLOCK_REALTIME_COARSE to it via is_realtime_clock(), and gettimeofday()/time() use it. Monotonic/boottime/cputime clocks and all timeout/uptime callers stay on SYS_CLOCK_MONOTONIC. 17097 posix tests pass; kernel + bare-metal posix build clean. clock_settime/settimeofday now wired via SYS_CLOCK_SETTIME=15 (absolute set), and adjtimex's ADJ_SETOFFSET clock step via SYS_CLOCK_ADJTIME=16 (signed-delta adjust, backed by atomic timekeeping::adjust_realtime).
   - [x] Memory: mmap, munmap, mprotect
   - [x] Strings: memcpy, memmove, memset, memcmp, memchr, strlen, strnlen, strcmp, strncmp, strcpy, strncpy, strchr, strrchr
-  - [x] Directory: opendir, readdir, closedir (static Dir pool, 8 concurrent)
+  - [x] Directory: opendir, readdir, closedir — each stream a heap snapshot of the listing, up to `dirent::MAX_OPEN_DIRS` (64) open at once (was a static pool of 8)
   - [x] Misc: getcwd, chdir (full CWD tracking with path normalization + resolve_path() wired into all file ops), isatty, getuid/geteuid/getgid/getegid, sysconf, abort
   - [x] Fcntl: O_* flags, SEEK_*, access mode flags, S_IF* file type bits
   - [x] Fd table: userspace fd→handle mapping (File/Pipe/Console), 256 entries, fds 0/1/2 pre-initialized
@@ -3722,12 +3740,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Strings extended: strcat, strncat, strstr, strspn, strcspn, strpbrk, strtok, strdup (via mmap), strerror
   - [x] stdlib: atoi, atol, strtol, strtoul (base auto-detect), abs, labs, qsort, bsearch, rand/srand
   - [x] ctype: isalpha, isdigit, isalnum, isspace, isupper, islower, isprint, iscntrl, ispunct, isxdigit, isgraph, isblank, isascii, toupper, tolower, toascii
-  - [x] malloc/free/calloc/realloc via mmap-backed allocator (size header per allocation)
+  - [x] malloc/free/calloc/realloc and the aligned forms: a dlmalloc heap (vendored dlmalloc-rs 0.2.14, one lock, large blocks mapped individually; design-decisions §1101). Until 2026-09-25 every allocation was its own `mmap` with a size header, and `malloc(0)` returned NULL
   - [x] setjmp/longjmp: x86_64 assembly, saves/restores callee-saved registers
   - [x] stdio: putchar, puts, fputs, fputc, fgetc, getchar, fwrite, fread, perror, fopen/fclose/fflush, fgets, fseek/ftell/rewind, fileno, feof/ferror/clearerr, remove, stdout/stderr/stdin symbols
   - [x] signal stubs: POSIX signal constants, signal/kill/raise stubs (ENOSYS), sigset operations, raise(SIGABRT)→abort
   - [x] assert: __assert_fail for C assert() macro
-  - [x] environ: getenv/setenv/unsetenv (static 128-entry store), environ pointer
+  - [x] environ: getenv/setenv/unsetenv/putenv/clearenv on the `environ` list itself, musl's design (2026-09-24; was a static 128-entry store that dropped what did not fit)
   - [x] C runtime: atexit (32 handlers LIFO), exit, __libc_start_main (glibc convention). **Initial arguments repaired 2026-09-13**: `retrieve_initial_args` dropped ALL arguments when argv+envp exceeded its 64 KiB static buffer, and truncated silently past 512 entries — while `sysconf(_SC_ARG_MAX)` advertised 128 KiB, so the caller that obeyed the documented limit was the one that lost its arguments, at half the advertised figure and with no error. The kernel had always supported the retry (*"put the data back and return the required size so they can retry"*) and libc never made the second call. Both limits now grow on demand; the kernel is behind an `InitArgSource` seam so the retry is testable on the host, where the syscall is an ENOSYS stub. See `B-A-LONG-COMMAND-LINE-SILENTLY-BECAME-NO-COMMAND-LINE`. Still open: an oversized list reports `EINVAL` where POSIX says `E2BIG` (`TD-B-AN-ARGUMENT-LIST-TOO-LONG-REPORTS-EINVAL-WHERE-POSIX-SAYS-E2BIG`).
   - [x] locale: setlocale (C locale only), localeconv (static lconv)
   - [x] pthread: working pthread_create (mmap stack + asm trampoline + SYS_THREAD_CREATE), pthread_join (SYS_THREAD_JOIN + stack cleanup), pthread_detach, pthread_self (SYS_TASK_ID), pthread_exit (SYS_THREAD_EXIT); atomic mutexes (CAS + spin-yield), thread-safe pthread_once; TSD (64 keys, **per-thread** — values keyed on kernel task ID under a spinlock, key destructors run at thread exit for up to PTHREAD_DESTRUCTOR_ITERATIONS=4 rounds via __pthread_thread_start trampoline entry + pthread_exit; table-keyed-by-tid impl, O(active-threads) lookup, not FS/GS-TLS but correct per-thread semantics; 2026-06-30)

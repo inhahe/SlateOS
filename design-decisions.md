@@ -36730,6 +36730,177 @@ open items that move. The gates need nothing, because they accept A–F.
 
 ---
 
+## 1101. The C library's heap is dlmalloc, vendored — and `malloc(0)` is a real pointer
+
+**Date:** 2026-09-25
+**Lane:** D
+**Decided by:** Claude (autonomous)
+
+**In short:** until today every `malloc` in a SlateOS program asked the kernel
+for a fresh 16 KiB page and gave it back on `free` — and so did every `Box`,
+`Vec` and `String` in the Rust programs, which go through the same function. A
+10-byte string cost 16 KiB and two system calls, and the kernel printed a
+console line for each. The C library now uses Doug Lea's allocator (the design
+glibc's descends from), which carves small blocks out of 64 KiB regions with no
+system call at all. The same change makes `malloc(0)` return a usable pointer
+instead of NULL, which is what programs written for Linux expect.
+
+**What was there.** `posix/src/malloc.rs` gave each block its own `mmap`, with
+a 16-byte header naming it; `free` was `munmap`. Its own module doc called that
+"correct but not efficient … programs needing a real allocator can link one in
+later". None did, and the cost fell everywhere, because Rust's
+`std::alloc::System` on `x86_64-slateos` (`os = "linux"`, `env = "musl"`) calls
+these very functions.
+
+**What it is now.** The core of dlmalloc-rs 0.2.14 (Alex Crichton's port, which
+Rust's standard library uses on wasm), vendored as
+`posix/src/malloc/dlmalloc.rs` with `VENDORED.md` beside it: upstream version,
+checksums, licence (MIT/Apache-2.0) and every local change. One heap, one lock.
+Its source of memory, `SlateSystem`, maps and unmaps whole regions, and three of
+the changes come from this kernel:
+
+- the core never merges two neighbouring regions into one segment, because
+  native `munmap` drops a mapping's record only when given that mapping's own
+  base address, so a merged segment freed in one call would leave the second
+  record behind;
+- it never gives back part of a region, for the same reason;
+- a request of 256 KiB or more gets a mapping of its own (C dlmalloc's
+  `mmap_alloc`, which the Rust port lacks), so a large block goes back to the
+  kernel as soon as it is freed rather than when its whole segment empties.
+
+`fork` takes the heap lock after the `pthread_atfork` *prepare* handlers and
+releases it before the *child*/*parent* ones — glibc's order — so a child never
+inherits a heap frozen mid-update by a thread it does not have.
+
+**Size zero.** `malloc(0)`, `calloc(0, n)`, `posix_memalign(&p, a, 0)`,
+`aligned_alloc(a, 0)`, `memalign`, `valloc(0)` and `pvalloc(0)` now return a
+unique pointer that must be freed, as both glibc and musl do. POSIX allows
+either answer; ported code assumes Linux's (`if (!(p = malloc(n)))
+die("out of memory")` with a legitimate `n == 0`). `realloc(p, 0)` still frees
+and returns NULL (glibc's answer; musl returns a new block; C23 makes it
+undefined, so no portable program depends on either).
+
+**Alternatives.**
+
+| Option | For | Against |
+|---|---|---|
+| Keep one mapping per block | simplest; a use-after-free faults at once | 16 KiB per block minimum; two syscalls per block; a console line per call |
+| Write our own size-class allocator | fits the kernel exactly | a new heap is a new source of heap bugs; dlmalloc has decades of use |
+| `dlmalloc` as a Cargo dependency | no vendored code | the no-merge change is inside `sys_alloc` and cannot be made through the crate's `Allocator` trait; `posix`'s first registry dependency, in every program's link |
+| musl's mallocng, ported from C | metadata kept away from user data, so a heap overflow is far harder to exploit | ~1,500 lines of subtle C to port and keep in step |
+| jemalloc / mimalloc | fastest under many threads; `memory management.txt` leans this way | large C code bases; need per-thread caches and cheap TLS the libc does not yet have |
+
+**The cost of this choice** is hardening. dlmalloc keeps its bookkeeping inline,
+beside user data, so a C program that writes past the end of a block can corrupt
+the heap in exploitable ways; mallocng exists largely to prevent that. The
+long-run choice is `deferred-questions.md` → "[D] Which allocator should the C
+library's heap be in the long run?", with its triggers. Any successor replaces
+only the core behind `SlateSystem` and `HeapGuard`; the C API and the system
+interface stay. `known-issues.md` → `TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA`.
+
+**How it was tested.** Upstream's regression tests run against `SlateSystem`,
+with upstream's own assertions switched on in test builds. In test builds every
+new block is filled with 0xA5 and every freed one with 0x5A (glibc's
+`MALLOC_PERTURB_`), because the old allocator returned zeroed memory and faulted
+on use-after-free, so code relying on either could never have failed a test.
+The whole `posix` suite — 20,770 tests — passes under that, in the default
+order and in three shuffled ones. New tests cover size zero at every alignment,
+contents across the 256 KiB threshold, a 6,000-operation mixed workload checking
+every byte, four threads sharing the heap, and the `fork` lock.
+
+**Revisit when** a program shows the heap lock in a profile (per-thread caches);
+when hardening is scheduled (mallocng); or when the kernel's `munmap` can split
+a mapping or `mremap` exists (then `free_part`/`remap` can say yes).
+
+---
+
+## 1102. A program whose ELF headers are not mapped runs with no TLS image, rather than aborting
+
+**Date:** 2026-09-25
+**Lane:** D
+**Decided by:** Claude (autonomous) — lane A's request left the choice to lane D
+("your call whether a null header means 'no TLS image' or a loud abort").
+
+**In short:** the C library finds a program's thread-local variables by reading
+the program's own ELF header in memory. Some linker scripts leave that header
+out of memory, and every program linked that way crashed on its first
+instructions with an unexplained fault. It now carries on as if the program had
+no thread-local variables — correct for every such program today — rather than
+stopping with an error message.
+
+**Background.** `posix::tls::image` reads the program headers through
+`__ehdr_start`. When no loaded segment contains the ELF header, lld resolves
+that symbol to 0, and the read faulted at address 0x36
+(`requests/a-bd-coreutils-cannot-start-two-link-faults.md`, fault 1 —
+`coreutils`, `oils` and `shell`). Native processes get no auxiliary vector, so
+there is no second source for the headers.
+
+| Option | For | Against |
+|---|---|---|
+| **No TLS image** (chosen) | what glibc (`_dl_aux_init`, weak `__ehdr_start`) and musl (no `AT_PHDR` → its `PT_TLS` walk runs zero times) both do; right for every program without `__thread`, which is every program linked this way today | a program with unmapped headers *and* C `__thread` starts its thread-locals at zero, silently |
+| Abort, naming the link | a wrong link can never run wrong | every such program stops at startup, though almost none has anything to lose; turns a latent script flaw into a hard outage |
+
+**Mitigation.** The compiler is kept from folding the null check away (the
+address goes through an empty `asm!`), the residual is
+`known-issues.md` → `TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`, and its proper fix
+— the kernel passing `AT_PHDR`/`AT_PHNUM` to native processes, as it already
+does to Linux ones — makes the question moot.
+
+---
+
+## 1103. `fts` has glibc's ABI and BSD's algorithm, and never changes directory
+
+**Date:** 2026-09-25
+**Lane:** D
+**Decided by:** Claude (autonomous)
+
+**In short:** `fts` is the C library's "walk a directory tree" interface, the one
+BSD and GNU `find`, `rm -r` and `du` are written against. Ours could go only
+eight folders deep, walked only the first folder it was given, ignored the
+requested sort order, and — worse — laid out its data and numbered its
+commands differently from Linux's, so a Linux-built program using it would have
+misread every result and had its "skip this folder" requests silently ignored.
+It is now a faithful re-implementation of the BSD design Linux's own uses, with
+Linux's exact data layout. Nothing in the tree calls it today; this is so that
+the first ported program that does gets what it expects.
+
+**What was wrong.**
+
+| | before | now |
+|---|---|---|
+| Depth | 8 levels (one open stream per level, from a pool of 64) | unlimited: a directory is read in one pass and released, as in BSD |
+| Streams | 2 at once | any number (heap objects) |
+| Roots | only the first of `argv` | all, in `argv` order or sorted by `compar` |
+| `compar` | ignored | sorts roots and every directory |
+| `fts_children` | `ENOSYS` | real, including `FTS_NAMEONLY` |
+| `FTS_SEEDOT`, `FTS_XDEV` | ignored | honoured |
+| Cycles under `FTS_LOGICAL` | walked until the depth limit | `FTS_DC`, with `fts_cycle` set |
+| `FTSENT`/`FTS` layout | this crate's own | glibc's, pinned by offset in tests |
+| `FTS_AGAIN`/`FOLLOW`/`NOINSTR`/`SKIP` | 2/1/4/3 | glibc's 1/2/3/4 |
+| Tests of the traversal itself | none — the host has no filesystem | a walk over an in-memory tree, through an `FsOps` seam |
+
+**The choices, and what they cost.**
+
+- **Never `chdir`.** glibc changes directory as it descends, so that each access
+  path is short. That makes `fts` unsafe in a threaded program, and this libc's
+  working directory is process state other threads read. Here every walk is
+  `FTS_NOCHDIR` (reported in `fts_options`) and `fts_accpath == fts_path`.
+  Cost: paths are full paths, so a tree deeper than `PATH_MAX` gives `FTS_NS`
+  entries past that depth where glibc would carry on — the same limit `ls -R`
+  and every path-based tool here already has.
+- **`fts_open` requires exactly one of `FTS_LOGICAL`/`FTS_PHYSICAL`**, as the
+  manual page says, rather than glibc's silent default.
+- **`fts_set` returns 1 on error**, glibc's actual value, not the manual page's
+  -1; callers test for non-zero.
+- **An empty root list is a walk that ends at once**, as in glibc; the old code
+  refused it with `EINVAL`.
+
+**Revisit when** a ported program needs `chdir`-speed on very deep trees (it
+would need a thread-safe design, e.g. `openat`-relative walking with per-level
+descriptors), or `FTS_WHITEOUT` gains meaning.
+
+---
+
 ## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told
 
 **Date:** 2026-08-22

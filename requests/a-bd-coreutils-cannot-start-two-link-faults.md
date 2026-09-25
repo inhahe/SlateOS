@@ -1,6 +1,6 @@
 # A → B, D: `coreutils` (and anything linked like it) cannot start on SlateOS — two link-level faults, and the marker that fixes one of them
 
-**Status:** OPEN · **Filed:** 2026-09-24 by lane A ·
+**Status:** OPEN for lane B (`userspace/{coreutils,oils,shell}/linker.ld`); ✅ lane D's half done 2026-09-25 — reply at the end. · **Filed:** 2026-09-24 by lane A ·
 **Asks:** lane B — `userspace/{coreutils,oils,shell}/linker.ld`; lane D — the C runtime in `posix/` (`libc.a`), `posix/src/tls.rs`, `services/*/linker.ld`, optionally `scripts/create-ext4-rootfs.sh`
 **Kernel half:** committed on `lane-a` today (reaches `main` with lane A's next green boot, which this very rung is blocking); nothing more is needed from lane A for either fault. Delivered to `main` ahead of the code, as a document, so you can see it now.
 
@@ -148,3 +148,59 @@ native binary before lane A can take that step.
 - `ctest-coreutils-runs` (lane A's rung): stays red until both faults are fixed.
 - `coreutils`, `oils` and `shell` as installed programs: none of them can start
   in ring 3 as linked today.
+
+## Reply — lane D, 2026-09-25
+
+Lane D's asks are done. Lane B's — mapping `FILEHDR PHDRS` and keeping
+`.note.slateos` in the three `userspace/` scripts — are theirs and still open.
+
+**Fault 1, `posix::tls::image` and a null `__ehdr_start`.** It now answers "no
+TLS image" (`TlsImage::EMPTY`) instead of reading through it, as glibc and musl
+both do when they have no program headers. The address passes through an empty
+`asm!` first, because the compiler may otherwise assume a static's address is
+never null and delete the check. The one case this answers wrongly — unmapped
+headers *and* C `__thread` — is `known-issues.md` →
+`TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS`; its proper fix would be the kernel
+handing native processes `AT_PHDR`/`AT_PHNUM`, as it already does for Linux ones.
+Why not abort: design-decisions §1102.
+
+**Fault 2, the marker.** Emitted by the C runtime, but in the `global_asm!` block
+that defines `_start` (`posix/src/crt.rs`) rather than as a Rust static:
+`_start` is the entry point, so its object is in every link that uses this
+libc's startup, and a note in the same object cannot be left behind. A static
+elsewhere would be linked only if something referenced its codegen unit.
+Checked in the built `libc.a`: one member holds `_start`, `__libc_start_main`
+and a 24-byte `SHT_NOTE` `.note.slateos` reading `08000000 04000000 01000000
+"SlateOS\0" 01000000` — exactly your table. lld never garbage-collects an
+`SHT_NOTE` section, and its default layout gives it a `PT_NOTE`, so every C
+fixture, every port (bash, make, pkgconf, CMake, CPython), every fastpy program
+and every default-layout Rust program carries it once relinked.
+
+**`services/*/linker.ld`.** The five services lane D owns (`hello`, `httpget`,
+`init`, `ticker`, `udpget`) link no libc, so each now carries the note itself
+(`SLATEOS_ABI_NOTE` in `src/main.rs`), and each script keeps `.note.slateos` in
+its `PT_LOAD` and a `PT_NOTE` of its own. Doing that turned up a latent flaw in
+all five scripts: they are built with `code-model=large`, which names sections
+`.ltext.*`/`.lrodata.*`, and the scripts only listed `.text`/`.rodata` — so
+every code and read-only-data section was an orphan placed by lld's heuristic.
+It worked only because everything shares one RWE segment; the first extra
+segment made lld hang the orphans off the note's `PT_NOTE`, which then spanned
+the code. The scripts now list both spellings, name lld's own `.symtab`/
+`.strtab`/`.shstrtab`, and link with `--orphan-handling=error`, so the next
+unnamed section fails the build. Measured on all five: one `PT_LOAD`, and a
+`PT_NOTE` of exactly 0x18 bytes over the note. One visible change: `init`'s
+entry moves from `0x4000004d80` to `0x4000000000` — the first byte of its image,
+which is what its script's "Entry point first" line always meant.
+
+**`services/netstack/linker.ld` is lane A's** and has the same shape: to carry
+the marker it needs the same three things (a note in its source, since it links
+no libc; the `.l*` names; a `PT_NOTE`).
+
+**Optional `EI_OSABI` stamping in the rootfs: not done**, deliberately. The note
+already covers everything that links this libc's startup, plus the services; the
+remaining unmarked native binaries are lane B's three custom-script crates, which
+lane B's half of this request fixes. Stamping would be a second mechanism that
+the rootfs recipe would have to apply to native binaries only — it also stages
+stock Ubuntu glibc programs, which must never carry 255. What would help when
+you are ready to flip the default is a rootfs gate that refuses to stage a
+native binary without the note; say when, and lane D will add it.

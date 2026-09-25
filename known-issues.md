@@ -125481,7 +125481,7 @@ that mattered; raising it is bounded by `dirent`'s 64-slot `Dir` pool
 (`MAX_FTS_INSTANCES * MAX_FTS_DEPTH` streams are held at full depth) and is
 tracked as `TD-B-FTS-DEPTH-IS-CAPPED-AT-EIGHT` below.
 
-### TD-B-FTS-DEPTH-IS-CAPPED-AT-EIGHT. `find`/`rm -r`/`du` stop at the eighth level — 2026-09-04 — OPEN
+### TD-B-FTS-DEPTH-IS-CAPPED-AT-EIGHT. `find`/`rm -r`/`du` stop at the eighth level — 2026-09-04 — FIXED 2026-09-25
 
 **Where:** `posix/src/fts.rs`, `MAX_FTS_DEPTH`.
 
@@ -125505,6 +125505,33 @@ that may have been replaced in between — which needs the same descriptor-
 identity check `rm -r`'s walk already does (design-decisions.md §752). Until
 then, raising `MAX_FTS_DEPTH` to 16 (32 of 64 slots) is a cheap partial step
 that halves the pool for a walk, and is not obviously the right trade.
+
+**Update (lane D, 2026-09-25) — who is actually affected.** Nobody in the tree
+today. `userspace/coreutils`'s `find`, `grep` and `mv` mention `fts_*` only in
+comments that trace GNU's logic; each walks the tree itself, and no program,
+port or fixture calls `fts_open` (checked with a tree-wide search). So the cap
+bites only a future C program that uses `<fts.h>` — and that program would meet
+more than the cap: one root only (`fts_open` ignores every path after the
+first), no `compar` sorting, no `fts_children`, no `FTS_XDEV`/`FTS_SEEDOT`, and
+no cycle detection under `FTS_LOGICAL`. The fix worth doing is therefore not the
+`telldir`/`seekdir` juggling above but BSD's model, which the real allocator
+(design-decisions §1101) now makes cheap: each frame copies its directory's
+listing into a growable heap array and closes the stream at once, so depth
+costs neither `Dir` slots nor descriptors; instances and the frame stack live on
+the heap; and `FTS_DC` compares each new directory's device and inode with its
+ancestors'. Lane D's next `fts` task, after the allocator is in.
+
+**FIXED (lane D, 2026-09-25) — by replacing the walker, not by raising the cap.**
+`posix/src/fts.rs` is now BSD's algorithm with glibc's ABI (design-decisions
+§1103): a directory is read into a list of heap entries in one pass and its
+stream released before `fts_read` returns, so depth costs neither `Dir` slots
+nor descriptors, and streams are heap objects rather than a pool of two. A
+600-level tree whose path outgrows the buffer several times is walked to the
+bottom in the tests. The same change makes every root walked, honours
+`compar`, `FTS_SEEDOT` and `FTS_XDEV`, implements `fts_children`, reports
+symlink cycles as `FTS_DC`, and gives `FTSENT`/`FTS` and the constants glibc's
+values — the instruction constants had been swapped, so a glibc-built caller's
+`FTS_SKIP` was read as "no instruction".
 
 ### B-NFTW-IGNORES-FTW-PHYS-AND-SKIPS-WHAT-IT-CANNOT-WALK. Four defects in one walker — 2026-09-04 — FIXED 2026-09-04
 
@@ -165013,7 +165040,8 @@ the same kernel half.
 ### [D] TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES — 2026-09-24 — OPEN
 
 **Status:** OPEN — lane D's code; the proper fix needs spawn-time fields in
-lane A's `SpawnEx2Args`, not yet requested.
+lane A's `SpawnEx2Args`, requested 2026-09-25 in
+`requests/d-a-ignored-signals-and-spawn-attributes-need-a-kernel-record.md`.
 
 **In short:** a program can ask `posix_spawn` to start its child in a new
 process group, with certain signals blocked or reset, or in a new session. All
@@ -165069,3 +165097,87 @@ terminated` to stderr, then `abort()`, as glibc) and have each wrapper check
 its bound. For the copy functions clamping is not a meaningful alternative — a
 `memcpy` that copies less than asked is a different bug, not a safe one — so
 these want the abort even though the printf family clamps.
+
+### [D] TD-D-MALLOC-HAS-ONE-LOCK-AND-INLINE-METADATA — 2026-09-25 — OPEN
+
+**Status:** OPEN — accepted costs of the allocator adopted 2026-09-25
+(design-decisions §1101), written down so they are found rather than
+rediscovered. Nothing is broken.
+
+**In short:** the C library's heap — every `malloc`, and every `Box`, `Vec` and
+`String` in the Rust userland — is now Doug Lea's allocator behind a single
+lock. Two things about it are weaker than they could be: every thread in a
+process takes that one lock to allocate, so a program with many busy threads
+queues on it; and the allocator keeps its bookkeeping beside the program's data,
+so a C program that writes past the end of a block can corrupt the heap in ways
+an attacker can use.
+
+**Where:** `posix/src/malloc.rs` (`HEAP`, `HeapGuard`); the vendored core,
+`posix/src/malloc/dlmalloc.rs` (inline chunk headers, as in glibc).
+
+**Also missing, same place:** `malloc_trim`, `mallinfo`/`mallinfo2` and
+`malloc_stats`. No port has linked against them (bash, make, pkgconf, CMake and
+CPython all link with nothing missing); dlmalloc can answer all three from its
+footprint counters and `trim`.
+
+**Proper fix:** measure first. Contention → per-thread caches in front of the
+shared heap. Hardening → an allocator with out-of-band metadata (musl's
+mallocng) or a size-class design. The choice between them is
+`deferred-questions.md` → "[D] Which allocator should the C library's heap be
+in the long run?", with its triggers. Any of them replaces only the core behind
+`SlateSystem` and `HeapGuard`.
+
+### [D] TD-D-TLS-NEEDS-MAPPED-PROGRAM-HEADERS — 2026-09-25 — OPEN
+
+**Status:** OPEN — the narrow residual of the fix for
+`requests/a-bd-coreutils-cannot-start-two-link-faults.md` fault 1; the proper
+fix is a kernel ABI addition (lane A), requested at low priority in
+`requests/d-a-native-processes-could-be-told-where-their-program-headers-are.md`.
+
+**In short:** the C library finds a program's thread-local variables through the
+program's own ELF header in memory. A linker script that leaves the header out
+of the loaded image used to crash every program linked with it on its first
+instructions; since 2026-09-25 the library treats "no header" as "no
+thread-local variables", as glibc and musl do. That is right for every such
+program today. A program that had both an unmapped header *and* C `__thread`
+variables would start those variables at zero instead of their initial values,
+silently.
+
+**Where:** `posix/src/tls.rs` → `image()` (design-decisions §1102).
+
+**Proper fix:** give native processes the program headers' address the way
+Linux does — `AT_PHDR`/`AT_PHNUM` in an auxiliary vector (the kernel already
+builds one for Linux-ABI processes, `kernel/src/proc/linux_stack.rs`), or the
+headers copied onto the new stack when no segment maps them — and read that
+here before `__ehdr_start`. Until then, every native linker script must map
+`FILEHDR PHDRS` into its first `PT_LOAD`; lld's default layout does.
+
+### [D] TD-D-SIG-IGN-DOES-NOT-SURVIVE-EXEC-OR-SPAWN — 2026-09-25 — OPEN
+
+**Status:** OPEN — needs a kernel record of the ignored set (lane A), requested
+in `requests/d-a-ignored-signals-and-spawn-attributes-need-a-kernel-record.md`;
+the libc half is lane D's and waits on it.
+
+**In short:** a program that tells the system to ignore a signal and then runs
+another program should pass that on: `nohup cmd` ignores the hang-up signal so
+that `cmd` survives the terminal closing, and shells ignore `^C` for background
+jobs the same way. On SlateOS the next program always starts with every signal
+back at its default, so `cmd` dies on hang-up anyway and a background job dies
+on `^C`. Separately, `SIGCHLD` set to "ignore" is supposed to stop dead children
+lingering as zombies, and cannot, because only the kernel could do that.
+
+**Where:** `posix/src/signal.rs` — the dispositions are a static table in the
+libc, consulted by `dispatch_self_signal` after the kernel has delivered every
+catchable signal to the trampoline. A new image's table starts all-default, so
+`SIG_IGN` never crosses `exec` or `posix_spawn` (`fork` copies the table with
+the address space, so it is fine there).
+
+**Reproduce (by reading; no rung exercises it):** `signal(SIGHUP, SIG_IGN);
+execvp("sleep", ...)`, then send `SIGHUP` to the `sleep` — it dies, where Linux
+keeps it alive.
+
+**Proper fix:** the kernel holds the ignored set per process, keeps it across
+`exec`, copies it on `fork` and spawn, drops an ignored signal at send time, and
+auto-reaps children when `SIGCHLD` is ignored; the libc keeps it current from
+`signal`/`sigaction` and seeds its table from it at start-up. Details and the
+syscall shapes in the request above.

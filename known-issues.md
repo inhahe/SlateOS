@@ -165379,3 +165379,33 @@ of mode drops the search, which stops the worker at its next file. Files over
 case, a UTF-8 file is lower-cased as text (`ÉCOLE` finds `école`) and any other
 file has only its ASCII letters folded -- never a lossy decode. Seven tests and
 five mutations in `apps/filesearch/mutate.py`.
+
+### [E] A test that forgets its scratch settings writes the developer's own -- 2026-09-25
+**Status:** OPEN -- the one leak found today is fixed; nothing stops the next
+
+**In short:** a test that saves a setting without first taking a scratch
+configuration directory writes to the real `~/.config/slateos` of whoever runs
+it. On 2026-09-25 the weather app's unit-key tests did exactly that, the first
+time pressing U, W, P or T began saving the choice: they left a
+`weather.yaml` of Fahrenheit, mph, inHg and 12-hour in the developer's home.
+They now run inside `settingsfile::testing::with_scratch_config`, and the file
+was deleted. Nothing but care stops the next such test.
+
+**What is still there.** On this Windows host `~/.config/slateos/` holds six
+more files that nothing but a test run can have written, all older than the
+2026-09-24 baseline run of every app's suite (so no current test writes them):
+`explorer.yaml` lists `explorer_test_manual_*` temporary folders as saved
+orderings; `appearance.yaml`, `fileassoc.yaml`, `input.yaml`,
+`notifications.yaml` and `widgets.yaml` hold what look like defaults. They
+were left in place, not being this session's to delete. A test that *reads*
+settings without a scratch directory sees them -- an order-dependent result
+waiting to happen.
+
+**The proper fix is a guard, in lane C's `gui/settingsfile`:** with its
+`testing` feature on -- which only a dev-dependency turns on -- `store` could
+refuse outright unless a `with_scratch_config` turn is held, panicking with a
+message that names the fix. Every app test that saves would then fail loudly
+the first time it forgot, instead of writing somebody's home. Not filed as a
+request yet: whether a feature-gated panic in a shared crate is acceptable is
+lane C's call, and the six files above should be looked at by whoever owns
+the apps that wrote them first.

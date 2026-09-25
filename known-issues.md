@@ -149593,7 +149593,7 @@ outcome from a source change -- "a document this run validates was edited while
 it ran" is a different fact from "the kernel changed", and only the second makes
 the boot's verdict meaningless.
 
-## TD-A-THE-HEAD-OF-LINE-WITNESS-CANNOT-RED-THE-BOOT (lane A, 2026-09-14)
+## TD-A-THE-HEAD-OF-LINE-WITNESS-CANNOT-RED-THE-BOOT (lane A, 2026-09-14) -- **FIXED 2026-09-25**
 
 **Status:** FIXED (stamped 2026-09-25) -- `proc::spawn::run_persistent_netstack` now routes the witness's `Err` through `selftest::dispatch_debug("net::socket head-of-line", Severity::Diagnostic, ..)`, which prints the `self-test failed` marker the harness fails a run on, exactly as proposed below. Whether the witness *runs* rather than declines is a separate question its `Ok(None)` arm answers on every boot.
 

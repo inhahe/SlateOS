@@ -550,13 +550,32 @@ fn inflate_stored(reader: &mut BitReader<'_>, output: &mut Vec<u8>, limit: usize
 
 /// Decode a block with fixed Huffman codes.
 fn inflate_fixed(reader: &mut BitReader<'_>, output: &mut Vec<u8>, limit: usize) -> Result<()> {
-    let lit_table = HuffmanTable::build(&fixed_lit_lengths())?;
-    let dist_table = HuffmanTable::build(&fixed_dist_lengths())?;
+    let (lit_table, dist_table) = fixed_tables()?;
     inflate_codes(reader, &lit_table, &dist_table, output, limit)
 }
 
 /// Decode a block with dynamic Huffman codes.
 fn inflate_dynamic(reader: &mut BitReader<'_>, output: &mut Vec<u8>, limit: usize) -> Result<()> {
+    let (lit_table, dist_table) = read_dynamic_tables(reader)?;
+    inflate_codes(reader, &lit_table, &dist_table, output, limit)
+}
+
+/// The fixed block's two tables (RFC 1951 §3.2.6).
+fn fixed_tables() -> Result<(HuffmanTable, HuffmanTable)> {
+    Ok((
+        HuffmanTable::build(&fixed_lit_lengths())?,
+        HuffmanTable::build(&fixed_dist_lengths())?,
+    ))
+}
+
+/// Read a dynamic block's header -- the code-length code, then the
+/// literal/length and distance code lengths it encodes -- and build the two
+/// tables the block's symbols are decoded with.
+///
+/// Shared by [`inflate_dynamic`] and [`InflateStream`], so the one-shot and
+/// streaming decoders cannot disagree about which headers are valid or which
+/// error a bad one produces.
+fn read_dynamic_tables(reader: &mut BitReader<'_>) -> Result<(HuffmanTable, HuffmanTable)> {
     // Read the number of literal/length codes, distance codes, and
     // code-length codes.
     let hlit = reader.read_bits(5)?.wrapping_add(257) as usize; // 257..286
@@ -652,8 +671,7 @@ fn inflate_dynamic(reader: &mut BitReader<'_>, output: &mut Vec<u8>, limit: usiz
             .get(hlit..total)
             .ok_or(Error::InvalidHuffmanTable)?,
     )?;
-
-    inflate_codes(reader, &lit_table, &dist_table, output, limit)
+    Ok((lit_table, dist_table))
 }
 
 /// Decode literal/length + distance symbols until end-of-block (256).
@@ -730,12 +748,39 @@ fn inflate_codes(
 /// The DEFLATE window size: back-references can look up to 32 KiB behind.
 const WINDOW_SIZE: usize = 32768;
 
+/// `WINDOW_SIZE - 1`, for wrapping a ring index without a division.
+const WINDOW_MASK: usize = WINDOW_SIZE - 1;
+
+/// Where an [`InflateStream`] is between two calls to `read`.
+///
+/// The decoder stops wherever the caller's buffer fills -- between two blocks,
+/// inside a stored block, between two symbols, or halfway through a
+/// back-reference -- and each of those is a state it can resume from. That is
+/// the whole difference from decoding a block at a time: a single DEFLATE block
+/// has no size limit, so "a block at a time" is "all of it at once" for any
+/// encoder that emits one block, and the memory bound goes with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StreamState {
+    /// About to read a block header.
+    BlockHeader,
+    /// Inside a stored block, with this many bytes of it still to copy.
+    Stored { remaining: u16 },
+    /// Between two symbols of a fixed or dynamic block.
+    Codes,
+    /// Inside a back-reference: this many bytes still to copy from `distance`
+    /// behind the end of the output.
+    Copy { remaining: usize, distance: usize },
+    /// Past the final block. Every read returns 0.
+    Done,
+}
+
 /// Incremental raw-DEFLATE decompressor.
 ///
-/// Decodes a raw DEFLATE stream one block at a time and lets the caller pull
-/// bytes through [`read`](Self::read). Between reads, only the 32 KiB sliding
-/// window plus pending (not-yet-consumed) output is held in memory — the
-/// caller never sees the full decompressed buffer.
+/// Decodes as far as the caller's buffer reaches and stops there, in the middle
+/// of a block or of a back-reference if that is where the buffer ends. Between
+/// reads it holds the 32 KiB window back-references read from, the current
+/// block's two Huffman tables, and nothing else: memory does not grow with the
+/// output, with the size of a block, or with how the caller slices its reads.
 ///
 /// # Output limit
 ///
@@ -743,10 +788,19 @@ const WINDOW_SIZE: usize = 32768;
 /// output, exactly like [`inflate_limited`]. [`Error::OutputTooLarge`] fires
 /// at the same byte.
 ///
+/// # Errors, and the bytes before one
+///
+/// When decoding fails partway through a `read`, the bytes decoded before the
+/// failure are returned first (`Ok(n)`) and the error is returned by the next
+/// `read` -- the `std::io::Read` convention -- so a caller sees every byte
+/// [`inflate_limited`] would have produced before failing. After an error every
+/// `read` returns the same error: a decoder that has lost its place in the bit
+/// stream cannot find it again.
+///
 /// # Example
 ///
 /// ```rust,ignore
-/// let mut stream = deflate::inflate_stream(compressed, expected_len)?;
+/// let mut stream = deflate::inflate_stream(compressed, expected_len);
 /// let mut row = [0u8; ROW_BYTES];
 /// while stream.read(&mut row)? > 0 {
 ///     process_row(&row);
@@ -754,17 +808,23 @@ const WINDOW_SIZE: usize = 32768;
 /// ```
 pub struct InflateStream<'a> {
     reader: BitReader<'a>,
-    /// Decoded bytes. The front holds the sliding window (already consumed);
-    /// `buf[cursor..]` is pending output the caller has not read yet.
-    buf: Vec<u8>,
-    /// Index into `buf` of the next byte to hand out via `read`.
-    cursor: usize,
-    /// Total bytes drained from the front of `buf` across all compactions.
-    flushed: usize,
+    /// The last `WINDOW_SIZE` bytes produced, as a ring: byte `total_out - 1`
+    /// is at `(total_out - 1) & WINDOW_MASK`. Allocated once, at full size.
+    window: Vec<u8>,
+    /// Bytes handed to the caller so far. Every decoded byte is handed over
+    /// at once, so this is also the number decoded.
+    total_out: usize,
     /// Caller's total-output cap.
     limit: usize,
-    /// `true` once the BFINAL block has been fully decoded.
-    finished: bool,
+    state: StreamState,
+    /// Whether the block being decoded is the last (its BFINAL bit).
+    final_block: bool,
+    /// The current block's literal/length table.
+    lit: HuffmanTable,
+    /// The current block's distance table.
+    dist: HuffmanTable,
+    /// The error that stopped decoding, once one has.
+    failed: Option<Error>,
 }
 
 /// Create a streaming raw-DEFLATE inflater.
@@ -781,108 +841,208 @@ pub struct InflateStream<'a> {
 pub fn inflate_stream(data: &[u8], limit: usize) -> InflateStream<'_> {
     InflateStream {
         reader: BitReader::new(data),
-        buf: Vec::with_capacity(data.len().saturating_mul(2).min(limit).min(65536)),
-        cursor: 0,
-        flushed: 0,
+        window: vec![0; WINDOW_SIZE],
+        total_out: 0,
         limit,
-        finished: false,
+        state: StreamState::BlockHeader,
+        final_block: false,
+        lit: HuffmanTable::empty(),
+        dist: HuffmanTable::empty(),
+        failed: None,
     }
 }
 
 impl InflateStream<'_> {
     /// Pull decompressed bytes into `out`.
     ///
-    /// Returns the number of bytes written, which is `out.len()` when there
-    /// are enough decoded bytes, and less only at end-of-stream. **Returns 0
-    /// only at EOF** — the same contract as `std::io::Read`.
+    /// Returns the number of bytes written: `out.len()` whenever that many
+    /// remain, fewer only at the end of the stream or just before an error.
+    /// **Returns 0 only at EOF** (or for an empty `out`) -- the same contract
+    /// as `std::io::Read`.
     ///
     /// # Errors
     ///
-    /// Every [`Error`] that [`inflate_limited`] can return, at the same byte.
+    /// Every [`Error`] that [`inflate_limited`] can return, at the same byte;
+    /// see the type's documentation for how the bytes before it are delivered.
     pub fn read(&mut self, out: &mut [u8]) -> Result<usize> {
-        if out.is_empty() {
-            return Ok(0);
+        if let Some(e) = self.failed {
+            return Err(e);
         }
-
-        // Serve from pending bytes first.
-        let avail = self.buf.len().saturating_sub(self.cursor);
-        if avail > 0 {
-            let n = avail.min(out.len());
-            let src = self
-                .buf
-                .get(self.cursor..self.cursor.wrapping_add(n))
-                .ok_or(Error::UnexpectedEnd)?;
-            out.get_mut(..n)
-                .ok_or(Error::UnexpectedEnd)?
-                .copy_from_slice(src);
-            self.cursor = self.cursor.wrapping_add(n);
-            self.compact();
-            return Ok(n);
-        }
-
-        if self.finished {
-            return Ok(0);
-        }
-
-        // Decode one more DEFLATE block.
-        self.decode_block()?;
-
-        // Serve from the freshly decoded bytes.
-        let avail = self.buf.len().saturating_sub(self.cursor);
-        if avail > 0 {
-            let n = avail.min(out.len());
-            let src = self
-                .buf
-                .get(self.cursor..self.cursor.wrapping_add(n))
-                .ok_or(Error::UnexpectedEnd)?;
-            out.get_mut(..n)
-                .ok_or(Error::UnexpectedEnd)?
-                .copy_from_slice(src);
-            self.cursor = self.cursor.wrapping_add(n);
-            self.compact();
-            Ok(n)
-        } else if self.finished {
-            Ok(0)
-        } else {
-            // Empty block (possible with stored blocks of length 0).
-            self.read(out)
+        let mut n = 0usize;
+        match self.fill(out, &mut n) {
+            Ok(()) => Ok(n),
+            Err(e) => {
+                self.failed = Some(e);
+                if n > 0 { Ok(n) } else { Err(e) }
+            }
         }
     }
 
     /// Total decompressed bytes returned by `read` so far.
     #[must_use]
     pub fn total_out(&self) -> usize {
-        self.flushed.wrapping_add(self.cursor)
+        self.total_out
     }
 
-    /// Decode one DEFLATE block into the internal buffer.
-    fn decode_block(&mut self) -> Result<()> {
-        let eff_limit = self.limit.saturating_sub(self.flushed);
-        let bfinal = self.reader.read_bits(1)?;
-        let btype = self.reader.read_bits(2)?;
-
-        match btype {
-            0 => inflate_stored(&mut self.reader, &mut self.buf, eff_limit)?,
-            1 => inflate_fixed(&mut self.reader, &mut self.buf, eff_limit)?,
-            2 => inflate_dynamic(&mut self.reader, &mut self.buf, eff_limit)?,
-            _ => return Err(Error::ReservedBlockType),
-        }
-
-        if bfinal != 0 {
-            self.finished = true;
+    /// Decode into `out[*n..]` until it is full or the stream ends.
+    ///
+    /// A loop over the states, never a recursion: a stream of empty blocks --
+    /// five bytes each, and legal -- would otherwise be a stack depth chosen by
+    /// the sender.
+    fn fill(&mut self, out: &mut [u8], n: &mut usize) -> Result<()> {
+        while *n < out.len() {
+            match self.state {
+                StreamState::Done => return Ok(()),
+                StreamState::BlockHeader => self.start_block()?,
+                StreamState::Stored { remaining } => {
+                    let mut remaining = remaining;
+                    while remaining > 0 && *n < out.len() {
+                        // Checked before the byte is read, as `inflate_stored`
+                        // does, so the two fail on the same byte.
+                        if self.total_out >= self.limit {
+                            self.state = StreamState::Stored { remaining };
+                            return Err(Error::OutputTooLarge);
+                        }
+                        let b = match self.reader.read_byte() {
+                            Ok(b) => b,
+                            Err(e) => {
+                                self.state = StreamState::Stored { remaining };
+                                return Err(e);
+                            }
+                        };
+                        self.emit(b, out, n);
+                        remaining = remaining.wrapping_sub(1);
+                    }
+                    self.state = if remaining == 0 {
+                        self.end_of_block()
+                    } else {
+                        StreamState::Stored { remaining }
+                    };
+                }
+                StreamState::Codes => self.next_symbol(out, n)?,
+                StreamState::Copy {
+                    remaining,
+                    distance,
+                } => {
+                    let mut remaining = remaining;
+                    while remaining > 0 && *n < out.len() {
+                        if self.total_out >= self.limit {
+                            self.state = StreamState::Copy {
+                                remaining,
+                                distance,
+                            };
+                            return Err(Error::OutputTooLarge);
+                        }
+                        // `distance` was checked against `total_out` when the
+                        // copy began and is at most 32 768, the window's size,
+                        // so the source is always a byte already written.
+                        let src = self.total_out.wrapping_sub(distance) & WINDOW_MASK;
+                        let b = self.window.get(src).copied().unwrap_or(0);
+                        self.emit(b, out, n);
+                        remaining = remaining.wrapping_sub(1);
+                    }
+                    self.state = if remaining == 0 {
+                        StreamState::Codes
+                    } else {
+                        StreamState::Copy {
+                            remaining,
+                            distance,
+                        }
+                    };
+                }
+            }
         }
         Ok(())
     }
 
-    /// Trim consumed bytes from the front of `buf`, keeping the 32 KiB window
-    /// that back-references need.
-    fn compact(&mut self) {
-        if self.cursor > WINDOW_SIZE {
-            let drain = self.cursor.saturating_sub(WINDOW_SIZE);
-            self.buf.drain(..drain);
-            self.cursor = self.cursor.saturating_sub(drain);
-            self.flushed = self.flushed.wrapping_add(drain);
+    /// Read a block header and set up for its body.
+    fn start_block(&mut self) -> Result<()> {
+        let bfinal = self.reader.read_bits(1)?;
+        let btype = self.reader.read_bits(2)?;
+        self.final_block = bfinal != 0;
+        match btype {
+            0 => {
+                self.reader.align();
+                let len = self.reader.read_u16_le()?;
+                let nlen = self.reader.read_u16_le()?;
+                if len != !nlen {
+                    return Err(Error::StoredLengthMismatch);
+                }
+                self.state = if len == 0 {
+                    self.end_of_block()
+                } else {
+                    StreamState::Stored { remaining: len }
+                };
+            }
+            1 => {
+                (self.lit, self.dist) = fixed_tables()?;
+                self.state = StreamState::Codes;
+            }
+            2 => {
+                (self.lit, self.dist) = read_dynamic_tables(&mut self.reader)?;
+                self.state = StreamState::Codes;
+            }
+            _ => return Err(Error::ReservedBlockType),
         }
+        Ok(())
+    }
+
+    /// Decode one literal/length symbol and act on it, as `inflate_codes` does.
+    fn next_symbol(&mut self, out: &mut [u8], n: &mut usize) -> Result<()> {
+        let sym = self.lit.decode(&mut self.reader)?;
+        match sym.cmp(&256) {
+            Ordering::Less => {
+                if self.total_out >= self.limit {
+                    return Err(Error::OutputTooLarge);
+                }
+                self.emit(sym as u8, out, n);
+            }
+            Ordering::Equal => self.state = self.end_of_block(),
+            Ordering::Greater => {
+                let len_idx = (sym as usize).wrapping_sub(257);
+                let base_len = *LENGTH_BASE.get(len_idx).ok_or(Error::InvalidSymbol)?;
+                let extra = *LENGTH_EXTRA.get(len_idx).ok_or(Error::InvalidSymbol)?;
+                let length =
+                    usize::from(base_len).wrapping_add(self.reader.read_bits(extra)? as usize);
+
+                let dist_sym = self.dist.decode(&mut self.reader)? as usize;
+                let base_dist = *DIST_BASE.get(dist_sym).ok_or(Error::InvalidSymbol)?;
+                let dist_extra = *DIST_EXTRA.get(dist_sym).ok_or(Error::InvalidSymbol)?;
+                let distance = usize::from(base_dist)
+                    .wrapping_add(self.reader.read_bits(dist_extra)? as usize);
+
+                // Before a byte of the copy, as in `inflate_codes`.
+                if distance == 0 || distance > self.total_out {
+                    return Err(Error::DistanceTooFar);
+                }
+                self.state = StreamState::Copy {
+                    remaining: length,
+                    distance,
+                };
+            }
+        }
+        Ok(())
+    }
+
+    /// The state after the current block ends.
+    fn end_of_block(&self) -> StreamState {
+        if self.final_block {
+            StreamState::Done
+        } else {
+            StreamState::BlockHeader
+        }
+    }
+
+    /// Hand one decoded byte to the caller and to the window.
+    fn emit(&mut self, b: u8, out: &mut [u8], n: &mut usize) {
+        if let Some(slot) = out.get_mut(*n) {
+            *slot = b;
+        }
+        if let Some(slot) = self.window.get_mut(self.total_out & WINDOW_MASK) {
+            *slot = b;
+        }
+        *n = n.wrapping_add(1);
+        self.total_out = self.total_out.wrapping_add(1);
     }
 }
 
@@ -3478,5 +3638,269 @@ mod tests {
             got.extend_from_slice(&buf[..n]);
         }
         assert_eq!(got, expected, "large streaming output must match one-shot");
+    }
+
+    // -----------------------------------------------------------------------
+    // The streaming decoder, held to the one-shot one
+    // -----------------------------------------------------------------------
+    //
+    // `requests/c-ab-deflate-has-no-incremental-inflate-and-that-is-what-caps-thumbnails.md`
+    // asked for streaming so that peak memory would stop scaling with the
+    // picture. The first `InflateStream` decoded a whole DEFLATE block per
+    // refill -- and a block has no size limit -- compacted its buffer with a
+    // `drain` per read (quadratic in the block), and recursed once per empty
+    // block. These tests pin the replacement to `inflate_limited` byte for
+    // byte and error for error, and pin the three properties it exists for.
+
+    use super::{WINDOW_SIZE, encode_distance, encode_length, fixed_code, fixed_dist_code};
+
+    /// Read `data` to the end through a buffer of `chunk` bytes: the bytes
+    /// delivered, and how the stream ended.
+    fn drain_stream(data: &[u8], limit: usize, chunk: usize) -> (Vec<u8>, Result<(), Error>) {
+        let mut stream = inflate_stream(data, limit);
+        let mut got = Vec::new();
+        let mut buf = alloc::vec![0u8; chunk];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => return (got, Ok(())),
+                Ok(n) => {
+                    got.extend_from_slice(&buf[..n]);
+                    assert_eq!(stream.total_out(), got.len());
+                }
+                Err(e) => {
+                    assert_eq!(stream.read(&mut buf), Err(e), "an error must repeat");
+                    return (got, Err(e));
+                }
+            }
+        }
+    }
+
+    /// The streaming decoder agrees with `inflate_limited` at every read
+    /// size: the same bytes when it succeeds, the same error when it fails,
+    /// and the same bytes before that error however the reads are sliced.
+    fn assert_parity(data: &[u8], limit: usize, chunks: &[usize], what: &str) {
+        let want = inflate_limited(data, limit);
+        let mut before_error: Option<Vec<u8>> = None;
+        for &chunk in chunks {
+            let (got, end) = drain_stream(data, limit, chunk);
+            match &want {
+                Ok(v) => {
+                    assert_eq!(end, Ok(()), "{what}: chunk {chunk}");
+                    assert!(got == *v, "{what}: chunk {chunk}: output differs");
+                }
+                Err(e) => {
+                    assert_eq!(end, Err(*e), "{what}: chunk {chunk}");
+                    match &before_error {
+                        None => before_error = Some(got),
+                        Some(first) => assert!(
+                            *first == got,
+                            "{what}: chunk {chunk} delivered different bytes before {e:?}"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    /// A deterministic byte source with no structure worth compressing.
+    fn noise(len: usize, mut seed: u32) -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                (seed >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn streaming_matches_oneshot_for_every_input_level_and_read_size() {
+        let text: Vec<u8> = b"the quick brown fox jumps over the lazy dog; "
+            .iter()
+            .copied()
+            .cycle()
+            .take(20_000)
+            .collect();
+        // A period just under the window, so back-references reach its edge.
+        let far: Vec<u8> = noise(30_000, 7).into_iter().cycle().take(100_000).collect();
+        let inputs: [(&str, Vec<u8>); 6] = [
+            ("empty", Vec::new()),
+            ("one byte", alloc::vec![b'x']),
+            ("text", text),
+            ("noise", noise(70_000, 1)),
+            ("run", alloc::vec![0xAA; 150_000]),
+            ("far references", far),
+        ];
+        for (name, input) in &inputs {
+            // 0 is stored blocks, 1 and 6 fixed and dynamic ones of different
+            // shapes; 9 adds nothing a decoder sees that 6 does not, and costs
+            // most of this test's time in a debug build.
+            for level in [0u8, 1, 6] {
+                let c = deflate_level(input, level);
+                let what = format!("{name} L{level}");
+                assert_parity(&c, MAX_OUTPUT, &[1, 3, 64, 4096, 1 << 20], &what);
+                assert_eq!(inflate_limited(&c, MAX_OUTPUT).unwrap(), *input, "{what}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_corrupted_or_truncated_stream_fails_the_same_way_streaming_and_whole() {
+        let original: Vec<u8> = b"streaming and one-shot must fail on the same byte, "
+            .iter()
+            .copied()
+            .cycle()
+            .take(800)
+            .chain(noise(200, 3))
+            .collect();
+        // Stored blocks cost a byte of stream per byte of output, so their
+        // copy of the input is kept short: every byte of it is flipped three
+        // ways, and the point is the header and the boundaries, not length.
+        // A cap well above the 1 KB a correct decode produces: a flip that
+        // turns the stream into a long run of garbage still meets it, and
+        // meets it at the same byte both ways, without every such case
+        // costing tens of thousands of one-byte reads.
+        const CAP: usize = 1 << 14;
+        let stored = deflate_level(&original[..400], 0);
+        for compressed in [deflate(&original), stored] {
+            for i in 0..compressed.len() {
+                for flip in [0x01u8, 0x80, 0xFF] {
+                    let mut c = compressed.clone();
+                    c[i] ^= flip;
+                    let what = format!("flip {flip:#x} at {i}");
+                    assert_parity(&c, CAP, &[1, 4096], &what);
+                }
+            }
+            for cut in 0..compressed.len() {
+                let what = format!("cut at {cut}");
+                assert_parity(&compressed[..cut], CAP, &[1, 4096], &what);
+            }
+        }
+    }
+
+    #[test]
+    fn the_output_limit_bites_at_the_same_byte() {
+        let original: Vec<u8> = noise(4_000, 9).into_iter().cycle().take(10_000).collect();
+        let c = deflate(&original);
+        for limit in [0usize, 1, 257, 4_095, 9_999, 10_000, 10_001] {
+            assert_parity(&c, limit, &[1, 100, 4096], &format!("limit {limit}"));
+            let (got, end) = drain_stream(&c, limit, 100);
+            if limit < original.len() {
+                assert_eq!(end, Err(Error::OutputTooLarge), "limit {limit}");
+                assert!(
+                    got == original[..limit],
+                    "limit {limit}: every byte up to it"
+                );
+            } else {
+                assert_eq!(end, Ok(()), "limit {limit}");
+            }
+        }
+    }
+
+    /// One fixed-Huffman block holding `len` zero bytes: a literal, then
+    /// distance-1 copies of 258. What any encoder may emit, and the case the
+    /// first `InflateStream` decoded whole.
+    fn one_block_of_zeros(len: usize) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.write_bits(1, 1); // BFINAL
+        w.write_bits(1, 2); // fixed Huffman
+        let literal_zero = fixed_code(0);
+        let mut left = len;
+        let mut first = true;
+        while left > 0 {
+            if first || left < 3 {
+                w.write_bits(u32::from(literal_zero.0), literal_zero.1);
+                left -= 1;
+                first = false;
+                continue;
+            }
+            let run = left.min(258);
+            let (sym, extra, extra_bits) = encode_length(run).unwrap();
+            let (code, bits) = fixed_code(sym);
+            w.write_bits(u32::from(code), bits);
+            w.write_bits(extra, extra_bits);
+            let (dsym, dextra, dextra_bits) = encode_distance(1).unwrap();
+            let (dcode, dbits) = fixed_dist_code(dsym);
+            w.write_bits(u32::from(dcode), dbits);
+            w.write_bits(dextra, dextra_bits);
+            left -= run;
+        }
+        let eob = fixed_code(256);
+        w.write_bits(u32::from(eob.0), eob.1);
+        w.into_bytes()
+    }
+
+    #[test]
+    fn one_huge_block_is_decoded_through_the_window_not_held_whole() {
+        let len = 4 << 20;
+        let c = one_block_of_zeros(len);
+        assert!(c.len() < 64 << 10, "{} compressed bytes", c.len());
+        let mut stream = inflate_stream(&c, len);
+        let mut buf = [0xFFu8; 4096];
+        let mut total = 0usize;
+        loop {
+            let n = stream.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            assert!(buf[..n].iter().all(|&b| b == 0));
+            total += n;
+            // The only buffer the decoder owns never grows past the window.
+            assert_eq!(stream.window.capacity(), WINDOW_SIZE);
+        }
+        assert_eq!(total, len);
+    }
+
+    #[test]
+    fn one_byte_reads_of_a_large_block_take_linear_time() {
+        // The first implementation drained its buffer's front on every read,
+        // moving the rest of the block each time: a megabyte read a byte at a
+        // time was a terabyte of copying. Each read is O(1) now.
+        let len = 1 << 20;
+        let c = one_block_of_zeros(len);
+        let (got, end) = drain_stream(&c, len, 1);
+        assert_eq!(end, Ok(()));
+        assert_eq!(got.len(), len);
+    }
+
+    #[test]
+    fn a_long_run_of_empty_blocks_is_a_loop_not_a_recursion() {
+        // Five bytes each, legal, and the first implementation recursed once
+        // per block -- a stack depth chosen by whoever wrote the stream.
+        let mut w = BitWriter::new();
+        for _ in 0..200_000 {
+            w.write_bits(0, 1); // not final
+            w.write_bits(0, 2); // stored
+            w.flush(); // align
+            for b in [0x00, 0x00, 0xFF, 0xFF] {
+                w.write_byte(b); // LEN 0, NLEN !0
+            }
+        }
+        w.write_bits(1, 1); // final
+        w.write_bits(0, 2); // stored
+        w.flush();
+        for b in [0x02, 0x00, 0xFD, 0xFF, b'o', b'k'] {
+            w.write_byte(b);
+        }
+        let c = w.into_bytes();
+        assert_eq!(inflate_limited(&c, 16), Ok(b"ok".to_vec()));
+        let (got, end) = drain_stream(&c, 16, 1);
+        assert_eq!((got.as_slice(), end), (b"ok".as_slice(), Ok(())));
+    }
+
+    #[test]
+    fn an_error_mid_read_delivers_the_bytes_before_it_first() {
+        // A stored stream cut off partway: fine for its first bytes, then short.
+        let original = noise(5_000, 11);
+        let c = deflate_level(&original, 0);
+        let cut = &c[..1_000];
+        let mut stream = inflate_stream(cut, MAX_OUTPUT);
+        let mut buf = alloc::vec![0u8; 4_096];
+        let n = stream
+            .read(&mut buf)
+            .expect("the bytes before the error come first");
+        assert!(n > 0 && buf[..n] == original[..n]);
+        assert_eq!(stream.read(&mut buf), Err(Error::UnexpectedEnd));
     }
 }

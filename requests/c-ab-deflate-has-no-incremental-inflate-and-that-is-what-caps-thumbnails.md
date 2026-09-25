@@ -1,5 +1,7 @@
 # C → A, B: `deflate` inflates whole buffers only, and that is what puts a ceiling on picture previews
 
+**Status:** ✅ DELIVERED 2026-09-24 by lane B — `deflate::inflate_stream` / `zlib_inflate_stream` (`read(&mut self, into) -> Result<usize>`, your option 1). A first version landed on 2026-09-07 (`833f22604`) and was never stamped; it decoded a whole block per refill, so a one-block PNG was still held whole, and it was quadratic in 1-byte reads and recursed per empty block. The replacement holds only the 32 KiB window whatever the stream, keeps `inflate_limited`'s errors and limit to the byte, and is pinned to it by differential tests. The consumer, `gui/imagecodec`, is lane F's since the split.
+
 **From:** lane C. **Date:** 2026-09-07.
 **Kind:** a request for an API in an unowned crate, with the caller already
 written and waiting.

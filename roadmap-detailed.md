@@ -1754,19 +1754,19 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
   - [ ] everything that is not themeable follows the demo;
   - [ ] and the demo's look **is** the default theme, rather than a separate "Aero mode".
   - [ ] The practical test: changing a theme axis must visibly change the settings pages too. A settings page that stays Aero-coloured when the user picks a dark theme has hardcoded what should have been a token.
-- [ ] The default theme is a normal YAML theme file — it uses the same axis system as third-party themes, so users can swap it out wholesale or override any single axis (e.g., keep Aero window decorations but switch icons to a flat-modern pack). No hard-coded "Aero mode" path in the compositor.
+- [-] The default theme is a normal YAML theme file — it uses the same axis system as third-party themes, so users can swap it out wholesale or override any single axis (e.g., keep Aero window decorations but switch icons to a flat-modern pack). No hard-coded "Aero mode" path in the compositor. — *Colours axis 2026-09-25 (§874): the built-in theme is `aero`, shipped as `gui/appearance/themes/aero/theme.yaml` with every colour role, and a test holds the file equal to the compiled palette. Its colours are compiled in so it cannot fail to load; the file is the template and the theme list's description. The other axes are not themes yet.*
 - [ ] Aero blur and transparency are theme axes (window-decorations, taskbar-panel-styling), so users who want a flat/opaque look can disable them without losing the rest of the default visual identity.
 
 ##### Theme Format
-- [ ] YAML theme file following the OS config convention (comment-preserving parser)
-- [ ] `meta` block: name, author, version, license, tags, screenshots, `supports` list
-- [ ] `supports` field declares which axes this theme covers (e.g., `[colors, window-decorations, icons, cursors, widget-style, sounds, terminal]`)
-- [ ] Mix-and-match: each axis is independently overridable — user can apply one theme's colors with a different theme's icons. A "full theme" sets everything, but no axis is mandatory.
+- [x] YAML theme file following the OS config convention (comment-preserving parser) — 2026-09-25, `appearance::themes` (§874): `<name>/theme.yaml` under `/usr/share/slateos/themes` or the user's `~/.local/share/slateos/themes`, read with `yamldoc`. What a file gets wrong costs that line, not the theme, and is listed for its author.
+- [x] `meta` block: name, author, version, license, tags, screenshots, `supports` list — 2026-09-25. Lists may be written as a block or `[a, b]`; a screenshot that would resolve outside the theme's folder is dropped.
+- [-] `supports` field declares which axes this theme covers (e.g., `[colors, window-decorations, icons, cursors, widget-style, sounds, terminal]`) — *read and kept for a theme list to show (2026-09-25); not trusted over what the file actually sets, and only `colors` exists as an axis so far.*
+- [-] Mix-and-match: each axis is independently overridable — user can apply one theme's colors with a different theme's icons. A "full theme" sets everything, but no axis is mandatory. — *The choice is per axis (`theme.colors` in `appearance.yaml`), so the next axis is a key beside it; colours is the only axis yet.*
 
 ##### Tier 1 — Colors (baseline, include from the start)
-- [ ] Semantic color tokens (~30-40 defined by OS): `background`, `surface`, `primary`, `secondary`, `accent`, `error`, `warning`, `text`, `text-dim`, `text-on-primary`, `border`, etc.
-- [ ] Apps reference semantic tokens, not hardcoded colors — theme redefines tokens and everything updates
-- [ ] Light and dark mode variants in a single theme file (`colors` and `colors-light` sections)
+- [x] Semantic color tokens (~30-40 defined by OS): `background`, `surface`, `primary`, `secondary`, `accent`, `error`, `warning`, `text`, `text-dim`, `text-on-primary`, `border`, etc. — the palette's 27 roles (`guitk::palette::Palette`); a theme sets 26 of them by the palette's own names (`THEME_ROLES`), the accent being the user's. Why those names and not the example ones here: §874.
+- [x] Apps reference semantic tokens, not hardcoded colors — theme redefines tokens and everything updates — 2026-09-25: a theme is loaded with the settings (`AppearanceSettings::read_from`), so every program that resolves `Palette::from_settings` -- the shell, the compositor, applications through `oswindow` -- draws in it. (Whether each app draws *only* from the palette is the conversion sweeps' question, not this one.)
+- [x] Light and dark mode variants in a single theme file (`colors` and `colors-light` sections) — 2026-09-25. A theme with only one section is shown in that mode in both (§874).
 - [ ] Auto mode: switch light/dark based on time of day or system toggle
 - [ ] Theme color API for applications (apps query current token values)
 

@@ -1,0 +1,94 @@
+# Aero -- SlateOS's own colours: what the desktop is drawn in when no other
+# theme is chosen.
+#
+# This file is also the template for a theme of your own. Copy this folder to
+# ~/.local/share/slateos/themes/<name>/, give `meta` a new name, change the
+# colours you want to change and delete the rest -- a colour a theme leaves out
+# keeps the value below, so a theme that sets only `base` and `text` is a whole
+# theme. Then choose it in Settings, or set `theme.colors: <name>` in
+# ~/.config/slateos/appearance.yaml.
+#
+# `colors` is dark mode and `colors-light` is light mode. A theme with only one
+# of the two is shown in that mode whichever the user has chosen.
+#
+# Colours are opaque, written "#rrggbb" -- in quotes, because an unquoted `#`
+# after a space begins a comment. The accent is not here: it is the user's own
+# choice, made in Settings. And the four text colours (text, subtext0,
+# subtext1, link) are held to a minimum contrast against the backgrounds, so a
+# theme chooses where its text starts but cannot make it unreadable.
+#
+# The desktop does not read the colours in this file: they are compiled into
+# it, so the built-in theme cannot fail to load. A test holds the two equal
+# (gui/appearance/src/themes.rs, the_shipped_built_in_theme_is_the_built_in_palette).
+# The hues are Catppuccin's (Mocha for dark, Latte for light), with the light
+# ones deepened until they read as text.
+
+meta:
+  name: Aero
+  author: SlateOS
+  version: "1.0"
+  tags: [default, dark, light]
+  supports: [colors]
+
+colors:
+  # Backgrounds, darkest to lightest: the frame behind everything, the
+  # sidebars, the page, then three raised surfaces.
+  crust: "#11111b"
+  mantle: "#181825"
+  base: "#1e1e2e"
+  surface0: "#313244"
+  surface1: "#45475a"
+  surface2: "#585b70"
+  # The faintest legible mark: placeholders, disabled labels.
+  overlay0: "#6c7086"
+  # Text, faintest to strongest, and links.
+  subtext0: "#a6adc8"
+  subtext1: "#bac2de"
+  text: "#cdd6f4"
+  link: "#89b4fa"
+  # The outline that carries structure where a box is not filled.
+  border: "#cdd6f4"
+  # The hues. Red means failed or dangerous, green succeeded, yellow warning;
+  # the rest are for things told apart by colour -- labels, charts, syntax.
+  red: "#f38ba8"
+  green: "#a6e3a1"
+  yellow: "#f9e2af"
+  peach: "#fab387"
+  blue: "#89b4fa"
+  lavender: "#b4befe"
+  mauve: "#cba6f7"
+  sapphire: "#74c7ec"
+  teal: "#94e2d5"
+  sky: "#89dceb"
+  pink: "#f5c2e7"
+  rosewater: "#f5e0dc"
+  flamingo: "#f2cdcd"
+  maroon: "#eba0ac"
+
+colors-light:
+  crust: "#dce0e8"
+  mantle: "#e6e9ef"
+  base: "#eff1f5"
+  surface0: "#ccd0da"
+  surface1: "#bcc0cc"
+  surface2: "#acb0be"
+  overlay0: "#9ca0b0"
+  subtext0: "#00688b"
+  subtext1: "#00688b"
+  text: "#000000"
+  link: "#0036a3"
+  border: "#000000"
+  red: "#d20f39"
+  green: "#317b21"
+  yellow: "#976014"
+  peach: "#b94908"
+  blue: "#0036a3"
+  lavender: "#5565be"
+  mauve: "#8839ef"
+  sapphire: "#187788"
+  teal: "#13787e"
+  sky: "#0374a1"
+  pink: "#9f508a"
+  rosewater: "#965e52"
+  flamingo: "#a05757"
+  maroon: "#c33b47"

@@ -370,6 +370,10 @@ pub struct ShellSession<T: Transport> {
     /// it: a greeter that refused to appear because a wallpaper had been
     /// deleted would be a machine nobody could log in to.
     login_background_error: Option<String>,
+    /// Why the chosen colour theme is not in use, as last told to the user --
+    /// so a theme that stays missing is said once, not once per settings
+    /// change. See [`sync_theme_problem`](Self::sync_theme_problem).
+    theme_problem: Option<String>,
 }
 
 impl<T: Transport> ShellSession<T> {
@@ -608,6 +612,7 @@ impl<T: Transport> ShellSession<T> {
             login_image: None,
             login_image_next: 1,
             login_background_error: None,
+            theme_problem: None,
             // A login screen exactly when there is somebody to log in as. On a
             // machine whose account database cannot be read there is nobody to
             // authenticate — `authlib` would answer `Unusable` to every name —
@@ -1019,35 +1024,77 @@ impl<T: Transport> ShellSession<T> {
             return;
         }
         if let Some(message) = why.as_deref() {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            // The id is discarded: nothing here ever needs to refer back to
-            // this notification. It is a message, not a progress indicator to
-            // be updated later.
-            let _ = self.shell.notify(notif_pane::Notification {
-                id: 0,
-                app_name: "Desktop".to_owned(),
-                title: "Wallpaper could not be shown".to_owned(),
-                body: message.to_owned(),
-                timestamp: now,
-                // Not `High`: the desktop still works and still has a
-                // background. High priority is for something the user has to
-                // act on now, and reserving it for those is what stops it
-                // meaning nothing.
-                priority: notif_pane::NotifPriority::Normal,
-                read: false,
-                action: None,
-                // Left to `notify`, which is the only thing that knows whether
-                // focus assist is silencing "Desktop" right now. Setting it
-                // here would be this call answering a question it cannot see
-                // the state of.
-                silent: false,
-            });
-            self.dirty = true;
+            self.post_desktop_notice("Wallpaper could not be shown", message);
         }
         self.wallpaper_error = why;
+    }
+
+    /// Post news from the desktop about itself: a wallpaper that could not be
+    /// shown, a layout that could not be saved, a colour theme that could not
+    /// be used.
+    ///
+    /// One definition for all of them, so they cannot drift apart in who they
+    /// name as the sender or how urgent they claim to be. Each caller decides
+    /// *whether* there is news -- they all post only what is new -- and this
+    /// decides how it is told.
+    ///
+    /// Not `High` priority: in every one of these cases the desktop still
+    /// works. High priority is for something the user has to act on now, and
+    /// reserving it for those is what stops it meaning nothing. And the pane
+    /// is not opened, for the same reason: a panel that shoved itself over the
+    /// screen at login because of a missing file would be worse than the
+    /// missing file.
+    fn post_desktop_notice(&mut self, title: &str, body: &str) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // The id is discarded: nothing here ever needs to refer back to a
+        // notice. It is a message, not a progress indicator to be updated.
+        let _ = self.shell.notify(notif_pane::Notification {
+            id: 0,
+            app_name: "Desktop".to_owned(),
+            title: title.to_owned(),
+            body: body.to_owned(),
+            timestamp: now,
+            priority: notif_pane::NotifPriority::Normal,
+            read: false,
+            action: None,
+            // Left to `notify`, which is the only thing that knows whether
+            // focus assist is silencing "Desktop" right now. Setting it here
+            // would be this call answering a question it cannot see the state
+            // of.
+            silent: false,
+        });
+        self.dirty = true;
+    }
+
+    /// Tell the user when the colour theme they chose cannot be used.
+    ///
+    /// By the time this runs the desktop is already drawn in the built-in
+    /// colours -- reading the settings did that, and recorded why
+    /// ([`appearance::themes::ColorTheme::problem`]). What is left is to say
+    /// so, which nothing else would: a theme uninstalled since it was chosen
+    /// otherwise looks like a setting that silently stopped working.
+    ///
+    /// Posted when the reason *changes*, not whenever there is one: the
+    /// settings are re-read on every change to them, and a theme that stays
+    /// missing should not add a notice per unrelated change. A theme that
+    /// comes back clears the record, so losing it again is news again.
+    fn sync_theme_problem(&mut self) {
+        let problem = self
+            .shell
+            .appearance
+            .color_theme
+            .problem()
+            .map(str::to_owned);
+        if problem == self.theme_problem {
+            return;
+        }
+        if let Some(message) = problem.as_deref() {
+            self.post_desktop_notice("Colour theme could not be used", message);
+        }
+        self.theme_problem = problem;
     }
 
     /// Make sure the compositor holds the pixels that the background surface's
@@ -1668,6 +1715,7 @@ impl<T: Transport> ShellSession<T> {
     /// to fix, and it would be a shame to leave a second door into it.
     pub fn load_appearance(&mut self) {
         self.shell.load_appearance();
+        self.sync_theme_problem();
         self.sync_wallpaper();
         self.sync_login_background();
         self.sync_animation_speed();
@@ -1751,25 +1799,7 @@ impl<T: Transport> ShellSession<T> {
         if self.save_errors.get(what) == Some(&message) {
             return;
         }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        // The id is discarded: this is a message, not something to update.
-        let _ = self.shell.notify(notif_pane::Notification {
-            id: 0,
-            app_name: "Desktop".to_owned(),
-            title: "Desktop layout not saved".to_owned(),
-            body: message.clone(),
-            timestamp: now,
-            priority: notif_pane::NotifPriority::Normal,
-            read: false,
-            action: None,
-            // Left to `notify`, which knows whether focus assist is silencing
-            // "Desktop" right now.
-            silent: false,
-        });
-        self.dirty = true;
+        self.post_desktop_notice("Desktop layout not saved", &message);
         self.save_errors.insert(what, message);
     }
 
@@ -2277,6 +2307,7 @@ impl<T: Transport> ShellSession<T> {
                     // to know which fields matter.
                     self.sync_animation_speed();
                     self.sync_autohide();
+                    self.sync_theme_problem();
                     // And the wallpaper, on the same argument the comment
                     // above makes: this is the live path, and a setting
                     // adopted only at startup is one that appears to need a

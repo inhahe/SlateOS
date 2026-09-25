@@ -4758,3 +4758,93 @@ fn a_rename_takes_keys_from_any_shell_surface_and_focus_leaving_keeps_it() {
         assert!(named(&restarted), "the name was not saved");
     });
 }
+
+// ---- the colour theme ---------------------------------------------------------
+
+/// **A chosen colour theme is what the shell is drawn in, and one that cannot
+/// be used is said -- once.** The settings carry the reason a theme was not
+/// used (`ColorTheme::problem`) and the desktop falls back to its own colours
+/// by itself; what nothing but the session does is tell the user, and without
+/// it a theme uninstalled since it was chosen looks like a setting that quietly
+/// stopped working. Once per loss and not once per settings change, however
+/// many changes follow; and a theme that comes back and goes again is news
+/// again.
+#[test]
+fn a_colour_theme_that_cannot_be_used_is_said_once_per_loss() {
+    settingsfile::testing::with_scratch_config("session-theme-problem", |root| {
+        let themes = settingsfile::testing::scratch_data_dir(root)
+            .join("slateos")
+            .join("themes");
+        let install = || {
+            let dir = themes.join("nord");
+            std::fs::create_dir_all(&dir).expect("the scratch directory is writable");
+            std::fs::write(
+                dir.join(appearance::themes::FILE_NAME),
+                "colors:\n  base: \"#2e3440\"\n",
+            )
+            .expect("the scratch directory is writable");
+        };
+        let uninstall = || {
+            std::fs::remove_dir_all(themes.join("nord")).expect("the theme was installed");
+        };
+        let notices = |session: &Session| -> Vec<String> {
+            session
+                .shell()
+                .notifications
+                .notifications()
+                .iter()
+                .filter(|n| n.title == "Colour theme could not be used")
+                .map(|n| n.body.clone())
+                .collect()
+        };
+        // Some unrelated change to the settings, announced as the Settings
+        // app announces one, so the session re-reads the file.
+        let touch = |session: &mut Session, desktop: &Desktop, accent: AccentColor| {
+            let mut file = appearance::AppearanceFile::load();
+            file.settings.accent_color = accent;
+            file.save().expect("save");
+            announce(desktop, session.panel(), SettingsGroup::Appearance);
+            session.pump().expect("pump");
+        };
+
+        install();
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.color_theme =
+            appearance::themes::ColorTheme::load(std::ffi::OsStr::new("nord"));
+        file.save().expect("save");
+        let (mut session, desktop, _turn) = session();
+        session.load_appearance();
+        assert_eq!(notices(&session), Vec::<String>::new());
+        // The colour, not its alpha: the taskbar is translucent by default.
+        let rgb = |c: guitk::color::Color| (c.r, c.g, c.b);
+        assert_eq!(
+            rgb(session.shell().theme.taskbar_bg),
+            (0x2E, 0x34, 0x40),
+            "the shell is not drawn in the theme's colours"
+        );
+
+        uninstall();
+        for accent in [AccentColor::Teal, AccentColor::Mauve, AccentColor::Peach] {
+            touch(&mut session, &desktop, accent);
+        }
+        let said = notices(&session);
+        assert_eq!(said.len(), 1, "one loss, one notice: {said:?}");
+        assert!(said[0].contains("\"nord\" is not installed"), "{said:?}");
+        assert_eq!(
+            rgb(session.shell().theme.taskbar_bg),
+            rgb(appearance::Palette::for_mode(false).base),
+            "a theme that is gone still colours the shell"
+        );
+
+        install();
+        touch(&mut session, &desktop, AccentColor::Teal);
+        assert_eq!(
+            notices(&session).len(),
+            1,
+            "a theme coming back is not a problem"
+        );
+        uninstall();
+        touch(&mut session, &desktop, AccentColor::Mauve);
+        assert_eq!(notices(&session).len(), 2, "losing it again is news again");
+    });
+}

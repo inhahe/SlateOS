@@ -415,8 +415,8 @@ pub mod testing {
         }
     }
 
-    /// Restores `XDG_CONFIG_HOME` and `HOME` to what the process had, on every
-    /// exit path.
+    /// Restores `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `HOME` to what the
+    /// process had, on every exit path.
     ///
     /// This used to be straight-line code after the call to `body`, which meant
     /// a body that panicked — i.e. any failing assertion, which is the normal
@@ -427,6 +427,7 @@ pub mod testing {
     /// comment says it exists to prevent, so the restore has to be a `Drop`.
     struct EnvRestore {
         xdg: Option<OsString>,
+        data: Option<OsString>,
         home: Option<OsString>,
     }
 
@@ -440,6 +441,10 @@ pub mod testing {
                     Some(v) => env::set_var("XDG_CONFIG_HOME", v),
                     None => env::remove_var("XDG_CONFIG_HOME"),
                 }
+                match self.data.take() {
+                    Some(v) => env::set_var("XDG_DATA_HOME", v),
+                    None => env::remove_var("XDG_DATA_HOME"),
+                }
                 match self.home.take() {
                     Some(v) => env::set_var("HOME", v),
                     None => env::remove_var("HOME"),
@@ -451,6 +456,12 @@ pub mod testing {
     /// Run `body` with the configuration directory pointed at a fresh empty
     /// directory, which is removed afterwards. The directory is passed in so
     /// the body can inspect what was written.
+    ///
+    /// The user's *data* directory (`XDG_DATA_HOME`) is pointed inside it as
+    /// well, at [`scratch_data_dir`]. Installed themes live there, and a
+    /// scratch user whose settings are private but whose themes are the
+    /// developer's own would make a test that names a theme pass or fail by
+    /// what happens to be installed on the machine running it.
     ///
     /// # Panics
     ///
@@ -473,12 +484,14 @@ pub mod testing {
 
         let restore = EnvRestore {
             xdg: env::var_os("XDG_CONFIG_HOME"),
+            data: env::var_os("XDG_DATA_HOME"),
             home: env::var_os("HOME"),
         };
         // SAFETY: the lock above makes this the only thread touching the
         // environment for the duration, which is what `set_var` requires.
         unsafe {
             env::set_var("XDG_CONFIG_HOME", root.dir());
+            env::set_var("XDG_DATA_HOME", scratch_data_dir(root.dir()));
             // Removed as well as overridden: `config_dir` prefers XDG, but a
             // test that clears XDG itself should not fall through to the
             // developer's real home.
@@ -503,6 +516,15 @@ pub mod testing {
         let mut path = root.join("slateos").join(name);
         path.set_extension("yaml");
         path
+    }
+
+    /// What `XDG_DATA_HOME` names inside the scratch directory `root` -- the
+    /// user's data directory, as against their configuration. Beside the
+    /// configuration rather than equal to it, so a test cannot pass by
+    /// looking for a file in the wrong one of the two.
+    #[must_use]
+    pub fn scratch_data_dir(root: &Path) -> PathBuf {
+        root.join("data")
     }
 }
 

@@ -1720,6 +1720,20 @@ live.
   program and closes the menu. Their program paths are now `launcher`
   constants, shared with the database and the Settings shortcut.
 
+- `[C]` **Colour themes** -- done 2026-09-25 (`design-decisions.md` §874;
+  `design.txt` lines 1249-1250, "light, dark, anything else" and "make your own
+  theme"). A theme is a YAML file in a folder named for it, under
+  `/usr/share/slateos/themes` or the user's `~/.local/share/slateos/themes`,
+  setting any of the palette's colours for dark mode (`colors`), light mode
+  (`colors-light`) or both; `theme.colors` in `appearance.yaml` chooses one,
+  and every program picks it up with the rest of the settings
+  (`appearance::themes`). A theme cannot set the accent or make text
+  unreadable, and one that cannot be used leaves the built-in colours and a
+  notice. The built-in theme ships as a complete file to copy
+  (`gui/appearance/themes/aero/theme.yaml`). The Settings picker is lane E's,
+  installing the file lane D's; an in-place edit of the chosen theme is not
+  yet noticed (`TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE`).
+
 Known-issues: no open GUI entries today beyond the theme debt named above
 (`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`). Standing
 work between features: bug-hunt sweeps over `gui/**` outside lane F's

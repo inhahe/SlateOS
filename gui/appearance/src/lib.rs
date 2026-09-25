@@ -42,13 +42,6 @@
 //! at the draw site; see `known-issues.md`
 //! `TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`.
 
-/// Where settings files live and how they are replaced.
-///
-/// This was `appearance::config` before it was a crate of its own, and it is
-/// re-exported under the old name because the path is used across the shell,
-/// the compositor and the Settings application, and none of those call sites
-/// were wrong. See `settingsfile`'s own documentation for why it moved: it is
-/// not about appearance, and `inputsettings` needs it without needing colours.
 /// The sweep that proves a module draws from the palette rather than from
 /// colours of its own.
 ///
@@ -60,6 +53,17 @@
 #[cfg(feature = "testing")]
 pub mod palette_check;
 
+/// Themes: the installed colour sets a user can choose between, and the one
+/// in use ([`AppearanceSettings::color_theme`]).
+pub mod themes;
+
+/// Where settings files live and how they are replaced.
+///
+/// This was `appearance::config` before it was a crate of its own, and it is
+/// re-exported under the old name because the path is used across the shell,
+/// the compositor and the Settings application, and none of those call sites
+/// were wrong. See `settingsfile`'s own documentation for why it moved: it is
+/// not about appearance, and `inputsettings` needs it without needing colours.
 pub use settingsfile as config;
 
 use core::num::NonZeroU32;
@@ -218,6 +222,10 @@ impl PaletteSource for AppearanceSettings {
     fn high_contrast(&self) -> Option<(Color, Color)> {
         self.high_contrast
             .map(|scheme| (scheme.background(), scheme.text()))
+    }
+
+    fn theme(&self) -> Option<&ThemeColors> {
+        self.color_theme.colors()
     }
 }
 
@@ -1390,6 +1398,16 @@ impl TaskbarStyle {
 pub struct AppearanceSettings {
     /// Light/dark/system theme mode.
     pub theme_mode: ThemeMode,
+    /// The theme the colours come from, and what reading it gave: the
+    /// built-in one unless the user chose another. `theme.colors` in the file,
+    /// by the theme's folder name.
+    ///
+    /// Read when the file is read -- [`read_from`](Self::read_from) loads the
+    /// theme along with the rest -- and not when a palette is resolved, which
+    /// happens per frame and must not touch a file. One value rather than a
+    /// name and a set of colours, so the two cannot disagree; see
+    /// [`themes::ColorTheme`].
+    pub color_theme: themes::ColorTheme,
     /// Whether boxes are outlined or filled. See [`SurfaceStyle`]; defaults to
     /// [`SurfaceStyle::Borders`] (§829), with `Cards` the optional theme.
     pub surface_style: SurfaceStyle,
@@ -1582,6 +1600,7 @@ impl Default for AppearanceSettings {
             wallpaper_exclusions: Vec::new(),
             login_background: LoginBackground::Theme,
             theme_mode: ThemeMode::Dark,
+            color_theme: themes::ColorTheme::built_in(),
             // Borders, per §829. The `Default` impl is what a machine with no
             // configuration file gets, so this is where "the default theme" is
             // actually decided.
@@ -2109,6 +2128,17 @@ impl AppearanceSettings {
                 .collect();
         }
 
+        // The colour theme, by the name of its folder, percent-encoded as a
+        // filename is (design-decisions 426): a folder's name need not be
+        // text. Loaded here, file and all -- see `color_theme` for why here.
+        // An empty value is the built-in theme, as a blanked wallpaper is no
+        // wallpaper.
+        if let Some(name) = doc.get_str(&["theme", "colors"]) {
+            let name = name.trim();
+            if !name.is_empty() {
+                s.color_theme = themes::ColorTheme::load(pathcodec::decode_path(name).as_os_str());
+            }
+        }
         read_into!(
             s.theme_mode,
             doc.get_str(&["theme", "mode"])
@@ -2352,6 +2382,10 @@ impl AppearanceSettings {
             LoginBackground::Theme | LoginBackground::SameAsDesktop => {}
         }
         doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
+        doc.set_str(
+            &["theme", "colors"],
+            &pathcodec::encode_path(std::path::Path::new(self.color_theme.id())),
+        );
         doc.set_str(
             &["theme", "surface_style"],
             surface_style_yaml_name(self.surface_style),
@@ -2869,10 +2903,34 @@ mod tests {
 
     // ---- Configuration file ----
 
+    /// The colour theme [`all_non_default`] chooses: its folder's name, with a
+    /// space, a `%` and a letter outside ASCII in it for the encoding to get
+    /// wrong, and its file.
+    const ROUND_TRIP_THEME: &str = "nord 100% ça";
+    const ROUND_TRIP_THEME_FILE: &str =
+        "colors:\n  base: \"#102030\"\ncolors-light:\n  text: \"#0a0b0c\"\n";
+
+    /// Install a theme in the scratch user's data directory under `root`,
+    /// where `AppearanceSettings::read_from` will look for it.
+    fn install_theme(root: &std::path::Path, name: &str, text: &str) {
+        let dir = config::testing::scratch_data_dir(root)
+            .join("slateos")
+            .join("themes")
+            .join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(themes::FILE_NAME), text).unwrap();
+    }
+
     /// Settings that differ from the defaults in every field, so a
     /// round-trip test cannot pass by accident on a field it forgot.
     fn all_non_default() -> AppearanceSettings {
         AppearanceSettings {
+            // Read back from a file the round trip installs, so the colours
+            // here are the file's.
+            color_theme: themes::ColorTheme::from_colors(
+                ROUND_TRIP_THEME,
+                themes::parse(ROUND_TRIP_THEME_FILE).colors,
+            ),
             // Every one of these differs from the default, which is what the
             // fixture is for: the defaults are `None`, 600 and `true`.
             wallpaper_folder: Some(PathBuf::from("/home/u/Pictures/rotation")),
@@ -2938,8 +2996,76 @@ mod tests {
         assert_ne!(settings, AppearanceSettings::default());
         let mut doc = Document::new();
         settings.write_into(&mut doc);
-        let reread = AppearanceSettings::read_from(&Document::parse(&doc.to_text()));
+        // The colour theme is read from its own file, so that file has to be
+        // where the reader looks: a scratch user's data directory.
+        let reread = config::testing::with_scratch_config("round-trip", |root| {
+            install_theme(root, ROUND_TRIP_THEME, ROUND_TRIP_THEME_FILE);
+            AppearanceSettings::read_from(&Document::parse(&doc.to_text()))
+        });
         assert_eq!(reread, settings);
+    }
+
+    /// The file names the colour theme by its folder, encoded as a filename
+    /// is -- so the name survives whatever bytes are in it -- and the name is
+    /// written even for the built-in theme, so the key is there to edit.
+    #[test]
+    fn the_colour_theme_is_written_by_name() {
+        let mut doc = Document::new();
+        AppearanceSettings::default().write_into(&mut doc);
+        assert_eq!(doc.get_str(&["theme", "colors"]).as_deref(), Some("aero"));
+
+        all_non_default().write_into(&mut doc);
+        assert_eq!(
+            doc.get_str(&["theme", "colors"]).as_deref(),
+            Some("nord 100%25 %C3%A7a")
+        );
+    }
+
+    /// A theme's colours reach the palette from nothing but the settings file
+    /// and the theme's own: the path every reader of the settings takes.
+    #[test]
+    fn a_chosen_themes_colours_reach_the_palette() {
+        config::testing::with_scratch_config("theme-palette", |root| {
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let s = AppearanceSettings::read_from(&Document::parse("theme:\n  colors: nord\n"));
+            assert_eq!(s.color_theme.problem(), None);
+            assert_eq!(Palette::from_settings(&s).base, Color::from_hex(0x2E3440));
+        });
+    }
+
+    /// A theme that cannot be used shows the built-in colours and says why --
+    /// and keeps its name, so that saving an unrelated setting does not
+    /// quietly put the user back on the built-in theme for good.
+    #[test]
+    fn a_theme_that_is_not_installed_keeps_its_name_through_a_save() {
+        config::testing::with_scratch_config("theme-missing", |_| {
+            let doc = Document::parse("theme:\n  colors: gone\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.color_theme.id(), "gone");
+            assert_eq!(s.color_theme.colors(), None);
+            assert!(
+                s.color_theme
+                    .problem()
+                    .is_some_and(|why| why.contains("\"gone\" is not installed")),
+                "{:?}",
+                s.color_theme.problem()
+            );
+            assert_eq!(
+                Palette::from_settings(&s),
+                Palette::from_settings(&AppearanceSettings::default())
+            );
+
+            let mut saved = doc.clone();
+            s.write_into(&mut saved);
+            assert_eq!(saved.get_str(&["theme", "colors"]).as_deref(), Some("gone"));
+        });
+    }
+
+    /// A blank name is the built-in theme, as a blanked wallpaper is none.
+    #[test]
+    fn a_blank_colour_theme_is_the_built_in_one() {
+        let s = AppearanceSettings::read_from(&Document::parse("theme:\n  colors: \"  \"\n"));
+        assert_eq!(s.color_theme, themes::ColorTheme::built_in());
     }
 
     #[test]

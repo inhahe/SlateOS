@@ -196,6 +196,18 @@ pub enum Dispatch {
     /// draws it in the same frame. Several wakes between two looks arrive as
     /// one.
     Woken,
+    /// The compositor asks for this window to be drawn whole again — part of
+    /// the desktop's artifact recovery (Ctrl+Super+R). Draw the entire window,
+    /// not just what you believe has changed: a region you believe is clean is
+    /// what recovery suspects.
+    ///
+    /// Not an [`Event`], for [`guiremote::repaint`]'s reason: it is the display
+    /// asking, not the user doing something to the window. Arrives after the
+    /// batch's events, before its [`Dispatch::Settled`].
+    Repaint {
+        /// The window to draw whole.
+        window: u64,
+    },
     /// Everything readable has now been dispatched, so the application's state
     /// has settled. This is the moment to draw it, and the loop is about to
     /// park.
@@ -1315,6 +1327,22 @@ impl<T: Transport> EventLoop<T> {
         self.conn.confirm(RequestBody::ReloadSession)
     }
 
+    /// Ask the compositor to recover the display: the same full redraw as its
+    /// own Ctrl+Super+R.
+    ///
+    /// For a shell, or a diagnostic tool, that offers the recovery somewhere
+    /// other than the keyboard. Windows no live program owns are dropped, the
+    /// display is reset, the screen is redrawn from scratch, and every program
+    /// — this one included — is asked to draw its windows whole
+    /// ([`Dispatch::Repaint`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`notifications_changed`](Self::notifications_changed).
+    pub fn recover_display(&mut self) -> Result<(), Error<T>> {
+        self.conn.confirm(RequestBody::RecoverDisplay)
+    }
+
     /// Every window on the desktop, bottom-to-top, as of the last update.
     ///
     /// Empty until the first list arrives — which, for a client that never
@@ -1705,7 +1733,9 @@ impl<T: Transport> EventLoop<T> {
     {
         self.run_batched(|events, dispatch| match dispatch {
             Dispatch::Event { window, event } => handler(events, window, event),
-            Dispatch::Woken | Dispatch::Settled => EventResponse::Continue,
+            Dispatch::Woken | Dispatch::Repaint { .. } | Dispatch::Settled => {
+                EventResponse::Continue
+            }
         })
     }
 
@@ -1757,6 +1787,18 @@ impl<T: Transport> EventLoop<T> {
                 dispatched = true;
                 if handler(self, Dispatch::Woken) == EventResponse::Exit {
                     self.running = false;
+                }
+            }
+            // The compositor's repaint requests, read by the same pumps as the
+            // events above, and handed over the same way: before `Settled`, so
+            // the whole-window frame is the one drawn at the batch's end.
+            if self.running {
+                for window in self.conn.take_repaints() {
+                    dispatched = true;
+                    if handler(self, Dispatch::Repaint { window }) == EventResponse::Exit {
+                        self.running = false;
+                        break;
+                    }
                 }
             }
             if dispatched && self.running && handler(self, Dispatch::Settled) == EventResponse::Exit
@@ -2055,6 +2097,16 @@ pub mod testing {
                 .unwrap();
         }
 
+        /// Ask the client to draw these windows whole again, as a compositor
+        /// does during recovery.
+        pub fn send_repaint(&mut self, windows: &[u64]) {
+            self.pipe
+                .write(&guiremote::encode_repaint(&guiremote::Repaint {
+                    windows: windows.to_vec(),
+                }))
+                .unwrap();
+        }
+
         /// Push a desktop window list, as a compositor does to a subscribed
         /// shell.
         ///
@@ -2156,6 +2208,7 @@ pub mod testing {
                 RequestBody::CreateWindow(_) => "CreateWindow",
                 RequestBody::WatchIdle { .. } => "WatchIdle",
                 RequestBody::ReloadSession => "ReloadSession",
+                RequestBody::RecoverDisplay => "RecoverDisplay",
                 RequestBody::DestroyWindow { .. } => "DestroyWindow",
                 RequestBody::SetTitle { .. } => "SetTitle",
                 RequestBody::Move { .. } => "Move",
@@ -3487,6 +3540,36 @@ mod tests {
             tick_ms(&first) + tick_ms(&second),
             36,
             "the deltas should cover every millisecond from t0 to t0+36"
+        );
+    }
+
+    // ---- the compositor's repaint requests ---------------------------------
+
+    #[test]
+    fn a_repaint_request_is_handed_over_before_the_frame_it_belongs_to() {
+        let (mut events, desktop) = wired();
+        let window = WindowBuilder::new("W", 100, 100)
+            .build(&mut events)
+            .unwrap();
+        desktop.borrow_mut().send_repaint(&[window]);
+        let mut seen = Vec::new();
+        events
+            .run_batched(|_, dispatch| {
+                seen.push(dispatch);
+                EventResponse::Continue
+            })
+            .unwrap();
+        assert_eq!(seen, vec![Dispatch::Repaint { window }, Dispatch::Settled]);
+    }
+
+    #[test]
+    fn asking_for_recovery_is_one_request() {
+        let (mut events, desktop) = wired();
+        events.recover_display().unwrap();
+        assert_eq!(
+            desktop.borrow_mut().asked(),
+            vec!["RecoverDisplay"],
+            "one request, and nothing else sent"
         );
     }
 }

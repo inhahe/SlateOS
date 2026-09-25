@@ -247,6 +247,10 @@ pub struct Connection<T: Transport> {
     /// copy — and, unlike a dirty flag, cannot be lost by two consumers, since
     /// each remembers the number it last acted on.
     window_list_revision: u64,
+    /// Windows the compositor has asked to have drawn whole again, oldest
+    /// first, each named once, until [`Connection::take_repaints`] collects
+    /// them.
+    repaints: Vec<u64>,
     /// Bumped on every tray frame, so a shell can tell "sent again" from
     /// "changed" without comparing lists itself.
     tray_revision: u64,
@@ -268,6 +272,7 @@ impl<T: Transport> Connection<T> {
             misdirected: 0,
             window_list: None,
             window_list_revision: 0,
+            repaints: Vec::new(),
             tray_list: None,
             tray_revision: 0,
         }
@@ -420,6 +425,15 @@ impl<T: Transport> Connection<T> {
                 self.tray_list = Some(list);
                 self.tray_revision = self.tray_revision.saturating_add(1);
             }
+            // Kept until collected, and each window once however many times it
+            // was named: two recoveries in a row still mean one full redraw.
+            Frame::Repaint(repaint) => {
+                for window in repaint.windows {
+                    if !self.repaints.contains(&window) {
+                        self.repaints.push(window);
+                    }
+                }
+            }
             // Everything else travels the other way. A compositor that sends
             // one is misrouting; that is worth being able to see and is not
             // worth killing an application over.
@@ -427,6 +441,18 @@ impl<T: Transport> Connection<T> {
                 self.misdirected = self.misdirected.saturating_add(1);
             }
         }
+    }
+
+    /// Take the windows the compositor has asked to have drawn whole again
+    /// since this was last asked, oldest first.
+    ///
+    /// The compositor sends these during artifact recovery
+    /// ([`RecoverDisplay`](crate::control::RequestBody::RecoverDisplay), or its
+    /// Ctrl+Super+R): it has redrawn everything it holds, and asks each client
+    /// to do the same for what only the client holds — a window it has been
+    /// updating a dirty patch at a time.
+    pub fn take_repaints(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.repaints)
     }
 
     /// The desktop's windows as of the last `WLST` frame, or `None` if none has
@@ -1457,5 +1483,28 @@ mod tests {
         let wrapped = c.send(RequestBody::GetDisplayInfo).unwrap();
         assert_eq!(last, u32::MAX);
         assert_eq!(wrapped, 1, "wraps past 0, not onto it");
+    }
+
+    #[test]
+    fn a_repaint_request_is_collected_once_and_each_window_named_once() {
+        let mut first = crate::repaint::encode_repaint(&crate::Repaint {
+            windows: vec![3, 5],
+        });
+        first.extend(crate::repaint::encode_repaint(&crate::Repaint {
+            windows: vec![5, 9],
+        }));
+        let mut conn = Connection::new(FakeTransport::new(vec![first]));
+        conn.pump().unwrap();
+        assert_eq!(
+            conn.take_repaints(),
+            vec![3, 5, 9],
+            "two recoveries in a row still mean one redraw per window"
+        );
+        assert!(conn.take_repaints().is_empty(), "and they are taken once");
+        assert_eq!(
+            conn.misdirected_frames(),
+            0,
+            "a repaint is traffic a client expects"
+        );
     }
 }

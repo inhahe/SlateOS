@@ -112,6 +112,9 @@ pub use submit::{
     try_decode_submit,
 };
 
+pub mod repaint;
+pub use repaint::{REPAINT_MAGIC, REPAINT_VERSION, Repaint, decode_repaint, encode_repaint};
+
 pub mod tray;
 pub mod window_list;
 pub use window_list::{
@@ -447,6 +450,9 @@ pub enum DecodeError {
     /// *scene* frame, so that a limit hit names the frame that hit it even if
     /// the two limits later diverge.
     TooManyListedWindows(u32),
+    /// A repaint frame names more windows than
+    /// [`repaint::MAX_REPAINT_WINDOWS`].
+    TooManyRepaints(u32),
     /// A [`ShellControlAction`](control::ShellControlAction) byte is not in this
     /// decoder's table.
     BadShellAction(u8),
@@ -522,6 +528,13 @@ impl core::fmt::Display for DecodeError {
                 )
             }
             Self::BadCursorShape(b) => write!(f, "unknown cursor shape {b:#04x}"),
+            Self::TooManyRepaints(n) => {
+                write!(
+                    f,
+                    "repaint window count {n} exceeds limit {}",
+                    repaint::MAX_REPAINT_WINDOWS
+                )
+            }
             Self::TooManyListedWindows(n) => {
                 write!(
                     f,

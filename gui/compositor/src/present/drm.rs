@@ -322,6 +322,9 @@ struct Head {
     width: u32,
     /// The mode's height in pixels.
     height: u32,
+    /// The mode programmed into the CRTC, kept so that recovery can program it
+    /// again ([`Present::reset`]).
+    mode: ModeModeinfo,
     /// The mode's refresh rate in Hz, as the display reported it.
     ///
     /// Carried rather than assumed because it is what paces the compositor's
@@ -906,6 +909,31 @@ impl<S: KmsSys> Present for DrmScanout<S> {
         self.heads.iter().any(|h| h.alive)
     }
 
+    /// Program every live head's mode again, and forget what each buffer was
+    /// last given, so the next frame is copied whole into both.
+    ///
+    /// The mode-set is the one `make_head` issued, scanning out the buffer on
+    /// screen now, so nothing visibly changes unless the CRTC had drifted from
+    /// it — which is the point. Its failure is dropped for `set_mode`'s reason:
+    /// the next flip is the stronger test.
+    fn reset(&mut self) {
+        for head in self.heads.iter_mut().filter(|h| h.alive) {
+            for buffer in &mut head.buffers {
+                buffer.holds = None;
+                buffer.pointer_drawn = None;
+            }
+            let Some(on_screen) = head.buffers.get(head.front).map(|b| b.fb_id) else {
+                continue;
+            };
+            let pick = Chosen {
+                connector_id: head.connector_id,
+                mode: head.mode,
+                crtc_id: head.crtc_id,
+            };
+            set_mode(&mut self.sys, &pick, on_screen);
+        }
+    }
+
     /// The next hotplug probe. Nothing tells this module a cable moved (see
     /// [`PROBE_INTERVAL`]), so a desktop nobody is touching must still wake
     /// this often for a monitor plugged into it to light up.
@@ -1307,6 +1335,7 @@ fn make_head(sys: &mut dyn KmsSys, pick: &Chosen) -> Result<Head, ScanoutError> 
         y: 0,
         width,
         height,
+        mode: pick.mode,
         // Zero means the display did not say, and a display that does not say
         // is treated as 60 rather than as "never refresh": every consumer of
         // this divides by it.

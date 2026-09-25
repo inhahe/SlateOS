@@ -988,6 +988,12 @@ impl super::Present for Window {
         PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()))
     }
 
+    /// Drop the staged copy of the last frame, so the next is copied whole
+    /// whatever its serial says.
+    fn reset(&mut self) {
+        self.staging = Staging::default();
+    }
+
     fn is_open(&self) -> bool {
         !CLOSED.get()
     }

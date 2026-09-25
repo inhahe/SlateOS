@@ -673,6 +673,15 @@ pub fn drive<T: Transport, A: App + ?Sized>(
                 Response::Exit => EventResponse::Exit,
             }
         }
+        // The compositor's recovery: the whole window, drawn again, even if the
+        // application believes nothing in it has changed — that belief is what
+        // recovery suspects. Another window's request is not this one's.
+        Dispatch::Repaint { window: id } => {
+            if id == window {
+                dirty = true;
+            }
+            EventResponse::Continue
+        }
         Dispatch::Woken => {
             let response = app.on_wake();
             // As after an event, and for the same reason: an application may
@@ -2722,5 +2731,31 @@ mod tests {
         drive(&mut events, window, &mut app).expect("the loop should have run");
         assert_eq!(*app.attached.borrow(), 0);
         assert_eq!(*app.woken.borrow(), 0);
+    }
+
+    // ---- the compositor's repaint requests ---------------------------------
+
+    #[test]
+    fn a_repaint_request_draws_the_window_whole_again() {
+        let mut app = Recorder::new(Response::Idle);
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+        desktop.borrow_mut().send_repaint(&[window]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+        assert_eq!(
+            app.drawn.borrow().len(),
+            2,
+            "the first frame, then the whole window again for the compositor"
+        );
+    }
+
+    #[test]
+    fn a_repaint_request_for_another_window_draws_nothing_here() {
+        let mut app = Recorder::new(Response::Idle);
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+        desktop.borrow_mut().send_repaint(&[window + 1000]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+        assert_eq!(app.drawn.borrow().len(), 1, "only the first frame");
     }
 }

@@ -2510,3 +2510,41 @@ fn the_next_hotplug_probe_is_a_deadline() {
     scanout.set_probe_interval(Duration::ZERO);
     assert_eq!(scanout.deadline(), None);
 }
+
+// ------------------------------------------------------ reset for recovery --
+
+#[test]
+fn a_reset_programs_every_mode_again_and_forgets_what_the_buffers_hold() {
+    // Recovery's display half: whatever the hardware or the buffers hold is
+    // suspect, so the next frame goes up whole even if its serial says the
+    // picture is one this presenter already has.
+    let card = FakeCard::desktop();
+    let mut scanout = DrmScanout::new(card.clone()).unwrap();
+    let (w, h) = scanout.size();
+    let old = vec![0xFF11_1111u32; (w * h) as usize];
+    // Both buffers of the pair hold the old picture under serial 7.
+    scanout.show(&Frame::new(&old, w, h).with_serial(7));
+    scanout.show(&Frame::new(&old, w, h).with_serial(7));
+    let sets_before = card.read(|s| s.mode_sets.len());
+
+    scanout.reset();
+    assert_eq!(
+        card.read(|s| s.mode_sets.len()),
+        sets_before + 1,
+        "one live head, one mode-set again"
+    );
+
+    // Same serial, different pixels: only a presenter that forgot what it held
+    // puts these up.
+    let new = vec![0xFF22_2222u32; (w * h) as usize];
+    scanout.show(&Frame::new(&new, w, h).with_serial(7));
+    let pitch = scanout.pitch_for(scanout.connector_id()) as usize;
+    let bytes = scanout.scanned_out_for(scanout.connector_id()).to_vec();
+    let at = (h as usize / 2) * pitch + (w as usize / 2) * 4;
+    let got = u32::from_le_bytes(fixed(&bytes[at..at + 4]));
+    assert_eq!(
+        got & 0x00FF_FFFF,
+        0x0022_2222,
+        "the old picture survived the reset"
+    );
+}

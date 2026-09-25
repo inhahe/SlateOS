@@ -174,6 +174,11 @@ pub struct ServerStats {
     pub frames: u64,
     /// Windows destroyed because the client that owned them went away.
     pub orphans_reclaimed: u64,
+    /// Times the display's artifact recovery has run.
+    pub recoveries: u64,
+    /// Windows recovery found with no live owner and dropped. Non-zero means
+    /// the ordinary reaping missed one — a symptom, like `unrouted_events`.
+    pub orphans_swept: u64,
 }
 
 /// One connected client: a socket, and the protocol state for what arrives on
@@ -239,6 +244,10 @@ pub struct Server {
     /// Whether the last wait failed, so a failure is reported when it starts
     /// and when it stops rather than sixty times a second in between.
     wait_failing: bool,
+    /// Set by recovery so that the next frame shown carries a new serial even
+    /// if the picture key has not changed: a presenter keeping its own copy
+    /// must not be told it already has this one.
+    force_new_serial: bool,
     /// Stands in for a process id. A TCP peer cannot be asked what process it
     /// is — there is no `SO_PEERCRED` across a network, and a remote client has
     /// no pid in this machine's namespace at all — so the compositor is given a
@@ -287,6 +296,7 @@ impl Server {
             listener_ready: true,
             waits: WaitSet::new(),
             wait_failing: false,
+            force_new_serial: false,
             // Zero is left free as "no client", matching the convention the
             // rest of the compositor uses for ids that may be absent.
             next_client_id: 1,
@@ -456,6 +466,11 @@ impl Server {
             .unrouted_events
             .saturating_add(u64::try_from(unrouted).unwrap_or(u64::MAX));
 
+        self.flush();
+    }
+
+    /// Write everything queued for every client.
+    fn flush(&mut self) {
         for client in &mut self.clients {
             if !client.link.has_outgoing() {
                 continue;
@@ -469,6 +484,71 @@ impl Server {
                 }
             }
         }
+    }
+
+    /// Recover the display from whatever has gone wrong with it: the full
+    /// redraw, run when the Ctrl+Super+R chord or a shell's `RecoverDisplay`
+    /// has asked for it ([`Compositor::request_recovery`]).
+    ///
+    /// Normal drawing is damage-tracked and trusts several records of what is
+    /// on screen; an artifact that survives it is living in one of them. This
+    /// throws all of them away, in the order the design gives
+    /// (`roadmap-detailed.md` §3.3):
+    ///
+    /// 1. **Drops every surface no live client owns** — a tooltip or popup
+    ///    whose program died and whose last frame the compositor would
+    ///    otherwise draw for ever. Counted in [`ServerStats::orphans_swept`].
+    /// 2. **Forgets what the compositor believes is on screen**
+    ///    ([`Compositor::reset_for_recovery`]): the whole screen is damage, and
+    ///    the history of recent frames is gone.
+    /// 3. **Resets the display** ([`Present::reset`]): a presenter's copy of
+    ///    the last picture, the mode programmed into the hardware.
+    /// 4. **Forgets the server's own copies** — the filtered frame, the drawn
+    ///    pointers — and gives the next frame a new serial, so no presenter
+    ///    can skip copying it.
+    /// 5. **Asks every client to draw its windows whole again**, for what only
+    ///    the client holds (an `RPNT` frame).
+    ///
+    /// The frame that follows is drawn whole and shown at once. If an artifact
+    /// is still there afterwards, it is in the compositor's own state, which is
+    /// the other thing this is for: telling whose fault it was.
+    pub fn recover<P: Present>(&mut self, compositor: &mut Compositor, present: &mut P) {
+        let live: Vec<u64> = self
+            .clients
+            .iter()
+            .filter(|c| c.ending.is_none())
+            .map(|c| c.link.client_pid())
+            .collect();
+        let dropped = compositor.drop_windows_without_owner(&live);
+        if !dropped.is_empty() {
+            eprintln!(
+                "compositor: recovery dropped {} window(s) no live client owns",
+                dropped.len()
+            );
+            self.stats.orphans_swept = self
+                .stats
+                .orphans_swept
+                .saturating_add(u64::try_from(dropped.len()).unwrap_or(u64::MAX));
+        }
+
+        compositor.reset_for_recovery();
+        present.reset();
+
+        self.filtered = Vec::new();
+        self.filtered_for = None;
+        self.cursors = CursorCache::new();
+        self.shown_pointer = None;
+        self.last_shown = None;
+        self.force_new_serial = true;
+
+        for client in &mut self.clients {
+            if client.ending.is_none() {
+                let windows = client.link.windows().to_vec();
+                client.link.queue_repaint(&windows);
+            }
+        }
+        self.flush();
+        self.stats.recoveries = self.stats.recoveries.saturating_add(1);
     }
 
     /// Remove the clients that ended, destroying the windows they left behind.
@@ -576,8 +656,9 @@ impl Server {
         // The compositor's own count of the frames it has produced names the
         // picture, so the serial is right however `compose_frame` was reached.
         let key: ShownKey = (compositor.frame_stats().frames_composited, filter, warmth);
+        let fresh = std::mem::take(&mut self.force_new_serial);
         let serial = match self.shown {
-            Some((shown_key, serial)) if shown_key == key => serial,
+            Some((shown_key, serial)) if shown_key == key && !fresh => serial,
             Some((_, serial)) => serial.wrapping_add(1),
             None => 0,
         };
@@ -826,6 +907,12 @@ impl Server {
             // moment: it is one of the deadlines `Compositor::wake_at` reports.
             compositor.poll_deferred_key();
             self.tick(compositor)?;
+            // After the tick, so a `RecoverDisplay` just served is acted on
+            // this frame, and before presenting, so the frame drawn whole is
+            // the very next one.
+            if compositor.take_recovery_request() {
+                self.recover(compositor, present);
+            }
             self.present_if_due(compositor, present, interval);
 
             // Checked again before waiting, not only at the top: a display
@@ -2457,5 +2544,238 @@ mod tests {
             .expect("inside the image");
         let (r, b) = ((px >> 16) & 0xFF, px & 0xFF);
         assert!(r > 0 && b < r, "the pointer was not warmed: {px:#010x}");
+    }
+
+    // ------------------------------------------------------------------
+    // Artifact recovery: the full redraw
+    // ------------------------------------------------------------------
+
+    /// Scan codes, in set 1: left Ctrl, left Super (extended) and R.
+    const CTRL: u32 = 0x1D;
+    const SUPER: u32 = 0xE05B;
+    const SHIFT: u32 = 0x2A;
+    const KEY_R: u32 = 0x13;
+
+    fn press(comp: &mut Compositor, scancode: u32) {
+        comp.handle_input(InputEvent::KeyDown {
+            scancode,
+            character: None,
+        });
+    }
+
+    fn release(comp: &mut Compositor, scancode: u32) {
+        comp.handle_input(InputEvent::KeyUp { scancode });
+    }
+
+    /// A client with one window, focused, and the scan codes its events carry
+    /// once the server has routed whatever the compositor queued.
+    fn client_with_a_window(
+        server: &mut Server,
+        compositor: &mut Compositor,
+        addr: SocketAddr,
+    ) -> (Connection<Socket>, u64) {
+        let mut conn = dial(server, compositor, addr);
+        let seq = conn
+            .send(RequestBody::CreateWindow(WindowSpec::new(
+                "Typing", 400, 300,
+            )))
+            .expect("send");
+        let ResponseBody::WindowCreated { window } =
+            await_reply(server, compositor, &mut conn, seq)
+        else {
+            panic!("no window");
+        };
+        (conn, window)
+    }
+
+    fn scancodes_delivered(
+        server: &mut Server,
+        compositor: &mut Compositor,
+        conn: &mut Connection<Socket>,
+    ) -> Vec<u32> {
+        let mut seen = Vec::new();
+        // A few rounds, so everything queued has crossed the socket.
+        for _ in 0..50 {
+            server.tick(compositor).expect("tick");
+            conn.pump().expect("pump");
+            seen.extend(conn.drain_events().into_iter().filter_map(|e| e.scancode));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        seen
+    }
+
+    /// Ctrl+Super+R asks for recovery, and no part of it — press, repeat or
+    /// release of the R — reaches the focused window.
+    #[test]
+    fn ctrl_super_r_asks_for_recovery_and_no_window_sees_the_r() {
+        let (mut server, mut compositor, addr) = server();
+        let (mut conn, _window) = client_with_a_window(&mut server, &mut compositor, addr);
+        assert!(!compositor.take_recovery_request());
+
+        press(&mut compositor, CTRL);
+        press(&mut compositor, SUPER);
+        press(&mut compositor, KEY_R);
+        press(&mut compositor, KEY_R); // a repeat
+        release(&mut compositor, KEY_R);
+        release(&mut compositor, SUPER);
+        release(&mut compositor, CTRL);
+
+        assert!(compositor.take_recovery_request(), "the chord was not seen");
+        assert!(
+            !compositor.take_recovery_request(),
+            "a held key's repeats asked again"
+        );
+        let seen = scancodes_delivered(&mut server, &mut compositor, &mut conn);
+        assert!(
+            !seen.contains(&KEY_R),
+            "the focused window was sent part of the recovery chord: {seen:x?}"
+        );
+        assert!(
+            seen.contains(&CTRL),
+            "the modifiers themselves still arrive"
+        );
+
+        // And R on its own is an ordinary key again.
+        press(&mut compositor, KEY_R);
+        release(&mut compositor, KEY_R);
+        let seen = scancodes_delivered(&mut server, &mut compositor, &mut conn);
+        assert!(
+            seen.contains(&KEY_R),
+            "R stayed swallowed after the chord ended"
+        );
+        assert!(!compositor.take_recovery_request());
+    }
+
+    /// Exact: a program's own Ctrl+Shift+Super+R is its own.
+    #[test]
+    fn a_chord_with_another_modifier_is_not_recovery() {
+        let (mut server, mut compositor, addr) = server();
+        let (mut conn, _window) = client_with_a_window(&mut server, &mut compositor, addr);
+        press(&mut compositor, CTRL);
+        press(&mut compositor, SHIFT);
+        press(&mut compositor, SUPER);
+        press(&mut compositor, KEY_R);
+        release(&mut compositor, KEY_R);
+        assert!(!compositor.take_recovery_request());
+        let seen = scancodes_delivered(&mut server, &mut compositor, &mut conn);
+        assert!(
+            seen.contains(&KEY_R),
+            "the application's shortcut was eaten"
+        );
+    }
+
+    /// No client can claim the chord: it is for when the thing that would
+    /// hold desktop shortcuts is what has gone wrong.
+    #[test]
+    fn a_grab_on_the_recovery_chord_does_not_take_it() {
+        let mut comp = Compositor::new(320, 240, 60).unwrap();
+        let shell = comp.create_window("Shell".to_string(), 100, 100, 1);
+        let _ = comp.grab_key(
+            shell,
+            guitk::event::Key::R,
+            guitk::event::Modifiers {
+                ctrl: true,
+                super_key: true,
+                ..guitk::event::Modifiers::default()
+            },
+        );
+        press(&mut comp, CTRL);
+        press(&mut comp, SUPER);
+        press(&mut comp, KEY_R);
+        assert!(comp.take_recovery_request());
+    }
+
+    /// Recovery drops the windows no live client owns and keeps the rest, and
+    /// asks each client to draw its own windows whole.
+    #[test]
+    fn recovery_drops_orphans_and_asks_every_client_to_repaint() {
+        let (mut server, mut compositor, addr) = server();
+        let (mut conn, window) = client_with_a_window(&mut server, &mut compositor, addr);
+        // A window whose owner is nobody connected: the tooltip whose program
+        // died without the ordinary reaping noticing.
+        let orphan = compositor.create_window("Orphaned tooltip".to_string(), 50, 20, 9999);
+        assert_eq!(compositor.window_count(), 2);
+
+        let mut display = Recording::new();
+        server.recover(&mut compositor, &mut display);
+
+        assert_eq!(compositor.window_count(), 1, "the orphan was kept");
+        assert!(compositor.window_ref(orphan).is_none());
+        assert!(compositor.window_ref(WindowId::from_raw(window)).is_some());
+        assert_eq!(server.stats().orphans_swept, 1);
+        assert_eq!(server.stats().recoveries, 1);
+        assert_eq!(display.resets(), 1, "the display's own state was not reset");
+
+        for _ in 0..1000 {
+            conn.pump().expect("pump");
+            let repaints = conn.take_repaints();
+            if !repaints.is_empty() {
+                assert_eq!(repaints, vec![window]);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the client was never asked to repaint");
+    }
+
+    /// The frame after recovery is drawn whole and carries a new serial, so a
+    /// presenter keeping its own copy of the picture cannot skip it.
+    #[test]
+    fn the_frame_after_recovery_is_drawn_whole_under_a_new_serial() {
+        let (mut server, mut compositor, _addr) = server();
+        let mut display = Recording::new();
+        assert!(server.compose(&mut compositor));
+        server.show(&compositor, &mut display);
+        let before = display.last_serial();
+        assert!(!compositor.frame_owed(), "the test premise: nothing owed");
+
+        server.recover(&mut compositor, &mut display);
+        assert!(
+            compositor.frame_owed(),
+            "recovery did not ask for a whole frame"
+        );
+        assert!(server.compose(&mut compositor));
+        server.show(&compositor, &mut display);
+        assert_ne!(display.last_serial(), before);
+    }
+
+    /// A shell can ask for recovery over the wire.
+    #[test]
+    fn a_shell_can_ask_for_recovery_over_the_wire() {
+        let (mut server, mut compositor, addr) = server();
+        let mut conn = dial(&mut server, &mut compositor, addr);
+        let seq = conn.send(RequestBody::RecoverDisplay).expect("send");
+        let reply = await_reply(&mut server, &mut compositor, &mut conn, seq);
+        assert!(matches!(reply, ResponseBody::Ok), "{reply:?}");
+        assert!(compositor.take_recovery_request());
+    }
+
+    /// Through the real loop: the chord at the display runs a recovery before
+    /// the next frame.
+    #[test]
+    fn the_loop_recovers_when_the_chord_is_pressed() {
+        let (mut server, mut compositor, _addr) = server();
+        let mut display = Recording::new();
+        display.feed(vec![
+            InputEvent::KeyDown {
+                scancode: CTRL,
+                character: None,
+            },
+            InputEvent::KeyDown {
+                scancode: SUPER,
+                character: None,
+            },
+            InputEvent::KeyDown {
+                scancode: KEY_R,
+                character: None,
+            },
+        ]);
+        display.close_when_idle = true;
+        display.close_at = Some(Instant::now() + Duration::from_mins(1));
+        server
+            .run_with(&mut compositor, &mut display)
+            .expect("the loop");
+        assert_eq!(server.stats().recoveries, 1);
+        assert_eq!(display.resets(), 1);
     }
 }

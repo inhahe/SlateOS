@@ -317,6 +317,19 @@ pub trait Present {
     fn wait(&mut self, set: &mut WaitSet, timeout: Option<Duration>) -> io::Result<()> {
         set.wait(timeout).map(drop)
     }
+
+    /// Put the display's own state back as it was set up, as part of the
+    /// desktop's artifact recovery (`Server::recover`).
+    ///
+    /// Whatever a display keeps between frames — a copy of the last picture it
+    /// was shown, a mode it programmed into the hardware — is exactly what an
+    /// artifact that survives ordinary redrawing could be living in. After
+    /// this, the next [`Self::show`] must put the whole frame up from scratch,
+    /// whatever its [`Frame::serial`] claims.
+    ///
+    /// The default does nothing, which is right for a display that keeps
+    /// nothing.
+    fn reset(&mut self) {}
 }
 
 /// A display server with no display.
@@ -395,6 +408,8 @@ pub struct Recording {
     /// a loop it is not driving. The loop notices the next time it wakes, so
     /// the test must also give it a reason to: hang up a client, say.
     pub stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// How many times [`Present::reset`] has been called.
+    resets: u64,
     /// What [`Present::monitors`] answers, if this recorder is standing in for a
     /// display that has monitors at all.
     ///
@@ -424,6 +439,7 @@ impl Recording {
             close_at: None,
             close_when_idle: false,
             stop: None,
+            resets: 0,
             monitors: None,
         }
     }
@@ -489,6 +505,12 @@ impl Recording {
     #[must_use]
     pub const fn ticks(&self) -> u64 {
         self.ticks
+    }
+
+    /// How many times the display has been reset for recovery.
+    #[must_use]
+    pub const fn resets(&self) -> u64 {
+        self.resets
     }
 
     /// The colour at a point of the last frame, if it is inside it.
@@ -557,6 +579,10 @@ impl Present for Recording {
             return None;
         }
         self.close_at
+    }
+
+    fn reset(&mut self) {
+        self.resets = self.resets.saturating_add(1);
     }
 
     /// Closes instead of waiting when [`Self::close_when_idle`] is set and
@@ -719,6 +745,11 @@ impl<S: Present, I: InputSource> Present for Paired<S, I> {
     /// source's handles are already in `set`.
     fn wait(&mut self, set: &mut WaitSet, timeout: Option<Duration>) -> io::Result<()> {
         self.screen.wait(set, timeout)
+    }
+
+    /// The screen's: an input source holds nothing a redraw could fix.
+    fn reset(&mut self) {
+        self.screen.reset();
     }
 }
 
@@ -1168,6 +1199,13 @@ mod tests {
         // ...and an unbounded one is the end of the session.
         rec.wait(&mut set, None).unwrap();
         assert!(!rec.is_open());
+    }
+
+    #[test]
+    fn a_pair_resets_its_screen() {
+        let mut pair = Paired::new(Recording::new(), ScriptedSource::default(), 2, 2);
+        pair.reset();
+        assert_eq!(pair.screen().resets(), 1);
     }
 
     #[test]

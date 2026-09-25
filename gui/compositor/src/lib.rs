@@ -633,6 +633,17 @@ struct DeferredKey {
 }
 
 /// Which mouse button a mouse-keys action presses, or `None` if it moves.
+/// Whether a key press, with the modifiers in force, is the display's
+/// artifact-recovery chord: Ctrl+Super+R, and nothing else held.
+///
+/// Exact, so that Ctrl+Shift+Super+R and friends stay free for applications:
+/// a recovery that fired on a superset would redraw the whole desktop on some
+/// program's own three-modifier shortcut. `R` is the letter wherever the
+/// layout puts it, as every shortcut in this tree is.
+fn is_recovery_chord(key: Key, modifiers: Modifiers) -> bool {
+    key == Key::R && modifiers.ctrl && modifiers.super_key && !modifiers.alt && !modifiers.shift
+}
+
 const fn mouse_key_button(action: a11ykeys::MouseKeyAction) -> Option<MouseButton> {
     match action {
         a11ykeys::MouseKeyAction::Click | a11ykeys::MouseKeyAction::DoubleClick => {
@@ -3367,6 +3378,11 @@ pub enum CompositorRequest {
     ///
     /// See [`guiremote::control::RequestBody::ReloadSession`].
     ReloadSession,
+    /// Recover the display: the full redraw the Ctrl+Super+R chord asks for.
+    ///
+    /// See [`guiremote::control::RequestBody::RecoverDisplay`] and
+    /// [`Compositor::request_recovery`].
+    RecoverDisplay,
     /// Begin a remote draw-command stream session (returns a stream id).
     StreamStart,
     /// Capture the current scene for a stream session as an encoded wire frame.
@@ -5416,6 +5432,16 @@ pub struct Compositor {
     /// somewhere. Released before then, it is dropped — that is precisely the
     /// accidental tap the feature exists to discard.
     deferred_key: Option<DeferredKey>,
+    /// Whether the display's artifact recovery has been asked for and not yet
+    /// run — by the Ctrl+Super+R chord or a shell's `RecoverDisplay`. The
+    /// server runs it, since part of it (dropping surfaces no live client owns,
+    /// asking clients to repaint, resetting the display hardware) needs things
+    /// only the server holds. See [`Compositor::request_recovery`].
+    recovery_requested: bool,
+    /// The scan code of the key that completed the recovery chord, while it is
+    /// held, so that its repeats and its release are swallowed with it. A
+    /// window that was sent none of the chord must not be sent its end.
+    recovery_key: Option<u32>,
     /// Whether a full recomposite is needed (e.g., after display resize).
     full_recomposite: bool,
     /// Whether the framebuffer's pixels no longer describe the scene at all.
@@ -5644,6 +5670,8 @@ impl Compositor {
             dead_keys: deadkey::DeadKeys::new(),
             a11y_keys: a11ykeys::AccessibilityKeys::default(),
             deferred_key: None,
+            recovery_requested: false,
+            recovery_key: None,
             full_recomposite: true,
             framebuffer_stale: false,
             damage_history: DamageHistory::new(),
@@ -8107,6 +8135,72 @@ impl Compositor {
         self.deferred_key.is_some()
     }
 
+    /// Ask for the display's artifact recovery: the full redraw.
+    ///
+    /// What the Ctrl+Super+R chord and a shell's `RecoverDisplay` both do.
+    /// Recorded rather than run, because most of the work needs things only
+    /// the server holds: [`Server::recover`](crate::Server::recover) drops the
+    /// surfaces no live client owns, calls [`Self::reset_for_recovery`], resets
+    /// the display, and asks every client to draw its windows whole. It runs
+    /// before the next frame. Asking twice before it runs is asking once.
+    pub const fn request_recovery(&mut self) {
+        self.recovery_requested = true;
+    }
+
+    /// Whether recovery has been asked for since this was last asked, clearing
+    /// the answer.
+    pub const fn take_recovery_request(&mut self) -> bool {
+        let requested = self.recovery_requested;
+        self.recovery_requested = false;
+        requested
+    }
+
+    /// Forget everything this compositor believes about what is on screen, so
+    /// the next frame is drawn whole from the windows themselves.
+    ///
+    /// The compositor half of recovery. Partial frames trust two records — the
+    /// damage accumulated since the last frame, and the history of what recent
+    /// frames changed, which says what a reused buffer is missing (§1300) — and
+    /// an artifact that survives normal drawing is, by definition, somewhere
+    /// those records are wrong. So both are discarded: the whole screen is
+    /// damaged, the history is emptied (every buffer's age becomes "unknown",
+    /// which already means "repaint it all"), and the framebuffer is declared
+    /// stale so a direct-scanout frame cannot stand in for the redraw.
+    pub fn reset_for_recovery(&mut self) {
+        self.full_recomposite = true;
+        self.framebuffer_stale = true;
+        self.damage_history = DamageHistory::new();
+        let (width, height) = self.backend.size();
+        self.damage.mark_full(width, height);
+        for window in &mut self.windows {
+            window.dirty = true;
+        }
+    }
+
+    /// Destroy every window no live client owns, and return their ids.
+    ///
+    /// `live` is the connection ids of the clients still connected. A window
+    /// whose owner is not among them is an orphan: something it was drawing —
+    /// a tooltip, a popup, a menu — outlived the program that drew it, and the
+    /// compositor would go on drawing its last frame for ever. The server's
+    /// ordinary reaping removes a departed client's windows when its
+    /// connection closes; this is the sweep for whatever that missed, run as
+    /// part of recovery (`Server::recover`).
+    pub fn drop_windows_without_owner(&mut self, live: &[u64]) -> Vec<WindowId> {
+        let orphans: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter(|w| !live.contains(&w.client_pid))
+            .map(|w| w.id)
+            .collect();
+        for &id in &orphans {
+            // Found in the list a line above, so `WindowNotFound` cannot
+            // happen; and a window that is already gone is what was wanted.
+            let _ = self.destroy_window(id);
+        }
+        orphans
+    }
+
     /// When something the compositor is waiting on by the clock next comes
     /// due: a keystroke's slow-keys threshold, or a window's idle deadline.
     /// `None` if nothing is.
@@ -8314,6 +8408,25 @@ impl Compositor {
         modifiers.alt |= stuck.alt;
         modifiers.shift |= stuck.shift;
         modifiers.super_key |= stuck.super_key;
+
+        // The recovery chord is the compositor's own, and is checked before
+        // the grab table so that no client can claim it: it exists for when
+        // something on screen has gone wrong, and the shell that would
+        // otherwise hold desktop shortcuts may be what went wrong. After the
+        // sticky merge, so that someone who cannot hold three keys still has
+        // it. Its repeats and its release are swallowed with the press — see
+        // `recovery_key`.
+        if self.recovery_key == Some(scancode) {
+            if !pressed {
+                self.recovery_key = None;
+            }
+            return;
+        }
+        if pressed && is_recovery_chord(key, modifiers) {
+            self.recovery_key = Some(scancode);
+            self.request_recovery();
+            return;
+        }
 
         // Grabs are consulted *here*: after the chord is known, before the
         // focused window is looked up. Both halves matter. After, because a grab
@@ -10128,6 +10241,10 @@ impl Compositor {
                 // this compositor keeps no copy of the lock delay. The shell
                 // holds the idle claim and is the only thing that acts on it.
                 self.announce_settings_change(SettingsGroup::Session);
+                CompositorResponse::Ok
+            }
+            CompositorRequest::RecoverDisplay => {
+                self.request_recovery();
                 CompositorResponse::Ok
             }
             CompositorRequest::ReloadInput => {

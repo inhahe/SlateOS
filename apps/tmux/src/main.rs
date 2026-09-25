@@ -1201,7 +1201,9 @@ impl Multiplexer {
         for pane in &mut self.panes {
             match pane.term.on_event(&Event::Tick { elapsed_ms }) {
                 Response::Exit => finished.push(pane.id),
-                Response::Redraw => changed |= visible.contains(&pane.id),
+                // `KeepOpen` is a redraw to anything but a close request, and a
+                // terminal never answers one with it.
+                Response::Redraw | Response::KeepOpen => changed |= visible.contains(&pane.id),
                 Response::Idle => {}
             }
         }

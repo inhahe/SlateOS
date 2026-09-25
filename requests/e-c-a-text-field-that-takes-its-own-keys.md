@@ -1,0 +1,47 @@
+# E → C: a `TextInput` that takes its own keys
+
+**From:** lane E · **To:** lane C · **Filed:** 2026-09-25
+**Status:** open — nothing in lane E is blocked; two applications carry a copy
+of the same fifty lines until this lands
+
+## In short
+
+`guitk::textinput::TextInput` holds a field's state -- text, caret, selection,
+clipboard -- and deliberately draws nothing, which is right. But it also leaves
+*the keys* to every caller: which key moves the caret, which deletes, which
+selects all, which copies, cuts and pastes, and that a control character in a
+paste has no place in a one-line field. Each application that uses it writes
+that table again.
+
+Lane E has now written it twice, the same both times:
+
+- `apps/regextester/src/main.rs` -> `edit_line`, `insert_limited`
+- `apps/flashcards/src/main.rs` -> `edit_line`, `insert_limited`
+
+and the next rework of an application with a text field (lane E has eleven
+left in `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`) would
+make three.
+
+## The ask
+
+A method on `TextInput`, something like
+
+```rust
+/// Apply `key` as a one-line field does: arrows (Shift extends), Home/End,
+/// Backspace/Delete, Ctrl+A/C/X/V, and typed text over the selection, keeping
+/// the text at most `capacity` characters and leaving control characters out.
+/// Returns whether the key was an editing key, and what a copy or cut put on
+/// the field's clipboard.
+pub fn apply_key(&mut self, key: &KeyEvent, capacity: usize, font_size: f32, weight: FontWeightHint) -> KeyApplied
+```
+
+using the clipboard `TextInput` already holds (`set_clipboard` / `clipboard`),
+so a window with several fields can share one by copying it between them, as
+both copies do today.
+
+The two copies differ only in the font size they pass to the caret movement
+(which the visual arrows need), so that is a parameter rather than a constant.
+
+## When it lands
+
+Lane E replaces both copies with the call and deletes them.

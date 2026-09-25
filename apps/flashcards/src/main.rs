@@ -57,9 +57,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// worse than no scheduler: it will show a card that was mastered last week
 /// and hold back one that is about to be forgotten, and the user cannot tell
 /// because the whole point is that they do not remember either.
+///
+/// The second line said nothing was saved -- "press Ctrl+S ... or every
+/// review resets when the window closes" -- and Ctrl+S wrote one deck to a
+/// file the user then had to open again at every start. The decks and their
+/// schedules are kept as they change now (`FlashcardsApp::keep`).
 const SAMPLE_AND_PROGRESS_LINES: [&str; 2] = [
-    "Three included decks -- these came with the app, not from you.",
-    "Nothing is saved automatically -- press Ctrl+S to write the deck, schedules included, or every review resets when the window closes.",
+    "Three decks came with the app -- World Capitals, Programming and Science.",
+    "Your decks and every review are kept as you go. Ctrl+S exports a deck to a file; Ctrl+O imports one.",
 ];
 
 /// The most of a deck file one open will read.
@@ -394,6 +399,8 @@ struct Deck {
     description: String,
     cards: Vec<Card>,
     next_card_id: u32,
+    /// The number of the file it is kept in, once it has one.
+    file_id: Option<u32>,
 }
 
 impl Deck {
@@ -403,7 +410,30 @@ impl Deck {
             description: String::from(description),
             cards: Vec::new(),
             next_card_id: 1,
+            file_id: None,
         }
+    }
+
+    /// A deck read back from `export_text`'s format: its `#` name and `##`
+    /// description when it has them, `fallback` for a name when it does not,
+    /// and its cards.
+    ///
+    /// The headers were written and never read: an imported deck was named
+    /// after its file, whatever it had been called.
+    fn from_text(text: &str, fallback: &str) -> (Self, Imported) {
+        let mut name = None;
+        let mut description = String::new();
+        for line in text.lines() {
+            if let Some(about) = line.strip_prefix("## ") {
+                description = unescape_field(about);
+            } else if let Some(title) = line.strip_prefix("# ") {
+                name.get_or_insert_with(|| unescape_field(title));
+            }
+        }
+        let name = name.filter(|n| !n.trim().is_empty());
+        let mut deck = Self::new(name.as_deref().unwrap_or(fallback), &description);
+        let done = deck.import_text(text);
+        (deck, done)
     }
 
     fn add_card(&mut self, front: &str, back: &str) -> u32 {
@@ -1127,6 +1157,15 @@ struct FlashcardsApp {
     last_hits: Vec<(Target, Rect)>,
     /// The wheel's remainder.
     wheel: wheel::Accumulator,
+    /// Whether changes are kept. Only `from_settings` turns it on, so an app
+    /// made with `new` -- every test's -- writes nothing, and a test that
+    /// forgets a scratch directory cannot write the developer's own.
+    persist: bool,
+    /// Whether the decks have been kept at all yet: the first change keeps
+    /// every one, the included decks with it.
+    library: bool,
+    /// The number the next kept deck's file gets.
+    next_file_id: u32,
     /// Scroll offset for card lists.
     scroll_offset: usize,
     /// Status message displayed at the bottom.
@@ -1229,6 +1268,9 @@ impl FlashcardsApp {
             hover: None,
             last_hits: Vec::new(),
             wheel: wheel::Accumulator::default(),
+            persist: false,
+            library: false,
+            next_file_id: 1,
             scroll_offset: 0,
             status_msg: String::from("Welcome to Flashcards"),
             // Was `shuffle_seed: 42`, incremented by 7 per press, so every
@@ -1237,6 +1279,134 @@ impl FlashcardsApp {
             // the kernel and falls back rather than refusing -- see
             // `randrange::seeded_from_system`.
             rng: seeded_from_system(FALLBACK_SEED),
+        }
+    }
+
+    /// The window's flashcards: the decks kept last time, and every change
+    /// kept from here on.
+    fn from_settings() -> Self {
+        let mut app = Self::new();
+        app.persist = true;
+        if let Some(dir) = library_dir() {
+            app.load_library(&dir);
+        }
+        app
+    }
+
+    /// Read every deck kept in `dir`, in the order they were made. A file
+    /// that cannot be read is left alone and counted; with none readable --
+    /// or no library yet -- the included decks stay.
+    fn load_library(&mut self, dir: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut files: Vec<(u32, std::path::PathBuf)> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter_map(|p| {
+                let id = p
+                    .file_name()?
+                    .to_str()?
+                    .strip_suffix(".deck")?
+                    .parse::<u32>()
+                    .ok()?;
+                Some((id, p))
+            })
+            .collect();
+        files.sort_unstable();
+        let mut decks = Vec::new();
+        let mut unreadable = 0u32;
+        for (id, file) in &files {
+            let deck = safeio::read_to_string_capped(file, MAX_DECK_BYTES)
+                .ok()
+                .map(|read| Deck::from_text(&read.text, &deck_name_of(file)).0)
+                .filter(|deck| !deck.cards.is_empty() || !deck.name.is_empty());
+            match deck {
+                Some(mut deck) => {
+                    deck.file_id = Some(*id);
+                    decks.push(deck);
+                }
+                None => unreadable = unreadable.saturating_add(1),
+            }
+        }
+        self.next_file_id = files
+            .iter()
+            .map(|(id, _)| id.saturating_add(1))
+            .max()
+            .unwrap_or(1);
+        if !decks.is_empty() {
+            self.decks = decks;
+            self.selected_deck = 0;
+        }
+        self.library = true;
+        if unreadable > 0 {
+            self.status_msg = format!(
+                "{unreadable} kept deck file(s) in {} could not be read, and were left alone",
+                dir.display()
+            );
+        }
+    }
+
+    /// Keep deck `idx` as it is now. The first time anything is kept, every
+    /// deck is -- the included ones too, which from then on are the user's.
+    ///
+    /// Nothing was kept: Ctrl+S wrote one deck to a file the user then had
+    /// to open again at every start, and a review not saved that way was
+    /// gone when the window closed -- which for a spaced-repetition program,
+    /// defined by its history, is the program.
+    fn keep(&mut self, idx: usize) {
+        if !self.persist {
+            return;
+        }
+        let Some(dir) = library_dir() else {
+            self.status_msg = String::from("Nowhere to keep decks: no home directory is set");
+            return;
+        };
+        if let Err(err) = std::fs::create_dir_all(&dir) {
+            self.status_msg = format!("Could not keep your decks in {}: {err}", dir.display());
+            return;
+        }
+        let which: Vec<usize> = if self.library {
+            vec![idx]
+        } else {
+            (0..self.decks.len()).collect()
+        };
+        self.library = true;
+        for i in which {
+            let id = match self.decks.get(i).and_then(|d| d.file_id) {
+                Some(id) => id,
+                None => {
+                    let id = self.next_file_id;
+                    self.next_file_id = self.next_file_id.saturating_add(1);
+                    if let Some(deck) = self.decks.get_mut(i) {
+                        deck.file_id = Some(id);
+                    }
+                    id
+                }
+            };
+            let Some(deck) = self.decks.get(i) else {
+                continue;
+            };
+            let file = dir.join(format!("{id}.deck"));
+            if let Err(err) = safeio::write_str_atomically(&file, &deck.export_text()) {
+                self.status_msg = format!("Could not keep {}: {err}", deck.name);
+            }
+        }
+    }
+
+    /// Take a deleted deck's file away with it.
+    fn forget(&mut self, deck: &Deck) {
+        if !self.persist {
+            return;
+        }
+        let (Some(dir), Some(id)) = (library_dir(), deck.file_id) else {
+            return;
+        };
+        let file = dir.join(format!("{id}.deck"));
+        if let Err(err) = std::fs::remove_file(&file)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            self.status_msg = format!("Could not remove {}: {err}", file.display());
         }
     }
 
@@ -1429,6 +1599,7 @@ impl FlashcardsApp {
     fn add_deck(&mut self, name: &str, description: &str) {
         self.decks.push(Deck::new(name, description));
         self.status_msg = format!("Created deck: {name}");
+        self.keep(self.decks.len().saturating_sub(1));
     }
 
     fn remove_deck(&mut self, idx: usize) {
@@ -1436,11 +1607,12 @@ impl FlashcardsApp {
             let Some(name) = self.decks.get(idx).map(|d| d.name.clone()) else {
                 return;
             };
-            self.decks.remove(idx);
+            let gone = self.decks.remove(idx);
             if self.selected_deck >= self.decks.len() {
                 self.selected_deck = self.decks.len().saturating_sub(1);
             }
             self.status_msg = format!("Deleted deck: {name}");
+            self.forget(&gone);
         }
     }
 
@@ -1509,12 +1681,14 @@ impl FlashcardsApp {
             idx
         };
 
-        // Apply SM-2 to the card in the deck
+        // Apply SM-2 to the card in the deck, and keep it: a rating is the
+        // history this program exists to keep.
         if let Some(deck) = self.decks.get_mut(deck_idx)
             && let Some(card) = deck.cards.get_mut(card_idx)
         {
             card.review.apply_rating(rating, day);
         }
+        self.keep(deck_idx);
 
         // Advance to next card
         if let Some(session) = &mut self.study_session {
@@ -1595,6 +1769,7 @@ impl FlashcardsApp {
                 deck.description = about;
                 self.selected_deck = idx;
                 self.status_msg = format!("Saved deck: {name}");
+                self.keep(idx);
             }
             None => {
                 self.add_deck(&name, &about);
@@ -1716,6 +1891,7 @@ impl FlashcardsApp {
                     && deck.remove_card(id)
                 {
                     self.status_msg = String::from("Card deleted");
+                    self.keep(self.selected_deck);
                 }
                 let count = self.matching_card_indices().len();
                 self.selected_card = before.min(count.saturating_sub(1));
@@ -1763,6 +1939,7 @@ impl FlashcardsApp {
                 card.tags = tags;
                 self.status_msg = String::from("Card updated");
                 self.view = AppView::DeckDetail;
+                self.keep(self.selected_deck);
                 return true;
             }
         } else {
@@ -1777,6 +1954,7 @@ impl FlashcardsApp {
                 }
                 self.status_msg = String::from("Card added");
                 self.view = AppView::DeckDetail;
+                self.keep(self.selected_deck);
                 return true;
             }
         }
@@ -1852,8 +2030,7 @@ impl FlashcardsApp {
             Err(err) => return format!("Could not read {}: {err}", path.display()),
         };
         let note = read.note(MAX_DECK_BYTES);
-        let mut deck = Deck::new(&deck_name_of(path), "");
-        let done = deck.import_text(&read.text);
+        let (deck, done) = Deck::from_text(&read.text, &deck_name_of(path));
         if done.cards == 0 {
             return format!(
                 "{note}{} holds no cards this program can read",
@@ -1862,6 +2039,7 @@ impl FlashcardsApp {
         }
         self.decks.push(deck);
         self.selected_deck = self.decks.len().saturating_sub(1);
+        self.keep(self.selected_deck);
         if done.history_unreadable > 0 {
             format!(
                 "{note}Imported {} card(s); {} had a review line this version could not read and start again as new",
@@ -2154,6 +2332,7 @@ impl FlashcardsApp {
                 }
                 self.rng = rng;
                 self.status_msg = String::from("Deck shuffled");
+                self.keep(self.selected_deck);
             }
             "t" => {
                 // Cycle through tag filters
@@ -3875,6 +4054,12 @@ impl FlashcardsApp {
     }
 }
 
+/// Where the decks are kept: one `<number>.deck` file each, in the deck text
+/// format, under the user's settings directory.
+fn library_dir() -> Option<std::path::PathBuf> {
+    settingsfile::config_dir().map(|dir| dir.join("flashcards"))
+}
+
 /// Today, as days since 1970 — the unit `ReviewData` schedules on.
 ///
 /// Falls back to day 0 only if the system clock cannot be read at all. That is
@@ -3954,8 +4139,7 @@ impl App for FlashcardsApp {
 }
 
 fn main() -> ExitCode {
-    let mut cards = FlashcardsApp::new();
-    app::launch("flashcards", &mut cards)
+    app::launch("flashcards", &mut FlashcardsApp::from_settings())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -4388,7 +4572,7 @@ mod tests {
     /// week and holds back one about to be forgotten, and the user cannot tell,
     /// because not remembering is the thing they came here about.
     #[test]
-    fn the_window_names_the_decks_and_the_lost_progress() {
+    fn the_window_names_the_decks_and_says_what_is_kept() {
         let app = FlashcardsApp::new();
         let texts: Vec<String> = app
             .render_commands()
@@ -4404,24 +4588,26 @@ mod tests {
                 "the window never said {line:?}"
             );
         }
-        // The PROPERTY, not the phrase. This required the words "review
-        // schedule resets", which stayed true of the test after it stopped
-        // being true of the program -- the third banner assertion in this
-        // tree to pin wording and go on passing while the wording went wrong
-        // (see apps/contacts and apps/diagram). What has to hold is that the
-        // banner names BOTH the cost and the remedy: a reader who believes it
-        // should know what they lose and what to do about it.
+        // The PROPERTY, not the phrase: it said every review reset when the
+        // window closed, and that stopped being true when the decks came to
+        // be kept. What has to hold now is that it says they are kept, and
+        // how a deck leaves this program -- and that it no longer says the
+        // opposite.
         assert!(
-            SAMPLE_AND_PROGRESS_LINES
-                .iter()
-                .any(|l| l.contains("resets when the window closes")),
-            "the message states the mechanism but not what it costs the user",
+            SAMPLE_AND_PROGRESS_LINES.iter().any(|l| l.contains("kept")),
+            "the notice does not say the reviews are kept"
         );
         assert!(
             SAMPLE_AND_PROGRESS_LINES
                 .iter()
                 .any(|l| l.contains("Ctrl+S")),
-            "the message states the cost but not how to avoid it",
+            "the notice does not say how a deck leaves the program"
+        );
+        assert!(
+            !SAMPLE_AND_PROGRESS_LINES
+                .iter()
+                .any(|l| l.contains("resets") || l.contains("Nothing is saved")),
+            "the notice still says reviews are lost"
         );
     }
 
@@ -6739,5 +6925,183 @@ mod tests {
             FlashcardsApp::key_name(&bare(Key::Up, false)).as_deref(),
             Some("Up")
         );
+    }
+    // ── What is kept ────────────────────────────────────────────────
+
+    /// The files in the scratch library, by name.
+    fn kept_files() -> Vec<String> {
+        let Some(dir) = library_dir() else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .filter_map(Result::ok)
+            .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A review survives the window closing. Nothing did: a review not
+    /// written out by hand with Ctrl+S was gone when the window closed.
+    #[test]
+    fn a_review_is_kept_across_a_restart() {
+        settingsfile::testing::with_scratch_config("flashcards-review", |_| {
+            let mut app = FlashcardsApp::from_settings();
+            app.select_deck(1);
+            app.start_study_all();
+            app.flip_card();
+            app.rate_card(Rating::Good);
+            let reviewed = app.decks[1].cards[0].id;
+            let again = FlashcardsApp::from_settings();
+            let card = again.decks[1]
+                .find_card(reviewed)
+                .expect("the card is kept");
+            assert_eq!(card.review.total_reviews, 1, "the review was not kept");
+            assert_eq!(again.decks.len(), 3);
+        });
+    }
+
+    /// The first change keeps every deck, the included ones with it -- or
+    /// they would vanish at the next start while the changed one stayed.
+    #[test]
+    fn the_first_change_keeps_every_deck() {
+        settingsfile::testing::with_scratch_config("flashcards-first", |_| {
+            let mut app = FlashcardsApp::from_settings();
+            assert!(
+                kept_files().is_empty(),
+                "something was kept before any change"
+            );
+            app.select_deck(2);
+            app.handle_key("r", false, false);
+            assert_eq!(kept_files(), vec!["1.deck", "2.deck", "3.deck"]);
+            let again = FlashcardsApp::from_settings();
+            let names: Vec<&str> = again.decks.iter().map(|d| d.name.as_str()).collect();
+            let before: Vec<&str> = app.decks.iter().map(|d| d.name.as_str()).collect();
+            assert_eq!(names, before, "the decks came back in another order");
+        });
+    }
+
+    /// A deck made, renamed and deleted is kept so, and a card with it.
+    #[test]
+    fn decks_and_cards_are_kept_as_they_change() {
+        settingsfile::testing::with_scratch_config("flashcards-decks", |_| {
+            let mut app = FlashcardsApp::from_settings();
+            app.open_new_deck_editor();
+            app.deck_name.set_text("Verbs");
+            app.deck_about.set_text("Spanish");
+            assert!(app.save_deck_edits());
+            let verbs = app.decks.len() - 1;
+            app.select_deck(verbs);
+            app.open_new_card_editor();
+            app.editor_front.set_text("ser");
+            app.editor_back.set_text("to be");
+            assert!(app.save_card());
+            app.open_edit_deck(verbs);
+            app.deck_name.set_text("Irregular verbs");
+            assert!(app.save_deck_edits());
+
+            let again = FlashcardsApp::from_settings();
+            let kept = again.decks.last().expect("the new deck is kept");
+            assert_eq!(kept.name, "Irregular verbs");
+            assert_eq!(kept.description, "Spanish");
+            assert_eq!(kept.cards.len(), 1);
+            assert_eq!(kept.cards[0].back, "to be");
+
+            let files = kept_files().len();
+            app.remove_deck(verbs);
+            assert_eq!(
+                kept_files().len(),
+                files - 1,
+                "the deleted deck's file stayed"
+            );
+            assert!(
+                FlashcardsApp::from_settings()
+                    .decks
+                    .iter()
+                    .all(|d| d.name != "Irregular verbs")
+            );
+        });
+    }
+
+    /// A window made with `new` -- every test's -- writes nothing.
+    #[test]
+    fn an_app_made_with_new_keeps_nothing() {
+        settingsfile::testing::with_scratch_config("flashcards-quiet", |_| {
+            let mut app = FlashcardsApp::new();
+            app.add_deck("Scratch", "");
+            app.start_study_all();
+            app.flip_card();
+            app.rate_card(Rating::Easy);
+            assert!(kept_files().is_empty());
+            assert!(!library_dir().unwrap().exists());
+        });
+    }
+
+    /// A kept deck file that cannot be read is left alone and counted, and
+    /// the rest are read.
+    #[test]
+    fn an_unreadable_deck_file_is_left_alone_and_reported() {
+        settingsfile::testing::with_scratch_config("flashcards-broken", |_| {
+            let mut app = FlashcardsApp::from_settings();
+            app.add_deck("Kept", "");
+            let dir = library_dir().unwrap();
+            std::fs::write(dir.join("9.deck"), b"\xff\xfe not text").unwrap();
+            let again = FlashcardsApp::from_settings();
+            assert!(again.decks.iter().any(|d| d.name == "Kept"));
+            assert!(
+                again.status_msg.contains("could not be read"),
+                "{}",
+                again.status_msg
+            );
+            assert!(
+                dir.join("9.deck").exists(),
+                "the unreadable file was removed"
+            );
+            assert_eq!(again.next_file_id, 10, "a new deck would overwrite it");
+        });
+    }
+
+    /// A deck file keeps its name and description, and an import takes the
+    /// name the deck had rather than its file's. The headers were written and
+    /// never read.
+    #[test]
+    fn a_deck_file_keeps_its_name_and_description() {
+        let mut deck = Deck::new("Capitals: Europe #1", "Line one\nline two");
+        deck.add_card("France?", "Paris");
+        let (back, done) = Deck::from_text(&deck.export_text(), "fallback");
+        assert_eq!(back.name, "Capitals: Europe #1");
+        assert_eq!(back.description, "Line one\nline two");
+        assert_eq!(done.cards, 1);
+        let (plain, _) = Deck::from_text("Q: a\nA: b\n", "From the file");
+        assert_eq!(plain.name, "From the file");
+
+        let dir = std::env::temp_dir().join(format!("flashcards-import-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("export.deck");
+        std::fs::write(&path, deck.export_text()).unwrap();
+        let mut app = FlashcardsApp::new();
+        let said = app.read_deck(&path);
+        assert!(said.starts_with("Imported"), "{said}");
+        assert_eq!(app.decks.last().unwrap().name, "Capitals: Europe #1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A write that fails says so.
+    #[test]
+    fn a_failed_keep_is_reported() {
+        settingsfile::testing::with_scratch_config("flashcards-refused", |dir| {
+            // A file where the settings directory must go.
+            std::fs::write(dir.join("slateos"), b"not a directory").unwrap();
+            let mut app = FlashcardsApp::from_settings();
+            app.add_deck("Doomed", "");
+            assert!(
+                app.status_msg.starts_with("Could not keep"),
+                "{}",
+                app.status_msg
+            );
+        });
     }
 }

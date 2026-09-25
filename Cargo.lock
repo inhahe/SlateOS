@@ -907,6 +907,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "safeio",
+ "settingsfile",
  "tzrules",
 ]
 

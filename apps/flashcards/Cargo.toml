@@ -20,5 +20,12 @@ safeio = { path = "../safeio" }
 # rather than UTC's.
 tzrules = { path = "../../tzrules" }
 
+# Where the decks are kept: a directory of deck files under the user's
+# settings (`settingsfile::config_dir`).
+settingsfile = { path = "../../gui/settingsfile" }
+
+[dev-dependencies]
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
+
 [lints]
 workspace = true

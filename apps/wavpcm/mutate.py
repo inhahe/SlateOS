@@ -147,11 +147,17 @@ MUTATIONS = [
     ),
     (
         "an odd data chunk is not padded",
-        "    if pad == 1 {\n"
+        "    if pad {\n"
         "        out.push(0);\n"
         "    }",
         "",
         ["an_odd_chunk_is_padded"],
+    ),
+    (
+        "captured samples are not stored as they came",
+        "        out.extend_from_slice(&s.to_le_bytes());",
+        "        out.extend_from_slice(&s.saturating_add(1).to_le_bytes());",
+        ["sixteen_bit_samples_are_stored_as_they_are"],
     ),
 ]
 

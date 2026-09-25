@@ -721,6 +721,42 @@ pub fn encode(audio: &Audio, format: SampleFormat, seed: u64) -> Result<Vec<u8>,
         .len()
         .checked_mul(width)
         .ok_or(WavError::TooLarge)?;
+    let (mut out, pad) = header(audio.sample_rate, audio.channels, format, data_len)?;
+    let mut dither = Dither(seed | 1);
+    for &sample in &audio.samples {
+        let s = if sample.is_finite() { sample } else { 0.0 };
+        encode_sample(format, s, &mut dither, &mut out);
+    }
+    if pad {
+        out.push(0);
+    }
+    Ok(out)
+}
+
+/// Write 16-bit samples as a 16-bit WAV file, each stored exactly as it is --
+/// what a recorder has from a capture device, and must not dither again.
+///
+/// # Errors
+///
+/// [`WavError::TooLarge`] past the four gigabytes a WAV's sizes can say.
+pub fn encode_pcm16(sample_rate: u32, channels: u16, samples: &[i16]) -> Result<Vec<u8>, WavError> {
+    let data_len = samples.len().checked_mul(2).ok_or(WavError::TooLarge)?;
+    let (mut out, _) = header(sample_rate, channels, SampleFormat::I16, data_len)?;
+    for s in samples {
+        out.extend_from_slice(&s.to_le_bytes());
+    }
+    Ok(out)
+}
+
+/// The header of a WAV file of `data_len` bytes of `format` samples, up to
+/// and including the `data` chunk's size; and whether the samples need a pad
+/// byte after them.
+fn header(
+    sample_rate: u32,
+    channels: u16,
+    format: SampleFormat,
+    data_len: usize,
+) -> Result<(Vec<u8>, bool), WavError> {
     let float = format.is_float();
     // A float format's header carries a two-byte extension size, as the
     // format requires for anything but integer PCM.
@@ -731,12 +767,10 @@ pub fn encode(audio: &Audio, format: SampleFormat, seed: u64) -> Result<Vec<u8>,
         .and_then(|d| d.checked_add(fmt_len.checked_add(20)?))
         .and_then(|n| n.checked_add(u32::try_from(pad).ok()?))
         .ok_or(WavError::TooLarge)?;
-    let block = audio
-        .channels
+    let block = channels
         .checked_mul(format.bits() / 8)
         .ok_or(WavError::TooLarge)?;
-    let byte_rate = audio
-        .sample_rate
+    let byte_rate = sample_rate
         .checked_mul(u32::from(block))
         .ok_or(WavError::TooLarge)?;
 
@@ -747,8 +781,8 @@ pub fn encode(audio: &Audio, format: SampleFormat, seed: u64) -> Result<Vec<u8>,
     out.extend_from_slice(b"fmt ");
     out.extend_from_slice(&fmt_len.to_le_bytes());
     out.extend_from_slice(&(if float { 3_u16 } else { 1 }).to_le_bytes());
-    out.extend_from_slice(&audio.channels.to_le_bytes());
-    out.extend_from_slice(&audio.sample_rate.to_le_bytes());
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
     out.extend_from_slice(&byte_rate.to_le_bytes());
     out.extend_from_slice(&block.to_le_bytes());
     out.extend_from_slice(&format.bits().to_le_bytes());
@@ -761,16 +795,7 @@ pub fn encode(audio: &Audio, format: SampleFormat, seed: u64) -> Result<Vec<u8>,
             .map_err(|_| WavError::TooLarge)?
             .to_le_bytes(),
     );
-
-    let mut dither = Dither(seed | 1);
-    for &sample in &audio.samples {
-        let s = if sample.is_finite() { sample } else { 0.0 };
-        encode_sample(format, s, &mut dither, &mut out);
-    }
-    if pad == 1 {
-        out.push(0);
-    }
-    Ok(out)
+    Ok((out, pad == 1))
 }
 
 /// One sample, in `format`, onto `out`.
@@ -1564,6 +1589,33 @@ mod tests {
             parse_header_prefix(&bytes[..30], whole),
             Err(WavError::Truncated(_))
         ));
+    }
+
+    /// Captured samples are stored exactly as they came -- no dither, no
+    /// rounding -- under the same header `encode` writes.
+    #[test]
+    fn sixteen_bit_samples_are_stored_as_they_are() {
+        let samples = [0_i16, 1, -1, i16::MAX, i16::MIN, 12_345];
+        let bytes = encode_pcm16(22_050, 2, &samples).unwrap();
+        let info = parse_header(&bytes).unwrap();
+        assert_eq!(
+            (info.sample_rate, info.channels, info.format, info.frames),
+            (22_050, 2, SampleFormat::I16, 3)
+        );
+        let stored: Vec<i16> = bytes[info.data_offset..]
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        assert_eq!(stored, samples);
+        let audio = Audio {
+            sample_rate: 22_050,
+            channels: 2,
+            samples: vec![0.0; 6],
+        };
+        assert_eq!(
+            bytes[..44],
+            encode(&audio, SampleFormat::I16, 1).unwrap()[..44]
+        );
     }
 
     /// A streaming writer that never went back leaves the data size at zero:

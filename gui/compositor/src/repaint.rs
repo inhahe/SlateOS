@@ -125,7 +125,9 @@ impl Region {
         covered >= wanted
     }
 
-    /// How many pixels the region holds.
+    /// How many pixels the region holds. Tests ask; nothing in production
+    /// needs the count, only the rectangles.
+    #[cfg(test)]
     #[must_use]
     pub fn area(&self) -> u64 {
         self.rects

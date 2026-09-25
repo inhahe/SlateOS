@@ -3188,15 +3188,6 @@ pub struct FrameStats {
     /// recomposite re-renders all of them. That number does not move when the
     /// machine is busy.
     pub windows_rendered: u64,
-    /// Pixels the last composited frame repainted — its damage, spread
-    /// through the blurred windows it reached, plus whatever an older buffer
-    /// had missed. Zero for a frame that composited nothing.
-    ///
-    /// The countable half of the question `windows_rendered` answers: that
-    /// one says how many windows a frame touched, this says how much of the
-    /// screen. A pointer moving over a still desktop should repaint nothing
-    /// at all, and this is how a test says so without a clock.
-    pub repainted_pixels: u64,
     /// Total frames composited since startup.
     pub frames_composited: u64,
     /// Frames dropped (compose took longer than frame interval).
@@ -3219,7 +3210,6 @@ impl FrameStats {
             bypass_frames: 0,
             target_interval,
             windows_rendered: 0,
-            repainted_pixels: 0,
             last_frame_start: None,
         }
     }
@@ -3230,7 +3220,6 @@ impl FrameStats {
         // frame", and a running total would answer a different question while
         // looking like this one.
         self.windows_rendered = 0;
-        self.repainted_pixels = 0;
         self.last_frame_start = Some(Instant::now());
     }
 
@@ -8898,7 +8887,6 @@ impl Compositor {
         self.scanout = Scanout::Composited;
 
         let (region, change) = self.plan_repaint();
-        self.frame_stats.repainted_pixels = region.area();
         let plan = self.stack_plan();
         self.repaint_background(&region, &plan);
         self.repaint_windows(&region, &plan);
@@ -23361,11 +23349,10 @@ mod tests {
         }
     }
 
-    /// A frame that repaints only what changed reports how much that was, and
-    /// a frame of a single small window's damage is a small fraction of the
-    /// screen.
+    /// A frame repaints only what changed: the first is whole, and one
+    /// window's redraw is exactly that window's drawn extent.
     #[test]
-    fn a_frame_reports_the_pixels_it_repainted() {
+    fn a_frame_repaints_only_its_damage() {
         let mut comp = ringed(800, 600, 1);
         let id = comp.create_window_from_spec(
             &WindowSpec {
@@ -23374,21 +23361,15 @@ mod tests {
             },
             1,
         );
+        assert_eq!(comp.plan_repaint().0.area(), 800 * 600, "the first frame is whole");
         assert!(comp.compose_frame());
-        assert_eq!(
-            comp.frame_stats().repainted_pixels,
-            800 * 600,
-            "the first frame is whole"
-        );
         comp.submit_render(id, solid(50.0, 40.0, Color::RED))
             .expect("draw");
-        assert!(comp.compose_frame());
-        let repainted = comp.frame_stats().repainted_pixels;
         let extent = Compositor::window_drawn_extent(comp.window_ref(id).expect("w"));
         assert_eq!(
-            repainted,
+            comp.plan_repaint().0.area(),
             u64::from(extent.width) * u64::from(extent.height),
-            "one window's redraw repainted something other than that window"
+            "one window's redraw repaints something other than that window"
         );
     }
 }

@@ -9877,8 +9877,10 @@ re-present every frame, which folding it into `full_recomposite` would have.
   it in release after touching the repaint), is 48,000 frames over ring depths
   one to four.
 - One small test per fault, so a regression names its cause.
-- `FrameStats::repainted_pixels`, so "this frame repainted nothing" is
-  countable without a clock.
+- `a_frame_repaints_only_its_damage`, which counts the repaint region's pixels
+  rather than timing it. (A `FrameStats::repainted_pixels` field did this for
+  a day and was removed: nothing in production read it, and
+  `check-fields-written-never-read.py` refused the push, rightly.)
 
 ### How to reverse
 

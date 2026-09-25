@@ -81,8 +81,10 @@
 #![cfg_attr(not(test), warn(clippy::indexing_slicing))]
 #![cfg_attr(not(test), warn(clippy::arithmetic_side_effects))]
 
+mod source;
 mod tzif;
 
+pub use source::{LOCALTIME, TzSource, ZONEINFO_DIR, tz_source};
 pub use tzif::TzFile;
 
 /// Longest zone abbreviation stored, in bytes.

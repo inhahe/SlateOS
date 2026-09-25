@@ -1137,7 +1137,7 @@ fn store_block(
         return;
     }
     let cols = block_size.min(plane_w.saturating_sub(origin_x));
-    for (y, samples) in block.chunks_exact(8).take(block_size).enumerate() {
+    for (y, samples) in block.as_chunks::<8>().0.iter().take(block_size).enumerate() {
         let py = origin_y.saturating_add(y);
         if py >= plane_h {
             break;

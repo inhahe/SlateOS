@@ -963,13 +963,12 @@ fn parse_plte(data: &[u8]) -> ImageResult<Vec<u32>> {
     if !data.len().is_multiple_of(3) || data.len() > 256 * 3 {
         return Err(ImageError::Malformed("PLTE length"));
     }
-    Ok(data
-        .chunks_exact(3)
-        .map(|c| {
-            (u32::from(*c.first().unwrap_or(&0)) << 16)
-                | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
-                | u32::from(*c.get(2).unwrap_or(&0))
-        })
+    // The length was checked to be a whole number of triples, so the
+    // remainder `as_chunks` hands back is empty.
+    let (triples, _) = data.as_chunks::<3>();
+    Ok(triples
+        .iter()
+        .map(|&[r, g, b]| (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b))
         .collect())
 }
 

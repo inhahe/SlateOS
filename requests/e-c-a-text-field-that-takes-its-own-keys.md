@@ -27,6 +27,15 @@ and each further rework of an application with a text field (lane E has six
 left in `TD-C-TWENTY-ONE-APPLICATIONS-DRAW-A-UI-THAT-CANNOT-BE-CLICKED`) adds
 one.
 
+**The multi-line half, meanwhile (2026-09-25):** a field of many lines --
+caret by character and by line, keeping its column across Up and Down,
+selection, typing over it, Enter as a line break -- was `apps/regextester`'s
+own `TextArea`, and `apps/email`'s message body needed it too. Rather than a
+second copy of a few hundred lines, it is now the lane E crate
+`apps/textarea`, with its key table as `TextArea::apply_key`. If the toolkit
+grows a multi-line field, the two applications move onto it and the crate
+goes.
+
 ## The ask
 
 A method on `TextInput`, something like

@@ -29,26 +29,16 @@ SRC = Path(__file__).parent / "src" / "main.rs"
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
     # -- the test input --------------------------------------------------------------
+    # Typing, line breaks and the column Up and Down keep are the shared
+    # field's now, and swept there: apps/textarea/mutate.py.
     (
-        "a newline cannot be typed into the test input",
-        '            Key::Enter => self.input.insert("\\n", Self::capacity(ActiveField::Input)),',
-        "            Key::Enter => false,",
+        "the test input's keys never reach the field",
+        "        let edited = self.input.apply_key(",
+        "        let edited = TextArea::default().apply_key(",
         [
             "the_test_input_takes_new_lines_and_can_be_edited_anywhere",
             "multiline_can_be_tried_on_text_typed_in_the_window",
         ],
-    ),
-    (
-        "the test input is edited only at its end",
-        "        self.text.insert_str(self.caret, &taken);",
-        "        self.text.push_str(&taken);",
-        ["the_test_input_takes_new_lines_and_can_be_edited_anywhere"],
-    ),
-    (
-        "Up and Down lose the column",
-        "        let within = text::cursor_at(line, goal, NORMAL_TEXT, FontWeightHint::Regular).byte;",
-        "        let within = 0;",
-        ["the_test_input_takes_new_lines_and_can_be_edited_anywhere"],
     ),
     (
         "a press in the test input puts the caret nowhere",
@@ -64,9 +54,9 @@ MUTATIONS = [
     ),
     (
         "the test input does not follow its caret",
-        "        let line = self.input.line_index(self.input.caret);\n"
+        "        let line = self.input.line_index(self.input.caret());\n"
         "        self.input_scroll = keep_in_view(self.input_scroll, line, self.input_rows());",
-        "        let _ = self.input.caret;",
+        "        let _ = self.input.caret();",
         ["the_test_input_scrolls_and_follows_its_caret"],
     ),
     (

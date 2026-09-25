@@ -50,6 +50,7 @@ use guitk::textedit;
 use guitk::textinput::TextInput;
 use guitk::theme::with_alpha;
 use guitk::wheel;
+use textarea::TextArea;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -1719,258 +1720,13 @@ const GUTTER: f32 = 40.0;
 // The test input: a text field of any number of lines
 // ============================================================================
 
-/// The test input: a text field of any number of lines.
-///
-/// The toolkit's `TextInput` is one line, and the test input has to hold a
-/// log excerpt, a file, a list -- the thing a multi-line pattern is tried
-/// against. It could not take a newline at all: Enter's text is a control
-/// character and the typing path dropped every control character, so the
-/// multiline flag had nothing to act on, and the text could only be edited
-/// at its end.
-#[derive(Debug, Clone, Default)]
-struct TextArea {
-    text: String,
-    /// The caret, as a byte offset on a character boundary.
-    caret: usize,
-    /// Where a selection started, when there is one.
-    anchor: Option<usize>,
-    /// Where Up and Down aim, in pixels from the line's start: kept across a
-    /// run of them, so passing a short line does not pull the caret left.
-    goal_x: Option<f32>,
-}
-
-impl TextArea {
-    fn text(&self) -> &str {
-        &self.text
-    }
-
-    /// Replace the text, with the caret at its end. **Tests only.**
-    #[cfg(test)]
-    fn set_text(&mut self, text: &str) {
-        text.clone_into(&mut self.text);
-        self.caret = self.text.len();
-        self.anchor = None;
-        self.goal_x = None;
-    }
-
-    /// The selected bytes, in order, when any are selected.
-    fn selection(&self) -> Option<(usize, usize)> {
-        let anchor = self.anchor?;
-        (anchor != self.caret).then(|| (anchor.min(self.caret), anchor.max(self.caret)))
-    }
-
-    fn selected_text(&self) -> &str {
-        self.selection()
-            .and_then(|(a, b)| self.text.get(a..b))
-            .unwrap_or("")
-    }
-
-    /// Where the line holding byte `at` starts.
-    fn line_start(&self, at: usize) -> usize {
-        self.text
-            .get(..at)
-            .and_then(|head| head.rfind('\n'))
-            .map_or(0, |nl| nl.saturating_add(1))
-    }
-
-    /// Where the line holding byte `at` ends: its newline, or the end.
-    fn line_end(&self, at: usize) -> usize {
-        self.text
-            .get(at..)
-            .and_then(|tail| tail.find('\n'))
-            .map_or(self.text.len(), |nl| at.saturating_add(nl))
-    }
-
-    /// Which line byte `at` is on, counting from zero.
-    fn line_index(&self, at: usize) -> usize {
-        self.text
-            .get(..at)
-            .map_or(0, |head| head.bytes().filter(|b| *b == b'\n').count())
-    }
-
-    /// Where line `index` starts, or the start of the last line past the end.
-    fn start_of_line(&self, index: usize) -> usize {
-        if index == 0 {
-            return 0;
-        }
-        self.text
-            .match_indices('\n')
-            .nth(index.saturating_sub(1))
-            .map_or_else(
-                || self.line_start(self.text.len()),
-                |(nl, _)| nl.saturating_add(1),
-            )
-    }
-
-    fn line_count(&self) -> usize {
-        self.text.matches('\n').count().saturating_add(1)
-    }
-
-    /// Put the caret at `at`, extending the selection when `shift` is held.
-    fn move_to(&mut self, at: usize, shift: bool) {
-        if shift {
-            if self.anchor.is_none() {
-                self.anchor = Some(self.caret);
-            }
-        } else {
-            self.anchor = None;
-        }
-        self.caret = at.min(self.text.len());
-    }
-
-    fn left(&mut self, shift: bool) {
-        self.goal_x = None;
-        if !shift && let Some((from, _)) = self.selection() {
-            self.move_to(from, false);
-            return;
-        }
-        let at = self
-            .text
-            .get(..self.caret)
-            .and_then(|head| head.chars().next_back())
-            .map_or(0, |c| self.caret.saturating_sub(c.len_utf8()));
-        self.move_to(at, shift);
-    }
-
-    fn right(&mut self, shift: bool) {
-        self.goal_x = None;
-        if !shift && let Some((_, to)) = self.selection() {
-            self.move_to(to, false);
-            return;
-        }
-        let at = self
-            .text
-            .get(self.caret..)
-            .and_then(|tail| tail.chars().next())
-            .map_or(self.caret, |c| self.caret.saturating_add(c.len_utf8()));
-        self.move_to(at, shift);
-    }
-
-    fn home(&mut self, shift: bool) {
-        self.goal_x = None;
-        self.move_to(self.line_start(self.caret), shift);
-    }
-
-    fn end(&mut self, shift: bool) {
-        self.goal_x = None;
-        self.move_to(self.line_end(self.caret), shift);
-    }
-
-    /// Up (`down == false`) or down by `lines` lines, aiming at the column
-    /// the caret was at when the run of vertical moves began.
-    fn vertical(&mut self, down: bool, lines: usize, shift: bool) {
-        let start = self.line_start(self.caret);
-        let here = self.line_index(self.caret);
-        let goal = self.goal_x.unwrap_or_else(|| {
-            let line = self.text.get(start..self.caret).unwrap_or("");
-            text::measure(line, NORMAL_TEXT, FontWeightHint::Regular)
-        });
-        let last = self.line_count().saturating_sub(1);
-        let target = if down {
-            here.saturating_add(lines).min(last)
-        } else {
-            here.saturating_sub(lines)
-        };
-        if target == here {
-            // Past the first or the last line: to its start or its end, as
-            // every text box does.
-            let at = if down {
-                self.line_end(self.caret)
-            } else {
-                start
-            };
-            self.move_to(at, shift);
-            self.goal_x = None;
-            return;
-        }
-        let from = self.start_of_line(target);
-        let line = self.text.get(from..self.line_end(from)).unwrap_or("");
-        let within = text::cursor_at(line, goal, NORMAL_TEXT, FontWeightHint::Regular).byte;
-        self.move_to(from.saturating_add(within), shift);
-        self.goal_x = Some(goal);
-    }
-
-    fn select_all(&mut self) {
-        self.goal_x = None;
-        self.anchor = Some(0);
-        self.caret = self.text.len();
-    }
-
-    /// Take the selection out. Returns whether there was one.
-    fn delete_selection(&mut self) -> bool {
-        let Some((from, to)) = self.selection() else {
-            return false;
-        };
-        self.text.replace_range(from..to, "");
-        self.caret = from;
-        self.anchor = None;
-        true
-    }
-
-    /// Put `typed` where the caret is, over any selection, taking no more
-    /// than leaves the field at `capacity` characters. Returns whether the
-    /// text changed.
-    fn insert(&mut self, typed: &str, capacity: usize) -> bool {
-        self.goal_x = None;
-        let removed = self.delete_selection();
-        let room = capacity.saturating_sub(self.text.chars().count());
-        // Line breaks and tabs are text here; other control characters --
-        // a paste's carriage returns among them -- are not.
-        let taken: String = typed
-            .chars()
-            .filter(|c| matches!(c, '\n' | '\t') || !c.is_control())
-            .take(room)
-            .collect();
-        if taken.is_empty() {
-            return removed;
-        }
-        self.text.insert_str(self.caret, &taken);
-        self.caret = self.caret.saturating_add(taken.len());
-        true
-    }
-
-    fn backspace(&mut self) -> bool {
-        self.goal_x = None;
-        if self.delete_selection() {
-            return true;
-        }
-        let Some(c) = self
-            .text
-            .get(..self.caret)
-            .and_then(|h| h.chars().next_back())
-        else {
-            return false;
-        };
-        let from = self.caret.saturating_sub(c.len_utf8());
-        self.text.replace_range(from..self.caret, "");
-        self.caret = from;
-        true
-    }
-
-    fn delete(&mut self) -> bool {
-        self.goal_x = None;
-        if self.delete_selection() {
-            return true;
-        }
-        let Some(c) = self.text.get(self.caret..).and_then(|t| t.chars().next()) else {
-            return false;
-        };
-        let to = self.caret.saturating_add(c.len_utf8());
-        self.text.replace_range(self.caret..to, "");
-        true
-    }
-
-    /// Put the caret on line `line`, at `x` pixels from where the line's
-    /// text starts.
-    fn click(&mut self, line: usize, x: f32, shift: bool) {
-        self.goal_x = None;
-        let line = line.min(self.line_count().saturating_sub(1));
-        let from = self.start_of_line(line);
-        let text = self.text.get(from..self.line_end(from)).unwrap_or("");
-        let within = text::cursor_at(text, x, NORMAL_TEXT, FontWeightHint::Regular).byte;
-        self.move_to(from.saturating_add(within), shift);
-    }
-}
+// The field itself -- caret, selection, the keys that edit it -- is
+// `textarea::TextArea`, shared with `apps/email`'s message body. It began here:
+// the toolkit's `TextInput` is one line, and the test input has to hold a log
+// excerpt, a file, a list -- the thing a multi-line pattern is tried against.
+// It could not take a newline at all: Enter's text is a control character and
+// the typing path dropped every control character, so the multiline flag had
+// nothing to act on, and the text could only be edited at its end.
 
 // ============================================================================
 // Pointer targets
@@ -2196,7 +1952,7 @@ impl App {
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
             pattern: TextInput::new(),
-            input: TextArea::default(),
+            input: TextArea::new(NORMAL_TEXT),
             replace: TextInput::new(),
             flags: RegexFlags::default(),
             active_tab: ActiveTab::Tester,
@@ -2650,7 +2406,7 @@ impl App {
     fn input_hscroll(&self, width: f32) -> f32 {
         let text = self.input.text();
         let at = if self.active_field == ActiveField::Input {
-            Some(self.input.caret)
+            Some(self.input.caret())
         } else {
             self.matches
                 .get(self.current_match_index)
@@ -2672,7 +2428,7 @@ impl App {
 
     /// Scroll the test input so its caret is on screen.
     fn keep_caret_visible(&mut self) {
-        let line = self.input.line_index(self.input.caret);
+        let line = self.input.line_index(self.input.caret());
         self.input_scroll = keep_in_view(self.input_scroll, line, self.input_rows());
     }
 
@@ -3256,9 +3012,9 @@ impl App {
                     max_width: None,
                     overflow: TextOverflow::Clip,
                 });
-                if focused && (line_start..=line_end).contains(&self.input.caret) {
+                if focused && (line_start..=line_end).contains(&self.input.caret()) {
                     let caret = text::measure(
-                        line.get(..self.input.caret.saturating_sub(line_start))
+                        line.get(..self.input.caret().saturating_sub(line_start))
                             .unwrap_or(""),
                         NORMAL_TEXT,
                         FontWeightHint::Regular,
@@ -4230,95 +3986,36 @@ impl App {
         }
     }
 
-    /// A key while the test input has the keyboard.
+    /// A key while the test input has the keyboard: the field's own keys
+    /// (`TextArea::apply_key`), a page being the rows the input shows.
     fn handle_input_key(&mut self, key: &KeyEvent) -> bool {
-        let shift = key.modifiers.shift;
-        let ctrl = key.modifiers.ctrl;
         let page = self.input_rows().saturating_sub(1).max(1);
-        let before = (self.input.caret, self.input.anchor, self.clipboard.len());
-        let changed = match key.key {
-            Key::Left => {
-                self.input.left(shift);
-                false
-            }
-            Key::Right => {
-                self.input.right(shift);
-                false
-            }
-            Key::Up => {
-                self.input.vertical(false, 1, shift);
-                false
-            }
-            Key::Down => {
-                self.input.vertical(true, 1, shift);
-                false
-            }
-            Key::PageUp => {
-                self.input.vertical(false, page, shift);
-                false
-            }
-            Key::PageDown => {
-                self.input.vertical(true, page, shift);
-                false
-            }
-            Key::Home if ctrl => {
-                self.input.move_to(0, shift);
-                false
-            }
-            Key::End if ctrl => {
-                self.input.move_to(self.input.text().len(), shift);
-                false
-            }
-            Key::Home => {
-                self.input.home(shift);
-                false
-            }
-            Key::End => {
-                self.input.end(shift);
-                false
-            }
-            Key::A if ctrl => {
-                self.input.select_all();
-                false
-            }
-            Key::C if ctrl => {
-                if self.input.selected_text().is_empty() {
-                    return false;
-                }
-                self.clipboard = self.input.selected_text().to_string();
-                return true;
-            }
-            Key::X if ctrl => {
-                if self.input.selected_text().is_empty() {
-                    return false;
-                }
-                self.clipboard = self.input.selected_text().to_string();
-                self.input.delete_selection()
-            }
-            Key::V if ctrl => {
-                let clipboard = self.clipboard.clone();
-                self.input
-                    .insert(&clipboard, Self::capacity(ActiveField::Input))
-            }
-            Key::Enter => self.input.insert("\n", Self::capacity(ActiveField::Input)),
-            Key::Backspace => self.input.backspace(),
-            Key::Delete => self.input.delete(),
-            _ => {
-                if key.text.is_empty() || ctrl {
-                    return false;
-                }
-                // Every character the keystroke produced, not just the first:
-                // a dead key followed by a letter composes into one, and an
-                // input method can deliver a whole word.
-                self.input
-                    .insert(&key.text, Self::capacity(ActiveField::Input))
-            }
-        };
-        if changed {
+        let before = (
+            self.input.caret(),
+            self.input.anchor(),
+            self.clipboard.len(),
+        );
+        let edited = self.input.apply_key(
+            key,
+            Self::capacity(ActiveField::Input),
+            &self.clipboard,
+            page,
+        );
+        let copied = edited.copied.is_some();
+        if let Some(text) = edited.copied {
+            self.clipboard = text;
+        }
+        if edited.changed {
             self.update_regex();
         }
         self.keep_caret_visible();
-        changed || (self.input.caret, self.input.anchor, self.clipboard.len()) != before
+        edited.changed
+            || copied
+            || (
+                self.input.caret(),
+                self.input.anchor(),
+                self.clipboard.len(),
+            ) != before
     }
 
     fn handle_library_key(&mut self, key: &KeyEvent) -> bool {
@@ -4426,9 +4123,9 @@ impl App {
             MouseEventKind::Move => {
                 let mut changed = false;
                 if self.dragging {
-                    let before = (self.input.caret, self.input.anchor);
+                    let before = (self.input.caret(), self.input.anchor());
                     self.place_input_caret(event.x, event.y, true);
-                    changed = before != (self.input.caret, self.input.anchor);
+                    changed = before != (self.input.caret(), self.input.anchor());
                 }
                 let over = self.target_at(event.x, event.y);
                 if over != self.hover {
@@ -6653,7 +6350,7 @@ mod tests {
         let (x, y) = at(1.0, "sec");
         app.handle_event(&mouse(x, y, MouseEventKind::Press(MouseButton::Left)));
         assert_eq!(app.active_field, ActiveField::Input);
-        assert_eq!(app.input.caret, "first line\nsec".len());
+        assert_eq!(app.input.caret(), "first line\nsec".len());
         let (x2, y2) = at(2.0, "th");
         assert!(app.handle_event(&mouse(x2, y2, MouseEventKind::Move)));
         assert_eq!(app.input.selected_text(), "ond line\nth");

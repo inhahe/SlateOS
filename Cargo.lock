@@ -2410,6 +2410,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "settingsfile",
+ "textarea",
  "yamldoc",
 ]
 
@@ -3047,6 +3048,13 @@ version = "0.1.0"
 dependencies = [
  "guitk",
  "oswindow",
+]
+
+[[package]]
+name = "textarea"
+version = "0.1.0"
+dependencies = [
+ "guitk",
 ]
 
 [[package]]

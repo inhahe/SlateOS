@@ -1,0 +1,11 @@
+[package]
+name = "textarea"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS multi-line text field for applications: text, caret, selection, and the keys that edit it."
+
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+
+[lints]
+workspace = true

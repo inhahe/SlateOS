@@ -12,6 +12,10 @@ guitk = { path = "../../gui/toolkit" }
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
 
+# The test input: a text field of any number of lines, shared with the mail
+# client's message body.
+textarea = { path = "../textarea" }
+
 # The user's own patterns, kept between sessions in their settings.
 settingsfile = { path = "../../gui/settingsfile" }
 yamldoc = { path = "../../yamldoc" }

@@ -33,6 +33,7 @@
 //! | `sed` | BRE | substring search, plus a hand-rolled `.`/`*` matcher | yes |
 //! | `awk`'s `/re/` and `~` | ERE | substring search | yes |
 //! | `expr`'s `:` | BRE anchored at the start | no `:` operator whatsoever | yes |
+//! | `ptx`'s `-S` and `-W` | glibc's Emacs syntax, newline-anchored | (not ported until then) | yes, through [`emacs`] |
 //!
 //! That is not four small gaps; it is one missing component, absent four times.
 //! Three of the four also failed *quietly* — `grep '^posix'` finds nothing

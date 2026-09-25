@@ -1898,7 +1898,7 @@ impl Regex {
     /// that the new first byte does not become a line start. Since the subject
     /// here is never sliced, there is nothing to suppress. A caller that really
     /// does want `^` switched off wants [`StartOfLine::No`] on
-    /// [`Regex::capture_spans_from`].)
+    /// [`Search::capture_spans_from`].)
     ///
     /// `from` is rounded forward to a character boundary, so a caller that
     /// resumes from an arbitrary byte cannot start a match inside a character.

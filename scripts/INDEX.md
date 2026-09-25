@@ -276,6 +276,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/prune-build-cache.py` | Prune the parts of a cargo `target/` that no recent build has used. |
 | `scripts/prune-build-trees.py` | List the cargo build trees in this worktree, and delete the unsanctioned ones. |
 | `scripts/ps-diff.sh` | Differential test: our `ps` against procps-ng `ps`. |
+| `scripts/ptx-diff.sh` | ptx-diff.sh — compare our `ptx` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/pwd-diff.sh` | pwd-diff.sh — run our `pwd` and GNU coreutils' `pwd` side by side and report |
 | `scripts/q45_apply.py` | Q45: give every `RenderCommand::Text` construction an explicit `overflow`. |
 | `scripts/q45_survey.py` | Survey every `RenderCommand::Text {` site before Q45 edits a single one. |
@@ -415,4 +416,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_405 scripts._
+_406 scripts._

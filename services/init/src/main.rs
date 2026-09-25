@@ -1854,10 +1854,10 @@ fn cmd_logs() {
 
     // Find the actual data length (scan for last non-zero byte).
     let data_len = buf.iter().rposition(|&b| b != 0).map_or(0, |p| p + 1);
-    if data_len > 0 {
-        if let Some(data) = buf.get(..data_len) {
-            console_write(data);
-        }
+    if data_len > 0
+        && let Some(data) = buf.get(..data_len)
+    {
+        console_write(data);
     }
 }
 
@@ -2413,45 +2413,37 @@ pub extern "C" fn _start() -> ! {
         //    Drain all available characters in a burst to avoid
         //    missing fast typists.
         let mut got_input = false;
-        loop {
-            match try_read_char() {
-                Some(ch) => {
-                    got_input = true;
-                    match ch {
-                        // Enter — execute the command line.
-                        b'\r' | b'\n' => {
-                            print("\n");
-                            if line_pos > 0 {
-                                execute(&line_buf[..line_pos], &mut registry);
-                            }
-                            line_pos = 0;
-                            prompt_shown = false;
-                            // Break out of input drain to re-show prompt.
-                            break;
-                        }
-
-                        // Backspace / DEL.
-                        0x08 | 0x7F => {
-                            if line_pos > 0 {
-                                line_pos -= 1;
-                                console_write(b"\x08 \x08");
-                            }
-                        }
-
-                        // Printable ASCII.
-                        0x20..=0x7E => {
-                            if line_pos < MAX_LINE {
-                                line_buf[line_pos] = ch;
-                                line_pos += 1;
-                                console_write(&[ch]);
-                            }
-                        }
-
-                        // Non-printable: ignore.
-                        _ => {}
+        // Until the buffer is empty, or a line is complete.
+        while let Some(ch) = try_read_char() {
+            got_input = true;
+            match ch {
+                // Enter — execute the command line.
+                b'\r' | b'\n' => {
+                    print("\n");
+                    if line_pos > 0 {
+                        execute(&line_buf[..line_pos], &mut registry);
                     }
+                    line_pos = 0;
+                    prompt_shown = false;
+                    // Break out of input drain to re-show prompt.
+                    break;
                 }
-                None => break, // No more characters in buffer.
+
+                // Backspace / DEL, when there is something to erase.
+                0x08 | 0x7F if line_pos > 0 => {
+                    line_pos -= 1;
+                    console_write(b"\x08 \x08");
+                }
+
+                // Printable ASCII, while the line has room.
+                0x20..=0x7E if line_pos < MAX_LINE => {
+                    line_buf[line_pos] = ch;
+                    line_pos += 1;
+                    console_write(&[ch]);
+                }
+
+                // Non-printable, or a key the line cannot take: ignore.
+                _ => {}
             }
         }
 

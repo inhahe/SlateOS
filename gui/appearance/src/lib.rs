@@ -2133,11 +2133,8 @@ impl AppearanceSettings {
         // text. Loaded here, file and all -- see `color_theme` for why here.
         // An empty value is the built-in theme, as a blanked wallpaper is no
         // wallpaper.
-        if let Some(name) = doc.get_str(&["theme", "colors"]) {
-            let name = name.trim();
-            if !name.is_empty() {
-                s.color_theme = themes::ColorTheme::load(pathcodec::decode_path(name).as_os_str());
-            }
+        if let Some(name) = color_theme_name(doc) {
+            s.color_theme = themes::ColorTheme::load(&name);
         }
         read_into!(
             s.theme_mode,
@@ -2470,6 +2467,31 @@ impl AppearanceSettings {
 /// processes that agree on every key but disagree about which file holds them
 /// have simply written two files.
 pub const CONFIG_NAME: &str = "appearance";
+
+/// The watcher for `appearance.yaml`: one that also notices the chosen colour
+/// theme's own file changing -- which changes every colour read from the
+/// settings without changing a byte of `appearance.yaml`.
+///
+/// Use this rather than `config::Watcher::new(CONFIG_NAME)`, which reports an
+/// in-place edit of the theme as nothing at all (`known-issues.md`
+/// `TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE`). It
+/// still only looks when asked: a process learns to look from a
+/// `SettingsChanged` announcement, as for any other change.
+#[must_use]
+pub fn watcher() -> config::Watcher {
+    config::Watcher::with_dependencies(CONFIG_NAME, themes::fingerprint)
+}
+
+/// The colour theme a settings document names, decoded; `None` when it names
+/// none -- the key is absent or blank, which is the built-in theme.
+///
+/// One decoding, shared by the reader and the watcher's fingerprint, so the
+/// two cannot disagree about which theme a file means.
+pub(crate) fn color_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    let name = doc.get_str(&["theme", "colors"])?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| pathcodec::decode_path(name).into_os_string())
+}
 
 /// The user's appearance settings together with the document they came from.
 ///
@@ -3066,6 +3088,60 @@ mod tests {
     fn a_blank_colour_theme_is_the_built_in_one() {
         let s = AppearanceSettings::read_from(&Document::parse("theme:\n  colors: \"  \"\n"));
         assert_eq!(s.color_theme, themes::ColorTheme::built_in());
+    }
+
+    /// `watcher()` sees the chosen theme's own file edited in place -- which
+    /// changes the colours without changing a byte of `appearance.yaml`, and
+    /// which a watcher of that file alone reported as nothing.
+    #[test]
+    fn the_appearance_watcher_sees_the_chosen_theme_edited_in_place() {
+        config::testing::with_scratch_config("watch-theme", |root| {
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let mut file = AppearanceFile::load();
+            file.settings.color_theme = themes::ColorTheme::load(std::ffi::OsStr::new("nord"));
+            file.save().unwrap();
+
+            let mut plain = config::Watcher::new(CONFIG_NAME);
+            let mut w = watcher();
+            assert!(
+                plain.poll().is_some() && w.poll().is_some(),
+                "the first look"
+            );
+            assert!(w.poll().is_none(), "nothing has changed");
+
+            install_theme(root, "nord", "colors:\n  base: \"#000000\"\n");
+            assert!(
+                plain.poll().is_none(),
+                "appearance.yaml itself did not change"
+            );
+            let doc = w.poll().expect("the theme changed, so the colours did");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(Palette::from_settings(&s).base, Color::from_hex(0x000000));
+            assert!(w.poll().is_none(), "reported once");
+
+            // Uninstalled is a change too: the colours fall back.
+            std::fs::remove_dir_all(
+                config::testing::scratch_data_dir(root).join("slateos/themes/nord"),
+            )
+            .unwrap();
+            let doc = w.poll().expect("the theme went away");
+            assert!(
+                AppearanceSettings::read_from(&doc)
+                    .color_theme
+                    .problem()
+                    .is_some()
+            );
+        });
+    }
+
+    /// The built-in theme depends on no file, so its fingerprint is empty and
+    /// nothing about a theme directory can make its watcher report.
+    #[test]
+    fn the_built_in_theme_depends_on_nothing() {
+        let mut doc = Document::new();
+        AppearanceSettings::default().write_into(&mut doc);
+        assert!(themes::fingerprint(&doc).is_empty());
+        assert!(themes::fingerprint(&Document::new()).is_empty());
     }
 
     #[test]

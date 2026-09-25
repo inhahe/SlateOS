@@ -529,6 +529,13 @@ impl Warnings {
 
 /// Read and parse the theme file at `path`, within [`MAX_FILE_BYTES`].
 fn read_theme_file(path: &Path) -> Result<ThemeFile, ThemeError> {
+    let bytes = read_theme_bytes(path)?;
+    let text = String::from_utf8(bytes).map_err(|_| ThemeError::NotText)?;
+    Ok(parse(&text))
+}
+
+/// The bytes of the theme file at `path`, within [`MAX_FILE_BYTES`].
+fn read_theme_bytes(path: &Path) -> Result<Vec<u8>, ThemeError> {
     let unreadable = |e: std::io::Error| ThemeError::Unreadable(e.to_string());
     let file = fs::File::open(path).map_err(unreadable)?;
     let size = file.metadata().map_err(unreadable)?.len();
@@ -545,8 +552,36 @@ fn read_theme_file(path: &Path) -> Result<ThemeFile, ThemeError> {
     if read > MAX_FILE_BYTES {
         return Err(ThemeError::TooLarge(read));
     }
-    let text = String::from_utf8(bytes).map_err(|_| ThemeError::NotText)?;
-    Ok(parse(&text))
+    Ok(bytes)
+}
+
+/// What the colours read from `doc` depend on besides the document itself:
+/// the chosen theme's file -- where it was found, and what it holds. The
+/// dependency fingerprint of [`crate::watcher`].
+///
+/// Empty for the built-in theme, whose colours are compiled in, and for a
+/// name that cannot be a theme. A theme that is not installed, or cannot be
+/// read, contributes that fact, so one appearing, disappearing or moving
+/// between the user's directory and the system's is a change as much as an
+/// edit is.
+pub(crate) fn fingerprint(doc: &Document) -> Vec<u8> {
+    let Some(id) = crate::color_theme_name(doc) else {
+        return Vec::new();
+    };
+    if id == OsStr::new(BUILT_IN) || !is_valid_id(&id) {
+        return Vec::new();
+    }
+    let Some((dir, _)) = ThemeDirs::standard().find(&id) else {
+        return b"not installed".to_vec();
+    };
+    let file = dir.join(FILE_NAME);
+    let mut out = file.as_os_str().as_encoded_bytes().to_vec();
+    out.push(0);
+    match read_theme_bytes(&file) {
+        Ok(bytes) => out.extend_from_slice(&bytes),
+        Err(err) => out.extend_from_slice(format!("{err:?}").as_bytes()),
+    }
+    out
 }
 
 /// Find, read and check the installed theme `id` for its colours.

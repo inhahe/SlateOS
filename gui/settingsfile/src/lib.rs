@@ -239,6 +239,22 @@ pub struct Watcher {
     name: String,
     /// What the file held when it was last looked at.
     seen: Seen,
+    /// What the settings depend on besides their own file, if anything; see
+    /// [`with_dependencies`](Self::with_dependencies).
+    depends: Option<Depends>,
+}
+
+/// A [`Watcher`]'s view of what the settings depend on besides their file.
+#[derive(Debug, Clone)]
+struct Depends {
+    /// Computes the fingerprint of everything else the settings are read
+    /// with, from the document.
+    of: fn(&Document) -> Vec<u8>,
+    /// The document last read, which the fingerprint is recomputed from when
+    /// the file itself has not changed.
+    doc: Document,
+    /// The fingerprint at the last look; `None` before the first.
+    seen: Option<Vec<u8>>,
 }
 
 /// What a [`Watcher`] found the last time it looked.
@@ -276,6 +292,37 @@ impl Watcher {
         Self {
             name: String::from(name),
             seen: Seen::Unread,
+            depends: None,
+        }
+    }
+
+    /// Watch a settings group whose meaning depends on more than its own
+    /// file.
+    ///
+    /// `depends` computes, from the document, a fingerprint of everything else
+    /// the settings are read with -- the bytes of a file the document names,
+    /// say. A look that finds the file itself unchanged recomputes the
+    /// fingerprint from the document last read, and reports that document
+    /// again if it differs: the settings a caller derives from it would now
+    /// come out differently, and "the settings changed" is the only thing a
+    /// caller of [`poll`](Self::poll) wants to learn.
+    ///
+    /// The appearance settings are the case this exists for: `theme.colors`
+    /// names a theme, and editing that theme's own file changes the colours
+    /// without changing a byte of `appearance.yaml` -- which a watcher of the
+    /// file alone reported as nothing at all. See `appearance::watcher`.
+    ///
+    /// A plain function rather than a closure, so the watcher stays `Clone`
+    /// and `Debug` and cannot capture state that goes stale.
+    #[must_use]
+    pub fn with_dependencies(name: &str, depends: fn(&Document) -> Vec<u8>) -> Self {
+        Self {
+            depends: Some(Depends {
+                of: depends,
+                doc: Document::new(),
+                seen: None,
+            }),
+            ..Self::new(name)
         }
     }
 
@@ -303,13 +350,24 @@ impl Watcher {
             None | Some(Err(_)) => Seen::Absent,
         };
         if found == self.seen {
-            return None;
+            // The file is as it was; what it depends on may not be.
+            let depends = self.depends.as_mut()?;
+            let now = (depends.of)(&depends.doc);
+            if depends.seen.as_ref() == Some(&now) {
+                return None;
+            }
+            depends.seen = Some(now);
+            return Some(depends.doc.clone());
         }
         let doc = match &found {
             Seen::Contents(text) => Document::parse(text),
             Seen::Unread | Seen::Absent => Document::new(),
         };
         self.seen = found;
+        if let Some(depends) = self.depends.as_mut() {
+            depends.seen = Some((depends.of)(&doc));
+            depends.doc = doc.clone();
+        }
         Some(doc)
     }
 }
@@ -600,6 +658,87 @@ mod tests {
             fs::write(&path, text).expect("write settings file");
         };
         with_env(Some(&root_str), None, || body(&write))
+    }
+
+    /// The fingerprint the dependent watchers below are built with: the bytes
+    /// of the file the document's `depends_on` key names.
+    fn named_file(doc: &Document) -> Vec<u8> {
+        doc.get_str(&["depends_on"])
+            .and_then(|path| fs::read(path).ok())
+            .unwrap_or_default()
+    }
+
+    /// A change in what the settings depend on is a change in the settings,
+    /// though the file is untouched -- reported once, with the document.
+    #[test]
+    fn a_change_in_what_the_settings_depend_on_is_a_change() {
+        with_config_dir("watch-depends", |write| {
+            // Through `write`, which makes the directory; the path is asked of
+            // `path_for` afterwards, for the document to name.
+            write("dependency", "one");
+            let dependency = path_for("dependency").expect("a config path");
+            let named = format!(
+                "depends_on: '{}'\n",
+                dependency.to_str().expect("a test path is text")
+            );
+            write("appearance", &named);
+            let mut w = Watcher::with_dependencies("appearance", named_file);
+            assert!(w.poll().is_some(), "the first look reports");
+            assert!(w.poll().is_none(), "nothing has changed");
+
+            write("dependency", "two");
+            let doc = w.poll().expect("the dependency changed");
+            assert!(
+                doc.to_text().contains("depends_on"),
+                "the document comes with it"
+            );
+            assert!(w.poll().is_none(), "reported once");
+
+            // The file's own changes are still seen, and re-anchor the
+            // fingerprint on the new document: once it names another
+            // dependency, that one is watched and the old one is not.
+            write("other", "a");
+            let other = path_for("other").expect("a config path");
+            write(
+                "appearance",
+                &format!(
+                    "depends_on: '{}'\n",
+                    other.to_str().expect("a test path is text")
+                ),
+            );
+            assert!(w.poll().is_some(), "the file's own change");
+            assert!(w.poll().is_none());
+            write("dependency", "three");
+            assert!(
+                w.poll().is_none(),
+                "the old dependency is no longer watched"
+            );
+            write("other", "b");
+            assert!(w.poll().is_some(), "the new one is");
+        });
+    }
+
+    /// A plain watcher looks at its file and nothing else -- which is why the
+    /// dependent one exists.
+    #[test]
+    fn a_plain_watcher_does_not_look_past_its_file() {
+        with_config_dir("watch-plain", |write| {
+            // Through `write`, which makes the directory; the path is asked of
+            // `path_for` afterwards, for the document to name.
+            write("dependency", "one");
+            let dependency = path_for("dependency").expect("a config path");
+            write(
+                "appearance",
+                &format!(
+                    "depends_on: '{}'\n",
+                    dependency.to_str().expect("a test path is text")
+                ),
+            );
+            let mut w = Watcher::new("appearance");
+            assert!(w.poll().is_some());
+            write("dependency", "two");
+            assert!(w.poll().is_none());
+        });
     }
 
     #[test]

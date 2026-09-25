@@ -1922,7 +1922,10 @@ impl DesktopShell {
             menu_icon: None,
             widget_drag: None,
             widgets_dirty: false,
-            appearance_watch: config::Watcher::new(appearance::CONFIG_NAME),
+            // `appearance::watcher`, not a plain one: an edit to the chosen
+            // theme's own file changes the colours without changing a byte of
+            // `appearance.yaml`.
+            appearance_watch: appearance::watcher(),
             notif_watch: config::Watcher::new(notifsettings::CONFIG_NAME),
             taskbar: taskbar::TaskbarState::new(taskbar::TaskbarConfig::default()),
             schedule_snooze: None,

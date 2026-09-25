@@ -4907,3 +4907,38 @@ fn a_bare_session_does_not_read_the_users_appearance_or_clock() {
         assert_eq!(session.shell().datetime.zone, None);
     });
 }
+
+/// **An edit to the chosen theme's own file reaches the shell** at the next
+/// announcement, though `appearance.yaml` did not change -- the shell watches
+/// with `appearance::watcher`, which looks past the file to the theme it
+/// names.
+#[test]
+fn an_edit_to_the_chosen_theme_reaches_the_shell() {
+    settingsfile::testing::with_scratch_config("session-theme-edit", |root| {
+        let dir = settingsfile::testing::scratch_data_dir(root)
+            .join("slateos")
+            .join("themes")
+            .join("nord");
+        std::fs::create_dir_all(&dir).expect("the scratch directory is writable");
+        let theme = dir.join(appearance::themes::FILE_NAME);
+        std::fs::write(&theme, "colors:\n  base: \"#2e3440\"\n").expect("write the theme");
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.color_theme =
+            appearance::themes::ColorTheme::load(std::ffi::OsStr::new("nord"));
+        file.save().expect("save");
+
+        let (mut session, desktop, _turn) = session();
+        session.load_appearance();
+        let rgb = |c: guitk::color::Color| (c.r, c.g, c.b);
+        assert_eq!(rgb(session.shell().theme.taskbar_bg), (0x2E, 0x34, 0x40));
+
+        std::fs::write(&theme, "colors:\n  base: \"#102030\"\n").expect("edit the theme");
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+        assert_eq!(
+            rgb(session.shell().theme.taskbar_bg),
+            (0x10, 0x20, 0x30),
+            "the edit did not reach the shell"
+        );
+    });
+}

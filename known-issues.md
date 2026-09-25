@@ -24067,7 +24067,18 @@ binary's door) and `a_bare_session_does_not_read_the_users_appearance_or_clock`.
 The test is the guard here, not the checker: what it checks is the door the
 binary actually uses.
 
-## TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE (lane C, 2026-09-25)
+## TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE (lane C, 2026-09-25) -- PARTLY FIXED the same day
+
+**Status:** the fix below exists: `settingsfile::Watcher::with_dependencies`,
+and `appearance::watcher()`, which compares the chosen theme's file as well as
+`appearance.yaml`. The shell watches with it. **Open:** applications, whose
+watcher is `oswindow`'s -- lane F's one-line change,
+`requests/c-f-watch-appearance-through-appearance-watcher.md`. And a watcher
+still only looks when a `SettingsChanged` announcement tells it to, so whatever
+edits a theme in place must then send `ReloadAppearance`, as the Settings app
+does after any save -- a theme editor, when there is one, included.
+
+The entry as it was first written:
 
 **In short:** if you edit the colours in the theme you are using, the desktop
 does not show the change until you choose a different theme and back. Choosing

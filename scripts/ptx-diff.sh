@@ -70,7 +70,8 @@ printf 'no newline at the end' > noeol
 : > empty
 printf 'A.\n.\nB\n' > zerolen
 printf 'Word\tafter\ttabs and\fform feeds\vand vtabs\r\n' > space
-printf '$money% & #hash _under {brace} back\\slash "quoted"\n' > specials
+# `%%`: a bare `% &` is a conversion to printf, which stops the fixture there.
+printf '$money%% & #hash _under {brace} back\\slash "quoted"\n' > specials
 mkdir dir
 
 ptx() { PATH=$PTX_PATH command ptx "$@"; }

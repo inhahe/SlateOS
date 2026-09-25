@@ -41,6 +41,13 @@
 //! copied, since that parser does read `[:` as a class and a backslash as an
 //! escape.
 //!
+//! A range written backwards, `[z-a]`, is **empty** rather than an error:
+//! `RE_SYNTAX_EMACS` lacks the `RE_NO_EMPTY_RANGES` bit that every POSIX syntax
+//! carries. It is passed through to the ERE parser as written, and compiled
+//! with [`Syntax::empty_ranges`] set, so that parser drops it the way glibc
+//! does -- which also settles what a bracket left with no members means,
+//! without a translation of "matches nothing" that ERE has no way to spell.
+//!
 //! # Not here: newline anchoring
 //!
 //! `re_compile_pattern` also sets `newline_anchor`, so that `^` and `$` match
@@ -51,7 +58,14 @@ use alloc::vec::Vec;
 
 use crate::bre::ends_here;
 use crate::ch::{BStr, Ch, Str, chars};
-use crate::engine::{EreError, RegCode, Regex};
+use crate::engine::{EreError, RegCode, Regex, Syntax};
+
+/// The ERE dialect a translation is compiled in: POSIX's, except that a
+/// backwards range is empty. See the module docs.
+const SYNTAX: Syntax = Syntax {
+    empty_ranges: true,
+    ..Syntax::POSIX_EXTENDED
+};
 
 /// Compile an Emacs-syntax pattern, `ci` selecting case-insensitive matching.
 ///
@@ -59,15 +73,16 @@ use crate::engine::{EreError, RegCode, Regex};
 /// Returns the translation's error, or the ERE engine's, whichever stops first.
 pub fn compile(pattern: BStr<'_>, ci: bool) -> Result<Regex, EreError> {
     let ere = to_ere(pattern)?;
-    Regex::new_flags(&ere, ci)
+    Regex::new_syntax(&ere, ci, SYNTAX)
 }
 
 /// Translate an Emacs-syntax pattern into the equivalent ERE.
 ///
 /// # Errors
 /// Returns [`EreError`] for a trailing backslash, an unmatched `\(` or `\)`, an
-/// unterminated bracket, a bad range, or a `[.x.]`/`[=x=]` naming no single
-/// character.
+/// unterminated bracket, a `-` that can be neither a member nor a range, or a
+/// `[.x.]`/`[=x=]` naming no single character. A backwards range is not an
+/// error here; see the module docs.
 pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
     let cs: Vec<Ch> = chars(pattern).collect();
     let mut out = Str::new();
@@ -306,12 +321,8 @@ fn bracket(cs: &[Ch], i: usize, out: &mut Str) -> Result<usize, EreError> {
         if dash && then.is_some() && then != Some(']') {
             let (hi, after) = element(cs, j.saturating_add(1))?;
             j = after;
-            if lo > hi {
-                return Err(EreError::new(
-                    RegCode::BadRangeEnd,
-                    b"invalid range".to_vec(),
-                ));
-            }
+            // Kept even when `lo > hi`: the ERE parser is told to read that as
+            // an empty range, which is glibc's reading of it here.
             members.push((lo, hi));
         } else {
             members.push((lo, lo));
@@ -416,7 +427,22 @@ mod tests {
         assert_eq!(find("[a-]", "x-"), Some((1, 2)));
         assert_eq!(find("[--/]", "x."), Some((1, 2)));
         assert_eq!(code("[a-c-e]"), RegCode::BadRangeEnd);
-        assert_eq!(code("[z-a]"), RegCode::BadRangeEnd);
+    }
+
+    /// Measured against GNU `ptx -W '[z-a]'`, which indexes nothing and exits
+    /// 0: `RE_SYNTAX_EMACS` has no `RE_NO_EMPTY_RANGES`.
+    #[test]
+    fn a_backwards_range_is_empty_not_an_error() {
+        assert_eq!(ere("[z-a]"), "[z-a]");
+        assert_eq!(find("[z-a]", "abcz"), None);
+        // An empty member leaves the others working...
+        assert_eq!(find("[z-ab]", "xyb"), Some((2, 3)));
+        // ...a bracket with no members at all can still be repeated...
+        assert_eq!(find("x[z-a]*y", "xy"), Some((0, 2)));
+        assert_eq!(find("x[z-a]+y", "xy"), None);
+        // ...and negating the empty set gives every character, newline too:
+        // `RE_HAT_LISTS_NOT_NEWLINE` is another bit Emacs syntax lacks.
+        assert_eq!(find("a[^z-a]b", "a\nb"), Some((0, 3)));
     }
 
     #[test]

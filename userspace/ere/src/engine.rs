@@ -551,6 +551,17 @@ pub struct Syntax {
     /// `a{99999999}` is still `REG_ESIZE`. Only the forms glibc *rolls back*
     /// become literals; see [`EParser::parse_brace`].
     pub invalid_interval_ord: bool,
+    /// A bracket range whose end sorts before its start -- the `z-a` of
+    /// `[z-a]` -- is empty, contributing nothing to the bracket, instead of an
+    /// error.
+    ///
+    /// glibc's syntax *without* `RE_NO_EMPTY_RANGES`. Every POSIX syntax sets
+    /// that bit and `RE_SYNTAX_EMACS` does not, so the only caller that wants
+    /// this is [`crate::emacs`]. Measured: GNU `ptx -W '[z-a]'` indexes nothing
+    /// and exits 0, where `grep -E '[z-a]'` is `Invalid range end`. A bracket
+    /// left with no members at all is legal and is what it says: `[z-a]`
+    /// matches nothing and `[^z-a]` matches any character.
+    pub empty_ranges: bool,
 }
 
 impl Syntax {
@@ -558,12 +569,14 @@ impl Syntax {
     pub const POSIX_EXTENDED: Syntax = Syntax {
         context_indep_ops: false,
         invalid_interval_ord: false,
+        empty_ranges: false,
     };
 
     /// `RE_SYNTAX_EGREP` as GNU `grep -E` applies it.
     pub const EGREP: Syntax = Syntax {
         context_indep_ops: true,
         invalid_interval_ord: true,
+        empty_ranges: false,
     };
 }
 
@@ -1270,7 +1283,9 @@ impl EParser {
             {
                 self.bump(1); // consume '-'
                 let hi = self.class_char()?;
-                if lo > hi {
+                if lo <= hi {
+                    ranges.push((lo, hi));
+                } else if !self.syntax.empty_ranges {
                     // Both endpoints are slices of the pattern, so the message
                     // is bytes.
                     return Err(EreError::new(
@@ -1284,7 +1299,8 @@ impl EParser {
                         ]),
                     ));
                 }
-                ranges.push((lo, hi));
+                // Otherwise the range is empty and adds nothing; see
+                // [`Syntax::empty_ranges`].
             } else {
                 ranges.push((lo, lo));
             }
@@ -3207,6 +3223,33 @@ mod tests {
         bad("(");
         bad("((a)");
         bad("(a");
+    }
+
+    /// [`Syntax::empty_ranges`] turns the one error it names into an empty
+    /// range, and nothing else: POSIX and egrep both keep refusing `[z-a]`.
+    #[test]
+    fn empty_ranges_makes_a_backwards_range_match_nothing() {
+        let lax = Syntax {
+            empty_ranges: true,
+            ..Syntax::POSIX_EXTENDED
+        };
+        let hit = |pat: &str, s: &str| {
+            Regex::new_syntax(pat.as_bytes(), false, lax)
+                .unwrap()
+                .is_match(s.as_bytes())
+                .unwrap()
+        };
+        assert!(!hit("[z-a]", "abcz"));
+        assert!(hit("[z-ab]", "b"));
+        assert!(!hit("[z-ab]", "z"));
+        assert!(hit("^[^z-a]$", "z"));
+        assert!(hit("^x[z-a]*y$", "xy"));
+        // A range that is merely *one* character wide is not backwards.
+        assert!(hit("[a-a]", "a"));
+        for strict in [Syntax::POSIX_EXTENDED, Syntax::EGREP] {
+            let e = Regex::new_syntax(b"[z-a]", false, strict).unwrap_err();
+            assert_eq!(e.code, RegCode::BadRangeEnd);
+        }
     }
 
     /// Compile in egrep syntax.

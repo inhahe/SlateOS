@@ -994,6 +994,14 @@ def run(args):
             # of them preceded the trigger it fired on in that same batch.
             "poll_seconds": POLL_SECONDS,
             "fired_at": round(fired_rel, 4) if fired_rel is not None else None,
+            # The same two instants on the raw `time.monotonic()` clock, which
+            # is one clock across processes on the hosts this runs on. A
+            # caller that measures the host *alongside* the run -- the test
+            # suite's concurrent headroom probe -- aligns its own samples with
+            # exactly this window through these; the relative times above
+            # cannot be aligned with anything outside this process.
+            "fired_monotonic": on_at,
+            "released_monotonic": off_at,
             "released_at": (round(released_rel, 4)
                             if released_rel is not None else None),
             "completions": [(name, round(when - started, 4))

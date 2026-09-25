@@ -17,6 +17,7 @@ linker = "rust-lld"
 # Large model is slightly less efficient but correct for any address.
 rustflags = [
     "-C", "link-arg=-Tlinker.ld",
+    "-C", "link-arg=--orphan-handling=error",
     "-C", "relocation-model=static",
     "-C", "code-model=large",
 ]

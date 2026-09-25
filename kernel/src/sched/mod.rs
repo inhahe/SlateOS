@@ -9126,21 +9126,35 @@ fn test_interactive_detection() -> KernelResult<()> {
             // then a wake `slept` ticks later. The wake is replayed through
             // `mark_ready` from `Blocked`, which is where sleep credit is
             // banked; ending Ready leaves the task as the run queue has it.
-            let cycle = |task: &mut task::Task, run: u64, slept: u64| {
+            //
+            // The ticks are counted on `clock`, which this test advances
+            // itself, never on `apic::tick_count()`. This runs at boot Step 9,
+            // before the APIC timer exists: the global tick is 0 and stays 0,
+            // so a wake stamped from it has slept for no time whatever `slept`
+            // says, no credit is ever banked, and the first check below fails
+            // -- an Integrity failure, which halts the boot. Found by reading,
+            // before any boot reached it.
+            let cycle = |task: &mut task::Task, clock: &mut u64, run: u64, slept: u64| {
                 for _ in 0..run {
                     task.tick_burst(true);
                 }
+                *clock = clock.saturating_add(run);
                 task.record_block();
-                let now = crate::apic::tick_count();
                 task.state = task::TaskState::Blocked;
-                task.block_tick = now.saturating_sub(slept);
-                task.mark_ready(now);
+                task.block_tick = *clock;
+                *clock = clock.saturating_add(slept);
+                task.mark_ready(*clock);
             };
+            // `mark_ready` also stamps `ready_since_tick`, which the run
+            // queue's wait accounting reads; put back what `spawn` left so the
+            // replay leaves no synthetic tick behind in the scheduler.
+            let spawned_stamps = (task.ready_since_tick, task.block_tick);
+            let mut clock = crate::apic::tick_count();
 
             // Five 1-tick bursts, each followed by a 10-tick sleep: short
             // bursts AND time actually spent asleep, so interactive.
             for _ in 0..5 {
-                cycle(task, 1, 10);
+                cycle(task, &mut clock, 1, 10);
             }
 
             if !task.interactive {
@@ -9199,7 +9213,7 @@ fn test_interactive_detection() -> KernelResult<()> {
                 if task.interactive {
                     break;
                 }
-                cycle(task, 1, 10);
+                cycle(task, &mut clock, 1, 10);
             }
             if !task.interactive {
                 serial_println!("[sched]   FAIL: could not re-earn the interactive boost");
@@ -9240,7 +9254,7 @@ fn test_interactive_detection() -> KernelResult<()> {
             // cycle it runs out, and for good while the task keeps not
             // sleeping.
             for _ in 0..64 {
-                cycle(task, 1, 10);
+                cycle(task, &mut clock, 1, 10);
             }
             if !task.interactive || task.sleep_credit != MAX_SLEEP_CREDIT {
                 serial_println!(
@@ -9256,7 +9270,7 @@ fn test_interactive_detection() -> KernelResult<()> {
             let expected = (MAX_SLEEP_CREDIT - MIN_SLEEP_CREDIT) / 2 + 1;
             let mut lost_at = None;
             for n in 1..=MAX_SLEEP_CREDIT {
-                cycle(task, 2, 0);
+                cycle(task, &mut clock, 2, 0);
                 match (lost_at, task.interactive) {
                     (None, false) => lost_at = Some(n),
                     (Some(at), true) => {
@@ -9287,6 +9301,7 @@ fn test_interactive_detection() -> KernelResult<()> {
                 "[sched]   Short bursts without sleep lose the boost when the sleep credit runs out (cycle {}): OK",
                 expected
             );
+            (task.ready_since_tick, task.block_tick) = spawned_stamps;
         }
     }
 

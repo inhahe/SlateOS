@@ -520,12 +520,13 @@ impl PosixSpawnFileActionsT {
     /// Lane A's report suggested dropping `MAX_FILE_ACTIONS` along with the
     /// inline storage, since a growable array makes the `ENOMEM` a real one.
     /// It is not local to this type: `MAX_FILE_ACTIONS` also sizes
-    /// [`OpenedHandles::handles`], and `MAX_FD_MAP >= 3 + MAX_FILE_ACTIONS` is
+    /// [`OpenedHandles::fds`], and `MAX_FD_MAP >= 3 + MAX_FILE_ACTIONS` is
     /// asserted against the **fd map handed to the kernel's spawn syscall**,
     /// which is fixed-width. An uncapped action list would silently overrun
-    /// that map — or, via `OpenedHandles::push`'s bounds check, silently *leak*
-    /// the handles past the end. Lifting the cap therefore means widening a
-    /// kernel interface that lives in lane A's tree, so it is not this fix.
+    /// that map — or, via `OpenedHandles::push`'s bounds check, close a
+    /// descriptor the child was about to be handed. Lifting the cap therefore
+    /// means widening a kernel interface that lives in lane A's tree, so it is
+    /// not this fix.
     ///
     /// The cap is also what makes one allocation right: with it, the array is
     /// 4608 bytes and cannot grow, so there is no `realloc` path to get wrong.
